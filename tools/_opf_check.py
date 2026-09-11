@@ -28,7 +28,10 @@ refused rather than followed off-tree. FAIL CLOSED EVERYWHERE: any unreadable, u
 malformed declared input, and any malformed injected observation, is a CANNOT-EVALUATE that NAMES the input,
 never a silent empty pass; every declared read refuses a non-regular (FIFO/device/socket) entry before
 opening it, the containment walk is depth-bounded, and a top-level barrier turns any unexpected error into a
-CANNOT-EVALUATE, so a hostile-shaped store never crashes, hangs, or blocks the engine. Time and memory are
+CANNOT-EVALUATE, so a hostile-shaped store never crashes, hangs, or blocks the engine. That non-regular
+refusal is an lstat-then-open check, sound under the store's single-writer model (spec 5.7); a writer that
+swaps a regular file for a FIFO in the window between the lstat and the open is the disclosed
+concurrent-mutation residual, not covered by a parse-only reader. Time and memory are
 proportional to the bytes actually read through the contained
 readers; NO loop is ever sized by a declared integer (a `WL-10**9` id, a `10**9` high-water, or a
 `["WL-1","WL-10**9"]` span never expands), so a declared numeric field cannot amplify the run.
@@ -63,12 +66,13 @@ from _opf_store import (  # noqa: E402
 from _opf_schema import (  # noqa: E402
     validate_record, validate_counters, check_unique_ids, check_ids_within_counters, check_monotonic,
     validate_transition, parse_status, BASELINE_SPECS, ACTOR_KINDS, LINK_RELS, _valid_id_shape,
-    SUPPORTED_SCHEMA,
+    SUPPORTED_SCHEMA, _valid_timestamp,
 )
 # U3 supplies the ledger validators, the frozen/rotation/partition guards, and the across-time append-only.
 from _opf_release import (  # noqa: E402
     validate_version, validate_worklog, _entries_by_id,
     check_frozen_coverage, check_ids_partition, check_rotation_only_released, _verify_append_only, _wl_num,
+    parse_semver, _parse_span, _valid_digest, RELEASE_KEYS,
 )
 
 # Fixed store-tree file / directory names (OPF-SPEC 4.2 layout; all lowercase machine source).
@@ -93,6 +97,9 @@ PERRECORD_ROW_KEYS = frozenset({"id", "state", "path", "digest"})
 ARCHIVE_TOP_KEYS = frozenset({"schema", "moved", "worklog_moved"})
 ARCHIVE_MOVED_KEYS = frozenset({"id", "type", "destination"})
 ARCHIVE_WLMOVED_KEYS = frozenset({"span", "destination"})
+# The recognized keys of the inert observations object (git-derived facts); an unknown key is a malformed
+# injection surfaced fail-closed, never silently dropped (F12).
+_OBSERVATION_KEYS = frozenset({"tracked", "actual_remote", "prior"})
 
 # The single-source type -> normative-namespace roster (baseline + every module-tier + importer type), used
 # to grade a moved-row `type` against its id namespace (F12) and to bound counters completeness.
@@ -100,6 +107,22 @@ _ROSTER_NAMESPACES = dict(BASELINE_TYPES)
 for _t, (_ns, _mod) in MODULE_TYPES.items():
     _ROSTER_NAMESPACES[_t] = _ns
 _ROSTER_NAMESPACES.update(IMPORTER_TYPES)
+# The set of valid roster namespaces (baseline + module-tier + importer), used to validate an injected
+# prior snapshot's counter namespaces against the authoritative roster rather than the observation's own
+# word (F6; guard-input-soundness).
+_ROSTER_NS_SET = frozenset(_ROSTER_NAMESPACES.values())
+
+# A module-tier record whose schema has not shipped is a named CANNOT-EVALUATE deferral, never graded
+# INVALID by the baseline-only record validator (F4), mirroring U7's module-tier staging refusal.
+_MODULE_DEFERRAL = ("module type schemas not yet available; deferred to U2M (the baseline record validator "
+                    "knows only the baseline specs)")
+
+
+def _module_deferred(tname):
+    """True when `tname` is a module-tier type whose record schema has not shipped (it is in MODULE_TYPES
+    but has no BASELINE_SPECS entry). Its records are a named CANNOT-EVALUATE deferral, not graded INVALID
+    by the baseline-only validator (F4)."""
+    return tname in MODULE_TYPES and tname not in BASELINE_SPECS
 
 # The closed spec-11 integrity roster. Every required check calls rep.ran(<id>) once; result() reconciles
 # the emitted set against this tuple, so a silently-skipped check becomes CANNOT-EVALUATE, never VALID.
@@ -132,6 +155,12 @@ _RESIDUALS = (
     "store state hides behind it, because every stored byte is graded.",
     "Declared-but-unsupported profiles (spec 16): named in unevaluated_profiles, enforced only by a "
     "profile-aware tool.",
+    "Module-tier record schema validation (spec 8.5): the baseline record validator knows only the "
+    "baseline specs, so a module-tier record is a named CANNOT-EVALUATE deferral (deferred to U2M) rather "
+    "than graded here; every such record is still surfaced, so none can hide a defect.",
+    "Byte-level view drift for a per-record store that declares views (spec 5.8/10): U4's view planner "
+    "does not yet support the per-record layout, so C-VIEW-DRIFT is a named CANNOT-EVALUATE there, never "
+    "a silent pass.",
 )
 
 
@@ -392,11 +421,13 @@ def _list_contained(root_fd, reldir):
 
 
 def _list_dir(root_fd, reldir, rep):
-    """_list_contained with StoreError mapped to a CANNOT-EVALUATE naming the directory."""
+    """_list_contained with StoreError mapped to a CANNOT-EVALUATE naming the directory. A directory or
+    entry name can carry control characters, so both the path and the error are rendered through
+    _safe_display rather than interpolated raw (F13)."""
     try:
         return _list_contained(root_fd, reldir)
     except StoreError as exc:
-        rep.cant("cannot list {}: {}".format(reldir, exc))
+        rep.cant("cannot list {}: {}".format(_safe_display(reldir), _safe_display(str(exc))))
         return None, None
 
 
@@ -418,18 +449,68 @@ def _under_any(p, prefixes):
     return False
 
 
-def _remote_forms_of_target(target):
-    """The concrete git-remote URL forms a REMOTE target (spec 5.5) can name, so a github:/gitlab:
-    shorthand is matched against its canonical git@ and https forms rather than string-compared raw (a
-    naive strip-compare over-fires; B3). Returns a set of candidate remote strings, or None for a LOCAL
-    (dir:/path) target that names no git remote."""
+def _canonical_remote(url):
+    """Canonicalize a git remote URL to a (host, path) pair for host+path equivalence (spec 5.5/5.6),
+    covering https/http/ssh/git scheme URLs and scp-style git@host:path, with or without a trailing
+    '.git'. Returns None when the string is not a git remote form the equivalence can canonicalize; such a
+    residual form is disclosed rather than silently matched (disclose-guard-residuals; F8)."""
+    if not isinstance(url, str):
+        return None
+    s = url.strip()
+    if not s:
+        return None
+    if "://" in s:
+        scheme, rest = s.split("://", 1)
+        if scheme.lower() not in ("https", "http", "ssh", "git"):
+            return None
+        if "/" not in rest:
+            return None
+        authority, path = rest.split("/", 1)
+        if "@" in authority:
+            authority = authority.rsplit("@", 1)[1]
+        if ":" in authority:
+            authority = authority.rsplit(":", 1)[0]
+        host = authority
+    else:
+        # scp-style [user@]host:path: a colon before any slash names a remote host:path
+        slash = s.find("/")
+        colon = s.find(":")
+        if colon == -1 or (slash != -1 and slash < colon):
+            return None
+        authority, path = s[:colon], s[colon + 1:]
+        if "@" in authority:
+            authority = authority.rsplit("@", 1)[1]
+        host = authority
+    if not host:
+        return None
+    p = path.strip("/")
+    if p.endswith(".git"):
+        p = p[:-len(".git")]
+    if not p:
+        return None
+    return (host.lower(), p)
+
+
+def _target_remote_canon(target):
+    """The canonical (host, path) forms a REMOTE target (spec 5.5) names, for host+path agreement against
+    an observed remote. Returns (canon_set, unresolved): `canon_set` is the set of canonical forms (empty
+    when a remote target names no canonicalizable form), and `unresolved` lists the raw target forms the
+    equivalence could not canonicalize (disclosed, never silently matched; F8). Returns (None, []) for a
+    LOCAL (dir:/path) target that names no git remote."""
     if target.kind in ("github", "gitlab"):
         host = "github.com" if target.kind == "github" else "gitlab.com"
         val = target.value.strip().lstrip("/")
-        return {"git@{}:{}".format(host, val), "https://{}/{}".format(host, val), val}
+        if val.endswith(".git"):
+            val = val[:-len(".git")]
+        if not val:
+            return set(), [target.value]
+        return {(host, val)}, []
     if target.kind == "git":
-        return {target.value.strip()}
-    return None
+        c = _canonical_remote(target.value)
+        if c is None:
+            return set(), [target.value]
+        return {c}, []
+    return None, []
 
 
 # --- index parsing (shape defined here) --------------------------------------------------------------
@@ -444,11 +525,15 @@ def _index_rows(data, where, rep):
     extra = set(data) - INDEX_TOP_KEYS
     if extra:
         rep.finding("{}: unknown top-level key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
-    sch = data.get("schema")
-    if sch is not None and (type(sch) is not int or sch != SUPPORTED_SCHEMA):
-        rep.cant("{}: schema {} is not the supported version {} (fail-closed; do not parse under v{} "
-                 "assumptions)".format(where, _safe_display(sch), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
-        return None
+    if "schema" not in data:
+        rep.finding("{}: index is missing the required `schema` key (a closed index declares its "
+                    "schema; spec 13)".format(where))
+    else:
+        sch = data.get("schema")
+        if type(sch) is not int or sch != SUPPORTED_SCHEMA:
+            rep.cant("{}: schema {} is not the supported version {} (fail-closed; do not parse under v{} "
+                     "assumptions)".format(where, _safe_display(sch), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+            return None
     records = data.get("record", [])
     if not isinstance(records, list):
         rep.cant("{}: [[record]] is not an array of tables".format(where))
@@ -583,6 +668,17 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
         rows = _index_rows(data, idx_rel, rep)
         if rows is None:
             continue
+        if _module_deferred(tname):
+            # F4: a module-tier record's schema ships in U2M; defer it to a named CANNOT-EVALUATE rather
+            # than the baseline validator's false "not a supported type". Seat the id best-effort so the
+            # id-space, no-deletion, and counters-completeness checks still see it.
+            if rows:
+                rep.cant("{}: {} module-tier record(s) of type {!r}; {}".format(
+                    idx_rel, len(rows), tname, _MODULE_DEFERRAL))
+            for row in rows:
+                if isinstance(row, dict):
+                    recs.append(_make_rec(row, tname, "active"))
+            continue
         if layout == "per-record":
             recs.extend(_gather_perrecord(root_fd, machine_rel, tname, namespace, rows, idx_rel,
                                           registered_vendors, rep, recon))
@@ -711,9 +807,12 @@ def _dest_index_has_id(root_fd, machine_rel, dest, target_id, rep):
 
 
 def _archived_rotatable(rec):
-    """A non-worklog archived record may rotate only from an UNQUALIFIED TERMINAL state (OPF-SPEC 12:972).
-    An open record, an active block, an unresolved decision, or a current handoff (each non-terminal or
-    proposal-qualified) must never rotate (OPF-SPEC 12:978)."""
+    """Rotation eligibility of a non-worklog archived record. Returns True (rotatable: an UNQUALIFIED
+    TERMINAL state, OPF-SPEC 12:972), False (must never rotate: non-terminal or proposal-qualified,
+    OPF-SPEC 12:978), or None when the record's type has no released schema (a module-tier record; rotation
+    eligibility is deferred to U2M, never graded here; F4)."""
+    if _module_deferred(rec.rtype):
+        return None
     spec = BASELINE_SPECS.get(rec.rtype)
     if spec is None:
         return False
@@ -733,7 +832,7 @@ def _archive_unmanaged(rep, import_status, path):
                     "archive artefact nor a <YYYY> bucket (spec 12/14.2)".format(path))
 
 
-def _validate_archive(root_fd, machine_rel, registered_vendors, import_status, rep):
+def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep):
     """Walk the archive tree, validating each bucket's archive.toml, its archived non-worklog records, and
     its archived worklog, and reconciling the enumeration BIDIRECTIONALLY against what is actually present
     (OPF-SPEC 12/13). Enumeration and record-schema faults attribute to the caller's C-ARCHIVE-ENUM focus;
@@ -789,6 +888,14 @@ def _validate_archive(root_fd, machine_rel, registered_vendors, import_status, r
                     fn_, bucket))
                 continue
             tname = fn_[:-len(INDEX_SUFFIX)]
+            if tname not in enabled_types:
+                # F1: a `<type>.index.toml` whose <type> is not an enabled roster type is unmanaged. The
+                # active tree flags this via managed_file and C-CONTAINMENT skips the archive, so grade it
+                # here (a stray junk.index.toml can no longer escape; spec 12/14.2).
+                rep.finding("C-ARCHIVE-ENUM: archive bucket {} carries {!r}, whose type {!r} is not "
+                            "an enabled roster type (an unmanaged archive index; spec 12/8.1)".format(
+                                bucket, fn_, tname))
+                continue
             idx_rel = _rel(bucket, fn_)
             data, st = _read_toml(root_fd, idx_rel, rep)
             if st != "ok":
@@ -796,23 +903,33 @@ def _validate_archive(root_fd, machine_rel, registered_vendors, import_status, r
             rows = _index_rows(data, idx_rel, rep)
             if rows is None:
                 continue
+            module_deferred = _module_deferred(tname)
+            if module_deferred and rows:
+                # F4: a module-tier record cannot be schema-graded until U2M ships its specs; defer to a
+                # named CANNOT-EVALUATE rather than the baseline validator's false "not a supported type".
+                rep.cant("{}: {} archived module-tier record(s) of type {!r}; {}".format(
+                    idx_rel, len(rows), tname, _MODULE_DEFERRAL))
             for i, row in enumerate(rows):
                 rw = "{}#{}".format(idx_rel, i + 1)
                 if not isinstance(row, dict):
                     rep.cant("{}: archived record row is not a table".format(rw))
                     continue
-                rv = validate_record(row, expected_type=tname, registered_vendors=registered_vendors)
-                if rv.status == CANNOT_EVALUATE:
-                    rep.cant("{}: {}".format(rw, "; ".join(rv.findings)))
-                    continue
-                if rv.status != VALID:
-                    for f in rv.findings:
-                        rep.finding("{}: {}".format(rw, f))
+                if not module_deferred:
+                    rv = validate_record(row, expected_type=tname, registered_vendors=registered_vendors)
+                    if rv.status == CANNOT_EVALUATE:
+                        rep.cant("{}: {}".format(rw, "; ".join(rv.findings)))
+                        continue
+                    if rv.status != VALID:
+                        for f in rv.findings:
+                            rep.finding("{}: {}".format(rw, f))
                 rec = _make_rec(row, tname, "archive/{}".format(year))
                 archive_recs.append(rec)
                 if isinstance(rec.id, str) and _valid_id_shape(rec.id) is not None:
                     present_types[rec.id] = tname
-                    if not _archived_rotatable(rec):
+                    elig = _archived_rotatable(rec)
+                    if elig is None:
+                        pass     # module-tier: rotation eligibility deferred to U2M (F4), never graded here
+                    elif not elig:
                         rotatable.append("C-ROTATION: archived record {!r} ({}) is not in an unqualified "
                                          "terminal state and must never rotate (spec 12:972-979)".format(
                                              rec.id, tname))
@@ -1125,8 +1242,12 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
     imports_root = _rel(mrel, _opf_import.IMPORTS_DIRNAME)
 
-    def managed_file(p):
-        if p in view_targets or _under_any(p, unmanaged):
+    def managed_leaf(p):
+        # A STRICT managed-leaf test: a ledger, an enabled type index, a per-record body, or a declared
+        # store-scope view target. It deliberately EXCLUDES the `_under_any(p, unmanaged)` clause so the
+        # collision check can ask whether an unmanaged declaration names a managed leaf without the
+        # declaration trivially matching itself (F2).
+        if p in view_targets:
             return True
         prefix = mrel + "/"
         if p.startswith(prefix):
@@ -1143,10 +1264,19 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
                     return True
         return False
 
-    # An unmanaged declaration that equals or nests with a managed path is a finding (spec 14.2).
+    def managed_file(p):
+        # The tree-walk test: a file UNDER a declared-unmanaged subtree stays covered (not flagged), plus
+        # every strict managed leaf.
+        if _under_any(p, unmanaged):
+            return True
+        return managed_leaf(p)
+
+    # An unmanaged declaration that equals or nests with a managed path is a finding (spec 14.2). The
+    # STRICT leaf test is used here (not managed_file), so a declaration no longer collides with itself via
+    # the unmanaged clause (F2).
     managed_dir_prefixes = (mrel, archive_root, imports_root)
     for u in unmanaged:
-        if managed_file(u) or u in managed_dir_prefixes or _under_any(u, managed_dir_prefixes):
+        if managed_leaf(u) or u in managed_dir_prefixes or _under_any(u, managed_dir_prefixes):
             rep.finding("C-CONTAINMENT: unmanaged path {!r} collides with a managed store path (an "
                         "unmanaged declaration cannot cover a managed file; spec 14.2)".format(u))
 
@@ -1190,6 +1320,30 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
 
 # --- observations (the inert git-derived facts the caller injects) -----------------------------------
 
+def _wellformed_release_row(row):
+    """True when `row` is a structurally well-formed release row: the per-row shape validate_version
+    enforces (keys EXACTLY RELEASE_KEYS, a valid SemVer version, an RFC 3339 date, a well-formed
+    worklog_span, and a sha256 coverage_digest). Cross-row tiling, uniqueness, and monotonicity are NOT
+    applied: this decides only whether an INJECTED prior row can serve as the append-only immutability
+    baseline, so a well-formed row that merely DIFFERS from the current ledger still reaches the graded
+    rewrite check (a real history rewrite), while a dict of garbage keys is a malformed observation routed
+    to CANNOT-EVALUATE rather than a false rewrite finding (F5; guard-input-soundness)."""
+    if not isinstance(row, dict):
+        return False
+    if set(row) != RELEASE_KEYS:
+        return False
+    if parse_semver(row.get("version")) is None:
+        return False
+    if not _valid_timestamp(row.get("date")):
+        return False
+    scratch = []
+    if _parse_span(row.get("worklog_span"), scratch, "prior release row") is False or scratch:
+        return False
+    if not _valid_digest(row.get("coverage_digest")):
+        return False
+    return True
+
+
 def _normalize_prior(prior):
     """Validate the injected prior committed snapshot: {releases: list, counters_high: {ns: int},
     records: {id: (type, status)}}. Returns the normalized dict or None when any field is malformed (which
@@ -1206,11 +1360,11 @@ def _normalize_prior(prior):
     # counter high-water must be a genuine non-negative int (never a bool); a record value must be a
     # (type, status) pair of strings.
     for row in releases:
-        if not isinstance(row, dict):
+        if not _wellformed_release_row(row):
             return None
     norm_high = {}
     for ns, val in counters_high.items():
-        if not isinstance(ns, str):
+        if not isinstance(ns, str) or ns not in _ROSTER_NS_SET:
             return None
         if not (isinstance(val, int) and not isinstance(val, bool) and val >= 0):
             return None
@@ -1236,6 +1390,13 @@ def _normalize_observations(observations):
     if not isinstance(observations, dict):
         return {}, ("observations must be an inert table of git-derived facts, not {} (fail-closed; a "
                     "malformed observation is cannot-evaluate)".format(type(observations).__name__))
+    unknown = set(observations) - _OBSERVATION_KEYS
+    if unknown:
+        # F12: an unrecognized observation key is a malformed injection (a typo silently demotes an
+        # intended observation to "absent"); surface it fail-closed rather than dropping it.
+        return {}, ("observations carries unrecognized key(s): {} (fail-closed; an unknown observation "
+                    "key is a malformed injection, never silently dropped)".format(
+                        ", ".join(_sorted_key_names(unknown))))
     obs = {}
     tracked = observations.get("tracked")
     if isinstance(tracked, str) and tracked in ("tracked", "untracked"):
@@ -1295,10 +1456,12 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
         except OSError:
             product_root_fd = None     # the product-scope checks route to cannot-evaluate naming the input
     pointer_target = getattr(resolution, "target", None)   # the parsed committed/override pointer Target
+    pointer_source = getattr(resolution, "pointer_source", None)   # "default"/"committed"/"local-override"
     evaluated_profiles, unevaluated_profiles = [], []
     try:
         evaluated_profiles, unevaluated_profiles = _validate_opened_store(
-            root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target, rep)
+            root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target, pointer_source,
+            rep)
     except Exception as exc:
         # Top-level fail-closed barrier (B6): any unexpected error (a RecursionError from a hostile-shaped
         # store, or any other escape no specific guard anticipated) becomes a CANNOT-EVALUATE naming the
@@ -1314,7 +1477,7 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
 
 
 def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target,
-                           rep):
+                           pointer_source, rep):
     # --- C-MANIFEST: identify the store, derive enabled types / vendors / layout ----------------------
     rep.ran("C-MANIFEST")
     manifest_rel = _rel(machine_rel, MANIFEST_NAME)
@@ -1378,8 +1541,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-ARCHIVE-ENUM: walk + reconcile the archive; collect rotation-eligibility for C-ROTATION -----
     rep.ran("C-ARCHIVE-ENUM")
-    archive_recs, archive_worklogs, rotatable = _validate_archive(root_fd, machine_rel, registered_vendors,
-                                                                  import_status, rep)
+    archive_recs, archive_worklogs, rotatable = _validate_archive(root_fd, machine_rel, enabled_types,
+                                                                  registered_vendors, import_status, rep)
 
     # --- the merged worklog (active + archive together; spec 12:982-983) and the id maps --------------
     merged = {}
@@ -1568,53 +1731,82 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     actual = obs.get("actual_remote")
     actual_reason = ("the `actual_remote` observation was supplied but malformed"
                      if obs.get("actual_remote_malformed") else "no `actual_remote` observation was supplied")
+    actual_present = isinstance(actual, str) and actual.strip() != ""
     if not isinstance(sync_target, str):
         rep.cant("C-SYNC-AGREE: [store].sync_target is not a string")
-    elif sync_target == "":
-        # Local-only claim: the manifest names no sync target. A REAL remote observed on the store
-        # repository is an unrecorded push destination (a spec-5.6 disagreement), not a bare pass; an
-        # absent observation is the disclosed local-only durability residual (spec 5.7/17), not a cant. A
-        # committed pointer that itself names a remote likewise contradicts the local-only claim.
-        if actual is not None and actual.strip():
-            rep.finding("C-SYNC-AGREE: the manifest declares no sync_target (local-only) but the store "
-                        "repository has an actual remote {!r} (an unrecorded push destination; spec "
-                        "5.6)".format(actual))
-        if pointer_target is not None and not pointer_target.local:
-            rep.finding("C-SYNC-AGREE: the manifest declares no sync_target (local-only) but the committed "
-                        "pointer names a remote {} target {!r} (spec 5.6)".format(
-                            pointer_target.kind, pointer_target.value))
-    else:
-        # Leg 1: the declared sync_target classifies as a target (spec 5.5).
+    elif sync_target != "":
+        # Pattern DEDICATED: the manifest names a dedicated sync target (spec 5.5). The store repository's
+        # actual remote must agree with it, and a committed pointer that names a disagreeing remote is a
+        # finding; the actual-remote leg is REQUIRED, so an absent observation is a cant, never a pass (F7).
         try:
             tgt = classify_target(sync_target)
         except StoreError as exc:
             rep.finding("C-SYNC-AGREE: [store].sync_target {!r} does not classify as a target (spec "
                         "5.5): {}".format(sync_target, exc))
         else:
-            forms = _remote_forms_of_target(tgt)     # concrete remote URL forms, or None for a local target
-            # Leg 2: the committed pointer agrees with the sync_target. resolve_store resolves only a LOCAL
-            # store, so a resolvable store's pointer is local (or absent by default), which does not
-            # contradict a declared remote mirror; a committed pointer that names a REMOTE disagreeing with
-            # the sync_target is graded here (this reads resolution.target, previously never consulted; B3).
-            if pointer_target is not None and not pointer_target.local and forms is not None:
-                pforms = _remote_forms_of_target(pointer_target) or set()
-                if pforms.isdisjoint(forms):
+            tcanon, tunresolved = _target_remote_canon(tgt)   # canonical (host, path) forms, None (local)
+            for raw in tunresolved:
+                rep.cant("C-SYNC-AGREE: the sync_target remote form {!r} cannot be canonicalized for "
+                         "host+path agreement (a disclosed residual; spec 5.5)".format(raw))
+            # Leg 2: a committed pointer that names a REMOTE disagreeing with the sync_target (B3).
+            if pointer_target is not None and not pointer_target.local:
+                pcanon, _pun = _target_remote_canon(pointer_target)
+                if tcanon and pcanon and pcanon.isdisjoint(tcanon):
                     rep.finding("C-SYNC-AGREE: the committed pointer remote {!r} does not agree with the "
                                 "manifest sync_target {!r} (spec 5.6)".format(pointer_target.value, sync_target))
-            # Leg 3: the store repository's actual remote agrees with the RESOLVED sync_target. The
-            # github:/gitlab: shorthand is resolved to its canonical git@/https remote forms before the
-            # comparison, so a valid shorthand is not wrongly rejected by a naive strip-compare (over-fire).
+            # Leg 3: the store repository's actual remote agrees with the RESOLVED sync_target. Equivalent
+            # URL forms (https / ssh scp-style git@host:path, with or without a trailing .git) compare by
+            # canonical host+path, so a valid shorthand is not rejected by a naive strip-compare (F8).
             if actual is None:
-                rep.cant("C-SYNC-AGREE: {}; the sync-target / remote agreement (spec 5.6) is not evaluable "
-                         "by a parse-only engine".format(actual_reason))
-            elif forms is None:
+                rep.cant("C-SYNC-AGREE: {}; the sync-target / remote agreement (spec 5.6) is required "
+                         "for a dedicated sync target and is not evaluable by a parse-only engine".format(
+                             actual_reason))
+            elif tcanon is None:
                 # a local dir:/path sync target with an observed remote cannot be canonicalized to compare
-                if actual.strip():
+                if actual_present:
                     rep.finding("C-SYNC-AGREE: [store].sync_target {!r} is a local target but the store "
                                 "repository has an actual remote {!r} (spec 5.6)".format(sync_target, actual))
-            elif actual.strip() not in forms:
-                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
-                            "repository's actual remote {!r} (spec 5.6)".format(sync_target, actual))
+            elif not actual_present:
+                rep.finding("C-SYNC-AGREE: the manifest declares a dedicated sync_target {!r} but the "
+                            "store repository has no actual remote (spec 5.6)".format(sync_target))
+            else:
+                acanon = _canonical_remote(actual)
+                if acanon is None:
+                    # a form the equivalence cannot canonicalize is disclosed, never a silent mismatch (F8)
+                    rep.cant("C-SYNC-AGREE: the actual remote {!r} cannot be canonicalized for "
+                             "host+path agreement against the sync_target (a disclosed residual; spec "
+                             "5.6)".format(actual))
+                elif not tcanon:
+                    rep.cant("C-SYNC-AGREE: the sync_target {!r} names no canonicalizable remote form "
+                             "to compare against the actual remote (a disclosed residual; spec 5.5)".format(
+                                 sync_target))
+                elif acanon not in tcanon:
+                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
+                                "repository's actual remote {!r} (spec 5.6)".format(sync_target, actual))
+    elif pointer_source == "default":
+        # Pattern IN-REPO DEFAULT: sync_target == "" and the store is co-located in the product repo (no
+        # pointer names it). It rides the product repository and shares its remote, so a present actual
+        # remote is EXPECTED, not a disagreement -> PASS (F3). Durability is the disclosed local-only
+        # residual (spec 5.7/17).
+        pass
+    else:
+        # Pattern RELOCATED LOCAL-ONLY: sync_target == "" but a pointer (committed / local-override) names
+        # the store, so it claims NO dedicated remote. A present actual remote is an unrecorded push
+        # destination (a spec-5.6 disagreement); an ABSENT observation cannot verify the no-remote claim,
+        # so it is a cant, never a pass (F7). A committed pointer that itself names a remote likewise
+        # contradicts the no-remote claim.
+        if actual is None:
+            rep.cant("C-SYNC-AGREE: {}; the store claims no dedicated remote (a relocated local-only "
+                     "store) yet that claim cannot be verified without the actual-remote observation "
+                     "(spec 5.6)".format(actual_reason))
+        elif actual_present:
+            rep.finding("C-SYNC-AGREE: the manifest declares no sync_target (relocated local-only) but the "
+                        "store repository has an actual remote {!r} (an unrecorded push destination; "
+                        "spec 5.6)".format(actual))
+        if pointer_target is not None and not pointer_target.local:
+            rep.finding("C-SYNC-AGREE: the manifest declares no sync_target (relocated local-only) but the "
+                        "committed pointer names a remote {} target {!r} (spec 5.6)".format(
+                            pointer_target.kind, pointer_target.value))
 
     # --- C-CONTAINMENT: whole-tree path / unmanaged-path containment (spec 14.2/11) -------------------
     rep.ran("C-CONTAINMENT")
@@ -2113,6 +2305,12 @@ def self_test():
         um["manifest.toml"] = base_manifest()
         um["manifest.toml"]["unmanaged"] = {"paths": [".working/toml/manifest.toml"]}
         check("unmanaged-collision-invalid", run(um).status == INVALID)
+        # F2: a valid declared unmanaged path (contained, non-colliding) validates VALID; the round-1
+        # collision test over-fired on every unmanaged declaration (it matched itself).
+        uv = clean_machine()
+        uv["manifest.toml"] = base_manifest()
+        uv["manifest.toml"]["unmanaged"] = {"paths": [".working/legacy.md"]}
+        check("unmanaged-declared-valid", run(uv, working={"legacy.md": "x\n"}).status == VALID)
         sm = clean_machine()
         sm["manifest.toml"] = base_manifest()
         sm["manifest.toml"]["store"] = {"sync_target": "git:git@example.com:store.git"}
@@ -2161,6 +2359,23 @@ def self_test():
         f["block.index.toml"] = idx([envelope("BL-1", "block", "active", scopes=["FN-99"])])
         f["counters.toml"] = counters(BL=1)
         check("r4-block-scope-unresolved-invalid", run(f).status == INVALID)
+        # F9 (C-LINKS sole layer): a supersedes link whose target is a DIFFERENT type is a finding.
+        f = clean_machine()
+        f["finding.index.toml"] = idx([envelope("FN-1", "finding", "open",
+                                                 links=[{"rel": "supersedes", "id": "BI-2"}])])
+        f["counters.toml"] = counters(FN=1)
+        r = run(f)
+        check("r4-supersedes-cross-type-invalid", r.status == INVALID)
+        check("r4-supersedes-cross-type-named",
+              any("supersedes" in x and "same type" in x for x in r.findings))
+        # F14 (C-DECISION-CHAINS discrimination): a wholly-undecided supersession chain (all open /
+        # withdrawn) is legitimately zero-current -> VALID; removing the `if not decided: continue` guard
+        # would flip it INVALID.
+        f = clean_machine()
+        f["pending_decision.index.toml"] = idx([pd(1, status="open"),
+                                                pd(2, status="withdrawn", supersedes="PD-1")])
+        f["counters.toml"] = counters(PD=2)
+        check("pd-wholly-undecided-chain-valid", run(f).status == VALID)
 
         # --- id space / counters ----------------------------------------------------------------------
         f = clean_machine()
@@ -2385,6 +2600,14 @@ def self_test():
         b2br = run(b2b)
         check("b2-subdir-in-bucket-invalid",
               b2br.status == INVALID and any("archive tree" in f for f in b2br.findings))
+        # F1: a stray <x>.index.toml whose type is not an enabled roster type no longer escapes grading in
+        # an archive bucket (the round-1 fail-open); an empty/junk index becomes an INVALID finding.
+        f1a = clean_machine()
+        f1a["archive/2026/junk.index.toml"] = idx([])
+        f1ar = run(f1a)
+        check("f1-stray-index-in-bucket-invalid",
+              f1ar is not None and f1ar.status == INVALID
+              and any("not an enabled roster type" in f for f in f1ar.findings))
 
         # --- N3: a stray root VERSION with an empty release ledger ------------------------------------
         n3m = copy.deepcopy(pr_machine)
@@ -2394,16 +2617,41 @@ def self_test():
         check("n3-empty-release-stray-version-named",
               n3r is not None and any("C-VERSION-FILE" in f for f in n3r.findings))
 
-        # --- B3: C-SYNC-AGREE three legs -------------------------------------------------------------
+        # --- B3 / F3 / F7 / F8: C-SYNC-AGREE three-pattern model -------------------------------------
         gm = clean_machine()
         gm["manifest.toml"] = base_manifest()
         gm["manifest.toml"]["store"] = {"sync_target": "github:org/repo.git"}
+        # DEDICATED: the github: shorthand agrees with the git@ and the https remote forms (F8).
         check("sync-shorthand-match-valid",
               run(gm, obs={"tracked": "tracked", "actual_remote": "git@github.com:org/repo.git",
                            "prior": clean_prior()["prior"]}).status == VALID)
-        check("sync-local-only-but-remote-invalid",
+        check("sync-shorthand-https-match-valid",
+              run(gm, obs={"tracked": "tracked", "actual_remote": "https://github.com/org/repo",
+                           "prior": clean_prior()["prior"]}).status == VALID)
+        # IN-REPO DEFAULT (pointer_source == "default", sync_target == ""): a present actual remote is
+        # EXPECTED (the store rides the product repo), so it PASSES -> VALID (F3 over-fire fix).
+        check("sync-in-repo-default-remote-valid",
               run(clean_machine(), obs={"tracked": "tracked", "actual_remote": "git@github.com:x/y.git",
-                                        "prior": clean_prior()["prior"]}).status == INVALID)
+                                        "prior": clean_prior()["prior"]}).status == VALID)
+        # RELOCATED LOCAL-ONLY (a committed dir: pointer names the store, sync_target == ""): a present
+        # remote is an unrecorded push destination -> INVALID (reworked from sync-local-only-but-remote).
+        def relocated_product():
+            p = clean_product()
+            p[".opf.toml"] = "[store]\ntarget = \"dir:.\"\n"
+            return p
+        rlr = validate_store(
+            resolve_store(build(clean_machine(), relocated_product())),
+            observations={"tracked": "tracked", "actual_remote": "git@github.com:x/y.git",
+                          "prior": clean_prior()["prior"]})
+        check("sync-relocated-local-remote-invalid", rlr is not None and rlr.status == INVALID)
+        check("sync-relocated-local-remote-named",
+              rlr is not None and any("relocated local-only" in f for f in rlr.findings))
+        # RELOCATED LOCAL-ONLY with NO remote observation: the no-remote claim cannot be verified without
+        # the observation -> cant, never a pass (F7).
+        rla = validate_store(
+            resolve_store(build(clean_machine(), relocated_product())),
+            observations={"tracked": "tracked", "prior": clean_prior()["prior"]})
+        check("sync-relocated-local-absent-cannot-eval", rla is not None and rla.status == CANNOT_EVALUATE)
 
         # --- M1: a malformed prior observation is CANNOT-EVALUATE (naming it malformed), not INVALID ---
         mp = copy.deepcopy(clean_prior())
@@ -2416,6 +2664,26 @@ def self_test():
         mp2["prior"]["counters_high"]["WL"] = "four"
         check("m1-malformed-prior-counters-cannot-eval",
               run(clean_machine(), obs=mp2).status == CANNOT_EVALUATE)
+        # F5: a dict-but-garbage prior release row is a MALFORMED observation (cant naming it), not a
+        # graded C-HISTORY-APPEND-ONLY rewrite finding against a clean store.
+        gp = copy.deepcopy(clean_prior())
+        gp["prior"]["releases"][0] = {"garbage": True}
+        gpr = run(clean_machine(), obs=gp)
+        check("f5-garbage-prior-release-cannot-eval", gpr is not None and gpr.status == CANNOT_EVALUATE)
+        check("f5-garbage-prior-release-named",
+              gpr is not None and any("malformed" in m for m in gpr.cannot_evaluate))
+        # F6: a prior counters namespace outside the roster is a MALFORMED observation (cant), not a
+        # graded C-HISTORY-COUNTERS finding against a clean store.
+        bp = copy.deepcopy(clean_prior())
+        bp["prior"]["counters_high"]["ZZ"] = 5
+        bpr = run(clean_machine(), obs=bp)
+        check("f6-bogus-prior-namespace-cannot-eval", bpr is not None and bpr.status == CANNOT_EVALUATE)
+        # F5 corollary: a well-formed prior release row that merely DIFFERS from the current ledger still
+        # reaches the graded rewrite check (a real history rewrite), not swallowed as malformed.
+        rp = copy.deepcopy(clean_prior())
+        rp["prior"]["releases"][0]["coverage_digest"] = "sha256:" + "c" * 64
+        rpr = run(clean_machine(), obs=rp)
+        check("f5-wellformed-prior-rewrite-invalid", rpr is not None and rpr.status == INVALID)
 
         # --- B5: a '..' moved destination is refused (confinement), never an uncaught JournalError ----
         b5 = clean_machine()
@@ -2450,6 +2718,28 @@ def self_test():
         check("b6-deep-nesting-cannot-eval-not-crash",
               dr is not None and dr.status == CANNOT_EVALUATE
               and any("ceiling" in m for m in dr.cannot_evaluate))
+
+        # --- F4: a module-tier record is a named CANNOT-EVALUATE deferral (deferred to U2M), never a
+        #         false INVALID from the baseline-only record validator -----------------------------
+        mm_types = {t: {"namespace": ns} for t, ns in (
+            ("backlog_item", "BI"), ("done", "DN"), ("worklog", "WL"), ("finding", "FN"),
+            ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
+            ("autonomous_decision", "AD"), ("block", "BL"),
+            ("artifact", "AR"), ("gate_run", "GR"), ("release", "RL"), ("waiver", "WV"))}
+        mm = clean_machine()
+        mm["manifest.toml"] = base_manifest(types=mm_types)
+        mm["manifest.toml"]["modules"] = {"delivery_assurance": True}
+        mm["counters.toml"] = counters(AR=1, GR=0, RL=0, WV=0)
+        mm["artifact.index.toml"] = idx([envelope("AR-1", "artifact", "recorded")])
+        mm["gate_run.index.toml"] = idx([])
+        mm["release.index.toml"] = idx([])
+        mm["waiver.index.toml"] = idx([])
+        mmr = run(mm)
+        check("f4-module-record-deferred-cannot-eval", mmr is not None and mmr.status == CANNOT_EVALUATE)
+        check("f4-module-record-deferral-named",
+              mmr is not None and any("deferred to U2M" in m for m in mmr.cannot_evaluate))
+        check("f4-module-record-not-false-invalid",
+              mmr is not None and not any("not a supported record type" in f for f in mmr.findings))
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
