@@ -249,6 +249,13 @@ def _read_toml(store_root_fd, rel):
         raise _cannot(str(exc))
     except _journal.JournalError as exc:
         raise _cannot("cannot read {} ({})".format(rel, exc))
+    except ValueError as exc:
+        # ValueError family, at the PARSE locus: tomllib raises a bare ValueError on a store-TOML integer
+        # literal over CPython's 4300-digit string-conversion ceiling (counters, index, archive, worklog).
+        # Convert it to the module's fail-closed CANNOT-EVALUATE HERE, at the specific parse call, so an
+        # unrelated internal invariant ValueError elsewhere in stage_import is NOT laundered into a
+        # malformed-input verdict (no-concealed-failure).
+        raise _cannot("cannot parse {} ({})".format(rel, exc))
 
 
 def _close_fd(fd, rel):
@@ -827,10 +834,18 @@ def stage_import(product_root, import_set, plan, *, now, run_nonce):
             raise _cannot("product_root must be a path string or os.PathLike, got {}".format(
                 type(product_root).__name__))
 
-        resolution = _opf_store.resolve_store(product_root)
-        if resolution.status != _opf_store.RESOLVED:
-            raise _cannot("store did not resolve ({}: {})".format(resolution.status, resolution.detail))
-        mv = _opf_store.load_manifest(resolution)
+        try:
+            resolution = _opf_store.resolve_store(product_root)
+            if resolution.status != _opf_store.RESOLVED:
+                raise _cannot("store did not resolve ({}: {})".format(resolution.status, resolution.detail))
+            mv = _opf_store.load_manifest(resolution)
+        except ValueError as exc:
+            # ValueError family, at the store-TOML PARSE locus: an oversized integer literal in the MANIFEST
+            # (read via resolve/load_manifest, not the _read_toml wrapper) makes tomllib raise a bare
+            # ValueError. Convert it to CANNOT-EVALUATE HERE, at the parse boundary, so the removal of the
+            # former function-wide `except ValueError` does not let a store-parse ValueError escape while an
+            # unrelated internal ValueError still propagates as a real error (no-concealed-failure).
+            raise _cannot("cannot parse store manifest for {!r} ({})".format(product_root, exc))
         if mv.status != _opf_store.VALID:
             raise _cannot("store manifest is not VALID ({}: {})".format(
                 mv.status, "; ".join(mv.findings)))
@@ -877,15 +892,6 @@ def stage_import(product_root, import_set, plan, *, now, run_nonce):
         # readers convert their own os.read/os.listdir/os.close at the site (regions A/B/F); this backstop
         # guarantees the remaining reachable os.* calls (enumerated in the draft) cannot escape.
         return StageResult(CANNOT_EVALUATE, ["fail-closed on a filesystem read error: {}".format(exc)])
-    except ValueError as exc:
-        # CLASS 1 (class-complete backstop, ValueError family): a ValueError reaching here from a read or
-        # parse path is fail-closed CANNOT-EVALUATE, never an uncaught escape. Two reachable sources sit
-        # OUTSIDE the OSError family the backstop above enumerates: tomllib raises a bare ValueError on a
-        # store-TOML integer literal over CPython's 4300-digit string-conversion ceiling (counters, manifest,
-        # any index/sibling/archive/version file the store carries), and the filesystem name codec raises
-        # UnicodeEncodeError (a ValueError subclass) when a declared source path carries a lone surrogate.
-        # Both are malformed/exotic inputs the outcome contract owes a verdict-2 for, not a raw crash.
-        return StageResult(CANNOT_EVALUATE, ["fail-closed on a malformed value: {}".format(exc)])
     except RecursionError as exc:
         # CLASS 3 (class-complete backstop, recursion): a plan model nested past the interpreter recursion
         # limit overflows copy.deepcopy at the candidate/worklog mint (the U8 emitter is iterative and bounds
@@ -916,6 +922,13 @@ def _read_sources(product_root_fd, import_set):
             # _open_parent's _check_rel then rejects. Convert that JournalError into the module's
             # fail-closed StageResult contract rather than letting it escape stage_import (F10).
             raise _cannot("source path {!r} is not a clean contained path ({})".format(rel, exc))
+        except UnicodeEncodeError as exc:
+            # ValueError family, at the filesystem-name-codec locus: a declared source path carrying a lone
+            # surrogate passes the lexical/control-character guards but makes the os.stat filename encode
+            # raise UnicodeEncodeError (a ValueError subclass). Convert it HERE, at the fs-name locus, so the
+            # removal of the former function-wide `except ValueError` still gives a verdict-2 for this
+            # exotic-but-real input while an unrelated internal ValueError propagates (no-concealed-failure).
+            raise _cannot("source path {!r} is not encodable for this filesystem ({})".format(rel, exc))
         if st is None:
             raise _cannot("declared source {!r} is absent (a declared member is never nothing-to-do)".format(rel))
         if not stat.S_ISREG(st.st_mode):
@@ -2734,6 +2747,27 @@ def self_test():
             vG3 = "escaped"
         check("G3-deep-nested-plan-cannot-eval", vG3 == 2)
         check("G3-deep-nested-plan-no-run", not (mG3 / "imports").exists())
+
+        # G7 (no-concealed-failure, ValueError narrowing): an INTERNAL invariant ValueError raised PAST the
+        # store-parse/fs-codec boundary (here from _stage_resolved, a programming failure, not malformed
+        # input) must PROPAGATE as a real error, never be laundered into a malformed-input verdict 2. The
+        # ValueError-family handling now lives at the specific parse loci (_read_toml, resolve/load_manifest,
+        # the _read_sources fs-name codec), so no function-wide `except ValueError` remains to conceal an
+        # internal bug. Reverting to the former function-wide backstop makes stage_import return verdict 2
+        # here instead of raising, so this check FAILS without the fix.
+        rootG7, _mG7 = build_store(sources={"a.txt": src})
+        _real_stage_resolved = _stage_resolved
+        globals()["_stage_resolved"] = lambda *a, **k: (_ for _ in ()).throw(
+            ValueError("INTERNAL INVARIANT BUG (not malformed input)"))
+        try:
+            g7_propagated = False
+            try:
+                stage_import(rootG7, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
+            except ValueError:
+                g7_propagated = True
+        finally:
+            globals()["_stage_resolved"] = _real_stage_resolved
+        check("G7-internal-valueerror-propagates-not-concealed", g7_propagated)
 
         # G4 (spec 8.2, counters never regress): a store whose counters high-water is BELOW an id already
         # seated in the active store (BI=0 with an existing BI-5), where the minted BI-1 clears every existing

@@ -77,8 +77,9 @@ _READ_CHUNK = 1 << 20
 # post-read re-check). It bounds ONLY the small journal control files: frames.log holds a cutover's INTENT
 # op-list METADATA (the file payloads live under preimages/, never here) and the lock holds a small owner
 # record, so 16 MiB is generous headroom over any real cutover's framed op list while decisively refusing an
-# oversize plant. It is NOT applied to _read_fd's remaining uncapped caller, _verify_fd_prestate, which
-# re-reads a write op's recorded-size prestate through an already-open apply-time fd.
+# oversize plant. The prestate verifiers (_verify_fd_prestate, _verify_prestate_at) instead cap at the
+# op's KNOWN recorded size (with a fast-reject on a changed size), so a legitimate large preimage is never
+# refused by this control cap while a file grown past its recorded size is still refused fail-closed (F2/F3).
 _MAX_JOURNAL_READ_BYTES = 16 << 20
 # The contained PRODUCT-FILE readers (_read_at, _read_contained) carry their own hard incremental ceiling.
 # A caller's pre-open st.st_size fast-reject (e.g. _opf_store._read_toml_contained's store cap, or
@@ -195,8 +196,9 @@ def _read_fd(fd, cap=None):
             # re-check a caller does with len(data), made memory-safe here so a file grown or swapped past
             # its pre-open st.st_size is still refused fail-closed (SECA resource-bounds). The journal
             # CONTROL readers pass _MAX_JOURNAL_READ_BYTES; the contained PRODUCT-FILE readers (_read_at,
-            # _read_contained) pass _MAX_PRODUCT_READ_BYTES; cap is None only for _verify_fd_prestate, whose
-            # apply-time re-read stays uncapped, so its behaviour is unchanged.
+            # _read_contained) pass _MAX_PRODUCT_READ_BYTES; the prestate verifiers (_verify_fd_prestate,
+            # _verify_prestate_at) pass the op's KNOWN recorded size, so a valid at-size preimage is never
+            # refused while a grown file is (F2/F3). cap=None (unbounded) is the bare default no caller uses.
             raise JournalError("contained file exceeds the {}-byte read cap (fail-closed)".format(cap))
         chunks.append(block)
     return b"".join(chunks)
@@ -234,11 +236,17 @@ def _lstat_at(pfd, name):
         raise JournalError("cannot lstat contained final component {!r} ({})".format(name, exc))
 
 
-def _read_at(pfd, name, relpath):
+def _read_at(pfd, name, relpath, cap=None):
     """Read the final component's bytes through an O_NOFOLLOW fd opened beneath the SAME parent handle,
     confirming on the opened fd it is a regular file. The fd-bound sibling of _read_contained, used where
     the read MUST bind to the parent handle the mutation uses (E1, 9.3 step 4). JournalError on a symlink,
-    a non-regular file, or a read error."""
+    a non-regular file, or a read error. cap=None (the default) resolves at CALL time to the generic
+    product-file ceiling _MAX_PRODUCT_READ_BYTES (read from the module global here, not baked as a default
+    argument, so a runtime override of the ceiling is honoured); the prestate verifier instead passes the
+    KNOWN recorded size so a legitimate large preimage is never refused by an unrelated memory cap (F2/F3)
+    while a file grown past that size is still refused fail-closed."""
+    if cap is None:
+        cap = _MAX_PRODUCT_READ_BYTES
     # O_NONBLOCK so a non-regular final component (e.g. a FIFO raced in for the regular file after an
     # lstat gate) returns at once instead of blocking forever on a writer-less FIFO; the fstat below then
     # refuses it. O_NONBLOCK is a no-op for a regular file (SECA resource-bounds; mirrors _read_contained).
@@ -247,7 +255,7 @@ def _read_at(pfd, name, relpath):
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise JournalError("contained path {!r} is not a regular file".format(relpath))
-        return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
+        return _read_fd(fd, cap=cap), st
     finally:
         os.close(fd)
 
@@ -292,7 +300,16 @@ def _fsync_parent(root_fd, relpath):
 
 
 def _fsync_path_dir(path):
-    fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)
+    """Durability flush of a directory by path. O_NOFOLLOW refuses a symlinked FINAL component (cheap
+    defence in depth). After the F1 containment work this is used ONLY for journal_root inside acquire_lock
+    and release_lock, where jr_fd is not in scope; every txn-tree fsync goes through a contained fd instead.
+    RESIDUAL (disclosed): a fsync makes no content mutation and discloses nothing, so following an ANCESTOR
+    symlink on journal_root's path here flushes an unintended directory but can neither write off-tree nor
+    leak. The co-located lock-file operations (the O_EXCL create in acquire_lock, which POSIX refuses a
+    symlinked final `lock` for, and the unlink in release_lock) likewise address journal_root by absolute
+    path as the lock protocol's design; fully containing that journal_root-level lock protocol beneath a
+    threaded journal-root fd is a separate hardening beyond F1's txn-dir-containment scope."""
+    fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
     finally:
@@ -342,6 +359,68 @@ def ensure_journal_dirs(root_fd, journal_rel):
             os.close(fd)
 
 
+def _open_dir_contained(root_fd, relpath):
+    """Open the directory at relpath beneath root_fd via a component-by-component O_DIRECTORY|O_NOFOLLOW
+    walk (a symlinked or non-directory component raises rather than redirecting the walk), returning a dir
+    fd the caller closes; root_fd is never closed. The read-only sibling of ensure_journal_dirs' walk: it
+    reaches a journal directory (the journal root) from the trusted repo-root anchor with NO re-resolved
+    absolute path, so an ANCESTOR symlink cannot escape containment (SECI-symlink-resolution).
+    FileNotFoundError propagates (a caller reads it as absent); any other OSError is a fail-closed
+    JournalError."""
+    parts = _check_rel(relpath)
+    cur = root_fd
+    opened = []
+    try:
+        for comp in parts:
+            try:
+                nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
+            except FileNotFoundError:
+                raise
+            except OSError as exc:
+                raise JournalError("cannot open contained directory component {!r} of {!r} ({})"
+                                   .format(comp, relpath, exc))
+            opened.append(nfd)
+            cur = nfd
+        result = os.dup(cur)
+    finally:
+        for fd in opened:
+            os.close(fd)
+    return result
+
+
+def open_journal_root_fd(root_fd, journal_rel):
+    """Open the journal root beneath the TRUSTED repo-root fd via a contained no-follow walk, returning a
+    dir fd the caller closes. This is the trusted ANCHOR threaded to publish/read_frames/_truncate_log
+    (and to classify_state/is_terminal/recover): each reaches its txn dir by a dir-fd-relative no-follow
+    open BENEATH this handle, never a re-resolved absolute path whose ancestor symlink could escape
+    containment (SECI-symlink-resolution)."""
+    return _open_dir_contained(root_fd, journal_rel)
+
+
+def open_journal_root_from_path(root, journal_rel):
+    """Convenience for a read-only caller holding a root PATH (not an fd): open the repo-root fd
+    (O_NOFOLLOW on the operator-supplied root, the same trust anchor migrate._open_root_fd uses) and walk
+    down to the journal root contained, returning a jr fd the caller closes. FileNotFoundError when the
+    root or a journal-rel component is absent."""
+    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return _open_dir_contained(root_fd, journal_rel)
+    finally:
+        os.close(root_fd)
+
+
+def _open_txn_beneath(jr_fd, txn_dir):
+    """Open the txn directory (a single path component: Path(txn_dir).name) beneath the trusted
+    journal-root fd with O_DIRECTORY|O_NOFOLLOW, so a symlinked txn component fails closed AND, because
+    jr_fd was reached by a contained walk, an ancestor symlink on the journal path cannot redirect the
+    open off-tree (SECI-symlink-resolution). FileNotFoundError propagates (an absent txn reads as nothing
+    to a reader); any other OSError is the caller's to map. Rejects a non-single-component name."""
+    name = Path(txn_dir).name
+    if not name or "/" in name or name in (".", ".."):
+        raise JournalError("invalid journal txn name {!r}".format(name))
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=jr_fd)
+
+
 # --- frame layer (checksummed framing; a torn final frame is detectably unwritten) --------------------
 
 def _frame(ftype, payload):
@@ -351,23 +430,27 @@ def _frame(ftype, payload):
     return header + payload + b"\n"
 
 
-def publish(txn_dir, ftype, obj):
+def publish(jr_fd, txn_dir, ftype, obj):
     """Append one checksummed-framed record (9.3 steps 4 and 7 discipline), fsync the log and the txn
     directory. A torn write of THIS frame is detectably-unwritten to read_frames; the torn:<TYPE>
     injection writes a half frame, fsyncs it, and dies, exactly as a power loss mid-write would.
-    MINOR-2 (symlink-race containment): frames.log is opened CONTAINED (a dir-fd-relative
-    O_CREAT|O_APPEND|O_NOFOLLOW open, confirmed a regular file on the opened fd, never a re-resolved
-    absolute path), so a symlinked or non-regular frames.log fails closed rather than redirecting the
-    append onto a victim file (SECI-symlink-resolution; matches read_frames' contained open)."""
+    Symlink-race containment: the txn dir (Path(txn_dir).name) is opened by a dir-fd-relative
+    O_DIRECTORY|O_NOFOLLOW open BENEATH the trusted journal-root fd (jr_fd, itself reached by a contained
+    walk from the repo root), and frames.log is opened dir-fd-relative to THAT txn fd
+    (O_CREAT|O_APPEND|O_NOFOLLOW, confirmed a regular file on the opened fd). No absolute path is
+    re-resolved, so neither an ANCESTOR symlink on the txn dir's path nor a symlinked frames.log can
+    redirect the append onto a victim file: both fail closed (SECI-symlink-resolution). The txn dir itself
+    is fsync'd through the SAME contained fd, never a re-resolved absolute path."""
     if ftype not in FRAME_TYPES:
         raise JournalError("refusing to publish unknown frame type {!r}".format(ftype))
     payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     frame = _frame(ftype, payload)
     torn = os.environ.get(KILL_ENV, "") == "torn:" + ftype
     try:
-        txnfd = os.open(str(txn_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        txnfd = _open_txn_beneath(jr_fd, txn_dir)
     except OSError as exc:
-        raise JournalError("cannot open journal txn dir {!r} no-follow ({})".format(str(txn_dir), exc))
+        raise JournalError("cannot open journal txn dir {!r} contained no-follow ({})"
+                           .format(str(txn_dir), exc))
     try:
         try:
             # O_NONBLOCK so a pre-planted FIFO frames.log is refused at the fstat gate below instead of
@@ -389,24 +472,29 @@ def publish(txn_dir, ftype, obj):
             os.fsync(fd)
         finally:
             os.close(fd)
+        os.fsync(txnfd)                                   # the txn dir durable through the CONTAINED fd
     finally:
         os.close(txnfd)
-    _fsync_path_dir(txn_dir)
     _kill_point("after-publish-" + ftype)
 
 
-def read_frames(txn_dir):
+def read_frames(jr_fd, txn_dir):
     """Parse frames.log. Returns (frames, torn, good_len): frames is [(ftype, obj)] for every checksum-
     valid frame in order; torn is True when the FINAL region is a detectably incomplete frame; good_len
     is the byte length of the clean prefix (everything before a torn tail), so recovery can truncate the
     tail before appending a terminal frame and keep the log parseable and idempotent. Any malformation
-    NOT at the tail raises JournalError (9.3: a FAIL state, never silently skipped)."""
+    NOT at the tail raises JournalError (9.3: a FAIL state, never silently skipped). The txn dir
+    (Path(txn_dir).name) is opened by a dir-fd-relative O_DIRECTORY|O_NOFOLLOW open beneath the trusted
+    journal-root fd (jr_fd), and frames.log dir-fd-relative to THAT, so no re-resolved absolute path is
+    walked and an ANCESTOR symlink on the txn path fails closed (SECI-symlink-resolution). An absent txn
+    dir (or absent frames.log) reads as no frames."""
     try:
-        txnfd = os.open(str(txn_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        txnfd = _open_txn_beneath(jr_fd, txn_dir)
     except FileNotFoundError:
         return [], False, 0
     except OSError as exc:
-        raise JournalError("cannot open journal txn dir {!r} no-follow ({})".format(str(txn_dir), exc))
+        raise JournalError("cannot open journal txn dir {!r} contained no-follow ({})"
+                           .format(str(txn_dir), exc))
     try:
         try:
             # O_NONBLOCK so a FIFO frames.log (a hostile pre-planted tree) is refused at the fstat gate
@@ -464,15 +552,18 @@ def read_frames(txn_dir):
     return frames, False, len(raw)
 
 
-def _truncate_log(txn_dir, good_len):
+def _truncate_log(jr_fd, txn_dir, good_len):
     """Cut a torn tail off frames.log so a fresh terminal frame appends onto a clean prefix. Fsync'd.
-    MINOR-2 (symlink-race containment): frames.log is opened CONTAINED (a dir-fd-relative O_NOFOLLOW open,
-    confirmed a regular file on the opened fd, never a re-resolved absolute path), so a symlinked frames.log
-    cannot redirect the ftruncate onto a victim file (SECI-symlink-resolution; matches read_frames)."""
+    Symlink-race containment: the txn dir (Path(txn_dir).name) is opened CONTAINED beneath the trusted
+    journal-root fd (jr_fd, O_DIRECTORY|O_NOFOLLOW) and frames.log dir-fd-relative to it (confirmed a
+    regular file on the opened fd), so no re-resolved absolute path is walked; a symlinked frames.log OR
+    an ANCESTOR symlink on the txn path cannot redirect the ftruncate onto a victim file
+    (SECI-symlink-resolution). The txn dir is fsync'd through the same contained fd."""
     try:
-        txnfd = os.open(str(txn_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        txnfd = _open_txn_beneath(jr_fd, txn_dir)
     except OSError as exc:
-        raise JournalError("cannot open journal txn dir {!r} no-follow ({})".format(str(txn_dir), exc))
+        raise JournalError("cannot open journal txn dir {!r} contained no-follow ({})"
+                           .format(str(txn_dir), exc))
     try:
         try:
             # O_NONBLOCK so a pre-planted FIFO frames.log is refused at the fstat gate rather than blocking
@@ -487,9 +578,9 @@ def _truncate_log(txn_dir, good_len):
             os.fsync(fd)
         finally:
             os.close(fd)
+        os.fsync(txnfd)                                   # the txn dir durable through the CONTAINED fd
     finally:
         os.close(txnfd)
-    _fsync_path_dir(txn_dir)
 
 
 def _first(frames, ftype):
@@ -717,7 +808,7 @@ def _journal_txn_dirs(journal_root):
     return out
 
 
-def reconcile_and_claim_stale(journal_root, root_fd, session_id):
+def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
     """E4 (spec 1262): a confirmed-dead stale lock is broken ONLY after (a) its recorded owner is confirmed
     dead AND (b) the journal is reconciled to a consistent (terminal) state. Under a kernel advisory lock on
     a STABLE, never-replaced arbitration file (<journal>/lock.break) that serializes recoverers (C1), RE-READ
@@ -760,16 +851,16 @@ def reconcile_and_claim_stale(journal_root, root_fd, session_id):
             # (b) reconcile every transaction to terminal BEFORE breaking the stale lock (spec 1262), the
             # stale lease RETAINED throughout so a crash mid-reconcile leaves the stale lock in place.
             for txn_dir in _journal_txn_dirs(journal_root):
-                recover(txn_dir, root_fd)
+                recover(jr_fd, txn_dir, root_fd)
             for txn_dir in _journal_txn_dirs(journal_root):
-                if not is_terminal(txn_dir):
+                if not is_terminal(jr_fd, txn_dir):
                     raise JournalError("journal {} did not reconcile to terminal; refusing to break the "
                                        "stale lock (fail-closed)".format(txn_dir.name))
             try:                                             # every journal terminal: NOW break the stale lock
                 os.unlink(str(journal_root / "lock"))
             except FileNotFoundError:
                 pass
-            _fsync_path_dir(journal_root)
+            os.fsync(jr_fd)                                  # F1: durability flush through the CONTAINED jr fd
             acquire_lock(journal_root, session_id)           # O_EXCL under the arbitration lock
             return "acquired"
         finally:
@@ -780,15 +871,28 @@ def reconcile_and_claim_stale(journal_root, root_fd, session_id):
 
 # --- preimages (durably FIRST; the whole reversal is reconstructable from them alone) -----------------
 
-def capture_preimages(txn_dir, root_fd, ops):
+def capture_preimages(parent_fd, txn_dir, root_fd, ops):
     """9.3 step 3: full prior bytes plus metadata, durably, FIRST. Mutates each op in place, adding its
     prestate. Creates/mkdirs record an explicit PRIOR-ABSENCE and REFUSE if the path already exists;
     directory removals record existence and mode with no payload; every other touched file's full prior
     bytes are copied to preimages/<seq> and fsync'd. Fsync the preimages dir and the txn dir at the end
-    so the whole reversal is durable before INTENT opens the transaction."""
-    txn_dir = Path(txn_dir)
-    pre = txn_dir / "preimages"
-    pre.mkdir(exist_ok=True)
+    so the whole reversal is durable before INTENT opens the transaction.
+
+    F1 containment: the (already-created) txn directory (Path(txn_dir).name) is reached CONTAINED beneath
+    the trusted parent_fd (the journal-root fd for a cutover from run_transaction, the pin-preimages dir fd
+    for a pin) by an O_DIRECTORY|O_NOFOLLOW open; its preimages/ subdir is created and opened dir-fd-relative
+    to that txn fd (a symlinked/non-directory preimages fails closed), every payload is written through a
+    dir-fd-relative O_NOFOLLOW open beneath the preimages fd, and BOTH the preimages dir and the txn dir are
+    fsync'd through those contained fds. No absolute path on the journal tree is re-resolved, so an ANCESTOR
+    symlink on the txn dir's path cannot redirect the preimage store or the durability fsyncs off-tree
+    (SECI-symlink-resolution). The product-file preimage READS stay contained beneath root_fd as before.
+
+    Contract limit (disclosed, not silent): a preimage is captured by _read_contained, which bounds a
+    single product file at _MAX_PRODUCT_READ_BYTES (16 MiB) since no expected size is yet known. A touched
+    file larger than that ceiling is REFUSED fail-closed with a JournalError naming the cap, never
+    truncated or slurped unbounded (SECA resource-bounds / disclose-guard-residuals). Once captured, the
+    recorded size governs the apply-time re-read, so a valid preimage at its captured size is never later
+    refused by this ceiling (F2)."""
     # E2: a REVERSE (un-adopt) transaction pins, per inverse op, the SOURCE poststate it expects to still
     # hold. Verify every pin here, at capture, so a non-engine write that landed after the caller's drift
     # check but before capture is caught (fail closed) rather than captured-and-clobbered (spec 1319/1323:
@@ -798,46 +902,85 @@ def capture_preimages(txn_dir, root_fd, ops):
         exp = op.get("source-poststate")
         if exp is not None:
             _verify_source_poststate(root_fd, op["path"], exp)
-    for seq, op in enumerate(ops):
-        kind = op["op"]
-        st = _lstat_contained(root_fd, op["path"])
-        if kind in ("create", "mkdir"):
-            if st is not None:
-                raise JournalError("{}: expected absent before {} (prestate violation)"
-                                   .format(op["path"], kind))
-            op["prestate"] = {"kind": "absent"}
-        elif kind == "rmdir":
-            if st is None or not stat.S_ISDIR(st.st_mode):
-                raise JournalError("{}: expected an existing directory before rmdir".format(op["path"]))
-            op["prestate"] = {"kind": "dir", "mode": stat.S_IMODE(st.st_mode)}
-        else:                                             # write, remove: file prestate with payload
-            if st is None or not stat.S_ISREG(st.st_mode):
-                raise JournalError("{}: expected an existing regular file before {}"
-                                   .format(op["path"], kind))
-            data, _fst = _read_contained(root_fd, op["path"])
-            ref = str(seq)
-            payload_path = pre / ref
-            payload_path.write_bytes(data)
-            with open(payload_path, "rb") as fh:
-                os.fsync(fh.fileno())
-            op["prestate"] = {"kind": "file", "mode": stat.S_IMODE(st.st_mode),
-                              "size": len(data), "payload": ref,
-                              "sha256": hashlib.sha256(data).hexdigest()}
-        _kill_point("after-preimage-{}".format(seq))
-    _fsync_path_dir(pre)
-    _fsync_path_dir(txn_dir)
+    try:
+        txnfd = _open_txn_beneath(parent_fd, txn_dir)
+    except OSError as exc:
+        raise JournalError("cannot open journal txn dir {!r} contained no-follow ({})"
+                           .format(str(txn_dir), exc))
+    try:
+        # preimages/ created + opened CONTAINED beneath the txn fd (idempotent: an existing dir is reused);
+        # a symlinked or non-directory preimages fails closed rather than redirecting the payload store.
+        try:
+            os.mkdir("preimages", 0o777, dir_fd=txnfd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise JournalError("cannot create contained preimages dir ({})".format(exc))
+        try:
+            prefd = os.open("preimages", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=txnfd)
+        except OSError as exc:
+            raise JournalError("cannot open contained preimages dir no-follow ({})".format(exc))
+        try:
+            for seq, op in enumerate(ops):
+                kind = op["op"]
+                st = _lstat_contained(root_fd, op["path"])
+                if kind in ("create", "mkdir"):
+                    if st is not None:
+                        raise JournalError("{}: expected absent before {} (prestate violation)"
+                                           .format(op["path"], kind))
+                    op["prestate"] = {"kind": "absent"}
+                elif kind == "rmdir":
+                    if st is None or not stat.S_ISDIR(st.st_mode):
+                        raise JournalError("{}: expected an existing directory before rmdir"
+                                           .format(op["path"]))
+                    op["prestate"] = {"kind": "dir", "mode": stat.S_IMODE(st.st_mode)}
+                else:                                     # write, remove: file prestate with payload
+                    if st is None or not stat.S_ISREG(st.st_mode):
+                        raise JournalError("{}: expected an existing regular file before {}"
+                                           .format(op["path"], kind))
+                    data, _fst = _read_contained(root_fd, op["path"])
+                    ref = str(seq)
+                    # payload written dir-fd-relative to the CONTAINED preimages fd, O_NOFOLLOW: a
+                    # symlinked preimages/<seq> is refused rather than followed onto a victim file.
+                    pfd = os.open(ref, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600,
+                                  dir_fd=prefd)
+                    try:
+                        _write_all(pfd, data)
+                        os.fsync(pfd)
+                    finally:
+                        os.close(pfd)
+                    op["prestate"] = {"kind": "file", "mode": stat.S_IMODE(st.st_mode),
+                                      "size": len(data), "payload": ref,
+                                      "sha256": hashlib.sha256(data).hexdigest()}
+                _kill_point("after-preimage-{}".format(seq))
+            os.fsync(prefd)                               # the preimages dir durable, CONTAINED
+        finally:
+            os.close(prefd)
+        os.fsync(txnfd)                                   # the txn dir durable, CONTAINED
+    finally:
+        os.close(txnfd)
     _kill_point("after-preimages")
 
 
 # --- prestate verification and post-state verification (domain separated per kind) --------------------
 
 def _verify_fd_prestate(fd, prestate, where):
+    """Verify a write/remove op's apply-time prestate on an ALREADY-OPEN fd against the recorded preimage.
+    The read is bounded by the KNOWN prestate size, not the generic product-file ceiling: a fast-reject on
+    st_size catches a grown/shrunk/tampered file cleanly (an integrity change), and reading capped at the
+    recorded size means a file GROWN between capture and apply is refused fail-closed AT that size rather
+    than slurped whole into memory (OOM safety), while a VALID file at its expected size is NEVER refused,
+    however large it is (it was captured at that size). This is the F2/F3 reconciliation with the generic
+    16 MiB product-read ceiling: the ceiling bounds capture where no size is yet known; verification uses
+    the recorded size and so never re-imposes an unrelated memory cap on a legitimate large preimage."""
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
         raise JournalError("{}: target is not a regular file at apply time".format(where))
     if stat.S_IMODE(st.st_mode) != prestate["mode"]:
         raise JournalError("{}: mode changed since preimage capture".format(where))
-    data = _read_fd(fd)
+    if st.st_size != prestate["size"]:
+        raise JournalError("{}: size changed since preimage capture".format(where))
+    data = _read_fd(fd, cap=prestate["size"])
     if hashlib.sha256(data).hexdigest() != prestate["sha256"]:
         raise JournalError("{}: content changed since preimage capture".format(where))
 
@@ -846,7 +989,10 @@ def _verify_prestate_at(pfd, name, relpath, prestate):
     """E1 (spec 1291/1300): verify a lookup-based prestate (a dir for rmdir, a regular file for remove)
     through the SAME already-open parent fd the mutation will use, by bare 'name' with no-follow, so an
     ancestor swap between the check and the unlinkat/rmdir cannot redirect either. Supersedes a re-walk
-    from root_fd, which bound the check to a freshly-resolved parent rather than the one bound at apply."""
+    from root_fd, which bound the check to a freshly-resolved parent rather than the one bound at apply.
+    A file prestate is verified against the KNOWN recorded size (a fast-reject on a changed size, then a
+    read capped at that size), the same F2/F3 discipline as _verify_fd_prestate, so a legitimate large
+    preimage is never refused by the generic product-file ceiling while a grown file fails closed."""
     st = _lstat_at(pfd, name)
     if prestate["kind"] == "dir":
         if st is None or not stat.S_ISDIR(st.st_mode):
@@ -858,7 +1004,9 @@ def _verify_prestate_at(pfd, name, relpath, prestate):
         raise JournalError("{}: expected a regular file at apply time".format(relpath))
     if stat.S_IMODE(st.st_mode) != prestate["mode"]:
         raise JournalError("{}: mode changed since preimage capture".format(relpath))
-    data, _ = _read_at(pfd, name, relpath)
+    if st.st_size != prestate["size"]:
+        raise JournalError("{}: size changed since preimage capture".format(relpath))
+    data, _ = _read_at(pfd, name, relpath, cap=prestate["size"])
     if hashlib.sha256(data).hexdigest() != prestate["sha256"]:
         raise JournalError("{}: content changed since preimage capture".format(relpath))
 
@@ -1151,13 +1299,14 @@ def _validate_terminal_agreement(frames):
             raise JournalError("frame {} txn id disagrees with the INTENT txn id".format(ftype))
 
 
-def classify_state(txn_dir):
+def classify_state(jr_fd, txn_dir):
     """Classify a transaction's DURABLE journal state via the C2 state machine (never a bare boolean).
     Returns 'nothing-opened' (no INTENT: pre-INTENT/capture-phase failure, nothing applied), 'complete',
     'rolled-back' ([INTENT,RIP,RC] terminal rollback), or 'open' (INTENT present without a terminal
     COMPLETE or RC). JournalError on a corrupt or invalid-sequence journal (fail-closed). A torn tail is
-    treated as never written (read_frames), consistent with recover()."""
-    frames, _torn, _ = read_frames(txn_dir)
+    treated as never written (read_frames), consistent with recover(). The txn dir is reached contained
+    beneath the trusted journal-root fd (jr_fd)."""
+    frames, _torn, _ = read_frames(jr_fd, txn_dir)
     _validate_terminal_agreement(frames)
     types = [t for t, _ in frames]
     if F_INTENT not in types:
@@ -1169,14 +1318,15 @@ def classify_state(txn_dir):
     return "open"
 
 
-def recover(txn_dir, root_fd):
+def recover(jr_fd, txn_dir, root_fd):
     """Reconcile one transaction directory to a terminal state from its journal ALONE, at every crash
     point, both directions, idempotently. Returns one of: nothing-opened, terminal, rolled-forward,
     rolled-back. A torn tail is truncated before any terminal frame is appended so the log stays
-    parseable and a second recover is a no-op."""
-    frames, torn, good_len = read_frames(txn_dir)
+    parseable and a second recover is a no-op. The txn journal is read and its terminal frames published
+    beneath the trusted journal-root fd (jr_fd); preimage restore uses the contained root_fd as before."""
+    frames, torn, good_len = read_frames(jr_fd, txn_dir)
     if torn:
-        _truncate_log(txn_dir, good_len)
+        _truncate_log(jr_fd, txn_dir, good_len)
     _validate_terminal_agreement(frames)
     types = [t for t, _ in frames]
     if F_INTENT not in types:
@@ -1187,29 +1337,37 @@ def recover(txn_dir, root_fd):
     ops = intent["ops"]
     if F_RIP not in types:
         if all(_poststate_verifies(root_fd, op) for op in ops):
-            publish(txn_dir, F_COMPLETE, {"txn": intent["txn"]})
+            publish(jr_fd, txn_dir, F_COMPLETE, {"txn": intent["txn"]})
             return "rolled-forward"
-        publish(txn_dir, F_RIP, {"txn": intent["txn"]})
+        publish(jr_fd, txn_dir, F_RIP, {"txn": intent["txn"]})
     total = len(ops)
     for j, op in enumerate(reversed(ops)):
         _restore_preimage(txn_dir, root_fd, op, total - 1 - j)
         _kill_point("after-restore-{}".format(total - 1 - j))
-    publish(txn_dir, F_RC, {"txn": intent["txn"]})
+    publish(jr_fd, txn_dir, F_RC, {"txn": intent["txn"]})
     return "rolled-back"
 
 
 # --- transaction driver (the shared cutover primitive migrate.py builds on) ---------------------------
 
-def run_transaction(root_fd, journal_root, txn_id, header, ops, staged_reader, session_id):
+def run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops, staged_reader, session_id):
     """Drive one cutover transaction through the seven normative steps under a fresh O_EXCL lock, rolling
     back from preimages on any prestate mismatch during apply. Assumes require_containment already
     passed. Returns 'complete' on success or raises JournalError (the caller maps to exit 2). The lock is
-    released by the caller's higher-level flow via release_lock after a terminal outcome."""
+    released by the caller's higher-level flow via release_lock after a terminal outcome. Every framed
+    record is published beneath the trusted journal-root fd (jr_fd), reached by a contained walk, so no
+    txn-dir absolute path is re-resolved for the frame writes (F1 / SECI-symlink-resolution)."""
     txn_dir = Path(journal_root) / txn_id
-    txn_dir.mkdir(parents=True, exist_ok=False)
-    _fsync_path_dir(journal_root)
-    capture_preimages(txn_dir, root_fd, ops)
-    publish(txn_dir, F_INTENT, {"txn": txn_id, "header": header, "ops": ops})
+    # F1: create the txn dir (a single component) CONTAINED beneath the trusted journal-root fd, and make
+    # its dir entry durable by fsync'ing THAT contained fd, never a re-resolved absolute journal_root path.
+    # os.mkdir raises FileExistsError on a collision, preserving the exist_ok=False refusal.
+    try:
+        os.mkdir(txn_id, 0o777, dir_fd=jr_fd)
+    except OSError as exc:
+        raise JournalError("cannot create contained journal txn dir {!r} ({})".format(txn_id, exc))
+    os.fsync(jr_fd)
+    capture_preimages(jr_fd, txn_dir, root_fd, ops)
+    publish(jr_fd, txn_dir, F_INTENT, {"txn": txn_id, "header": header, "ops": ops})
     try:
         apply_ops(root_fd, ops, staged_reader)
         # C3: COMPLETE must mean every poststate was installed. Verify ALL domain-separated post-states
@@ -1219,22 +1377,23 @@ def run_transaction(root_fd, journal_root, txn_id, header, ops, staged_reader, s
     except JournalError:
         # A prestate mismatch, a staged-digest mismatch, or a failed poststate (a hostile or racing tree):
         # roll back from the durable preimages and fail.
-        publish(txn_dir, F_RIP, {"txn": txn_id})
+        publish(jr_fd, txn_dir, F_RIP, {"txn": txn_id})
         total = len(ops)
         for j, op in enumerate(reversed(ops)):
             _restore_preimage(txn_dir, root_fd, op, total - 1 - j)
-        publish(txn_dir, F_RC, {"txn": txn_id})
+        publish(jr_fd, txn_dir, F_RC, {"txn": txn_id})
         raise
-    publish(txn_dir, F_COMPLETE, {"txn": txn_id})
+    publish(jr_fd, txn_dir, F_COMPLETE, {"txn": txn_id})
     return "complete"
 
 
-def is_terminal(txn_dir):
+def is_terminal(jr_fd, txn_dir):
     """True when the transaction has a durable terminal record (COMPLETE or ROLLBACK-COMPLETE); False
     when it is still open (INTENT or ROLLBACK-IN-PROGRESS without a terminal). Invokes the SAME C2 state
     machine as recover() so the two classify identically; a corrupt mid-log frame or an invalid frame
-    sequence is a JournalError (fail-closed)."""
-    frames, torn, _ = read_frames(txn_dir)
+    sequence is a JournalError (fail-closed). The txn dir is reached contained beneath the trusted
+    journal-root fd (jr_fd)."""
+    frames, torn, _ = read_frames(jr_fd, txn_dir)
     _validate_terminal_agreement(frames)
     types = [t for t, _ in frames]
     if F_INTENT not in types:

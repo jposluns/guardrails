@@ -1878,7 +1878,12 @@ def self_test():
         # never a hang. A hostile on-disk tree can pre-plant these paths.
         _rf_dir = base / "n2-read-frames"; _rf_dir.mkdir()
         os.mkfifo(str(_rf_dir / "frames.log"))
-        check("new2-read-frames-fifo-no-hang", _refused_no_hang(lambda: _journal.read_frames(_rf_dir)))
+        _rf_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            check("new2-read-frames-fifo-no-hang",
+                  _refused_no_hang(lambda: _journal.read_frames(_rf_jr, _rf_dir)))
+        finally:
+            os.close(_rf_jr)
         _rl_dir = base / "n2-read-lock-owner"; _rl_dir.mkdir()
         os.mkfifo(str(_rl_dir / "lock"))
         check("new2-read-lock-owner-fifo-no-hang", _refused_no_hang(lambda: _journal.read_lock_owner(_rl_dir)))
@@ -1956,13 +1961,15 @@ def self_test():
         (_m1_lock / "lock").write_bytes(b'{"uid": 0, "pid": 1, "pid-start": "", "session": "s", "utc": "u"}')
         _real_jcap = _journal._MAX_JOURNAL_READ_BYTES
         _journal._MAX_JOURNAL_READ_BYTES = 8        # below either well-formed control file; above 0
+        _m1_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             check("minor1-read-frames-oversize-refused",
-                  _guard(lambda: (_journal.read_frames(_m1_frames), "read")[1]) == "RAISED")
+                  _guard(lambda: (_journal.read_frames(_m1_jr, _m1_frames), "read")[1]) == "RAISED")
             check("minor1-read-lock-owner-oversize-refused",
                   _guard(lambda: (_journal.read_lock_owner(_m1_lock), "read")[1]) == "RAISED")
         finally:
             _journal._MAX_JOURNAL_READ_BYTES = _real_jcap
+            os.close(_m1_jr)
 
         # ---- ITEM A: product-file read ceiling (fail pre-fix, pass post-fix) ---------------------------
         # _read_contained / _read_at carry a HARD INCREMENTAL ceiling so a product file GROWN or swapped past
@@ -1998,16 +2005,72 @@ def self_test():
         # refusal check and a victim-intact check discriminate.
         _victim = base / "minor2-victim"
         _victim.write_bytes(b"VICTIM-INTACT")
-        _m2_pub = base / "minor2-publish"; _m2_pub.mkdir()
-        os.symlink(str(_victim), str(_m2_pub / "frames.log"))
-        check("minor2-publish-symlink-refused",
-              _guard(lambda: _journal.publish(_m2_pub, _journal.F_INTENT, {"txn": "t", "ops": []})) == "RAISED")
-        check("minor2-publish-victim-intact", _victim.read_bytes() == b"VICTIM-INTACT")
-        _m2_tr = base / "minor2-truncate"; _m2_tr.mkdir()
-        os.symlink(str(_victim), str(_m2_tr / "frames.log"))
-        check("minor2-truncate-symlink-refused",
-              _guard(lambda: _journal._truncate_log(_m2_tr, 0)) == "RAISED")
-        check("minor2-truncate-victim-intact", _victim.read_bytes() == b"VICTIM-INTACT")
+        _m2_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            _m2_pub = base / "minor2-publish"; _m2_pub.mkdir()
+            os.symlink(str(_victim), str(_m2_pub / "frames.log"))
+            check("minor2-publish-symlink-refused",
+                  _guard(lambda: _journal.publish(_m2_jr, _m2_pub, _journal.F_INTENT,
+                                                  {"txn": "t", "ops": []})) == "RAISED")
+            check("minor2-publish-victim-intact", _victim.read_bytes() == b"VICTIM-INTACT")
+            _m2_tr = base / "minor2-truncate"; _m2_tr.mkdir()
+            os.symlink(str(_victim), str(_m2_tr / "frames.log"))
+            check("minor2-truncate-symlink-refused",
+                  _guard(lambda: _journal._truncate_log(_m2_jr, _m2_tr, 0)) == "RAISED")
+            check("minor2-truncate-victim-intact", _victim.read_bytes() == b"VICTIM-INTACT")
+        finally:
+            os.close(_m2_jr)
+
+        # ---- F1: an ANCESTOR symlink on the txn dir's path fails closed (fail pre-fix, pass post-fix) ----
+        # publish/read_frames/_truncate_log now reach the txn dir by a dir-fd-relative O_NOFOLLOW open
+        # BENEATH a journal-root fd that is itself reached by a CONTAINED per-component no-follow walk from
+        # the repo root (open_journal_root_fd). So a symlinked ANCESTOR component of the journal path is
+        # refused fail-closed. Pre-fix each opened the txn dir by its ABSOLUTE path with O_NOFOLLOW guarding
+        # only the FINAL txn component, so a symlinked journal-root ancestor was FOLLOWED and the frame op
+        # escaped off-tree. Discriminated by planting a symlinked journal-root component: the contained walk
+        # refuses it (ELOOP -> JournalError), where the reverted absolute-path open would have followed it.
+        _f1root = base / "f1-ancestor"; _f1root.mkdir()
+        (_f1root / "realj" / "txn").mkdir(parents=True)
+        (_f1root / "realj" / "txn" / "frames.log").write_bytes(
+            _journal._frame(_journal.F_INTENT, b'{"txn":"t","ops":[]}'))
+        os.symlink("realj", str(_f1root / "jdir"))          # jdir -> realj: a symlinked journal-root ancestor
+        _f1_rootfd = os.open(str(_f1root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            # positive control: through the REAL journal root, the txn journal reads normally.
+            _f1_realjr = _journal.open_journal_root_fd(_f1_rootfd, "realj")
+            try:
+                _f1_frames, _f1_torn, _f1_len = _journal.read_frames(_f1_realjr, _f1root / "realj" / "txn")
+                check("f1-ancestor-real-path-reads", [t for t, _ in _f1_frames] == [_journal.F_INTENT])
+            finally:
+                os.close(_f1_realjr)
+            # the symlinked ancestor 'jdir' is refused by the contained walk (this FAILS if the walk is
+            # reverted to a symlink-following absolute-path open of the journal root).
+            check("f1-ancestor-symlink-refused",
+                  _guard(lambda: _journal.open_journal_root_fd(_f1_rootfd, "jdir")) == "RAISED")
+
+            # capture_preimages leg: it reaches the txn dir and writes/fsyncs its preimages CONTAINED
+            # beneath the trusted parent_fd, using only Path(txn_dir).name, so an ANCESTOR symlink on the
+            # txn_dir path is IGNORED and the store lands under the real txn (parent_fd tree). Pre-fix it
+            # built `pre = txn_dir/"preimages"` and `_fsync_path_dir(txn_dir)` by ABSOLUTE path, following an
+            # ancestor symlink onto a DECOY off-tree. Discriminated by pointing txn_dir's absolute route
+            # through a symlink to a decoy: post-fix the preimage lands under the real txn and the decoy
+            # stays empty; a body reverted to the absolute-path store would write into the decoy instead.
+            (_f1root / "data.txt").write_bytes(b"F1-CAPTURE-PAYLOAD")
+            (_f1root / "realj" / "capt").mkdir()            # the REAL txn dir, beneath the real journal root
+            (_f1root / "decoy" / "capt").mkdir(parents=True)  # a decoy the ancestor symlink resolves onto
+            os.symlink("decoy", str(_f1root / "caplink"))   # caplink -> decoy: an ANCESTOR symlink on the txn path
+            _f1_capjr = os.open(str(_f1root / "realj"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                _journal.capture_preimages(
+                    _f1_capjr, _f1root / "caplink" / "capt", _f1_rootfd, [{"op": "remove", "path": "data.txt"}])
+            finally:
+                os.close(_f1_capjr)
+            check("f1-capture-preimage-contained-under-real-txn",
+                  (_f1root / "realj" / "capt" / "preimages" / "0").is_file())
+            check("f1-capture-preimage-not-under-ancestor-symlink-decoy",
+                  not (_f1root / "decoy" / "capt" / "preimages").exists())
+        finally:
+            os.close(_f1_rootfd)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

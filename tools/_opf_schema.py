@@ -1647,7 +1647,7 @@ def self_test():
     check("g1-ratified-block-release-ok",
           validate_transition("block", "active", "released", "maintainer").status == VALID)
 
-    # ----- reconcile-draft fixes (U2 retro: Fable + codex). The fixN1/fixA3/fixA4-distinct/fix10/fix8/
+    # ----- reconcile-draft fixes (U2 retro: Fable + codex). The fixN1/fixA3/fixA4-subepsilon/fix10/fix8/
     # fixB1 vectors discriminate a fix landed in THIS commit (they fail or crash pre-fix); the remaining
     # fix2/fix3/fix4/fix5*/fix6/fixC6/fixD1 vectors are retained regression guards, not fail-to-pass. -----
     _big = 10 ** 5000
@@ -1657,10 +1657,12 @@ def self_test():
     check("fixN1-newline-ts-false", not _valid_timestamp(TS + chr(10)))
     check("fixN1-newline-unique-distinct", bool(check_unique_ids(["BI-1", "BI-1" + chr(10)])))
     check("fixA3-nonascii-digit-ts-false", not _valid_timestamp("202" + chr(0x666) + "-01-02T03:04:05Z"))
-    check("fixA4-frac-distinct-key",
-          _instant_key("2026-01-02T03:04:05.11Z") != _instant_key("2026-01-02T03:04:05.12Z"))
-    check("fixA4-frac-trailing-zero-equal",
-          _instant_key("2026-01-02T03:04:05.5Z") == _instant_key("2026-01-02T03:04:05.50Z"))
+    # fixA4 replaced a FLOAT fractional-seconds key with a decimal-string one. The distinct-key (.11/.12)
+    # and trailing-zero-equal (.5/.50) vectors were removed as false pins: a float key ALSO distinguishes
+    # .11/.12 and equates .5/.50, so they passed with or without the fix and discriminated nothing. Only the
+    # sub-epsilon vector below discriminates: two fractions differing beyond double precision collapse to one
+    # float (updated_at == created_at, a clean chronology) but stay distinct as strings (updated_at precedes
+    # created_at, INVALID), so it fails pre-fix and passes post-fix.
     check("fixA4-subepsilon-regression-invalid",
           validate_record(envelope("backlog_item", 1, "open",
                                    created_at="2026-08-12T09:14:02.12345678901234567892Z",

@@ -1109,6 +1109,19 @@ def _count_expected_absent(expected_ids, present, where, findings):
         findings.append("{}: must be a range id space (a range 1..high-water), not {}".format(
             where, type(expected_ids).__name__))
         return 0
+    if expected_ids.start != 1 or expected_ids.step != 1 or expected_ids.stop < 1:
+        # The authoritative id space is the CANONICAL range 1..high-water: range(1, high_water+1), i.e.
+        # start 1, step 1, stop >= 1. A range that does not start at 1, does not step by 1, or stops below
+        # 1 cannot answer "which of ids 1..high-water is covered": e.g. range(2, 3) silently drops WL-1
+        # from the space, so a genuine loss of WL-1 reads as a clean partition. isinstance(range) alone is
+        # not enough (guard-input-soundness): validate the endpoint form and fail closed to a
+        # cannot-evaluate finding, never a false clean pass. (Attribute reads are O(1) and never overflow;
+        # only len() below can, which the OverflowError branch handles.)
+        findings.append("{}: id space must be the canonical range 1..high-water (start 1, step 1); got "
+                        "range(start={}, stop={}, step={}); cannot evaluate the partition "
+                        "(guard-input-soundness)".format(where, expected_ids.start, expected_ids.stop,
+                                                          expected_ids.step))
+        return 0
     try:
         expected_n = len(expected_ids)
     except (TypeError, OverflowError):
@@ -1218,6 +1231,71 @@ def self_test():
              "actor": {"kind": "maintainer"}, "kind": kind, "summary": summary}
         e.update(extra)
         return e
+
+    def run_bounded(thunk, timeout_s=20, mem_bytes=1024 * 1024 * 1024):
+        """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS, returning
+        that str or a sentinel: 'TIMEOUT' / 'OOM' / 'CHILD-DIED' / 'ERROR:<Type>' / 'SETUP-ERROR:<Type>'.
+        F11: the RANGE-BOUNDS mutant-kill vectors below drive the engine over a spoofed 10**9 high-water /
+        span; run IN-PROCESS, a reverted bounded-counting fix would materialize an O(10**9) collection and
+        HANG or OOM the WHOLE self-test before it could report. The watchdog turns such a regression into a
+        deterministic sentinel the assertion rejects, without weakening it (the shipped bounded engine
+        returns its real token well inside the bounds). A SETUP-ERROR (a bound could not be installed) or a
+        fork failure is never equal to an expected token, so it fails closed. Mirrors the F7-hardened
+        _opf_check runner: the child resets SIGALRM to SIG_DFL (so an inherited SIG_IGN cannot defeat the
+        watchdog and block the parent's read), installs BOTH bounds or exits SETUP-ERROR without running
+        the thunk unbounded, and both pipe fds are closed on a fork failure. Fork-less fallback runs
+        in-process (safe on the shipped, bounded code CI exercises)."""
+        import os as _os
+        import signal as _signal
+        if not hasattr(_os, "fork"):
+            return str(thunk())
+        rfd, wfd = _os.pipe()
+        try:
+            pid = _os.fork()
+        except OSError as exc:
+            _os.close(rfd)
+            _os.close(wfd)
+            return "SETUP-ERROR:" + type(exc).__name__
+        if pid == 0:
+            _os.close(rfd)
+            try:
+                _signal.signal(_signal.SIGALRM, _signal.SIG_DFL)
+                import resource
+                resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+                _signal.setitimer(_signal.ITIMER_REAL, timeout_s)
+            except BaseException as exc:                  # noqa: BLE001 (bounds NOT installed: never run unbounded)
+                try:
+                    _os.write(wfd, ("SETUP-ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200])
+                except OSError:
+                    pass
+                _os._exit(0)
+            try:
+                payload = str(thunk()).encode("utf-8", "replace")[:200]
+            except MemoryError:
+                payload = b"OOM"
+            except BaseException as exc:                  # noqa: BLE001 (child boundary: any failure -> token)
+                payload = ("ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200]
+            try:
+                _os.write(wfd, payload)
+            except OSError:
+                pass
+            _os._exit(0)
+        _os.close(wfd)
+        data = b""
+        try:
+            while True:
+                chunk = _os.read(rfd, 200)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            _os.close(rfd)
+        _wpid, wstatus = _os.waitpid(pid, 0)
+        if not data:
+            if _os.WIFSIGNALED(wstatus) and _os.WTERMSIG(wstatus) == _signal.SIGALRM:
+                return "TIMEOUT"
+            return "CHILD-DIED"
+        return data.decode("utf-8", "replace")
 
     # --- 1: a VALID version.toml + worklog.toml (the everyday shape, Appendix B/C) --------------------
     worklog = {"schema": 1, "entry": [entry(1), entry(2), entry(3), entry(4)]}
@@ -1547,6 +1625,18 @@ def self_test():
     check("m9-partition-loss-across-active-archive-ok",
           not check_ids_partition([2], [1], expected_ids=range(1, 3)))
     check("m9-partition-no-expected-backward-compat", not check_ids_partition([1], []))
+    # F6: a NON-CANONICAL authoritative range (not starting at 1, not stepping by 1, or stopping below 1)
+    # is a cannot-evaluate finding, never a false clean pass. range(2, 3) drops WL-1 from the id space, so
+    # pre-fix a genuine loss of WL-1 read as a clean partition ([] returned); post-fix the malformed space
+    # itself is a finding. Discriminates: reverting the endpoint-form guard makes these return [] (clean).
+    check("f6-noncanonical-range-start-cannot-eval",
+          bool(check_ids_partition([2], [], expected_ids=range(2, 3))))
+    check("f6-noncanonical-range-step-cannot-eval",
+          bool(check_ids_partition([1, 3], [], expected_ids=range(1, 4, 2))))
+    check("f6-noncanonical-range-empty-stop-cannot-eval",
+          bool(check_ids_partition([], [], expected_ids=range(1, 0))))
+    # control: the canonical range(1, high_water+1) still evaluates without the malformed-space finding.
+    check("f6-canonical-range-ok", not check_ids_partition([1, 2], [], expected_ids=range(1, 3)))
 
     # M10: a superseded summary's superseded_by must name an EXISTING rollup that COVERS it, never itself.
     D = "sha256:" + "a" * 64
@@ -1585,8 +1675,13 @@ def self_test():
     # WL-1, so the cut returns a controlled INVALID in O(1). Before the fix release_cut built
     # list(range(1, 1000000001)) and raised an uncaught MemoryError, never reaching this INVALID.
     wl_bigid = {"schema": 1, "entry": [entry(1000000000)]}
-    bigid_cut = release_cut({"release": []}, wl_bigid, "1.0.0", "2026-06-15T00:00:00Z")
-    check("blocker-large-id-tail-bounded-invalid", bigid_cut.status == INVALID)
+    # F11: behind a child-process watchdog. A reverted RANGE-BOUNDS fix would build list(range(1, 10**9+1))
+    # here and OOM the whole suite in-process; the watchdog turns that into an OOM/TIMEOUT sentinel this
+    # assertion rejects, while the shipped bounded engine returns INVALID in O(1).
+    check("blocker-large-id-tail-bounded-invalid",
+          run_bounded(lambda: "INVALID" if release_cut(
+              {"release": []}, wl_bigid, "1.0.0", "2026-06-15T00:00:00Z").status == INVALID
+              else "NOT-INVALID") == "INVALID")
     # MINOR (SELF-TEST DISCRIMINATION): a reversed span in a NON-FIRST position (start > end) tiles its
     # start against the cursor but drives coverage backward; the _parse_span a > b guard is the sole
     # layer against it. Pin the guard: without it this ledger fails OPEN to VALID.
@@ -1608,8 +1703,12 @@ def self_test():
     # BLOCKER (RANGE-BOUNDS): the expected-id LOSS check is bounded by the PRESENT set, never by the
     # declared high-water. A range 1..10^9 (a spoofed WL-1000000000 store entry) reports loss in O(1);
     # before the fix _wl_id_set(expected_ids) materialized it into a set and raised an uncaught MemoryError.
-    huge_expected = check_ids_partition([1], [], expected_ids=range(1, 1000000001))
-    check("blocker-partition-huge-expected-bounded", bool(huge_expected))
+    # F11: behind the child-process watchdog. A reverted RANGE-BOUNDS fix would materialize the 10**9-wide
+    # expected set here and OOM the whole suite in-process; the watchdog makes the regression a deterministic
+    # sentinel this assertion rejects, while the shipped bounded engine reports loss in O(present).
+    check("blocker-partition-huge-expected-bounded",
+          run_bounded(lambda: "LOSS" if check_ids_partition(
+              [1], [], expected_ids=range(1, 1000000001)) else "NO-LOSS") == "LOSS")
     check("partition-huge-expected-still-detects-loss",
           not check_ids_partition([1], [], expected_ids=range(1, 2)))
 

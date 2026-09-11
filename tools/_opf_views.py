@@ -134,14 +134,19 @@ def _read_raw_and_parsed(store_root_fd, relpath):
     (raw_bytes, parsed_dict), or None when the file is ABSENT. ViewsError (a cannot-evaluate) on an
     unreadable file, a refused symlink, or a parse error: a present-but-unreadable declared source is a
     failure, never an empty pass (the check-fails-closed-on-unreadable rule).
-    Disclosed residual (disclose-guard-residuals): the S_ISREG gate reads an lstat taken BEFORE the
-    no-follow open in _journal._read_contained, which does not pass O_NONBLOCK, so a live writer that
-    swaps a regular file for a FIFO in that lstat-to-open window can still block the open. This is a
-    concurrent-writer race beyond static on-disk store content, mirroring the store resolver own
-    lstat-then-open pattern; it is named here rather than left implied."""
+    Disclosed residual (disclose-guard-residuals): _journal._read_contained opens the file no-follow with
+    O_NONBLOCK and re-confirms S_ISREG on the OPENED fd, so a live writer that swaps the regular file for a
+    FIFO between the lstat here and that open does NOT block: the non-blocking open returns at once and the
+    fstat gate refuses the non-regular object (fail-closed). The narrower residual is a swap to a DIFFERENT
+    regular file in that window, whose bytes would then be read and validated as TOML and schema-checked;
+    this is a concurrent-writer race beyond static on-disk store content, named here rather than left implied."""
     try:
         st = _journal._lstat_contained(store_root_fd, relpath)
-    except _journal.JournalError as exc:
+    except (_journal.JournalError, OSError) as exc:
+        # OSError (not only JournalError): _open_parent's terminal os.dup(root_fd) is UNWRAPPED, so a bad
+        # store_root_fd (EBADF) or fd exhaustion (EMFILE) raises a raw OSError that _lstat_contained does not
+        # convert. Map it here (with the JournalError symlink/read-error case) to a ViewsError cannot-evaluate,
+        # so an unreadable declared source never escapes as an uncaught OSError (check-fails-closed-on-unreadable).
         raise ViewsError("cannot stat {} ({})".format(relpath, exc))
     if st is None:
         return None
@@ -150,7 +155,7 @@ def _read_raw_and_parsed(store_root_fd, relpath):
                          "fail-closed, never opened)".format(relpath))
     try:
         raw, _ = _journal._read_contained(store_root_fd, relpath)
-    except _journal.JournalError as exc:
+    except (_journal.JournalError, OSError) as exc:        # OSError caught for parity with the lstat path above
         raise ViewsError("cannot read {} ({})".format(relpath, exc))
     try:
         return raw, tomllib.loads(raw.decode("utf-8"))
@@ -1044,14 +1049,33 @@ def _write_contained(root_fd, relpath, text, check):
             return current != new_bytes
         if current == new_bytes:
             return False                                  # already current: byte-stable, no rewrite
-        if st is None:
-            fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
-        else:
-            fd = os.open(name, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, dir_fd=pfd)
+        # Reopen-TOCTOU hardening: never open the destination NAME for truncation. O_NOFOLLOW refuses a
+        # symlink but NOT a hardlink or a regular-file swap raced in after the lstat/read above, so an
+        # O_TRUNC of `name` could truncate a victim the attacker hardlinked in over the destination. Instead
+        # write the new bytes to a fresh O_EXCL temp beneath the SAME parent fd and atomically rename it over
+        # `name`: the rename re-points only the directory entry, so a raced hardlink/regular swap of `name`
+        # loses the entry rather than having its inode truncated (the victim's own bytes stay intact).
+        # Descriptor-relative throughout (dir_fd=pfd), never a re-resolved path.
+        tmpname = ".{}.opf-tmp".format(name)
+        try:
+            fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
+        except FileExistsError:
+            os.unlink(tmpname, dir_fd=pfd)                 # clear a stale temp left by a crashed prior write
+            fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
         try:
             _journal._write_all(fd, new_bytes)
+            os.fsync(fd)
         finally:
             os.close(fd)
+        try:
+            os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)   # atomic entry replace, no truncation
+        except OSError:
+            try:
+                os.unlink(tmpname, dir_fd=pfd)             # never leave a temp behind on a failed rename
+            except OSError:
+                pass
+            raise
+        os.fsync(pfd)                                     # the rename (a directory entry change) is durable
         return False
     except _journal.JournalError as exc:                  # a swapped-in non-regular file at read time
         raise ViewsError("cannot write {} ({})".format(relpath, exc))
@@ -1178,10 +1202,11 @@ def render(argv):
     try:
         try:
             return _render_resolved(store_root_fd, product_root_fd, machine_rel, check)
-        except (ViewsError, RecursionError, ValueError) as exc:
-            # ViewsError is U4's cannot-evaluate; RecursionError and (defensively) ValueError are widened
-            # here as defence in depth, so a parse recursion escaping any inner path becomes a controlled
-            # exit 2 rather than an uncontrolled traceback.
+        except (ViewsError, RecursionError, ValueError, OSError) as exc:
+            # ViewsError is U4's cannot-evaluate; RecursionError, (defensively) ValueError, and OSError are
+            # widened here as defence in depth, so a parse recursion or a raw OSError (e.g. an unwrapped
+            # os.dup EBADF/EMFILE) escaping any inner path becomes a controlled exit 2 rather than an
+            # uncontrolled traceback.
             print("opf render: cannot evaluate: {}".format(exc), file=sys.stderr)
             return EXIT_CANNOT_EVALUATE
     finally:
@@ -1671,6 +1696,20 @@ def self_test():
         finally:
             os.close(_spfd)
         check("symlinked-parent-component-maps-to-viewserror", _sp_ok)
+        # F5 (read-path fail-closed on an unreadable source): a bad store_root_fd (or fd exhaustion at
+        # os.dup) makes _open_parent's terminal os.dup raise a RAW OSError that _lstat_contained does not
+        # wrap; _read_raw_and_parsed must map it to a ViewsError (a cannot-evaluate), never let the OSError
+        # escape the render boundary as an uncaught exit-1 traceback. A single-component relpath drives the
+        # os.dup(root_fd) path with fd -1. Pre-fix (only `except JournalError`) this raised OSError; post-fix
+        # it is a ViewsError, so the check discriminates the OSError-widening at the reader boundary.
+        _f5_kind = None
+        try:
+            _read_raw_and_parsed(-1, "x.index.toml")
+        except ViewsError:
+            _f5_kind = "ViewsError"
+        except OSError:
+            _f5_kind = "OSError"
+        check("read-bad-fd-maps-to-viewserror", _f5_kind == "ViewsError")
         # QA-1 (write-path sibling of the read-path check above): _write_contained's _open_parent call maps a
         # symlinked or non-directory intermediate component to a ViewsError, not an uncaught JournalError.
         # _open_parent signals that case as JournalError (NOT an OSError subclass), so the pre-fix
@@ -1690,8 +1729,33 @@ def self_test():
         finally:
             os.close(_wspfd)
         check("write-symlinked-parent-component-maps-to-viewserror", _wsp_ok)
-        check("mirror-type-refuses-worklog-ledger", _mirror_type("WORKLOG-INDEX.md") is None)
-        check("mirror-type-refuses-version-ledger", _mirror_type("VERSION-INDEX.md") is None)
+        # F4 (reopen-TOCTOU, class B): _write_contained never truncates the destination NAME in place; it
+        # writes a fresh O_EXCL temp and atomically renames it over the entry. So a destination raced to a
+        # HARDLINK of a victim (O_NOFOLLOW refuses a symlink, NOT a hardlink) cannot have the victim's inode
+        # truncated: the rename re-points only the directory entry, leaving the victim's bytes intact while
+        # the store file receives the new content. Pre-fix (O_WRONLY|O_TRUNC of `name`) the shared inode was
+        # truncated and rewritten through the hardlink, corrupting the victim; this vector FAILS pre-fix
+        # (victim reads the new bytes) and passes post-fix (victim intact, destination updated).
+        _f4dir = base / "f4-hardlink-swap"; _f4dir.mkdir()
+        _f4victim = _f4dir / "victim"; _f4victim.write_text("VICTIM-INTACT", encoding="utf-8")
+        os.link(str(_f4victim), str(_f4dir / "TODO.md"))   # destination is a hardlink to the victim inode
+        _f4fd = os.open(str(_f4dir), os.O_RDONLY | os.O_DIRECTORY)
+        _f4saved_gate = _WRITE_GATE_COMPOSED
+        try:
+            _WRITE_GATE_COMPOSED = True                    # exercise a real write through the sink
+            _write_contained(_f4fd, "TODO.md", "NEW-VIEW-CONTENT\n", False)
+        finally:
+            _WRITE_GATE_COMPOSED = _f4saved_gate
+            os.close(_f4fd)
+        check("write-hardlink-swap-victim-intact", _f4victim.read_text(encoding="utf-8") == "VICTIM-INTACT")
+        check("write-hardlink-swap-dest-updated",
+              (_f4dir / "TODO.md").read_text(encoding="utf-8") == "NEW-VIEW-CONTENT\n")
+        # F12: the two ledger-refuses pins ("worklog"/"version" -> None) are removed as non-discriminating.
+        # Neither ledger name is in _opf_schema.BASELINE_SPECS, so _mirror_type's final fallthrough returns
+        # None for them regardless of the _LEDGER_SOURCES guard; the assertion held for any state of that
+        # guard (and even a broken _MIRROR_RE, which also returns None), so it pinned no fix. The positive
+        # mapping below DOES discriminate: backlog_item IS a baseline type, so a broken regex or baseline
+        # lookup flips it from "backlog_item" to None.
         check("mirror-type-resolves-record-type", _mirror_type("BACKLOG_ITEM-INDEX.md") == "backlog_item")
         _f5_bb, _f5_hid = join_actionability([dict(id="BI-1", status="open")],
                                              [dict(status="active", scopes=["BI-1"])])
@@ -1733,8 +1797,11 @@ def self_test():
         _d02 = _opf_release.coverage_digest([dict(id="WL-1", date="2026-01-02T00:00:00Z",
             actor=dict(kind="maintainer"), kind="added", summary="first change")])
         check("coverage-digest-date-sensitive", _d01 != _d02)
-        check("read-source-toctou-residual-disclosed",
-              "O_NONBLOCK" in _read_raw_and_parsed.__doc__ and "lstat-to-open" in _read_raw_and_parsed.__doc__)
+        # F13: the stale word-presence pin ("O_NONBLOCK"/"lstat-to-open" in the docstring) is removed; it
+        # asserted the presence of text, not behaviour, and pinned a docstring claim that _read_contained
+        # "does not pass O_NONBLOCK" which is FALSE (it does). The LIVE behaviour the disclosure describes,
+        # a writer-less FIFO source fails closed without hanging, is asserted by "fifo-source-fails-closed-
+        # not-hang" above (an actual FIFO under a watchdog), which discriminates the real O_NONBLOCK guard.
         check("read-ledger-schema-divergence-disclosed",
               "optional-marker" in _load_worklog.__doc__ and "optional-marker" in _load_version.__doc__)
         check("entry-writes-fixed-date", 'date = "2026-01-01T00:00:00Z"' in _entry("WL-2", "fixed", "x"))

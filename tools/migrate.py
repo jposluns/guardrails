@@ -195,7 +195,7 @@ def _open_root_or_none(root):
                       "(O_NOFOLLOW, 3.6b); fail-closed".format(root, exc))
 
 
-def _validated_completed_cutover(txn_dir):
+def _validated_completed_cutover(jr_fd, txn_dir):
     """Fix #3 (C2 in all consumers): classify a transaction through the SINGLE validated terminal state
     machine and return its INTENT object ONLY when it is a genuinely COMPLETE cutover eligible for
     coverage-gating (and, in Step 7, reverse-replay): the frame sequence is exactly [INTENT, COMPLETE]
@@ -204,9 +204,9 @@ def _validated_completed_cutover(txn_dir):
     transaction, or None when it is not a completed cutover (a rolled-back, still-open, un-adopt, or other
     non-cutover terminal journal). JournalError (fail-closed) on a corrupt or invalid-sequence journal.
     Used by check_crosswalk's whole-component coverage gate; it exposes no un-adopt CLI (that is Step 7)."""
-    if _journal.classify_state(txn_dir) != "complete":       # runs the C2 validator; raises on an invalid sequence
+    if _journal.classify_state(jr_fd, txn_dir) != "complete":  # runs the C2 validator; raises on an invalid sequence
         return None
-    frames, _torn, _ = _journal.read_frames(txn_dir)
+    frames, _torn, _ = _journal.read_frames(jr_fd, txn_dir)
     if [t for t, _ in frames] != [_journal.F_INTENT, _journal.F_COMPLETE]:
         return None
     intent = _journal._first(frames, _journal.F_INTENT)
@@ -216,7 +216,7 @@ def _validated_completed_cutover(txn_dir):
     return intent
 
 
-def _claim_recover_lock(journal_root, root_fd):
+def _claim_recover_lock(journal_root, jr_fd, root_fd):
     """Atomically claim the journal lock for recovery (fix #3, hardened for C1 and E4). Returns 'acquired'
     when this process now owns the lock (the lock was absent, or a confirmed-dead stale lock was reconciled
     and broken), or 'possibly-live' when a lock whose owner may still be alive holds it (never seized, the
@@ -233,7 +233,7 @@ def _claim_recover_lock(journal_root, root_fd):
         return "possibly-live"
     # Confirmed dead: reconcile-then-break under the kernel arbitration lock (E4, spec 1262): the stale
     # lease is the recovery claim, retained until every journal validates terminal, and only then broken.
-    return _journal.reconcile_and_claim_stale(journal_root, root_fd, session_id="recover")
+    return _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id="recover")
 
 
 def do_plan(root):
@@ -260,6 +260,7 @@ def do_cutover(root, staged, unit):
     if err:
         print("error: {}".format(err), file=sys.stderr)
         return 2
+    jr_fd = None
     try:
         try:
             _assert_off_path(root, staged)
@@ -283,7 +284,11 @@ def do_cutover(root, staged, unit):
             # or apply, so a crash cannot keep an applied tree mutation while losing the journal subtree
             # (which recovery would then miss, falsely reporting nothing to recover).
             _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
-        except _journal.JournalError as exc:
+            # F1: reach the journal root ONCE by a contained no-follow walk from the trusted root fd, and
+            # thread that stable handle to run_transaction so every framed record is written beneath it,
+            # never through a re-resolved txn-dir absolute path an ancestor symlink could redirect.
+            jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+        except (_journal.JournalError, OSError) as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
         txn_id = "{}.{}.{}".format(_slug(unit), os.getpid(), time.time_ns())
@@ -297,18 +302,20 @@ def do_cutover(root, staged, unit):
                   "component-successors": member["successors"]}
         txn_dir = journal_root / txn_id
         try:
-            _journal.run_transaction(root_fd, journal_root, txn_id, header, ops,
+            _journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
                                      _staged_reader(staged), session_id="cutover")
         except _journal.JournalError as exc:
-            return _settle_failed_transaction(journal_root, txn_dir, exc, "cutover")
+            return _settle_failed_transaction(journal_root, jr_fd, txn_dir, exc, "cutover")
         _journal.release_lock(journal_root)
     finally:
+        if jr_fd is not None:
+            os.close(jr_fd)
         os.close(root_fd)
     print("cutover complete: unit {} txn {}".format(unit, txn_id))
     return 0
 
 
-def _settle_failed_transaction(journal_root, txn_dir, exc, what):
+def _settle_failed_transaction(journal_root, jr_fd, txn_dir, exc, what):
     """A JournalError escaped run_transaction. Classify the VALIDATED journal state via the C2 state
     machine (classify_state), never a bare is_terminal that reads True on a NO-INTENT journal and so
     falsely reports a pre-INTENT failure as 'rolled back' (C4). Three cases:
@@ -319,7 +326,7 @@ def _settle_failed_transaction(journal_root, txn_dir, exc, what):
       (c) otherwise ('open': the rollback itself failed, or an unreadable/invalid journal): RETAIN the
           lock, leave the transaction open for a later `recover`, claim no rollback, exit 2."""
     try:
-        state = _journal.classify_state(txn_dir)
+        state = _journal.classify_state(jr_fd, txn_dir)
     except _journal.JournalError:
         state = "open"                                    # unreadable/invalid journal: fail-closed, retain lock
     if state == "nothing-opened":
@@ -347,16 +354,25 @@ def do_recover(root):
     if err:
         print("error: {}".format(err), file=sys.stderr)
         return 2
+    jr_fd = None
     try:
         journal_root = root / JOURNAL_REL
         if not journal_root.is_dir():
             print("recover: no journal at {} (nothing to recover)".format(JOURNAL_REL))
             return 0
+        # F1: reach the journal root ONCE by a contained no-follow walk from the trusted root fd, and
+        # thread that stable handle to the lock reconcile and every recover() so each txn journal is read
+        # and its terminal frames written beneath it, never through a re-resolved txn-dir absolute path.
+        try:
+            jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+        except (_journal.JournalError, OSError) as exc:
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return 2
         # Atomically CLAIM the lock before touching any transaction (fix #3): acquire an absent lock, or
         # (E4) reconcile-then-break a confirmed-dead stale lock under the arbitration lock; a possibly-live
         # owner is NEVER seized. Only the lock THIS recover owns is released, after every txn is terminal.
         try:
-            claim = _claim_recover_lock(journal_root, root_fd)
+            claim = _claim_recover_lock(journal_root, jr_fd, root_fd)
         except _journal.JournalError as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
@@ -368,7 +384,7 @@ def do_recover(root):
         outcomes = {}
         for txn_dir in _txn_dirs(journal_root):
             try:
-                outcomes[txn_dir.name] = _journal.recover(txn_dir, root_fd)
+                outcomes[txn_dir.name] = _journal.recover(jr_fd, txn_dir, root_fd)
             except _journal.JournalError as exc:
                 print("error: cannot recover {} ({}); fail-closed".format(txn_dir.name, exc),
                       file=sys.stderr)
@@ -381,6 +397,8 @@ def do_recover(root):
             print("recover: no transactions to recover")
         return 0
     finally:
+        if jr_fd is not None:
+            os.close(jr_fd)
         os.close(root_fd)
 
 
@@ -389,18 +407,26 @@ def do_status(root):
     if not journal_root.is_dir():
         print("status: not adopted (no journal)")
         return 0
+    try:                                                  # F1: read each txn journal contained beneath a
+        jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)   # trusted journal-root handle
+    except (_journal.JournalError, OSError) as exc:
+        print("error: cannot open journal root ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
     open_txns = []
-    for txn_dir in _txn_dirs(journal_root):
-        try:
-            terminal = _journal.is_terminal(txn_dir)
-        except _journal.JournalError as exc:
-            print("error: corrupt journal {} ({}); fail-closed".format(txn_dir.name, exc),
-                  file=sys.stderr)
-            return 2
-        state = "terminal" if terminal else "OPEN"
-        print("status: txn {} -> {}".format(txn_dir.name, state))
-        if not terminal:
-            open_txns.append(txn_dir.name)
+    try:
+        for txn_dir in _txn_dirs(journal_root):
+            try:
+                terminal = _journal.is_terminal(jr_fd, txn_dir)
+            except _journal.JournalError as exc:
+                print("error: corrupt journal {} ({}); fail-closed".format(txn_dir.name, exc),
+                      file=sys.stderr)
+                return 2
+            state = "terminal" if terminal else "OPEN"
+            print("status: txn {} -> {}".format(txn_dir.name, state))
+            if not terminal:
+                open_txns.append(txn_dir.name)
+    finally:
+        os.close(jr_fd)
     lock = _journal.read_lock_owner(journal_root)
     if lock is not None:
         print("status: journal lock held by pid {}".format(lock.get("pid")))
@@ -618,12 +644,19 @@ def _all_terminal(root):
     journal_root = Path(root) / JOURNAL_REL
     if not journal_root.is_dir():
         return True
-    for txn_dir in _txn_dirs(journal_root):
-        try:
-            if not _journal.is_terminal(txn_dir):
+    try:
+        jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+    except (_journal.JournalError, OSError):
+        return False
+    try:
+        for txn_dir in _txn_dirs(journal_root):
+            try:
+                if not _journal.is_terminal(jr_fd, txn_dir):
+                    return False
+            except _journal.JournalError:
                 return False
-        except _journal.JournalError:
-            return False
+    finally:
+        os.close(jr_fd)
     return not (journal_root / "lock").exists()
 
 
@@ -761,7 +794,11 @@ def self_test():
             if txn is None:
                 failures.append("{} inverse: no completed cutover txn to invert".format(case))
                 continue
-            frames, _torn, _good = _journal.read_frames(uroot / JOURNAL_REL / txn)
+            _ujr = _journal.open_journal_root_from_path(uroot, JOURNAL_REL)
+            try:
+                frames, _torn, _good = _journal.read_frames(_ujr, uroot / JOURNAL_REL / txn)
+            finally:
+                os.close(_ujr)
             src_ops = (_journal._first(frames, _journal.F_INTENT) or {}).get("ops", [])
             inverse = _journal.build_inverse_ops(src_ops)
             expected = [(_INVERSE_KIND[o["op"]], o["path"]) for o in reversed(src_ops)]
@@ -906,12 +943,16 @@ def self_test():
             _journal._restore_preimage = orig_restore
         jr = Path(rbroot) / JOURNAL_REL
         nonterminal = False
-        for td in _txn_dirs(jr):
-            try:
-                if not _journal.is_terminal(td):
+        _jr_fd = _journal.open_journal_root_from_path(rbroot, JOURNAL_REL)
+        try:
+            for td in _txn_dirs(jr):
+                try:
+                    if not _journal.is_terminal(_jr_fd, td):
+                        nonterminal = True
+                except _journal.JournalError:
                     nonterminal = True
-            except _journal.JournalError:
-                nonterminal = True
+        finally:
+            os.close(_jr_fd)
         if rc != 2:
             failures.append("fix4: do_cutover on a failed rollback must exit 2")
         if not (jr / "lock").exists():
@@ -928,8 +969,12 @@ def self_test():
         mroot = _build_case_root(tmp / "mismatch" / "root", "flat-files")
         mtxn = mroot / JOURNAL_REL / "sometxn"
         mtxn.mkdir(parents=True)
-        _journal.publish(mtxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
-        _journal.publish(mtxn, _journal.F_COMPLETE, {"txn": "B"})
+        _mjr = _journal.open_journal_root_from_path(mroot, JOURNAL_REL)
+        try:
+            _journal.publish(_mjr, mtxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
+            _journal.publish(_mjr, mtxn, _journal.F_COMPLETE, {"txn": "B"})
+        finally:
+            os.close(_mjr)
         if _run(["recover", "--root", str(mroot)]) != 2:
             failures.append("fix2: a mismatched-txn terminal frame must fail closed (exit 2)")
         checked += 1
@@ -948,25 +993,33 @@ def self_test():
                   (_journal.F_RIP, {"txn": "A"})])):
             stxn = tmp / "c2" / label.replace(" ", "_")
             stxn.mkdir(parents=True)
-            for ftype, obj in frames_spec:
-                _journal.publish(stxn, ftype, obj)
+            _sjr = os.open(str(stxn.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
-                _journal.classify_state(stxn)
-                failures.append("C2: {} must be rejected by the state machine".format(label))
-            except _journal.JournalError:
-                pass
+                for ftype, obj in frames_spec:
+                    _journal.publish(_sjr, stxn, ftype, obj)
+                try:
+                    _journal.classify_state(_sjr, stxn)
+                    failures.append("C2: {} must be rejected by the state machine".format(label))
+                except _journal.JournalError:
+                    pass
+            finally:
+                os.close(_sjr)
             checked += 1
         # is_terminal invokes the SAME validator (C2): an INTENT then RC (no preceding RIP) is not an
         # accepted sequence, so is_terminal fails closed there too, classifying identically to recover.
         itxn = tmp / "c2-isterm"
         itxn.mkdir(parents=True)
-        _journal.publish(itxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
-        _journal.publish(itxn, _journal.F_RC, {"txn": "A"})
+        _ijr = os.open(str(itxn.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            _journal.is_terminal(itxn)
-            failures.append("C2: is_terminal must reject an invalid frame sequence (same validator)")
-        except _journal.JournalError:
-            pass
+            _journal.publish(_ijr, itxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
+            _journal.publish(_ijr, itxn, _journal.F_RC, {"txn": "A"})
+            try:
+                _journal.is_terminal(_ijr, itxn)
+                failures.append("C2: is_terminal must reject an invalid frame sequence (same validator)")
+            except _journal.JournalError:
+                pass
+        finally:
+            os.close(_ijr)
         checked += 1
 
         # (M) C3: COMPLETE means the poststate was installed. A staged payload whose bytes do NOT match the
@@ -976,23 +1029,25 @@ def self_test():
         c3jr = c3root / JOURNAL_REL
         c3jr.mkdir(parents=True, exist_ok=True)
         c3fd = os.open(str(c3root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        c3jrfd = _journal.open_journal_root_fd(c3fd, JOURNAL_REL)
         try:
             planned = {"op": "write", "path": "dataA",
                        "poststate": {"kind": "file",
                                      "content-sha256": hashlib.sha256(b"PLANNED-A\n").hexdigest()}}
             pre3 = _snapshot(c3root)
             try:
-                _journal.run_transaction(c3fd, c3jr, "c3txn", {"unit": "x", "kind": "cutover"},
+                _journal.run_transaction(c3fd, c3jrfd, c3jr, "c3txn", {"unit": "x", "kind": "cutover"},
                                          [planned], lambda op: b"MUTATED-A\n", session_id="c3")
                 failures.append("C3: a staged/INTENT digest mismatch must raise (no false COMPLETE)")
             except _journal.JournalError:
                 pass
-            ftypes = [t for t, _ in _journal.read_frames(c3jr / "c3txn")[0]]
+            ftypes = [t for t, _ in _journal.read_frames(c3jrfd, c3jr / "c3txn")[0]]
             if _journal.F_COMPLETE in ftypes:
                 failures.append("C3: a digest mismatch must NEVER publish COMPLETE")
             if _snapshot(c3root) != pre3:
                 failures.append("C3: a digest mismatch must roll back to the prestate exactly")
         finally:
+            os.close(c3jrfd)
             os.close(c3fd)
         checked += 1
 
@@ -1028,9 +1083,10 @@ def self_test():
         c1jr = tmp / "c1" / JOURNAL_REL
         c1jr.mkdir(parents=True)
         c1fd = os.open(str(tmp / "c1"), os.O_RDONLY | os.O_DIRECTORY)
+        c1jrfd = _journal.open_journal_root_fd(c1fd, JOURNAL_REL)
         try:
             _journal.acquire_lock(c1jr, session_id="live-holder")
-            res1 = _journal.reconcile_and_claim_stale(c1jr, c1fd, session_id="recover")
+            res1 = _journal.reconcile_and_claim_stale(c1jr, c1jrfd, c1fd, session_id="recover")
             if res1 != "possibly-live":
                 failures.append("C1: reconcile_and_claim_stale must report possibly-live for a live lock")
             if not (c1jr / "lock").exists():
@@ -1040,6 +1096,7 @@ def self_test():
                 failures.append("C1: the live current lock owner must be left unchanged")
             _journal.release_lock(c1jr)
         finally:
+            os.close(c1jrfd)
             os.close(c1fd)
         checked += 1
 
@@ -1145,12 +1202,14 @@ def self_test():
         ajr.mkdir(parents=True)
         os.symlink(str(tmp / "arb-symlink" / "elsewhere"), str(ajr / "lock.break"))
         awfd = os.open(str(tmp / "arb-symlink"), os.O_RDONLY | os.O_DIRECTORY)
+        awjrfd = _journal.open_journal_root_fd(awfd, JOURNAL_REL)
         try:
-            _journal.reconcile_and_claim_stale(ajr, awfd, session_id="recover")
+            _journal.reconcile_and_claim_stale(ajr, awjrfd, awfd, session_id="recover")
             failures.append("hardening: a symlinked lock.break must be refused (O_NOFOLLOW, fail-closed)")
         except _journal.JournalError:
             pass
         finally:
+            os.close(awjrfd)
             os.close(awfd)
         checked += 1
 
@@ -1333,7 +1392,8 @@ def self_test():
                 ("remove",
                  lambda d: ((d / "t").write_bytes(b"DRIFTED\n"), os.chmod(d / "t", 0o644)),
                  lambda d: ((d / "t").write_bytes(b"REAL\n"), os.chmod(d / "t", 0o644)),
-                 {"kind": "file", "mode": 0o644, "sha256": hashlib.sha256(b"REAL\n").hexdigest()}),
+                 {"kind": "file", "mode": 0o644, "size": len(b"REAL\n"),
+                  "sha256": hashlib.sha256(b"REAL\n").hexdigest()}),
                 ("rmdir",
                  lambda d: ((d / "t").mkdir(), os.chmod(d / "t", 0o700)),
                  lambda d: ((d / "t").mkdir(), os.chmod(d / "t", 0o755)),
@@ -1399,8 +1459,12 @@ def self_test():
         e4jr.mkdir(parents=True, exist_ok=True)
         badtxn = e4jr / "badtxn"
         badtxn.mkdir()
-        _journal.publish(badtxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
-        _journal.publish(badtxn, _journal.F_RC, {"txn": "A"})    # INTENT then RC (no RIP): recover() rejects
+        _e4jrfd = _journal.open_journal_root_from_path(e4root, JOURNAL_REL)
+        try:
+            _journal.publish(_e4jrfd, badtxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
+            _journal.publish(_e4jrfd, badtxn, _journal.F_RC, {"txn": "A"})  # INTENT then RC (no RIP): recover() rejects
+        finally:
+            os.close(_e4jrfd)
         dead = subprocess.Popen([sys.executable, "-c", "pass"])   # a pid that is confirmed dead once reaped
         dead.wait()
         (e4jr / "lock").write_bytes(json.dumps(
@@ -1436,10 +1500,11 @@ def self_test():
                 pass
             return _orig(fd)
 
-        def _snapshot_publish(txn_dir, ftype, obj, _orig=j1_orig_publish, _s=j1_at_intent, _rec=j1_recorded):
+        def _snapshot_publish(jr_fd, txn_dir, ftype, obj, _orig=j1_orig_publish, _s=j1_at_intent,
+                              _rec=j1_recorded):
             if ftype == _journal.F_INTENT and _s["inos"] is None:
                 _s["inos"] = set(_rec)                        # freeze the fsync'd set at the FIRST INTENT
-            return _orig(txn_dir, ftype, obj)
+            return _orig(jr_fd, txn_dir, ftype, obj)
 
         os.fsync = _tracking_fsync
         _journal.publish = _snapshot_publish
@@ -1489,14 +1554,18 @@ def _latest_txn(root):
     best = None
     if not journal_root.is_dir():
         return None
-    for txn_dir in _txn_dirs(journal_root):
-        if "unadopt" in txn_dir.name:
-            continue
-        try:
-            if _journal.F_COMPLETE in [t for t, _ in _journal.read_frames(txn_dir)[0]]:
-                best = txn_dir.name
-        except _journal.JournalError:
-            continue
+    jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+    try:
+        for txn_dir in _txn_dirs(journal_root):
+            if "unadopt" in txn_dir.name:
+                continue
+            try:
+                if _journal.F_COMPLETE in [t for t, _ in _journal.read_frames(jr_fd, txn_dir)[0]]:
+                    best = txn_dir.name
+            except _journal.JournalError:
+                continue
+    finally:
+        os.close(jr_fd)
     return best
 
 

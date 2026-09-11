@@ -2595,27 +2595,41 @@ def self_test():
     def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS and return that
         str, or a sentinel: 'TIMEOUT' (wall-clock bound tripped), 'OOM' (address-space bound tripped),
-        'CHILD-DIED', or 'ERROR:<Type>' (thunk raised). Some vectors drive the whole engine over a declared
-        10**9 high-water/span (S7-F1) or a blocking FIFO read target (S7-F2); run in-process a range-expansion
-        or blocking-read REGRESSION would HANG or OOM the whole self-test. This watchdog turns such a
-        regression into a deterministic sentinel the assertion catches, without weakening the assertion (a
-        correct engine returns its real verdict token well inside the bounds). Test-harness only (self_test is
-        the sole caller); the production validator forks nothing. Requires os.fork; the caller fails closed
-        where it is absent."""
+        'CHILD-DIED', 'ERROR:<Type>' (thunk raised), or 'SETUP-ERROR:<Type>' (the child could NOT install its
+        bounds, or fork failed: a cannot-evaluate, never a normal result). Some vectors drive the whole engine
+        over a declared 10**9 high-water/span (S7-F1) or a blocking FIFO read target (S7-F2); run in-process a
+        range-expansion or blocking-read REGRESSION would HANG or OOM the whole self-test. This watchdog turns
+        such a regression into a deterministic sentinel the assertion catches, without weakening the assertion
+        (a correct engine returns its real verdict token well inside the bounds). A SETUP-ERROR sentinel is
+        never equal to any expected verdict token, so a check whose bounds could not be installed FAILS
+        closed rather than reading a possibly-unbounded run as a clean pass (no-concealed-failure). Test-harness
+        only (self_test is the sole caller); the production validator forks nothing. Requires os.fork; the
+        caller fails closed where it is absent."""
         import signal
         rfd, wfd = os.pipe()
-        pid = os.fork()
+        try:
+            pid = os.fork()
+        except OSError as exc:                           # (b) fork failed: close BOTH pipe fds, no leak
+            os.close(rfd)
+            os.close(wfd)
+            return "SETUP-ERROR:" + type(exc).__name__
         if pid == 0:                                    # child: bounded, writes one short token, never returns
             os.close(rfd)
             try:
+                # (c) the child must not inherit an ambient SIG_IGN/custom SIGALRM disposition that would
+                # defeat the watchdog and leave the parent blocked in os.read() with no deadline: reset to
+                # SIG_DFL so the timer's SIGALRM default-terminates the child. (a) install BOTH bounds or,
+                # on any failure, write a SETUP-ERROR token and exit WITHOUT running the thunk unbounded.
+                signal.signal(signal.SIGALRM, signal.SIG_DFL)
                 import resource
                 resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-            except Exception:
-                pass
-            try:
-                signal.setitimer(signal.ITIMER_REAL, timeout_s)   # SIGALRM default-terminates the child
-            except Exception:
-                pass
+                signal.setitimer(signal.ITIMER_REAL, timeout_s)
+            except BaseException as exc:                 # noqa: BLE001 (bounds NOT installed: never run unbounded)
+                try:
+                    os.write(wfd, ("SETUP-ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200])
+                except OSError:
+                    pass
+                os._exit(0)
             try:
                 payload = str(thunk()).encode("utf-8", "replace")[:200]
             except MemoryError:
@@ -3260,6 +3274,31 @@ def self_test():
                 lambda: validate_store(resolve_store(_sp_root), observations=clean_prior()).status)
             check("f15-huge-span-bounded-invalid", _sp_status == INVALID)
 
+            # --- F7 bounded-runner hardening (fail pre-fix, pass post-fix) ----------------------------
+            import signal as _sig7
+            import time as _t7
+            # (a) a SETUP failure (a bound could NOT be installed) must yield a DISTINCT SETUP-ERROR
+            # sentinel, NEVER the thunk's normal result run unbounded. Force setitimer to raise in the
+            # child (the patched module carries across the fork); a reverted `except: pass` would swallow
+            # it and return "F7-NORMAL".
+            _real_setitimer = _sig7.setitimer
+            _sig7.setitimer = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("f7-injected-setup-failure"))
+            try:
+                _setup = run_bounded(lambda: "F7-NORMAL")
+            finally:
+                _sig7.setitimer = _real_setitimer
+            check("f7-setup-failure-yields-setup-error-not-normal", _setup.startswith("SETUP-ERROR"))
+            # (c) the child must not inherit an ambient SIG_IGN SIGALRM disposition that would defeat the
+            # watchdog: with SIGALRM ignored in the parent, a thunk that sleeps past the timeout must still
+            # TIMEOUT (the child resets SIG_DFL). Reverted (no reset), the ignored timer lets the sleep run
+            # to completion and the thunk's own result returns instead of TIMEOUT.
+            _prev7 = _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
+            try:
+                _to = run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], timeout_s=1)
+            finally:
+                _sig7.signal(_sig7.SIGALRM, _prev7)
+            check("f7-inherited-ignored-sigalrm-still-times-out", _to == "TIMEOUT")
+
         # --- io fail-closed ---------------------------------------------------------------------------
         f = clean_machine()
         f["version.toml"] = "not valid toml === ["
@@ -3900,9 +3939,12 @@ def self_test():
               and _canonical_remote("ssh://h:022/p") == _canonical_remote("ssh://h/p"))
 
         # ===== ROUND-2 retrofix discriminating vectors ==============================================
-        check("r2-exit-code-valid-zero", exit_code(StoreValidation(VALID)) == 0)
-        check("r2-exit-code-invalid-one", exit_code(StoreValidation(INVALID)) == 1)
-        check("r2-exit-code-cannot-eval-two", exit_code(StoreValidation(CANNOT_EVALUATE)) == 2)
+        # The exit_code retrofix hardened the FALLTHROUGH: only the exact VALID status yields 0 and any
+        # unrecognized/malformed status fails CLOSED to 2 (never a two-valued fall-through that read a bad
+        # status as success). The VALID->0 and INVALID->1 explicit branches were satisfied by the
+        # pre-retrofix reducer too, so those pins discriminate nothing about this fix and were removed
+        # (F12). The UNKNOWN-status vector is the sole discriminator: it exercises the hardened fallthrough,
+        # failing (returning 0) under the pre-retrofix reducer and returning 2 only with the fix in place.
         check("r2-exit-code-unknown-fails-closed", exit_code(StoreValidation("UNKNOWN-STATUS")) == 2)
         check("r2-canonical-scheme-bad-bracket-none", _canonical_remote("ssh://[::1/p") is None)
         check("r2-canonical-scheme-bad-bracket2-none",

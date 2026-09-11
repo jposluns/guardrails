@@ -27,6 +27,7 @@ Run standalone (`python3 -I -B tools/_opf_fuzz.py`) or as the `opf-fuzz` leg of 
 Returns 0 clean, 1 on a failed assertion, 2 on a harness/fail-closed error. Judged on returned
 status/finding VALUES and on raised exception TYPES, never by grepping output (the isolate-verifiers rule).
 """
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -50,10 +51,20 @@ TS = "2026-08-12T09:14:02Z"
 # A closed-by-construction proof is only real if every production site it claims to cover is actually
 # EXERCISED by a case; an un-reached site would let a future regression there escape unproven (round 6
 # found 8 of the 20 _sorted_key_names sites were never reached because the nested sweep replaced the PARENT
-# tables, so the deeper child-table sorts never ran). We derive the authoritative site set by SCANNING the
-# three module SOURCES (the guard-input-soundness authoritative-index approach, never a hand-maintained
-# list that can silently drift), and record which source lines actually EXECUTE via a line tracer, then
-# assert the scanned sites are a subset of the executed lines. A future un-exercised site FAILS the proof.
+# tables, so the deeper child-table sorts never ran). We derive the site set by SCANNING the three module
+# SOURCES for the render-helper call tokens (so the site LINE NUMBERS are never a hand-maintained list),
+# record which source lines actually EXECUTE via a line tracer, then assert the scanned sites are a subset
+# of the executed lines. A future un-exercised site FAILS the proof.
+#
+# The token VOCABULARY that defines WHICH sites count (_KEY_NAME_RENDER_TOKENS) is itself reconciled
+# against the authoritative source rather than trusted as a fixed hand list (guard-input-soundness): the
+# coverage section below asserts every `*_key_names` render helper DEFINED in the three modules is
+# registered in the vocabulary, so a renamed or newly-added helper cannot silently drop out of BOTH the
+# coverage numerator and denominator (it FAILS the proof, a cannot-evaluate, rather than staying green).
+# DISCLOSED RESIDUAL (disclose-guard-residuals): this reconciles the NAMED `*_key_names` helper vocabulary;
+# a key set rendered INLINE without such a helper is outside this scan's semantic scope and is not claimed
+# covered. The scan is a coverage proof over the enumerated helper vocabulary, not a semantic guarantee
+# that every conceivable key-rendering construct is exercised.
 #
 # ROUND-8 REVISION (the gemini meta-finding, evidence-grounded-completion). The int/str-guard class is no
 # longer proven by an author-declared `# opf-fuzz:int-guard` MARKER: a marker scan is non-authoritative,
@@ -98,6 +109,28 @@ def _skn_call_sites():
     # non-emptiness can be asserted (a class that scans to zero is a drifted or broken authoritative index).
     return {tok: _scan_sites(lambda ln, tok=tok: tok in ln and not ln.lstrip().startswith("def "))
             for tok in _KEY_NAME_RENDER_TOKENS}
+
+
+# A render helper follows the `*_key_names` naming convention (_sorted_key_names / _safe_key_names). The
+# vocabulary above is RECONCILED against every such definition in the three module sources so a renamed or
+# newly-added helper cannot silently escape the coverage vocabulary (an authoritative-index reconciliation,
+# not a trusted hand list). `_instant_key` / `_check_keyset` do not match and are correctly excluded.
+_KEY_NAME_RENDER_DEF_RE = re.compile(r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*_key_names)\s*\(")
+
+
+def _key_name_render_defs():
+    """The call token `<name>(` of every `*_key_names` render helper DEFINED in the three target module
+    sources. Reconciling this discovered set against _KEY_NAME_RENDER_TOKENS surfaces a renamed or added
+    helper that is absent from the vocabulary (a cannot-evaluate / fail-closed drift), rather than letting
+    it drop silently out of both the coverage numerator and denominator. It cannot discover a key set
+    rendered INLINE without such a helper (the disclosed residual noted above)."""
+    defs = set()
+    for path in _MODULE_PATHS.values():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            m = _KEY_NAME_RENDER_DEF_RE.match(line)
+            if m:
+                defs.add(m.group(1) + "(")
+    return defs
 
 
 def _make_tracer(executed):
@@ -898,6 +931,26 @@ def run():
         if not sites:
             fail("coverage scan found no {} call site(s): the authoritative-index scan under-counts or "
                  "has drifted".format(tok))
+    # Reconcile the vocabulary against the authoritative source: every `*_key_names` render helper DEFINED
+    # in the three modules must be registered in _KEY_NAME_RENDER_TOKENS. A renamed or newly-added helper
+    # absent from the vocabulary is drift (fail-closed), rather than silently dropping out of both the
+    # coverage numerator and denominator (guard-input-soundness). DISCLOSED RESIDUAL: a key set rendered
+    # inline without such a helper is outside this scan's scope (disclose-guard-residuals).
+    _vocab = set(_KEY_NAME_RENDER_TOKENS)
+    _defs = _key_name_render_defs()
+    assertions += 1
+    if _defs != _vocab:
+        fail("coverage vocabulary drift: `*_key_names` render helpers defined in source {} do not match the "
+             "registered vocabulary {}; an unregistered or renamed helper would escape both the coverage "
+             "numerator and denominator (fail-closed)".format(sorted(_defs), sorted(_vocab)))
+    # DISCRIMINATION: the reconciliation must actually FIRE on an unregistered helper (fails if the def-scan
+    # or the equality guard is reverted/weakened). A synthetic `_rogue_key_names` def must be recognized by
+    # the def-scan predicate and, added to the discovered set, must break the equality guard above.
+    assertions += 1
+    _rogue = _KEY_NAME_RENDER_DEF_RE.match("def _rogue_key_names(keys):")
+    if _rogue is None or (_defs | {_rogue.group(1) + "("}) == _vocab:
+        fail("coverage reconciliation is non-discriminating: it would not flag an unregistered "
+             "`*_key_names` render helper (the def-scan or equality guard has been weakened)")
     skn_missed = sorted(skn_sites - executed)
     assertions += 1
     if skn_missed:
@@ -917,8 +970,9 @@ def run():
     print("OPF-FUZZ SELF-TEST: PASS ({} adversarial cases over {} public functions; {} assertions: no "
           "uncontrolled crash, well-formed outcome, no fail-open, the by-value oversized-int / deep-nested "
           "shapes fail closed at the digest path, and an oversized parsed int (hex/octal/binary) renders to "
-          "a structured finding at every finding-message site rather than crashing; coverage: {}/{} "
-          "key-name-render call sites reached)".format(
+          "a structured finding at every finding-message site rather than crashing; coverage over the "
+          "reconciled `*_key_names` render-helper vocabulary: {}/{} registered call sites reached, inline "
+          "renders disclosed out of scope)".format(
               cases, len(targets), assertions, skn_reached, len(skn_sites)))
     return 0
 

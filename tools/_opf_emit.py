@@ -483,6 +483,19 @@ def _model_equal(a, b):
     return True
 
 
+def _is_exception_spec(spec):
+    """True only when `spec` is usable as an `except` operand: an exception CLASS (a subclass of
+    BaseException), or a tuple of such classes (the empty tuple, which matches nothing, is valid). A
+    non-exception value (an int, a string, a tuple carrying a non-exception) is rejected so the caller can
+    substitute a match-nothing tuple rather than let `except <non-exception>` raise an uncontrolled
+    TypeError at handling time (F8, guard-input-soundness)."""
+    if isinstance(spec, type) and issubclass(spec, BaseException):
+        return True
+    if isinstance(spec, tuple):
+        return all(isinstance(e, type) and issubclass(e, BaseException) for e in spec)
+    return False
+
+
 def emit_checked(document):
     """The staging contract: emit `document`, reparse the result, and confirm it is model-equivalent to
     the input before returning the text. Nothing that does not reparse or does not round-trip is ever
@@ -500,6 +513,14 @@ def emit_checked(document):
     except (KeyboardInterrupt, SystemExit, GeneratorExit):
         raise
     except BaseException:  # noqa: BLE001 - a tomllib without TOMLDecodeError: match nothing, fail closed below
+        _decode_error = ()
+    # F8: the bound attribute is TRUSTED as an exception class only AFTER validating it. A tomllib-like
+    # object whose TOMLDecodeError is a non-exception (the int 7, or a tuple carrying one) would make
+    # `except _decode_error` raise an uncontrolled TypeError ("catching classes that do not inherit from
+    # BaseException") when a reparse failure reaches the handler. Accept only an exception class or a tuple
+    # of exception classes; anything else matches nothing (an empty tuple), so a reparse failure then falls
+    # to the value-free BaseException backstop below rather than escaping (guard-input-soundness; fail closed).
+    if not _is_exception_spec(_decode_error):
         _decode_error = ()
     try:
         reparsed = tomllib.loads(text)
@@ -559,6 +580,69 @@ def self_test():
     """Round-trip fuzz over adversarial bodies, canonical-form determinism, constrained-subset coverage
     (accepted and rejected), and byte-canon cleanliness verified against check_byte_canon itself."""
     failures = []
+
+    def run_bounded(thunk, timeout_s=20, mem_bytes=1024 * 1024 * 1024):
+        """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS, returning
+        that str or a sentinel: 'TIMEOUT' / 'OOM' / 'CHILD-DIED' / 'ERROR:<Type>' / 'SETUP-ERROR:<Type>'.
+        F11: the identity-guard diamond vector below, run IN-PROCESS, would expand a 64-level shared DAG
+        (2**64 pair-pushes) and HANG or OOM the WHOLE self-test if the `x is y` short-circuit were reverted;
+        the watchdog turns that into a deterministic sentinel the assertion rejects, without weakening it
+        (the shipped guard returns its token instantly). A SETUP-ERROR (a bound could not be installed) or a
+        fork failure is never equal to an expected token, so it fails closed. Mirrors the F7-hardened
+        _opf_check runner: the child resets SIGALRM to SIG_DFL, installs BOTH bounds or exits SETUP-ERROR
+        without running the thunk unbounded, and both pipe fds are closed on a fork failure. Fork-less
+        fallback runs in-process (safe on the shipped, bounded code CI exercises)."""
+        import os as _os
+        import signal as _signal
+        if not hasattr(_os, "fork"):
+            return str(thunk())
+        rfd, wfd = _os.pipe()
+        try:
+            pid = _os.fork()
+        except OSError as exc:
+            _os.close(rfd)
+            _os.close(wfd)
+            return "SETUP-ERROR:" + type(exc).__name__
+        if pid == 0:
+            _os.close(rfd)
+            try:
+                _signal.signal(_signal.SIGALRM, _signal.SIG_DFL)
+                import resource
+                resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+                _signal.setitimer(_signal.ITIMER_REAL, timeout_s)
+            except BaseException as exc:                  # noqa: BLE001 (bounds NOT installed: never run unbounded)
+                try:
+                    _os.write(wfd, ("SETUP-ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200])
+                except OSError:
+                    pass
+                _os._exit(0)
+            try:
+                payload = str(thunk()).encode("utf-8", "replace")[:200]
+            except MemoryError:
+                payload = b"OOM"
+            except BaseException as exc:                  # noqa: BLE001 (child boundary: any failure -> token)
+                payload = ("ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200]
+            try:
+                _os.write(wfd, payload)
+            except OSError:
+                pass
+            _os._exit(0)
+        _os.close(wfd)
+        data = b""
+        try:
+            while True:
+                chunk = _os.read(rfd, 200)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            _os.close(rfd)
+        _wpid, wstatus = _os.waitpid(pid, 0)
+        if not data:
+            if _os.WIFSIGNALED(wstatus) and _os.WTERMSIG(wstatus) == _signal.SIGALRM:
+                return "TIMEOUT"
+            return "CHILD-DIED"
+        return data.decode("utf-8", "replace")
 
     # check_byte_canon is the authority for the byte rules; reuse it rather than re-implement (a stale
     # duplicate is the guard-input-soundness failure this avoids). It is loaded from its pinned sibling
@@ -812,26 +896,58 @@ def self_test():
     # MINOR-4 identity-guard pin: two DISTINCT lists that each hold the SAME deep shared object collapse
     # under the `x is y` short-circuit, so _model_equal returns True in O(nodes). Each level is a diamond
     # (one child shared under two keys); without the short-circuit the guardless walk expands the diamonds
-    # (2**64 pair-pushes) and does not return promptly, so removing the guard is caught here. Hermetic: no
-    # timers, no wall-clock, no host state; under the guard this runs in a handful of iterations.
+    # (2**64 pair-pushes) and does not return promptly. F11: run behind a child-process watchdog so a
+    # reverted short-circuit produces a deterministic OOM/TIMEOUT sentinel this assertion rejects rather
+    # than HANGING or OOMing the whole self-test in-process; under the guard the child returns "True"
+    # instantly.
     shared_sub = {"leaf": 1}
     for _ in range(64):
         shared_sub = {"l": shared_sub, "r": shared_sub}
-    if not _model_equal([shared_sub, shared_sub], [shared_sub, shared_sub]):
-        failures.append("identity-guard/shared-dag: a shared DAG compared unequal to itself")
+    _idg = run_bounded(lambda: str(_model_equal([shared_sub, shared_sub], [shared_sub, shared_sub])))
+    if _idg != "True":
+        failures.append("identity-guard/shared-dag: a shared DAG did not compare equal to itself under the "
+                        "identity short-circuit (got {!r}; a regressed short-circuit trips the watchdog)"
+                        .format(_idg))
 
-    # _model_equal type-strictness pins: the exact-type clause (int != float, datetime != date) is the sole
-    # carrier of the strictness that makes the round-trip proof meaningful rather than merely plausible. A
-    # mutant dropping that clause falls back to bare ==, so 1 would equal 1.0; no other leg asserts
-    # _model_equal returns False on a type-conflated pair, so these direct assertions turn that mutant red.
+    # _model_equal type-strictness pins: the exact-type clause is the sole carrier of the strictness that
+    # makes the round-trip proof meaningful rather than merely plausible. A mutant dropping that clause
+    # falls back to bare ==, so 1 would equal 1.0 and True would equal 1; these direct assertions turn that
+    # mutant red. Only pairs that bare == CONFLATES discriminate the clause: int-vs-float and bool-vs-int
+    # (1 == 1.0 and True == 1 are both True under ==). A datetime-vs-date pin is NOT a discriminator and was
+    # removed (F12): Python's own == already returns False for a datetime compared to a date, so that
+    # assertion passes with OR without the exact-type clause and pins nothing.
     if _model_equal(1, 1.0):
         failures.append("model-equal/int-vs-float: 1 compared equal to 1.0 (exact-type strictness lost)")
-    if _model_equal(datetime.datetime(2026, 1, 1), datetime.date(2026, 1, 1)):
-        failures.append("model-equal/datetime-vs-date: a datetime compared equal to a date")
     if _model_equal(True, 1) or _model_equal(1, True):
         failures.append("model-equal/bool-vs-int: True compared equal to a bare int")
     if _model_equal({"n": 1}, {"n": 1.0}):
         failures.append("model-equal/nested-int-vs-float: a nested 1 compared equal to 1.0")
+
+    # F8: the reparse boundary binds tomllib.TOMLDecodeError and uses it as an `except` operand. A
+    # tomllib-like object whose TOMLDecodeError is NOT an exception class (here the int 7) would make
+    # `except _decode_error` raise an uncontrolled TypeError ("catching classes that do not inherit from
+    # BaseException") when a reparse failure reaches the handler; _is_exception_spec now rejects it so the
+    # failure falls to the value-free EmitError backstop. Discriminates: with the guard reverted the probe
+    # escapes as TypeError, not EmitError. The tomllib module attributes carry across into emit_checked (it
+    # reads them at call time), restored in a finally.
+    _real_tde = tomllib.TOMLDecodeError
+    _real_loads = tomllib.loads
+    tomllib.TOMLDecodeError = 7                                # a non-exception "decode-error" attribute
+    tomllib.loads = lambda _s: (_ for _ in ()).throw(ValueError("f8-forced-reparse-failure"))
+    try:
+        _f8_kind = None
+        try:
+            emit_checked({"schema": 1})                       # emits fine; the patched reparse then fails
+        except EmitError:
+            _f8_kind = "EmitError"
+        except BaseException as _exc:                         # noqa: BLE001 - capture an ESCAPING TypeError
+            _f8_kind = type(_exc).__name__
+    finally:
+        tomllib.TOMLDecodeError = _real_tde
+        tomllib.loads = _real_loads
+    if _f8_kind != "EmitError":
+        failures.append("f8/nonexception-tomldecodeerror: a non-exception TOMLDecodeError must fail closed "
+                        "to EmitError, not escape as {}".format(_f8_kind))
 
     # Identity-membership pin: scalar admission tests _SCALAR_TYPES by IDENTITY (_is_scalar_type), never
     # `==`, so classifying never invokes a hostile metaclass's __eq__. This spy's __eq__ records every
