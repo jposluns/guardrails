@@ -291,17 +291,37 @@ def _read_toml_contained(root_fd, relpath):
                          "opened)".format(relpath))
     # A store input is not read unboundedly: refuse a file larger than the read cap on the size the lstat
     # already returned, so a multi-gigabyte stray file in an adopter-controlled tree meets a controlled
-    # refusal rather than exhausting memory during resolution (SECA resource-bounds).
+    # refusal rather than exhausting memory during resolution (SECA resource-bounds). This lstat size is a
+    # pre-open FAST REJECT bound to the size BEFORE the open; a file swapped or grown between this lstat and
+    # the open is caught by the post-read length check below (disclose-guard-residuals).
     if st.st_size > MAX_STORE_READ_BYTES:
         raise StoreError("{} is {} bytes, over the {}-byte store-read cap (fail-closed)".format(
             relpath, st.st_size, MAX_STORE_READ_BYTES))
     try:
         data, _ = _journal._read_contained(root_fd, relpath)
-    except _journal.JournalError as exc:
+    except (_journal.JournalError, OSError) as exc:
+        # _read_contained maps its open/read errors to JournalError, but its post-open os.fstat can still
+        # raise a BARE OSError (a device/EIO-level failure) that would otherwise escape resolve_store
+        # uncaught; catch OSError alongside JournalError here (as the _lstat_contained choke point above
+        # already does) so any unreadable manifest/pointer is a fail-closed StoreError, never a crash
+        # (check-fails-closed-on-unreadable).
         raise StoreError("cannot read {} ({})".format(relpath, exc))
+    # Re-check the bytes ACTUALLY read against the cap: the pre-open lstat size is bound to the file as it
+    # was BEFORE the open, so a store file swapped in or grown between that lstat and the open (a TOCTOU race
+    # on an adopter-controlled tree) is refused here rather than parsed over the cap. Residual: the bytes are
+    # read before this refusal, so a concurrently-growing file is bounded at classification, not mid-read
+    # (SECA resource-bounds; disclose-guard-residuals).
+    if len(data) > MAX_STORE_READ_BYTES:
+        raise StoreError("{} read {} bytes, over the {}-byte store-read cap (a raced swap or growth past "
+                         "the pre-open size; fail-closed)".format(relpath, len(data), MAX_STORE_READ_BYTES))
     try:
         return tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError) as exc:
+        # tomllib.TOMLDecodeError is a ValueError subclass, but an oversized BASE-10 integer literal (a
+        # token past CPython's ~4300-digit limit) makes tomllib raise a BARE ValueError from int(), not a
+        # TOMLDecodeError, so a hostile store file would otherwise escape resolve_store uncaught; catch the
+        # ValueError base so a present-but-unparseable input is a fail-closed StoreError, never a crash
+        # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
         raise StoreError("cannot parse {} ({})".format(relpath, exc))
     except RecursionError as exc:
         # A deeply-nested TOML value overflows the parser's recursion: a present-but-unparseable input is a
@@ -674,15 +694,16 @@ def _str_token_set(value):
 
 def _sorted_key_names(keys):
     """Order an iterable of keys for a FINDING MESSAGE as a sorted list of strings. Every element is
-    str-coerced BEFORE the sort, so a heterogeneous or non-str key set (e.g. a hand-constructed table
-    with mixed int/str keys) can neither crash sorted() on an int-vs-str type mismatch nor break the
+    coerced through _safe_str BEFORE the sort, so a heterogeneous or non-str key set (e.g. a hand-
+    constructed table with mixed int/str keys, or an oversized-int key whose str() would trip CPython's
+    integer-string-conversion limit) can neither crash sorted() on an int-vs-str type mismatch nor break the
     later ", ".join, which is always over strings. This is the shared total-sort for the unknown-key
     finding-message idiom (formerly a bare sorted over the surplus-key set) across the three OPF pass-A
     validators (schema, store, release). It
     is for ERROR-MESSAGE ORDERING ONLY; it is deliberately NOT used on the byte-stable coverage digest,
     where a non-str key fails closed with a ReleaseError instead (str-coercing a digest key would change
     the digest, so the digest path rejects rather than coerces)."""
-    return sorted(str(k) for k in keys)
+    return sorted(_safe_str(k) for k in keys)
 
 
 def _safe_display(value):
@@ -1057,7 +1078,7 @@ def _validate_types(types, modules_enabled, findings):
                             "(spec 8.1)".format(where, ns, normative_ns, _safe_display(name)))
         if ns in seen_ns:
             findings.append("namespace {!r} is bound to more than one type ({} and {}); the binding is "
-                            "one-to-one (spec 8.2)".format(ns, seen_ns[ns], name))
+                            "one-to-one (spec 8.2)".format(ns, _safe_str(seen_ns[ns]), _safe_str(name)))
         else:
             seen_ns[ns] = name
 
@@ -1755,28 +1776,109 @@ def self_test():
         m8_root = build_store(manifest=big_manifest)
         check("m8-oversized-manifest-cannot-eval", resolve_store(m8_root).status == CANNOT_EVALUATE)
 
-        # M2: _read_contained does not hang on a writer-less FIFO (the raced regular-file->FIFO swap); it
-        # returns a fail-closed JournalError at once. Bounded by an alarm so a blocking regression is caught
-        # as a failure rather than hanging the suite.
+        # ---- round-2 reconcile-draft fix vectors (fail pre-fix, pass post-fix) ------------------------
+        # The FIFO-hang alarm marker MUST NOT derive from OSError: a reader's own `except OSError`
+        # (read_frames, read_lock_owner, _read_contained) would launder an OSError-derived marker such as
+        # TimeoutError into a JournalError, so a genuine writer-less-FIFO hang would read as a refusal and the
+        # check would pass while blocking. A distinct non-OSError marker propagates out of the reader instead,
+        # so a hang is a check FAILURE, never a silent slow pass (self-test-discrimination).
         import signal as _signal
+
+        class _HangMarker(Exception):
+            pass
+
+        def _refused_no_hang(thunk):
+            """True when thunk() fails closed with a JournalError inside a 2s alarm; False when it HANGS (the
+            marker fires) so a writer-less-FIFO blocking-open regression is a check failure, not a hung suite."""
+            _prev = _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(_HangMarker()))
+            try:
+                _signal.setitimer(_signal.ITIMER_REAL, 2.0)
+                try:
+                    thunk()
+                    return False
+                except _journal.JournalError:
+                    return True
+                except _HangMarker:
+                    return False
+            finally:
+                _signal.setitimer(_signal.ITIMER_REAL, 0)
+                _signal.signal(_signal.SIGALRM, _prev)
+
+        # M2: _read_contained does not hang on a writer-less FIFO (the raced regular-file->FIFO swap); it
+        # returns a fail-closed JournalError at once. The non-OSError marker makes a blocking regression a
+        # check failure (the earlier TimeoutError marker, an OSError subclass, was laundered to JournalError
+        # by _read_contained's own `except OSError` and so passed even while blocking).
         _fd_dir = base / "m2-fifo"; _fd_dir.mkdir()
         os.mkfifo(str(_fd_dir / "f"))
         _rfd = os.open(str(_fd_dir), os.O_RDONLY | os.O_DIRECTORY)
-        _prev = _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(TimeoutError()))
-        _refused = False
         try:
-            _signal.setitimer(_signal.ITIMER_REAL, 2.0)
-            try:
-                _journal._read_contained(_rfd, "f")
-            except _journal.JournalError:
-                _refused = True
-            except TimeoutError:
-                _refused = False
+            check("m2-fifo-no-hang-refused",
+                  _refused_no_hang(lambda: _journal._read_contained(_rfd, "f")))
         finally:
-            _signal.setitimer(_signal.ITIMER_REAL, 0)
-            _signal.signal(_signal.SIGALRM, _prev)
             os.close(_rfd)
-        check("m2-fifo-no-hang-refused", _refused)
+
+        # NEW-2: the FIFO-hang class survived at three sibling _journal readers (read_frames, read_lock_owner,
+        # _read_at); each now opens O_NONBLOCK so a writer-less FIFO is refused at the fstat gate at once,
+        # never a hang. A hostile on-disk tree can pre-plant these paths.
+        _rf_dir = base / "n2-read-frames"; _rf_dir.mkdir()
+        os.mkfifo(str(_rf_dir / "frames.log"))
+        check("new2-read-frames-fifo-no-hang", _refused_no_hang(lambda: _journal.read_frames(_rf_dir)))
+        _rl_dir = base / "n2-read-lock-owner"; _rl_dir.mkdir()
+        os.mkfifo(str(_rl_dir / "lock"))
+        check("new2-read-lock-owner-fifo-no-hang", _refused_no_hang(lambda: _journal.read_lock_owner(_rl_dir)))
+        _ra_dir = base / "n2-read-at"; _ra_dir.mkdir()
+        os.mkfifo(str(_ra_dir / "f"))
+        _rafd = os.open(str(_ra_dir), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            check("new2-read-at-fifo-no-hang", _refused_no_hang(lambda: _journal._read_at(_rafd, "f", "f")))
+        finally:
+            os.close(_rafd)
+
+        # NEW-1: a hostile store file with an oversized BASE-10 integer literal makes tomllib raise a bare
+        # ValueError (not TOMLDecodeError); it maps to a fail-closed StoreError -> CANNOT-EVALUATE, never an
+        # uncaught crash out of resolve_store.
+        n1_root = build_store(manifest="[devprocess]\nbig = " + "9" * 5000 + "\n")
+        check("new1-oversized-int-literal-cannot-eval", resolve_store(n1_root).status == CANNOT_EVALUATE)
+
+        # NEW-3: an OSError from _read_contained (e.g. a post-open fstat EIO) maps to a fail-closed StoreError
+        # -> CANNOT-EVALUATE, never an uncaught OSError out of resolve_store.
+        n3_root = build_store(manifest=manifest_text())
+        _real_rc = _journal._read_contained
+        def _rc_oserror(_rfd_arg, _rel_arg):
+            raise OSError(5, "injected EIO on read")
+        _journal._read_contained = _rc_oserror
+        try:
+            check("new3-read-oserror-cannot-eval", resolve_store(n3_root).status == CANNOT_EVALUATE)
+        finally:
+            _journal._read_contained = _real_rc
+
+        # NEW-4: an oversized-int key rendered into a finding message no longer crashes the validator: the
+        # unknown-key idiom (_sorted_key_names) and the duplicate-namespace message both render through
+        # _safe_str. TOML keys are always strings, so these reach the validator only from a hand-built control
+        # dict (an injected-boundary hardening).
+        _n4a = _t.loads(manifest_text()); _n4a[10 ** 5000] = dict(x=1)
+        check("new4-oversized-toplevel-key-invalid", validate_manifest(_n4a).status == INVALID)
+        _n4b = _t.loads(manifest_text())
+        _n4tk = dict(); _n4tk[10 ** 5000] = dict(namespace="BI"); _n4tk["backlog_item"] = dict(namespace="BI")
+        _n4b["types"] = _n4tk
+        check("new4-oversized-dup-ns-key-invalid", validate_manifest(_n4b).status == INVALID)
+
+        # NEW-5: the store-read cap is enforced on the bytes ACTUALLY read, not only the pre-open lstat, so a
+        # file reporting a small size at lstat but reading over the cap (a raced swap) is refused. The lstat is
+        # pinned small while the real file is over-cap.
+        n5_root = build_store(manifest=manifest_text() + "\n#" + "x" * (MAX_STORE_READ_BYTES + 16))
+        _real_lstat = _journal._lstat_contained
+        def _small_lstat(_rfd_arg, _rel_arg):
+            _stv = _real_lstat(_rfd_arg, _rel_arg)
+            if _stv is not None and stat.S_ISREG(_stv.st_mode):
+                _f = list(_stv); _f[stat.ST_SIZE] = 1
+                return os.stat_result(_f)
+            return _stv
+        _journal._lstat_contained = _small_lstat
+        try:
+            check("new5-toctou-oversized-read-cannot-eval", resolve_store(n5_root).status == CANNOT_EVALUATE)
+        finally:
+            _journal._lstat_contained = _real_lstat
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

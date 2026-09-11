@@ -206,7 +206,10 @@ def _read_at(pfd, name, relpath):
     confirming on the opened fd it is a regular file. The fd-bound sibling of _read_contained, used where
     the read MUST bind to the parent handle the mutation uses (E1, 9.3 step 4). JournalError on a symlink,
     a non-regular file, or a read error."""
-    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=pfd)
+    # O_NONBLOCK so a non-regular final component (e.g. a FIFO raced in for the regular file after an
+    # lstat gate) returns at once instead of blocking forever on a writer-less FIFO; the fstat below then
+    # refuses it. O_NONBLOCK is a no-op for a regular file (SECA resource-bounds; mirrors _read_contained).
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -353,7 +356,9 @@ def read_frames(txn_dir):
         raise JournalError("cannot open journal txn dir {!r} no-follow ({})".format(str(txn_dir), exc))
     try:
         try:
-            ffd = os.open("frames.log", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=txnfd)
+            # O_NONBLOCK so a FIFO frames.log (a hostile pre-planted tree) is refused at the fstat gate
+            # below instead of blocking the open forever; a no-op for the regular file this expects.
+            ffd = os.open("frames.log", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=txnfd)
         except FileNotFoundError:
             return [], False, 0
         except OSError as exc:
@@ -491,7 +496,9 @@ def read_lock_owner(journal_root):
         raise JournalError("cannot open journal root ({})".format(exc))
     try:
         try:
-            lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=jr_fd)
+            # O_NONBLOCK so a FIFO lock (a hostile pre-planted tree) is refused at the fstat gate below
+            # instead of blocking the open forever; a no-op for the regular file this expects.
+            lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=jr_fd)
         except FileNotFoundError:
             return None
         except OSError as exc:                            # ELOOP on a symlinked lock, or any read error: fail closed
