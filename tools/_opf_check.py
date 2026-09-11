@@ -33,8 +33,11 @@ refusal is an lstat-then-open check, sound under the store's single-writer model
 swaps a regular file for a FIFO in the window between the lstat and the open is the disclosed
 concurrent-mutation residual, not covered by a parse-only reader. Time and memory are
 proportional to the bytes actually read through the contained
-readers; NO loop is ever sized by a declared integer (a `WL-10**9` id, a `10**9` high-water, or a
-`["WL-1","WL-10**9"]` span never expands), so a declared numeric field cannot amplify the run.
+readers; this engine's own loops are sized by the ids and bytes actually present, never by a declared
+integer (a `WL-10**9` id, a `10**9` high-water, or a `["WL-1","WL-10**9"]` span expands no loop here). A
+composed U3 helper may construct a LAZY `range` over a declared worklog span, but it is iterated only
+against the present ids and short-circuits at the first gap, so a declared numeric field still cannot
+amplify the run into an enumeration of the interval.
 
 CRITICAL SEQUENCING (honoured by this unit): the live `doctor` verb is NOT CLI-wired here. A prerequisite
 hardening step (VC-4-HARDEN) has not landed, and wiring a live store verb before it is a known finding
@@ -97,6 +100,15 @@ PERRECORD_ROW_KEYS = frozenset({"id", "state", "path", "digest"})
 ARCHIVE_TOP_KEYS = frozenset({"schema", "moved", "worklog_moved"})
 ARCHIVE_MOVED_KEYS = frozenset({"id", "type", "destination"})
 ARCHIVE_WLMOVED_KEYS = frozenset({"span", "destination"})
+# The single-writer lease payload (spec 5.7): lease.toml is present only while the lease is held, carrying
+# the holder, the operation, and an acquired-at timestamp read from the clock. This schema-release unit
+# DEFINES the closed shape (the operation layer that writes it ships in a later release; spec 5.7/1).
+LEASE_TOP_KEYS = frozenset(("schema", "holder", "operation", "acquired_at"))
+# The enabled roster types that are LEDGERS, not index/per-record slots: the worklog home is worklog.toml
+# (a fixed ledger), so it never has a `<type>.index.toml` or a `<type>/<id>.toml` body. A ledger type is
+# therefore never a managed leaf under either clause (F2), mirroring the name != "worklog" skip in
+# _gather_active_records.
+_LEDGER_TYPES = frozenset(("worklog",))
 # The recognized keys of the inert observations object (git-derived facts); an unknown key is a malformed
 # injection surfaced fail-closed, never silently dropped (F12).
 _OBSERVATION_KEYS = frozenset({"tracked", "actual_remote", "prior"})
@@ -128,7 +140,8 @@ def _module_deferred(tname):
 # the emitted set against this tuple, so a silently-skipped check becomes CANNOT-EVALUATE, never VALID.
 REQUIRED_CHECKS = (
     "C-MANIFEST", "C-PROFILES", "C-ROSTER", "C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM",
-    "C-VERSION-LEDGER", "C-COUNTERS", "C-ROTATION", "C-STAGING", "C-ID-SPACE", "C-RECEIPTS", "C-HANDOFF",
+    "C-VERSION-LEDGER", "C-COUNTERS", "C-ROTATION", "C-STAGING", "C-LEASE", "C-ID-SPACE", "C-RECEIPTS",
+    "C-HANDOFF",
     "C-DECISION-CHAINS", "C-LINKS", "C-FROZEN-COVERAGE", "C-NO-DELETION", "C-PARTITION", "C-CONTIGUITY",
     "C-TRACKED", "C-SYNC-AGREE", "C-CONTAINMENT", "C-VIEW-DRIFT", "C-VERSION-FILE", "C-CHANGELOG-GATES",
     "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-HISTORY-RESURRECTION",
@@ -138,7 +151,8 @@ _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
 # Disclosed by-design residuals (OPF-SPEC 17): the sub-checks a parse-only, read-only whole-store engine
 # cannot soundly reach from its inputs, or that another layer owns. They are reported alongside every result
 # and never fold into the gradeable status. The membership test is that no residual may ever let a broken
-# store certify VALID; every stored byte is graded, so none of these can hide a defect in the store's data.
+# store certify VALID; every stored byte is graded at steady state (an import in progress surfaces the
+# active run's interior to the partial-import triage set instead), so none of these can hide a defect.
 _RESIDUALS = (
     "Backup, access, and hosting discipline of the tracking repository (spec 17): the tracked-store check "
     "verifies version control, not the repository's durability; the local-only pattern places durability "
@@ -152,7 +166,7 @@ _RESIDUALS = (
     "placed elsewhere is undiscoverable.",
     "Dedicated-sync-target freshness (behind / ahead / divergence, spec 5.7): needs a fetch a parse-only, "
     "read-only validator must not perform; it is the operation layer's consistency contract. No broken "
-    "store state hides behind it, because every stored byte is graded.",
+    "store state hides behind it, because every stored byte is graded at steady state.",
     "Declared-but-unsupported profiles (spec 16): named in unevaluated_profiles, enforced only by a "
     "profile-aware tool.",
     "Module-tier record schema validation (spec 8.5): the baseline record validator knows only the "
@@ -161,6 +175,12 @@ _RESIDUALS = (
     "Byte-level view drift for a per-record store that declares views (spec 5.8/10): U4's view planner "
     "does not yet support the per-record layout, so C-VIEW-DRIFT is a named CANNOT-EVALUATE there, never "
     "a silent pass.",
+    "The active import run's interior while import_status == 'partial' (spec 14.2): its stray bytes are "
+    "surfaced to the partial-import triage set rather than graded, since a migration in progress "
+    "legitimately holds not-yet-reconciled paths; at steady state every such byte is graded.",
+    "Immutable-record body preservation across time (spec 8.5) when the prior committed snapshot carries "
+    "no body digest for a created-terminal record: it is a named CANNOT-EVALUATE (never a silent VALID on "
+    "a rewritten immutable body), verified only when the prior supplies the digest (codex-3).",
 )
 
 
@@ -275,9 +295,10 @@ class _Report:
 # --- a lightweight record descriptor for the cross-record checks -------------------------------------
 
 class _Rec:
-    __slots__ = ("id", "rtype", "namespace", "state", "qual", "links", "actor_kind", "location", "scopes")
+    __slots__ = ("id", "rtype", "namespace", "state", "qual", "links", "actor_kind", "location", "scopes",
+                 "body")
 
-    def __init__(self, rid, rtype, namespace, state, qual, links, actor_kind, location, scopes):
+    def __init__(self, rid, rtype, namespace, state, qual, links, actor_kind, location, scopes, body=None):
         self.id = rid                 # the raw id value (a str for a well-formed record)
         self.rtype = rtype            # the record's type name
         self.namespace = namespace    # the two-letter namespace, or None when the id is malformed
@@ -287,6 +308,7 @@ class _Rec:
         self.actor_kind = actor_kind  # the actor.kind string, or None
         self.location = location      # "active" or "archive/<YYYY>"
         self.scopes = scopes          # a block's scoped ids (list), or [] (spec 8.5)
+        self.body = body              # the raw record table (immutable-body preservation check; codex-3)
 
 
 def _make_rec(table, rtype, location):
@@ -315,7 +337,7 @@ def _make_rec(table, rtype, location):
     akind = actor.get("kind") if isinstance(actor, dict) and isinstance(actor.get("kind"), str) else None
     scopes = table.get("scopes")
     scopes = list(scopes) if isinstance(scopes, list) else []
-    return _Rec(rid, rtype, namespace, state, qual, links, akind, location, scopes)
+    return _Rec(rid, rtype, namespace, state, qual, links, akind, location, scopes, table)
 
 
 def _status_string(state, qual):
@@ -452,8 +474,10 @@ def _under_any(p, prefixes):
 def _canonical_remote(url):
     """Canonicalize a git remote URL to a (host, path) pair for host+path equivalence (spec 5.5/5.6),
     covering https/http/ssh/git scheme URLs and scp-style git@host:path, with or without a trailing
-    '.git'. Returns None when the string is not a git remote form the equivalence can canonicalize; such a
-    residual form is disclosed rather than silently matched (disclose-guard-residuals; F8)."""
+    '.git'. The scheme-URL host RETAINS its port (host:port is part of the endpoint identity, so
+    ssh://h:2222/p and ssh://h:2223/p are distinct; codex-4); a scp-style form carries no port. Returns
+    None when the string is not a git remote form the equivalence can canonicalize; such a residual form is
+    disclosed rather than silently matched (disclose-guard-residuals; F8)."""
     if not isinstance(url, str):
         return None
     s = url.strip()
@@ -468,9 +492,7 @@ def _canonical_remote(url):
         authority, path = rest.split("/", 1)
         if "@" in authority:
             authority = authority.rsplit("@", 1)[1]
-        if ":" in authority:
-            authority = authority.rsplit(":", 1)[0]
-        host = authority
+        host = authority     # KEEP the port: host:port is part of the endpoint identity (codex-4)
     else:
         # scp-style [user@]host:path: a colon before any slash names a remote host:path
         slash = s.find("/")
@@ -819,12 +841,25 @@ def _archived_rotatable(rec):
     return rec.state in spec.terminal and rec.qual is None
 
 
-def _archive_unmanaged(rep, import_status, path):
-    """Grade an unregistered path found in the archive tree: a finding at required posture, a triage entry
-    at import_status = "partial" (spec 12/14.2). C-CONTAINMENT skips the archive subtree, so the archive's
-    own stray-path grading is owned here (B2), matching C-ARCHIVE-ENUM's existing unexpected-bucket-file
-    flag."""
-    if import_status == "partial":
+def _has_active_import_run(root_fd, machine_rel, rep):
+    """True when an imports/<run-id> run directory (a valid U7 run-id shape) is actually present. A declared
+    import_status = "partial" is substantiated only by such a run (spec 11:940 requires an import or
+    migration ACTUALLY running); with none present a partial declaration cannot license the triage posture
+    that disables steady-state grading (codex-2). A listing failure is recorded CANNOT-EVALUATE by _list_dir
+    and returns False (fail-closed: the cant dominates, so the paths then grade as findings)."""
+    imports_rel = _rel(machine_rel, _opf_import.IMPORTS_DIRNAME)
+    subdirs, _files = _list_dir(root_fd, imports_rel, rep)
+    if not subdirs:
+        return False
+    return any(_opf_import._RUN_ID_RE.match(d) for d in subdirs)
+
+
+def _archive_unmanaged(rep, partial_active, path):
+    """Grade an unregistered path found in the archive tree: a finding at steady state, a triage entry only
+    when a partial import is SUBSTANTIATED by an active run (codex-2; spec 12/14.2). C-CONTAINMENT skips the
+    archive subtree, so the archive's own stray-path grading is owned here (B2), matching C-ARCHIVE-ENUM's
+    existing unexpected-bucket-file flag."""
+    if partial_active:
         rep.triage_path("unregistered path {!r} in the archive tree (an import or migration is in "
                         "progress; triage per spec 14.2)".format(path))
     else:
@@ -843,6 +878,10 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     archive_recs = []
     archive_worklogs = {}
     rotatable = []
+    # codex-2: a partial import triages archive stray paths only when SUBSTANTIATED by an active run; a
+    # stale partial with no running import grades them as findings (never a triage pass that disables
+    # grading), matching C-CONTAINMENT.
+    partial_active = import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep)
     archive_rel = _rel(machine_rel, ARCHIVE_DIRNAME)
     years, top_files = _list_dir(root_fd, archive_rel, rep)
     if years is None:
@@ -850,7 +889,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     for fn_ in (top_files or []):
         # A regular file directly under archive/ is unmanaged: only <YYYY> bucket directories belong here.
         # C-CONTAINMENT skips the archive subtree, so its stray-path grading lives here (spec 12/14.2; B2).
-        _archive_unmanaged(rep, import_status, _rel(archive_rel, fn_))
+        _archive_unmanaged(rep, partial_active, _rel(archive_rel, fn_))
     for year in years:
         bucket = _rel(archive_rel, year)
         bucket_rel = _rel(ARCHIVE_DIRNAME, year)      # bucket path RELATIVE to machine_rel (dest space)
@@ -865,7 +904,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             # A subdirectory inside a bucket is unmanaged: a bucket holds only files (archive.toml,
             # worklog.toml, <type>.index.toml), and its contents are never listed, so the whole subtree is
             # graded as one unregistered path (spec 12/14.2; B2).
-            _archive_unmanaged(rep, import_status, _rel(bucket, d))
+            _archive_unmanaged(rep, partial_active, _rel(bucket, d))
         if ARCHIVE_MANIFEST_NAME not in bfiles:
             rep.cant("archive bucket {} has no {} (cannot evaluate the rotation; spec 12)".format(
                 bucket, ARCHIVE_MANIFEST_NAME))
@@ -1170,14 +1209,44 @@ def _check_worklog_contiguous(numbers, rep):
             break
 
 
-def _check_resurrection(prior_records, by_id, all_ids, rep):
+def _verify_immutable_body(rid, cur, prior_digests, rep):
+    """C-HISTORY-RESURRECTION: a created-terminal record (done / worklog / autonomous_decision / reference)
+    is immutable in BODY too (OPF-SPEC 8.5). The prior snapshot carries only (type, status), so body
+    preservation is verifiable only when the prior supplies a body digest for the record: a changed body is
+    then a finding, and an ABSENT digest is a named CANNOT-EVALUATE (a disclosed boundary), never a silent
+    VALID on a rewritten immutable body (codex-3)."""
+    pdig = prior_digests.get(rid) if isinstance(prior_digests, dict) else None
+    if not isinstance(pdig, str):
+        rep.cant("C-HISTORY-RESURRECTION: immutable record {!r} body preservation (spec 8.5) cannot be "
+                 "verified; the prior snapshot carries no body digest for it (a disclosed boundary)".format(
+                     rid))
+        return
+    body = getattr(cur, "body", None)
+    if not isinstance(body, dict):
+        rep.cant("C-HISTORY-RESURRECTION: immutable record {!r} body is unavailable to compare against the "
+                 "prior digest".format(rid))
+        return
+    try:
+        cur_dig = _record_digest(body)
+    except _opf_emit.EmitError as exc:
+        rep.cant("C-HISTORY-RESURRECTION: cannot canonicalize the current body of immutable record {!r} to "
+                 "compare against the prior digest ({})".format(rid, exc))
+        return
+    if cur_dig != pdig:
+        rep.finding("C-HISTORY-RESURRECTION: immutable record {!r} body changed since the prior committed "
+                    "snapshot (a created-terminal record does not change; spec 8.5)".format(rid))
+
+
+def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
     """C-HISTORY-RESURRECTION: for every id in the prior committed snapshot, confirm it did not resurrect
     across time (OPF-SPEC 8.4/13). A prior unqualified-terminal state now in any other state is a definite
-    finding (actor-independent). A non-terminal change is swept across the four actor kinds: VALID for some
-    actor passes; INVALID for every actor is a finding; a rejection-shaped transition needing a
-    pre-proposal state the snapshot cannot supply is CANNOT-EVALUATE for that transition (never a permissive
-    pass, never a fabricated actor). Every durable prior id must remain present in active or archive (the
-    across-time complement of the no-deletion check)."""
+    finding (actor-independent). A created-terminal record's BODY is additionally checked for preservation
+    (immutable-body, spec 8.5; codex-3). A non-terminal status change is judged across ALL four actor kinds:
+    legal for every actor passes; illegal for every actor is a finding; a transition legal for some actors
+    but illegal for others is actor-DEPENDENT and, since the last-transition actor is not identifiable from
+    the envelope, is CANNOT-EVALUATE (never accept-if-any-actor; codex-6); a rejection-shaped transition
+    needing a pre-proposal state the snapshot cannot supply is likewise CANNOT-EVALUATE. Every durable prior
+    id must remain present in active or archive (the across-time complement of the no-deletion check)."""
     for rid in sorted(prior_records):
         ptype, pstatus = prior_records[rid]
         if rid not in all_ids:
@@ -1197,34 +1266,48 @@ def _check_resurrection(prior_records, by_id, all_ids, rep):
                 rid, pstatus, perr))
             continue
         p_state, p_qual = pparsed
+        immutable_body = not spec.transitions     # created-terminal type: body-immutable (spec 8.5)
+        terminal_unqual = p_state in spec.terminal and p_qual is None
         cur_status = _status_string(cur.state, cur.qual)
-        if cur_status is None or cur_status == pstatus:
-            continue     # an unparseable current status is the schema check's; an unchanged status is clean
-        if p_state in spec.terminal and p_qual is None:
+        status_changed = cur_status is not None and cur_status != pstatus
+        if terminal_unqual and status_changed:
             rep.finding("C-HISTORY-RESURRECTION: prior record {!r} was at unqualified terminal {!r} but is "
                         "now {!r}; a terminal record does not change (no resurrection; spec 8.4)".format(
                             rid, pstatus, cur_status))
             continue
-        results = [validate_transition(ptype, pstatus, cur_status, ak) for ak in ACTOR_KINDS]
-        if any(rv.status == VALID for rv in results):
+        if immutable_body:
+            # a created-terminal record keeps its status AND its body; verify the body against the prior
+            # digest, or record the disclosed cannot-evaluate boundary when none is supplied (codex-3).
+            _verify_immutable_body(rid, cur, prior_digests, rep)
             continue
-        if any(rv.status == CANNOT_EVALUATE for rv in results):
+        if cur_status is None or not status_changed:
+            continue     # an unparseable current status is the schema check's; an unchanged status is clean
+        statuses = [validate_transition(ptype, pstatus, cur_status, ak).status for ak in ACTOR_KINDS]
+        if all(s == VALID for s in statuses):
+            continue
+        if all(s == INVALID for s in statuses):
+            rep.finding("C-HISTORY-RESURRECTION: prior record {!r} transition {!r} -> {!r} is illegal for "
+                        "every actor kind (spec 8.4/8.5)".format(rid, pstatus, cur_status))
+            continue
+        if any(s == CANNOT_EVALUATE for s in statuses):
             rep.cant("C-HISTORY-RESURRECTION: prior record {!r} transition {!r} -> {!r} cannot be verified "
                      "without the pre-proposal state (spec 8.4)".format(rid, pstatus, cur_status))
             continue
-        rep.finding("C-HISTORY-RESURRECTION: prior record {!r} transition {!r} -> {!r} is illegal for every "
-                    "actor kind (spec 8.4/8.5)".format(rid, pstatus, cur_status))
+        rep.cant("C-HISTORY-RESURRECTION: prior record {!r} transition {!r} -> {!r} is legal for some actor "
+                 "kinds but illegal for others (actor-dependent); the last-transition actor is not "
+                 "identifiable from the prior snapshot (spec 8.4/8.5)".format(rid, pstatus, cur_status))
 
 
 # --- containment (C-CONTAINMENT, OPF-SPEC 14.2) ------------------------------------------------------
 
 def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_data, import_status, rep):
     """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
-    (the ledgers, the enabled type indexes, per-record bodies, the archive tree, valid imports run
-    subtrees, declared store-scope view targets, and declared [unmanaged] paths). A path in neither set is
-    a finding at steady state; at `import_status = "partial"` it goes to `triage` instead (spec 11/14.2). An
-    unmanaged declaration that collides with a managed path is a finding. Listing failure is
-    CANNOT-EVALUATE."""
+    (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
+    store-scope view targets, and files under a valid declared [unmanaged] path). A path in neither set is
+    a finding at steady state; at a SUBSTANTIATED `import_status = "partial"` (an active imports/<run-id>
+    run present) it goes to `triage` instead (spec 11/14.2). The imports subtree interior is walked, not
+    skipped, so a leftover run or stray bytes is graded (F3). An unmanaged declaration that names or
+    contains a managed path is a finding. Listing failure is CANNOT-EVALUATE."""
     mrel = machine_rel
     view_targets = set()
     views = manifest_data.get("views") if isinstance(manifest_data, dict) else None
@@ -1255,30 +1338,44 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
             if "/" not in r:
                 if r in ledger_names:
                     return True
-                if r.endswith(INDEX_SUFFIX) and r[:-len(INDEX_SUFFIX)] in enabled_types:
-                    return True
+                if r.endswith(INDEX_SUFFIX):
+                    t = r[:-len(INDEX_SUFFIX)]
+                    # worklog is a ledger only (home: worklog.toml), so worklog.index.toml is NEVER a
+                    # managed leaf (F2); a ledger type has no `<type>.index.toml`.
+                    if t in enabled_types and t not in _LEDGER_TYPES:
+                        return True
             elif layout == "per-record":
                 head, tail = r.split("/", 1)
+                # worklog has no per-record bodies either (F2): entries live in worklog.toml, never in
+                # worklog/<id>.toml.
                 if "/" not in tail and tail.endswith(".toml") and head in enabled_types \
+                        and head not in _LEDGER_TYPES \
                         and _valid_id_shape(tail[:-len(".toml")]) is not None:
                     return True
         return False
 
     def managed_file(p):
-        # The tree-walk test: a file UNDER a declared-unmanaged subtree stays covered (not flagged), plus
-        # every strict managed leaf.
-        if _under_any(p, unmanaged):
+        # The tree-walk test: a file UNDER a VALID declared-unmanaged subtree stays covered (not flagged),
+        # plus every strict managed leaf. A rejected declaration is absent from valid_unmanaged, so it
+        # covers nothing (F1).
+        if _under_any(p, valid_unmanaged):
             return True
         return managed_leaf(p)
 
-    # An unmanaged declaration that equals or nests with a managed path is a finding (spec 14.2). The
-    # STRICT leaf test is used here (not managed_file), so a declaration no longer collides with itself via
-    # the unmanaged clause (F2).
+    # An unmanaged declaration is a finding when it NAMES a managed leaf (the round-2 strict-leaf check) or
+    # when it EQUALS or is an ANCESTOR of the machine-store root or a managed prefix (F1: an entry like
+    # ".working" or the machine dir CONTAINS the managed tree and would launder it). Merely lying UNDER the
+    # machine dir is fine (codex-7: a legacy file kept in place that names no managed slot is VALID). Only a
+    # declaration that survives is used to cover a subtree in the walk, so a REJECTED declaration never
+    # launders the tree it names (F1).
     managed_dir_prefixes = (mrel, archive_root, imports_root)
+    valid_unmanaged = []
     for u in unmanaged:
-        if managed_leaf(u) or u in managed_dir_prefixes or _under_any(u, managed_dir_prefixes):
+        if managed_leaf(u) or any(_under_any(pfx, (u,)) for pfx in managed_dir_prefixes):
             rep.finding("C-CONTAINMENT: unmanaged path {!r} collides with a managed store path (an "
-                        "unmanaged declaration cannot cover a managed file; spec 14.2)".format(u))
+                        "unmanaged declaration cannot name or contain a managed file; spec 14.2)".format(u))
+        else:
+            valid_unmanaged.append(u)
 
     unmanaged_files = []
 
@@ -1299,23 +1396,66 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
                 unmanaged_files.append(full)
         for d in subdirs:
             full = reldir + "/" + d
-            if _under_any(full, unmanaged) or full == archive_root:
-                continue     # a declared-unmanaged subtree is never read; the archive is C-ARCHIVE-ENUM's
-            if reldir == imports_root:
-                # a valid imports run subtree is U7's (managed); a non-matching entry is unmanaged
-                if not _opf_import._RUN_ID_RE.match(d):
-                    unmanaged_files.append(full)
-                continue
+            if _under_any(full, valid_unmanaged) or full == archive_root:
+                continue     # a valid declared-unmanaged subtree is never read; the archive is C-ARCHIVE-ENUM's
+            # The imports/<run-id> interior is NOT blanket-skipped (F3): at steady state a leftover run or
+            # any stray bytes under it is an unregistered path, and at a substantiated partial the active
+            # run interior goes to triage. Walking it grades every file there.
             walk(full, depth + 1)
 
+    # codex-2: a partial status is substantiated only by an import/migration ACTUALLY running (an
+    # imports/<run-id> run present; spec 11:940). Without one the partial declaration cannot license the
+    # triage posture that would disable steady-state grading, so it is itself a finding and the stray paths
+    # grade as findings, never a silent triage pass.
+    partial_active = import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep)
+    if import_status == "partial" and not partial_active:
+        rep.finding("C-CONTAINMENT: the manifest declares import_status partial but no active "
+                    "imports/<run-id> run is present; a partial status is substantiated only by an import "
+                    "or migration actually running (spec 11:940/14.2)")
     walk(WORKING_DIRNAME, 0)
     for p in sorted(unmanaged_files):
-        if import_status == "partial":
+        if partial_active:
             rep.triage_path("unregistered path {!r} at the store location (an import or migration is in "
                             "progress; triage per spec 14.2)".format(p))
         else:
             rep.finding("C-CONTAINMENT: unregistered path {!r} at the store location is neither OPF-managed "
                         "nor enumerated as unmanaged (spec 14.2/11)".format(p))
+
+
+def _check_lease(root_fd, machine_rel, rep):
+    """C-LEASE: validate lease.toml when present (spec 5.7/11). The lease is present only WHILE HELD, so its
+    ABSENCE is clean (no lease held). A present-but-unreadable/unparseable lease is CANNOT-EVALUATE naming
+    it (schema validity of what exists; spec 11). A parseable lease with a malformed payload is a finding:
+    the closed shape carries a schema, a non-empty holder, a non-empty operation, and an RFC 3339 UTC
+    acquired-at timestamp (spec 5.7)."""
+    lease_rel = _rel(machine_rel, LEASE_NAME)
+    data, st = _read_toml(root_fd, lease_rel, rep)
+    if st == "error":
+        return                       # _read_toml already recorded the CANNOT-EVALUATE naming the input
+    if st == "absent":
+        return                       # no lease held: a present-only-while-held artefact is clean when absent
+    if not isinstance(data, dict):
+        rep.finding("C-LEASE: {} is not a table (the single-writer lease payload; spec 5.7)".format(
+            lease_rel))
+        return
+    extra = set(data) - LEASE_TOP_KEYS
+    if extra:
+        rep.finding("C-LEASE: {} carries unknown key(s): {} (the closed lease shape; spec 5.7)".format(
+            lease_rel, ", ".join(_sorted_key_names(extra))))
+    sch = data.get("schema")
+    if type(sch) is not int or sch != SUPPORTED_SCHEMA:
+        rep.finding("C-LEASE: {} schema {} is not the supported version {} (spec 5.7)".format(
+            lease_rel, _safe_display(sch), SUPPORTED_SCHEMA))
+    holder = data.get("holder")
+    if not (isinstance(holder, str) and holder):
+        rep.finding("C-LEASE: {} holder must be a non-empty string (the lease holder; spec 5.7)".format(
+            lease_rel))
+    operation = data.get("operation")
+    if not (isinstance(operation, str) and operation):
+        rep.finding("C-LEASE: {} operation must be a non-empty string (spec 5.7)".format(lease_rel))
+    if not _valid_timestamp(data.get("acquired_at")):
+        rep.finding("C-LEASE: {} acquired_at must be an RFC 3339 UTC timestamp read from the clock "
+                    "(spec 5.7)".format(lease_rel))
 
 
 # --- observations (the inert git-derived facts the caller injects) -----------------------------------
@@ -1346,14 +1486,20 @@ def _wellformed_release_row(row):
 
 def _normalize_prior(prior):
     """Validate the injected prior committed snapshot: {releases: list, counters_high: {ns: int},
-    records: {id: (type, status)}}. Returns the normalized dict or None when any field is malformed (which
-    the caller routes to CANNOT-EVALUATE, never a permissive pass)."""
+    records: {id: (type, status)}, digests: {id: str} (optional)}. Every record id is shape-validated and
+    its namespace reconciled against its declared type's roster namespace, so a malformed id or a
+    namespace/type mismatch makes the WHOLE prior malformed -> CANNOT-EVALUATE naming the observation,
+    never a store INVALID (codex-9/F4). Returns the normalized dict or None when any field is malformed
+    (which the caller routes to CANNOT-EVALUATE, never a permissive pass)."""
     if not isinstance(prior, dict):
         return None
     releases = prior.get("releases")
     counters_high = prior.get("counters_high")
     records = prior.get("records")
+    digests = prior.get("digests")
     if not isinstance(releases, list) or not isinstance(counters_high, dict) or not isinstance(records, dict):
+        return None
+    if digests is not None and not isinstance(digests, dict):
         return None
     # M1: validate CONTENTS, so a malformed prior routes to CANNOT-EVALUATE naming the observation rather
     # than flowing into a graded INVALID that falsely accuses the store. A release row must be a table; a
@@ -1376,8 +1522,24 @@ def _normalize_prior(prior):
         if not (isinstance(val, (list, tuple)) and len(val) == 2
                 and isinstance(val[0], str) and isinstance(val[1], str)):
             return None
+        # codex-9/F4: the id must be a valid shape AND its namespace must reconcile against the declared
+        # type's roster namespace; a malformed id or a known-type namespace mismatch makes the WHOLE prior
+        # malformed (CANNOT-EVALUATE naming it), never a store INVALID (resurrection / durable-id-vanished).
+        shape = _valid_id_shape(rid)
+        if shape is None:
+            return None
+        expected_ns = _ROSTER_NAMESPACES.get(val[0])
+        if expected_ns is not None and shape[0] != expected_ns:
+            return None
         norm_records[rid] = (val[0], val[1])
-    return {"releases": list(releases), "counters_high": norm_high, "records": norm_records}
+    norm_digests = {}
+    if isinstance(digests, dict):
+        for did, dval in digests.items():
+            if not isinstance(did, str) or not isinstance(dval, str):
+                return None
+            norm_digests[did] = dval
+    return {"releases": list(releases), "counters_high": norm_high, "records": norm_records,
+            "digests": norm_digests}
 
 
 def _normalize_observations(observations):
@@ -1457,11 +1619,20 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
             product_root_fd = None     # the product-scope checks route to cannot-evaluate naming the input
     pointer_target = getattr(resolution, "target", None)   # the parsed committed/override pointer Target
     pointer_source = getattr(resolution, "pointer_source", None)   # "default"/"committed"/"local-override"
+    # Topology is classified by RESOLVED LOCATION, not pointer provenance: a store whose root IS the product
+    # root (the default, or a self-pointer such as `dir:.`) is IN-REPO and rides the product remote, never a
+    # relocated local-only store (codex-8).
+    in_repo = pointer_source == "default"
+    if not in_repo and product_root is not None:
+        try:
+            in_repo = os.path.samefile(resolution.store_root, product_root)
+        except OSError:
+            in_repo = False
     evaluated_profiles, unevaluated_profiles = [], []
     try:
         evaluated_profiles, unevaluated_profiles = _validate_opened_store(
             root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target, pointer_source,
-            rep)
+            in_repo, rep)
     except Exception as exc:
         # Top-level fail-closed barrier (B6): any unexpected error (a RecursionError from a hostile-shaped
         # store, or any other escape no specific guard anticipated) becomes a CANNOT-EVALUATE naming the
@@ -1477,7 +1648,7 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
 
 
 def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target,
-                           pointer_source, rep):
+                           pointer_source, in_repo, rep):
     # --- C-MANIFEST: identify the store, derive enabled types / vendors / layout ----------------------
     rep.ran("C-MANIFEST")
     manifest_rel = _rel(machine_rel, MANIFEST_NAME)
@@ -1626,6 +1797,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             rep.finding("C-STAGING: {}".format(exc.message))
         else:
             rep.cant("C-STAGING: {}".format(exc.message))
+
+    # --- C-LEASE: the single-writer lease payload, present only while held (spec 5.7) -----------------
+    rep.ran("C-LEASE")
+    _check_lease(root_fd, machine_rel, rep)
 
     # --- C-ID-SPACE (R6/H4): store-wide uniqueness (incl. staging) + ids-within-counters --------------
     rep.ran("C-ID-SPACE")
@@ -1780,21 +1955,32 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                     rep.cant("C-SYNC-AGREE: the sync_target {!r} names no canonicalizable remote form "
                              "to compare against the actual remote (a disclosed residual; spec 5.5)".format(
                                  sync_target))
-                elif acanon not in tcanon:
-                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
-                                "repository's actual remote {!r} (spec 5.6)".format(sync_target, actual))
-    elif pointer_source == "default":
-        # Pattern IN-REPO DEFAULT: sync_target == "" and the store is co-located in the product repo (no
-        # pointer names it). It rides the product repository and shares its remote, so a present actual
-        # remote is EXPECTED, not a disagreement -> PASS (F3). Durability is the disclosed local-only
-        # residual (spec 5.7/17).
-        pass
+                else:
+                    matched = acanon in tcanon
+                    if not matched and tgt.kind in ("github", "gitlab"):
+                        # GitHub / GitLab resolve the org/repo path case-insensitively, so a case-only
+                        # difference is not a disagreement (F5). The host is already lowercased; the
+                        # disclosed residual is that a bare git: remote path stays case-sensitive, since an
+                        # arbitrary git host may be case-sensitive.
+                        matched = (acanon[0], acanon[1].lower()) in {(h, p.lower()) for h, p in tcanon}
+                    if not matched:
+                        rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
+                                    "repository's actual remote {!r} (spec 5.6)".format(sync_target, actual))
+    elif in_repo:
+        # Pattern IN-REPO: sync_target == "" and the store root IS the product repo root (the default, or a
+        # self-pointer such as `dir:.`; codex-8). It rides the product repository and shares its remote, so
+        # a present actual remote is EXPECTED, not a disagreement -> PASS (F3). Durability is the disclosed
+        # local-only residual (spec 5.7/17). A MALFORMED actual_remote observation is still an unreadable
+        # input, not a pass: it routes to CANNOT-EVALUATE naming the observation (codex-5).
+        if obs.get("actual_remote_malformed"):
+            rep.cant("C-SYNC-AGREE: {}; an in-repo store shares the product repository's remote, but the "
+                     "actual-remote observation cannot be read (spec 5.6)".format(actual_reason))
     else:
-        # Pattern RELOCATED LOCAL-ONLY: sync_target == "" but a pointer (committed / local-override) names
-        # the store, so it claims NO dedicated remote. A present actual remote is an unrecorded push
-        # destination (a spec-5.6 disagreement); an ABSENT observation cannot verify the no-remote claim,
-        # so it is a cant, never a pass (F7). A committed pointer that itself names a remote likewise
-        # contradicts the no-remote claim.
+        # Pattern RELOCATED LOCAL-ONLY: sync_target == "" but a pointer names a store root OUTSIDE the
+        # product repo, so it claims NO dedicated remote. A present actual remote is an unrecorded push
+        # destination (a spec-5.6 disagreement); an ABSENT or MALFORMED observation cannot verify the
+        # no-remote claim, so it is a cant, never a pass (F7). A committed pointer that itself names a
+        # remote likewise contradicts the no-remote claim.
         if actual is None:
             rep.cant("C-SYNC-AGREE: {}; the store claims no dedicated remote (a relocated local-only "
                      "store) yet that claim cannot be verified without the actual-remote observation "
@@ -1938,7 +2124,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.cant("C-HISTORY-RESURRECTION: {}; no-resurrection across time (spec 8.4) is not "
                  "evaluated".format(prior_reason))
     else:
-        _check_resurrection(prior["records"], by_id, all_ids, rep)
+        _check_resurrection(prior["records"], prior.get("digests") or {}, by_id, all_ids, rep)
 
     return evaluated_profiles, unevaluated_profiles
 
@@ -2135,7 +2321,8 @@ def self_test():
                 "prior": {"releases": [rel_row("1.0.0", 1, 2, dig12), rel_row("1.1.0", 3, 4, dig34)],
                           "counters_high": counters()["counters"],
                           "records": {"BI-1": ("backlog_item", "done"), "BI-2": ("backlog_item", "open"),
-                                      "DN-1": ("done", "recorded"), "HO-1": ("handoff", "current")}}}
+                                      "DN-1": ("done", "recorded"), "HO-1": ("handoff", "current")},
+                          "digests": {"DN-1": _record_digest(dn(1, "BI-1"))}}}
 
     base = Path(tempfile.mkdtemp(prefix="opf-check-selftest-")).resolve()
     counter = [0]
@@ -2295,12 +2482,25 @@ def self_test():
         junk = run(clean_machine(), working={"junk.md": "x\n"})
         check("undeclared-file-invalid", junk.status == INVALID)
         check("undeclared-file-named", any("C-CONTAINMENT" in f for f in junk.findings))
+        # A partial import SUBSTANTIATED by an active imports/<run-id> run triages stray paths (VALID):
+        # the stray junk and the active run interior both land in triage, never a finding (codex-2).
+        RUNID = "imp-20260601T000000Z-0123456789abcdef"
         pm = clean_machine()
         pm["manifest.toml"] = base_manifest()
         pm["manifest.toml"]["devprocess"]["import_status"] = "partial"
-        partial = run(pm, working={"junk.md": "x\n"})
+        pm["imports/{}/plan.toml".format(RUNID)] = "schema = 1"
+        partial = run(pm, working=dict([("junk.md", "x")]))
         check("partial-import-triage-not-finding",
               partial.status == VALID and any("junk.md" in t for t in partial.triage))
+        # codex-2: a STALE partial with no active run does not launder; the stray path grades as a finding
+        # and the unsubstantiated declaration is itself flagged -> INVALID.
+        stale = clean_machine()
+        stale["manifest.toml"] = base_manifest()
+        stale["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        sr = run(stale, working=dict([("junk.md", "x")]))
+        check("partial-no-active-run-invalid", sr.status == INVALID)
+        check("partial-no-active-run-named",
+              any("no active" in f and "partial" in f for f in sr.findings))
         um = clean_machine()
         um["manifest.toml"] = base_manifest()
         um["manifest.toml"]["unmanaged"] = {"paths": [".working/toml/manifest.toml"]}
@@ -2319,6 +2519,79 @@ def self_test():
                            "prior": clean_prior()["prior"]}).status == INVALID)
         check("sync-no-remote-cannot-eval",
               run(sm, obs={"tracked": "tracked", "prior": clean_prior()["prior"]}).status == CANNOT_EVALUATE)
+
+        # --- F1/F2/codex-7 containment by construction ---------------------------------------------
+        # F1: an [unmanaged] entry that is an ANCESTOR of the managed tree (".working" contains it) is a
+        # collision AND does not launder a stray path -> INVALID with both findings.
+        anc = clean_machine()
+        anc["manifest.toml"] = base_manifest()
+        anc["manifest.toml"]["unmanaged"] = dict(paths=[".working"])
+        ar = run(anc, working=dict([("stray.md", "x")]))
+        check("unmanaged-ancestor-invalid", ar.status == INVALID)
+        check("unmanaged-ancestor-collision-named", any("collides" in f for f in ar.findings))
+        check("unmanaged-ancestor-no-launder", any("stray.md" in f for f in ar.findings))
+        # F1: the machine dir itself declared unmanaged is a collision (it equals a managed prefix).
+        mdir = clean_machine()
+        mdir["manifest.toml"] = base_manifest()
+        mdir["manifest.toml"]["unmanaged"] = dict(paths=[".working/toml"])
+        check("unmanaged-machine-dir-invalid",
+              run(mdir, working=dict([("stray2.md", "x")])).status == INVALID)
+        # codex-7: a declared [unmanaged] file INSIDE the machine dir that names no managed slot is VALID
+        # (merely lying under the machine dir is not a collision; spec 14.2 Keep).
+        leg = clean_machine()
+        leg["manifest.toml"] = base_manifest()
+        leg["manifest.toml"]["unmanaged"] = dict(paths=[".working/toml/legacy.txt"])
+        check("unmanaged-inside-machine-valid",
+              run(leg, working=dict([("toml/legacy.txt", "legacy")])).status == VALID)
+        # F2: worklog is a ledger only, so worklog.index.toml is never a managed leaf -> INVALID.
+        wli = clean_machine()
+        wli["worklog.index.toml"] = idx([dict(id="WL-999", anything="goes")])
+        rwli = run(wli)
+        check("worklog-index-leaf-invalid", rwli.status == INVALID)
+        check("worklog-index-leaf-named",
+              any("C-CONTAINMENT" in f and "worklog.index.toml" in f for f in rwli.findings))
+        # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
+        # is still caught.
+        wlr = copy.deepcopy(pr_machine)
+        wlr["worklog/WL-9.toml"] = "schema = 1"
+        check("worklog-perrecord-body-invalid",
+              run(wlr, product=pr_product, obs=pr_obs).status == INVALID)
+        gbc = copy.deepcopy(pr_machine)
+        gbc["finding/garbage.toml"] = "schema = 1"
+        check("perrecord-garbage-body-invalid",
+              run(gbc, product=pr_product, obs=pr_obs).status == INVALID)
+        # F3: the imports/<run-id> interior is graded at steady state (import_status none): stray bytes
+        # under a run dir and a leftover run each -> INVALID.
+        RUNID0 = "imp-20260601T000000Z-0123456789abcdef"
+        imp1 = clean_machine()
+        imp1["imports/{}/candidate/evil.bin".format(RUNID0)] = "x"
+        check("imports-stray-bytes-none-invalid", run(imp1).status == INVALID)
+        imp2 = clean_machine()
+        imp2["imports/{}/plan.toml".format(RUNID0)] = "schema = 1"
+        check("imports-leftover-run-none-invalid", run(imp2).status == INVALID)
+
+        # --- C-LEASE (codex-1): the single-writer lease payload (spec 5.7) --------------------------
+        def lease(**over):
+            payload = dict(schema=1, holder="run-abc", operation="sync", acquired_at=TS)
+            payload.update(over)
+            return payload
+        lz = clean_machine()
+        lz["lease.toml"] = lease()
+        check("lease-wellformed-valid", run(lz).status == VALID)
+        lz = clean_machine()
+        lz["lease.toml"] = "this is not valid toml === ["
+        check("lease-corrupt-cannot-eval", run(lz).status == CANNOT_EVALUATE)
+        lz = clean_machine()
+        lz["lease.toml"] = lease(acquired_at="not-a-timestamp")
+        rlz = run(lz)
+        check("lease-bad-timestamp-invalid", rlz.status == INVALID)
+        check("lease-bad-timestamp-named", any("C-LEASE" in f for f in rlz.findings))
+        lz = clean_machine()
+        lz["lease.toml"] = lease(extra="x")
+        check("lease-unknown-key-invalid", run(lz).status == INVALID)
+        lz = clean_machine()
+        lz["lease.toml"] = lease(holder="")
+        check("lease-empty-holder-invalid", run(lz).status == INVALID)
 
         # --- cross-record -----------------------------------------------------------------------------
         f = clean_machine()
@@ -2628,30 +2901,75 @@ def self_test():
         check("sync-shorthand-https-match-valid",
               run(gm, obs={"tracked": "tracked", "actual_remote": "https://github.com/org/repo",
                            "prior": clean_prior()["prior"]}).status == VALID)
+        # F5: GitHub / GitLab resolve the org/repo path case-insensitively, so a case-only difference agrees.
+        gmc = clean_machine()
+        gmc["manifest.toml"] = base_manifest()
+        gmc["manifest.toml"]["store"] = {"sync_target": "github:Org/Repo.git"}
+        check("sync-shorthand-case-insensitive-valid",
+              run(gmc, obs={"tracked": "tracked", "actual_remote": "git@github.com:org/repo.git",
+                            "prior": clean_prior()["prior"]}).status == VALID)
+        # codex-4: a scheme-URL remote PORT is part of the endpoint identity, so distinct ports disagree.
+        gmp = clean_machine()
+        gmp["manifest.toml"] = base_manifest()
+        gmp["manifest.toml"]["store"] = {"sync_target": "git:ssh://git@example.com:2222/ops.git"}
+        check("sync-port-mismatch-invalid",
+              run(gmp, obs={"tracked": "tracked", "actual_remote": "ssh://git@example.com:2223/ops.git",
+                            "prior": clean_prior()["prior"]}).status == INVALID)
+        check("sync-port-match-valid",
+              run(gmp, obs={"tracked": "tracked", "actual_remote": "ssh://git@example.com:2222/ops.git",
+                            "prior": clean_prior()["prior"]}).status == VALID)
         # IN-REPO DEFAULT (pointer_source == "default", sync_target == ""): a present actual remote is
         # EXPECTED (the store rides the product repo), so it PASSES -> VALID (F3 over-fire fix).
         check("sync-in-repo-default-remote-valid",
               run(clean_machine(), obs={"tracked": "tracked", "actual_remote": "git@github.com:x/y.git",
                                         "prior": clean_prior()["prior"]}).status == VALID)
-        # RELOCATED LOCAL-ONLY (a committed dir: pointer names the store, sync_target == ""): a present
-        # remote is an unrecorded push destination -> INVALID (reworked from sync-local-only-but-remote).
-        def relocated_product():
+        # codex-8: a self-pointer `dir:.` resolves store_root == product_root, so the store is IN-REPO and
+        # rides the product remote -> a present remote is EXPECTED -> VALID (NOT relocated local-only).
+        def self_pointer_product():
             p = clean_product()
             p[".opf.toml"] = "[store]\ntarget = \"dir:.\"\n"
             return p
-        rlr = validate_store(
-            resolve_store(build(clean_machine(), relocated_product())),
+        spr = validate_store(
+            resolve_store(build(clean_machine(), self_pointer_product())),
             observations={"tracked": "tracked", "actual_remote": "git@github.com:x/y.git",
                           "prior": clean_prior()["prior"]})
-        check("sync-relocated-local-remote-invalid", rlr is not None and rlr.status == INVALID)
-        check("sync-relocated-local-remote-named",
+        check("sync-self-pointer-in-repo-remote-valid", spr is not None and spr.status == VALID)
+        # codex-5: a MALFORMED actual_remote in the IN-REPO topology is an unreadable input -> CANNOT-
+        # EVALUATE naming it, never a silent pass.
+        cm5 = run(clean_machine(), obs={"tracked": "tracked", "actual_remote": 123,
+                                        "prior": clean_prior()["prior"]})
+        check("sync-in-repo-malformed-remote-cannot-eval", cm5 is not None and cm5.status == CANNOT_EVALUATE)
+        # A GENUINELY relocated store (a dir: pointer to a store root OUTSIDE the product repo, so
+        # store_root != product_root): a present remote is an unrecorded push destination -> INVALID; an
+        # absent observation cannot verify the no-remote claim -> cant, never a pass (F7).
+        def build_relocated(machine, product=None):
+            counter[0] += 1
+            p_root = base / "prod-{:02d}".format(counter[0])
+            s_root = base / "store-{:02d}".format(counter[0])
+            (s_root / ".working" / "toml").mkdir(parents=True)
+            for rel, doc in machine.items():
+                p = s_root / ".working" / "toml" / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(doc if isinstance(doc, str) else _opf_emit.emit(doc), encoding="utf-8")
+            p_root.mkdir(parents=True)
+            (p_root / ".opf.toml").write_text(
+                "[store]\ntarget = \"dir:{}\"\n".format(s_root), encoding="utf-8")
+            for rel, doc in (product or clean_product()).items():
+                p = p_root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(doc if isinstance(doc, str) else _opf_emit.emit(doc), encoding="utf-8")
+            return p_root
+        rlr = validate_store(
+            resolve_store(build_relocated(clean_machine())),
+            observations={"tracked": "tracked", "actual_remote": "git@github.com:x/y.git",
+                          "prior": clean_prior()["prior"]})
+        check("sync-relocated-remote-invalid", rlr is not None and rlr.status == INVALID)
+        check("sync-relocated-remote-named",
               rlr is not None and any("relocated local-only" in f for f in rlr.findings))
-        # RELOCATED LOCAL-ONLY with NO remote observation: the no-remote claim cannot be verified without
-        # the observation -> cant, never a pass (F7).
         rla = validate_store(
-            resolve_store(build(clean_machine(), relocated_product())),
+            resolve_store(build_relocated(clean_machine())),
             observations={"tracked": "tracked", "prior": clean_prior()["prior"]})
-        check("sync-relocated-local-absent-cannot-eval", rla is not None and rla.status == CANNOT_EVALUATE)
+        check("sync-relocated-absent-cannot-eval", rla is not None and rla.status == CANNOT_EVALUATE)
 
         # --- M1: a malformed prior observation is CANNOT-EVALUATE (naming it malformed), not INVALID ---
         mp = copy.deepcopy(clean_prior())
@@ -2740,6 +3058,100 @@ def self_test():
               mmr is not None and any("deferred to U2M" in m for m in mmr.cannot_evaluate))
         check("f4-module-record-not-false-invalid",
               mmr is not None and not any("not a supported record type" in f for f in mmr.findings))
+
+        # ===== draft-2 discriminating vectors ========================================================
+        # F4/codex-9: a malformed prior record id is a MALFORMED observation (cant), never store INVALID.
+        mid = copy.deepcopy(clean_prior())
+        mid["prior"]["records"]["not-an-id!"] = ("finding", "open")
+        r = run(clean_machine(), obs=mid)
+        check("f4-malformed-prior-record-id-cannot-eval", r is not None and r.status == CANNOT_EVALUATE)
+        check("f4-malformed-prior-record-id-named",
+              r is not None and any("malformed" in m for m in r.cannot_evaluate))
+        # F4/codex-9: a prior record id whose namespace disagrees with its declared type is MALFORMED.
+        nsm = copy.deepcopy(clean_prior())
+        nsm["prior"]["records"]["BI-1"] = ("finding", "fixed")
+        check("f4-prior-record-ns-type-mismatch-cannot-eval",
+              run(clean_machine(), obs=nsm).status == CANNOT_EVALUATE)
+        # codex-3: a created-terminal record whose BODY was rewritten while its status is unchanged -> a
+        # finding, verified against the prior body digest.
+        f = clean_machine()
+        rw_dn = dn(1, "BI-1")
+        rw_dn["title"] = "rewritten immutable receipt"
+        f["done.index.toml"] = idx([rw_dn])
+        r = run(f)
+        check("history-immutable-body-rewrite-invalid", r is not None and r.status == INVALID)
+        check("history-immutable-body-rewrite-named",
+              r is not None and any("body changed" in x for x in r.findings))
+        # codex-3: with NO prior body digest for a created-terminal record, body preservation is a named
+        # CANNOT-EVALUATE boundary, never a silent VALID.
+        nd = copy.deepcopy(clean_prior())
+        nd["prior"]["digests"] = {}
+        r = run(clean_machine(), obs=nd)
+        check("history-immutable-body-no-digest-cannot-eval", r is not None and r.status == CANNOT_EVALUATE)
+        check("history-immutable-body-no-digest-named",
+              r is not None and any("body preservation" in m for m in r.cannot_evaluate))
+        # codex-6: an actor-DEPENDENT transition (legal for a maintainer, illegal for an assistant) is
+        # CANNOT-EVALUATE (the last-transition actor is not identifiable), never accept-if-any-actor.
+        f = clean_machine()
+        f["finding.index.toml"] = idx([envelope("FN-1", "finding", "fixed")])
+        f["counters.toml"] = counters(FN=1)
+        ad6 = copy.deepcopy(clean_prior())
+        ad6["prior"]["records"]["FN-1"] = ("finding", "open")
+        ad6["prior"]["counters_high"]["FN"] = 1
+        r = run(f, obs=ad6)
+        check("history-actor-dependent-transition-cannot-eval", r is not None and r.status == CANNOT_EVALUATE)
+        # codex-10: C-RECEIPTS second loop - a done receipt targeting a NON-ratified backlog_item (active).
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([bi(1, "active"), bi(2, "open")])
+        rc10 = copy.deepcopy(clean_prior())
+        rc10["prior"]["records"]["BI-1"] = ("backlog_item", "active")
+        r = run(f, obs=rc10)
+        check("receipts-target-not-ratified-invalid", r is not None and r.status == INVALID)
+        check("receipts-target-not-ratified-named",
+              r is not None and any("not ratified" in x for x in r.findings))
+        # gemini: a moved row whose destination index FILE is entirely absent -> a finding (not a cant).
+        f = clean_machine()
+        f["archive/2026/archive.toml"] = {
+            "schema": 1,
+            "moved": [{"id": "RF-9", "type": "reference", "destination": "archive/2026/reference.index.toml"}],
+            "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]}
+        f["counters.toml"] = counters(RF=9)
+        # archive/2026/reference.index.toml is deliberately NOT created (destination file absent)
+        r = run(f)
+        check("archive-dest-file-absent-invalid", r is not None and r.status == INVALID)
+        check("archive-dest-file-absent-named", r is not None and any("does not exist" in x for x in r.findings))
+        # F6.1: inline record schema-fault forwarding (_gather_inline) - a finding missing its title.
+        f = clean_machine()
+        bad_fn = fn(1)
+        del bad_fn["title"]
+        f["finding.index.toml"] = idx([bad_fn])
+        f["counters.toml"] = counters(FN=1)
+        check("inline-record-schema-fault-invalid", run(f).status == INVALID)
+        # F6.2: C-MANIFEST finding forwarding - an unknown top-level manifest table.
+        f = clean_machine()
+        mbad = base_manifest()
+        mbad["bogus_table"] = {"x": 1}
+        f["manifest.toml"] = mbad
+        check("manifest-unknown-table-invalid", run(f).status == INVALID)
+        # F6.5: index unknown-top-level-key finding (_index_rows).
+        f = clean_machine()
+        ibad = idx([bi(1, "done"), bi(2, "open")])
+        ibad["bogus"] = 1
+        f["backlog_item.index.toml"] = ibad
+        check("index-unknown-key-invalid", run(f).status == INVALID)
+        # F6.4: worklog_moved span-overlap (two spans jointly covering the present archived worklog ids).
+        f = clean_machine()
+        f["archive/2026/archive.toml"] = {"schema": 1, "moved": [],
+            "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"},
+                              {"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]}
+        r = run(f)
+        check("worklog-moved-overlap-invalid", r is not None and r.status == INVALID)
+        check("worklog-moved-overlap-named", r is not None and any("overlap" in x for x in r.findings))
+        # F6.6: an unknown observation key is a malformed injection -> CANNOT-EVALUATE, never dropped.
+        r = run(clean_machine(), obs={"tracked": "tracked", "prior": clean_prior()["prior"], "bogus_key": 1})
+        check("unknown-observation-key-cannot-eval", r is not None and r.status == CANNOT_EVALUATE)
+        check("unknown-observation-key-named",
+              r is not None and any("unrecognized" in m for m in r.cannot_evaluate))
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
