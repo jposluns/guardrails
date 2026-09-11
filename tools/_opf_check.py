@@ -216,12 +216,14 @@ class StoreValidation:
 
 
 def exit_code(result):
-    """Reduce a StoreValidation to a 0/1/2 exit code for the future doctor verb."""
-    if result.status == CANNOT_EVALUATE:
-        return 2
+    """Reduce a StoreValidation to a 0/1/2 exit code for the future doctor verb. Only the exact VALID
+    status yields 0; any unrecognized/malformed status fails CLOSED to 2, never a two-valued fall-through
+    reading a bad status as success (ROUND-2 codex-2 s1; guard-input-soundness)."""
+    if result.status == VALID:
+        return 0
     if result.status == INVALID:
         return 1
-    return 0
+    return 2
 
 
 class _Report:
@@ -523,16 +525,33 @@ def _canonical_remote(url):
         # An UNBRACKETED multi-colon authority is an IPv6 literal that MUST be bracketed
         # (ssh://[2001:db8::22]/p); unbracketed it is unresolvable rather than mis-read with a trailing
         # '::22' consumed as a default port (F5b).
-        if not host.startswith("[") and host.count(":") > 1:
-            return None
         _default_port = {"https": "443", "http": "80", "ssh": "22", "git": "9418"}.get(scheme.lower())
-        hname, _sep, hport = host.rpartition(":")
-        # A numeric default port, including one written with leading zeros (":022" == ":22"), names the
-        # default endpoint and is dropped; a non-numeric tail (a bracketed IPv6 fragment) is never a port
-        # (F5c).
-        if _sep and hname and _default_port is not None and hport.isdigit() \
-                and int(hport) == int(_default_port):
-            host = hname
+        if host.startswith("["):
+            # A bracketed IPv6 literal: a missing ']' or junk before the ':' is unresolvable (ROUND-2
+            # codex-2), never a mis-canonicalized ('[::1', path) pair that could falsely agree.
+            rb = host.find("]")
+            if rb == -1 or host[rb + 1:rb + 2] not in ("", ":"):
+                return None
+            hostpart, portsep, hport = host[:rb + 1], host[rb + 1:rb + 2], host[rb + 2:]
+        else:
+            # An UNBRACKETED multi-colon authority is an IPv6 literal that MUST be bracketed; unbracketed it
+            # is unresolvable rather than mis-read with a trailing '::22' consumed as a port (F5b).
+            if host.count(":") > 1:
+                return None
+            hostpart, portsep, hport = host.rpartition(":")
+        # A port is a run of ASCII digits: a default port (incl. a leading-zero spelling, ':022' == ':22')
+        # names the port-less endpoint and is dropped; a non-default numeric port is re-emitted without
+        # leading zeros so its spelling cannot cause a false disagreement (ROUND-2 codex-4). A colon whose
+        # tail is not ASCII digits (a bracket fragment, or hostile Unicode digits int() would reject with a
+        # ValueError) is not a port: unresolvable rather than a crash escaping the barrier (ROUND-2 codex-2).
+        if portsep:
+            if not (hostpart and hport.isascii() and hport.isdigit()):
+                return None
+            port_i = int(hport)
+            if _default_port is not None and port_i == int(_default_port):
+                host = hostpart
+            else:
+                host = "{}:{}".format(hostpart, port_i)
     else:
         # scp-style [user@]host:path: the colon before any slash separates host from path. A bracketed
         # IPv6 host ([addr]) carries colons INSIDE the brackets that are part of the address, not the
@@ -597,10 +616,14 @@ def _canon_sets_agree(a_canon, b_canon, kind):
     the actual-remote leg) share this one fold so they cannot diverge (round-16 F-3)."""
     if not a_canon.isdisjoint(b_canon):
         return True
-    if kind in ("github", "gitlab"):
-        b_fold = {(h, pth.lower()) for h, pth in b_canon}
-        return any((h, pth.lower()) in b_fold for h, pth in a_canon)
-    return False
+    # github.com / gitlab.com resolve the org/repo PATH case-insensitively: this is a property of the HOST,
+    # not of how the target was spelled, so a git: URL naming github.com folds exactly as the github:
+    # shorthand does (ROUND-2 codex-3 s2; the host is already lowercased by the canonicalizers). Any other
+    # host stays case-sensitive, a disclosed residual since an arbitrary git host may be case-sensitive.
+    _ci = ("github.com", "gitlab.com")
+    a_fold = {(h, pth.lower()) if h in _ci else (h, pth) for h, pth in a_canon}
+    b_fold = {(h, pth.lower()) if h in _ci else (h, pth) for h, pth in b_canon}
+    return not a_fold.isdisjoint(b_fold)
 
 
 # --- index parsing (shape defined here) --------------------------------------------------------------
@@ -1504,6 +1527,11 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
     # per-record worklog/; round-13 the inline analog). A ledger type's INDEX file (<type>.index.toml) is
     # likewise a never-legal slot and is reserved so it cannot be declared unmanaged to shield a rogue file.
     type_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types))
+    # The per-record body dirs to RECURSE are the non-ledger type dirs only: a ledger type (worklog) keeps
+    # its entries in <type>.toml, so a <ledgertype>/ dir must NEVER exist and is graded as a stray even when
+    # empty, never recursed as a managed namespace where an empty one would escape grading (ROUND-2 Fable
+    # F-1a). type_body_dirs (all enabled types) still drives the reservation below.
+    perrecord_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types) if t not in _LEDGER_TYPES)
     ledger_index_files = tuple(_rel(mrel, t + INDEX_SUFFIX) for t in sorted(enabled_types)
                                if t in _LEDGER_TYPES)
     graded_containers = (archive_root, imports_root) + type_body_dirs
@@ -1530,7 +1558,7 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
         # directory, or a tree of only empty dirs, escaped grading entirely).
         if full == mrel or _under_any(full, (imports_root,)):
             return True
-        if layout == "per-record" and full in type_body_dirs:
+        if layout == "per-record" and full in perrecord_body_dirs:
             return True
         return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
 
@@ -2094,7 +2122,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                          "host+path agreement (a disclosed residual; spec 5.5)".format(raw))
             # Leg 2: a committed pointer that names a REMOTE disagreeing with the sync_target (B3).
             if pointer_target is not None and not pointer_target.local:
-                pcanon, _pun = _target_remote_canon(pointer_target)
+                pcanon, pun = _target_remote_canon(pointer_target)
+                for raw in pun:
+                    # Symmetric with the sync_target unresolved-forms cant (F7): a committed pointer naming a
+                    # REMOTE the equivalence cannot canonicalize is a disclosed CANNOT-EVALUATE, never a
+                    # silent leg-2 pass (ROUND-2 Fable F-4 / codex-3 s5).
+                    rep.cant("C-SYNC-AGREE: the committed pointer remote form {!r} cannot be canonicalized "
+                             "for host+path agreement against the sync_target (a disclosed residual; spec "
+                             "5.6)".format(raw))
                 if tcanon and pcanon and not _canon_sets_agree(pcanon, tcanon, tgt.kind):
                     rep.finding("C-SYNC-AGREE: the committed pointer remote {!r} does not agree with the "
                                 "manifest sync_target {!r} (spec 5.6)".format(pointer_target.value, sync_target))
@@ -3648,6 +3683,68 @@ def self_test():
         check("canonical-leading-zero-default-port-folds",
               _canonical_remote("ssh://h:022/p") is not None
               and _canonical_remote("ssh://h:022/p") == _canonical_remote("ssh://h/p"))
+
+        # ===== ROUND-2 retrofix discriminating vectors ==============================================
+        check("r2-exit-code-valid-zero", exit_code(StoreValidation(VALID)) == 0)
+        check("r2-exit-code-invalid-one", exit_code(StoreValidation(INVALID)) == 1)
+        check("r2-exit-code-cannot-eval-two", exit_code(StoreValidation(CANNOT_EVALUATE)) == 2)
+        check("r2-exit-code-unknown-fails-closed", exit_code(StoreValidation("UNKNOWN-STATUS")) == 2)
+        check("r2-canonical-scheme-bad-bracket-none", _canonical_remote("ssh://[::1/p") is None)
+        check("r2-canonical-scheme-bad-bracket2-none",
+              _canonical_remote("ssh://[2001/db8::1]:org/repo") is None)
+        check("r2-canonical-nondefault-leading-zero-folds",
+              _canonical_remote("ssh://h:02222/p") is not None
+              and _canonical_remote("ssh://h:02222/p") == _canonical_remote("ssh://h:2222/p"))
+        check("r2-canonical-nondefault-port-significant",
+              _canonical_remote("ssh://h:23/p") != _canonical_remote("ssh://h/p"))
+        check("r2-canonical-ipv6-scp-at-path-preserved",
+              _canonical_remote("git@[2001:db8::1]:path@x") == ("[2001:db8::1]", "path@x"))
+        check("r2-canonical-unicode-port-none", _canonical_remote("ssh://h:\u00b2/p") is None)
+        _r2wd = build(pr_machine, product=pr_product)
+        os.makedirs(str(_r2wd / ".working" / "toml" / "worklog"), exist_ok=False)
+        _r2wdr = validate_store(resolve_store(_r2wd), observations=pr_obs)
+        check("r2-empty-perrecord-ledger-dir-invalid", _r2wdr.status == INVALID)
+        check("r2-empty-perrecord-ledger-dir-named",
+              any("C-CONTAINMENT" in f and "worklog" in f and "unregistered" in f for f in _r2wdr.findings))
+        check("r2-perrecord-clean-still-valid",
+              run(pr_machine, product=pr_product, obs=pr_obs).status == VALID)
+        _r2lg = clean_machine()
+        _r2lg["manifest.toml"] = base_manifest()
+        _r2lg["manifest.toml"]["store"] = {"sync_target": "github:org/repo"}
+        _r2lgres = resolve_store(build(_r2lg))
+        _r2lgres.target = classify_target("git:not-a-canonicalizable-url")
+        _r2lgr = validate_store(_r2lgres, observations={"tracked": "tracked",
+                                                        "actual_remote": "git@github.com:org/repo.git",
+                                                        "prior": clean_prior()["prior"]})
+        check("r2-pointer-uncanon-remote-cannot-eval", _r2lgr is not None and _r2lgr.status == CANNOT_EVALUATE)
+        check("r2-pointer-uncanon-remote-named",
+              _r2lgr is not None and any("committed pointer remote form" in m and "cannot be canonicalized" in m
+                                         for m in _r2lgr.cannot_evaluate))
+        _r2lz = clean_machine()
+        _r2lz["lease.toml"] = dict(schema=1, holder="run-abc", operation="", acquired_at=TS)
+        _r2lzr = run(_r2lz)
+        check("r2-lease-empty-operation-invalid", _r2lzr.status == INVALID)
+        check("r2-lease-empty-operation-named",
+              any("C-LEASE" in f and "operation" in f for f in _r2lzr.findings))
+        _r2rn = clean_machine()
+        _r2rn["done.index.toml"] = idx([])
+        _r2rn["counters.toml"] = counters(DN=0)
+        _r2rn_prior = copy.deepcopy(clean_prior())
+        del _r2rn_prior["prior"]["records"]["DN-1"]
+        del _r2rn_prior["prior"]["digests"]["DN-1"]
+        _r2rn_prior["prior"]["counters_high"]["DN"] = 0
+        _r2rnr = run(_r2rn, obs=_r2rn_prior)
+        check("r2-ratified-bi-no-done-isolated-invalid", _r2rnr is not None and _r2rnr.status == INVALID)
+        check("r2-ratified-bi-no-done-isolated-named",
+              _r2rnr is not None and any("C-RECEIPTS" in f and "no done receipt" in f
+                                         for f in _r2rnr.findings))
+        _r2gs = clean_machine()
+        _r2gs["manifest.toml"] = base_manifest()
+        _r2gs["manifest.toml"]["store"] = {"sync_target": "git:https://github.com/Org/Repo"}
+        check("r2-git-scheme-github-case-valid",
+              run(_r2gs, obs={"tracked": "tracked", "actual_remote": "https://github.com/org/repo",
+                          "prior": clean_prior()["prior"]}).status == VALID)
+
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
