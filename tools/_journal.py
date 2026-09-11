@@ -70,6 +70,16 @@ FRAME_TYPES = (F_INTENT, F_COMPLETE, F_RIP, F_RC)
 OP_KINDS = ("write", "create", "remove", "mkdir", "rmdir")
 KILL_ENV = "AIQT_JOURNAL_KILL"   # crash-injection hook; inert unless the self-test harness sets it
 _READ_CHUNK = 1 << 20
+# MINOR-1 (journal-reader memory bound): the journal CONTROL readers (read_frames, read_lock_owner) cap how
+# much they will read, so a pre-planted oversize journal file (e.g. a 128 MiB frames.log in a hostile tree)
+# meets a controlled fail-closed refusal rather than being slurped whole into memory (SECA resource-bounds).
+# This mirrors the store-read cap discipline in _opf_store.py (a pre-open st.st_size fast-reject plus a
+# post-read re-check). It bounds ONLY the small journal control files: frames.log holds a cutover's INTENT
+# op-list METADATA (the file payloads live under preimages/, never here) and the lock holds a small owner
+# record, so 16 MiB is generous headroom over any real cutover's framed op list while decisively refusing an
+# oversize plant. It is deliberately NOT applied to _read_fd's other callers (_read_at, _read_contained,
+# _verify_fd_prestate), which read arbitrary product-file bytes during a cutover and must stay uncapped.
+_MAX_JOURNAL_READ_BYTES = 16 << 20
 
 
 class JournalError(Exception):
@@ -149,8 +159,9 @@ def _open_parent(root_fd, relpath):
     return pfd, parts[-1]
 
 
-def _read_fd(fd):
+def _read_fd(fd, cap=None):
     chunks = []
+    total = 0
     while True:
         try:
             block = os.read(fd, _READ_CHUNK)
@@ -165,6 +176,16 @@ def _read_fd(fd):
             raise JournalError("read error on a contained file descriptor ({})".format(exc))
         if not block:
             break
+        total += len(block)
+        if cap is not None and total > cap:
+            # MINOR-1: a capped journal-control reader refuses an oversize file AT the cap rather than
+            # reading it whole into memory. Bounding INCREMENTALLY (never accumulating more than the cap
+            # plus one chunk) is the post-read re-check the store cap does with len(data), made memory-safe
+            # here so a file grown or swapped past its pre-open st.st_size is still refused fail-closed
+            # (SECA resource-bounds). cap is None for the uncapped product-file readers (_read_at,
+            # _read_contained, _verify_fd_prestate), so their behaviour is unchanged.
+            raise JournalError("contained journal file exceeds the {}-byte journal-read cap "
+                               "(fail-closed)".format(cap))
         chunks.append(block)
     return b"".join(chunks)
 
@@ -321,23 +342,43 @@ def _frame(ftype, payload):
 def publish(txn_dir, ftype, obj):
     """Append one checksummed-framed record (9.3 steps 4 and 7 discipline), fsync the log and the txn
     directory. A torn write of THIS frame is detectably-unwritten to read_frames; the torn:<TYPE>
-    injection writes a half frame, fsyncs it, and dies, exactly as a power loss mid-write would."""
+    injection writes a half frame, fsyncs it, and dies, exactly as a power loss mid-write would.
+    MINOR-2 (symlink-race containment): frames.log is opened CONTAINED (a dir-fd-relative
+    O_CREAT|O_APPEND|O_NOFOLLOW open, confirmed a regular file on the opened fd, never a re-resolved
+    absolute path), so a symlinked or non-regular frames.log fails closed rather than redirecting the
+    append onto a victim file (SECI-symlink-resolution; matches read_frames' contained open)."""
     if ftype not in FRAME_TYPES:
         raise JournalError("refusing to publish unknown frame type {!r}".format(ftype))
     payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     frame = _frame(ftype, payload)
-    log = Path(txn_dir) / "frames.log"
     torn = os.environ.get(KILL_ENV, "") == "torn:" + ftype
-    with open(log, "ab") as fh:
-        if torn:
-            half = frame[: max(1, len(frame) // 2)]
-            fh.write(half)
-            fh.flush()
-            os.fsync(fh.fileno())
-            os._exit(137)
-        fh.write(frame)
-        fh.flush()
-        os.fsync(fh.fileno())
+    try:
+        txnfd = os.open(str(txn_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise JournalError("cannot open journal txn dir {!r} no-follow ({})".format(str(txn_dir), exc))
+    try:
+        try:
+            # O_NONBLOCK so a pre-planted FIFO frames.log is refused at the fstat gate below instead of
+            # blocking the append open forever; a no-op for the regular file this expects. O_NOFOLLOW
+            # refuses a symlinked frames.log (a swapped-in symlink cannot redirect the append off-tree).
+            fd = os.open("frames.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
+                         | os.O_NONBLOCK, 0o600, dir_fd=txnfd)
+        except OSError as exc:
+            raise JournalError("cannot open journal frames.log no-follow for append ({})".format(exc))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise JournalError("journal frames.log is not a regular file (no-follow append)")
+            if torn:
+                half = frame[: max(1, len(frame) // 2)]
+                _write_all(fd, half)
+                os.fsync(fd)
+                os._exit(137)
+            _write_all(fd, frame)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(txnfd)
     _fsync_path_dir(txn_dir)
     _kill_point("after-publish-" + ftype)
 
@@ -364,9 +405,16 @@ def read_frames(txn_dir):
         except OSError as exc:
             raise JournalError("cannot read journal frames.log no-follow ({})".format(exc))
         try:
-            if not stat.S_ISREG(os.fstat(ffd).st_mode):
+            _st = os.fstat(ffd)
+            if not stat.S_ISREG(_st.st_mode):
                 raise JournalError("journal frames.log is not a regular file (no-follow)")
-            raw = _read_fd(ffd)
+            # MINOR-1: pre-open-size fast-reject on the fstat already taken, then a capped read whose
+            # incremental post-read re-check catches a file grown/swapped past this size (SECA
+            # resource-bounds; mirrors the store cap). frames.log holds only INTENT op-list metadata.
+            if _st.st_size > _MAX_JOURNAL_READ_BYTES:
+                raise JournalError("journal frames.log is {} bytes, over the {}-byte journal-read cap "
+                                   "(fail-closed)".format(_st.st_size, _MAX_JOURNAL_READ_BYTES))
+            raw = _read_fd(ffd, cap=_MAX_JOURNAL_READ_BYTES)
         finally:
             os.close(ffd)
     finally:
@@ -405,14 +453,30 @@ def read_frames(txn_dir):
 
 
 def _truncate_log(txn_dir, good_len):
-    """Cut a torn tail off frames.log so a fresh terminal frame appends onto a clean prefix. Fsync'd."""
-    log = Path(txn_dir) / "frames.log"
-    fd = os.open(str(log), os.O_RDWR)
+    """Cut a torn tail off frames.log so a fresh terminal frame appends onto a clean prefix. Fsync'd.
+    MINOR-2 (symlink-race containment): frames.log is opened CONTAINED (a dir-fd-relative O_NOFOLLOW open,
+    confirmed a regular file on the opened fd, never a re-resolved absolute path), so a symlinked frames.log
+    cannot redirect the ftruncate onto a victim file (SECI-symlink-resolution; matches read_frames)."""
     try:
-        os.ftruncate(fd, good_len)
-        os.fsync(fd)
+        txnfd = os.open(str(txn_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise JournalError("cannot open journal txn dir {!r} no-follow ({})".format(str(txn_dir), exc))
+    try:
+        try:
+            # O_NONBLOCK so a pre-planted FIFO frames.log is refused at the fstat gate rather than blocking
+            # the open; a no-op for the regular file this expects. O_NOFOLLOW refuses a symlinked target.
+            fd = os.open("frames.log", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=txnfd)
+        except OSError as exc:
+            raise JournalError("cannot open journal frames.log no-follow for truncate ({})".format(exc))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise JournalError("journal frames.log is not a regular file (no-follow truncate)")
+            os.ftruncate(fd, good_len)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
+        os.close(txnfd)
     _fsync_path_dir(txn_dir)
 
 
@@ -504,9 +568,16 @@ def read_lock_owner(journal_root):
         except OSError as exc:                            # ELOOP on a symlinked lock, or any read error: fail closed
             raise JournalError("cannot read journal lock ({})".format(exc))
         try:
-            if not stat.S_ISREG(os.fstat(lfd).st_mode):
+            _st = os.fstat(lfd)
+            if not stat.S_ISREG(_st.st_mode):
                 raise JournalError("journal lock is not a regular file (fail-closed)")
-            raw = _read_fd(lfd)
+            # MINOR-1: the same journal-read cap bounds the lock (a small owner record); an oversize plant
+            # is refused fail-closed rather than slurped (SECA resource-bounds; pre-open-size fast-reject
+            # plus the capped read's incremental post-read re-check).
+            if _st.st_size > _MAX_JOURNAL_READ_BYTES:
+                raise JournalError("journal lock is {} bytes, over the {}-byte journal-read cap "
+                                   "(fail-closed)".format(_st.st_size, _MAX_JOURNAL_READ_BYTES))
+            raw = _read_fd(lfd, cap=_MAX_JOURNAL_READ_BYTES)
         finally:
             os.close(lfd)
     finally:

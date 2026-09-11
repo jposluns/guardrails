@@ -1317,6 +1317,18 @@ def self_test():
         if not cond:
             failures.append(name)
 
+    def _guard(thunk, default="RAISED"):
+        """Run thunk() and return its result, or the sentinel `default` if it raised. MINOR-3: a self-test
+        vector whose fix, when reverted, throws an UNCAUGHT exception wraps its probe here, so a reverted fix
+        yields a NAMED counted check FAILURE (the sentinel fails the assertion) rather than aborting the whole
+        suite with a traceback. Detection is not weakened: the assertion still passes only on the fixed result
+        (self-test-discrimination; the fail-closed reporting check-fails-closed-on-unreadable asks of the
+        suite itself)."""
+        try:
+            return thunk()
+        except Exception:
+            return default
+
     # A minimal valid base + a valid aiqt profile, as a manifest text builder.
     def manifest_text(standard=STANDARD_TOKEN, spec_version="1.0.0", posture="required",
                       with_aiqt=False, aiqt_floor="required", aiqt_compat=">=1.0.0 <2.0.0",
@@ -1756,9 +1768,14 @@ def self_test():
         check("m4-contained-still-ok",
               _is_contained_relpath("a/../b") and _is_contained_relpath("docs/x.md"))
 
-        # m5: a '//'-anchored absolute path is accepted as a root spelling, not falsely rejected.
-        _fd = _open_dir_nofollow("//"); os.close(_fd)
-        check("m5-double-slash-root-accepted", True)
+        # m5: a '//'-anchored absolute path is accepted as a root spelling, not falsely rejected. The probe
+        # runs INSIDE the check via _guard: with the fix reverted _open_dir_nofollow("//") raises, which now
+        # yields a NAMED counted failure rather than aborting the suite with an uncaught traceback (MINOR-3).
+        def _double_slash_root_opens():
+            _fd = _open_dir_nofollow("//")
+            os.close(_fd)
+            return "opened"
+        check("m5-double-slash-root-accepted", _guard(_double_slash_root_opens) == "opened")
 
         # S1.4 (defence in depth): a NUL-bearing pointer target fails closed as OSError, honouring
         # _open_dir_nofollow's documented OSError contract rather than raising an unmapped ValueError.
@@ -1838,7 +1855,11 @@ def self_test():
         # ValueError (not TOMLDecodeError); it maps to a fail-closed StoreError -> CANNOT-EVALUATE, never an
         # uncaught crash out of resolve_store.
         n1_root = build_store(manifest="[devprocess]\nbig = " + "9" * 5000 + "\n")
-        check("new1-oversized-int-literal-cannot-eval", resolve_store(n1_root).status == CANNOT_EVALUATE)
+        # MINOR-3: run the probe INSIDE _guard so a reverted fix (resolve_store no longer mapping the bare
+        # ValueError from tomllib's int() to CANNOT-EVALUATE) yields a NAMED counted failure, not an uncaught
+        # traceback that aborts the suite. Still passes only on CANNOT-EVALUATE (no weakened detection).
+        check("new1-oversized-int-literal-cannot-eval",
+              _guard(lambda: resolve_store(n1_root).status) == CANNOT_EVALUATE)
 
         # NEW-3: an OSError from _read_contained (e.g. a post-open fstat EIO) maps to a fail-closed StoreError
         # -> CANNOT-EVALUATE, never an uncaught OSError out of resolve_store.
@@ -1848,7 +1869,11 @@ def self_test():
             raise OSError(5, "injected EIO on read")
         _journal._read_contained = _rc_oserror
         try:
-            check("new3-read-oserror-cannot-eval", resolve_store(n3_root).status == CANNOT_EVALUATE)
+            # MINOR-3: _guard the probe so a reverted fix (resolve_store catching only JournalError, letting
+            # the injected OSError escape) is a NAMED counted failure, not an uncaught traceback aborting the
+            # suite. Still passes only on CANNOT-EVALUATE (no weakened detection).
+            check("new3-read-oserror-cannot-eval",
+                  _guard(lambda: resolve_store(n3_root).status) == CANNOT_EVALUATE)
         finally:
             _journal._read_contained = _real_rc
 
@@ -1879,6 +1904,45 @@ def self_test():
             check("new5-toctou-oversized-read-cannot-eval", resolve_store(n5_root).status == CANNOT_EVALUATE)
         finally:
             _journal._lstat_contained = _real_lstat
+
+        # ---- MINOR-1: journal-reader memory bound (fail pre-fix, pass post-fix) ------------------------
+        # The journal CONTROL readers (read_frames, read_lock_owner) cap how much they read, so a pre-planted
+        # oversize journal file is refused fail-closed rather than slurped whole into memory. Discriminated
+        # with the cap monkeypatched SMALL so the vector stays fast and deterministic: a WELL-FORMED control
+        # file LARGER than the (patched) cap must be refused (JournalError) at the size gate, whereas with the
+        # cap logic reverted each reader would read and parse it normally (no refusal). Restored in a finally.
+        _m1_frames = base / "minor1-frames"; _m1_frames.mkdir()
+        (_m1_frames / "frames.log").write_bytes(_journal._frame(_journal.F_INTENT, b'{"txn":"t","ops":[]}'))
+        _m1_lock = base / "minor1-lock"; _m1_lock.mkdir()
+        (_m1_lock / "lock").write_bytes(b'{"uid": 0, "pid": 1, "pid-start": "", "session": "s", "utc": "u"}')
+        _real_jcap = _journal._MAX_JOURNAL_READ_BYTES
+        _journal._MAX_JOURNAL_READ_BYTES = 8        # below either well-formed control file; above 0
+        try:
+            check("minor1-read-frames-oversize-refused",
+                  _guard(lambda: (_journal.read_frames(_m1_frames), "read")[1]) == "RAISED")
+            check("minor1-read-lock-owner-oversize-refused",
+                  _guard(lambda: (_journal.read_lock_owner(_m1_lock), "read")[1]) == "RAISED")
+        finally:
+            _journal._MAX_JOURNAL_READ_BYTES = _real_jcap
+
+        # ---- MINOR-2: symlink-race containment (fail pre-fix, pass post-fix) ---------------------------
+        # publish and _truncate_log open frames.log CONTAINED (O_NOFOLLOW + dir-fd relative), so a symlinked
+        # frames.log cannot redirect the append/ftruncate onto a victim file. Pre-fix each followed a
+        # re-resolved absolute path and would mutate the victim (publish appends, _truncate_log truncates it
+        # to 0); post-fix each fails closed (JournalError) and leaves the victim byte-for-byte intact. Both a
+        # refusal check and a victim-intact check discriminate.
+        _victim = base / "minor2-victim"
+        _victim.write_bytes(b"VICTIM-INTACT")
+        _m2_pub = base / "minor2-publish"; _m2_pub.mkdir()
+        os.symlink(str(_victim), str(_m2_pub / "frames.log"))
+        check("minor2-publish-symlink-refused",
+              _guard(lambda: _journal.publish(_m2_pub, _journal.F_INTENT, {"txn": "t", "ops": []})) == "RAISED")
+        check("minor2-publish-victim-intact", _victim.read_bytes() == b"VICTIM-INTACT")
+        _m2_tr = base / "minor2-truncate"; _m2_tr.mkdir()
+        os.symlink(str(_victim), str(_m2_tr / "frames.log"))
+        check("minor2-truncate-symlink-refused",
+              _guard(lambda: _journal._truncate_log(_m2_tr, 0)) == "RAISED")
+        check("minor2-truncate-victim-intact", _victim.read_bytes() == b"VICTIM-INTACT")
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
