@@ -502,11 +502,29 @@ def _load_inputs(resolution, product_root):
         return None, None, None, frozenset(), "cannot open product root {} ({})".format(product_root, exc)
     try:
         try:
-            # A non-regular CHANGELOG.md (a FIFO, device, socket, or directory) is refused BEFORE any open:
-            # opening a FIFO O_RDONLY with no writer blocks the process forever, so the regular-file gate is
-            # checked on the lstat result rather than after _read_contained opens the target, exactly as
-            # _opf_store._read_toml_contained guards the ledger reads (check-fails-closed-on-unreadable, SECA
-            # resource-bounds; an unbounded block is worse than a crash for a CI gate).
+            # A non-regular CHANGELOG.md (a FIFO, device, socket, or directory) is refused BEFORE any open,
+            # and an OVERSIZE one is refused BEFORE it is read into memory. Both gates read the lstat result:
+            # opening a FIFO O_RDONLY with no writer blocks the process forever, and reading a
+            # multi-hundred-MiB file allocates it three times over (the raw bytes, the decoded str, and the
+            # scanner's pre-parse re-encode) before the scanner's own MAX_CHANGELOG_BYTES check can reject it,
+            # turning a bounded fail-closed verdict into a MemoryError / OOM kill. So the regular-file gate
+            # and the size ceiling are BOTH checked on the lstat result rather than after _read_contained
+            # opens the target, exactly as _opf_store._read_toml_contained's pre-open st.st_size fast-reject
+            # guards the ledger reads (check-fails-closed-on-unreadable, SECA resource-bounds; an unbounded
+            # block or an OOM is worse than a crash for a CI gate). The ceiling is the scanner's own named
+            # policy value (_commonmark_headings.MAX_CHANGELOG_BYTES), so this pre-open check is the cheap
+            # fast-path of the SAME bound the scanner re-checks on the decoded bytes as depth, never a second
+            # divergent limit.
+            #
+            # Depth behind this fast-path: _journal._read_contained re-opens O_NONBLOCK and re-confirms
+            # S_ISREG on the fd, so a non-regular file swapped in AFTER this lstat neither hangs nor slips
+            # through; and the scanner re-applies MAX_CHANGELOG_BYTES to the decoded bytes. Residual
+            # (disclose-guard-residuals): the intermediate _read_contained read is itself uncapped
+            # (_read_fd cap=None for product-file readers), so a writer racing to GROW the file past
+            # st.st_size between this lstat and that open is bounded only by the post-decode scanner check,
+            # not before the read. A hard incremental read-cap belongs in _journal._read_contained /
+            # _read_fd (which already supports `cap` for the journal readers); this module reuses the
+            # contained reader rather than duplicating it, so closing that window is routed to _journal.
             st = _journal._lstat_contained(product_fd, CHANGELOG_REL)
             if st is None:
                 return None, None, None, frozenset(), ("{} is absent from the product root (a required "
@@ -514,6 +532,11 @@ def _load_inputs(resolution, product_root):
             if not stat.S_ISREG(st.st_mode):
                 return None, None, None, frozenset(), ("{} is present but is not a regular file (an exotic "
                                                         "entry; fail-closed, never opened)".format(CHANGELOG_REL))
+            if st.st_size > _commonmark_headings.MAX_CHANGELOG_BYTES:
+                return None, None, None, frozenset(), (
+                    "{} is {} bytes, over the {}-byte changelog ceiling; refused before the read "
+                    "(fail-closed, SECA resource-bounds)".format(
+                        CHANGELOG_REL, st.st_size, _commonmark_headings.MAX_CHANGELOG_BYTES))
             raw, _ = _journal._read_contained(product_fd, CHANGELOG_REL)
         except (_journal.JournalError, OSError) as exc:
             return None, None, None, frozenset(), "cannot read {} ({})".format(CHANGELOG_REL, exc)
@@ -588,7 +611,8 @@ def self_test():
     registered / unregistered x-vendor cases, unreadable / unparseable / inconsistent input failing closed,
     and end-to-end store resolution (NOT-APPLICABLE, cannot-evaluate, PASS, and FINDING) including a
     registered-vendor pass and an injected-OSError fail-closed path. Fail-closed store-input hardening: a
-    FIFO CHANGELOG.md refused as non-regular (never blocking), a non-UTF-8 CHANGELOG.md, an un-encodable
+    FIFO CHANGELOG.md refused as non-regular (never blocking), an oversized CHANGELOG.md refused before the
+    read (the pre-open st.st_size ceiling), a non-UTF-8 CHANGELOG.md, an un-encodable
     (lone-surrogate) changelog, an unresolvable --root, run()'s exit-code mapping, and the two unreleased
     heading vectors (a heading with no summary row, and a misplaced not-first entry)."""
     import tempfile
@@ -1023,6 +1047,21 @@ def self_test():
             _signal.signal(_signal.SIGALRM, _old_alarm)
         check("f1-fifo-changelog-not-regular-fail-closed",
               r_fifo.status == CANNOT_EVALUATE and any("not a regular file" in f for f in r_fifo.findings))
+
+        # F-A (RANGE-BOUNDS, hostile store-file on disk): an OVERSIZE CHANGELOG.md is refused by
+        # _load_inputs on the pre-open st.st_size ceiling BEFORE the whole file is read into memory,
+        # mirroring _opf_store's store-read-cap discipline. Pre-fix _load_inputs read it unbounded and only
+        # the scanner rejected it, after three input-sized allocations ("heading scan failed (oversized)");
+        # post-fix the finding names the pre-read ceiling refusal. Both verdicts are CANNOT-EVALUATE, so the
+        # discriminator is the "before the read" message that only the new pre-open guard emits (the scanner
+        # path never says "before the read"). Sized just over the ceiling (ceiling + slack), the same shape
+        # _opf_store's oversize vectors use, so the write is cheap and no OOM is needed to exercise it.
+        oversize_cl = (cl_disk + "\n<!-- "
+                       + ("x" * (_commonmark_headings.MAX_CHANGELOG_BYTES + 64)) + " -->\n")
+        r_oversize = evaluate(build_store(version_text, worklog_text, oversize_cl))
+        check("disk-oversize-changelog-refused-before-read",
+              r_oversize.status == CANNOT_EVALUATE
+              and any("before the read" in f for f in r_oversize.findings))
 
         # F5: a manifest that omits the required [types] section must fail the FULL manifest validator and
         # come back CANNOT-EVALUATE. Pre-fix only [vendors] was checked, so this clean-passed.
