@@ -1077,7 +1077,8 @@ def check_no_deletion(old_ids, new_ids):
     old = _wl_id_set(old_ids, "check_no_deletion old id-collection", findings)
     for n in sorted(old):
         if n not in now:
-            findings.append("worklog id WL-{} vanished: no worklog entry is ever deleted (spec 6.2/13)".format(n))
+            findings.append("worklog id WL-{} vanished: no worklog entry is ever deleted (spec 6.2/13)".format(
+                _safe_str(n)))
     return findings
 
 
@@ -1090,13 +1091,33 @@ def _count_expected_absent(expected_ids, present, where, findings):
     uses answers the interval question in O(present) (RANGE-BOUNDS; SECA-resource-bounds;
     guard-input-soundness). Since `present` holds distinct WL-numbers, the count of present ids that fall
     in `expected_ids` equals |present intersect expected|, so len(expected) minus that count is the number
-    of expected ids covered by NEITHER location. A control that cannot answer (not sized, or not
-    membership-testable, e.g. an unbounded generator) is a fail-closed finding, never a silent zero."""
+    of expected ids covered by NEITHER location. The authoritative id space MUST be a `range` 1..high-water
+    (the documented contract): a range is sized and membership-tested WITHOUT materializing its members,
+    and its members ARE the WL-numbers, so `present` (already-normalized WL-numbers) tests against it
+    directly. A NON-range collection is a fail-closed finding, never membership-tested raw: its elements
+    are neither deduplicated nor normalized here, so a duplicate would inflate len() and an un-normalized
+    element (a bare "WL-1") would never match a normalized present id, each reporting a FALSE loss
+    (over-fire). A range too large to size (>= 2**63 members, e.g. a spoofed 19-digit high-water id
+    WL-9223372036854775808, whose len() raises OverflowError) is likewise a fail-closed finding. A control
+    that cannot answer is a fail-closed finding, never a silent zero."""
+    if not isinstance(expected_ids, range):
+        # The id space is a RANGE by contract. A non-range collection (a list/set/tuple/generator) cannot
+        # be both bounded (never materialized, RANGE-BOUNDS) AND element-normalized here, so its raw
+        # elements would size and membership-test WRONG and report a FALSE loss; fail closed to a
+        # cannot-evaluate finding rather than over-fire (guard-input-soundness; the fail direction stays
+        # closed, never a false pass).
+        findings.append("{}: must be a range id space (a range 1..high-water), not {}".format(
+            where, type(expected_ids).__name__))
+        return 0
     try:
         expected_n = len(expected_ids)
-    except TypeError:
-        findings.append("{}: must be a SIZED id space (a range 1..high-water), not {}".format(
-            where, type(expected_ids).__name__))
+    except (TypeError, OverflowError):
+        # OverflowError: a range with >= 2**63 members cannot convert its length to a C ssize_t (a spoofed
+        # 19-digit high-water id, WL-9223372036854775808). TypeError is defence-in-depth (the range guard
+        # above already excludes an unsized space). Either routes to the same fail-closed finding rather
+        # than an uncontrolled crash (SECA-resource-bounds; guard-input-soundness).
+        findings.append("{}: id space is too large to size (a range with >= 2**63 members; a spoofed "
+                        "high-water id); cannot evaluate the partition (spec 12/13)".format(where))
         return 0
     covered = 0
     for n in present:
@@ -1124,7 +1145,7 @@ def check_ids_partition(active_ids, archive_ids, expected_ids=None):
     archive = _wl_id_set(archive_ids, "check_ids_partition archive id-collection", findings)
     for n in sorted(active & archive):
         findings.append("worklog id WL-{} is in BOTH the active worklog and the archive; rotation is a "
-                        "move, an id lives in exactly one location (spec 12)".format(n))
+                        "move, an id lives in exactly one location (spec 12)".format(_safe_str(n)))
     if expected_ids is not None:
         # Detect a LOST id (present in NEITHER location) WITHOUT materializing a set sized by the declared
         # high-water: an `expected_ids` range spanning a spoofed large id would OOM _wl_id_set here, and a
@@ -1172,7 +1193,7 @@ def check_rotation_only_released(rotated_ids, version_data):
                 _safe_display(rid)))
         elif n > end:
             local.append("worklog id WL-{} is in the unreleased tail (> released end WL-{}) and must "
-                         "never rotate (spec 12)".format(n, end))
+                         "never rotate (spec 12)".format(_safe_str(n), end))
     findings.extend(sorted(local))
     return findings
 
@@ -1643,6 +1664,32 @@ def self_test():
     gap_cut = release_cut({"release": []}, wl_gap_tail, "1.0.0", "2026-06-15T00:00:00Z")
     check("cut-interior-gap-tail-invalid", gap_cut.status == INVALID)
     check("cut-interior-gap-tail-named", any("not contiguous" in f for f in gap_cut.findings))
+
+    # --- retro hardening (opf-hardening branch): three whole-file adversarial-QA findings ------------
+    # NF-1 (fail-closed soundness): _count_expected_absent's len(expected_ids) raises OverflowError, not
+    # TypeError, for a range with >= 2**63 members (a spoofed 19-digit high-water id). Before the fix
+    # check_ids_partition crashed uncontrolled here; now it fails closed to a cannot-evaluate finding and
+    # reports NO false loss.
+    nf1 = check_ids_partition([1], [], expected_ids=range(1, 2**63 + 2))
+    check("nf1-oversized-range-len-failclosed", bool(nf1) and not any("NEITHER" in f for f in nf1))
+    # NF-2 (oversized-int class closure): three WELL-FORMED-branch findings format an ACCEPTED WL-number
+    # via "WL-{}".format(n); an oversized non-decimal int (a TOML hex literal passing _wl_id_set's n >= 1)
+    # made str(n) raise ValueError uncaught. Rendered through _safe_str they fail closed instead. `big`
+    # trips CPython's base-10 integer-string-conversion limit (> 4300 digits).
+    big = int("f" * 4000, 16)
+    check("nf2-partition-both-location-oversized-safe",
+          any("oversized-int" in f for f in check_ids_partition([big], [big])))
+    check("nf2-no-deletion-vanished-oversized-safe",
+          any("oversized-int" in f for f in check_no_deletion([big], [])))
+    check("nf2-rotation-tail-oversized-safe",
+          any("oversized-int" in f for f in check_rotation_only_released([big], frozen_ver)))
+    # NF-4 (over-fire regression): _count_expected_absent must not membership-test RAW expected-id
+    # elements. A non-range expected_ids (a duplicate list, or an un-normalized "WL-1") reported a FALSE
+    # loss before the fix; now it fails closed to a cannot-evaluate finding and reports NO loss.
+    nf4_dup = check_ids_partition([1, 2], [], expected_ids=[1, 1, 2])
+    check("nf4-duplicate-expected-no-false-loss", not any("NEITHER" in f for f in nf4_dup))
+    nf4_norm = check_ids_partition([1], [], expected_ids=["WL-1"])
+    check("nf4-unnormalized-expected-no-false-loss", not any("NEITHER" in f for f in nf4_norm))
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
