@@ -181,6 +181,11 @@ _RESIDUALS = (
     "The active import run's interior while import_status == 'partial' (spec 14.2): its stray bytes are "
     "surfaced to the partial-import triage set rather than graded, since a migration in progress "
     "legitimately holds not-yet-reconciled paths; at steady state every such byte is graded.",
+    "Per-record rotation period-correspondence (spec 12): a non-worklog archived record carries no "
+    "worklog-span or release field in its envelope, so rotation is bound per BUCKET (the bucket carries a "
+    "released worklog span) rather than per record to its own resolution period; this is the maximal "
+    "binding the data model supports. No broken store hides behind it: a bucket with moved records but no "
+    "span is a finding, and every archived worklog span must fall within a released range.",
     "Immutable-record body preservation across time (spec 8.5) when the prior committed snapshot carries "
     "no body digest for a created-terminal record: it is a named CANNOT-EVALUATE (never a silent VALID on "
     "a rewritten immutable body), verified only when the prior supplies the digest (codex-3).",
@@ -887,7 +892,17 @@ def _has_active_import_run(root_fd, machine_rel, rep):
     subdirs, _files = _list_dir(root_fd, imports_rel, rep)
     if not subdirs:
         return False
-    return any(_opf_import._RUN_ID_RE.match(d) for d in subdirs)
+    for d in subdirs:
+        if not _opf_import._RUN_ID_RE.match(d):
+            continue
+        # round-14 C5: a partial status is substantiated only by a WELL-FORMED run, not a bare
+        # run-id-named (possibly empty) directory. Require the staged plan.toml (stage_import always writes
+        # it) to be present, so a fake or empty run dir cannot license the store-wide triage posture that
+        # suppresses stray grading.
+        _rsubs, rfiles = _list_dir(root_fd, _rel(imports_rel, d), rep)
+        if rfiles is not None and "plan.toml" in rfiles:
+            return True
+    return False
 
 
 def _archive_unmanaged(rep, partial_active, path):
@@ -1357,14 +1372,31 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
     views = manifest_data.get("views") if isinstance(manifest_data, dict) else None
     if isinstance(views, dict):
         for name in views:
-            if isinstance(name, str):
-                scope, dest = _opf_views._spec_destination(name)
-                if scope == "store":
-                    view_targets.add(dest)
+            if not isinstance(name, str):
+                continue
+            try:
+                _opf_views._resolve_view(name)   # a RECOGNIZED view name (pure name check, no I/O)
+            except _opf_views.ViewsError:
+                # round-14 C3: an UNRECOGNIZED view name marks NO managed target, so a crafted manifest view
+                # name cannot turn an arbitrary store path into a "managed" view target and defeat
+                # C-CONTAINMENT; the rogue path is then graded as a stray by the walk, keeping containment
+                # self-sound rather than reliant on the sibling C-VIEW-DRIFT cannot-evaluate.
+                continue
+            scope, dest = _opf_views._spec_destination(name)
+            if scope == "store" and _is_contained_relpath(dest):
+                view_targets.add(dest)
     unmanaged = []
     um = manifest_data.get("unmanaged") if isinstance(manifest_data, dict) else None
     if isinstance(um, dict) and isinstance(um.get("paths"), list):
-        unmanaged = [p for p in um["paths"] if isinstance(p, str) and _is_contained_relpath(p)]
+        for p in um["paths"]:
+            if isinstance(p, str) and _is_contained_relpath(p):
+                unmanaged.append(p)
+            else:
+                # guard-input-soundness (round-14 C4): a malformed [unmanaged] entry (non-string, or a
+                # non-contained / escaping path) is a named CANNOT-EVALUATE, not a silent drop; a malformed
+                # control input is surfaced, never quietly removed.
+                rep.cant("C-CONTAINMENT: [unmanaged] path entry {} is not a contained store-relative string "
+                         "(spec 14.2); the unmanaged declaration cannot be evaluated".format(_safe_display(p)))
     ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, WORKLOG_NAME, LEASE_NAME})
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
     imports_root = _rel(mrel, _opf_import.IMPORTS_DIRNAME)
@@ -1414,14 +1446,17 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
     # Merely lying UNDER the machine dir is otherwise fine (codex-7: a legacy file, or a legacy directory
     # outside every graded container, that names no managed slot is VALID; a file contains nothing). Only a
     # declaration that survives covers a subtree in the walk, so a REJECTED declaration never launders it.
-    # Per-record type directories are reserved: a non-ledger type's dir holds its <id>.toml managed
-    # leaves, and a LEDGER type's dir (e.g. worklog/) must NEVER exist (its home is <type>.toml), so an
-    # unmanaged declaration of or within either is a collision (gemini round-11: a rogue worklog/WL-1.toml
-    # under an [unmanaged] worklog dir must not launder).
-    type_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types)) \
-        if layout == "per-record" else ()
+    # Type directories are reserved in EVERY layout: in per-record a non-ledger type's dir holds its
+    # <id>.toml managed leaves; a LEDGER type's dir (e.g. worklog/) must NEVER exist (its home is
+    # <type>.toml); and in INLINE layout NO <type>/ dir is legal (records live in <type>.index.toml). So an
+    # unmanaged declaration of, or within, any <type>/ dir is a collision in every layout (round-11
+    # per-record worklog/; round-13 the inline analog). A ledger type's INDEX file (<type>.index.toml) is
+    # likewise a never-legal slot and is reserved so it cannot be declared unmanaged to shield a rogue file.
+    type_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types))
+    ledger_index_files = tuple(_rel(mrel, t + INDEX_SUFFIX) for t in sorted(enabled_types)
+                               if t in _LEDGER_TYPES)
     graded_containers = (archive_root, imports_root) + type_body_dirs
-    managed_dir_prefixes = (mrel, archive_root, imports_root) + type_body_dirs
+    managed_dir_prefixes = (mrel, archive_root, imports_root) + type_body_dirs + ledger_index_files
     valid_unmanaged = []
     for u in unmanaged:
         if (managed_leaf(u)
@@ -1434,6 +1469,19 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
             valid_unmanaged.append(u)
 
     unmanaged_files = []
+
+    def managed_dir(full):
+        # A subdir that is a legitimate managed namespace to RECURSE rather than flag: the machine-store
+        # root, the imports root and its run interior (graded/triaged per F3), a per-record type-body dir,
+        # or an ancestor of a store-scope view target. (archive_root and valid_unmanaged subtrees are
+        # handled by the caller's skip.) Anything else under the store is an UNREGISTERED directory, graded
+        # as a stray even when empty (round-14: the walk previously graded files only, so an empty rogue
+        # directory, or a tree of only empty dirs, escaped grading entirely).
+        if full == mrel or _under_any(full, (imports_root,)):
+            return True
+        if layout == "per-record" and full in type_body_dirs:
+            return True
+        return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
 
     def walk(reldir, depth):
         if depth > _CONTAINMENT_MAX_DEPTH:
@@ -1454,6 +1502,12 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
             full = reldir + "/" + d
             if _under_any(full, valid_unmanaged) or full == archive_root:
                 continue     # a valid declared-unmanaged subtree is never read; the archive is C-ARCHIVE-ENUM's
+            if not managed_dir(full):
+                # An unregistered directory is itself a stray path (round-14): grade the whole subtree as
+                # one unregistered entry and do not recurse. Flagging each nested file would be redundant,
+                # and an EMPTY rogue directory has no file to flag at all.
+                unmanaged_files.append(full)
+                continue
             # The imports/<run-id> interior is NOT blanket-skipped (F3): at steady state a leftover run or
             # any stray bytes under it is an unregistered path, and at a substantiated partial the active
             # run interior goes to triage. Walking it grades every file there.
@@ -2595,6 +2649,61 @@ def self_test():
         check("history-illegal-for-all-named",
               _iafr is not None and any("C-HISTORY-RESURRECTION" in f and "illegal for every actor" in f
                                         for f in _iafr.findings))
+        # round-14 C1: INLINE layout reserves <type>/ dirs too - a rogue <type>/ body dir declared
+        # [unmanaged] must not launder (the inline analog of the per-record worklog-dir case).
+        _inl = clean_machine()
+        _inl["manifest.toml"] = base_manifest()
+        _inl["manifest.toml"]["unmanaged"] = {"paths": [".working/toml/worklog"]}
+        _inlr = run(_inl, working={"toml/worklog/WL-1.toml": "x\n"})
+        check("unmanaged-inline-type-dir-invalid", _inlr is not None and _inlr.status == INVALID)
+        check("unmanaged-inline-type-dir-collision",
+              _inlr is not None and any("collides" in f for f in _inlr.findings))
+        # round-14 (ledger-index): a rogue <ledgertype>.index.toml declared [unmanaged] must not be shielded;
+        # the ledger index file is a never-legal reserved slot.
+        _lix = clean_machine()
+        _lix["manifest.toml"] = base_manifest()
+        _lix["manifest.toml"]["unmanaged"] = {"paths": [".working/toml/worklog.index.toml"]}
+        _lixr = run(_lix, working={"toml/worklog.index.toml": "x\n"})
+        check("unmanaged-ledger-index-invalid", _lixr is not None and _lixr.status == INVALID)
+        check("unmanaged-ledger-index-collision",
+              _lixr is not None and any("collides" in f for f in _lixr.findings))
+        # round-14 C4: a malformed [unmanaged] entry (non-contained / escaping path) is a named
+        # CANNOT-EVALUATE, not a silent drop.
+        _mal = clean_machine()
+        _mal["manifest.toml"] = base_manifest()
+        _mal["manifest.toml"]["unmanaged"] = {"paths": ["/etc/passwd"]}
+        _malr = run(_mal)
+        check("unmanaged-malformed-path-cannot-eval", _malr is not None and _malr.status == CANNOT_EVALUATE)
+        check("unmanaged-malformed-path-named",
+              _malr is not None and any("not a contained store-relative string" in m
+                                        for m in _malr.cannot_evaluate))
+        # round-14 empty-dir: an unregistered EMPTY directory under the machine store (no files at all) must
+        # be graded as a stray, not silently laundered (the walk previously graded files only).
+        _ed_root = build(clean_machine())
+        os.makedirs(str(_ed_root / ".working" / "toml" / "rogue_empty_dir"), exist_ok=False)
+        _edr = validate_store(resolve_store(_ed_root), observations=clean_prior())
+        check("empty-rogue-dir-invalid", _edr.status == INVALID)
+        check("empty-rogue-dir-named",
+              any("rogue_empty_dir" in f and "unregistered" in f for f in _edr.findings))
+        # round-14 C3: a crafted manifest view NAME (unrecognized) must not turn an arbitrary store path
+        # into a managed view target; the rogue path is graded by C-CONTAINMENT (self-sound), not laundered.
+        _c3 = clean_machine()
+        _c3["manifest.toml"] = base_manifest(views={"x/y/EVIL.toml": {
+            "kind": "deterministic", "sources": ["worklog"], "target": ".working/x/y/EVIL.toml"}})
+        _c3r = run(_c3, working={"x/y/EVIL.toml": "x\n"})
+        check("c3-crafted-view-name-graded",
+              _c3r is not None and any("C-CONTAINMENT" in f and "unregistered" in f and ".working/x" in f
+                                       for f in _c3r.findings))
+        # round-14 C5: a partial import substantiated only by a WELL-FORMED run (carrying plan.toml). A
+        # run-id-named dir WITHOUT plan.toml does not substantiate, so a stray is graded, not triaged.
+        _c5 = clean_machine()
+        _c5["manifest.toml"] = base_manifest()
+        _c5["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _c5["imports/imp-20260601T000000Z-0123456789abcdef/junk.txt"] = "x"
+        _c5r = run(_c5, working=dict([("stray.md", "x")]))
+        check("c5-partial-no-plan-not-substantiated",
+              _c5r is not None and _c5r.status == INVALID
+              and any("no active" in f and "partial" in f for f in _c5r.findings))
         # digest byte flipped -> INVALID (proves the digest still bites over the x-vendor-date body)
         prm = copy.deepcopy(pr_machine)
         prm["finding.index.toml"]["record"][0]["digest"] = "sha256:" + "b" * 64
@@ -3214,9 +3323,12 @@ def self_test():
                   fr is not None and fr.status == CANNOT_EVALUATE
                   and any("regular file" in m for m in fr.cannot_evaluate))
 
-        # --- B6: a pathologically deep directory chain fails closed, never a RecursionError -----------
+        # --- B6: a pathologically deep directory chain UNDER A RECURSED namespace (the imports interior)
+        # fails closed to CANNOT-EVALUATE, never a RecursionError. A deep chain OUTSIDE a managed namespace
+        # is now flagged as an unregistered directory at its first level (round-14), so the ceiling is
+        # exercised here via the imports interior, which the walk does descend. -----------
         deep_root = build(clean_machine(), clean_product())
-        deep = deep_root / ".working" / "toml" / "deepdir"
+        deep = deep_root / ".working" / "toml" / "imports" / "imp-20260601T000000Z-0123456789abcdef"
         for _ in range(_CONTAINMENT_MAX_DEPTH + 16):
             deep = deep / "d"
         deep.mkdir(parents=True)
