@@ -77,9 +77,21 @@ _READ_CHUNK = 1 << 20
 # post-read re-check). It bounds ONLY the small journal control files: frames.log holds a cutover's INTENT
 # op-list METADATA (the file payloads live under preimages/, never here) and the lock holds a small owner
 # record, so 16 MiB is generous headroom over any real cutover's framed op list while decisively refusing an
-# oversize plant. It is deliberately NOT applied to _read_fd's other callers (_read_at, _read_contained,
-# _verify_fd_prestate), which read arbitrary product-file bytes during a cutover and must stay uncapped.
+# oversize plant. It is NOT applied to _read_fd's remaining uncapped caller, _verify_fd_prestate, which
+# re-reads a write op's recorded-size prestate through an already-open apply-time fd.
 _MAX_JOURNAL_READ_BYTES = 16 << 20
+# The contained PRODUCT-FILE readers (_read_at, _read_contained) carry their own hard incremental ceiling.
+# A caller's pre-open st.st_size fast-reject (e.g. _opf_store._read_toml_contained's store cap, or
+# _opf_changelog._load_inputs's changelog ceiling) can be DEFEATED by a writer GROWING the file past
+# st.st_size between the caller's lstat and this open, so the read itself is bounded here: a file grown or
+# swapped past its pre-open size is refused fail-closed AT the ceiling rather than slurped whole into memory
+# (SECA resource-bounds; the racing-grow read residual those callers disclosed and routed to these readers).
+# 16 MiB matches the journal-control ceiling and is generous over any legitimate store control file
+# (manifests, the changelog, and pointers are all well under 1 MiB), so a normal-size product file reads
+# unchanged on the happy path. A caller keeping a TIGHTER cap (the 1 MiB store cap, the changelog ceiling)
+# still refuses earlier on its own post-read re-check, so this is a broad memory-safety net BENEATH those,
+# never a double-cap that changes their verdict for a file between the tighter cap and this ceiling.
+_MAX_PRODUCT_READ_BYTES = 16 << 20
 
 
 class JournalError(Exception):
@@ -178,14 +190,14 @@ def _read_fd(fd, cap=None):
             break
         total += len(block)
         if cap is not None and total > cap:
-            # MINOR-1: a capped journal-control reader refuses an oversize file AT the cap rather than
-            # reading it whole into memory. Bounding INCREMENTALLY (never accumulating more than the cap
-            # plus one chunk) is the post-read re-check the store cap does with len(data), made memory-safe
-            # here so a file grown or swapped past its pre-open st.st_size is still refused fail-closed
-            # (SECA resource-bounds). cap is None for the uncapped product-file readers (_read_at,
-            # _read_contained, _verify_fd_prestate), so their behaviour is unchanged.
-            raise JournalError("contained journal file exceeds the {}-byte journal-read cap "
-                               "(fail-closed)".format(cap))
+            # A capped reader refuses an oversize file AT the cap rather than reading it whole into memory.
+            # Bounding INCREMENTALLY (never accumulating more than the cap plus one chunk) is the post-read
+            # re-check a caller does with len(data), made memory-safe here so a file grown or swapped past
+            # its pre-open st.st_size is still refused fail-closed (SECA resource-bounds). The journal
+            # CONTROL readers pass _MAX_JOURNAL_READ_BYTES; the contained PRODUCT-FILE readers (_read_at,
+            # _read_contained) pass _MAX_PRODUCT_READ_BYTES; cap is None only for _verify_fd_prestate, whose
+            # apply-time re-read stays uncapped, so its behaviour is unchanged.
+            raise JournalError("contained file exceeds the {}-byte read cap (fail-closed)".format(cap))
         chunks.append(block)
     return b"".join(chunks)
 
@@ -235,7 +247,7 @@ def _read_at(pfd, name, relpath):
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise JournalError("contained path {!r} is not a regular file".format(relpath))
-        return _read_fd(fd), st
+        return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
     finally:
         os.close(fd)
 
@@ -261,7 +273,7 @@ def _read_contained(root_fd, relpath):
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise JournalError("contained path {!r} is not a regular file".format(relpath))
-        return _read_fd(fd), st
+        return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
     finally:
         os.close(fd)
         os.close(pfd)

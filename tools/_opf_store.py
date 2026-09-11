@@ -504,7 +504,17 @@ def resolve_store(product_root):
     # A relative dir: target joined to a relative product root would otherwise be rejected downstream by
     # _open_dir_nofollow as not absolute, so a valid relative --root refused a valid companion store
     # (MAJOR 2).
-    product_root = Path(os.path.abspath(product_root))
+    try:
+        product_root = Path(os.path.abspath(product_root))
+    except OSError as exc:
+        # os.path.abspath anchors a RELATIVE product root to os.getcwd(); when the process cwd has been
+        # deleted or become unreadable, os.getcwd() raises OSError, which would otherwise ESCAPE this
+        # resolver uncaught (it contracts to never raise for an expected outcome, only return a Resolution).
+        # The abspath CHOICE is deliberate (it anchors a relative --root without following symlinks, MAJOR 2);
+        # this only closes its ambient-cwd crash residual by mapping an unreadable cwd to a fail-closed
+        # CANNOT-EVALUATE, exactly as every other unreadable input here is (check-fails-closed-on-unreadable).
+        return Resolution(CANNOT_EVALUATE,
+                          "cannot resolve product root to an absolute path (cwd unreadable?): {}".format(exc))
     if not _containment.probe():
         # A store read touches adopter-controlled paths; without the race-free primitive a read cannot be
         # done safely, so resolution fails closed rather than resolving over an unguarded name (spec 17).
@@ -1700,14 +1710,43 @@ def self_test():
         (rel_prod / POINTER_REL).write_text('[store]\ntarget = "dir:rel-companion"\n', encoding="utf-8")
         abs_res = resolve_store(rel_prod)
         check("relative-root-abs-baseline", abs_res.status == RESOLVED)
-        prev_cwd = os.getcwd()
+        # test-hermeticity: resolve the SAME cwd-relative product root WITHOUT os.chdir, which would mutate
+        # the ambient process cwd (a test leaves the host as it found it, and shared process state is exactly
+        # the kind of surrounding a test's verdict must not depend on or perturb). A CHILD process carries its
+        # cwd via subprocess cwd=base instead, resolves the relative name there, and prints its status and
+        # resolved store root for the parent to compare. This exercises os.path.abspath's cwd anchoring (the
+        # MAJOR 2 relative-root path) exactly as before, but with no mutation of this process's cwd.
+        import subprocess
+        import json
+        _child_src = (
+            "import sys, json\n"
+            "import _opf_store as S\n"
+            "r = S.resolve_store(sys.argv[1])\n"
+            "sys.stdout.write(json.dumps([r.status, None if r.store_root is None else str(r.store_root)]))\n")
+        _child_env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parent),
+                          PYTHONDONTWRITEBYTECODE="1")
+        _child = subprocess.run([sys.executable, "-c", _child_src, rel_prod.name],
+                                cwd=str(base), env=_child_env, capture_output=True, text=True)
+        _rel_status, _rel_store = (json.loads(_child.stdout)
+                                   if _child.returncode == 0 and _child.stdout else (None, None))
+        check("relative-root-resolves", _rel_status == RESOLVED)
+        check("relative-root-matches-abs",
+              _rel_store is not None and _rel_store == str(abs_res.store_root))
+
+        # ITEM C (ambient-cwd crash): a RELATIVE product root reaches os.path.abspath, whose os.getcwd()
+        # raises when the process cwd is deleted or unreadable. resolve_store must MAP that to
+        # CANNOT-EVALUATE (its no-raise contract), never let the OSError escape uncaught. Simulate the
+        # unreadable cwd by making os.getcwd raise; the pre-abspath exists()/is_dir() gates use os.stat(".")
+        # (which does NOT consult getcwd) so they still pass and the abspath path is reached. _guard'd so a
+        # reverted fix (the OSError escaping) is a NAMED counted failure, not a traceback that aborts the
+        # suite; still passes only on CANNOT-EVALUATE (no weakened detection). getcwd restored in finally.
+        _real_getcwd = os.getcwd
+        os.getcwd = lambda: (_ for _ in ()).throw(FileNotFoundError(2, "No such file or directory"))
         try:
-            os.chdir(str(base))
-            rel_res = resolve_store(Path(rel_prod.name))       # a cwd-relative product root
+            check("itemC-abspath-cwd-unreadable-cannot-eval",
+                  _guard(lambda: resolve_store(".").status) == CANNOT_EVALUATE)
         finally:
-            os.chdir(prev_cwd)
-        check("relative-root-resolves", rel_res.status == RESOLVED)
-        check("relative-root-matches-abs", rel_res.store_root == abs_res.store_root)
+            os.getcwd = _real_getcwd
         # ---- reconcile-draft fix vectors (fail pre-fix, pass post-fix) --------------------------------
         # M1: an oddly-named .working subdir (_check_rel refuses a backslash) -> CANNOT-EVALUATE, never an
         # uncaught JournalError out of resolve_store.
@@ -1924,6 +1963,32 @@ def self_test():
                   _guard(lambda: (_journal.read_lock_owner(_m1_lock), "read")[1]) == "RAISED")
         finally:
             _journal._MAX_JOURNAL_READ_BYTES = _real_jcap
+
+        # ---- ITEM A: product-file read ceiling (fail pre-fix, pass post-fix) ---------------------------
+        # _read_contained / _read_at carry a HARD INCREMENTAL ceiling so a product file GROWN or swapped past
+        # a caller's pre-open st.st_size (the store/changelog racing-grow residual) is refused fail-closed AT
+        # the ceiling rather than slurped whole into memory, while a normal-size file reads unchanged.
+        # Discriminated with the ceiling monkeypatched SMALL: a file LARGER than the (patched) ceiling must be
+        # refused (JournalError) by BOTH readers, whereas with the cap reverted (cap=None) each would read it
+        # whole (no refusal); an UNDER-ceiling file still reads through. Restored in a finally.
+        _pa_dir = base / "itemA-product"; _pa_dir.mkdir()
+        (_pa_dir / "big").write_bytes(b"x" * 4096)
+        (_pa_dir / "small").write_bytes(b"ok")
+        _pa_fd = os.open(str(_pa_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _pa_pfd = os.open(str(_pa_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _real_pcap = _journal._MAX_PRODUCT_READ_BYTES
+        _journal._MAX_PRODUCT_READ_BYTES = 8        # below the 4096-byte file; above the 2-byte file
+        try:
+            check("itemA-read-contained-oversize-refused",
+                  _guard(lambda: (_journal._read_contained(_pa_fd, "big"), "read")[1]) == "RAISED")
+            check("itemA-read-at-oversize-refused",
+                  _guard(lambda: (_journal._read_at(_pa_pfd, "big", "big"), "read")[1]) == "RAISED")
+            check("itemA-read-contained-under-ceiling-ok",
+                  _guard(lambda: _journal._read_contained(_pa_fd, "small")[0]) == b"ok")
+        finally:
+            _journal._MAX_PRODUCT_READ_BYTES = _real_pcap
+            os.close(_pa_fd)
+            os.close(_pa_pfd)
 
         # ---- MINOR-2: symlink-race containment (fail pre-fix, pass post-fix) ---------------------------
         # publish and _truncate_log open frames.log CONTAINED (O_NOFOLLOW + dir-fd relative), so a symlinked
