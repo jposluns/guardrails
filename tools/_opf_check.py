@@ -178,9 +178,10 @@ _RESIDUALS = (
     "Byte-level view drift for a per-record store that declares views (spec 5.8/10): U4's view planner "
     "does not yet support the per-record layout, so C-VIEW-DRIFT is a named CANNOT-EVALUATE there, never "
     "a silent pass.",
-    "The active import run's interior while import_status == 'partial' (spec 14.2): its stray bytes are "
-    "surfaced to the partial-import triage set rather than graded, since a migration in progress "
-    "legitimately holds not-yet-reconciled paths; at steady state every such byte is graded.",
+    "An unregistered path at the store location while import_status == 'partial' (spec 14.2): its stray "
+    "bytes are surfaced to the partial-import triage set rather than graded (store-wide, matching spec "
+    "14.2's 'at the store location'), since a migration in progress legitimately holds not-yet-reconciled "
+    "paths; at steady state every such byte is graded.",
     "Per-record rotation period-correspondence (spec 12): a non-worklog archived record carries no "
     "worklog-span or release field in its envelope, so rotation is bound per BUCKET (the bucket carries a "
     "released worklog span) rather than per record to its own resolution period; this is the maximal "
@@ -3267,6 +3268,16 @@ def self_test():
             resolve_store(build_relocated(clean_machine())),
             observations={"tracked": "tracked", "prior": clean_prior()["prior"]})
         check("sync-relocated-absent-cannot-eval", rla is not None and rla.status == CANNOT_EVALUATE)
+        # round-16 (F-5b / round-15 MINOR): the relocated-local-only COMMITTED-POINTER-REMOTE leg is
+        # unreachable via resolve_store (a remote pointer resolves to CANNOT-EVALUATE before validate_store
+        # sees it), so exercise it with a hand-set remote Target on an otherwise-resolved relocated store: a
+        # relocated store (sync_target="") whose committed pointer names a REMOTE is a C-SYNC-AGREE finding.
+        _rp_res = resolve_store(build_relocated(clean_machine()))
+        _rp_res.target = classify_target("github:org/repo")
+        _rpr = validate_store(_rp_res, observations={"tracked": "tracked", "actual_remote": "",
+                                                     "prior": clean_prior()["prior"]})
+        check("sync-relocated-remote-pointer-named",
+              _rpr is not None and any("committed pointer names a remote" in f for f in _rpr.findings))
 
         # --- M1: a malformed prior observation is CANNOT-EVALUATE (naming it malformed), not INVALID ---
         mp = copy.deepcopy(clean_prior())
