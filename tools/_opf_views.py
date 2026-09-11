@@ -703,7 +703,7 @@ def render_todo(src):
     _blocked_by, hidden = join_actionability(items, blocks)
     actionable = t_filter(items, "is_actionable", hidden=hidden)
     ordered = t_sort(actionable, keys=("status",))
-    lines = ["- {} ({}) {}".format(_md_text(r["id"]), _md_text(_state(r)), _md_text(r.get("title", "")))
+    lines = ["- {} ({}) {}".format(_md_text(r.get("id")), _md_text(_state(r)), _md_text(r.get("title", "")))
              for r in ordered]
     return _lines("TODO", lines)
 
@@ -716,10 +716,10 @@ def render_backlog(src):
     lines = []
     for r in t_sort(items):
         note = "actionable" if is_actionable(r, hidden) else (
-            "blocked by {}".format(", ".join(_md_text(b) for b in blocked_by[r["id"]])) if r.get("id") in hidden
+            "blocked by {}".format(", ".join(_md_text(b) for b in blocked_by[r.get("id")])) if r.get("id") in hidden
             else "not actionable ({})".format(_md_text(_state(r))))
         lines.append("- {} ({}) {} -- {}".format(
-            _md_text(r["id"]), _md_text(r.get("status", "")), _md_text(r.get("title", "")), note))
+            _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", "")), note))
     return _lines("BACKLOG", lines)
 
 
@@ -734,7 +734,7 @@ def render_pipeline(src):
     blocked_by, hidden = join_actionability(items, blocks)
 
     def _marker(r):
-        return " [blocked by {}]".format(", ".join(_md_text(b) for b in blocked_by[r["id"]])) \
+        return " [blocked by {}]".format(", ".join(_md_text(b) for b in blocked_by[r.get("id")])) \
             if r.get("id") in hidden else ""
 
     out = []
@@ -742,14 +742,14 @@ def render_pipeline(src):
                                 order=("open", "active", "done", "dropped")):
         out.append("## {}".format(_md_text(state)))
         for r in group:
-            out.append("- {} {}{}".format(_md_text(r["id"]), _md_text(r.get("title", "")), _marker(r)))
+            out.append("- {} {}{}".format(_md_text(r.get("id")), _md_text(r.get("title", "")), _marker(r)))
         out.append("")
     proposed = t_sort(t_filter(items, "is_proposed"))
     if proposed:
         out.append("## awaiting ratification")
         for r in proposed:
             out.append("- {} ({}) {}{}".format(
-                _md_text(r["id"]), _md_text(r.get("status", "")), _md_text(r.get("title", "")), _marker(r)))
+                _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", "")), _marker(r)))
         out.append("")
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
     return "# {}\n\n{}\n".format("PIPELINE", body)
@@ -762,7 +762,7 @@ def render_done(src):
     for r in t_sort(src["done"]):
         recs = _sorted_ids(_links_of(r, "receipt_of"))
         suffix = " (receipt_of {})".format(", ".join(_md_text(x) for x in recs)) if recs else ""
-        lines.append("- {} {}{}".format(_md_text(r["id"]), _md_text(r.get("title", "")), suffix))
+        lines.append("- {} {}{}".format(_md_text(r.get("id")), _md_text(r.get("title", "")), suffix))
     return _lines("DONE", lines)
 
 
@@ -773,7 +773,7 @@ def render_findings(src):
         out.append("## {}".format(_md_text(status)))
         for r in group:
             sev = " (severity: {})".format(_md_text(r["severity"])) if "severity" in r else ""
-            out.append("- {}{} {}".format(_md_text(r["id"]), sev, _md_text(r.get("title", ""))))
+            out.append("- {}{} {}".format(_md_text(r.get("id")), sev, _md_text(r.get("title", ""))))
         out.append("")
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
     return "# {}\n\n{}\n".format("FINDINGS", body)
@@ -800,26 +800,26 @@ def render_decisions(src):
     gone = t_sort(t_filter(decided, "id_in", ids=superseded))
     withdrawn = t_sort(t_filter(settled, "state_in", states=("withdrawn",)))
     out = ["## Pending decisions"]
-    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in open_pd] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in open_pd] or [_EMPTY])
     out += ["", "## Effective resolutions"]
     if effective:
         for r in effective:
-            sup = supersedes_map.get(r["id"]) or []
+            sup = supersedes_map.get(r.get("id")) or []
             tail = " (supersedes {})".format(", ".join(_md_text(s) for s in sup)) if sup else ""
-            out.append("- {} {}{}".format(_md_text(r["id"]), _md_text(r.get("title", "")), tail))
+            out.append("- {} {}{}".format(_md_text(r.get("id")), _md_text(r.get("title", "")), tail))
     else:
         out.append(_EMPTY)
     out += ["", "## Superseded resolutions"]
-    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in gone] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in gone] or [_EMPTY])
     if withdrawn:
         out += ["", "## Withdrawn decisions"]
-        out += ["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in withdrawn]
+        out += ["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in withdrawn]
     if proposed:
         out += ["", "## Awaiting ratification"]
         out += ["- {} ({}) {}".format(
-            _md_text(r["id"]), _md_text(r.get("status", "")), _md_text(r.get("title", ""))) for r in proposed]
+            _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", ""))) for r in proposed]
     out += ["", "## Autonomous decisions"]
-    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in t_sort(auto)] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in t_sort(auto)] or [_EMPTY])
     return "# {}\n\n{}\n".format("DECISIONS", "\n".join(out))
 
 
@@ -829,7 +829,7 @@ def render_blocks(src):
     for r in t_sort(src["block"]):
         scopes = ", ".join(_md_text(s) for s in (r.get("scopes", []) or []))
         lines.append("- {} ({}) scopes [{}] -- {}".format(
-            _md_text(r["id"]), _md_text(r.get("status", "")), scopes, _md_text(r.get("title", ""))))
+            _md_text(r.get("id")), _md_text(r.get("status", "")), scopes, _md_text(r.get("title", ""))))
     return _lines("BLOCKS", lines)
 
 
@@ -842,15 +842,15 @@ def render_handoff(src):
     handoffs = src["handoff"]
     out = ["## Current"]
     cur = t_sort(t_filter(handoffs, "state_in", states=("current",)))
-    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
     out += ["", "## Superseded"]
     old = t_sort(t_filter(t_filter(handoffs, "state_in", states=("superseded",)), "not_proposed"))
-    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in old] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in old] or [_EMPTY])
     proposed = t_sort(t_filter(handoffs, "is_proposed"))
     if proposed:
         out += ["", "## Awaiting ratification"]
         out += ["- {} ({}) {}".format(
-            _md_text(r["id"]), _md_text(r.get("status", "")), _md_text(r.get("title", ""))) for r in proposed]
+            _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", ""))) for r in proposed]
     return "# {}\n\n{}\n".format("HANDOFF", "\n".join(out))
 
 
@@ -858,7 +858,7 @@ def render_references(src):
     """REFERENCES: the captured references in ID order, each with its captured refs."""
     lines = []
     for r in t_sort(src["reference"]):
-        lines.append("- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))))
+        lines.append("- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))))
         for ref in r.get("refs", []) or []:
             if isinstance(ref, dict):
                 lines.append("  - {}: {}".format(
@@ -1012,8 +1012,9 @@ def _write_contained(root_fd, relpath, text, check):
     no-follow counterpart of the `_journal` contained READS the module already uses: a symlinked
     destination, a symlinked path component, or a non-regular destination is REFUSED (ViewsError, a
     cannot-evaluate), never followed, so a manifest or a planted link cannot redirect a write off-tree.
-    Fail-closed: any read/write error, or a parent directory that cannot be opened, is a ViewsError, never
-    a silent skip. Byte-stable: an unchanged target is not rewritten.
+    Fail-closed: any read/write error, or a parent directory that cannot be opened (including a symlinked or
+    non-directory intermediate path component, which _open_parent signals as a JournalError rather than an
+    OSError), is a ViewsError, never a silent skip. Byte-stable: an unchanged target is not rewritten.
 
     This is the single choke point EVERY view and deliverable write passes through, so the F1 write-gate
     refusal is enforced HERE at the write boundary, not only at the render() entry: while the U6 store-
@@ -1027,7 +1028,11 @@ def _write_contained(root_fd, relpath, text, check):
     new_bytes = text.encode("utf-8")
     try:
         pfd, name = _journal._open_parent(root_fd, relpath)
-    except OSError as exc:                                 # includes FileNotFoundError (a missing parent dir)
+    except (OSError, _journal.JournalError) as exc:
+        # OSError includes FileNotFoundError (a missing parent dir); JournalError is how _open_parent signals a
+        # symlinked or non-directory intermediate path component (it is NOT an OSError subclass, so the plain
+        # `except OSError` here let it escape uncaught -- render()'s handler does not catch it either, so it
+        # died as exit 1, colliding with EXIT_DRIFT). Both are fail-closed, mapped to a cannot-evaluate here.
         raise ViewsError("cannot open parent of {} for write ({})".format(relpath, exc))
     try:
         st = _journal._lstat_at(pfd, name)
@@ -1666,6 +1671,25 @@ def self_test():
         finally:
             os.close(_spfd)
         check("symlinked-parent-component-maps-to-viewserror", _sp_ok)
+        # QA-1 (write-path sibling of the read-path check above): _write_contained's _open_parent call maps a
+        # symlinked or non-directory intermediate component to a ViewsError, not an uncaught JournalError.
+        # _open_parent signals that case as JournalError (NOT an OSError subclass), so the pre-fix
+        # `except OSError` let it escape _write_contained; render()'s handler catches only
+        # ViewsError/RecursionError/ValueError, so it died as exit 1, colliding with EXIT_DRIFT. check=True so
+        # the write gate is not consulted; the failure is at the parent walk, before any write.
+        _wslp = base / "wsymparent"; _wslp.mkdir(); (_wslp / "real").mkdir()
+        (_wslp / "toml").symlink_to("real")
+        _wspfd = os.open(str(_wslp), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _write_contained(_wspfd, "toml/TODO.md", "x\n", True)
+            _wsp_ok = False
+        except ViewsError:
+            _wsp_ok = True
+        except _journal.JournalError:
+            _wsp_ok = False
+        finally:
+            os.close(_wspfd)
+        check("write-symlinked-parent-component-maps-to-viewserror", _wsp_ok)
         check("mirror-type-refuses-worklog-ledger", _mirror_type("WORKLOG-INDEX.md") is None)
         check("mirror-type-refuses-version-ledger", _mirror_type("VERSION-INDEX.md") is None)
         check("mirror-type-resolves-record-type", _mirror_type("BACKLOG_ITEM-INDEX.md") == "backlog_item")
@@ -1676,6 +1700,34 @@ def self_test():
                                        block=[dict(status="active", scopes=["BI-1"])]))
         check("idless-block-no-dangling-annotation",
               "blocked by \n" not in _f5_body and _f5_body.rstrip().endswith("actionable"))
+        # QA-2 (sibling of the closed id-less-block finding): every composed record renderer indexes the
+        # record id; an id-less record from a trusted caller must render gracefully (via .get("id"), the
+        # posture render_worklog/render_mirror/_id_key already take), never raise an unmapped KeyError --
+        # which render() maps nowhere, so it would escape as exit 1, colliding with EXIT_DRIFT. The round-1
+        # fix hardened id-less BLOCKS in join_actionability; this closes the sibling record sinks across the
+        # renderers. Each case FAILS pre-fix with KeyError('id') and passes post-fix.
+        _idless_cases = [
+            (render_todo, {"backlog_item": [{"status": "open", "title": "t"}], "block": []}),
+            (render_backlog, {"backlog_item": [{"status": "open", "title": "t"}], "block": []}),
+            (render_pipeline, {"backlog_item": [{"status": "open", "title": "t"}], "block": []}),
+            (render_done, {"done": [{"status": "recorded", "title": "t"}]}),
+            (render_findings, {"finding": [{"status": "open", "title": "t"}]}),
+            (render_decisions, {"pending_decision": [{"status": "open", "title": "t"}],
+                                "autonomous_decision": [{"status": "recorded", "title": "t"}]}),
+            (render_blocks, {"block": [{"status": "active", "title": "t"}]}),
+            (render_handoff, {"handoff": [{"status": "current", "title": "t"}]}),
+            (render_references, {"reference": [{"status": "recorded", "title": "t"}]}),
+        ]
+
+        def _renders_without_keyerror(fn, arg):
+            try:
+                fn(arg)
+                return True
+            except KeyError:
+                return False
+
+        check("idless-record-renderers-no-keyerror",
+              all(_renders_without_keyerror(fn, src) for fn, src in _idless_cases))
         _d01 = _opf_release.coverage_digest([dict(id="WL-1", date="2026-01-01T00:00:00Z",
             actor=dict(kind="maintainer"), kind="added", summary="first change")])
         _d02 = _opf_release.coverage_digest([dict(id="WL-1", date="2026-01-02T00:00:00Z",
