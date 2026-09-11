@@ -476,6 +476,24 @@ def _under_any(p, prefixes):
     return False
 
 
+def _canonical_contained(p):
+    """The canonical store-relative form of a CONTAINED path (one _is_contained_relpath admits): empty and
+    '.' components dropped and lexical '..' resolved, so a non-canonical but contained [unmanaged]
+    declaration (a trailing slash, a './' or '//' form, or a lexical '..') matches the canonical paths the
+    walk produces rather than covering nothing and over-firing its legacy content as unregistered (F4). The
+    caller confirms containment first, so no component can pop above the root; the reduction cannot escape."""
+    out = []
+    for comp in p.split("/"):
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            if out:
+                out.pop()
+        else:
+            out.append(comp)
+    return "/".join(out)
+
+
 def _canonical_remote(url):
     """Canonicalize a git remote URL to a (host, path) pair for host+path equivalence (spec 5.5/5.6),
     covering https/http/ssh/git scheme URLs and scp-style git@host:path, with or without a trailing
@@ -502,19 +520,30 @@ def _canonical_remote(url):
         # (spec 5.6 host+path equivalence): https://h:443/p, ssh://h:22/p and github:org/repo are one
         # endpoint. A NON-default port (2222 vs 2223) stays distinct (F3); match only a trailing numeric
         # default so a bracketed IPv6 host is never mis-split.
+        # An UNBRACKETED multi-colon authority is an IPv6 literal that MUST be bracketed
+        # (ssh://[2001:db8::22]/p); unbracketed it is unresolvable rather than mis-read with a trailing
+        # '::22' consumed as a default port (F5b).
+        if not host.startswith("[") and host.count(":") > 1:
+            return None
         _default_port = {"https": "443", "http": "80", "ssh": "22", "git": "9418"}.get(scheme.lower())
         hname, _sep, hport = host.rpartition(":")
-        if _sep and hname and hport == _default_port:
+        # A numeric default port, including one written with leading zeros (":022" == ":22"), names the
+        # default endpoint and is dropped; a non-numeric tail (a bracketed IPv6 fragment) is never a port
+        # (F5c).
+        if _sep and hname and _default_port is not None and hport.isdigit() \
+                and int(hport) == int(_default_port):
             host = hname
     else:
         # scp-style [user@]host:path: the colon before any slash separates host from path. A bracketed
         # IPv6 host ([addr]) carries colons INSIDE the brackets that are part of the address, not the
         # separator, so the separator is the colon immediately after the closing bracket; a malformed
         # bracket or a missing host:path colon is unresolvable (returns None, disclosed; gemini round-7).
-        at = s.rfind("@")
-        hoststart = at + 1 if at != -1 else 0
-        if s[hoststart:hoststart + 1] == "[":
-            rb = s.find("]", hoststart)
+        # The userinfo boundary is found from the FRONT: the host '[' sits at the start or immediately
+        # after the userinfo '@'. The PATH may itself contain '@' (git@[addr]:path@x), so rfind would land
+        # in the path and skip the bracket branch, mis-splitting on a colon inside the address (F5a).
+        lb = s.find("[")
+        if lb != -1 and (lb == 0 or s[lb - 1] == "@"):
+            rb = s.find("]", lb)
             if rb == -1 or s[rb + 1:rb + 2] != ":":
                 return None
             colon = rb + 1
@@ -557,6 +586,21 @@ def _target_remote_canon(target):
             return set(), [target.value]
         return {c}, []
     return None, []
+
+
+def _canon_sets_agree(a_canon, b_canon, kind):
+    """True when two canonical (host, path) remote sets share an endpoint (spec 5.6). For a github/gitlab
+    target the org/repo PATH compares case-INSENSITIVELY (those hosts resolve org/repo without regard to
+    case; the host is already lowercased by _canonical_remote / _target_remote_canon), so a case-only
+    difference is not a disagreement (F5); any other host stays case-sensitive, a disclosed residual since
+    an arbitrary git host may be case-sensitive. BOTH legs of C-SYNC-AGREE (the committed-pointer leg and
+    the actual-remote leg) share this one fold so they cannot diverge (round-16 F-3)."""
+    if not a_canon.isdisjoint(b_canon):
+        return True
+    if kind in ("github", "gitlab"):
+        b_fold = {(h, pth.lower()) for h, pth in b_canon}
+        return any((h, pth.lower()) in b_fold for h, pth in a_canon)
+    return False
 
 
 # --- index parsing (shape defined here) --------------------------------------------------------------
@@ -982,8 +1026,11 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             if fn_ in (ARCHIVE_MANIFEST_NAME, WORKLOG_NAME):
                 continue
             if not fn_.endswith(INDEX_SUFFIX):
-                rep.finding("C-ARCHIVE-ENUM: unexpected file {!r} in archive bucket {} (spec 12)".format(
-                    fn_, bucket))
+                # A non-index file in a bucket (only archive.toml, worklog.toml, and <type>.index.toml
+                # belong) is an unregistered path; route it through the SAME substantiated-partial triage
+                # as its siblings (_archive_unmanaged for root files and bucket subdirs), so the store-wide
+                # partial relaxation (spec 14.2) is honoured here too rather than hard-failing (F2).
+                _archive_unmanaged(rep, partial_active, _rel(bucket, fn_))
                 continue
             tname = fn_[:-len(INDEX_SUFFIX)]
             if tname not in enabled_types:
@@ -1391,7 +1438,10 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
     if isinstance(um, dict) and isinstance(um.get("paths"), list):
         for p in um["paths"]:
             if isinstance(p, str) and _is_contained_relpath(p):
-                unmanaged.append(p)
+                # Normalize to the canonical contained form so a non-canonical declaration covers the
+                # legacy content it names rather than nothing (F4); this also makes the collision check
+                # below see a declaration of a managed path in any spelling.
+                unmanaged.append(_canonical_contained(p))
             else:
                 # guard-input-soundness (round-14 C4): a malformed [unmanaged] entry (non-string, or a
                 # non-contained / escaping path) is a named CANNOT-EVALUATE, not a silent drop; a malformed
@@ -1494,6 +1544,14 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
             return
         subdirs, files = _list_dir(root_fd, reldir, rep)
         if subdirs is None and files is None:
+            return
+        if not subdirs and not files and reldir != imports_root and _under_any(reldir, (imports_root,)):
+            # An EMPTY directory strictly under the imports interior has no file to flag, so it would
+            # escape grading entirely (round-14 graded files only; F1). Grade the directory itself as an
+            # unregistered path, exactly as any other unregistered path is: a finding at steady state and
+            # a triage entry under a substantiated partial (the sorted loop below routes it). The imports
+            # ROOT itself, holding no runs, is a legitimate empty namespace and stays clean.
+            unmanaged_files.append(reldir)
             return
         for f in files:
             full = reldir + "/" + f
@@ -2037,7 +2095,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             # Leg 2: a committed pointer that names a REMOTE disagreeing with the sync_target (B3).
             if pointer_target is not None and not pointer_target.local:
                 pcanon, _pun = _target_remote_canon(pointer_target)
-                if tcanon and pcanon and pcanon.isdisjoint(tcanon):
+                if tcanon and pcanon and not _canon_sets_agree(pcanon, tcanon, tgt.kind):
                     rep.finding("C-SYNC-AGREE: the committed pointer remote {!r} does not agree with the "
                                 "manifest sync_target {!r} (spec 5.6)".format(pointer_target.value, sync_target))
             # Leg 3: the store repository's actual remote agrees with the RESOLVED sync_target. Equivalent
@@ -2067,14 +2125,9 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                              "to compare against the actual remote (a disclosed residual; spec 5.5)".format(
                                  sync_target))
                 else:
-                    matched = acanon in tcanon
-                    if not matched and tgt.kind in ("github", "gitlab"):
-                        # GitHub / GitLab resolve the org/repo path case-insensitively, so a case-only
-                        # difference is not a disagreement (F5). The host is already lowercased; the
-                        # disclosed residual is that a bare git: remote path stays case-sensitive, since an
-                        # arbitrary git host may be case-sensitive.
-                        matched = (acanon[0], acanon[1].lower()) in {(h, p.lower()) for h, p in tcanon}
-                    if not matched:
+                    # The committed-pointer leg (above) and this actual-remote leg share ONE fold
+                    # (_canon_sets_agree) so they cannot diverge on github/gitlab case (round-16 F-3).
+                    if not _canon_sets_agree({acanon}, tcanon, tgt.kind):
                         rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
                                     "repository's actual remote {!r} (spec 5.6)".format(sync_target, actual))
     elif in_repo:
@@ -3463,6 +3516,138 @@ def self_test():
         check("unknown-observation-key-cannot-eval", r is not None and r.status == CANNOT_EVALUATE)
         check("unknown-observation-key-named",
               r is not None and any("unrecognized" in m for m in r.cannot_evaluate))
+
+        # ===== round-16 Fable-retrofix discriminating vectors (F-1..F-6) ==============================
+        RUNID16 = "imp-20260601T000000Z-0123456789abcdef"
+        # F-1: an EMPTY unregistered directory under the imports interior is graded like any other stray
+        # (round-14 graded FILES only, so an empty rogue dir laundered to VALID). Steady state -> INVALID.
+        _f1a = build(clean_machine())
+        os.makedirs(str(_f1a / ".working" / "toml" / "imports" / "rogue-empty"), exist_ok=False)
+        _f1ar = validate_store(resolve_store(_f1a), observations=clean_prior())
+        check("imports-empty-rogue-dir-none-invalid", _f1ar.status == INVALID)
+        check("imports-empty-rogue-dir-named",
+              any("C-CONTAINMENT" in f and "imports/rogue-empty" in f and "unregistered" in f
+                  for f in _f1ar.findings))
+        # a tree of ONLY-empty dirs under imports is still graded (its deepest empty leaf) -> INVALID.
+        _f1b = build(clean_machine())
+        os.makedirs(str(_f1b / ".working" / "toml" / "imports" / "a" / "b" / "c"), exist_ok=False)
+        _f1br = validate_store(resolve_store(_f1b), observations=clean_prior())
+        check("imports-empty-tree-none-invalid", _f1br.status == INVALID)
+        # under a SUBSTANTIATED partial (an active run carries plan.toml) an empty dir under imports
+        # triages (VALID), never a finding, exactly as files under imports already do.
+        _f1c = clean_machine()
+        _f1c["manifest.toml"] = base_manifest()
+        _f1c["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _f1c["imports/{}/plan.toml".format(RUNID16)] = "schema = 1"
+        _f1croot = build(_f1c)
+        os.makedirs(str(_f1croot / ".working" / "toml" / "imports" / "empty-under-partial"),
+                    exist_ok=False)
+        _f1cr = validate_store(resolve_store(_f1croot), observations=clean_prior())
+        check("imports-empty-dir-partial-triaged",
+              _f1cr.status == VALID and any("empty-under-partial" in t for t in _f1cr.triage))
+        # the empty imports ROOT itself (no runs) is a legitimate empty namespace and stays clean.
+        _f1d = build(clean_machine())
+        os.makedirs(str(_f1d / ".working" / "toml" / "imports"), exist_ok=False)
+        _f1dr = validate_store(resolve_store(_f1d), observations=clean_prior())
+        check("imports-empty-root-valid", _f1dr.status == VALID)
+
+        # F-2: a stray (non-index) file in an archive bucket routes through the SAME substantiated-partial
+        # triage as its siblings: a finding at steady state, a triage entry under a substantiated partial.
+        _f2 = clean_machine()
+        _f2["archive/2026/strayfile.txt"] = "x\n"
+        _f2r = run(_f2)
+        check("archive-bucket-stray-file-steady-invalid",
+              _f2r is not None and _f2r.status == INVALID
+              and any("C-ARCHIVE-ENUM" in f and "strayfile.txt" in f for f in _f2r.findings))
+        _f2p = clean_machine()
+        _f2p["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _f2p["imports/{}/plan.toml".format(RUNID16)] = "schema = 1"
+        _f2p["archive/2026/strayfile.txt"] = "x\n"
+        _f2pr = run(_f2p)
+        check("archive-bucket-stray-file-partial-triaged",
+              _f2pr is not None and _f2pr.status == VALID
+              and any("strayfile.txt" in t for t in _f2pr.triage))
+
+        # F-3: the committed-pointer leg (leg 2) applies the SAME github/gitlab case fold as the
+        # actual-remote leg. A dedicated sync_target differing only in case from the committed pointer
+        # AGREES -> VALID (the actual remote also agrees).
+        _f3 = clean_machine()
+        _f3["manifest.toml"] = base_manifest()
+        _f3["manifest.toml"]["store"] = {"sync_target": "github:Org/Repo"}
+        _f3res = resolve_store(build(_f3))
+        _f3res.target = classify_target("github:org/repo")
+        _f3r = validate_store(_f3res, observations={"tracked": "tracked",
+                                                    "actual_remote": "git@github.com:org/repo.git",
+                                                    "prior": clean_prior()["prior"]})
+        check("sync-pointer-leg-case-insensitive-valid", _f3r is not None and _f3r.status == VALID)
+
+        # F-4: a non-canonical but CONTAINED [unmanaged] declaration (trailing slash, '//', or lexical
+        # '..') is normalized so it covers the legacy content it names rather than over-firing it as
+        # unregistered (a false INVALID). Without the fix each of these is INVALID.
+        for _ncp in (".working/legacy-dir/", ".working//legacy-dir", ".working/x/../legacy-dir"):
+            _f4 = clean_machine()
+            _f4["manifest.toml"] = base_manifest()
+            _f4["manifest.toml"]["unmanaged"] = {"paths": [_ncp]}
+            check("unmanaged-noncanonical-not-false-invalid:" + _ncp,
+                  run(_f4, working={"legacy-dir/old-note.md": "x\n"}).status == VALID)
+
+        # F-6a: C-CONTIGUITY "does not start at WL-1" is the SOLE layer catching a worklog whose first
+        # present id is not WL-1 (the below-max side; the overhang side is C-NO-DELETION). A zero-release
+        # store holding only WL-2, WL-3 (high-water 3, contiguous among themselves) is INVALID solely via
+        # this branch; deleting it flips the store VALID.
+        _f6a = copy.deepcopy(pr_machine)
+        _f6a["worklog.toml"] = {"schema": 1, "entry": [wl(2), wl(3)]}
+        _f6a["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=3, HO=0)
+        _f6a_obs = {"tracked": "tracked",
+                    "prior": {"releases": [],
+                              "counters_high": counters(FN=2, BI=0, DN=0, WL=3, HO=0)["counters"],
+                              "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")}}}
+        _f6ar = run(_f6a, product=pr_product, obs=_f6a_obs)
+        check("c-contiguity-start-not-wl1-invalid", _f6ar is not None and _f6ar.status == INVALID)
+        check("c-contiguity-start-not-wl1-named",
+              _f6ar is not None and any("C-CONTIGUITY" in f and "does not start at WL-1" in f
+                                        for f in _f6ar.findings))
+        # F-6b: the "archived worklog WL-n not enumerated in a worklog_moved span" branch is the SOLE
+        # layer catching an archived worklog id no span accounts for. A bucket holding WL-1, WL-2 whose
+        # span enumerates only WL-1 is INVALID solely via it.
+        _f6b = clean_machine()
+        _f6b["archive/2026/archive.toml"] = {"schema": 1, "moved": [],
+            "worklog_moved": [{"span": ["WL-1", "WL-1"], "destination": "archive/2026/worklog.toml"}]}
+        _f6br = run(_f6b)
+        check("archive-wl-unenumerated-invalid", _f6br is not None and _f6br.status == INVALID)
+        check("archive-wl-unenumerated-named",
+              _f6br is not None and any("C-ARCHIVE-ENUM" in f and "WL-2" in f and "not enumerated" in f
+                                        for f in _f6br.findings))
+        # F-6c: the committed-pointer leg (leg 2) is the SOLE layer catching a committed pointer whose
+        # remote genuinely disagrees with a dedicated sync_target while the actual remote (leg 3) AGREES
+        # -> INVALID; deleting leg 2 flips it VALID. Pairs with the F-3 fold fix.
+        _f6c = clean_machine()
+        _f6c["manifest.toml"] = base_manifest()
+        _f6c["manifest.toml"]["store"] = {"sync_target": "github:Org/Repo"}
+        _f6cres = resolve_store(build(_f6c))
+        _f6cres.target = classify_target("github:other/repo")
+        _f6cr = validate_store(_f6cres, observations={"tracked": "tracked",
+                                                      "actual_remote": "git@github.com:org/repo.git",
+                                                      "prior": clean_prior()["prior"]})
+        check("sync-pointer-leg-disagree-invalid", _f6cr is not None and _f6cr.status == INVALID)
+        check("sync-pointer-leg-disagree-named",
+              _f6cr is not None and any("committed pointer remote" in f and "does not agree" in f
+                                        for f in _f6cr.findings))
+
+        # F-5: _canonical_remote exotic edges.
+        # (a) an scp bracketed-IPv6 host whose PATH itself contains '@' must not mis-split on a colon
+        # inside the brackets; it canonicalizes to the same (host, path) as the ssh:// equivalent.
+        check("canonical-ipv6-scp-at-in-path-matches-ssh",
+              _canonical_remote("git@[2001:db8::1]:path@x") is not None
+              and _canonical_remote("git@[2001:db8::1]:path@x")
+              == _canonical_remote("ssh://[2001:db8::1]/path@x"))
+        # (b) an UNBRACKETED multi-colon (IPv6-looking) scheme authority is unresolvable (None), never
+        # mis-read with a trailing '::22' consumed as a default port.
+        check("canonical-unbracketed-ipv6-none", _canonical_remote("ssh://2001:db8::22/p") is None)
+        # (c) a default port written with leading zeros names the default endpoint (== the port-less form).
+        check("canonical-leading-zero-default-port-folds",
+              _canonical_remote("ssh://h:022/p") is not None
+              and _canonical_remote("ssh://h:022/p") == _canonical_remote("ssh://h/p"))
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
