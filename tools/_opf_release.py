@@ -687,6 +687,14 @@ def _validate_summaries(summaries, ledger_versions, findings):
                     # REPLACED this row, which is a different row (M10).
                     findings.append("{}: superseded_by must not name the row itself; a summary cannot "
                                     "supersede itself (spec 6.1/6.4)".format(where))
+                elif sb == UNRELEASED:
+                    # The working tail is never a rollup: it is status working (enforced below) and can
+                    # never have superseded a released summary, so superseded_by must not name it. Without
+                    # this an 'unreleased' token routes _covers_range to None, the covering check
+                    # (roll_range is not None) is skipped, and the row fails OPEN to VALID whenever an
+                    # 'unreleased' summary row is present (spec 6.1/6.4; fail-closed to INVALID).
+                    findings.append("{}: superseded_by must name a rollup summary, not the working "
+                                    "'unreleased' tail (spec 6.1/6.4)".format(where))
                 elif sb not in covers_index:
                     # superseded_by must name an EXISTING rollup summary row (spec 6.1: "the covers token
                     # of the rollup summary that replaced this one"), not merely a ledger-valid token (M10).
@@ -899,9 +907,14 @@ def release_cut(version_data, worklog_data, new_version, date,
         span_value = []
         span_parsed = None
     else:
-        # The tail MUST be the contiguous run end+1 .. max, or a span cannot tile (spec 6.1).
-        expected = list(range(end + 1, tail[-1] + 1))
-        if tail != expected:
+        # The tail MUST be the contiguous run end+1 .. max, or a span cannot tile (spec 6.1). Checked by
+        # COUNT over the present ids (tail is a sorted set of distinct WL-numbers all > end), never by
+        # materializing list(range(end + 1, tail[-1] + 1)): that list is sized by the DECLARED max id, not
+        # the entry count, so a single large-id entry (a plausible WL-1000000000 typo) forces an O(max_id)
+        # allocation and an uncaught MemoryError. The contiguous run end+1..max holds exactly (max - end)
+        # ids from end+1, so len(tail) == tail[-1] - end and tail[0] == end + 1 iff it tiles (RANGE-BOUNDS;
+        # SECA-resource-bounds; fail-closed to INVALID on a gap).
+        if tail[0] != end + 1 or tail[-1] - end != len(tail):
             return CutResult(INVALID, ["cannot cut: the unreleased tail WL-{}..WL-{} is not contiguous "
                                        "(a gap would break span tiling, spec 6.1)".format(end + 1, tail[-1])])
         span_value = ["WL-{}".format(tail[0]), "WL-{}".format(tail[-1])]
@@ -1472,6 +1485,31 @@ def self_test():
     check("m3-rotation-nonpositive-invalid", bool(check_rotation_only_released([0], frozen_ver)))
     check("m3-rotation-negative-invalid", bool(check_rotation_only_released([-1], frozen_ver)))
     check("m3-append-nonpositive-invalid", bool(check_no_append_into_released(frozen_ver, [0])))
+
+    # --- retro fixes: discriminating vectors for the three confirmed defects ---------------------
+    # BLOCKER (RANGE-BOUNDS): a single large-id tail entry is judged by COUNT, not by materializing a
+    # range sized by the declared max id. Empty ledger + WL-1000000000: the tail is not contiguous from
+    # WL-1, so the cut returns a controlled INVALID in O(1). Before the fix release_cut built
+    # list(range(1, 1000000001)) and raised an uncaught MemoryError, never reaching this INVALID.
+    wl_bigid = {"schema": 1, "entry": [entry(1000000000)]}
+    bigid_cut = release_cut({"release": []}, wl_bigid, "1.0.0", "2026-06-15T00:00:00Z")
+    check("blocker-large-id-tail-bounded-invalid", bigid_cut.status == INVALID)
+    # MINOR (SELF-TEST DISCRIMINATION): a reversed span in a NON-FIRST position (start > end) tiles its
+    # start against the cursor but drives coverage backward; the _parse_span a > b guard is the sole
+    # layer against it. Pin the guard: without it this ledger fails OPEN to VALID.
+    reversed_span_ver = {"release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+         "worklog_span": ["WL-1", "WL-2"], "coverage_digest": dig12},
+        {"version": "1.1.0", "date": "2026-06-02T00:00:00Z",
+         "worklog_span": ["WL-3", "WL-1"], "coverage_digest": "sha256:" + "0" * 64}]}
+    check("reversed-span-non-first-invalid", validate_version(reversed_span_ver).status == INVALID)
+    # MAJOR (FAIL-OPEN): superseded_by must not name the working 'unreleased' tail. With an
+    # 'unreleased' summary row present the token sits in covers_index and _covers_range returns None,
+    # so the covering check is skipped and the row failed OPEN to VALID before the fix; now INVALID.
+    sup_by_unreleased = {"release": sup_releases, "summary": [
+        {"covers": "unreleased", "status": "working"},
+        {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "unreleased"}]}
+    check("m10-superseded-by-unreleased-invalid", validate_version(sup_by_unreleased).status == INVALID)
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
