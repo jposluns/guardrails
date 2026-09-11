@@ -490,12 +490,23 @@ def emit_checked(document):
     The two failure modes are defensive: a correct emitter never reaches them, so either is a fail-closed
     EmitError, never a silent degraded write."""
     text = emit(document)
+    # Resolve the decode-error type BEFORE the try: `except tomllib.TOMLDecodeError` evaluates the
+    # attribute at handling time, so a swapped tomllib lacking it would make the except clause itself
+    # raise an uncontrolled AttributeError. Bind it defensively; a tomllib without the attribute yields
+    # an empty tuple that matches nothing, so a reparse failure then falls to the value-free backstop
+    # below rather than escaping.
+    try:
+        _decode_error = tomllib.TOMLDecodeError
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except BaseException:  # noqa: BLE001 - a tomllib without TOMLDecodeError: match nothing, fail closed below
+        _decode_error = ()
     try:
         reparsed = tomllib.loads(text)
         if not _model_equal(document, reparsed):
             raise EmitError("emitted document did not round-trip to a model equal to its input; fail-closed")
-    except tomllib.TOMLDecodeError as exc:
-        raise EmitError("emitted document did not reparse as TOML ({}); fail-closed".format(exc))
+    except _decode_error:  # value-free so a hostile decode-error __str__ is never formatted into a diagnostic
+        raise EmitError("emitted document did not reparse as TOML; fail-closed")
     except EmitError:
         raise
     except (KeyboardInterrupt, SystemExit, GeneratorExit):  # genuine control flow re-raised, never converted
@@ -511,6 +522,28 @@ def emit_checked(document):
 
 
 # --- self-test --------------------------------------------------------------------------------------
+
+def _load_byte_canon_authority():
+    """Load check_byte_canon from its pinned sibling FILE by explicit path, never via a bare `import`
+    (which trusts sys.path) or the ambient sys.modules cache (which a poisoned entry could substitute
+    with an always-clean scanner that would falsely certify the emitted bytes). module_from_spec +
+    exec_module loads the real file without consulting or registering in sys.modules, so the authority
+    is bound by file identity. sys.path is snapshotted and restored around the load (the authority
+    inserts its own directory for its transitive imports). Any failure propagates so the caller fails
+    closed; byte-canon cleanliness cannot be asserted without the genuine authority."""
+    import importlib.util
+    path = Path(__file__).resolve().parent / "check_byte_canon.py"
+    spec = importlib.util.spec_from_file_location("_opf_emit_byte_canon_authority", path)
+    if spec is None or spec.loader is None:
+        raise ImportError("no import spec for the byte-canon authority at {}".format(path))
+    module = importlib.util.module_from_spec(spec)
+    _saved_sys_path = list(sys.path)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = _saved_sys_path
+    return module
+
 
 def _rejects(document):
     """True iff emit() rejects `document` with EmitError (the fail-closed subset boundary). Any other
@@ -528,19 +561,23 @@ def self_test():
     failures = []
 
     # check_byte_canon is the authority for the byte rules; reuse it rather than re-implement (a stale
-    # duplicate is the guard-input-soundness failure this avoids). Fail closed if it cannot be imported:
-    # byte-canon cleanliness cannot be asserted without the authority.
-    _saved_sys_path = list(sys.path)  # snapshot so the import (and its transitive imports) cannot leak sys.path
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    # duplicate is the guard-input-soundness failure this avoids). It is loaded from its pinned sibling
+    # FILE by explicit identity (_load_byte_canon_authority), never a bare `import` that the ambient
+    # sys.modules cache could satisfy with a substituted always-clean scanner. Fail closed if it cannot
+    # be loaded, or if it lacks the expected interface: cleanliness cannot be asserted without it.
     try:
-        try:
-            import check_byte_canon
-        except Exception as exc:  # noqa: BLE001 - any import failure is fail-closed here
-            print("error: cannot import check_byte_canon for the byte-canon leg ({}); fail-closed".format(exc),
-                  file=sys.stderr)
-            return 2
-    finally:
-        sys.path[:] = _saved_sys_path  # restore whether the import succeeded, failed (return 2), or completed; check_byte_canon stays in sys.modules
+        check_byte_canon = _load_byte_canon_authority()
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any load failure is fail-closed here
+        print("error: cannot load check_byte_canon for the byte-canon leg ({}); fail-closed".format(exc),
+              file=sys.stderr)
+        return 2
+    if not (isinstance(getattr(check_byte_canon, "FORBIDDEN", None), dict)
+            and callable(getattr(check_byte_canon, "scan_bytes", None))):
+        print("error: the byte-canon authority lacks the expected FORBIDDEN/scan_bytes interface; "
+              "fail-closed", file=sys.stderr)
+        return 2
 
     # The forbidden-codepoint set MUST match the authority's, so a body carrying any of them is escaped.
     authority = set(check_byte_canon.FORBIDDEN.values())
@@ -548,6 +585,35 @@ def self_test():
         failures.append("forbidden-codepoint set disagrees with check_byte_canon.FORBIDDEN "
                         "(missing {}, extra {})".format(sorted(authority - set(_FORBIDDEN_CODEPOINTS)),
                                                         sorted(set(_FORBIDDEN_CODEPOINTS) - authority)))
+
+    # sys.modules-substitution pin: the authority is loaded from its pinned sibling FILE, not the ambient
+    # sys.modules cache, so a poisoned check_byte_canon entry cannot substitute an always-clean scanner
+    # and falsely certify the emitted bytes. Poison sys.modules with such a substitute, reload via the
+    # loader, and require the reload to still flag a known-forbidden codepoint (U+200B); a bare-import
+    # mutant would return the poison and report clean. sys.modules is restored in finally.
+    class _AlwaysCleanCanon:
+        FORBIDDEN = dict(check_byte_canon.FORBIDDEN)
+
+        @staticmethod
+        def scan_bytes(data):
+            return []
+
+    _saved_canon = sys.modules.get("check_byte_canon")
+    sys.modules["check_byte_canon"] = _AlwaysCleanCanon
+    try:
+        _reloaded = _load_byte_canon_authority()
+        if not any("U+200B" in f for f in _reloaded.scan_bytes(chr(0x200B).encode("utf-8"))):
+            failures.append("authority-substitution: the byte-canon authority was substituted by a "
+                            "poisoned sys.modules entry (an always-clean scanner)")
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - loading the pinned authority must not fail here
+        failures.append("authority-substitution: loading the pinned authority raised {!r}".format(exc))
+    finally:
+        if _saved_canon is None:
+            sys.modules.pop("check_byte_canon", None)
+        else:
+            sys.modules["check_byte_canon"] = _saved_canon
 
     def _byte_canon_clean(text, label):
         findings = check_byte_canon.scan_bytes(text.encode("utf-8"))
@@ -936,6 +1002,83 @@ def self_test():
     finally:
         globals()["tomllib"] = _saved_tomllib
 
+    # emit_checked backstop coverage (round-2): the decode-error handler must not itself escape on a
+    # malformed injected tomllib, and the model-equivalence COMPARISON (not merely the reparse) must be
+    # enforced and fail closed when it raises. Each leg turns red on the specific mutant named; hermetic,
+    # rebound via globals() and restored in finally.
+    class _NoDecodeAttrReparse:  # a tomllib LACKING TOMLDecodeError: the except clause must not raise
+        def loads(self, text):
+            raise RecursionError("stubbed reparse failure; this tomllib lacks TOMLDecodeError")
+
+    globals()["tomllib"] = _NoDecodeAttrReparse()
+    try:
+        try:
+            emit_checked(dict(a=1))
+            failures.append("emit-checked/missing-decode-type: a reparse failure under a tomllib lacking "
+                            "TOMLDecodeError was not converted to a fail-closed EmitError")
+        except EmitError:
+            pass
+        except BaseException as exc:  # noqa: BLE001 - anything but EmitError is the fail-open escape
+            failures.append("emit-checked/missing-decode-type: escaped as {!r} instead of a fail-closed "
+                            "EmitError".format(exc))
+    finally:
+        globals()["tomllib"] = _saved_tomllib
+
+    class _HostileDecodeError(Exception):  # a decode error whose __str__ is hostile
+        def __str__(self):
+            raise RuntimeError("a hostile decode-error __str__ must never be formatted into a diagnostic")
+
+    class _HostileStrReparse:
+        TOMLDecodeError = _HostileDecodeError
+
+        def loads(self, text):
+            raise _HostileDecodeError()
+
+    globals()["tomllib"] = _HostileStrReparse()
+    try:
+        try:
+            emit_checked(dict(a=1))
+            failures.append("emit-checked/hostile-decode-str: a hostile decode-error __str__ path did not "
+                            "fail closed to EmitError")
+        except EmitError:
+            pass
+        except BaseException as exc:  # noqa: BLE001 - a leaked RuntimeError is the fail-open escape
+            failures.append("emit-checked/hostile-decode-str: escaped as {!r} instead of a fail-closed "
+                            "EmitError".format(exc))
+    finally:
+        globals()["tomllib"] = _saved_tomllib
+
+    # The model-equivalence comparison is enforced (a mutant deleting `if not _model_equal(...)` returns
+    # unproven text) and fails closed when it raises. Swap _model_equal for a False stub (require the
+    # round-trip EmitError) and for a MemoryError stub (require the generic backstop EmitError).
+    _saved_model_equal = globals()["_model_equal"]
+    try:
+        globals()["_model_equal"] = lambda _a, _b: False
+        try:
+            emit_checked(dict(a=1))
+            failures.append("emit-checked/compare-enforced: a False model-equivalence comparison did not "
+                            "fail closed (unproven text returned)")
+        except EmitError as exc:
+            if "round-trip" not in str(exc):
+                failures.append("emit-checked/compare-enforced: rejected but not by the round-trip "
+                                "comparison ({})".format(exc))
+
+        def _raise_memoryerror(_a, _b):
+            raise MemoryError("stubbed comparison failure for the backstop pin")
+
+        globals()["_model_equal"] = _raise_memoryerror
+        try:
+            emit_checked(dict(a=1))
+            failures.append("emit-checked/compare-backstop: a MemoryError in the comparison was not "
+                            "converted to a fail-closed EmitError")
+        except EmitError:
+            pass
+        except BaseException as exc:  # noqa: BLE001 - anything but EmitError is the fail-open escape
+            failures.append("emit-checked/compare-backstop: a comparison MemoryError escaped as {!r} "
+                            "instead of a fail-closed EmitError".format(exc))
+    finally:
+        globals()["_model_equal"] = _saved_model_equal
+
     # --- constrained-subset coverage: every rejected shape (fail-closed) ------------------------------
     class _Other:
         pass
@@ -1176,8 +1319,8 @@ def self_test():
                             "KeyboardInterrupt".format(fn_name, returned))
 
     # The table-cycle rejects must be caught by the active-chain cycle check specifically, not by the
-    # output ceiling as a backstop: assert each raises an EmitError that NAMES a cyclic reference. With the
-    # cycle check at line 294 removed, these instead grow the dotted header until _MAX_EMIT_BYTES raises a
+    # output ceiling as a backstop: assert each raises an EmitError that NAMES a cyclic reference. With that
+    # cycle check removed, these instead grow the dotted header until _MAX_EMIT_BYTES raises a
     # different (ceiling) message, so this leg turns red, distinguishing cycle detection from budget
     # exhaustion. self-referential-list is excluded on purpose: it is rejected by _classify_list as a
     # nested array, so its message legitimately does not name a cycle. Each leg terminates: the cycle check
@@ -1219,6 +1362,32 @@ def self_test():
             failures.append("cli/misuse: {!r} was not classified as misuse (membership, not whole-vector, "
                             "validation)".format(bad_argv))
 
+    # CLI mode selection validates the vector is an exact list of exact strings BEFORE any equality
+    # comparison, so a hostile str subclass injected into argv cannot raise from mode selection or spoof
+    # a self-test invocation. A membership/`in` regression would run the subclass __eq__: one that raises
+    # would leak, one that always returns True would spoof a self-test run.
+    class _RaisingEqStr(str):
+        def __eq__(self, other):
+            raise RuntimeError("a hostile argv __eq__ must never be reached by mode selection")
+
+        def __hash__(self):
+            return id(self)
+
+    class _AlwaysEqStr(str):
+        def __eq__(self, other):
+            return True
+
+        def __hash__(self):
+            return id(self)
+
+    try:
+        if _selected_mode([_RaisingEqStr("--malformed")]) != "misuse":
+            failures.append("cli/hostile-eq: a raising-__eq__ argv token was not classified as misuse")
+    except Exception as exc:  # noqa: BLE001 - a leaked comparison is the fail-open escape
+        failures.append("cli/hostile-eq: mode selection leaked {!r} instead of classifying misuse".format(exc))
+    if _selected_mode([_AlwaysEqStr("--malformed")]) != "misuse":
+        failures.append("cli/spoof-eq: an always-equal argv token spoofed a self-test invocation")
+
     # emit_checked returns exactly what emit returns for a good document (no divergent second path).
     if emit_checked(coverage) != emit(coverage):
         failures.append("emit_checked/parity: emit_checked text differs from emit text")
@@ -1240,7 +1409,11 @@ def _selected_mode(args):
     """Map a CLI argument vector to a mode. The WHOLE vector is validated, not mere membership: exactly one
     recognized self-test flag selects 'self-test', and any other vector (an unknown or extra argument, a
     duplicated flag, a bare positional, or an empty vector) is 'misuse', so a malformed control vector is
-    never silently read as a valid self-test invocation."""
+    never silently read as a valid self-test invocation. The vector must be an exact list of exact `str`
+    tokens; a non-list, or a token that is not exactly `str` (a hostile str subclass whose `__eq__` could
+    raise or always match), is 'misuse' before any equality comparison runs."""
+    if type(args) is not list or not all(type(a) is str for a in args):
+        return "misuse"
     if args in (["--self-test"], ["--selftest"]):
         return "self-test"
     return "misuse"
