@@ -1830,6 +1830,13 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         else:
             for f in check_rotation_only_released(archive_wl_ids, version_data):
                 rep.finding("C-ROTATION: {}".format(f))
+    elif archive_recs:
+        # gemini round-9 BLOCKER: records were rotated to the archive but NO worklog span was archived to
+        # bind them to a released period, so the released-only check above (keyed on archive_wl_ids) never
+        # runs. Rotation is bound to a released worklog span (spec 12); records archived with no bounding
+        # archived worklog span are otherwise a fail-open, so they are a finding.
+        rep.finding("C-ROTATION: {} record(s) are rotated to the archive with no archived worklog span to "
+                    "bind them to a released period (spec 12)".format(len(archive_recs)))
 
     # --- C-STAGING: staged ids under imports/<run-id>/ (spec 14.1), reusing U7's enumerator ------------
     rep.ran("C-STAGING")
@@ -2530,6 +2537,23 @@ def self_test():
               _canonical_remote("git@[2001:db8::1]:repo") is not None
               and _canonical_remote("git@[2001:db8::1]:repo") == _canonical_remote("ssh://[2001:db8::1]/repo"))
         check("canonical-ipv6-malformed-bracket-none", _canonical_remote("git@[2001:db8::1:repo") is None)
+        # gemini round-9 BLOCKER: a record rotated to the archive with NO archived worklog span to bind it
+        # to a released period is a C-ROTATION finding, not laundered VALID (the released-only check keys on
+        # the archived worklog ids, which are empty here). Reuse the per-record clean fixture (empty
+        # archive, so archive_wl_ids stays empty) and add one present moved finding record to the bucket.
+        _rrf = copy.deepcopy(pr_machine)
+        _rrf["counters.toml"] = counters(FN=3, BI=0, DN=0, WL=0, HO=0)
+        _rrf["archive/2026/archive.toml"] = {"schema": 1, "worklog_moved": [],
+            "moved": [{"id": "FN-3", "type": "finding", "destination": "archive/2026/finding.index.toml"}]}
+        _rrf["archive/2026/finding.index.toml"] = idx([envelope("FN-3", "finding", "resolved")])
+        _rr_obs = {"tracked": "tracked",
+                   "prior": {"releases": [],
+                             "counters_high": counters(FN=3, BI=0, DN=0, WL=0, HO=0)["counters"],
+                             "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open"),
+                                         "FN-3": ("finding", "resolved")}}}
+        _rr = run(_rrf, product=pr_product, obs=_rr_obs)
+        check("rotation-no-worklog-span-named",
+              _rr is not None and any("C-ROTATION" in f and "no archived worklog span" in f for f in _rr.findings))
         # digest byte flipped -> INVALID (proves the digest still bites over the x-vendor-date body)
         prm = copy.deepcopy(pr_machine)
         prm["finding.index.toml"]["record"][0]["digest"] = "sha256:" + "b" * 64
