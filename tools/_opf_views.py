@@ -133,7 +133,12 @@ def _read_raw_and_parsed(store_root_fd, relpath):
     """Read a declared source file's raw bytes AND its parsed table through a no-follow fd. Returns
     (raw_bytes, parsed_dict), or None when the file is ABSENT. ViewsError (a cannot-evaluate) on an
     unreadable file, a refused symlink, or a parse error: a present-but-unreadable declared source is a
-    failure, never an empty pass (the check-fails-closed-on-unreadable rule)."""
+    failure, never an empty pass (the check-fails-closed-on-unreadable rule).
+    Disclosed residual (disclose-guard-residuals): the S_ISREG gate reads an lstat taken BEFORE the
+    no-follow open in _journal._read_contained, which does not pass O_NONBLOCK, so a live writer that
+    swaps a regular file for a FIFO in that lstat-to-open window can still block the open. This is a
+    concurrent-writer race beyond static on-disk store content, mirroring the store resolver own
+    lstat-then-open pattern; it is named here rather than left implied."""
     try:
         st = _journal._lstat_contained(store_root_fd, relpath)
     except _journal.JournalError as exc:
@@ -193,7 +198,12 @@ def _load_records(store_root_fd, relpath, type_name, registered_vendors, registe
 
 
 def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds):
-    """Load and validate worklog.toml (spec 6.2); return (raw_bytes, [entry, ...]) in file order."""
+    """Load and validate worklog.toml (spec 6.2); return (raw_bytes, [entry, ...]) in file order.
+    Disclosed divergence (disclose-guard-residuals): unlike the index schema marker, which
+    _load_records pins MANDATORY and exact, the ledger schema marker follows U3 optional-marker
+    contract: _opf_release.validate_worklog type-pins a PRESENT marker (a non-integer or unsupported
+    version is refused) but PERMITS an absent one. A schema-less ledger authored for another schema
+    version is not caught here; grading an unsupported-schema-version ledger is U3/U6 remit (F2)."""
     got = _read_raw_and_parsed(store_root_fd, relpath)
     if got is None:
         raise ViewsError("declared source {} is missing (the worklog ledger must exist)".format(relpath))
@@ -206,7 +216,11 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds):
 
 
 def _load_version(store_root_fd, relpath):
-    """Load and validate version.toml (spec 6.1); return (raw_bytes, releases, summaries) in file order."""
+    """Load and validate version.toml (spec 6.1); return (raw_bytes, releases, summaries) in file order.
+    Disclosed divergence (disclose-guard-residuals): the version ledger schema marker follows U3
+    optional-marker contract, as _load_worklog documents: validate_version type-pins a PRESENT marker
+    but permits an absent one, diverging from the index MANDATORY pin. An unsupported-schema-version
+    ledger that omits the marker is routed to U3/U6, not caught here."""
     got = _read_raw_and_parsed(store_root_fd, relpath)
     if got is None:
         raise ViewsError("declared source {} is missing (the version ledger must exist)".format(relpath))
@@ -1667,6 +1681,10 @@ def self_test():
         _d02 = _opf_release.coverage_digest([dict(id="WL-1", date="2026-01-02T00:00:00Z",
             actor=dict(kind="maintainer"), kind="added", summary="first change")])
         check("coverage-digest-date-sensitive", _d01 != _d02)
+        check("read-source-toctou-residual-disclosed",
+              "O_NONBLOCK" in _read_raw_and_parsed.__doc__ and "lstat-to-open" in _read_raw_and_parsed.__doc__)
+        check("read-ledger-schema-divergence-disclosed",
+              "optional-marker" in _load_worklog.__doc__ and "optional-marker" in _load_version.__doc__)
         check("entry-writes-fixed-date", 'date = "2026-01-01T00:00:00Z"' in _entry("WL-2", "fixed", "x"))
 
         # F4 (cited sink, B2 class): a spec-VALID free-text severity renders as LITERAL text, forging no
@@ -2257,6 +2275,11 @@ def self_test():
             # Write mode renders cleanly, then --check is clean (a byte-stable re-render).
             check("populated-write-ok", render(["--root", str(root)]) == EXIT_OK)
             check("populated-check-clean", render(["--root", str(root), "--check"]) == EXIT_OK)
+            _wl_on_disk = tomllib.loads((root / WORKING_DIRNAME / "toml" / "worklog.toml").read_text(encoding="utf-8"))
+            _ver_on_disk = tomllib.loads((root / WORKING_DIRNAME / "toml" / "version.toml").read_text(encoding="utf-8"))
+            check("coverage-digest-reconciles-worklog",
+                  _opf_release.coverage_digest(_wl_on_disk.get("entry", []))
+                  == _ver_on_disk["release"][0]["coverage_digest"])
 
             def read_view(name):
                 return (root / WORKING_DIRNAME / name).read_text(encoding="utf-8")
@@ -2416,6 +2439,9 @@ def self_test():
             stroot = new_root(); write_toml(stroot, "manifest.toml", manifest); empty_indexes(stroot)
             write_toml(stroot, "backlog_item.index.toml", "schema = true\n")
             check("index-schema-bool-cannot-eval", render(["--root", str(stroot)]) == EXIT_CANNOT_EVALUATE)
+            saroot = new_root(); write_toml(saroot, "manifest.toml", manifest); empty_indexes(saroot)
+            write_toml(saroot, "backlog_item.index.toml", "record = []\n")
+            check("index-schema-absent-cannot-eval", render(["--root", str(saroot)]) == EXIT_CANNOT_EVALUATE)
             ukroot = new_root(); write_toml(ukroot, "manifest.toml", manifest); empty_indexes(ukroot)
             write_toml(ukroot, "backlog_item.index.toml", "schema = 1\nbogus_table = 1\n")
             check("index-unknown-key-cannot-eval", render(["--root", str(ukroot)]) == EXIT_CANNOT_EVALUATE)
