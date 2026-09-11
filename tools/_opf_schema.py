@@ -133,11 +133,11 @@ ENVELOPE_KEYS = frozenset({"id", "type", "status", "title", "created_at", "updat
 WORKLOG_KEYS = frozenset({"id", "date", "actor", "kind", "summary", "detail", "links", "refs"})
 
 # `<NS>-<n>`: two uppercase letters, a hyphen, a positive integer with no leading zero (spec 8.2).
-_ID_RE = re.compile(r"^([A-Z]{2})-([1-9][0-9]*)$")
+_ID_RE = re.compile(r"^([A-Z]{2})-([1-9][0-9]*)\Z")
 # RFC 3339 UTC with optional fractional seconds. UTC is expressible as `Z` OR the `+00:00` offset (both
 # denote a zero offset); both are accepted, any other numeric offset (e.g. +05:30) is not UTC and is
 # rejected (see the timestamp ambiguity note above).
-_TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(?:Z|\+00:00)$")
+_TS_RE = re.compile(r"^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]+)?(?:Z|\+00:00)\Z")
 
 # counters.toml layout (defined here; see the ambiguity note).
 COUNTERS_TOP_KEYS = frozenset({"schema", "counters"})
@@ -260,9 +260,27 @@ def _instant_key(value):
     m = _TS_RE.match(value) if isinstance(value, str) else None
     if not m:
         return None
-    frac = float(m.group(7)) if m.group(7) else 0.0
+    frac = m.group(7)[1:].rstrip("0") if m.group(7) else ""
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)),
             int(m.group(4)), int(m.group(5)), int(m.group(6)), frac)
+
+
+def _is_single_line(value):
+    """Non-empty single-line string under EVERY Unicode line boundary (splitlines catches \u2028/\u2029
+    and \x85 a plain \n/\r scan misses; Fable-10)."""
+    return isinstance(value, str) and bool(value) and value.splitlines() == [value]
+
+
+def _genuine_high_water(value):
+    """A non-negative int usable as a high-water: not a bool, and expressible as an id number under the
+    runtime int-to-str limit, so an oversized counter is rejected not certified clean (Fable-8; spec 8.2)."""
+    if type(value) is not int or value < 0:
+        return False
+    try:
+        str(value)
+    except ValueError:
+        return False
+    return True
 
 
 def parse_status(status, spec):
@@ -569,10 +587,10 @@ def _validate_worklog(record, spec, registered_vendors, findings, registered_kin
         # REJECTED with a finding, never silently accepted as "no additional kinds" (M-round3). A genuinely
         # empty list/tuple is well-formed and adds no kinds without a finding.
         if isinstance(registered_kinds, (list, tuple)) and all(
-                isinstance(k, str) for k in registered_kinds):
+                isinstance(k, str) and k for k in registered_kinds):
             allowed_kinds |= set(registered_kinds)
         else:
-            findings.append("registered worklog kinds must be a list of strings")
+            findings.append("registered worklog kinds must be a list of non-empty strings")
     if "kind" not in record:
         findings.append("missing required field: kind")
     elif not isinstance(record.get("kind"), str):
@@ -585,7 +603,7 @@ def _validate_worklog(record, spec, registered_vendors, findings, registered_kin
     summ = record.get("summary")
     if "summary" not in record or not isinstance(summ, str) or not summ:
         findings.append("a worklog entry must carry a non-empty one-line summary (spec 6.2)")
-    elif "\n" in summ or "\r" in summ:
+    elif not _is_single_line(summ):
         # A worklog summary is one line (spec 6.2), like the envelope title (m1).
         findings.append("a worklog entry summary must be a single line (spec 6.2)")
     if "detail" in record and not isinstance(record.get("detail"), str):
@@ -658,8 +676,9 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
 
     spec = specs.get(rtype)
     if spec is None:
-        return RecordValidation(INVALID, ["{!r} is not a supported record type (baseline: {})".format(
-            rtype, sorted(specs, key=repr))], rtype=rtype)
+        findings.append("{!r} is not a supported record type (baseline: {})".format(
+            rtype, sorted(specs, key=repr)))
+        return RecordValidation(INVALID, findings, rtype=rtype)
 
     rid = record.get("id")
     shape = _valid_id_shape(rid)
@@ -689,7 +708,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     title = record.get("title")
     if "title" not in record:
         findings.append("missing required field: title")
-    elif not isinstance(title, str) or not title or "\n" in title or "\r" in title:
+    elif not _is_single_line(title):
         findings.append("title must be a non-empty single line")
 
     actor_kind = _validate_actor(record, findings)
@@ -825,9 +844,9 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
                 "a rejection target cannot be verified without the pre-proposal state; supply it from the "
                 "record's history (spec 8.4)"])
         elif to_state != pre_proposal_state:
-            findings.append("a rejection must return to the record's actual pre-proposal state {!r}, not "
+            findings.append("a rejection must return to the record's actual pre-proposal state {}, not "
                             "{!r} (a rejection may not restore a state the record was never in, spec "
-                            "8.4/8.5)".format(pre_proposal_state, to_state))
+                            "8.4/8.5)".format(_safe_display(pre_proposal_state), to_state))
         elif not (isinstance(reason, str) and reason.strip()):
             # Spec 8.4: a rejection returns the record to a working state "with a recorded reason". An
             # otherwise-legal rejection carrying no recorded reason is INVALID (fail-closed).
@@ -910,7 +929,7 @@ def validate_counters(data, known_namespaces=None):
         if known_namespaces is not None and ns not in known_namespaces:
             findings.append("[counters] namespace {!r} is not a known namespace".format(ns))
         # A bool is an int subclass; a high-water is a genuine non-negative int, never True/False.
-        if type(val) is not int or val < 0:
+        if not _genuine_high_water(val):
             findings.append("[counters].{} must be a non-negative integer high-water mark".format(ns))
             continue
         high_water[ns] = val
@@ -950,7 +969,7 @@ def _validated_counter_map(high, where):
         if ns not in RECORD_NAMESPACES:
             raise ValueError("{}: namespace {!r} is bound to no record type in the section 8.1 taxonomy "
                              "(spec 8.1/8.2)".format(where, ns))
-        if type(val) is not int or val < 0:
+        if not _genuine_high_water(val):
             raise ValueError("{}: high-water for {!r} must be a genuine non-negative int, got {} "
                              "(a bool is not a high-water; spec 8.2)".format(where, ns, _safe_display(val)))
 
@@ -1004,11 +1023,11 @@ def check_monotonic(old_high, new_high):
             continue
         for ns, val in m.items():
             if ns not in RECORD_NAMESPACES:
-                findings.append("{} counters namespace {!r} is bound to no record type in the section 8.1 "
-                                "taxonomy (spec 8.1/8.2)".format(label, ns))
-            if type(val) is not int or val < 0:
-                findings.append("{} counters high-water for {!r} must be a genuine non-negative int, got "
-                                "{} (a bool is not a high-water; spec 8.2)".format(label, ns, _safe_display(val)))
+                findings.append("{} counters namespace {} is bound to no record type in the section 8.1 "
+                                "taxonomy (spec 8.1/8.2)".format(label, _safe_display(ns)))
+            if not _genuine_high_water(val):
+                findings.append("{} counters high-water for {} must be a genuine non-negative int, got "
+                                "{} (a bool is not a high-water; spec 8.2)".format(label, _safe_display(ns), _safe_display(val)))
     if findings:
         return findings                  # a corrupt map is not compared for monotonicity (fail-closed)
     for ns, old in old_high.items():
@@ -1037,7 +1056,7 @@ def check_ids_within_counters(ids, high):
     for rid in ids:
         shape = _valid_id_shape(rid)
         if shape is None:
-            findings.append("id {!r} is not a well-formed <NS>-<n> id".format(rid))
+            findings.append("id {} is not a well-formed <NS>-<n> id".format(_safe_display(rid)))
             continue
         ns, n = shape
         if ns not in high:
@@ -1048,7 +1067,7 @@ def check_ids_within_counters(ids, high):
         # genuine non-negative high-water, so do NOT certify the id against it (the comparison would
         # silently accept True/1.5, or reject against a negative). type(hv) is not int rejects bool, whose
         # type is bool not int (spec 8.2).
-        if type(hv) is not int or hv < 0:
+        if not _genuine_high_water(hv):
             findings.append("namespace {!r} high-water {} is not a non-negative integer (spec 8.2)".format(
                 ns, _safe_display(hv)))
             continue
@@ -1074,7 +1093,7 @@ def check_unique_ids(ids):
         # (guard-input-soundness; spec 8.2). Uniqueness cannot be judged for a malformed id, so it is
         # surfaced and not added to `seen`.
         if _valid_id_shape(rid) is None:
-            findings.append("malformed id {!r}: an id must be a well-formed '<NS>-<n>' string (spec 8.2)".format(rid))
+            findings.append("malformed id {}: an id must be a well-formed '<NS>-<n>' string (spec 8.2)".format(_safe_display(rid)))
             continue
         if rid in seen:
             findings.append("duplicate id {!r}: IDs are never reused (spec 8.2)".format(rid))
@@ -1416,11 +1435,11 @@ def self_test():
     b_failopen = validate_record(dict(wl, kind="p"), expected_type="worklog", registered_kinds="perf")
     check("r3b-string-kinds-no-failopen", b_failopen.status == INVALID)
     check("r3b-string-kinds-named",
-          any("registered worklog kinds must be a list of strings" in f for f in b_failopen.findings))
+          any("registered worklog kinds must be a list of non-empty strings" in f for f in b_failopen.findings))
     b_listoflist = validate_record(dict(wl, kind="fixed"), expected_type="worklog",
                                    registered_kinds=[["perf"]])
     check("r3b-listoflist-kinds-finding-no-crash",
-          any("registered worklog kinds must be a list of strings" in f for f in b_listoflist.findings))
+          any("registered worklog kinds must be a list of non-empty strings" in f for f in b_listoflist.findings))
     check("r3b-legit-list-kinds-still-ok",
           validate_record(dict(wl, kind="perf"), expected_type="worklog",
                           registered_kinds=["perf"]).status == VALID)
@@ -1583,6 +1602,73 @@ def self_test():
           validate_transition("block", "active/proposed", "active", "maintainer").status == VALID)
     check("g1-ratified-block-release-ok",
           validate_transition("block", "active", "released", "maintainer").status == VALID)
+
+    # ----- reconcile-draft fixes (U2 retro: Fable + codex; each vector fails pre-fix, passes post-fix) -
+    _big = 10 ** 5000
+    nl_env = envelope("backlog_item", 1, "open", id="BI-1" + chr(10), created_at=TS + chr(10), updated_at=TS + chr(10))
+    check("fixN1-newline-record-invalid", validate_record(nl_env).status == INVALID)
+    check("fixN1-newline-id-shape-none", _valid_id_shape("BI-1" + chr(10)) is None)
+    check("fixN1-newline-ts-false", not _valid_timestamp(TS + chr(10)))
+    check("fixN1-newline-unique-distinct", bool(check_unique_ids(["BI-1", "BI-1" + chr(10)])))
+    check("fixA3-nonascii-digit-ts-false", not _valid_timestamp("202" + chr(0x666) + "-01-02T03:04:05Z"))
+    check("fixA4-frac-distinct-key",
+          _instant_key("2026-01-02T03:04:05.11Z") != _instant_key("2026-01-02T03:04:05.12Z"))
+    check("fixA4-frac-trailing-zero-equal",
+          _instant_key("2026-01-02T03:04:05.5Z") == _instant_key("2026-01-02T03:04:05.50Z"))
+    check("fixA4-subepsilon-regression-invalid",
+          validate_record(envelope("backlog_item", 1, "open",
+                                   created_at="2026-08-12T09:14:02.12345678901234567892Z",
+                                   updated_at="2026-08-12T09:14:02.12345678901234567891Z")).status == INVALID)
+    check("fix10-u2028-title-invalid",
+          validate_record(envelope("finding", 1, "open", title="a" + chr(0x2028) + "b")).status == INVALID)
+    check("fix10-u2028-summary-invalid",
+          validate_record(dict(wl, summary="a" + chr(0x2028) + "b"), expected_type="worklog").status == INVALID)
+    _hw8, f8 = validate_counters(dict(schema=1, counters=dict(BI=_big)))
+    check("fix8-oversized-counter-flagged", bool(f8) and "BI" not in _hw8)
+    try:
+        next_id(dict(BI=_big), "BI", known_complete=True)
+        check("fix8-next-id-oversized-refused", False)
+    except ValueError:
+        check("fix8-next-id-oversized-refused", True)
+    check("fix2-unique-oversized-clean", bool(check_unique_ids([_big])))
+    check("fix2-within-oversized-clean", bool(check_ids_within_counters([_big], dict())))
+    check("fix2-monotonic-oversized-key-clean", bool(check_monotonic(dict(), {_big: 1})))
+    check("fix2-transition-oversized-preproposal-clean",
+          validate_transition("backlog_item", "dropped/proposed", "open", "maintainer",
+                              pre_proposal_state=_big, reason="x").status == INVALID)
+    check("fixB1-empty-registered-kind-invalid",
+          validate_record(dict(wl, kind=""), expected_type="worklog", registered_kinds=[""]).status == INVALID)
+    _rvbad = envelope("finding", 8, "open")
+    _rvbad["x-aiqt"] = dict(a=1)
+    check("fix3-malformed-registered-vendors-invalid",
+          validate_record(_rvbad, registered_vendors="x-aiqt,x-evil").status == INVALID)
+    check("fix5c-counters-bool-schema-flagged",
+          any("schema must be an integer" in f
+              for f in validate_counters(dict(schema=True, counters=dict(BI=1)))[1]))
+    try:
+        next_id(dict(BI=5), "FN", known_complete="no")
+        check("fix4-known-complete-nonbool-refused", False)
+    except ValueError:
+        check("fix4-known-complete-nonbool-refused", True)
+    try:
+        next_id(dict(BI=-1), "BI", known_complete=True)
+        check("fix6-negative-map-next-id-refused", False)
+    except ValueError:
+        check("fix6-negative-map-next-id-refused", True)
+    check("fix5b-reject-whitespace-reason-invalid",
+          validate_transition("finding", "fixed/proposed", "open", "maintainer",
+                              pre_proposal_state="open", reason="   ").status == INVALID)
+    check("fixC6-ad-missing-action-only-invalid",
+          validate_record(envelope("autonomous_decision", 1, "recorded",
+                                   actor=dict(kind="assistant"), classification="ACT")).status == INVALID)
+    check("fixC6-ad-missing-classification-only-invalid",
+          validate_record(envelope("autonomous_decision", 1, "recorded",
+                                   actor=dict(kind="assistant"), action="merged")).status == INVALID)
+    _d1 = validate_transition("backlog_item", "done/proposed", "dropped", "maintainer",
+                              pre_proposal_state="dropped", reason="isolate terminal-target")
+    check("fixD1-reject-to-terminal-isolated-invalid", _d1.status == INVALID)
+    check("fixD1-reject-to-terminal-isolated-named",
+          any("rejection to a working state" in f for f in _d1.findings))
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
