@@ -88,6 +88,8 @@ WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root
 DEFAULT_MACHINE_SUBDIR = "toml"        # standard machine-store subdir name, tried first (spec 4.4)
 MANIFEST_NAME = "manifest.toml"        # discovery marker filename (spec 4.5)
 STANDARD_TOKEN = "devprocess"          # exact discovery token in [devprocess].standard (spec 4.5)
+MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (manifest/pointer); a larger
+                                       # store input is refused rather than read unboundedly (SECA)
 
 # Resolution outcomes.
 RESOLVED = "RESOLVED"                  # a machine store was resolved and located
@@ -169,6 +171,7 @@ TOP_LEVEL_TABLES = frozenset({"devprocess", "store", "modules", "profiles", "typ
                               "views", "deliverables", "archive", "unmanaged", "vendors"})
 
 _NAMESPACE_OK = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_EXTENSION_VENDOR_OK = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")   # ASCII x-<vendor> slug alphabet
 
 
 class StoreError(Exception):
@@ -232,8 +235,17 @@ def _open_dir_nofollow(abspath):
     symlink-resolution rule). `Path.resolve()` is deliberately NOT used to resolve a pointer target: it
     canonicalizes symlinks BEFORE the open, so a symlinked target would resolve away and open
     successfully. Raises OSError, which the caller maps to CANNOT-EVALUATE."""
+    if "\x00" in str(abspath):
+        # os.open raises ValueError (not the OSError this helper documents) for an embedded NUL; refuse it
+        # here as OSError so a NUL-bearing pointer target fails closed to CANNOT-EVALUATE at the caller
+        # rather than escaping unmapped (guard-input-soundness; defence in depth behind the caller's
+        # existence pre-check that already shields the current resolve path).
+        raise OSError("store root {!r} carries an embedded NUL byte".format(str(abspath)))
     parts = Path(abspath).parts
-    if not parts or parts[0] != os.sep:
+    # POSIX preserves a leading '//' as a distinct root anchor (pathlib yields '//' for exactly two leading
+    # slashes; '///...' collapses to '/'), so accept both root spellings rather than falsely rejecting a
+    # '//'-anchored path with a message claiming it is not absolute (over-fire; class 2).
+    if not parts or parts[0] not in (os.sep, os.sep + os.sep):
         raise OSError("store root {!r} is not an absolute POSIX path".format(str(abspath)))
     fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)   # the filesystem root itself is never a symlink
     for comp in parts[1:]:
@@ -259,7 +271,15 @@ def _read_toml_contained(root_fd, relpath):
     """Read and parse a contained TOML file beneath root_fd, no-follow. Returns the parsed dict, or None
     when the file (or a parent) is absent. StoreError (a cannot-evaluate) on an unreadable file, a
     refused symlink, or a TOML/parse error: an unreadable input is a failure, never an empty pass."""
-    st = _journal._lstat_contained(root_fd, relpath)
+    try:
+        st = _journal._lstat_contained(root_fd, relpath)
+    except (_journal.JournalError, OSError) as exc:
+        # _lstat_contained walks the contained parents no-follow and can raise JournalError (a backslash,
+        # control-character, or refused/unreadable intermediate component) or OSError; neither is a
+        # StoreError, so an unwrapped raise escapes resolve_store/discover/load_manifest uncaught. Map it to
+        # a fail-closed StoreError (routed to CANNOT-EVALUATE), never an uncaught crash on an adopter-
+        # controlled store tree (check-fails-closed-on-unreadable).
+        raise StoreError("cannot stat {} ({})".format(relpath, exc))
     if st is None:
         return None
     # A non-regular entry (a FIFO, device, socket, or directory) is refused BEFORE any open: opening a
@@ -269,13 +289,39 @@ def _read_toml_contained(root_fd, relpath):
     if not stat.S_ISREG(st.st_mode):
         raise StoreError("{} is present but is not a regular file (an exotic entry; fail-closed, never "
                          "opened)".format(relpath))
+    # A store input is not read unboundedly: refuse a file larger than the read cap on the size the lstat
+    # already returned, so a multi-gigabyte stray file in an adopter-controlled tree meets a controlled
+    # refusal rather than exhausting memory during resolution (SECA resource-bounds). This lstat size is a
+    # pre-open FAST REJECT bound to the size BEFORE the open; a file swapped or grown between this lstat and
+    # the open is caught by the post-read length check below (disclose-guard-residuals).
+    if st.st_size > MAX_STORE_READ_BYTES:
+        raise StoreError("{} is {} bytes, over the {}-byte store-read cap (fail-closed)".format(
+            relpath, st.st_size, MAX_STORE_READ_BYTES))
     try:
         data, _ = _journal._read_contained(root_fd, relpath)
-    except _journal.JournalError as exc:
+    except (_journal.JournalError, OSError) as exc:
+        # _read_contained maps its open/read errors to JournalError, but its post-open os.fstat can still
+        # raise a BARE OSError (a device/EIO-level failure) that would otherwise escape resolve_store
+        # uncaught; catch OSError alongside JournalError here (as the _lstat_contained choke point above
+        # already does) so any unreadable manifest/pointer is a fail-closed StoreError, never a crash
+        # (check-fails-closed-on-unreadable).
         raise StoreError("cannot read {} ({})".format(relpath, exc))
+    # Re-check the bytes ACTUALLY read against the cap: the pre-open lstat size is bound to the file as it
+    # was BEFORE the open, so a store file swapped in or grown between that lstat and the open (a TOCTOU race
+    # on an adopter-controlled tree) is refused here rather than parsed over the cap. Residual: the bytes are
+    # read before this refusal, so a concurrently-growing file is bounded at classification, not mid-read
+    # (SECA resource-bounds; disclose-guard-residuals).
+    if len(data) > MAX_STORE_READ_BYTES:
+        raise StoreError("{} read {} bytes, over the {}-byte store-read cap (a raced swap or growth past "
+                         "the pre-open size; fail-closed)".format(relpath, len(data), MAX_STORE_READ_BYTES))
     try:
         return tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError) as exc:
+        # tomllib.TOMLDecodeError is a ValueError subclass, but an oversized BASE-10 integer literal (a
+        # token past CPython's ~4300-digit limit) makes tomllib raise a BARE ValueError from int(), not a
+        # TOMLDecodeError, so a hostile store file would otherwise escape resolve_store uncaught; catch the
+        # ValueError base so a present-but-unparseable input is a fail-closed StoreError, never a crash
+        # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
         raise StoreError("cannot parse {} ({})".format(relpath, exc))
     except RecursionError as exc:
         # A deeply-nested TOML value overflows the parser's recursion: a present-but-unparseable input is a
@@ -307,8 +353,14 @@ def _immediate_subdirs(store_root_fd, working_rel):
             # O_NOFOLLOW refuses a symlinked .working with ELOOP: refused, not followed, fail-closed.
             raise StoreError("cannot open {} no-follow ({})".format(working_rel, exc))
         try:
+            try:
+                names = sorted(os.listdir(wfd))
+            except OSError as exc:
+                # A listing I/O error (EIO, or a state change after the open) is fail-closed, never read as
+                # an empty (no-store) directory (check-fails-closed-on-unreadable).
+                raise StoreError("cannot list {} ({})".format(working_rel, exc))
             subdirs = []
-            for entry in sorted(os.listdir(wfd)):
+            for entry in names:
                 try:
                     est = os.stat(entry, dir_fd=wfd, follow_symlinks=False)
                 except OSError as exc:
@@ -593,11 +645,14 @@ def _valid_namespace(value):
 
 
 def _valid_extension_namespace(value):
-    """An `x-<vendor>` token: 'x-' plus a lowercase-alphanumeric vendor slug (spec 8.7)."""
+    """An `x-<vendor>` token: 'x-' plus a lowercase-ASCII-alphanumeric vendor slug (spec 8.7). The vendor
+    alphabet is the explicit ASCII set, NOT str.islower()/str.isdigit(), which also admit non-ASCII letters
+    and digits, so a Unicode slug that should be INVALID cannot pass a check meant for the ASCII token
+    alphabet (guard-input-soundness)."""
     if not isinstance(value, str) or not value.startswith("x-"):
         return False
     vendor = value[2:]
-    return bool(vendor) and all(ch.islower() or ch.isdigit() or ch == "-" for ch in vendor) \
+    return bool(vendor) and all(ch in _EXTENSION_VENDOR_OK for ch in vendor) \
         and vendor[0] != "-" and vendor[-1] != "-"
 
 
@@ -639,15 +694,16 @@ def _str_token_set(value):
 
 def _sorted_key_names(keys):
     """Order an iterable of keys for a FINDING MESSAGE as a sorted list of strings. Every element is
-    str-coerced BEFORE the sort, so a heterogeneous or non-str key set (e.g. a hand-constructed table
-    with mixed int/str keys) can neither crash sorted() on an int-vs-str type mismatch nor break the
+    coerced through _safe_str BEFORE the sort, so a heterogeneous or non-str key set (e.g. a hand-
+    constructed table with mixed int/str keys, or an oversized-int key whose str() would trip CPython's
+    integer-string-conversion limit) can neither crash sorted() on an int-vs-str type mismatch nor break the
     later ", ".join, which is always over strings. This is the shared total-sort for the unknown-key
     finding-message idiom (formerly a bare sorted over the surplus-key set) across the three OPF pass-A
     validators (schema, store, release). It
     is for ERROR-MESSAGE ORDERING ONLY; it is deliberately NOT used on the byte-stable coverage digest,
     where a non-str key fails closed with a ReleaseError instead (str-coercing a digest key would change
     the digest, so the digest path rejects rather than coerces)."""
-    return sorted(str(k) for k in keys)
+    return sorted(_safe_str(k) for k in keys)
 
 
 def _safe_display(value):
@@ -699,6 +755,34 @@ def _is_item_collection(value):
             and not isinstance(value, collections.abc.Mapping))
 
 
+_MAX_SUPPORTED_MAJORS = 4096   # a profile supports a handful of majors; a larger control is malformed
+
+
+def _materialize_majors(value):
+    """Materialize a supported-profiles majors control to a concrete list of NON-NEGATIVE ints, FAIL-
+    CLOSED. A well-formed control (a finite item collection whose every element is a non-negative int)
+    yields that list; anything malformed yields None, so the caller fails closed to CANNOT-EVALUATE rather
+    than crashing, hanging, or exhausting memory: a non-collection, a bare string/mapping/scalar, an
+    element that is not an int, a boolean (an int subclass, excluded), a NEGATIVE major (no SemVer major is
+    negative), an iterator that raises mid-iteration, or a control longer than _MAX_SUPPORTED_MAJORS (a
+    range(10**12) or an unbounded generator is cut off at the cap, never fully materialized). This is the
+    single boundary that normalizes the enforcement control's majors (guard-input-soundness, SECA resource-
+    bounds); a one-shot iterator is consumed here exactly once and the returned list is reused."""
+    if not _is_item_collection(value):
+        return None
+    out = []
+    try:
+        for m in value:
+            if not isinstance(m, int) or isinstance(m, bool) or m < 0:
+                return None
+            out.append(m)
+            if len(out) > _MAX_SUPPORTED_MAJORS:
+                return None
+    except Exception:
+        return None
+    return out
+
+
 def validate_manifest(data, supported_profiles=None):
     """Validate a parsed manifest against the base schema and, for each SUPPORTED profile, the profile
     schema. Returns a ManifestValidation.
@@ -737,13 +821,12 @@ def validate_manifest(data, supported_profiles=None):
     # validation and enforcement consumes each value exactly once, so enforcement still fires.
     materialized_profiles = {}
     for _pname, _majors in supported_profiles.items():
-        _mats = list(_majors) if _is_item_collection(_majors) else None
-        if not isinstance(_pname, str) or _mats is None or not all(
-                isinstance(m, int) and not isinstance(m, bool) for m in _mats):
+        _mats = _materialize_majors(_majors)
+        if not isinstance(_pname, str) or _mats is None:
             return ManifestValidation(CANNOT_EVALUATE,
-                                      ["supported_profiles entry {!r} is malformed: each profile name "
-                                       "(a string) maps to a list of integer major versions (fail-closed; "
-                                       "spec 9.1)".format(_pname)])
+                                      ["supported_profiles entry {} is malformed: each profile name (a "
+                                       "string) maps to a bounded list of non-negative integer major "
+                                       "versions (fail-closed; spec 9.1)".format(_safe_display(_pname))])
         materialized_profiles[_pname] = _mats
     supported_profiles = materialized_profiles
     if not isinstance(data, dict):
@@ -787,7 +870,8 @@ def validate_manifest(data, supported_profiles=None):
             # FAIL-CLOSED finding (INVALID), never routed to unevaluated, which would skip all its gates
             # and let the manifest validate VALID (BLOCKER 1, spec 9.1).
             findings.append("[profiles.{}] is a supported profile but its major cannot be determined "
-                            "(version absent, non-string, or not a bare SemVer); fail-closed".format(name))
+                            "(version absent, non-string, or not a bare SemVer); fail-closed".format(
+                                _safe_display(name)))
             continue
         if prof_major not in supported_majors:
             # A genuinely UNSUPPORTED profile major is ignored for enforcement (spec 9.1), recorded
@@ -920,13 +1004,13 @@ def _normative_namespace(name, modules_enabled, where, findings):
     if name in MODULE_TYPES:
         normative_ns, module = MODULE_TYPES[name]
         if module not in modules_enabled:
-            findings.append("{} declares module type {!r} but its module {!r} is not enabled in "
-                            "[modules] (spec 8.1)".format(where, name, module))
+            findings.append("{} declares module type {} but its module {!r} is not enabled in "
+                            "[modules] (spec 8.1)".format(where, _safe_display(name), module))
             return None
         return normative_ns
     if name in RESERVED_EXCLUDED_TYPES:
-        findings.append("{} type {!r} is reserved and excluded from the adopter standard "
-                        "(spec 8.1)".format(where, name))
+        findings.append("{} type {} is reserved and excluded from the adopter standard "
+                        "(spec 8.1)".format(where, _safe_display(name)))
         return None
     findings.append("{} is not a known record type (spec 8.1)".format(where))
     return None
@@ -953,7 +1037,7 @@ def _is_contained_relpath(p):
                 return False
         else:
             depth += 1
-    return True
+    return depth > 0        # a path that resolves AT the root (e.g. "." or "a/..") is not contained-below
 
 
 def _validate_types(types, modules_enabled, findings):
@@ -973,7 +1057,7 @@ def _validate_types(types, modules_enabled, findings):
         return
     seen_ns = {}
     for name, tbl in types.items():
-        where = "[types.{}]".format(name)
+        where = "[types.{}]".format(_safe_display(name))
         if not isinstance(tbl, dict):
             findings.append("{} is not a table".format(where))
             continue
@@ -990,11 +1074,11 @@ def _validate_types(types, modules_enabled, findings):
         # finding, as is an unknown or reserved-excluded name).
         normative_ns = _normative_namespace(name, modules_enabled, where, findings)
         if normative_ns is not None and ns != normative_ns:
-            findings.append("{}.namespace {!r} is not the normative namespace {!r} bound to type {!r} "
-                            "(spec 8.1)".format(where, ns, normative_ns, name))
+            findings.append("{}.namespace {!r} is not the normative namespace {!r} bound to type {} "
+                            "(spec 8.1)".format(where, ns, normative_ns, _safe_display(name)))
         if ns in seen_ns:
             findings.append("namespace {!r} is bound to more than one type ({} and {}); the binding is "
-                            "one-to-one (spec 8.2)".format(ns, seen_ns[ns], name))
+                            "one-to-one (spec 8.2)".format(ns, _safe_str(seen_ns[ns]), _safe_str(name)))
         else:
             seen_ns[ns] = name
 
@@ -1006,7 +1090,7 @@ def _validate_providers(providers, findings):
         findings.append("[providers] is not a table")
         return
     for name, tbl in providers.items():
-        where = "[providers.{}]".format(name)
+        where = "[providers.{}]".format(_safe_display(name))
         if not isinstance(tbl, dict):
             findings.append("{} is not a table".format(where))
             continue
@@ -1028,7 +1112,7 @@ def _validate_views(views, findings):
         findings.append("[views] is not a table")
         return
     for name, tbl in views.items():
-        where = "[views.{!r}]".format(name)
+        where = "[views.{}]".format(_safe_display(name))
         if not isinstance(tbl, dict):
             findings.append("{} is not a table".format(where))
             continue
@@ -1056,7 +1140,7 @@ def _validate_deliverables(deliverables, findings):
         findings.append("[deliverables] is not a table")
         return
     for name, tbl in deliverables.items():
-        where = "[deliverables.{!r}]".format(name)
+        where = "[deliverables.{}]".format(_safe_display(name))
         if not isinstance(tbl, dict):
             findings.append("{} is not a table".format(where))
             continue
@@ -1123,7 +1207,7 @@ def _validate_supported_profile(name, prof, spec_tuple, base_posture, modules_en
     closed on a base-incompatible instance, a posture_floor that WEAKENS the base, a required module
     that is not enabled, and an extension_namespace that is absent, malformed, or not registered in
     [vendors]."""
-    where = "[profiles.{}]".format(name)
+    where = "[profiles.{}]".format(_safe_display(name))
     if not isinstance(prof, dict):
         findings.append("{} is not a table".format(where))
         return
@@ -1612,6 +1696,190 @@ def self_test():
             os.chdir(prev_cwd)
         check("relative-root-resolves", rel_res.status == RESOLVED)
         check("relative-root-matches-abs", rel_res.store_root == abs_res.store_root)
+        # ---- reconcile-draft fix vectors (fail pre-fix, pass post-fix) --------------------------------
+        # M1: an oddly-named .working subdir (_check_rel refuses a backslash) -> CANNOT-EVALUATE, never an
+        # uncaught JournalError out of resolve_store.
+        _m1subs = dict()
+        _m1subs[DEFAULT_MACHINE_SUBDIR] = manifest_text()
+        _m1subs["bad" + chr(92) + "name"] = manifest_text()
+        m1_root = build_store(machine_subdirs=_m1subs)
+        check("m1-oddly-named-subdir-cannot-eval", resolve_store(m1_root).status == CANNOT_EVALUATE)
+
+        # S1.3: a listing I/O error inside .working fails closed, never read as an empty (no-store) dir.
+        s13_root = build_store(manifest=manifest_text())
+        _real_listdir = os.listdir
+        os.listdir = (lambda x: (_ for _ in ()).throw(OSError(5, "EIO"))
+                      if isinstance(x, int) else _real_listdir(x))
+        try:
+            check("s13-listdir-io-error-cannot-eval", resolve_store(s13_root).status == CANNOT_EVALUATE)
+        finally:
+            os.listdir = _real_listdir
+
+        # S2.2: a non-ASCII x-<vendor> slug is not a valid extension namespace (islower()/isdigit() admit
+        # non-ASCII; the ASCII alphabet does not).
+        check("s22-ascii-vendor-ok", _valid_extension_namespace("x-acme1"))
+        check("s22-unicode-vendor-rejected", not _valid_extension_namespace("x-" + chr(0xe9)))
+        check("s22-unicode-digit-vendor-rejected", not _valid_extension_namespace("x-" + chr(0xb2)))
+
+        # S2.3: a NEGATIVE supported major is malformed -> CANNOT-EVALUATE, never silently routing a covered
+        # (weakening) profile to unevaluated and validating VALID.
+        m_weak2 = _t.loads(manifest_text(with_aiqt=True, aiqt_floor="warn"))
+        _neg = dict(); _neg["aiqt"] = [-1]
+        check("s23-negative-major-cannot-eval",
+              validate_manifest(m_weak2, supported_profiles=_neg).status == CANNOT_EVALUATE)
+
+        # S2.4/S2.5: an unbounded/exploding majors control (huge range, throwing iterator) is cut off or
+        # caught at the materialization boundary -> CANNOT-EVALUATE, never an eager alloc/hang/escape.
+        _hr = dict(); _hr["aiqt"] = range(10 ** 12)
+        check("s24-huge-range-cannot-eval",
+              validate_manifest(m_weak2, supported_profiles=_hr).status == CANNOT_EVALUATE)
+        def _one_then_raise():
+            yield 1
+            raise OSError("boom")
+        _thr = dict(); _thr["aiqt"] = _one_then_raise()
+        check("s25-throwing-iterator-cannot-eval",
+              validate_manifest(m_weak2, supported_profiles=_thr).status == CANNOT_EVALUATE)
+
+        # m3: an oversized-int table key renders through _safe_display rather than crashing the validator
+        # (including inside the fail-closed supported_profiles branch).
+        _big = 10 ** 5000
+        _spk = dict(); _spk[_big] = [1]
+        check("m3-oversized-sp-key-cannot-eval",
+              validate_manifest(_t.loads(manifest_text()), supported_profiles=_spk).status == CANNOT_EVALUATE)
+        _md = _t.loads(manifest_text()); _tk = dict(); _tk[_big] = dict(namespace="BI"); _md["types"] = _tk
+        check("m3-oversized-types-key-invalid", validate_manifest(_md).status == INVALID)
+
+        # m4: a target/path resolving AT the root (".", "a/..") is not contained-below; a genuine contained
+        # path is still accepted.
+        check("m4-at-root-dot-rejected", not _is_contained_relpath("."))
+        check("m4-at-root-dotdot-rejected", not _is_contained_relpath("a/.."))
+        check("m4-contained-still-ok",
+              _is_contained_relpath("a/../b") and _is_contained_relpath("docs/x.md"))
+
+        # m5: a '//'-anchored absolute path is accepted as a root spelling, not falsely rejected.
+        _fd = _open_dir_nofollow("//"); os.close(_fd)
+        check("m5-double-slash-root-accepted", True)
+
+        # S1.4 (defence in depth): a NUL-bearing pointer target fails closed as OSError, honouring
+        # _open_dir_nofollow's documented OSError contract rather than raising an unmapped ValueError.
+        _kind = None
+        try:
+            _open_dir_nofollow("/tmp/a" + chr(0) + "b")
+        except OSError:
+            _kind = "OSError"
+        except ValueError:
+            _kind = "ValueError"
+        check("s14-nul-target-oserror", _kind == "OSError")
+
+        # m8: a store file larger than the read cap is refused rather than read unboundedly.
+        big_manifest = manifest_text() + chr(10) + "#" + ("x" * (MAX_STORE_READ_BYTES + 16))
+        m8_root = build_store(manifest=big_manifest)
+        check("m8-oversized-manifest-cannot-eval", resolve_store(m8_root).status == CANNOT_EVALUATE)
+
+        # ---- round-2 reconcile-draft fix vectors (fail pre-fix, pass post-fix) ------------------------
+        # The FIFO-hang alarm marker MUST NOT derive from OSError: a reader's own `except OSError`
+        # (read_frames, read_lock_owner, _read_contained) would launder an OSError-derived marker such as
+        # TimeoutError into a JournalError, so a genuine writer-less-FIFO hang would read as a refusal and the
+        # check would pass while blocking. A distinct non-OSError marker propagates out of the reader instead,
+        # so a hang is a check FAILURE, never a silent slow pass (self-test-discrimination).
+        import signal as _signal
+
+        class _HangMarker(Exception):
+            pass
+
+        def _refused_no_hang(thunk):
+            """True when thunk() fails closed with a JournalError inside a 2s alarm; False when it HANGS (the
+            marker fires) so a writer-less-FIFO blocking-open regression is a check failure, not a hung suite."""
+            _prev = _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(_HangMarker()))
+            try:
+                _signal.setitimer(_signal.ITIMER_REAL, 2.0)
+                try:
+                    thunk()
+                    return False
+                except _journal.JournalError:
+                    return True
+                except _HangMarker:
+                    return False
+            finally:
+                _signal.setitimer(_signal.ITIMER_REAL, 0)
+                _signal.signal(_signal.SIGALRM, _prev)
+
+        # M2: _read_contained does not hang on a writer-less FIFO (the raced regular-file->FIFO swap); it
+        # returns a fail-closed JournalError at once. The non-OSError marker makes a blocking regression a
+        # check failure (the earlier TimeoutError marker, an OSError subclass, was laundered to JournalError
+        # by _read_contained's own `except OSError` and so passed even while blocking).
+        _fd_dir = base / "m2-fifo"; _fd_dir.mkdir()
+        os.mkfifo(str(_fd_dir / "f"))
+        _rfd = os.open(str(_fd_dir), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            check("m2-fifo-no-hang-refused",
+                  _refused_no_hang(lambda: _journal._read_contained(_rfd, "f")))
+        finally:
+            os.close(_rfd)
+
+        # NEW-2: the FIFO-hang class survived at three sibling _journal readers (read_frames, read_lock_owner,
+        # _read_at); each now opens O_NONBLOCK so a writer-less FIFO is refused at the fstat gate at once,
+        # never a hang. A hostile on-disk tree can pre-plant these paths.
+        _rf_dir = base / "n2-read-frames"; _rf_dir.mkdir()
+        os.mkfifo(str(_rf_dir / "frames.log"))
+        check("new2-read-frames-fifo-no-hang", _refused_no_hang(lambda: _journal.read_frames(_rf_dir)))
+        _rl_dir = base / "n2-read-lock-owner"; _rl_dir.mkdir()
+        os.mkfifo(str(_rl_dir / "lock"))
+        check("new2-read-lock-owner-fifo-no-hang", _refused_no_hang(lambda: _journal.read_lock_owner(_rl_dir)))
+        _ra_dir = base / "n2-read-at"; _ra_dir.mkdir()
+        os.mkfifo(str(_ra_dir / "f"))
+        _rafd = os.open(str(_ra_dir), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            check("new2-read-at-fifo-no-hang", _refused_no_hang(lambda: _journal._read_at(_rafd, "f", "f")))
+        finally:
+            os.close(_rafd)
+
+        # NEW-1: a hostile store file with an oversized BASE-10 integer literal makes tomllib raise a bare
+        # ValueError (not TOMLDecodeError); it maps to a fail-closed StoreError -> CANNOT-EVALUATE, never an
+        # uncaught crash out of resolve_store.
+        n1_root = build_store(manifest="[devprocess]\nbig = " + "9" * 5000 + "\n")
+        check("new1-oversized-int-literal-cannot-eval", resolve_store(n1_root).status == CANNOT_EVALUATE)
+
+        # NEW-3: an OSError from _read_contained (e.g. a post-open fstat EIO) maps to a fail-closed StoreError
+        # -> CANNOT-EVALUATE, never an uncaught OSError out of resolve_store.
+        n3_root = build_store(manifest=manifest_text())
+        _real_rc = _journal._read_contained
+        def _rc_oserror(_rfd_arg, _rel_arg):
+            raise OSError(5, "injected EIO on read")
+        _journal._read_contained = _rc_oserror
+        try:
+            check("new3-read-oserror-cannot-eval", resolve_store(n3_root).status == CANNOT_EVALUATE)
+        finally:
+            _journal._read_contained = _real_rc
+
+        # NEW-4: an oversized-int key rendered into a finding message no longer crashes the validator: the
+        # unknown-key idiom (_sorted_key_names) and the duplicate-namespace message both render through
+        # _safe_str. TOML keys are always strings, so these reach the validator only from a hand-built control
+        # dict (an injected-boundary hardening).
+        _n4a = _t.loads(manifest_text()); _n4a[10 ** 5000] = dict(x=1)
+        check("new4-oversized-toplevel-key-invalid", validate_manifest(_n4a).status == INVALID)
+        _n4b = _t.loads(manifest_text())
+        _n4tk = dict(); _n4tk[10 ** 5000] = dict(namespace="BI"); _n4tk["backlog_item"] = dict(namespace="BI")
+        _n4b["types"] = _n4tk
+        check("new4-oversized-dup-ns-key-invalid", validate_manifest(_n4b).status == INVALID)
+
+        # NEW-5: the store-read cap is enforced on the bytes ACTUALLY read, not only the pre-open lstat, so a
+        # file reporting a small size at lstat but reading over the cap (a raced swap) is refused. The lstat is
+        # pinned small while the real file is over-cap.
+        n5_root = build_store(manifest=manifest_text() + "\n#" + "x" * (MAX_STORE_READ_BYTES + 16))
+        _real_lstat = _journal._lstat_contained
+        def _small_lstat(_rfd_arg, _rel_arg):
+            _stv = _real_lstat(_rfd_arg, _rel_arg)
+            if _stv is not None and stat.S_ISREG(_stv.st_mode):
+                _f = list(_stv); _f[stat.ST_SIZE] = 1
+                return os.stat_result(_f)
+            return _stv
+        _journal._lstat_contained = _small_lstat
+        try:
+            check("new5-toctou-oversized-read-cannot-eval", resolve_store(n5_root).status == CANNOT_EVALUATE)
+        finally:
+            _journal._lstat_contained = _real_lstat
+
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
