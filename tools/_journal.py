@@ -940,11 +940,24 @@ def capture_preimages(parent_fd, txn_dir, root_fd, ops):
                                            .format(op["path"], kind))
                     data, _fst = _read_contained(root_fd, op["path"])
                     ref = str(seq)
-                    # payload written dir-fd-relative to the CONTAINED preimages fd, O_NOFOLLOW: a
-                    # symlinked preimages/<seq> is refused rather than followed onto a victim file.
-                    pfd = os.open(ref, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600,
-                                  dir_fd=prefd)
+                    # payload written dir-fd-relative to the CONTAINED preimages fd, EXCLUSIVELY created
+                    # (O_EXCL, no O_TRUNC): a pre-planted FIFO or a hard link to a victim regular file at the
+                    # slot is REFUSED (the open fails closed) rather than being truncated and overwritten
+                    # through the shared inode. O_NOFOLLOW refuses a symlinked slot; O_NONBLOCK so a raced
+                    # non-regular final component returns at once instead of blocking the open forever; the
+                    # fstat confirms the opened object is the regular file we just created. The slot is fresh
+                    # per transaction (the txn dir is created with a collision-refusing mkdir), so O_EXCL
+                    # never trips on a legitimate re-run (SECI-symlink-resolution; fail closed).
                     try:
+                        pfd = os.open(ref, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                                      | os.O_NONBLOCK, 0o600, dir_fd=prefd)
+                    except OSError as exc:
+                        raise JournalError("cannot exclusively create contained preimage payload {!r} ({})"
+                                           .format(ref, exc))
+                    try:
+                        if not stat.S_ISREG(os.fstat(pfd).st_mode):
+                            raise JournalError("contained preimage payload {!r} is not a regular file after "
+                                               "exclusive create (fail-closed)".format(ref))
                         _write_all(pfd, data)
                         os.fsync(pfd)
                     finally:
@@ -1175,7 +1188,7 @@ def _maybe_torn_dirsync(root_fd, relpath, i):
 
 # --- restore (idempotent, contained) ------------------------------------------------------------------
 
-def _restore_preimage(txn_dir, root_fd, op, op_index=0):
+def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
     """Restore one op to its prestate, idempotently and contained. A no-op when the path already holds
     its prestate (including when a parent is still absent, so a create/mkdir undo whose subtree was
     never built is a clean no-op), so replaying a rollback is safe. Restores run in reverse dependency
@@ -1225,7 +1238,19 @@ def _restore_preimage(txn_dir, root_fd, op, op_index=0):
                 raise JournalError("cannot restore {!r}: expected a directory or absence, found a "
                                    "non-directory".format(path))
         else:                                             # write or remove: recreate/rewrite prior bytes
-            data = (txn_dir / "preimages" / prestate["payload"]).read_bytes()
+            # Read the retained preimage CONTAINED (an O_DIRECTORY|O_NOFOLLOW walk beneath the trusted
+            # journal-root fd, never a re-resolved absolute pathname that could follow a swapped txn-dir
+            # component out of containment) and BOUNDED by the recorded prestate size (so a preimage grown
+            # or swapped past its recorded length is refused fail-closed BEFORE the whole file is read into
+            # memory, rather than read unbounded and only then digest-checked). _read_at confirms a regular
+            # file on the opened fd; the digest check below still gates the restore (SECI-symlink-resolution,
+            # SECA-resource-bounds).
+            pre_rel = "{}/preimages/{}".format(Path(txn_dir).name, prestate["payload"])
+            ppfd, pname = _open_parent(jr_fd, pre_rel)
+            try:
+                data, _pst = _read_at(ppfd, pname, pre_rel, cap=prestate["size"])
+            finally:
+                os.close(ppfd)
             if hashlib.sha256(data).hexdigest() != prestate["sha256"]:
                 raise JournalError("preimage for {!r} does not match recorded prestate digest".format(path))
             if st is None:
@@ -1342,7 +1367,7 @@ def recover(jr_fd, txn_dir, root_fd):
         publish(jr_fd, txn_dir, F_RIP, {"txn": intent["txn"]})
     total = len(ops)
     for j, op in enumerate(reversed(ops)):
-        _restore_preimage(txn_dir, root_fd, op, total - 1 - j)
+        _restore_preimage(jr_fd, txn_dir, root_fd, op, total - 1 - j)
         _kill_point("after-restore-{}".format(total - 1 - j))
     publish(jr_fd, txn_dir, F_RC, {"txn": intent["txn"]})
     return "rolled-back"
@@ -1380,7 +1405,7 @@ def run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops, staged_re
         publish(jr_fd, txn_dir, F_RIP, {"txn": txn_id})
         total = len(ops)
         for j, op in enumerate(reversed(ops)):
-            _restore_preimage(txn_dir, root_fd, op, total - 1 - j)
+            _restore_preimage(jr_fd, txn_dir, root_fd, op, total - 1 - j)
         publish(jr_fd, txn_dir, F_RC, {"txn": txn_id})
         raise
     publish(jr_fd, txn_dir, F_COMPLETE, {"txn": txn_id})

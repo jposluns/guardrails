@@ -2592,71 +2592,12 @@ def self_test():
         observations = clean_prior() if obs == "clean" else obs
         return validate_store(res, observations=observations)
 
-    def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
-        """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS and return that
-        str, or a sentinel: 'TIMEOUT' (wall-clock bound tripped), 'OOM' (address-space bound tripped),
-        'CHILD-DIED', 'ERROR:<Type>' (thunk raised), or 'SETUP-ERROR:<Type>' (the child could NOT install its
-        bounds, or fork failed: a cannot-evaluate, never a normal result). Some vectors drive the whole engine
-        over a declared 10**9 high-water/span (S7-F1) or a blocking FIFO read target (S7-F2); run in-process a
-        range-expansion or blocking-read REGRESSION would HANG or OOM the whole self-test. This watchdog turns
-        such a regression into a deterministic sentinel the assertion catches, without weakening the assertion
-        (a correct engine returns its real verdict token well inside the bounds). A SETUP-ERROR sentinel is
-        never equal to any expected verdict token, so a check whose bounds could not be installed FAILS
-        closed rather than reading a possibly-unbounded run as a clean pass (no-concealed-failure). Test-harness
-        only (self_test is the sole caller); the production validator forks nothing. Requires os.fork; the
-        caller fails closed where it is absent."""
-        import signal
-        rfd, wfd = os.pipe()
-        try:
-            pid = os.fork()
-        except OSError as exc:                           # (b) fork failed: close BOTH pipe fds, no leak
-            os.close(rfd)
-            os.close(wfd)
-            return "SETUP-ERROR:" + type(exc).__name__
-        if pid == 0:                                    # child: bounded, writes one short token, never returns
-            os.close(rfd)
-            try:
-                # (c) the child must not inherit an ambient SIG_IGN/custom SIGALRM disposition that would
-                # defeat the watchdog and leave the parent blocked in os.read() with no deadline: reset to
-                # SIG_DFL so the timer's SIGALRM default-terminates the child. (a) install BOTH bounds or,
-                # on any failure, write a SETUP-ERROR token and exit WITHOUT running the thunk unbounded.
-                signal.signal(signal.SIGALRM, signal.SIG_DFL)
-                import resource
-                resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-                signal.setitimer(signal.ITIMER_REAL, timeout_s)
-            except BaseException as exc:                 # noqa: BLE001 (bounds NOT installed: never run unbounded)
-                try:
-                    os.write(wfd, ("SETUP-ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200])
-                except OSError:
-                    pass
-                os._exit(0)
-            try:
-                payload = str(thunk()).encode("utf-8", "replace")[:200]
-            except MemoryError:
-                payload = b"OOM"
-            except BaseException as exc:                 # noqa: BLE001 (child boundary: any failure -> token)
-                payload = ("ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200]
-            try:
-                os.write(wfd, payload)
-            except OSError:
-                pass
-            os._exit(0)
-        os.close(wfd)                                    # parent
-        data = b""
-        try:
-            while True:
-                chunk = os.read(rfd, 200)
-                if not chunk:
-                    break
-                data += chunk
-        finally:
-            os.close(rfd)
-        _wpid, wstatus = os.waitpid(pid, 0)
-        if not data:
-            if os.WIFSIGNALED(wstatus) and os.WTERMSIG(wstatus) == signal.SIGALRM:
-                return "TIMEOUT"
-            return "CHILD-DIED"
-        return data.decode("utf-8", "replace")
+    # run_bounded: the shared bounded-child watchdog, imported from _opf_emit so the fork/timer/pipe
+    # hardening lives in ONE place across the three OPF self-tests and cannot diverge again (its prior
+    # per-file copies drifted: the fork-less, SIGALRM-unblock, and parent-reap fixes had to be re-carried
+    # by hand). Callers here still pre-check hasattr(os, "fork") and fail their setup closed where it is
+    # absent; the shared helper additionally returns a SETUP-ERROR sentinel on a fork-less host.
+    run_bounded = _opf_emit.run_bounded
 
     try:
         # --- clean inline store ----------------------------------------------------------------------
@@ -3298,6 +3239,20 @@ def self_test():
             finally:
                 _sig7.signal(_sig7.SIGALRM, _prev7)
             check("f7-inherited-ignored-sigalrm-still-times-out", _to == "TIMEOUT")
+            # (d) the child must also UNBLOCK SIGALRM, not merely reset its DISPOSITION: a caller with
+            # SIGALRM BLOCKED in its signal mask passes that blocked mask across the fork, so the timer's
+            # SIGALRM stays pending (never delivered) and never terminates the child, leaving the parent
+            # blocked in os.read() with no deadline. With SIGALRM blocked in the parent, a thunk that sleeps
+            # past the timeout must still TIMEOUT (the child unblocks it before arming the timer). Reverted
+            # (no unblock), the pending timer never fires and the sleep runs to completion, so the thunk's
+            # own result returns instead of TIMEOUT.
+            if hasattr(_sig7, "pthread_sigmask"):
+                _sig7.pthread_sigmask(_sig7.SIG_BLOCK, {_sig7.SIGALRM})
+                try:
+                    _tb = run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], timeout_s=1)
+                finally:
+                    _sig7.pthread_sigmask(_sig7.SIG_UNBLOCK, {_sig7.SIGALRM})
+                check("f7-inherited-blocked-sigalrm-still-times-out", _tb == "TIMEOUT")
 
         # --- io fail-closed ---------------------------------------------------------------------------
         f = clean_machine()

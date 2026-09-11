@@ -97,6 +97,11 @@ REGEN_COMMAND = "opf render"
 # CLI runs check-only meanwhile. This is not a fabricated gate; it is a refusal pending the real one.
 _WRITE_GATE_COMPOSED = False
 
+# The mode installed on a NEWLY-created view/deliverable file. An EXISTING target's own mode is preserved
+# across the atomic replace instead (a restrictive mode is never widened); this default applies only when
+# the target did not previously exist.
+_VIEW_FILE_MODE = 0o644
+
 WORKING_DIRNAME = _opf_store.WORKING_DIRNAME     # ".working": public targets sit OUTSIDE it, at product root
 
 # The baseline record types (spec 8.1), with worklog and version resolved to their ledger files rather
@@ -1056,13 +1061,20 @@ def _write_contained(root_fd, relpath, text, check):
         # `name`: the rename re-points only the directory entry, so a raced hardlink/regular swap of `name`
         # loses the entry rather than having its inode truncated (the victim's own bytes stay intact).
         # Descriptor-relative throughout (dir_fd=pfd), never a re-resolved path.
-        tmpname = ".{}.opf-tmp".format(name)
+        # A UNIQUE, exclusively-created temp NAME, never a fixed ".{name}.opf-tmp" a concurrent call could be
+        # using and never an unconditional unlink of that fixed name (which could delete another live call's
+        # temp). O_EXCL proves THIS call created the inode; a collision on the random name is a genuine
+        # anomaly that fails closed (the OSError maps to a ViewsError below), never a clobber of an existing
+        # file. Created 0o600 so the in-flight temp is not world-readable before the real mode is applied.
+        tmpname = ".{}.opf-tmp.{}.{}".format(name, os.getpid(), os.urandom(8).hex())
+        fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=pfd)
         try:
-            fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
-        except FileExistsError:
-            os.unlink(tmpname, dir_fd=pfd)                 # clear a stale temp left by a crashed prior write
-            fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
-        try:
+            # PRESERVE the destination's EXISTING mode across the atomic replace: installing the temp's
+            # create mode would silently WIDEN a restrictive view (e.g. a 0600 target -> 0644). fchmod the
+            # temp fd to the destination's current mode, or to the intended default for a new file, BEFORE
+            # the rename. fchmod is not umask-masked, so the installed mode is deterministic regardless of
+            # the process umask (test-hermeticity).
+            os.fchmod(fd, stat.S_IMODE(st.st_mode) if st is not None else _VIEW_FILE_MODE)
             _journal._write_all(fd, new_bytes)
             os.fsync(fd)
         finally:
@@ -1750,6 +1762,45 @@ def self_test():
         check("write-hardlink-swap-victim-intact", _f4victim.read_text(encoding="utf-8") == "VICTIM-INTACT")
         check("write-hardlink-swap-dest-updated",
               (_f4dir / "TODO.md").read_text(encoding="utf-8") == "NEW-VIEW-CONTENT\n")
+        # F(unique-temp): the write temp uses a UNIQUE, exclusively-created name, never a FIXED
+        # ".{name}.opf-tmp" it would unconditionally unlink on collision -- which, under concurrency, is
+        # ANOTHER live call's temp. Plant a file at the OLD fixed temp name and confirm a write leaves it
+        # intact (the new unique name never addresses it). Pre-fix the write would collide on that fixed
+        # name and unlink the planted file; post-fix it is untouched.
+        _utdir = base / "unique-temp"; _utdir.mkdir()
+        (_utdir / "TODO.md").write_text("OLD\n", encoding="utf-8")
+        _utplanted = _utdir / ".TODO.md.opf-tmp"
+        _utplanted.write_text("ANOTHER-CALLERS-TEMP", encoding="utf-8")
+        _utfd = os.open(str(_utdir), os.O_RDONLY | os.O_DIRECTORY)
+        _utsaved_gate = _WRITE_GATE_COMPOSED
+        try:
+            _WRITE_GATE_COMPOSED = True
+            _write_contained(_utfd, "TODO.md", "NEW\n", False)
+        finally:
+            _WRITE_GATE_COMPOSED = _utsaved_gate
+            os.close(_utfd)
+        check("write-unique-temp-does-not-clobber-fixed-name",
+              _utplanted.exists() and _utplanted.read_text(encoding="utf-8") == "ANOTHER-CALLERS-TEMP")
+        check("write-unique-temp-dest-updated",
+              (_utdir / "TODO.md").read_text(encoding="utf-8") == "NEW\n")
+        # F(mode-preserve): the atomic replace PRESERVES the destination's existing mode; a restrictive 0600
+        # view is not widened to the temp's create mode. The prestate mode is set explicitly (fchmod, not
+        # umask), so the assertion is hermetic. Pre-fix the temp's 0644 create mode became the view's mode on
+        # rename; post-fix the temp is fchmod'd to the destination's 0600 first.
+        _mpdir = base / "mode-preserve"; _mpdir.mkdir()
+        _mpview = _mpdir / "TODO.md"; _mpview.write_text("OLD\n", encoding="utf-8")
+        os.chmod(str(_mpview), 0o600)
+        _mpfd = os.open(str(_mpdir), os.O_RDONLY | os.O_DIRECTORY)
+        _mpsaved_gate = _WRITE_GATE_COMPOSED
+        try:
+            _WRITE_GATE_COMPOSED = True
+            _write_contained(_mpfd, "TODO.md", "NEW\n", False)
+        finally:
+            _WRITE_GATE_COMPOSED = _mpsaved_gate
+            os.close(_mpfd)
+        check("write-preserves-existing-restrictive-mode",
+              stat.S_IMODE(os.stat(str(_mpview)).st_mode) == 0o600
+              and _mpview.read_text(encoding="utf-8") == "NEW\n")
         # F12: the two ledger-refuses pins ("worklog"/"version" -> None) are removed as non-discriminating.
         # Neither ledger name is in _opf_schema.BASELINE_SPECS, so _mirror_type's final fallthrough returns
         # None for them regardless of the _LEDGER_SOURCES guard; the assertion held for any state of that

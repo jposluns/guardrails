@@ -522,16 +522,27 @@ def emit_checked(document):
     # to the value-free BaseException backstop below rather than escaping (guard-input-soundness; fail closed).
     if not _is_exception_spec(_decode_error):
         _decode_error = ()
+    # NARROW the decode-error spec to genuine Exception subclasses. _is_exception_spec accepts ANY
+    # BaseException subclass (it must, to keep `except <spec>` from raising), but a substituted tomllib
+    # whose TOMLDecodeError is a CANCELLATION class (KeyboardInterrupt/SystemExit/GeneratorExit, or any
+    # other BaseException-that-is-not-Exception) would otherwise let `except _decode_error` convert genuine
+    # control flow raised by loads() into an EmitError. Only Exception-subclass specs route to the
+    # "did not reparse" conversion; a cancellation spec is narrowed to match-nothing (an empty tuple), and
+    # the cancellation clause below is ORDERED FIRST as defence in depth (guard-input-soundness, fail closed).
+    _cancel_classes = (KeyboardInterrupt, SystemExit, GeneratorExit)
+    _decode_classes = _decode_error if isinstance(_decode_error, tuple) else (_decode_error,)
+    if not all(isinstance(e, type) and issubclass(e, Exception) for e in _decode_classes):
+        _decode_error = ()
     try:
         reparsed = tomllib.loads(text)
         if not _model_equal(document, reparsed):
             raise EmitError("emitted document did not round-trip to a model equal to its input; fail-closed")
-    except _decode_error:  # value-free so a hostile decode-error __str__ is never formatted into a diagnostic
-        raise EmitError("emitted document did not reparse as TOML; fail-closed")
+    except _cancel_classes:  # genuine control flow re-raised FIRST, never converted (even by a hostile spec)
+        raise
     except EmitError:
         raise
-    except (KeyboardInterrupt, SystemExit, GeneratorExit):  # genuine control flow re-raised, never converted
-        raise
+    except _decode_error:  # value-free so a hostile decode-error __str__ is never formatted into a diagnostic
+        raise EmitError("emitted document did not reparse as TOML; fail-closed")
     except BaseException:  # noqa: BLE001 - fail-closed backstop mirroring emit(): a NON-TOMLDecodeError
         # reparse or comparison failure (a RecursionError from a >1000-part dotted key on 3.12/3.13, or a
         # MemoryError building the second tree or the comparison stack) becomes a value-free EmitError, so
@@ -576,73 +587,104 @@ def _rejects(document):
         return True
 
 
+def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
+    """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS and return that
+    str, or a sentinel: 'TIMEOUT' (wall-clock bound tripped), 'OOM' (address-space bound tripped),
+    'CHILD-DIED', 'ERROR:<Type>' (the thunk raised), or 'SETUP-ERROR:<Type>' (the child could NOT install
+    its bounds, or fork is unavailable or failed: a cannot-evaluate, never a normal result). Several
+    adversarial vectors drive an engine over a declared 10**9 high-water/span or a deeply-shared DAG; run
+    IN-PROCESS a regression that reverted the bounded counting or an identity short-circuit would HANG or
+    OOM the whole self-test before it could report. This watchdog turns such a regression into a
+    deterministic sentinel the assertion catches, without weakening the assertion (a correct engine returns
+    its real verdict token well inside the bounds). A SETUP-ERROR sentinel is never equal to any expected
+    verdict token, so a check whose bounds could not be installed FAILS closed rather than reading a
+    possibly-unbounded run as a clean pass (no-concealed-failure).
+
+    Test-harness only: the three OPF self-tests (_opf_check, _opf_release, _opf_emit) share THIS one
+    implementation so the fork/timer/pipe hardening lives in a single place and cannot diverge again; the
+    production validators fork nothing.
+
+    Hardening: (fork-less) a host without os.fork returns SETUP-ERROR WITHOUT running the thunk, never the
+    thunk's own result run unbounded. (child) the child resets SIGALRM to SIG_DFL AND UNBLOCKS it in its
+    signal mask, so neither an inherited SIG_IGN disposition nor an inherited BLOCKED mask can defeat the
+    watchdog and leave the parent blocked in os.read() with no deadline; it then installs BOTH bounds or,
+    on any failure, writes a SETUP-ERROR token and exits WITHOUT running the thunk unbounded. (parent) the
+    read fd is closed and the child is reaped in an ENCLOSING finally, so a parent-side exception during the
+    pipe read cannot skip waitpid and orphan the child; both pipe fds are closed on a fork failure."""
+    import os
+    import signal
+    if not hasattr(os, "fork"):
+        # A bound could NOT be installed on a fork-less host: a cannot-evaluate. Return the SETUP-ERROR
+        # sentinel WITHOUT invoking the thunk (never run it unbounded); the caller fails closed because the
+        # sentinel is never equal to an expected verdict token.
+        return "SETUP-ERROR:NoFork"
+    rfd, wfd = os.pipe()
+    try:
+        pid = os.fork()
+    except OSError as exc:                               # fork failed: close BOTH pipe fds, no leak
+        os.close(rfd)
+        os.close(wfd)
+        return "SETUP-ERROR:" + type(exc).__name__
+    if pid == 0:                                         # child: bounded, writes one short token, never returns
+        os.close(rfd)
+        try:
+            # The child must not inherit an ambient SIG_IGN/custom SIGALRM disposition NOR a BLOCKED SIGALRM
+            # mask: either would keep the timer's SIGALRM from terminating the child and leave the parent
+            # blocked in os.read() with no deadline. Reset the disposition to SIG_DFL and UNBLOCK SIGALRM in
+            # the mask BEFORE arming the timer, then install BOTH bounds or, on any failure, write a
+            # SETUP-ERROR token and exit WITHOUT running the thunk unbounded.
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            if hasattr(signal, "pthread_sigmask"):
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+            import resource
+            resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+            signal.setitimer(signal.ITIMER_REAL, timeout_s)
+        except BaseException as exc:                     # noqa: BLE001 (bounds NOT installed: never run unbounded)
+            try:
+                os.write(wfd, ("SETUP-ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200])
+            except OSError:
+                pass
+            os._exit(0)
+        try:
+            payload = str(thunk()).encode("utf-8", "replace")[:200]
+        except MemoryError:
+            payload = b"OOM"
+        except BaseException as exc:                     # noqa: BLE001 (child boundary: any failure -> token)
+            payload = ("ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200]
+        try:
+            os.write(wfd, payload)
+        except OSError:
+            pass
+        os._exit(0)
+    os.close(wfd)                                        # parent
+    data = b""
+    wstatus = None
+    try:
+        while True:
+            chunk = os.read(rfd, 200)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        # Close the read fd AND reap the child even when the read loop raises, so a parent-side exception
+        # during the pipe read cannot skip waitpid and orphan the child. The child always arms its own
+        # SIGALRM timer (or exits at once on a setup failure), so this waitpid is bounded and cannot block
+        # indefinitely.
+        try:
+            os.close(rfd)
+        finally:
+            _wpid, wstatus = os.waitpid(pid, 0)
+    if not data:
+        if os.WIFSIGNALED(wstatus) and os.WTERMSIG(wstatus) == signal.SIGALRM:
+            return "TIMEOUT"
+        return "CHILD-DIED"
+    return data.decode("utf-8", "replace")
+
+
 def self_test():
     """Round-trip fuzz over adversarial bodies, canonical-form determinism, constrained-subset coverage
     (accepted and rejected), and byte-canon cleanliness verified against check_byte_canon itself."""
     failures = []
-
-    def run_bounded(thunk, timeout_s=20, mem_bytes=1024 * 1024 * 1024):
-        """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS, returning
-        that str or a sentinel: 'TIMEOUT' / 'OOM' / 'CHILD-DIED' / 'ERROR:<Type>' / 'SETUP-ERROR:<Type>'.
-        F11: the identity-guard diamond vector below, run IN-PROCESS, would expand a 64-level shared DAG
-        (2**64 pair-pushes) and HANG or OOM the WHOLE self-test if the `x is y` short-circuit were reverted;
-        the watchdog turns that into a deterministic sentinel the assertion rejects, without weakening it
-        (the shipped guard returns its token instantly). A SETUP-ERROR (a bound could not be installed) or a
-        fork failure is never equal to an expected token, so it fails closed. Mirrors the F7-hardened
-        _opf_check runner: the child resets SIGALRM to SIG_DFL, installs BOTH bounds or exits SETUP-ERROR
-        without running the thunk unbounded, and both pipe fds are closed on a fork failure. Fork-less
-        fallback runs in-process (safe on the shipped, bounded code CI exercises)."""
-        import os as _os
-        import signal as _signal
-        if not hasattr(_os, "fork"):
-            return str(thunk())
-        rfd, wfd = _os.pipe()
-        try:
-            pid = _os.fork()
-        except OSError as exc:
-            _os.close(rfd)
-            _os.close(wfd)
-            return "SETUP-ERROR:" + type(exc).__name__
-        if pid == 0:
-            _os.close(rfd)
-            try:
-                _signal.signal(_signal.SIGALRM, _signal.SIG_DFL)
-                import resource
-                resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-                _signal.setitimer(_signal.ITIMER_REAL, timeout_s)
-            except BaseException as exc:                  # noqa: BLE001 (bounds NOT installed: never run unbounded)
-                try:
-                    _os.write(wfd, ("SETUP-ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200])
-                except OSError:
-                    pass
-                _os._exit(0)
-            try:
-                payload = str(thunk()).encode("utf-8", "replace")[:200]
-            except MemoryError:
-                payload = b"OOM"
-            except BaseException as exc:                  # noqa: BLE001 (child boundary: any failure -> token)
-                payload = ("ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200]
-            try:
-                _os.write(wfd, payload)
-            except OSError:
-                pass
-            _os._exit(0)
-        _os.close(wfd)
-        data = b""
-        try:
-            while True:
-                chunk = _os.read(rfd, 200)
-                if not chunk:
-                    break
-                data += chunk
-        finally:
-            _os.close(rfd)
-        _wpid, wstatus = _os.waitpid(pid, 0)
-        if not data:
-            if _os.WIFSIGNALED(wstatus) and _os.WTERMSIG(wstatus) == _signal.SIGALRM:
-                return "TIMEOUT"
-            return "CHILD-DIED"
-        return data.decode("utf-8", "replace")
 
     # check_byte_canon is the authority for the byte rules; reuse it rather than re-implement (a stale
     # duplicate is the guard-input-soundness failure this avoids). It is loaded from its pinned sibling
@@ -948,6 +990,34 @@ def self_test():
     if _f8_kind != "EmitError":
         failures.append("f8/nonexception-tomldecodeerror: a non-exception TOMLDecodeError must fail closed "
                         "to EmitError, not escape as {}".format(_f8_kind))
+
+    # F(cancellation): a substituted tomllib whose loads() raises a CANCELLATION signal (KeyboardInterrupt/
+    # SystemExit/GeneratorExit) must RE-RAISE, never be converted to EmitError, even when its TOMLDecodeError
+    # is a broad BaseException subclass that `except _decode_error` would otherwise catch. Discriminates the
+    # two-part fix: with the cancellation clause moved back BELOW `except _decode_error` AND the
+    # Exception-subclass narrowing removed, the signal is swallowed into EmitError and this flips red. The
+    # patched tomllib attributes carry into emit_checked (read at call time), restored in a finally.
+    for _cancel in (KeyboardInterrupt, SystemExit, GeneratorExit):
+        _real_tde2 = tomllib.TOMLDecodeError
+        _real_loads2 = tomllib.loads
+        tomllib.TOMLDecodeError = _cancel                     # a cancellation-class "decode-error" spec
+        tomllib.loads = (lambda _c: (lambda _s: (_ for _ in ()).throw(_c())))(_cancel)
+        try:
+            _c_kind = "no-raise"
+            try:
+                emit_checked({"schema": 1})                   # emits fine; the patched reparse then cancels
+            except EmitError:
+                _c_kind = "EmitError"
+            except _cancel:                                   # the required re-raise of genuine control flow
+                _c_kind = "reraised"
+            except BaseException as _exc:                     # noqa: BLE001 - capture any other escape
+                _c_kind = type(_exc).__name__
+        finally:
+            tomllib.TOMLDecodeError = _real_tde2
+            tomllib.loads = _real_loads2
+        if _c_kind != "reraised":
+            failures.append("cancellation/reparse: a {} raised by a substituted loads must re-raise, not "
+                            "become {}".format(_cancel.__name__, _c_kind))
 
     # Identity-membership pin: scalar admission tests _SCALAR_TYPES by IDENTITY (_is_scalar_type), never
     # `==`, so classifying never invokes a hostile metaclass's __eq__. This spy's __eq__ records every

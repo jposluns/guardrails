@@ -883,13 +883,67 @@ def self_test():
             for kind, prestate in (("mkdir", {"kind": "absent"}),
                                    ("rmdir", {"kind": "dir", "mode": 0o755})):
                 try:
-                    _journal._restore_preimage(nd / "txn", ndfd,
+                    # mkdir/rmdir undo never reads a payload preimage, so the jr_fd arg is unused here; pass
+                    # the same dir fd to satisfy the (jr_fd, txn_dir, root_fd, op) signature.
+                    _journal._restore_preimage(ndfd, nd / "txn", ndfd,
                                                {"op": kind, "path": "collide", "prestate": prestate})
                     failures.append("{}-undo on a non-directory must raise JournalError".format(kind))
                 except _journal.JournalError:
                     pass
         finally:
             os.close(ndfd)
+        checked += 1
+
+        # (K) PREIMAGE-SLOT EXCLUSIVE CREATE: capture_preimages creates each payload slot with O_EXCL (no
+        #     O_TRUNC), so a pre-planted HARD LINK to a victim regular file at preimages/<seq> is REFUSED
+        #     (JournalError), never truncated and overwritten through the shared inode. Reverted (O_TRUNC),
+        #     the open succeeds on the planted link and rewrites the victim's bytes, so the victim-intact
+        #     assertion below flips red. (A hard link, not a FIFO, so the buggy O_WRONLY open cannot block.)
+        kroot = _build_case_root(tmp / "exclcap" / "root", "flat-files")   # has regular file dataA
+        kjr = tmp / "exclcap" / "journal"; (kjr / "t1" / "preimages").mkdir(parents=True)
+        kvictim = tmp / "exclcap" / "victim"; kvictim.write_bytes(b"VICTIM-INTACT")
+        os.link(str(kvictim), str(kjr / "t1" / "preimages" / "0"))         # slot 0: a hard link to the victim
+        kjr_fd = os.open(str(kjr), os.O_RDONLY | os.O_DIRECTORY)
+        kroot_fd = os.open(str(kroot), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _journal.capture_preimages(kjr_fd, kjr / "t1", kroot_fd, [{"op": "write", "path": "dataA"}])
+            failures.append("capture_preimages must refuse a pre-planted payload slot (O_EXCL), not overwrite it")
+        except _journal.JournalError:
+            pass
+        finally:
+            os.close(kjr_fd)
+            os.close(kroot_fd)
+        if kvictim.read_bytes() != b"VICTIM-INTACT":
+            failures.append("capture_preimages truncated/overwrote a hard-linked victim at the payload slot")
+        checked += 1
+
+        # (L) PREIMAGE READ CONTAINED + BOUNDED: _restore_preimage reads the retained preimage through a
+        #     contained dir-fd walk beneath the journal-root fd, BOUNDED by the recorded prestate size, so an
+        #     oversized preimage is refused AT the read cap before it is read whole and only then digested.
+        #     Reverted to an unbounded absolute-path read_bytes(), the whole file is read and the failure is
+        #     a DIGEST mismatch instead, so the "read cap" message below no longer appears.
+        lroot = tmp / "boundpre" / "root"; lroot.mkdir(parents=True)
+        (lroot / "dataA").write_bytes(b"live\n")
+        ljr = tmp / "boundpre" / "journal"; (ljr / "t1" / "preimages").mkdir(parents=True)
+        (ljr / "t1" / "preimages" / "0").write_bytes(b"X" * 4096)          # far larger than the recorded size
+        _small = b"orig\n"
+        _lop = {"op": "write", "path": "dataA",
+                "prestate": {"kind": "file", "mode": 0o644, "size": len(_small), "payload": "0",
+                             "sha256": hashlib.sha256(_small).hexdigest()}}
+        ljr_fd = os.open(str(ljr), os.O_RDONLY | os.O_DIRECTORY)
+        lroot_fd = os.open(str(lroot), os.O_RDONLY | os.O_DIRECTORY)
+        _lmsg = ""
+        try:
+            _journal._restore_preimage(ljr_fd, ljr / "t1", lroot_fd, _lop)
+            failures.append("_restore_preimage must refuse an oversized preimage at the recorded-size cap")
+        except _journal.JournalError as exc:
+            _lmsg = str(exc)
+        finally:
+            os.close(ljr_fd)
+            os.close(lroot_fd)
+        if "read cap" not in _lmsg:
+            failures.append("_restore_preimage did not bound the preimage read by the recorded size "
+                            "(failure was {!r}, expected a read-cap refusal)".format(_lmsg))
         checked += 1
 
         # (F2) FIX #3 OWNERSHIP-CHECKED RELEASE: a lock NOT owned by this process is never unlinked.

@@ -1406,6 +1406,22 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
         files["fragments/legacy_fragment.index.toml"] = _emit_bytes(
             {"schema": SCHEMA, "record": lf_records}, "fragments/legacy_fragment.index.toml")
 
+    # PRODUCER-BOUNDARY ceiling reconciliation: every emitted store-TOML file staged here is later read
+    # back through the CONTAINED store reader (_opf_store._read_toml_contained), which REFUSES anything over
+    # MAX_STORE_READ_BYTES (1 MiB) fail-closed. The emitter permits far larger output, so a candidate whose
+    # emitted bytes exceed that cap would stage and PROMOTE cleanly yet be UNREADABLE afterwards; worse, the
+    # post-claim sibling sweep excludes THIS run (skip_run_id), so nothing downstream would catch it. Reject
+    # the oversized record HERE, at the producer boundary before promotion, with a clear cannot-evaluate
+    # finding, so no store reader is ever handed an index it will refuse (guard-input-soundness; fail at the
+    # producer, never hand a consumer an input it structurally cannot read). The raw content-addressed
+    # `sources/<sha256>` bodies below are NOT store TOML (never parsed by that reader) and are exempt.
+    for _suffix in sorted(files):
+        _n = len(files[_suffix])
+        if _n > _opf_store.MAX_STORE_READ_BYTES:
+            raise _cannot("candidate {} is {} bytes, over the {}-byte contained store-read cap; the staged "
+                          "record would be unreadable after promotion (rejected at the producer boundary "
+                          "before promotion)".format(_suffix, _n, _opf_store.MAX_STORE_READ_BYTES))
+
     # F7: preserve each source's FULL original bytes in the run, content-addressed as `sources/<sha256>`
     # (spec 14.2: the original's full content is preserved in the import run). Stored VERBATIM, not through
     # U8 (a raw body, not TOML), so a fully-mapped source's content still survives here; the digest is the
@@ -1644,6 +1660,22 @@ def self_test():
         imports_children = sorted(d.name for d in (machine / "imports").iterdir())
         check("1-only-run-dir-under-imports", imports_children == [res.run_id])
         check("1-two-ids", len(res.staged_ids) == 2)
+
+        # PRODUCER-BOUNDARY ceiling: a candidate that is otherwise VALID but whose emitted index would
+        # exceed the CONTAINED store-read cap (_opf_store.MAX_STORE_READ_BYTES, 1 MiB) is rejected HERE,
+        # before promotion, as a cannot-evaluate (verdict 2), never staged as an index the store reader
+        # would later refuse (and which the post-claim sibling sweep, excluding this run, would not catch).
+        # A 2 MiB single-line title passes record validation (no length cap) yet blows the emitted candidate
+        # past the cap. Reverted (no producer-boundary check), staging would PASS (verdict 0) and promote an
+        # unreadable record; this vector then flips red.
+        big_root, _big_machine = build_store(sources={"a.txt": src})
+        _big_cand = dict(bi_candidate(), title="x" * (2 * 1024 * 1024))
+        _big_plan = {"fragments": {"a.txt": [
+            {"span": [0, len(src)], "state": "mapped", "record": _big_cand}]}}
+        _big_res = stage_import(big_root, ["a.txt"], _big_plan, now=NOW, run_nonce=NONCE)
+        check("producer-ceiling-oversized-candidate-cannot-evaluate", _big_res.verdict == 2)
+        check("producer-ceiling-names-store-read-cap",
+              any("store-read cap" in f for f in _big_res.findings))
 
         # 2: determinism: identical inputs give a byte-identical id; a different nonce gives a different id.
         root2, machine2 = build_store(sources={"a.txt": src})

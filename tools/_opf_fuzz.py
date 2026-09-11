@@ -133,6 +133,17 @@ def _key_name_render_defs():
     return defs
 
 
+def _render_vocab_drift(defs, vocab):
+    """Reconcile the DISCOVERED `*_key_names` render-helper definitions against the REGISTERED vocabulary,
+    returning `(unregistered, stale)`: `unregistered` are helpers defined in source but absent from the
+    vocabulary (they would escape both the coverage numerator and denominator, fail-closed), and `stale`
+    are registered tokens no longer defined. Either non-empty is drift. This is the ACTUAL reconciliation
+    the coverage guard fires on (`defs != vocab` expressed as its two directions); run()'s guard AND its
+    discrimination vector both route through THIS function, so disabling the reconciliation breaks both
+    rather than only a separate throwaway expression."""
+    return defs - vocab, vocab - defs
+
+
 def _make_tracer(executed):
     """A sys.settrace pair that records every executed (filename, lineno) in the three target modules into
     `executed`. Judged by executed LINES, never by grepping output (the isolate-verifiers rule)."""
@@ -939,18 +950,26 @@ def run():
     _vocab = set(_KEY_NAME_RENDER_TOKENS)
     _defs = _key_name_render_defs()
     assertions += 1
-    if _defs != _vocab:
+    _unreg, _stale = _render_vocab_drift(_defs, _vocab)
+    if _unreg or _stale:
         fail("coverage vocabulary drift: `*_key_names` render helpers defined in source {} do not match the "
              "registered vocabulary {}; an unregistered or renamed helper would escape both the coverage "
              "numerator and denominator (fail-closed)".format(sorted(_defs), sorted(_vocab)))
-    # DISCRIMINATION: the reconciliation must actually FIRE on an unregistered helper (fails if the def-scan
-    # or the equality guard is reverted/weakened). A synthetic `_rogue_key_names` def must be recognized by
-    # the def-scan predicate and, added to the discovered set, must break the equality guard above.
+    # DISCRIMINATION: feed an UNREGISTERED `*_key_names` render definition through the ACTUAL reconciliation
+    # the guard above uses (_render_vocab_drift), and confirm it reports the rogue as unregistered drift.
+    # The rogue token is first recognized by the real def-scan predicate (a weakened _KEY_NAME_RENDER_DEF_RE
+    # stops matching it), then, added to the discovered defs, must appear in the reconciliation's
+    # `unregistered` set. Because this routes through the SAME function run()'s guard fires on, disabling the
+    # `_defs != _vocab` reconciliation (returning no drift) makes THIS assertion FAIL, not merely a separate
+    # throwaway expression as the prior form did.
     assertions += 1
     _rogue = _KEY_NAME_RENDER_DEF_RE.match("def _rogue_key_names(keys):")
-    if _rogue is None or (_defs | {_rogue.group(1) + "("}) == _vocab:
-        fail("coverage reconciliation is non-discriminating: it would not flag an unregistered "
-             "`*_key_names` render helper (the def-scan or equality guard has been weakened)")
+    _rogue_tok = None if _rogue is None else _rogue.group(1) + "("
+    _rogue_unreg = set() if _rogue_tok is None else _render_vocab_drift(_defs | {_rogue_tok}, _vocab)[0]
+    if _rogue_tok is None or _rogue_tok not in _rogue_unreg:
+        fail("coverage reconciliation is non-discriminating: an unregistered `*_key_names` render helper fed "
+             "through the reconciliation was not reported as drift (the def-scan predicate or the "
+             "_render_vocab_drift reconciliation has been weakened)")
     skn_missed = sorted(skn_sites - executed)
     assertions += 1
     if skn_missed:

@@ -104,7 +104,7 @@ from _opf_schema import (  # noqa: E402
 )
 # U8 supplies the deterministic float SPELLING rule; reuse it so the coverage digest and the emitter agree
 # byte-for-byte on floats (M2), rather than re-deriving the signed-zero / non-finite handling here.
-from _opf_emit import _canonical_float, EmitError  # noqa: E402
+from _opf_emit import _canonical_float, EmitError, run_bounded  # noqa: E402
 
 
 WL_NAMESPACE = "WL"                       # the worklog type's namespace (spec 8.1)
@@ -1232,70 +1232,10 @@ def self_test():
         e.update(extra)
         return e
 
-    def run_bounded(thunk, timeout_s=20, mem_bytes=1024 * 1024 * 1024):
-        """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS, returning
-        that str or a sentinel: 'TIMEOUT' / 'OOM' / 'CHILD-DIED' / 'ERROR:<Type>' / 'SETUP-ERROR:<Type>'.
-        F11: the RANGE-BOUNDS mutant-kill vectors below drive the engine over a spoofed 10**9 high-water /
-        span; run IN-PROCESS, a reverted bounded-counting fix would materialize an O(10**9) collection and
-        HANG or OOM the WHOLE self-test before it could report. The watchdog turns such a regression into a
-        deterministic sentinel the assertion rejects, without weakening it (the shipped bounded engine
-        returns its real token well inside the bounds). A SETUP-ERROR (a bound could not be installed) or a
-        fork failure is never equal to an expected token, so it fails closed. Mirrors the F7-hardened
-        _opf_check runner: the child resets SIGALRM to SIG_DFL (so an inherited SIG_IGN cannot defeat the
-        watchdog and block the parent's read), installs BOTH bounds or exits SETUP-ERROR without running
-        the thunk unbounded, and both pipe fds are closed on a fork failure. Fork-less fallback runs
-        in-process (safe on the shipped, bounded code CI exercises)."""
-        import os as _os
-        import signal as _signal
-        if not hasattr(_os, "fork"):
-            return str(thunk())
-        rfd, wfd = _os.pipe()
-        try:
-            pid = _os.fork()
-        except OSError as exc:
-            _os.close(rfd)
-            _os.close(wfd)
-            return "SETUP-ERROR:" + type(exc).__name__
-        if pid == 0:
-            _os.close(rfd)
-            try:
-                _signal.signal(_signal.SIGALRM, _signal.SIG_DFL)
-                import resource
-                resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-                _signal.setitimer(_signal.ITIMER_REAL, timeout_s)
-            except BaseException as exc:                  # noqa: BLE001 (bounds NOT installed: never run unbounded)
-                try:
-                    _os.write(wfd, ("SETUP-ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200])
-                except OSError:
-                    pass
-                _os._exit(0)
-            try:
-                payload = str(thunk()).encode("utf-8", "replace")[:200]
-            except MemoryError:
-                payload = b"OOM"
-            except BaseException as exc:                  # noqa: BLE001 (child boundary: any failure -> token)
-                payload = ("ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200]
-            try:
-                _os.write(wfd, payload)
-            except OSError:
-                pass
-            _os._exit(0)
-        _os.close(wfd)
-        data = b""
-        try:
-            while True:
-                chunk = _os.read(rfd, 200)
-                if not chunk:
-                    break
-                data += chunk
-        finally:
-            _os.close(rfd)
-        _wpid, wstatus = _os.waitpid(pid, 0)
-        if not data:
-            if _os.WIFSIGNALED(wstatus) and _os.WTERMSIG(wstatus) == _signal.SIGALRM:
-                return "TIMEOUT"
-            return "CHILD-DIED"
-        return data.decode("utf-8", "replace")
+    # run_bounded: the shared bounded-child watchdog imported from _opf_emit (the RANGE-BOUNDS mutant-kill
+    # vectors below run behind it; a reverted bounded-counting fix would otherwise materialize an O(10**9)
+    # collection and HANG or OOM the whole self-test). One shared implementation across the three OPF
+    # self-tests so the fork/timer/pipe hardening cannot diverge again.
 
     # --- 1: a VALID version.toml + worklog.toml (the everyday shape, Appendix B/C) --------------------
     worklog = {"schema": 1, "entry": [entry(1), entry(2), entry(3), entry(4)]}
@@ -1785,10 +1725,19 @@ def self_test():
     # NF-4 (over-fire regression): _count_expected_absent must not membership-test RAW expected-id
     # elements. A non-range expected_ids (a duplicate list, or an un-normalized "WL-1") reported a FALSE
     # loss before the fix; now it fails closed to a cannot-evaluate finding and reports NO loss.
+    # Excluding "NEITHER" alone is NON-discriminating: an EMPTY findings list satisfies it, so retaining the
+    # non-range branch's `return 0` WITHOUT its `findings.append(...)` would still pass. Require a NONEMPTY
+    # result carrying the specifically-identified cannot-evaluate finding ("must be a range id space"), so
+    # dropping the finding (a silent zero, guard-input-soundness) flips this red while a genuine FALSE loss
+    # ("NEITHER") stays excluded.
     nf4_dup = check_ids_partition([1, 2], [], expected_ids=[1, 1, 2])
-    check("nf4-duplicate-expected-no-false-loss", not any("NEITHER" in f for f in nf4_dup))
+    check("nf4-duplicate-expected-no-false-loss",
+          any("must be a range id space" in f for f in nf4_dup)
+          and not any("NEITHER" in f for f in nf4_dup))
     nf4_norm = check_ids_partition([1], [], expected_ids=["WL-1"])
-    check("nf4-unnormalized-expected-no-false-loss", not any("NEITHER" in f for f in nf4_norm))
+    check("nf4-unnormalized-expected-no-false-loss",
+          any("must be a range id space" in f for f in nf4_norm)
+          and not any("NEITHER" in f for f in nf4_norm))
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
