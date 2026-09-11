@@ -180,10 +180,10 @@ class StoreError(Exception):
 
 class Resolution:
     __slots__ = ("status", "detail", "store_root", "machine_dir", "machine_rel", "pointer_source",
-                 "target")
+                 "target", "product_root")
 
     def __init__(self, status, detail="", store_root=None, machine_dir=None, machine_rel=None,
-                 pointer_source=None, target=None):
+                 pointer_source=None, target=None, product_root=None):
         self.status = status              # RESOLVED / NOT_ADOPTED / CANNOT_EVALUATE
         self.detail = detail
         self.store_root = store_root      # Path to the resolved STORE repository root
@@ -191,6 +191,9 @@ class Resolution:
         self.machine_rel = machine_rel    # store-relative path to the machine store (".working/<dir>")
         self.pointer_source = pointer_source  # "local-override" / "committed" / "default"
         self.target = target              # the parsed Target the pointer named (or None for default)
+        self.product_root = product_root  # the PRODUCT repository root this store was resolved from (the
+                                          # authoritative binding for the product-scope deliverables VERSION
+                                          # and CHANGELOG.md; explicit-binding-over-ambient-context)
 
 
 class Target:
@@ -259,6 +262,13 @@ def _read_toml_contained(root_fd, relpath):
     st = _journal._lstat_contained(root_fd, relpath)
     if st is None:
         return None
+    # A non-regular entry (a FIFO, device, socket, or directory) is refused BEFORE any open: opening a
+    # FIFO O_RDONLY with no writer blocks the process forever, so the regular-file gate is checked on the
+    # lstat result rather than after _read_contained opens the target (check-fails-closed-on-unreadable,
+    # SECA resource-bounds; an unbounded block is worse than a crash for the doctor verb).
+    if not stat.S_ISREG(st.st_mode):
+        raise StoreError("{} is present but is not a regular file (an exotic entry; fail-closed, never "
+                         "opened)".format(relpath))
     try:
         data, _ = _journal._read_contained(root_fd, relpath)
     except _journal.JournalError as exc:
@@ -267,6 +277,12 @@ def _read_toml_contained(root_fd, relpath):
         return tomllib.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise StoreError("cannot parse {} ({})".format(relpath, exc))
+    except RecursionError as exc:
+        # A deeply-nested TOML value overflows the parser's recursion: a present-but-unparseable input is a
+        # fail-closed StoreError (the caller routes it to CANNOT-EVALUATE), never an uncontrolled crash
+        # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
+        raise StoreError("cannot parse {} (input nesting is too deep; present but unparseable): {}".format(
+            relpath, exc))
 
 
 def _immediate_subdirs(store_root_fd, working_rel):
@@ -465,11 +481,16 @@ def resolve_store(product_root):
         try:
             store_root = _target_store_root(target, product_root)
         except StoreError as exc:
-            return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source)
-        return _resolve_at(store_root, source, target, pointer=True)
+            return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
+                              product_root=product_root)
+        res = _resolve_at(store_root, source, target, pointer=True)
+        res.product_root = product_root
+        return res
 
     # Neither pointer file exists: try the default in-repo location.
-    return _resolve_at(product_root, "default", None, pointer=False)
+    res = _resolve_at(product_root, "default", None, pointer=False)
+    res.product_root = product_root
+    return res
 
 
 def _resolve_at(store_root, source, target, pointer):

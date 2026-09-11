@@ -1156,11 +1156,14 @@ def render(argv):
         os.close(product_root_fd)
 
 
-def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
-    """The resolved-store render, split out so its ViewsError maps to exit 2 in render()'s handler. Views
-    write beneath store_root_fd (`.working/<name>`); the one public VERSION deliverable writes beneath
-    product_root_fd. Every target is bound to its spec destination (never the manifest `target`) and
-    written through U4's no-follow contained write."""
+def plan_views(store_root_fd, machine_rel):
+    """Phase 1 of the resolved-store render, extracted as a public READ-ONLY planner (OPF core-tooling U6
+    reuses it for byte-level view-drift detection). Reads the manifest and every declared view source
+    beneath store_root_fd, renders each declared target's full text, and returns the planned list of
+    (view_name, scope, dest_relpath, text) WITHOUT writing anything. Raises ViewsError (a cannot-evaluate)
+    on an unreadable manifest or source, a `per-record` store (deferred, F7), a view/kind/target mismatch,
+    or a byte-canon-invalid render, exactly as the render path does; _render_resolved calls it and performs
+    the writes. It makes no state-changing or outbound side effect (a planner is a preview)."""
     manifest_rel = "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)
     got = _read_raw_and_parsed(store_root_fd, manifest_rel)
     if got is None:
@@ -1211,9 +1214,9 @@ def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
             rows_by_source[name] = records
         raw_by_relpath[relpath] = raw
 
-    # Phase 1: render every target's full text from the loaded sources, before any target is written. Each
-    # target is bound to its OWN spec destination; a manifest `target` that does not match is rejected,
-    # never silently redirected.
+    # Render every target's full text from the loaded sources, before any target is written. Each target is
+    # bound to its OWN spec destination; a manifest `target` that does not match is rejected, never silently
+    # redirected.
     planned = []   # (view_name, scope, dest_relpath, text)
     import check_byte_canon  # authoritative byte-canon leg; pure function over bytes, lazy like self_test
     for name in sorted(views):
@@ -1258,6 +1261,16 @@ def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
             raise ViewsError("view {!r} would emit byte-canon-invalid output ({}); refusing rather than "
                              "emitting or silently altering owner text".format(name, "; ".join(canon)))
         planned.append((name, scope, dest_rel, text))
+    return planned
+
+
+def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
+    """The resolved-store render, split out so its ViewsError maps to exit 2 in render()'s handler. Views
+    write beneath store_root_fd (`.working/<name>`); the one public VERSION deliverable writes beneath
+    product_root_fd. Every target is bound to its spec destination (never the manifest `target`) and
+    written through U4's no-follow contained write. Phase 1 is the reusable `plan_views`; this performs the
+    writes."""
+    planned = plan_views(store_root_fd, machine_rel)
 
     # Phase 2: write (or drift-report under --check) each target in the stable (view-name) order, through
     # U4's no-follow contained write. `.working/<name>` writes beneath the store root; the public VERSION
