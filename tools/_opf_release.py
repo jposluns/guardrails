@@ -119,7 +119,9 @@ SUMMARY_STATUSES = ("working", "published", "superseded")
 UNRELEASED = "unreleased"                 # the reserved covers token for the working tail (spec 6.1)
 
 # A coverage / freeze digest is `sha256:` + 64 lowercase hex (the form of every spec example, Appendix B).
-_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# Anchored with \Z (the true end of string), not $, which also matches just before a trailing newline and
+# would admit a newline-terminated digest read from a store file (fail-open on the format gate).
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 
 # The canonicalization scheme header (see the coverage-digest ambiguity note). Versioned so a future
 # scheme is distinguishable from this one by construction.
@@ -137,7 +139,8 @@ _SEMVER_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
     r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?"
-    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$")
+    # \Z, not $: $ also matches before a trailing newline, admitting a newline-terminated version string.
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\Z")
 
 
 class ReleaseError(Exception):
@@ -235,12 +238,19 @@ def _wl_id_set(values, where, findings):
             where, type(values).__name__))
         return set()
     out = set()
+    # Accumulate the per-element findings locally and append them SORTED, so a `set` input (some callers
+    # pass the union of active and archive ids) cannot leak its nondeterministic iteration order into the
+    # finding stream and break the house sorted-output constraint. _safe_display renders an oversized
+    # element without tripping repr()'s base-10 integer-string-conversion limit.
+    local = []
     for v in values:
         n = v if isinstance(v, int) and not isinstance(v, bool) else _wl_num(v)
         if n is None or n < 1:
-            findings.append("{}: entry {!r} is not a well-formed WL-<n> id (spec 8.2)".format(where, v))
+            local.append("{}: entry {} is not a well-formed WL-<n> id (spec 8.2)".format(
+                where, _safe_display(v)))
             continue
         out.add(n)
+    findings.extend(sorted(local))
     return out
 
 
@@ -659,8 +669,8 @@ def _validate_summaries(summaries, ledger_versions, findings):
         if "status" not in row:
             findings.append("{}: missing required field: status".format(where))
         elif status not in SUMMARY_STATUSES:
-            findings.append("{}: status {!r} is not one of {} (spec 6.1)".format(
-                where, status, list(SUMMARY_STATUSES)))
+            findings.append("{}: status {} is not one of {} (spec 6.1)".format(
+                where, _safe_display(status), list(SUMMARY_STATUSES)))
 
         # digest is required once published or superseded; and never carried by a working row.
         has_digest = "digest" in row
@@ -703,21 +713,32 @@ def _validate_summaries(summaries, ledger_versions, findings):
                 else:
                     # The rollup must COVER this summary's range (spec 6.4: a range summary supersedes only
                     # the summaries within its range).
+                    # `covers` may be an UNHASHABLE malformed value (a list/table already flagged above);
+                    # gate the dict membership on isinstance(str) so `covers in covers_index` cannot raise
+                    # TypeError on an unhashable key (fail-closed to the recorded covers finding, no crash).
                     this_range = _covers_range(covers_index[covers], ledger_versions) \
-                        if covers in covers_index else None
+                        if isinstance(covers, str) and covers in covers_index else None
                     roll_range = _covers_range(sb_parsed, ledger_versions)
-                    if this_range is not None and roll_range is not None and not (
-                            roll_range[0] <= this_range[0] and this_range[1] <= roll_range[1]):
-                        findings.append("{}: superseded_by {!r} does not cover this summary's range; a "
-                                        "rollup supersedes only the summaries within its range "
-                                        "(spec 6.4)".format(where, sb))
+                    if this_range is not None and roll_range is not None:
+                        if tuple(roll_range) == tuple(this_range):
+                            # A rollup whose covered range EQUALS this row's own range rolls up nothing and
+                            # supersedes the same versions; distinct tokens for one range (e.g. "1.0.0" and
+                            # "1.0.0..1.0.0") otherwise slip the token-level self-reference guard above and
+                            # admit a supersession CYCLE with no surviving rollup (spec 6.4; fail-closed).
+                            findings.append("{}: superseded_by {!r} covers exactly this summary's own "
+                                            "range; a rollup must roll up more than the row it supersedes "
+                                            "(spec 6.4)".format(where, sb))
+                        elif not (roll_range[0] <= this_range[0] and this_range[1] <= roll_range[1]):
+                            findings.append("{}: superseded_by {!r} does not cover this summary's range; a "
+                                            "rollup supersedes only the summaries within its range "
+                                            "(spec 6.4)".format(where, sb))
         elif has_sb:
             findings.append("{}: superseded_by is present only on a superseded summary (spec 6.1)".format(where))
 
         # The unreleased working tail is a working row; it is never published or superseded (spec 6.1).
         if kind == "unreleased" and status is not None and status != "working":
-            findings.append("{}: the 'unreleased' summary is always working, not {!r} (spec 6.1)".format(
-                where, status))
+            findings.append("{}: the 'unreleased' summary is always working, not {} (spec 6.1)".format(
+                where, _safe_display(status)))
 
 
 # --- worklog.toml validation (spec 6.2) --------------------------------------------------------------
@@ -966,6 +987,12 @@ def tail_ids(releases, worklog_ids):
     for n in worklog_ids:
         if not (isinstance(n, int) and not isinstance(n, bool)):
             raise ReleaseError("cannot compute the tail: worklog id {!r} is not a WL-number".format(n))
+        if n < 1:
+            # A WL-number is a POSITIVE integer (spec 8.2); a non-positive id (WL-0, a negative) is
+            # malformed, not a tail member to be silently dropped by the `n > end` filter, which would let
+            # it falsely satisfy an empty-tail assertion. Fail closed (guard-input-soundness).
+            raise ReleaseError("cannot compute the tail: worklog id {} is not a positive WL-<n> id "
+                               "(spec 8.2)".format(_safe_display(n)))
         if n > end:
             tail.append(n)
     return sorted(tail)
@@ -1022,17 +1049,22 @@ def check_no_append_into_released(version_data, candidate_ids):
     except ReleaseError as exc:
         findings.append("cannot evaluate: {}".format(exc))
         return findings
+    # Accumulate per-id findings locally and append them SORTED, so a `set` candidate collection cannot
+    # leak its nondeterministic iteration order into the finding stream (house sorted-output constraint).
+    local = []
     for cid in candidate_ids:
         n = cid if isinstance(cid, int) and not isinstance(cid, bool) else _wl_num(cid)
         if n is None:
-            findings.append("candidate worklog id {!r} is not a well-formed WL-<n> id".format(cid))
+            local.append("candidate worklog id {} is not a well-formed WL-<n> id".format(_safe_display(cid)))
         elif n < 1:
             # A WL-number is a positive integer (spec 8.2); a non-positive raw int is malformed, not a
             # released-span member (m3 sibling sweep).
-            findings.append("candidate worklog id {!r} is not a positive WL-<n> id (spec 8.2)".format(cid))
+            local.append("candidate worklog id {} is not a positive WL-<n> id (spec 8.2)".format(
+                _safe_display(cid)))
         elif n <= end:
-            findings.append("worklog id WL-{} falls in an already-released span (<= released end WL-{}); a "
-                            "post-release correction is a NEW entry in the unreleased tail (spec 6.2)".format(n, end))
+            local.append("worklog id WL-{} falls in an already-released span (<= released end WL-{}); a "
+                         "post-release correction is a NEW entry in the unreleased tail (spec 6.2)".format(n, end))
+    findings.extend(sorted(local))
     return findings
 
 
@@ -1049,11 +1081,42 @@ def check_no_deletion(old_ids, new_ids):
     return findings
 
 
+def _count_expected_absent(expected_ids, present, where, findings):
+    """The number of `expected_ids` (the authoritative id space, a range 1..high-water) absent from
+    `present` (a set of WL-numbers), computed WITHOUT materializing a collection sized by the declared
+    high-water. A range spanning a spoofed large id (a store entry WL-1000000000) would make
+    `_wl_id_set`'s `out.add(n)` loop an O(high-water) allocation and MemoryError, and a per-missing-id
+    finding would be O(high-water) too; instead the count/identity discipline the release-cut tail check
+    uses answers the interval question in O(present) (RANGE-BOUNDS; SECA-resource-bounds;
+    guard-input-soundness). Since `present` holds distinct WL-numbers, the count of present ids that fall
+    in `expected_ids` equals |present intersect expected|, so len(expected) minus that count is the number
+    of expected ids covered by NEITHER location. A control that cannot answer (not sized, or not
+    membership-testable, e.g. an unbounded generator) is a fail-closed finding, never a silent zero."""
+    try:
+        expected_n = len(expected_ids)
+    except TypeError:
+        findings.append("{}: must be a SIZED id space (a range 1..high-water), not {}".format(
+            where, type(expected_ids).__name__))
+        return 0
+    covered = 0
+    for n in present:
+        try:
+            in_expected = n in expected_ids
+        except TypeError:
+            findings.append("{}: is not a membership-testable id space ({})".format(
+                where, type(expected_ids).__name__))
+            return 0
+        if in_expected:
+            covered += 1
+    return expected_n - covered
+
+
 def check_ids_partition(active_ids, archive_ids, expected_ids=None):
     """Rotation is archival MOVEMENT, never duplication or loss (spec 12): every worklog id exists in
     EXACTLY ONE of the active worklog or the archive. Returns a finding per id present in both, and, when
-    an authoritative `expected_ids` set is given (e.g. 1..high-water), a finding per expected id present in
-    NEITHER location, so a dropped/lost id is reported rather than reading as clean (M9). Without
+    an authoritative `expected_ids` set is given (e.g. 1..high-water), a finding naming the COUNT of
+    expected ids present in NEITHER location, bounded by the present set so a range 1..high-water spanning
+    a spoofed large id cannot force an O(high-water) allocation (M9; RANGE-BOUNDS). Without
     `expected_ids` the guard cannot see a loss (its inputs are the two locations, not the id space it
     should cover), so the authoritative set is threaded in per guard-input-soundness."""
     findings = []
@@ -1063,12 +1126,16 @@ def check_ids_partition(active_ids, archive_ids, expected_ids=None):
         findings.append("worklog id WL-{} is in BOTH the active worklog and the archive; rotation is a "
                         "move, an id lives in exactly one location (spec 12)".format(n))
     if expected_ids is not None:
-        expected = _wl_id_set(expected_ids, "check_ids_partition expected id-collection", findings)
+        # Detect a LOST id (present in NEITHER location) WITHOUT materializing a set sized by the declared
+        # high-water: an `expected_ids` range spanning a spoofed large id would OOM _wl_id_set here, and a
+        # per-missing-id finding would itself be O(high-water). Answer the interval question by the
+        # count/identity discipline over the (bounded) present set instead (RANGE-BOUNDS).
         present = active | archive
-        for n in sorted(expected):
-            if n not in present:
-                findings.append("worklog id WL-{} is in NEITHER the active worklog nor the archive; "
-                                "rotation is a move, never a loss (spec 12/13)".format(n))
+        absent = _count_expected_absent(
+            expected_ids, present, "check_ids_partition expected id-collection", findings)
+        if absent > 0:
+            findings.append("{} expected worklog id(s) are in NEITHER the active worklog nor the archive; "
+                            "rotation is a move, never a loss (spec 12/13)".format(absent))
     return findings
 
 
@@ -1091,17 +1158,22 @@ def check_rotation_only_released(rotated_ids, version_data):
     except ReleaseError as exc:
         findings.append("cannot evaluate: {}".format(exc))
         return findings
+    # Accumulate per-id findings locally and append them SORTED, so a `set` rotated collection cannot leak
+    # its nondeterministic iteration order into the finding stream (house sorted-output constraint).
+    local = []
     for rid in rotated_ids:
         n = rid if isinstance(rid, int) and not isinstance(rid, bool) else _wl_num(rid)
         if n is None:
-            findings.append("rotated worklog id {!r} is not a well-formed WL-<n> id".format(rid))
+            local.append("rotated worklog id {} is not a well-formed WL-<n> id".format(_safe_display(rid)))
         elif n < 1:
             # A WL-number is a positive integer (spec 8.2); a non-positive raw int (e.g. WL-0) is outside
             # the id grammar and must not slip the > released-end test (m3).
-            findings.append("rotated worklog id {!r} is not a positive WL-<n> id (spec 8.2)".format(rid))
+            local.append("rotated worklog id {} is not a positive WL-<n> id (spec 8.2)".format(
+                _safe_display(rid)))
         elif n > end:
-            findings.append("worklog id WL-{} is in the unreleased tail (> released end WL-{}) and must "
-                            "never rotate (spec 12)".format(n, end))
+            local.append("worklog id WL-{} is in the unreleased tail (> released end WL-{}) and must "
+                         "never rotate (spec 12)".format(n, end))
+    findings.extend(sorted(local))
     return findings
 
 
@@ -1510,6 +1582,67 @@ def self_test():
         {"covers": "unreleased", "status": "working"},
         {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "unreleased"}]}
     check("m10-superseded-by-unreleased-invalid", validate_version(sup_by_unreleased).status == INVALID)
+
+    # ----- round-2 fix-forward QA: reconciled NEW/residual findings ---------------------------------
+    # BLOCKER (RANGE-BOUNDS): the expected-id LOSS check is bounded by the PRESENT set, never by the
+    # declared high-water. A range 1..10^9 (a spoofed WL-1000000000 store entry) reports loss in O(1);
+    # before the fix _wl_id_set(expected_ids) materialized it into a set and raised an uncaught MemoryError.
+    huge_expected = check_ids_partition([1], [], expected_ids=range(1, 1000000001))
+    check("blocker-partition-huge-expected-bounded", bool(huge_expected))
+    check("partition-huge-expected-still-detects-loss",
+          not check_ids_partition([1], [], expected_ids=range(1, 2)))
+
+    # MAJOR (FAIL-OPEN, format gate): a trailing newline no longer passes the digest / SemVer regex
+    # (`$` matched before a final newline; `\Z` anchors the whole string).
+    check("digest-trailing-newline-rejected", not _valid_digest("sha256:" + "0" * 64 + "\n"))
+    check("semver-trailing-newline-rejected", parse_semver("1.0.0\n") is None)
+    check("semver-valid-still-parses", parse_semver("1.0.0") is not None)
+
+    # MAJOR (fail-CRASH -> fail-closed): an oversized non-decimal int status renders through _safe_display,
+    # so validate_version returns INVALID instead of an uncontrolled ValueError from repr().
+    big_int_status = int("f" * 4000, 16)   # a >4300-decimal-digit int; repr() trips CPython's limit
+    check("summary-oversized-int-status-invalid", validate_version(
+        {"release": [], "summary": [{"covers": "unreleased", "status": big_int_status}]}).status == INVALID)
+
+    # MAJOR (fail-CRASH -> fail-closed): an UNHASHABLE covers value no longer crashes the covering check
+    # (`covers in covers_index`); the malformed covers is a finding and the row is INVALID.
+    covers_unhashable = {"release": sup_releases, "summary": [
+        {"covers": [], "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"},
+        {"covers": "1.0.0..1.1.0", "status": "published", "digest": D}]}
+    check("covers-unhashable-invalid", validate_version(covers_unhashable).status == INVALID)
+
+    # MAJOR (FAIL-OPEN): a supersession whose rollup range EQUALS the superseded row's own range (distinct
+    # tokens "1.0.0" and "1.0.0..1.0.0" for the same range) is a cycle with no surviving rollup; the
+    # token-level self-reference guard missed it, the range-equality guard catches it (INVALID).
+    sup_cycle = {"release": sup_releases, "summary": [
+        {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.0.0"},
+        {"covers": "1.0.0..1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0"}]}
+    check("m10-equal-range-supersession-cycle-invalid", validate_version(sup_cycle).status == INVALID)
+
+    # MINOR (fail-closed): tail_ids raises on a non-positive id rather than silently dropping it through
+    # the `n > end` filter (which would let a malformed id falsely satisfy an empty-tail assertion).
+    try:
+        tail_ids([], [0])
+        check("tail-ids-nonpositive-fails-closed", False)
+    except ReleaseError:
+        check("tail-ids-nonpositive-fails-closed", True)
+
+    # MINOR (determinism / house sorted-output): the id-collection guards emit findings in SORTED order
+    # regardless of input iteration order (a set input would otherwise be nondeterministic).
+    check("wl-id-set-findings-sorted",
+          check_no_deletion(["mB", "mA"], []) == sorted(check_no_deletion(["mB", "mA"], [])))
+    appf_order = check_no_append_into_released(frozen_ver, [2, 1])
+    check("append-findings-sorted", appf_order == sorted(appf_order))
+    rotf_order = check_rotation_only_released([4, 3], frozen_ver)
+    check("rotation-findings-sorted", rotf_order == sorted(rotf_order))
+
+    # MINOR (self-test discrimination, Fable): pin the load-bearing contiguity clause tail[-1]-end !=
+    # len(tail). An interior-gap tail (WL-1, WL-3 over an empty ledger) must cut INVALID with the
+    # not-contiguous finding; removing the clause degrades it to CANNOT-EVALUATE with a different message.
+    wl_gap_tail = {"schema": 1, "entry": [entry(1), entry(3)]}
+    gap_cut = release_cut({"release": []}, wl_gap_tail, "1.0.0", "2026-06-15T00:00:00Z")
+    check("cut-interior-gap-tail-invalid", gap_cut.status == INVALID)
+    check("cut-interior-gap-tail-named", any("not contiguous" in f for f in gap_cut.findings))
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
