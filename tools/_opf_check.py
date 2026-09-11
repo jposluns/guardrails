@@ -501,9 +501,20 @@ def _canonical_remote(url):
         if _sep and hname and hport == _default_port:
             host = hname
     else:
-        # scp-style [user@]host:path: a colon before any slash names a remote host:path
+        # scp-style [user@]host:path: the colon before any slash separates host from path. A bracketed
+        # IPv6 host ([addr]) carries colons INSIDE the brackets that are part of the address, not the
+        # separator, so the separator is the colon immediately after the closing bracket; a malformed
+        # bracket or a missing host:path colon is unresolvable (returns None, disclosed; gemini round-7).
+        at = s.rfind("@")
+        hoststart = at + 1 if at != -1 else 0
+        if s[hoststart:hoststart + 1] == "[":
+            rb = s.find("]", hoststart)
+            if rb == -1 or s[rb + 1:rb + 2] != ":":
+                return None
+            colon = rb + 1
+        else:
+            colon = s.find(":")
         slash = s.find("/")
-        colon = s.find(":")
         if colon == -1 or (slash != -1 and slash < colon):
             return None
         authority, path = s[:colon], s[colon + 1:]
@@ -591,7 +602,7 @@ def _gather_inline(tname, rows, where, registered_vendors, rep):
     return recs
 
 
-def _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, where, registered_vendors, rep, recon):
+def _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, where, registered_vendors, rep, recon, schema_deferred=False):
     """Gather the per-record-layout records of one type: each registry row is `{id, state, path, digest}`,
     its body lives at `<type>/<id>.toml`, and the row must bind to the body (id, state, digest; OPF-SPEC
     9:839, 13). Record-body SCHEMA faults are emitted directly (C-RECORDS focus); the RECONCILIATION
@@ -638,12 +649,19 @@ def _gather_perrecord(root_fd, machine_rel, tname, namespace, rows, where, regis
         if not isinstance(body, dict):
             recon.append(("cant", "{}: record file {} is not a table".format(rw, body_rel)))
             continue
-        rv = validate_record(body, expected_type=tname, registered_vendors=registered_vendors)
-        if rv.status == CANNOT_EVALUATE:
-            rep.cant("{}: {}".format(body_rel, "; ".join(rv.findings)))
-        elif rv.status != VALID:
-            for f in rv.findings:
-                rep.finding("{}: {}".format(body_rel, f))
+        if schema_deferred:
+            # round-7 BLOCKER: a schema-deferred per-record type still gets FULL structural reconciliation
+            # (row/body binding, path canonicality, digest, and the reverse orphan-body scan below); only the
+            # record CONTENT schema defers to a named CANNOT-EVALUATE, so an orphan or mis-bound body can
+            # never certify VALID through the deferral path.
+            rep.cant("{}: {}".format(body_rel, _SCHEMA_DEFERRAL))
+        else:
+            rv = validate_record(body, expected_type=tname, registered_vendors=registered_vendors)
+            if rv.status == CANNOT_EVALUATE:
+                rep.cant("{}: {}".format(body_rel, "; ".join(rv.findings)))
+            elif rv.status != VALID:
+                for f in rv.findings:
+                    rep.finding("{}: {}".format(body_rel, f))
         # F8: bind the registry row to the body it names (id then state), before seating it into the maps.
         body_id = body.get("id")
         if body_id != rid:
@@ -699,15 +717,25 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
             continue
         if _schema_deferred(tname):
             # F4/round-5 F-2: a record whose schema has not shipped in the baseline validator (a module-tier
-            # type, or the importer legacy_fragment type) is deferred to a named CANNOT-EVALUATE rather than
-            # the baseline validator's false "not a supported type". Seat the id best-effort so the id-space,
-            # no-deletion, and counters-completeness checks still see it.
-            if rows:
-                rep.cant("{}: {} schema-deferred record(s) of type {!r}; {}".format(
-                    idx_rel, len(rows), tname, _SCHEMA_DEFERRAL))
-            for row in rows:
-                if isinstance(row, dict):
-                    recs.append(_make_rec(row, tname, "active"))
+            # type, or the importer legacy_fragment type) defers its CONTENT schema to a named
+            # CANNOT-EVALUATE rather than the baseline validator's false "not a supported type".
+            if layout == "per-record":
+                # round-7 BLOCKER: per-record bodies still need STRUCTURAL reconciliation (orphan bodies,
+                # row/body id-state-digest binding, path canonicality, the reverse body-file scan) even when
+                # the content schema is deferred, so a valid-id .toml body with no registry row is a finding,
+                # never a silently-managed leaf. Only the content schema defers (inside _gather_perrecord).
+                recs.extend(_gather_perrecord(root_fd, machine_rel, tname, namespace, rows, idx_rel,
+                                              registered_vendors, rep, recon, schema_deferred=True))
+            else:
+                # Inline: the index rows ARE the records, so there are no separate body files to reconcile;
+                # defer the content schema and seat the ids best-effort so the id-space, no-deletion, and
+                # counters-completeness checks still see them.
+                if rows:
+                    rep.cant("{}: {} schema-deferred record(s) of type {!r}; {}".format(
+                        idx_rel, len(rows), tname, _SCHEMA_DEFERRAL))
+                for row in rows:
+                    if isinstance(row, dict):
+                        recs.append(_make_rec(row, tname, "active"))
             continue
         if layout == "per-record":
             recs.extend(_gather_perrecord(root_fd, machine_rel, tname, namespace, rows, idx_rel,
@@ -2479,6 +2507,29 @@ def self_test():
         check("sync-nondefault-port-invalid",
               run(_dpf, obs={"tracked": "tracked", "actual_remote": "https://github.com:8443/org/repo.git",
                              "prior": clean_prior()["prior"]}).status == INVALID)
+
+        # round-7 BLOCKER: a schema-deferred PER-RECORD type still gets structural reconciliation. An orphan
+        # body (a valid-id .toml with no registry row) under a deferred type is a finding, not VALID.
+        _orf = copy.deepcopy(pr_machine)
+        _orf["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
+        _orf["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=0, HO=0, LF=0)
+        _orf["legacy_fragment.index.toml"] = idx([])
+        _orf_obs = {"tracked": "tracked",
+                    "prior": {"releases": [],
+                              "counters_high": counters(FN=2, BI=0, DN=0, WL=0, HO=0, LF=0)["counters"],
+                              "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")}}}
+        _oro = run(_orf, product=pr_product, obs=_orf_obs,
+                   working={"toml/legacy_fragment/LF-99.toml": "x\n"})
+        check("perrecord-deferred-orphan-invalid", _oro is not None and _oro.status == INVALID)
+        check("perrecord-deferred-orphan-named",
+              _oro is not None and any("LF-99" in f and "no registry row" in f for f in _oro.findings))
+        # gemini round-7: a bracketed IPv6 scp-form remote canonicalizes to the same (host, path) as its
+        # ssh:// equivalent instead of mis-splitting on a colon inside the brackets; a malformed bracket is
+        # unresolvable (None), disclosed rather than mis-matched.
+        check("canonical-ipv6-scp-matches-ssh",
+              _canonical_remote("git@[2001:db8::1]:repo") is not None
+              and _canonical_remote("git@[2001:db8::1]:repo") == _canonical_remote("ssh://[2001:db8::1]/repo"))
+        check("canonical-ipv6-malformed-bracket-none", _canonical_remote("git@[2001:db8::1:repo") is None)
         # digest byte flipped -> INVALID (proves the digest still bites over the x-vendor-date body)
         prm = copy.deepcopy(pr_machine)
         prm["finding.index.toml"]["record"][0]["digest"] = "sha256:" + "b" * 64
