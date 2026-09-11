@@ -105,9 +105,11 @@ _HOUSE_STYLE_DASHES = frozenset((chr(0x2013), chr(0x2014)))
 _NAMED_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t",
                   "\n": "\\n", "\f": "\\f", "\r": "\\r"}
 
-# The admitted scalar/date-time built-ins. Admission is by EXACT type (`type(v) in _SCALAR_TYPES`, never
-# isinstance), so a hostile subclass of an admitted built-in is rejected as out-of-subset before any of its
-# methods runs; this is what closes the hostile-subclass exception-leak class.
+# The admitted scalar/date-time built-ins. Admission is by EXACT type tested by IDENTITY (via
+# _is_scalar_type: `type(v) is T`, never isinstance and never `==`), so a hostile subclass of an admitted
+# built-in is rejected as out-of-subset before any of its methods runs, and a hostile metaclass's __eq__ is
+# never invoked while classifying (an `in _SCALAR_TYPES` membership test would compare with `==` and run
+# it); this is what closes the hostile-subclass exception-leak class.
 _SCALAR_TYPES = (str, bool, int, float,
                  datetime.datetime, datetime.date, datetime.time)
 
@@ -263,6 +265,15 @@ def _render_scalar(value):
     raise EmitError("value is outside the subset: {}".format(type(value).__name__))
 
 
+def _is_scalar_type(value):
+    """True iff `value`'s EXACT type is an admitted scalar/date-time built-in, tested by IDENTITY (never
+    `==`). Membership via `type(value) in _SCALAR_TYPES` would compare with `==`, running a hostile
+    metaclass's __eq__ during classification (which can raise a control-flow signal or fail to terminate);
+    an identity test never invokes it, matching the exact-type-by-identity admission the module relies on."""
+    t = type(value)
+    return any(t is scalar_type for scalar_type in _SCALAR_TYPES)
+
+
 def _classify_list(items):
     """Classify a list as 'empty', 'scalar' (an inline array of scalars/dates), or 'aot' (an array of
     tables). A mixed or nested array is outside the subset and fails closed."""
@@ -270,7 +281,7 @@ def _classify_list(items):
         return "empty"
     if all(type(e) is dict for e in items):  # exact type: a dict subclass is not admitted as a table
         return "aot"
-    if all(type(e) in _SCALAR_TYPES for e in items):  # exact type: a scalar subclass is rejected below
+    if all(_is_scalar_type(e) for e in items):  # exact type by identity: a scalar subclass is rejected below
         return "scalar"
     raise EmitError("an array must be all tables or all scalars; a mixed or nested array is outside "
                     "the subset")
@@ -353,7 +364,7 @@ def _emit_table(table, path, lines):
                     nested.append((key, value, "aot"))
                 else:
                     leaves.append((key, value))  # empty or scalar array: an inline leaf
-            elif type(value) in _SCALAR_TYPES:
+            elif _is_scalar_type(value):
                 leaves.append((key, value))
             else:
                 raise EmitError("value for key {!r} is outside the subset: {}".format(
@@ -481,10 +492,21 @@ def emit_checked(document):
     text = emit(document)
     try:
         reparsed = tomllib.loads(text)
+        if not _model_equal(document, reparsed):
+            raise EmitError("emitted document did not round-trip to a model equal to its input; fail-closed")
     except tomllib.TOMLDecodeError as exc:
         raise EmitError("emitted document did not reparse as TOML ({}); fail-closed".format(exc))
-    if not _model_equal(document, reparsed):
-        raise EmitError("emitted document did not round-trip to a model equal to its input; fail-closed")
+    except EmitError:
+        raise
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):  # genuine control flow re-raised, never converted
+        raise
+    except BaseException:  # noqa: BLE001 - fail-closed backstop mirroring emit(): a NON-TOMLDecodeError
+        # reparse or comparison failure (a RecursionError from a >1000-part dotted key on 3.12/3.13, or a
+        # MemoryError building the second tree or the comparison stack) becomes a value-free EmitError, so
+        # emit_checked honours the same no-uncontrolled-exception contract as emit() and U7's `except
+        # EmitError` fail-closed path is never bypassed by a leaked exception.
+        raise EmitError("emitted document could not be reparsed or compared for the round-trip proof; "
+                        "fail-closed")
     return text
 
 
@@ -732,6 +754,47 @@ def self_test():
     if not _model_equal([shared_sub, shared_sub], [shared_sub, shared_sub]):
         failures.append("identity-guard/shared-dag: a shared DAG compared unequal to itself")
 
+    # _model_equal type-strictness pins: the exact-type clause (int != float, datetime != date) is the sole
+    # carrier of the strictness that makes the round-trip proof meaningful rather than merely plausible. A
+    # mutant dropping that clause falls back to bare ==, so 1 would equal 1.0; no other leg asserts
+    # _model_equal returns False on a type-conflated pair, so these direct assertions turn that mutant red.
+    if _model_equal(1, 1.0):
+        failures.append("model-equal/int-vs-float: 1 compared equal to 1.0 (exact-type strictness lost)")
+    if _model_equal(datetime.datetime(2026, 1, 1), datetime.date(2026, 1, 1)):
+        failures.append("model-equal/datetime-vs-date: a datetime compared equal to a date")
+    if _model_equal(True, 1) or _model_equal(1, True):
+        failures.append("model-equal/bool-vs-int: True compared equal to a bare int")
+    if _model_equal({"n": 1}, {"n": 1.0}):
+        failures.append("model-equal/nested-int-vs-float: a nested 1 compared equal to 1.0")
+
+    # Identity-membership pin: scalar admission tests _SCALAR_TYPES by IDENTITY (_is_scalar_type), never
+    # `==`, so classifying never invokes a hostile metaclass's __eq__. This spy's __eq__ records every
+    # invocation and returns NotImplemented (so membership still resolves False and the value is rejected);
+    # a `type(v) in _SCALAR_TYPES` regression would compare with `==` and populate the record, turning this
+    # red, while the value stays fail-closed either way.
+    _eq_calls = []
+
+    class _EqSpyMeta(type):
+        def __eq__(cls, other):
+            _eq_calls.append(other)
+            return NotImplemented
+
+        def __hash__(cls):
+            return id(cls)
+
+    class _EqSpy(metaclass=_EqSpyMeta):
+        pass
+
+    _eq_spy = _EqSpy()
+    for _label, _doc in (("value", {"k": _eq_spy}), ("aot-element", {"k": [_eq_spy]}),
+                         ("scalar-array", {"k": [1, _eq_spy]})):
+        _eq_calls.clear()
+        if not _rejects(_doc):
+            failures.append("identity-membership/{}: a hostile-eq value was accepted".format(_label))
+        if _eq_calls:
+            failures.append("identity-membership/{}: classifying invoked a metaclass __eq__ ({} times) via "
+                            "`==` membership instead of an identity test".format(_label, len(_eq_calls)))
+
     # --- golden byte vectors: parity locks over sorting, separators, empties, and dotted headers --------
     # The leaf-rooted golden below (built in a deliberately noncanonical insertion order; the literal was
     # captured from this emitter) has root-level leaf key-values, so it exercises the separator-PRESENT
@@ -843,6 +906,36 @@ def self_test():
     if _MAX_EMIT_BYTES != saved_ceiling_mb:
         failures.append("budget/multibyte-restore: the production ceiling was not restored")
 
+    # --- emit_checked reparse/compare backstop: ANY non-control-flow failure fails closed to EmitError --
+    # A >1000-part dotted key makes tomllib raise RecursionError (NOT TOMLDecodeError) on 3.12/3.13, and
+    # either the reparse or the comparison can raise MemoryError on a large store-derived model; the
+    # contract (docstring) and U7's `except EmitError` fail-closed path require these to become EmitError,
+    # never escape uncontrolled. Swap the module tomllib for a stub whose loads() raises a
+    # non-TOMLDecodeError and assert the conversion; a mutant catching only TOMLDecodeError, or dropping
+    # the reparse/equivalence enforcement entirely, lets the raw exception escape or returns unproven text,
+    # so this leg turns red. Hermetic and version-independent; rebind via globals() (not a `global`
+    # statement, which cannot follow the earlier tomllib reads in this function) and restore in finally.
+    class _RaisingReparse:
+        TOMLDecodeError = tomllib.TOMLDecodeError
+
+        def loads(self, text):
+            raise RecursionError("stubbed non-TOMLDecodeError reparse failure for the backstop pin")
+
+    _saved_tomllib = globals()["tomllib"]
+    globals()["tomllib"] = _RaisingReparse()
+    try:
+        try:
+            emit_checked({"a": 1})
+            failures.append("emit-checked/reparse-backstop: a non-TOMLDecodeError reparse failure was not "
+                            "converted to a fail-closed EmitError (unproven text returned)")
+        except EmitError:
+            pass
+        except BaseException as exc:  # noqa: BLE001 - anything but EmitError here is the fail-open escape
+            failures.append("emit-checked/reparse-backstop: a non-TOMLDecodeError reparse failure escaped "
+                            "as {!r} instead of a fail-closed EmitError".format(exc))
+    finally:
+        globals()["tomllib"] = _saved_tomllib
+
     # --- constrained-subset coverage: every rejected shape (fail-closed) ------------------------------
     class _Other:
         pass
@@ -949,6 +1042,34 @@ def self_test():
     rejects["hostile-datetime-subclass"] = {"k": _HostileDatetime(2026, 1, 1)}
     rejects["hostile-list-subclass"] = {"k": _HostileList([1, 2])}
     rejects["hostile-dict-subclass"] = {"k": _HostileDict({"a": 1})}
+
+    # A BENIGN, well-behaved subclass of an admitted container/scalar built-in is ALSO out of the subset:
+    # admission is by exact type, so ANY subclass is rejected, not only a hostile one (the documented
+    # boundary). No overridden method is needed to expose a regression; these pin the exact-type gates that
+    # the hostile-subclass vectors above cannot, because those pass via the outermost backstop regardless of
+    # where the raise happens. Weakening an exact-type gate to isinstance (at the aot list-element, the
+    # table value, the scalar-array element, or the top-level document position) silently ACCEPTS one of
+    # these and emits out-of-subset bytes while every hostile vector still passes, so these turn an
+    # isinstance regression red.
+    class _BenignDict(dict):
+        pass
+
+    class _BenignList(list):
+        pass
+
+    class _BenignInt(int):
+        pass
+
+    class _BenignStr(str):
+        pass
+
+    rejects["benign-dict-subclass-value"] = {"k": _BenignDict({"a": 1})}
+    rejects["benign-dict-subclass-aot-element"] = {"k": [_BenignDict({"a": 1})]}
+    rejects["benign-list-subclass-value"] = {"k": _BenignList([1, 2])}
+    rejects["benign-int-subclass-value"] = {"k": _BenignInt(5)}
+    rejects["benign-str-subclass-value"] = {"k": _BenignStr("x")}
+    rejects["benign-int-subclass-scalar-array-element"] = {"k": [_BenignInt(5)]}
+    rejects["benign-dict-subclass-document"] = _BenignDict({"a": 1})
 
     # A hostile METACLASS whose __getattribute__ raises on the __name__ lookup: a bare type(value).__name__
     # while a rejection diagnostic is built would otherwise leak an uncontrolled RuntimeError out of emit()
@@ -1072,6 +1193,32 @@ def self_test():
                 failures.append("cycle-message/{}: rejected but the message does not name a cyclic "
                                 "reference ({})".format(name, exc))
 
+    # The oversized-int guard is pinned by its SPECIFIC message, not merely by EmitError-rejection: with
+    # the guard removed, the escaping ValueError is caught by the outermost emit() backstop and reported
+    # with the generic value-free message, so a bare-EmitError assertion cannot tell the guard from the
+    # backstop. Asserting the guard's own wording turns a guard-removal mutant red, matching the
+    # cycle-message pin pattern above.
+    try:
+        emit({"k": 10 ** 4301})
+        failures.append("oversized-int-message: an oversized int was not rejected")
+    except EmitError as exc:
+        if "too large to render" not in str(exc):
+            failures.append("oversized-int-message: rejected, but not by the specific oversized-int guard "
+                            "({})".format(exc))
+
+    # CLI mode selection validates the WHOLE argument vector, not mere membership: exactly one recognized
+    # flag runs the self-test, and anything else (an unknown or extra token, a duplicated flag, a bare
+    # positional, or an empty vector) is misuse. A membership regression (`"--self-test" in args`) would
+    # let a malformed control vector read as a valid self-test run, so these turn that regression red.
+    for good_argv in (["--self-test"], ["--selftest"]):
+        if _selected_mode(good_argv) != "self-test":
+            failures.append("cli/valid: {!r} was not recognized as a self-test invocation".format(good_argv))
+    for bad_argv in ([], ["--self-test", "--unknown"], ["--self-test", "--self-test"],
+                     ["--selftest", "extra"], ["positional"], ["--self-test", "--selftest"]):
+        if _selected_mode(bad_argv) != "misuse":
+            failures.append("cli/misuse: {!r} was not classified as misuse (membership, not whole-vector, "
+                            "validation)".format(bad_argv))
+
     # emit_checked returns exactly what emit returns for a good document (no divergent second path).
     if emit_checked(coverage) != emit(coverage):
         failures.append("emit_checked/parity: emit_checked text differs from emit text")
@@ -1089,9 +1236,18 @@ def self_test():
     return 0
 
 
+def _selected_mode(args):
+    """Map a CLI argument vector to a mode. The WHOLE vector is validated, not mere membership: exactly one
+    recognized self-test flag selects 'self-test', and any other vector (an unknown or extra argument, a
+    duplicated flag, a bare positional, or an empty vector) is 'misuse', so a malformed control vector is
+    never silently read as a valid self-test invocation."""
+    if args in (["--self-test"], ["--selftest"]):
+        return "self-test"
+    return "misuse"
+
+
 def main():
-    args = sys.argv[1:]
-    if "--self-test" in args or "--selftest" in args:
+    if _selected_mode(sys.argv[1:]) == "self-test":
         return self_test()
     print("usage: _opf_emit.py --self-test (a library module; no live mode)", file=sys.stderr)
     return 2
