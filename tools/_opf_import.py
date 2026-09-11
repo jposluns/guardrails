@@ -820,6 +820,12 @@ def stage_import(product_root, import_set, plan, *, now, run_nonce):
         _require_nonce(run_nonce)
         if not (isinstance(import_set, (list, tuple)) and all(isinstance(p, str) for p in import_set)):
             raise _cannot("import_set must be a list of source-path strings")
+        # MINOR-5: product_root is the only public argument not type-guarded; a non-path value would flow
+        # into resolve_store as an uncaught TypeError rather than the module's controlled verdict 2. Guard it
+        # like now/run_nonce/import_set so the argument-guard posture stays total (a path str or os.PathLike).
+        if not isinstance(product_root, (str, os.PathLike)):
+            raise _cannot("product_root must be a path string or os.PathLike, got {}".format(
+                type(product_root).__name__))
 
         resolution = _opf_store.resolve_store(product_root)
         if resolution.status != _opf_store.RESOLVED:
@@ -871,6 +877,23 @@ def stage_import(product_root, import_set, plan, *, now, run_nonce):
         # readers convert their own os.read/os.listdir/os.close at the site (regions A/B/F); this backstop
         # guarantees the remaining reachable os.* calls (enumerated in the draft) cannot escape.
         return StageResult(CANNOT_EVALUATE, ["fail-closed on a filesystem read error: {}".format(exc)])
+    except ValueError as exc:
+        # CLASS 1 (class-complete backstop, ValueError family): a ValueError reaching here from a read or
+        # parse path is fail-closed CANNOT-EVALUATE, never an uncaught escape. Two reachable sources sit
+        # OUTSIDE the OSError family the backstop above enumerates: tomllib raises a bare ValueError on a
+        # store-TOML integer literal over CPython's 4300-digit string-conversion ceiling (counters, manifest,
+        # any index/sibling/archive/version file the store carries), and the filesystem name codec raises
+        # UnicodeEncodeError (a ValueError subclass) when a declared source path carries a lone surrogate.
+        # Both are malformed/exotic inputs the outcome contract owes a verdict-2 for, not a raw crash.
+        return StageResult(CANNOT_EVALUATE, ["fail-closed on a malformed value: {}".format(exc)])
+    except RecursionError as exc:
+        # CLASS 3 (class-complete backstop, recursion): a plan model nested past the interpreter recursion
+        # limit overflows copy.deepcopy at the candidate/worklog mint (the U8 emitter is iterative and bounds
+        # no depth), raising RecursionError outside the OSError/ValueError families. It is a malformed,
+        # out-of-subset input the outcome contract owes verdict 2, never an uncaught crash (SECA resource-
+        # bounds: recursion is bounded and fails safe). The stack has unwound to stage_import by the time this
+        # handler runs, so building the fail-closed StageResult has ample headroom.
+        return StageResult(CANNOT_EVALUATE, ["fail-closed on excessive input nesting: {}".format(exc)])
 
 
 def _read_sources(product_root_fd, import_set):
@@ -1241,6 +1264,23 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
     if dup_findings:
         raise _finding("R6 id uniqueness: {}".format("; ".join(dup_findings)))
 
+    # MAJOR-4 (spec 8.2, counters never regress below an allocated id): the declared counters high-water is
+    # the durable reservation promotion advances; a high-water BELOW an id already seated in the active store
+    # or archive is a regressed, corrupt basis. The R6 union above already refuses the case where a MINTED id
+    # lands ON an existing one (verdict 1); this catches the residual where the minted ids clear every
+    # existing id yet the declared basis still under-states the store (counter 0 with an existing BI-5,
+    # minting BI-1), which would otherwise certify a promotion-ready candidate counters.toml that
+    # under-reserves the namespace and sets up avoidable collisions at promotion. The declared high-water is
+    # a passed premise validated against the authoritative observed ids already in hand (guard-input-
+    # soundness); an under-statement is CANNOT-EVALUATE (a store inconsistent with its own indexes is an
+    # unusable basis). Placed AFTER the union so a genuine collision keeps the author's verdict-1 finding.
+    # (Re-reads the durable ids the union already scanned; a later change could thread them to avoid it.)
+    regressed = _counters_regressed_below_existing(
+        _active_store_ids(store_root_fd, machine_rel, active_types, roster, registered_vendors),
+        high_water, counters_rel)
+    if regressed:
+        raise _cannot("; ".join(regressed))
+
     # --- counters soundness: monotonic advance, minted ids within the advanced high-water -----------
     mono = _opf_schema.check_monotonic(high_water, working_high)
     if mono:
@@ -1272,6 +1312,27 @@ def _existing_id_set(store_root_fd, machine_rel, active_types, roster,
     ids.update(_worklog_ids(store_root_fd, machine_rel, roster, registered_vendors))
     ids.update(_archive_ids(store_root_fd, machine_rel, roster, registered_vendors))
     return ids
+
+
+def _counters_regressed_below_existing(durable_ids, high_water, where):
+    """Findings for every namespace whose declared counters high-water is below a durable id already seated
+    in it (spec 8.2: counters never regress beneath an allocated id). `durable_ids` are the active-store and
+    archive ids (promoted, durable reservations); sibling staging ids are excluded (a proposal reserves
+    nothing). A malformed durable id is not this gate's concern (the active/archive readers already refuse it
+    to CANNOT-EVALUATE upstream), so it is skipped here. Returns a findings list; the caller routes a
+    non-empty list to CANNOT-EVALUATE, a corrupt counters basis being an unusable store input."""
+    worst = {}
+    for rid in durable_ids:
+        shape = _opf_schema._valid_id_shape(rid)
+        if shape is None:
+            continue
+        ns, n = shape[0], shape[1]
+        if ns in high_water and n > high_water[ns] and n > worst.get(ns, 0):
+            worst[ns] = n
+    return ["{}: counters high-water {}={} is below the durable id {}-{} already seated in the store "
+            "(spec 8.2: a counter never regresses beneath an allocated id; a regressed counter is a corrupt "
+            "basis, fail-closed)".format(where, ns, high_water[ns], ns, worst[ns])
+            for ns in sorted(worst)]
 
 
 def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources, now, run_nonce,
@@ -2598,6 +2659,93 @@ def self_test():
                 except OSError:
                     pass
         check("M-d-boundary-close-failure-cannot-eval", vMd == 2)
+
+        # ======================= fix-forward discriminating vectors (G-series) =======================
+
+        # G1 (ValueError family, tomllib int ceiling): a store-TOML integer literal over CPython's 4300-digit
+        # string-conversion ceiling raises a bare ValueError from tomllib, OUTSIDE the OSError family the
+        # backstop enumerated. The class-complete ValueError backstop converts it to verdict 2, never an
+        # uncaught crash. Reverting the `except ValueError` backstop lets the raw ValueError escape.
+        big_int = "9" * 5000
+        rootG1, mG1 = build_store(sources={"a.txt": src})
+        (mG1 / "counters.toml").write_text(
+            "schema = 1\n\n[counters]\nBI = " + big_int + "\nLF = 0\nWL = 0\n", encoding="utf-8")
+        try:
+            vG1 = stage_import(rootG1, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict
+        except ValueError:
+            vG1 = "escaped"
+        check("G1-huge-int-counters-cannot-eval", vG1 == 2)
+        # the same ceiling in the MANIFEST (read via load_manifest/resolve, not the _read_toml wrapper) is
+        # caught by the SAME top-level backstop, proving the fix covers every store-TOML read surface.
+        rootG1m, mG1m = build_store(sources={"a.txt": src})
+        (mG1m / "manifest.toml").write_text(manifest_text() + "big = " + big_int + "\n", encoding="utf-8")
+        try:
+            vG1m = stage_import(rootG1m, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict
+        except ValueError:
+            vG1m = "escaped"
+        check("G1-huge-int-manifest-cannot-eval", vG1m == 2)
+
+        # G2 (ValueError family, filesystem name codec): a declared source path carrying a lone surrogate
+        # passes the lexical containment and control-character guards but makes the os.stat filename encode
+        # raise UnicodeEncodeError (a ValueError subclass), outside the OSError family. Verdict 2, never a
+        # crash. Reverting the ValueError backstop lets the raw UnicodeEncodeError escape.
+        rootG2, mG2 = build_store(sources={"a.txt": src})
+        try:
+            vG2 = stage_import(rootG2, ["a\ud800.txt"], plan_mapped(len(src)),
+                               now=NOW, run_nonce=NONCE).verdict
+        except (ValueError, UnicodeEncodeError):
+            vG2 = "escaped"
+        check("G2-surrogate-source-path-cannot-eval", vG2 == 2)
+
+        # G3 (recursion backstop): a plan candidate model nested past the interpreter recursion limit
+        # overflows copy.deepcopy at the mint (the emitter is iterative and bounds no depth), raising
+        # RecursionError outside the OSError/ValueError families; the backstop converts it to verdict 2 and
+        # stages nothing. Reverting the RecursionError backstop lets the raw crash escape.
+        g3_deep = {}
+        g3_cur = g3_deep
+        for _ in range(3000):
+            g3_cur["deep"] = {}
+            g3_cur = g3_cur["deep"]
+        g3_cand = bi_candidate()
+        g3_cand["title"] = g3_deep
+        g3_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                                            "record": g3_cand}]}}
+        rootG3, mG3 = build_store(sources={"a.txt": src})
+        try:
+            vG3 = stage_import(rootG3, ["a.txt"], g3_plan, now=NOW, run_nonce=NONCE).verdict
+        except RecursionError:
+            vG3 = "escaped"
+        check("G3-deep-nested-plan-cannot-eval", vG3 == 2)
+        check("G3-deep-nested-plan-no-run", not (mG3 / "imports").exists())
+
+        # G4 (spec 8.2, counters never regress): a store whose counters high-water is BELOW an id already
+        # seated in the active store (BI=0 with an existing BI-5), where the minted BI-1 clears every existing
+        # id so the R6 union does NOT fire, is a corrupt counters basis: CANNOT-EVALUATE, nothing staged.
+        # Pre-fix it staged verdict 0 promotion_ready with an under-stated new_high_water. Reverting the
+        # regression gate re-opens the fail-open.
+        rootG4, mG4 = build_store(sources={"a.txt": src},
+                                  extra={"backlog_item.index.toml": bi_index_text("BI-5")})
+        resG4 = stage_import(rootG4, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
+        check("G4-counters-regressed-cannot-eval", resG4.verdict == 2)
+        check("G4-counters-regressed-no-run", not (mG4 / "imports").exists())
+        # the gate refuses ONLY a genuine regression: a high-water AT or ABOVE the observed durable id still
+        # stages (BI=5 with an existing BI-5, minting BI-6 above it), so a well-formed high store is not
+        # false-rejected.
+        rootG4b, mG4b = build_store(sources={"a.txt": src}, counters="BI=5,LF=0,WL=0",
+                                    extra={"backlog_item.index.toml": bi_index_text("BI-5")})
+        check("G4-counters-covered-clean",
+              stage_import(rootG4b, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 0)
+
+        # G5 (argument-guard symmetry): a non-path product_root is verdict 2 like every other refused
+        # argument (now/run_nonce/import_set), never an uncaught TypeError from resolve_store. Reverting the
+        # product_root type guard lets the TypeError escape.
+        for g5_bad in (12345, None):
+            try:
+                vG5 = stage_import(g5_bad, ["a.txt"], plan_mapped(len(src)),
+                                   now=NOW, run_nonce=NONCE).verdict
+            except TypeError:
+                vG5 = "escaped"
+            check("G5-nonpath-product-root-cannot-eval", vG5 == 2)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
