@@ -2388,6 +2388,31 @@ def main():
         dexpect("(l11-d1) bare git diff denies", "git diff", "deny")
         dexpect("(l11-d2) git show HEAD denies", "git show HEAD", "deny")
         dexpect("(l11-d3) git range-diff A B denies", "git range-diff A B", "deny")
+        # cnsdif blob-form precision: 'git show <ref>:<path>' / ':<path>' is a file READ (cat against a
+        # revision), NOT a diff dump -> ALLOW; a bare 'git show <commit>' still renders a diff -> covered.
+        # Each blob ALLOW is fail-to-pass under a revert: without the _is_diff_producer show refinement AND
+        # the _diff_proof_show_blob proof, the OLD code classified every 'git show ...' as a diff producer
+        # and DENIED these. Judged by the structured verdict, never by grepping prose.
+        dexpect("(l11-blob1) git show <ref>:<path> allows (blob read, the adopter repro)",
+                "git show origin/plugin-manifests:.claude-plugin/plugin.json", "allow")
+        dexpect("(l11-blob2) git show :<path> allows (index blob read)",
+                "git show :path/to/file.json", "allow")
+        dexpect("(l11-blob3) git show HEAD:src/x.py allows (blob read)", "git show HEAD:src/x.py", "allow")
+        dexpect("(l11-blob4) git show --textconv HEAD:x.c allows (option skipped, first operand is a blob)",
+                "git show --textconv HEAD:x.c", "allow")
+        dexpect("(l11-blob5) bare git show HEAD still DENIES (no colon operand -> a real diff)",
+                "git show HEAD", "deny")
+        dexpect("(l11-blob6) git show (no operand) still DENIES", "git show", "deny")
+        dexpect("(l11-blob7) git diff still DENIES (unaffected by the blob refinement)", "git diff", "deny")
+        dexpect("(l11-blob8) blob show in a compound is not a whole-command proof -> ASK (safe)",
+                "git show ref:path && echo done", "ask")
+        dexpect("(l11-blob9) 'git diff && git show ref:path' still DENIES (git diff is a dump)",
+                "git diff && git show ref:path", "deny")
+        # Discrimination at the classifier: the blob form is NOT a diff producer, the bare form IS.
+        if aiqt_hooks._is_diff_producer(["git", "show", "HEAD:x.py"]):
+            failures.append("(l11-blob-cls1) _is_diff_producer must be False for a blob-form git show")
+        if not aiqt_hooks._is_diff_producer(["git", "show", "HEAD"]):
+            failures.append("(l11-blob-cls2) _is_diff_producer must stay True for a bare 'git show <commit>'")
         dexpect("(l11-d4) sudo git diff asks (wrapper)", "sudo git diff", "ask")
         dexpect("(l11-d5) command /usr/bin/git show asks (wrapper + path)",
                 "command /usr/bin/git show", "ask")
@@ -4729,6 +4754,121 @@ def main():
                      "deny", "Write", reg_j("tools", "y.py"), ws_reg)
         finally:
             os.lstat = _ws_real_lstat
+
+        # --- SANCTIONED COMPANION-STORE declaration (wrtscp cross-repo fix) ------------------------------
+        # A covered write into an adopter-DECLARED companion-store repo (the orchestrator's own durable store
+        # beside the code repo, a SECOND git repo whose toplevel resolves to itself) is ALLOWED and AUDITED;
+        # an UNDECLARED other repo, a MALFORMED/unresolvable/non-repo declaration, a repo NESTED inside the
+        # store, and the frozen/nested-in-session denials all stay DENY. Every companion ALLOW below is
+        # fail-to-pass under a revert: the OLD code denied EVERY cross-repo write unconditionally. Judged by
+        # the STRUCTURED verdict, never by grepping prose.
+        try:
+            cs_sess = tmp / "cssess"      # the session code repo
+            cs_store = tmp / "csstore"    # the declared companion store (a second repo beside it)
+            cs_other = tmp / "csother"    # an UNDECLARED other repo
+            cs_nonrepo = tmp / "csnonrepo"
+            for _p in (cs_sess, cs_store, cs_other):
+                _p.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["git", "init", "-q", "-b", "main", str(_p)],
+                               check=True, capture_output=True, text=True, timeout=30)
+            cs_nonrepo.mkdir(parents=True, exist_ok=True)   # a plain dir, not a git repo
+            cs_store_nested = cs_store / "innerrepo"         # a repo NESTED inside the store
+            cs_store_nested.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(cs_store_nested)],
+                           check=True, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the companion-store fixtures: {}".format(exc),
+                  file=sys.stderr)
+            return 2
+        cs_reg = cs_sess / ".aiqt" / "orchestration.local.json"
+        cs_reg.parent.mkdir(parents=True, exist_ok=True)
+
+        def cs_set(companion):
+            obj = {"version": 1}
+            if companion is not None:
+                obj["companion_stores"] = companion
+            cs_reg.write_text(json.dumps(obj), encoding="utf-8")
+
+        def cs_rm():
+            if cs_reg.exists():
+                cs_reg.unlink()
+
+        store_root = os.path.realpath(str(cs_store))
+        # Baseline: no declaration -> a cross-repo write to the store DENIES (the pre-fix floor).
+        cs_rm()
+        wsexpect("(ws-cs-baseline) no companion declaration: a store write DENIES",
+                 "deny", "Write", os.path.join(str(cs_store), "s.md"), cs_sess)
+        # Declared: writes anywhere in the declared store repo ALLOW (root file and a deep path).
+        cs_set([store_root])
+        wsexpect("(ws-cs-allow-root) a write to a DECLARED companion-store root file ALLOWS",
+                 "allow", "Write", os.path.join(str(cs_store), "s.md"), cs_sess)
+        wsexpect("(ws-cs-allow-deep) a write deep in the DECLARED store ALLOWS",
+                 "allow", "Edit", os.path.join(str(cs_store), "recs", "a", "b.md"), cs_sess)
+        # An UNDECLARED other repo still DENIES (the floor holds for genuine aiming errors).
+        wsexpect("(ws-cs-other-deny) a write to an UNDECLARED other repo DENIES",
+                 "deny", "Write", os.path.join(str(cs_other), "x.md"), cs_sess)
+        # EXACT repo-root match: a repo NESTED inside the store (its own toplevel differs) does NOT match.
+        wsexpect("(ws-cs-nested-in-store) a write into a repo NESTED inside the declared store DENIES "
+                 "(exact-root match, no escape)", "deny",
+                 "Write", os.path.join(str(cs_store_nested), "f.txt"), cs_sess)
+        # An in-repo write is unaffected (still allows in this un-armed session).
+        wsexpect("(ws-cs-inrepo) an in-repo write still ALLOWS (companion path untouched)",
+                 "allow", "Write", os.path.join(str(cs_sess), "src", "x.py"), cs_sess)
+        # Fail-closed on a MALFORMED / unresolvable / non-repo declaration: the store write DENIES.
+        cs_set("not-a-list")
+        wsexpect("(ws-cs-notlist) companion_stores not a list -> fail-closed, store DENIES",
+                 "deny", "Write", os.path.join(str(cs_store), "s.md"), cs_sess)
+        cs_set([str(tmp / "does-not-exist")])
+        wsexpect("(ws-cs-missing) an unresolvable declared path -> fail-closed, DENIES",
+                 "deny", "Write", os.path.join(str(cs_store), "s.md"), cs_sess)
+        cs_set([str(cs_nonrepo)])
+        wsexpect("(ws-cs-nonrepo) a declared path that is NOT a git repo -> fail-closed, DENIES",
+                 "deny", "Write", os.path.join(str(cs_store), "s.md"), cs_sess)
+        cs_set(["relative/not/absolute"])
+        wsexpect("(ws-cs-relative) a non-absolute declared path -> fail-closed, DENIES",
+                 "deny", "Write", os.path.join(str(cs_store), "s.md"), cs_sess)
+        cs_set([os.path.join(store_root, "recs")])   # inside the store, not its root
+        wsexpect("(ws-cs-subdir) a declared path INSIDE the store but not its root -> DENIES "
+                 "(exact-root only)", "deny", "Write", os.path.join(str(cs_store), "s.md"), cs_sess)
+        # Mixed: a valid store beside a bad entry -> the valid store is honoured, the bad entry opens no hole.
+        cs_set([store_root, "bad-entry"])
+        wsexpect("(ws-cs-mixed-ok) a valid store beside a bad entry still ALLOWS the valid store",
+                 "allow", "Write", os.path.join(str(cs_store), "s.md"), cs_sess)
+        wsexpect("(ws-cs-mixed-nohole) a bad entry never opens an UNDECLARED other repo",
+                 "deny", "Write", os.path.join(str(cs_other), "x.md"), cs_sess)
+        # A companion declaration does NOT bypass the frozen floor OR the nested-in-SESSION denial.
+        cs_set([store_root])
+        (cs_sess / ".aiqt" / "frozen.json").write_text(
+            json.dumps({"version": 1, "frozen": [".aiqt/manifest.toml"]}), encoding="utf-8")
+        wsexpect("(ws-cs-frozen-intact) a frozen path in the session repo still DENIES (floor not lowered)",
+                 "deny", "Edit", os.path.join(str(cs_sess), ".aiqt", "manifest.toml"), cs_sess)
+        (cs_sess / ".aiqt" / "frozen.json").unlink()
+        cs_sess_nested = cs_sess / "nested"
+        cs_sess_nested.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(cs_sess_nested)],
+                       check=True, capture_output=True, text=True, timeout=30)
+        wsexpect("(ws-cs-nested-session) a nested-in-SESSION repo still DENIES (unchanged)",
+                 "deny", "Write", os.path.join(str(cs_sess_nested), "f.txt"), cs_sess)
+        # AUDIT: a companion-store ALLOW emits a guard-event row (kind wrtscp, decision allow).
+        cs_set([store_root])
+        _ = wsdecide("Write", os.path.join(str(cs_store), "audit.md"), str(cs_sess))
+        cs_sd = aiqt_hooks._orch_state_dir_for_root(aiqt_hooks._recovery_toplevel(str(cs_sess)))
+        cs_ge = os.path.join(cs_sd, "guard-events.jsonl")
+        cs_rows = []
+        if os.path.exists(cs_ge):
+            with open(cs_ge, "r", encoding="utf-8") as fh:
+                cs_rows = [json.loads(ln) for ln in fh if ln.strip()]
+        if not any(r.get("kind") == "wrtscp" and r.get("decision") == "allow"
+                   and "companion-store" in r.get("detail", "") for r in cs_rows):
+            failures.append("(ws-cs-audit) a companion-store ALLOW must emit a wrtscp allow guard-event row")
+        # Classifier discrimination: the matcher matches only the declared root, never an undeclared repo.
+        _cs_stores = aiqt_hooks._wrtscp_companion_stores(aiqt_hooks._recovery_toplevel(str(cs_sess)))
+        if aiqt_hooks._wrtscp_target_companion_store(
+                os.path.realpath(os.path.join(str(cs_store), "z")), _cs_stores) is None:
+            failures.append("(ws-cs-match1) a target inside the declared store must match its root")
+        if aiqt_hooks._wrtscp_target_companion_store(
+                os.path.realpath(os.path.join(str(cs_other), "z")), _cs_stores) is not None:
+            failures.append("(ws-cs-match2) a target in an undeclared repo must never match")
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

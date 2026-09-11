@@ -658,13 +658,13 @@ _GIT_ARG_OPTS = frozenset((
     # git does NOT abbreviate top-level options, so exact membership is complete here (F-121)
 
 
-def _git_subcommand(tokens):
-    """The git subcommand of a segment whose command word is git: the first non-option token after the
-    command word, skipping any leading env-assignment prefix and the git global options. An
-    arg-consuming global option in its space-separated form (-C DIR, --git-dir DIR, ...) skips two tokens
-    (its value is now its own token, per the tokenizer) so the value is not read as the subcommand; the
-    '--opt=value' form and any other leading '-' token skip one. None when there is no subcommand
-    token."""
+def _git_subcommand_rest(tokens):
+    """(subcommand, args-after-subcommand) for a git segment whose command word is git: the first
+    non-option token after the command word (skipping any leading env-assignment prefix and the git global
+    options), paired with every token AFTER it (the subcommand's own options and operands). An arg-consuming
+    global option in its space-separated form (-C DIR, --git-dir DIR, ...) skips two tokens (its value is
+    now its own token, per the tokenizer) so the value is not read as the subcommand; the '--opt=value' form
+    and any other leading '-' token skip one. (None, []) when there is no subcommand token."""
     i = _command_word_index(tokens) + 1  # skip leading env assignments and the command word itself
     n = len(tokens)
     while i < n:
@@ -677,8 +677,42 @@ def _git_subcommand(tokens):
             else:
                 i += 1
             continue
-        return token
-    return None
+        return token, tokens[i + 1:]
+    return None, []
+
+
+def _git_subcommand(tokens):
+    """The git subcommand of a segment whose command word is git (see _git_subcommand_rest), or None when
+    there is no subcommand token."""
+    return _git_subcommand_rest(tokens)[0]
+
+
+def _show_blob_selector(args):
+    """True when the FIRST non-option argument of a git-show argument list (the tokens AFTER the 'show'
+    subcommand) is a BLOB SELECTOR: a '<ref>:<path>' or ':<path>' form, detected as a non-option token
+    containing a ':'. In that form 'git show' prints ONE file's contents at a revision (it is `cat` against
+    a revision, the normal way to read a file on an un-checked-out branch) - no diff, no @@ hunk headers,
+    no +/- lines - so it renders no console diff. Detection stops at the first non-option token, which is
+    where git show reads its object argument; leading options ('-'/'--opt') are skipped, and an
+    end-of-options '--' makes the NEXT token the first operand, tested for the colon. A best-effort lexical
+    heuristic (colon = blob) with two disclosed residuals (disclose-guard-residuals), both a SAFE-DIRECTION
+    over-allow of at worst a small console dump for this quality guard, never an under-read: (1) a separated
+    option VALUE that happens to contain a ':' (the F-119-class limit the sibling detectors carry); (2) the
+    'git show :/<text>' commit-MESSAGE-SEARCH form, which carries a colon yet renders a commit diff rather
+    than a file (it is neither the <ref>:<path> nor the :<path> blob form). Detection errs toward reading a
+    file, not toward a false diff-dump deny."""
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if tok in _DIFF_END_OF_OPTIONS:
+            # after '--'/'--end-of-options' every token is an operand; the next is the object argument
+            return i + 1 < n and ":" in args[i + 1]
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return ":" in tok  # the first non-option operand IS git show's object argument
+    return False
 
 
 # --- cnsdif (Stop): the diff-wall shape --------------------------------------------------------------
@@ -903,14 +937,19 @@ def _is_diff_producer(tokens):
     already confirmed the segment's command word is git. Judging the SUBCOMMAND (not a bare 'diff'
     token) avoids a false positive on a commit message that mentions the word diff.
 
-    Always a diff dump: diff, show, range-diff (they render a patch by default). Patch-flag gated: log,
-    the plumbing producers diff-tree, diff-index, diff-files, and stash 'show' (they emit a listing by
-    default and a patch only with -p/-u/--patch). stdout gated: format-patch (writes numbered files by
-    default and dumps to the console only with --stdout). Gating the plumbing/format-patch/stash forms
-    on their flag keeps the file-writing and name-only forms from a false positive."""
-    sub = _git_subcommand(tokens)
-    if sub in ("diff", "show", "range-diff"):
+    Always a diff dump: diff, range-diff (they render a patch by default). 'show' renders a diff by default
+    (git show <commit>) EXCEPT in the blob-read form git show <ref>:<path> / :<path>, which prints one
+    file's contents at a revision with no diff and is therefore NOT a producer (see _show_blob_selector).
+    Patch-flag gated: log, the plumbing producers diff-tree, diff-index, diff-files, and stash 'show' (they
+    emit a listing by default and a patch only with -p/-u/--patch). stdout gated: format-patch (writes
+    numbered files by default and dumps to the console only with --stdout). Gating the plumbing/format-patch/
+    stash forms on their flag keeps the file-writing and name-only forms from a false positive."""
+    sub, rest = _git_subcommand_rest(tokens)
+    if sub in ("diff", "range-diff"):
         return True
+    if sub == "show":
+        # A blob selector (<ref>:<path> / :<path>) makes git show a file read, not a diff dump.
+        return not _show_blob_selector(rest)
     if sub in ("log", "diff-tree", "diff-index", "diff-files"):
         return _has_patch_flag(tokens)
     if sub == "format-patch":
@@ -1168,6 +1207,25 @@ def _diff_proof_log_listing(command):
     return True
 
 
+def _diff_proof_show_blob(command):
+    """Proof F: an EXACT 'git show <ref>:<path>' (or 'git show :<path>') BLOB READ. In this form git show
+    prints ONE file's contents at a revision - no diff, no @@ hunk headers, no +/- lines - so it is `cat`
+    against a revision, the normal way to read a file on an un-checked-out branch, and renders no console
+    diff. Requires a metacharacter-free single simple command (the conservative charset, no shell reserved
+    word, so no redirect and no pipe), the first resolved words literally 'git' and 'show', and a blob
+    selector as the first non-option argument after 'show' (_show_blob_selector). A bare 'git show <commit>'
+    (no colon-bearing first operand) is NOT this proof and stays covered (ASK, or DENY on a confirmed
+    patch). This mirrors proof B/E: EXACT-form, never a fuzzy allow."""
+    if not _DIFF_PLAIN_RE.fullmatch(command):
+        return False
+    words = command.split()
+    if _DIFF_RESERVED_WORDS & set(words):
+        return False
+    if words[:2] != ["git", "show"]:
+        return False
+    return _show_blob_selector(words[2:])
+
+
 def _diff_proof_realfile(segments):
     """Proof C: a single simple command whose command word is literally 'git', a possible producer, with no
     opaque shell feature, whose FINAL stdout redirect (last-redirect-wins over the raw redirect metadata) is
@@ -1229,9 +1287,9 @@ def _diff_source_fallback(command):
 
 def diff_source_pretool(data):
     """cnsdif (trust/no-console-diff-dumps), PreToolUse/Bash. FAIL-SAFE-BY-CONSTRUCTION: a git diff-producer
-    is ALLOWED only when the WHOLE command matches one of five closed proofs (exact help, exact summary, a
-    benign 'git log' commit listing, a single simple command proven to redirect stdout to a real file, or an
-    exact terminal pager pipeline);
+    is ALLOWED only when the WHOLE command matches one of six closed proofs (exact help, exact summary, a
+    benign 'git log' commit listing, an exact 'git show <ref>:<path>' blob read, a single simple command
+    proven to redirect stdout to a real file, or an exact terminal pager pipeline);
     a producer confirmed to emit a console patch and fitting no proof DENIES; any other producer-capable but
     unproven form ASKS. Across a compound or multiple producers, DENY outranks ASK: every possible producer
     must clear a proof, and a multi-command form is never admitted merely because one segment is safe."""
@@ -1258,7 +1316,7 @@ def diff_source_pretool(data):
         return _allow()  # no producer-capable form anywhere: the bounded true boundary allows
     # AIRTIGHT-NARROW ALLOW: only when the WHOLE command is one of the five closed proofs.
     if (_diff_proof_help(command) or _diff_proof_summary(command)
-            or _diff_proof_log_listing(command)
+            or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
             or _diff_proof_realfile(segments) or _diff_proof_pager(segments)):
         return _allow()
     # Otherwise judge each possible producer: a confirmed console dump DENIES (outranking ASK across a
@@ -8061,6 +8119,76 @@ def _wrtscp_nested_repo(target, root_c):
         return None
 
 
+def _wrtscp_companion_stores(root):
+    """The adopter-declared companion-store repo roots, read AT DECISION TIME from the orchestration
+    registry's `companion_stores` key (a list of absolute paths to git repo TOPLEVELS beside the session
+    repo, e.g. the sole orchestrator's OWN durable store, which is by design a SECOND git repo next to the
+    code repo). Returns a list of canonicalized (realpath'd) repo-root strings.
+
+    This is ADOPTER-CONTROLLED CONFIG: the guard only HONOURS a validly-declared store, it never
+    self-widens. An entry is honoured ONLY when it is a non-empty absolute string with no control character
+    AND resolves to a real git toplevel that IS the declared root itself (its own `rev-parse
+    --show-toplevel`, via the scrubbed _recovery_toplevel primitive, canonicalizes to the declared path).
+    Per guard-input-soundness, a MALFORMED, unresolvable, or non-repo entry is fail-closed: it is silently
+    dropped, so a cross-repo write it would have named still DENIES (the floor is never lowered on a bad
+    declaration; a bad entry can only ever remove a would-be allow, never open a hole). A registry that is
+    bad or absent, or a `companion_stores` that is absent or not a list, yields no stores, so cross-repo
+    writes deny exactly as before. Read at decision time, never cached (the write-scope reader's discipline).
+    Note the residual: this reads the registry, it does not police who WROTE the registry; the registry is
+    the adopter/harness surface, exactly as `state_dir` already is (guardrail-config integrity of the
+    registry file itself is the harness's, not this path guard's, to hold)."""
+    reg_status, reg = _orch_registry(root)
+    if reg_status != "ok" or not isinstance(reg, dict):
+        return []
+    raw = reg.get("companion_stores")
+    if not isinstance(raw, list):
+        return []
+    stores = []
+    for item in raw:
+        if not isinstance(item, str) or not item or not _is_absolute(item):
+            continue
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in item):
+            continue
+        try:
+            item_c = os.path.realpath(item)
+        except (OSError, ValueError):
+            continue
+        top = _recovery_toplevel(item_c)   # scrubbed rev-parse; None on a non-repo / unresolvable path
+        if top is None:
+            continue
+        try:
+            top_c = os.path.realpath(top)
+        except (OSError, ValueError):
+            continue
+        if top_c != item_c:
+            continue  # the declared path must BE a git repo root, not merely lie inside one
+        stores.append(top_c)
+    return stores
+
+
+def _wrtscp_target_companion_store(target, stores):
+    """The declared companion-store root the write target belongs to, by EXACT repo-root match, or None.
+    The target's OWN resolved git toplevel must EQUAL a declared store root: never a prefix/substring, so a
+    write into a repo NESTED inside a declared store (its own toplevel differs) does not match, nor does a
+    sibling merely beside it. `target` is already realpath'd; its repo toplevel is resolved from the nearest
+    existing ancestor via the scrubbed primitive (the _wrtscp_nested_repo idiom), so a not-yet-existing file
+    still resolves. A target whose repo toplevel cannot be resolved returns None (no match), leaving the
+    caller's cross-repo denial to stand (fail-closed)."""
+    if not stores:
+        return None
+    anchor = _wrtscp_nearest_existing_dir(target)
+    if anchor is None:
+        return None
+    top = _recovery_toplevel(anchor)
+    if top is None:
+        return None
+    try:
+        top_c = os.path.realpath(top)
+    except (OSError, ValueError):
+        return None
+    return top_c if top_c in stores else None
+
+
 def _wrtscp_deny(root, detail, reason, banner):
     """A write-scope DENY that also makes a BEST-EFFORT guard-events append (the over-fire metric) when root
     is resolvable. The append is best-effort: _orch_guard_event may return False and this ignores it, so a
@@ -8085,7 +8213,16 @@ def write_scope_guard(data):
     The in-tree committed frozen floor .aiqt/frozen.json arms the FROZEN layer (absent -> the frozen layer is
     inert un-armed; present -> the floor is enforced). The structural other-repo/nested-repo denial applies
     to every covered write whose repository root resolves, and a covered write whose root CANNOT be resolved
-    is denied (fail-closed), not allowed. The root is resolved FIRST, so this unresolvable-root denial
+    is denied (fail-closed), not allowed. The ONE sanctioned exception to the other-repo denial is an
+    adopter-DECLARED COMPANION STORE: the orchestration registry's `companion_stores` names absolute git
+    repo TOPLEVELS beside the session repo (e.g. the sole orchestrator's own durable store, a SECOND git repo
+    by design), and a covered write whose target resolves - by EXACT repo-root match, never a prefix - into a
+    declared store is ALLOWED and AUDITED (a wrtscp allow guard-event) rather than denied, so the single most
+    routine legitimate cross-repo write no longer inverts to denying the audited path while the Bash residual
+    stays open. The hook only HONOURS a validly-declared store, never self-widens: a malformed, unresolvable,
+    non-repo, or non-root declaration is fail-closed (the cross-repo write still denies), and the exact-root
+    match keeps a repo nested inside a declared store, or a sibling beside it, denied. The nested-in-session
+    and frozen-floor denials are unchanged by a declaration. The root is resolved FIRST, so this unresolvable-root denial
     precedes any relative-path handling (a non-git relative-path write denies, it does not defer); only once
     the root resolves does an un-armed relative path defer to the sibling absolute_paths hook. The
     frozen-floor denial fires whenever a floor is PRESENT, and an
@@ -8244,11 +8381,25 @@ def write_scope_guard(data):
                             "denied a {} (containment fault)".format(tool_name))  # row 11 (fault -> deny)
     slice_name = decl["slice"] if armed else None
     if within == "out":
+        # SANCTIONED COMPANION-STORE path: a write into an adopter-DECLARED companion-store repo (an exact
+        # repo-root match; e.g. the sole orchestrator's own durable store beside the code repo) is the single
+        # most routine legitimate cross-repo write, so it is ALLOWED and AUDITED rather than denied. The match
+        # is fail-closed by construction (only a well-formed declaration resolving to a real git toplevel is
+        # honoured), so an UNDECLARED other repo, or a bad declaration, still falls through to the denial.
+        store = _wrtscp_target_companion_store(target, _wrtscp_companion_stores(root))
+        if store is not None:
+            _orch_guard_event(root, "wrtscp", "allow",
+                              "companion-store write to the declared store {} (target {})"
+                              .format(store, target))
+            return _allow()                                                                   # companion store
         return _wrtscp_deny(root, "outside toplevel",
                             "the write target resolves OUTSIDE this repository ({}); a guarded-tool write "
-                            "landing outside the session repo is an aiming error and is denied as a floor "
-                            "the scope declaration cannot lower. Run the write from a session rooted in the "
-                            "target repo.".format(target),
+                            "landing outside the session repo is denied as a floor the scope declaration "
+                            "cannot lower, UNLESS the target repo is declared a companion store. The "
+                            "sanctioned path for a legitimate cross-repo write (such as the orchestrator's "
+                            "own durable store) is to declare that repo's root in the orchestration "
+                            "registry's `companion_stores`; writes into a declared companion store are "
+                            "allowed and audited. An undeclared other repo stays denied.".format(target),
                             "denied a {} to a target outside this repository".format(tool_name))  # rows 7/16
     nested = _wrtscp_nested_repo(target, root_c)
     if nested is None:

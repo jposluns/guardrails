@@ -28,7 +28,8 @@ keys except `version` are optional; an undeclared surface simply removes the pro
   "mistakes_register": "path",
   "attestations": "path",
   "staleness": {"external_hours": 24, "task_hours": 24},
-  "escape": {"path": "path"}
+  "escape": {"path": "path"},
+  "companion_stores": ["/abs/path/to/a/store/repo/root"]
 }
 ```
 
@@ -48,6 +49,21 @@ the next resume audit. Where operator and assistant share one uid, no file eithe
 so the clean-ALLOW escape channel is unavailable there: recovery is a differently-owned sentinel
 (for example root-owned), registry or mode maintenance by the operator, or the bounded, marked exit;
 split-uid deployment is the recommended posture.
+
+`companion_stores` is an optional list of ABSOLUTE paths to git repo TOPLEVELS beside the session
+repo that the write-scope guard (wrtscp) treats as SANCTIONED cross-repo write targets: the most
+common case is the sole orchestrator's own durable store, which is by design a SECOND git repo next
+to the code repo. A guarded Write/Edit/MultiEdit whose target resolves, by EXACT repo-root match
+(the target's own resolved git toplevel EQUALS a declared store root, never a prefix or substring),
+into a declared store is ALLOWED and AUDITED (a `guard-events.jsonl` row, kind `wrtscp`, decision
+`allow`) instead of denied as an out-of-repo aiming error. It is honoured only when well-formed:
+each entry must be a non-empty absolute string resolving to a real git toplevel that IS the declared
+root itself; a malformed, unresolvable, non-repo, or non-root entry is fail-closed (dropped, so the
+cross-repo write still denies), and a bad entry can only ever remove a would-be allow, never open a
+hole. Declaring a store does not let a write escape into a repo nested inside it (a nested repo's
+toplevel differs) nor defeat the frozen-floor or nested-in-session denials. Like every registry key
+it is adopter/harness-controlled config the guard READS; the guard never self-widens, and integrity
+of the registry file itself is the harness's to hold.
 
 A declared `attestations` register is a chained, append-only row file (AT-N ids; the
 mistakes-register machinery under a different prefix: `tools/orch_register.py append --prefix AT`
