@@ -518,13 +518,13 @@ def _load_inputs(resolution, product_root):
             #
             # Depth behind this fast-path: _journal._read_contained re-opens O_NONBLOCK and re-confirms
             # S_ISREG on the fd, so a non-regular file swapped in AFTER this lstat neither hangs nor slips
-            # through; and the scanner re-applies MAX_CHANGELOG_BYTES to the decoded bytes. Residual
-            # (disclose-guard-residuals): the intermediate _read_contained read is itself uncapped
-            # (_read_fd cap=None for product-file readers), so a writer racing to GROW the file past
-            # st.st_size between this lstat and that open is bounded only by the post-decode scanner check,
-            # not before the read. A hard incremental read-cap belongs in _journal._read_contained /
-            # _read_fd (which already supports `cap` for the journal readers); this module reuses the
-            # contained reader rather than duplicating it, so closing that window is routed to _journal.
+            # through; and the scanner re-applies MAX_CHANGELOG_BYTES to the decoded bytes. Racing-grow
+            # window (SECA resource-bounds): the intermediate _read_contained read is itself capped at
+            # _journal._MAX_PRODUCT_READ_BYTES (its hard incremental read-cap), so a writer racing to GROW
+            # the changelog past st.st_size between this lstat and that open is refused fail-closed AT that
+            # ceiling before the read completes, not merely by the post-decode scanner. That ceiling is well
+            # above MAX_CHANGELOG_BYTES, so no legitimate changelog is refused by it; this module reuses the
+            # contained reader rather than duplicating its cap.
             st = _journal._lstat_contained(product_fd, CHANGELOG_REL)
             if st is None:
                 return None, None, None, frozenset(), ("{} is absent from the product root (a required "
