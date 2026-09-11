@@ -363,7 +363,9 @@ def _validate_actor(record, findings):
     elif kind not in ACTOR_KINDS:
         findings.append("actor.kind {!r} is not one of {}".format(kind, list(ACTOR_KINDS)))
         kind = None
-    if "id" in actor and (not isinstance(actor.get("id"), str) or not actor.get("id")):
+    if "id" in actor and (not isinstance(actor.get("id"), str) or not actor.get("id").strip()):
+        # A whitespace-only id is semantically blank, rejected like a blank title/summary/reason
+        # (the Fable-M4 blank-string stance, harmonized across required payloads; Fable-F4).
         findings.append("actor.id must be a non-empty string when present")
     return kind
 
@@ -427,7 +429,8 @@ def _validate_refs(record, findings):
         elif ref.get("kind") not in REF_KINDS:
             findings.append("{}.kind {!r} is not one of {} (spec 8.6)".format(
                 where, ref.get("kind"), list(REF_KINDS)))
-        if not isinstance(ref.get("locator"), str) or not ref.get("locator"):
+        if not isinstance(ref.get("locator"), str) or not ref.get("locator").strip():
+            # A whitespace-only locator is semantically blank (the Fable-M4 stance; Fable-F4).
             findings.append("{}.locator must be a non-empty string".format(where))
         # note is a required member of every ref on every record, not only a reference record (spec 8.6
         # {kind, locator, note}; m2).
@@ -453,7 +456,9 @@ def _check_keyset(record, allowed, registered_vendors, findings):
             elif not isinstance(record.get(key), dict):
                 findings.append("extension {!r} must be a table (spec 8.7)".format(key))
         else:
-            findings.append("unknown key {!r} (schemas are closed; spec 8.3)".format(key))
+            # `key` is an untrusted top-level key: an oversized non-decimal int key would crash a raw
+            # {!r} render, so it goes through _safe_display like every other key render (Fable-F2).
+            findings.append("unknown key {} (schemas are closed; spec 8.3)".format(_safe_display(key)))
 
 
 def _validate_type_specific(record, spec, findings):
@@ -468,7 +473,8 @@ def _validate_type_specific(record, spec, findings):
             if state == "open":
                 findings.append("finding.severity is graded at or after the fix decision, never while "
                                 "open (spec 8.5)")
-            if not isinstance(record.get("severity"), str) or not record.get("severity"):
+            if not isinstance(record.get("severity"), str) or not record.get("severity").strip():
+                # A whitespace-only severity is semantically blank (the Fable-M4 stance; Fable-F4).
                 findings.append("finding.severity must be a non-empty string when present")
 
     elif spec.name == "pending_decision":
@@ -481,12 +487,14 @@ def _validate_type_specific(record, spec, findings):
                 findings.append("a decided pending_decision must carry all of {}, missing {} "
                                 "(all-or-none bundle, spec 8.5)".format(list(bundle), missing))
             if "decision" in record and (not isinstance(record.get("decision"), str)
-                                         or not record.get("decision")):
+                                         or not record.get("decision").strip()):
+                # A whitespace-only decision is semantically blank (the Fable-M4 stance; Fable-F4).
                 findings.append("pending_decision.decision must be a non-empty string")
             if "decided_at" in record and not _valid_timestamp(record.get("decided_at")):
                 findings.append("pending_decision.decided_at must be an RFC 3339 UTC timestamp")
             if "decided_by" in record and (not isinstance(record.get("decided_by"), str)
-                                           or not record.get("decided_by")):
+                                           or not record.get("decided_by").strip()):
+                # A whitespace-only decided_by is semantically blank (the Fable-M4 stance; Fable-F4).
                 findings.append("pending_decision.decided_by must be a non-empty string")
         elif state in ("open", "withdrawn") and present:
             findings.append("an {} pending_decision must carry none of {}, has {} (all-or-none bundle, "
@@ -563,7 +571,8 @@ def _validate_type_specific(record, spec, findings):
         for k in ("classification", "action"):
             if k not in record:
                 findings.append("an autonomous_decision must carry a non-empty {} (spec 8.5)".format(k))
-            elif not isinstance(record.get(k), str) or not record.get(k):
+            elif not isinstance(record.get(k), str) or not record.get(k).strip():
+                # A whitespace-only classification/action is semantically blank (Fable-M4 stance; Fable-F4).
                 findings.append("autonomous_decision.{} must be a non-empty string".format(k))
 
     elif spec.name == "reference":
@@ -694,8 +703,11 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
 
     spec = specs.get(rtype)
     if spec is None:
+        # The roster's keys are rendered through _safe_display (the unknown-key idiom): a hand-constructed
+        # specs roster carrying an oversized non-decimal int key would crash a raw repr sort/render, so
+        # each key is coerced to a safe string before ordering (Fable-F2; matches _safe_key_names' stance).
         findings.append("{!r} is not a supported record type (baseline: {})".format(
-            rtype, sorted(specs, key=repr)))
+            rtype, ", ".join(sorted(_safe_display(s) for s in specs))))
         return RecordValidation(INVALID, findings, rtype=rtype)
 
     rid = record.get("id")
@@ -936,7 +948,10 @@ def validate_counters(data, known_namespaces=None):
         return high_water, findings
     for ns, val in counters.items():
         if not (isinstance(ns, str) and len(ns) == 2 and ns.isupper() and ns.isalpha()):
-            findings.append("[counters] key {!r} is not a two-letter uppercase namespace".format(ns))
+            # `ns` is an untrusted inner key: an oversized non-decimal int key would crash a raw {!r}
+            # render, so it goes through _safe_display like every other key render (Fable-F2).
+            findings.append("[counters] key {} is not a two-letter uppercase namespace".format(
+                _safe_display(ns)))
             continue
         # A namespace must be bound to a real record type in the section 8.1 taxonomy, checked against that
         # authoritative set EVEN WHEN known_namespaces is omitted, so an unknown 2-letter namespace like ZZ
@@ -986,8 +1001,10 @@ def _validated_counter_map(high, where):
         raise ValueError("{}: counters map is not a table (spec 8.2)".format(where))
     for ns, val in high.items():
         if ns not in RECORD_NAMESPACES:
-            raise ValueError("{}: namespace {!r} is bound to no record type in the section 8.1 taxonomy "
-                             "(spec 8.1/8.2)".format(where, ns))
+            # `ns` is an untrusted map key: an oversized non-decimal int key would crash a raw {!r} render
+            # and lose this module's named refusal, so it renders through _safe_display (Fable-F3).
+            raise ValueError("{}: namespace {} is bound to no record type in the section 8.1 taxonomy "
+                             "(spec 8.1/8.2)".format(where, _safe_display(ns)))
         if not _genuine_high_water(val):
             raise ValueError("{}: high-water for {!r} must be a genuine non-negative int, got {} "
                              "(a bool is not a high-water; spec 8.2)".format(where, ns, _safe_display(val)))
@@ -1009,15 +1026,16 @@ def next_id(high, ns, known_complete=False):
         # Guard by type first: a non-string ns (e.g. a list) is unhashable and would crash on the
         # RECORD_NAMESPACES frozenset membership; it is also bound to no record type. Fail closed either
         # way, never a TypeError (guard-input-soundness; spec 8.1/8.2).
-        raise ValueError("cannot allocate an id for namespace {!r}: it is bound to no record type in the "
-                         "section 8.1 taxonomy (spec 8.1/8.2)".format(ns))
+        raise ValueError("cannot allocate an id for namespace {}: it is bound to no record type in the "
+                         "section 8.1 taxonomy (spec 8.1/8.2)".format(_safe_display(ns)))
     if not isinstance(known_complete, bool):
         # known_complete is a genuine-bool PROOF flag, not a truthiness test: a non-bool (e.g. the truthy
         # string "false", or 1) must NOT be read as True and allow allocation from a counters map that is
         # not actually known complete, which could reuse an existing id. Fail closed (spec 8.2,
         # guard-input-soundness).
         raise ValueError("cannot allocate an id: known_complete must be a genuine bool proof flag, got "
-                         "{!r}; a non-bool must not be read as True (spec 8.2)".format(known_complete))
+                         "{}; a non-bool must not be read as True (spec 8.2)".format(
+                             _safe_display(known_complete)))
     _validated_counter_map(high, "next_id")
     if ns not in high and not known_complete:
         raise ValueError("cannot allocate an id for namespace {!r}: it has no recorded high-water and the "
@@ -1734,6 +1752,69 @@ def self_test():
     check("r2fix5-wellformed-vendors-no-finding",
           not any("registered_vendors must be a collection" in f
                   for f in validate_record(_r2f5b, registered_vendors=REG).findings))
+
+    # ----- round-3 residual sweep (Fable ff-QA F2 crash-class siblings, F3 message-integrity siblings,
+    # F4 blank-string siblings). Each vector discriminates a fix landed HERE: the F2/F3 vectors CRASH the
+    # validator with the raw CPython int-to-str ValueError pre-fix (aborting self_test), and the F4 vectors
+    # validate VALID pre-fix; each is INVALID/refused post-fix, with the *-still-ok guards catching over-reach.
+    # F2 (crash-class): an oversized non-decimal int key renders through _safe_display, never a raw {!r},
+    # at the three unknown-key/roster render sites the r2fix1 sweep left open. Each returns a structured
+    # INVALID/finding rather than aborting self_test with an uncontrolled ValueError.
+    _f2a = envelope("finding", 60, "open"); _f2a[_big] = 1
+    check("f2a-toplevel-oversized-int-key-no-crash", validate_record(_f2a).status == INVALID)
+    check("f2b-counters-inner-oversized-int-key-no-crash",
+          bool(validate_counters({"counters": {_big: 1}})[1]))
+    check("f2c-unsupported-type-oversized-specs-key-no-crash",
+          validate_record({"type": "artifact", "id": "AR-1"},
+                          specs={_big: BASELINE_SPECS["finding"]}).status == INVALID)
+    # F3 (message-integrity): a refusal handed an oversized non-decimal int control keeps this module's OWN
+    # named ValueError, never the raw CPython "Exceeds the limit"/"integer string conversion" text. Pre-fix
+    # the {!r} render raises that CPython ValueError while building the message; assert the module's message.
+    try:
+        next_id({}, _big, known_complete=True)
+        check("f3-next-id-oversized-ns-named", False)
+    except ValueError as _e:
+        check("f3-next-id-oversized-ns-named",
+              "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+    try:
+        next_id({}, "BI", known_complete=_big)
+        check("f3-known-complete-oversized-named", False)
+    except ValueError as _e:
+        check("f3-known-complete-oversized-named",
+              "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+    try:
+        next_id({_big: 1}, "BI", known_complete=True)
+        check("f3-counter-map-oversized-ns-named", False)
+    except ValueError as _e:
+        check("f3-counter-map-oversized-ns-named",
+              "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+    # F4 (blank-string): a whitespace-only required payload is semantically blank and INVALID, harmonizing
+    # the Fable-M4 stance across actor.id, ref.locator, finding.severity, pending_decision.decision/
+    # decided_by, and autonomous_decision.classification/action. A real value still validates VALID.
+    check("f4-actor-id-whitespace-invalid",
+          validate_record(envelope("backlog_item", 61, "open",
+                                   actor={"kind": "maintainer", "id": "   "})).status == INVALID)
+    check("f4-actor-id-real-still-ok",
+          validate_record(envelope("backlog_item", 62, "open",
+                                   actor={"kind": "maintainer", "id": "orchestrator"})).status == VALID)
+    check("f4-ref-locator-whitespace-invalid",
+          validate_record(envelope("backlog_item", 63, "open",
+                                   refs=[{"kind": "path", "locator": "   ", "note": "n"}])).status == INVALID)
+    check("f4-severity-whitespace-invalid",
+          validate_record(envelope("finding", 64, "fixed/proposed", actor={"kind": "assistant"},
+                                   severity="   ")).status == INVALID)
+    check("f4-decision-whitespace-invalid",
+          validate_record(envelope("pending_decision", 65, "decided", decision="   ",
+                                   decided_at=TS, decided_by="maintainer")).status == INVALID)
+    check("f4-decided-by-whitespace-invalid",
+          validate_record(envelope("pending_decision", 66, "decided", decision="chose X",
+                                   decided_at=TS, decided_by="   ")).status == INVALID)
+    check("f4-ad-classification-whitespace-invalid",
+          validate_record(envelope("autonomous_decision", 67, "recorded", actor={"kind": "assistant"},
+                                   classification="   ", action="merged")).status == INVALID)
+    check("f4-ad-action-whitespace-invalid",
+          validate_record(envelope("autonomous_decision", 68, "recorded", actor={"kind": "assistant"},
+                                   classification="ACT", action="   ")).status == INVALID)
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
