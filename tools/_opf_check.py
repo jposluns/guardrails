@@ -951,6 +951,13 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
         moved, wl_moved = _parse_archive_manifest(amf, bucket, rep)
         if moved is None:
             continue
+        if moved and not wl_moved:
+            # gemini/claude round-11 BLOCKER: per-bucket rotation binding. A bucket that rotates non-worklog
+            # records MUST carry an archived worklog span to bind them to a released period (spec 12).
+            # archive_wl_ids aggregates GLOBALLY, so the caller's released-only check can be satisfied by
+            # ANOTHER bucket's span; the binding is therefore enforced here, per bucket.
+            rotatable.append("C-ROTATION: {} record(s) are rotated to bucket {!r} with no archived worklog "
+                             "span to bind them to a released period (spec 12)".format(len(moved), bucket_rel))
         enumerated_ids = {mid for mid, _mtype, _dest in moved}
 
         # Archived non-worklog records actually present in this bucket's <type>.index.toml files.
@@ -1407,7 +1414,11 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
     # Merely lying UNDER the machine dir is otherwise fine (codex-7: a legacy file, or a legacy directory
     # outside every graded container, that names no managed slot is VALID; a file contains nothing). Only a
     # declaration that survives covers a subtree in the walk, so a REJECTED declaration never launders it.
-    type_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types) if t not in _LEDGER_TYPES) \
+    # Per-record type directories are reserved: a non-ledger type's dir holds its <id>.toml managed
+    # leaves, and a LEDGER type's dir (e.g. worklog/) must NEVER exist (its home is <type>.toml), so an
+    # unmanaged declaration of or within either is a collision (gemini round-11: a rogue worklog/WL-1.toml
+    # under an [unmanaged] worklog dir must not launder).
+    type_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types)) \
         if layout == "per-record" else ()
     graded_containers = (archive_root, imports_root) + type_body_dirs
     managed_dir_prefixes = (mrel, archive_root, imports_root) + type_body_dirs
@@ -1830,13 +1841,6 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         else:
             for f in check_rotation_only_released(archive_wl_ids, version_data):
                 rep.finding("C-ROTATION: {}".format(f))
-    elif archive_recs:
-        # gemini round-9 BLOCKER: records were rotated to the archive but NO worklog span was archived to
-        # bind them to a released period, so the released-only check above (keyed on archive_wl_ids) never
-        # runs. Rotation is bound to a released worklog span (spec 12); records archived with no bounding
-        # archived worklog span are otherwise a fail-open, so they are a finding.
-        rep.finding("C-ROTATION: {} record(s) are rotated to the archive with no archived worklog span to "
-                    "bind them to a released period (spec 12)".format(len(archive_recs)))
 
     # --- C-STAGING: staged ids under imports/<run-id>/ (spec 14.1), reusing U7's enumerator ------------
     rep.ran("C-STAGING")
@@ -2554,6 +2558,43 @@ def self_test():
         _rr = run(_rrf, product=pr_product, obs=_rr_obs)
         check("rotation-no-worklog-span-named",
               _rr is not None and any("C-ROTATION" in f and "no archived worklog span" in f for f in _rr.findings))
+        # gemini/claude round-11 BLOCKER: PER-BUCKET rotation binding. A mixed-bucket store where one bucket
+        # has a worklog span (global archive_wl_ids non-empty) must still flag a DIFFERENT bucket that
+        # rotated records with no worklog span of its own.
+        _mb = clean_machine()
+        _mb["counters.toml"] = counters(FN=1)
+        _mb["finding.index.toml"] = idx([])
+        _mb["archive/2027/archive.toml"] = {"schema": 1, "worklog_moved": [],
+            "moved": [{"id": "FN-1", "type": "finding", "destination": "archive/2027/finding.index.toml"}]}
+        _mb["archive/2027/finding.index.toml"] = idx([envelope("FN-1", "finding", "resolved")])
+        _mbr = run(_mb)
+        check("rotation-mixed-bucket-unbound-named",
+              _mbr is not None and any("C-ROTATION" in f and "2027" in f and "no archived worklog span" in f
+                                       for f in _mbr.findings))
+        # gemini round-11 BLOCKER: a rogue per-record worklog directory (worklog is ledger-only; its home is
+        # worklog.toml) declared [unmanaged] must NOT launder a rogue body beneath it; the ledger type dir is
+        # a reserved collision.
+        _wd = copy.deepcopy(pr_machine)
+        _wd["manifest.toml"]["unmanaged"] = {"paths": [".working/toml/worklog"]}
+        _wdr = run(_wd, product=pr_product, obs=pr_obs, working={"toml/worklog/WL-1.toml": "x\n"})
+        check("unmanaged-worklog-dir-invalid", _wdr is not None and _wdr.status == INVALID)
+        check("unmanaged-worklog-dir-collision",
+              _wdr is not None and any("collides" in f for f in _wdr.findings))
+        # gemini round-11 MINOR: an illegal-for-every-actor cross-time transition (backlog_item open -> the
+        # terminal done, skipping active) is a C-HISTORY-RESURRECTION finding; exercises the illegal-for-all
+        # block, distinct from the terminal-prior resurrection vector.
+        _iaf = clean_machine()
+        _iaf["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "done")])
+        _iaf_obs = {"tracked": "tracked",
+                    "prior": {"releases": clean_prior()["prior"]["releases"],
+                              "counters_high": clean_prior()["prior"]["counters_high"],
+                              "records": {"BI-1": ("backlog_item", "done"), "BI-2": ("backlog_item", "open"),
+                                          "DN-1": ("done", "recorded"), "HO-1": ("handoff", "current")},
+                              "digests": clean_prior()["prior"]["digests"]}}
+        _iafr = run(_iaf, obs=_iaf_obs)
+        check("history-illegal-for-all-named",
+              _iafr is not None and any("C-HISTORY-RESURRECTION" in f and "illegal for every actor" in f
+                                        for f in _iafr.findings))
         # digest byte flipped -> INVALID (proves the digest still bites over the x-vendor-date body)
         prm = copy.deepcopy(pr_machine)
         prm["finding.index.toml"]["record"][0]["digest"] = "sha256:" + "b" * 64
