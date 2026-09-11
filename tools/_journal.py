@@ -225,7 +225,11 @@ def _read_contained(root_fd, relpath):
     except OSError as exc:                                 # includes FileNotFoundError
         raise JournalError("cannot read contained file {!r} ({})".format(relpath, exc))
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=pfd)
+        # O_NONBLOCK so opening a non-regular final component (e.g. a FIFO swapped in for the regular file
+        # between an earlier lstat gate and this open) returns at once instead of blocking forever on a
+        # writer-less FIFO; the fstat below then refuses the non-regular object. O_NONBLOCK is a no-op for a
+        # regular file (SECA resource-bounds; the TOCTOU-hang backstop behind a check-then-open gate).
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
     except OSError as exc:
         os.close(pfd)
         raise JournalError("cannot read contained file {!r} ({})".format(relpath, exc))
