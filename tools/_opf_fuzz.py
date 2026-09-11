@@ -63,9 +63,11 @@ TS = "2026-08-12T09:14:02Z"
 # (see ADVERSARIAL above), injected at every field and nested position the general and nested sweeps visit,
 # so every str(int) / canonicalization-recursion path is exercised by an adversarial VALUE rather than by a
 # developer remembering a marker. The behavioural assertion (no uncontrolled exception, only the documented
-# ReleaseError / StoreError / ValueError / EmitError) is the coverage. The _sorted_key_names scan below is
-# retained unchanged: it is a real function-CALL scan (an authoritative index of a distinct site class),
-# not a marker, so it stays.
+# ReleaseError / StoreError / ValueError / EmitError) is the coverage. The key-name-render scan below is
+# retained: it is a real function-CALL scan (an authoritative index of a distinct site class), not a
+# marker, so it stays. It counts BOTH key-name-render helpers, _sorted_key_names( and the _opf_schema
+# _safe_key_names( variant, because they are one coverage class: scanning only the former went blind to the
+# four _opf_schema sites when they moved across to _safe_key_names(.
 _TARGET_FILES = frozenset({"_opf_store.py", "_opf_schema.py", "_opf_release.py"})
 _MODULE_PATHS = {Path(m.__file__).name: Path(m.__file__)
                  for m in (_opf_store, _opf_schema, _opf_release)}
@@ -82,10 +84,20 @@ def _scan_sites(predicate):
     return sites
 
 
+# The key-name-rendering helper CALL tokens: both render a surplus-key SET into a finding message and are
+# ONE coverage class. _sorted_key_names( is the _opf_store / _opf_release unknown-key join; _safe_key_names(
+# is the _opf_schema variant that renders each key through _safe_display so a control-char or oversized
+# non-decimal int key cannot forge a finding line or crash the sort. Scanning only the former went blind to
+# the latter when the four _opf_schema sites moved across, so BOTH tokens are scanned.
+_KEY_NAME_RENDER_TOKENS = ("_sorted_key_names(", "_safe_key_names(")
+
+
 def _skn_call_sites():
-    # A _sorted_key_names CALL site: the token followed by '(', excluding its own `def` line (and the
-    # bare-name import lines, which carry no '(').
-    return _scan_sites(lambda ln: "_sorted_key_names(" in ln and not ln.lstrip().startswith("def "))
+    # The key-name-render CALL sites per helper token: the token followed by '(', excluding its own `def`
+    # line (and the bare-name import lines, which carry no '('). Keyed by token so each class's own
+    # non-emptiness can be asserted (a class that scans to zero is a drifted or broken authoritative index).
+    return {tok: _scan_sites(lambda ln, tok=tok: tok in ln and not ln.lstrip().startswith("def "))
+            for tok in _KEY_NAME_RENDER_TOKENS}
 
 
 def _make_tracer(executed):
@@ -456,7 +468,7 @@ def run():
     # keys crash vector) into an otherwise-present child table or row, so every remaining site fires.
     # Contract as before: (a) no uncontrolled crash and (b) a well-formed status. _sorted_key_names
     # str-coerces every key, so a mixed-key surplus set must sort cleanly. The coverage assertion at the end
-    # confirms ALL 20 sites are now reached; a future un-exercised site fails the proof.
+    # confirms every key-name-render site is now reached; a future un-exercised site fails the proof.
     HETERO_EXTRA = {97: "x", "zzz-extra-key": 1}      # a non-string + string surplus key set (mixed sort)
     child_cases = [
         # manifest top-level extras (_opf_store._validate_top_level): a heterogeneous top-level surplus key.
@@ -870,19 +882,26 @@ def run():
 
     # --- coverage-instrumentation assertions (round 7): every production site was actually reached -------
     sys.settrace(None)      # stop tracing before the verdict; self_test's finally is the backstop
-    skn_sites = _skn_call_sites()
-    # The scan must not vacuously pass by finding nothing: the corpus carries 20 _sorted_key_names call
-    # sites today, so a count below that means the authoritative-index scan itself has drifted or broken
-    # (guard-input-soundness applied to the coverage input). The int/str-guard class is no longer proven by
-    # a marker scan (see the round-8 revision note above); it is proven by the by-value probes just above.
-    assertions += 1
-    if len(skn_sites) < 20:
-        fail("coverage scan found only {} _sorted_key_names call site(s) (expected >= 20): the "
-             "authoritative-index scan under-counts".format(len(skn_sites)))
+    skn_by_token = _skn_call_sites()
+    skn_sites = set().union(*skn_by_token.values())
+    # The scan must not vacuously pass by finding nothing. The fail-closed floor is DERIVED from the
+    # authoritative index (both key-name-render helper tokens) rather than a single magic total that
+    # silently drifts: EACH helper class must scan to at least one call site. A class that scans to zero
+    # means the authoritative-index scan has drifted or broken -- exactly the failure mode when the four
+    # _opf_schema sites moved from _sorted_key_names( to _safe_key_names( and a _sorted_key_names-only scan
+    # went blind to them (guard-input-soundness applied to the coverage input). The int/str-guard class is
+    # no longer proven by a marker scan (see the round-8 revision note above); it is proven by the by-value
+    # probes just above. The expected count is never hardcoded: the required-exercised set is the scan's own
+    # union, so adding or removing a site cannot silently drift past a stale literal.
+    for tok, sites in sorted(skn_by_token.items()):
+        assertions += 1
+        if not sites:
+            fail("coverage scan found no {} call site(s): the authoritative-index scan under-counts or "
+                 "has drifted".format(tok))
     skn_missed = sorted(skn_sites - executed)
     assertions += 1
     if skn_missed:
-        fail("coverage: {} of {} _sorted_key_names call site(s) never exercised by any case: {}".format(
+        fail("coverage: {} of {} key-name-render call site(s) never exercised by any case: {}".format(
             len(skn_missed), len(skn_sites), skn_missed))
     skn_reached = len(skn_sites) - len(skn_missed)
 
@@ -899,7 +918,7 @@ def run():
           "uncontrolled crash, well-formed outcome, no fail-open, the by-value oversized-int / deep-nested "
           "shapes fail closed at the digest path, and an oversized parsed int (hex/octal/binary) renders to "
           "a structured finding at every finding-message site rather than crashing; coverage: {}/{} "
-          "_sorted_key_names call sites reached)".format(
+          "key-name-render call sites reached)".format(
               cases, len(targets), assertions, skn_reached, len(skn_sites)))
     return 0
 
