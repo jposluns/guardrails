@@ -124,17 +124,20 @@ _ROSTER_NAMESPACES.update(IMPORTER_TYPES)
 # word (F6; guard-input-soundness).
 _ROSTER_NS_SET = frozenset(_ROSTER_NAMESPACES.values())
 
-# A module-tier record whose schema has not shipped is a named CANNOT-EVALUATE deferral, never graded
-# INVALID by the baseline-only record validator (F4), mirroring U7's module-tier staging refusal.
-_MODULE_DEFERRAL = ("module type schemas not yet available; deferred to U2M (the baseline record validator "
-                    "knows only the baseline specs)")
+# A record whose schema has not shipped in the baseline validator is a named CANNOT-EVALUATE deferral,
+# never graded INVALID (F4; round-5 F-2). This covers the module tier (schemas land in U2M) AND the
+# importer-only legacy_fragment type (its record schema ships in U7's import layer, not the baseline
+# validator), mirroring U7's own staging validation of the identical shape.
+_SCHEMA_DEFERRAL = ("record schema not available to the baseline validator; deferred (module-tier schemas "
+                    "land in U2M, the importer legacy_fragment schema in the import layer)")
 
 
-def _module_deferred(tname):
-    """True when `tname` is a module-tier type whose record schema has not shipped (it is in MODULE_TYPES
-    but has no BASELINE_SPECS entry). Its records are a named CANNOT-EVALUATE deferral, not graded INVALID
-    by the baseline-only validator (F4)."""
-    return tname in MODULE_TYPES and tname not in BASELINE_SPECS
+def _schema_deferred(tname):
+    """True when `tname` is an enabled module-tier OR importer type whose record schema has not shipped
+    (it is in MODULE_TYPES or IMPORTER_TYPES but has no BASELINE_SPECS entry). Its records are a named
+    CANNOT-EVALUATE deferral, not graded INVALID by the baseline-only validator (F4; round-5 F-2 extends
+    this from the module tier to the importer legacy_fragment type)."""
+    return tname not in BASELINE_SPECS and (tname in MODULE_TYPES or tname in IMPORTER_TYPES)
 
 # The closed spec-11 integrity roster. Every required check calls rep.ran(<id>) once; result() reconciles
 # the emitted set against this tuple, so a silently-skipped check becomes CANNOT-EVALUATE, never VALID.
@@ -238,10 +241,6 @@ class _Report:
             self.cannot.append("internal: check {!r} was run more than once".format(check_id))
         else:
             self.checks[check_id] = "PASS"
-        self._current = check_id
-
-    def focus(self, check_id):
-        # Re-point attribution at an already-run check (one gather pass can feed two checks).
         self._current = check_id
 
     def finding(self, msg):
@@ -492,7 +491,15 @@ def _canonical_remote(url):
         authority, path = rest.split("/", 1)
         if "@" in authority:
             authority = authority.rsplit("@", 1)[1]
-        host = authority     # KEEP the port: host:port is part of the endpoint identity (codex-4)
+        host = authority     # KEEP the port: host:port is part of the endpoint identity (codex-4),
+        # EXCEPT a port that spells the scheme's DEFAULT names the same endpoint as the port-less form
+        # (spec 5.6 host+path equivalence): https://h:443/p, ssh://h:22/p and github:org/repo are one
+        # endpoint. A NON-default port (2222 vs 2223) stays distinct (F3); match only a trailing numeric
+        # default so a bracketed IPv6 host is never mis-split.
+        _default_port = {"https": "443", "http": "80", "ssh": "22", "git": "9418"}.get(scheme.lower())
+        hname, _sep, hport = host.rpartition(":")
+        if _sep and hname and hport == _default_port:
+            host = hname
     else:
         # scp-style [user@]host:path: a colon before any slash names a remote host:path
         slash = s.find("/")
@@ -690,13 +697,14 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
         rows = _index_rows(data, idx_rel, rep)
         if rows is None:
             continue
-        if _module_deferred(tname):
-            # F4: a module-tier record's schema ships in U2M; defer it to a named CANNOT-EVALUATE rather
-            # than the baseline validator's false "not a supported type". Seat the id best-effort so the
-            # id-space, no-deletion, and counters-completeness checks still see it.
+        if _schema_deferred(tname):
+            # F4/round-5 F-2: a record whose schema has not shipped in the baseline validator (a module-tier
+            # type, or the importer legacy_fragment type) is deferred to a named CANNOT-EVALUATE rather than
+            # the baseline validator's false "not a supported type". Seat the id best-effort so the id-space,
+            # no-deletion, and counters-completeness checks still see it.
             if rows:
-                rep.cant("{}: {} module-tier record(s) of type {!r}; {}".format(
-                    idx_rel, len(rows), tname, _MODULE_DEFERRAL))
+                rep.cant("{}: {} schema-deferred record(s) of type {!r}; {}".format(
+                    idx_rel, len(rows), tname, _SCHEMA_DEFERRAL))
             for row in rows:
                 if isinstance(row, dict):
                     recs.append(_make_rec(row, tname, "active"))
@@ -833,7 +841,7 @@ def _archived_rotatable(rec):
     TERMINAL state, OPF-SPEC 12:972), False (must never rotate: non-terminal or proposal-qualified,
     OPF-SPEC 12:978), or None when the record's type has no released schema (a module-tier record; rotation
     eligibility is deferred to U2M, never graded here; F4)."""
-    if _module_deferred(rec.rtype):
+    if _schema_deferred(rec.rtype):
         return None
     spec = BASELINE_SPECS.get(rec.rtype)
     if spec is None:
@@ -942,18 +950,19 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             rows = _index_rows(data, idx_rel, rep)
             if rows is None:
                 continue
-            module_deferred = _module_deferred(tname)
-            if module_deferred and rows:
-                # F4: a module-tier record cannot be schema-graded until U2M ships its specs; defer to a
-                # named CANNOT-EVALUATE rather than the baseline validator's false "not a supported type".
-                rep.cant("{}: {} archived module-tier record(s) of type {!r}; {}".format(
-                    idx_rel, len(rows), tname, _MODULE_DEFERRAL))
+            deferred = _schema_deferred(tname)
+            if deferred and rows:
+                # F4/round-5 F-2: an archived record whose schema has not shipped in the baseline validator
+                # (module-tier, or importer legacy_fragment) is deferred to a named CANNOT-EVALUATE rather
+                # than the baseline validator's false "not a supported type".
+                rep.cant("{}: {} archived schema-deferred record(s) of type {!r}; {}".format(
+                    idx_rel, len(rows), tname, _SCHEMA_DEFERRAL))
             for i, row in enumerate(rows):
                 rw = "{}#{}".format(idx_rel, i + 1)
                 if not isinstance(row, dict):
                     rep.cant("{}: archived record row is not a table".format(rw))
                     continue
-                if not module_deferred:
+                if not deferred:
                     rv = validate_record(row, expected_type=tname, registered_vendors=registered_vendors)
                     if rv.status == CANNOT_EVALUATE:
                         rep.cant("{}: {}".format(rw, "; ".join(rv.findings)))
@@ -1362,16 +1371,24 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
             return True
         return managed_leaf(p)
 
-    # An unmanaged declaration is a finding when it NAMES a managed leaf (the round-2 strict-leaf check) or
-    # when it EQUALS or is an ANCESTOR of the machine-store root or a managed prefix (F1: an entry like
-    # ".working" or the machine dir CONTAINS the managed tree and would launder it). Merely lying UNDER the
-    # machine dir is fine (codex-7: a legacy file kept in place that names no managed slot is VALID). Only a
-    # declaration that survives is used to cover a subtree in the walk, so a REJECTED declaration never
-    # launders the tree it names (F1).
-    managed_dir_prefixes = (mrel, archive_root, imports_root)
+    # An unmanaged declaration is a finding when it NAMES a managed leaf, when it CONTAINS one (it equals or
+    # is an ancestor of the machine root, the archive or imports roots, a per-record type-body directory, or
+    # a store-scope view target), or when it lies strictly WITHIN a fully-graded container (the archive or
+    # imports subtree, or a per-record type-body directory) where every path is already graded as managed or
+    # a finding (round-5 F-1/F-4: a declaration inside such a container would shield strays beneath it).
+    # Merely lying UNDER the machine dir is otherwise fine (codex-7: a legacy file, or a legacy directory
+    # outside every graded container, that names no managed slot is VALID; a file contains nothing). Only a
+    # declaration that survives covers a subtree in the walk, so a REJECTED declaration never launders it.
+    type_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types) if t not in _LEDGER_TYPES) \
+        if layout == "per-record" else ()
+    graded_containers = (archive_root, imports_root) + type_body_dirs
+    managed_dir_prefixes = (mrel, archive_root, imports_root) + type_body_dirs
     valid_unmanaged = []
     for u in unmanaged:
-        if managed_leaf(u) or any(_under_any(pfx, (u,)) for pfx in managed_dir_prefixes):
+        if (managed_leaf(u)
+                or any(_under_any(pfx, (u,)) for pfx in managed_dir_prefixes)
+                or _under_any(u, graded_containers)
+                or any(_under_any(vt, (u,)) for vt in view_targets)):
             rep.finding("C-CONTAINMENT: unmanaged path {!r} collides with a managed store path (an "
                         "unmanaged declaration cannot name or contain a managed file; spec 14.2)".format(u))
         else:
@@ -2407,6 +2424,61 @@ def self_test():
         prc = run(pr_machine, product=pr_product, obs=pr_obs)
         check("per-record-clean-valid", prc is not None and prc.status == VALID)
         check("per-record-clean-no-cant", prc is not None and not prc.cannot_evaluate)
+        # --- round-5 containment / deferral / sync fixes (F-1..F-5) ---------------------------------
+        # F-1/F-4: an [unmanaged] declaration inside a fully-graded container (a per-record type-body dir,
+        # the imports subtree, or an archive bucket) must not launder strays beneath it.
+        for _udecl, _stray in ((".working/toml/finding", "toml/finding/evil.bin"),
+                               (".working/toml/finding/sub", "toml/finding/sub/deep.toml"),
+                               (".working/toml/imports/leftover", "toml/imports/leftover/junk.bin"),
+                               (".working/toml/archive/2026", "toml/archive/2026/evil.bin")):
+            _cc = copy.deepcopy(pr_machine)
+            _cc["manifest.toml"]["unmanaged"] = {"paths": [_udecl]}
+            _rc = run(_cc, product=pr_product, obs=pr_obs, working={_stray: "x\n"})
+            check("unmanaged-in-container-collision:" + _udecl,
+                  _rc is not None and any("collides" in f for f in _rc.findings))
+            check("unmanaged-in-container-invalid:" + _udecl, _rc is not None and _rc.status == INVALID)
+        # gemini MINOR: a valid legacy DIRECTORY outside every managed namespace covers files nested under
+        # it (VALID); a regression in the valid-unmanaged subtree coverage would flip this to INVALID.
+        _legd = clean_machine()
+        _legd["manifest.toml"] = base_manifest()
+        _legd["manifest.toml"]["unmanaged"] = {"paths": [".working/legacy-dir"]}
+        check("unmanaged-subtree-dir-valid",
+              run(_legd, working={"legacy-dir/old-note.md": "x\n"}).status == VALID)
+        # F-5a: C-NO-DELETION below-max GAP (FN-1 and FN-3 present, high-water 3 -> FN-2 absent), distinct
+        # from the overhang branch the existing vector exercises.
+        _b1g = clean_machine()
+        _b1g["finding.index.toml"] = idx([envelope("FN-1", "finding", "open"),
+                                          envelope("FN-3", "finding", "open")])
+        _b1g["counters.toml"] = counters(FN=3)
+        _b1gr = run(_b1g)
+        check("b1-nonwl-gap-below-max-invalid", _b1gr is not None and _b1gr.status == INVALID)
+        check("b1-nonwl-gap-below-max-named",
+              _b1gr is not None and any("C-NO-DELETION" in f and "FN-2" in f for f in _b1gr.findings))
+        # F-2: a declared importer legacy_fragment type defers to a named CANNOT-EVALUATE (its record schema
+        # ships in U7's import layer, not the baseline validator), never a false INVALID.
+        _lff = clean_machine()
+        _lff["manifest.toml"] = base_manifest()
+        _lff["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
+        _lff["counters.toml"] = counters(LF=1)
+        _lff["legacy_fragment.index.toml"] = idx([envelope("LF-1", "legacy_fragment", "quarantined")])
+        _lf_prior = copy.deepcopy(clean_prior()["prior"])
+        _lf_prior["counters_high"] = dict(_lf_prior["counters_high"], LF=1)
+        _lf_prior["records"]["LF-1"] = ("legacy_fragment", "quarantined")
+        _lfr = run(_lff, obs={"tracked": "tracked", "prior": _lf_prior})
+        check("legacy-fragment-deferred-cannot-eval", _lfr is not None and _lfr.status == CANNOT_EVALUATE)
+        check("legacy-fragment-deferred-named",
+              _lfr is not None and any("legacy_fragment" in m and "deferred" in m for m in _lfr.cannot_evaluate))
+        # F-3: a remote spelling the scheme DEFAULT port names the same endpoint as the port-less shorthand
+        # (VALID); a NON-default port stays distinct (INVALID).
+        _dpf = clean_machine()
+        _dpf["manifest.toml"] = base_manifest()
+        _dpf["manifest.toml"]["store"] = {"sync_target": "github:org/repo"}
+        check("sync-default-port-valid",
+              run(_dpf, obs={"tracked": "tracked", "actual_remote": "https://github.com:443/org/repo.git",
+                             "prior": clean_prior()["prior"]}).status == VALID)
+        check("sync-nondefault-port-invalid",
+              run(_dpf, obs={"tracked": "tracked", "actual_remote": "https://github.com:8443/org/repo.git",
+                             "prior": clean_prior()["prior"]}).status == INVALID)
         # digest byte flipped -> INVALID (proves the digest still bites over the x-vendor-date body)
         prm = copy.deepcopy(pr_machine)
         prm["finding.index.toml"]["record"][0]["digest"] = "sha256:" + "b" * 64
@@ -3055,7 +3127,7 @@ def self_test():
         mmr = run(mm)
         check("f4-module-record-deferred-cannot-eval", mmr is not None and mmr.status == CANNOT_EVALUATE)
         check("f4-module-record-deferral-named",
-              mmr is not None and any("deferred to U2M" in m for m in mmr.cannot_evaluate))
+              mmr is not None and any("U2M" in m for m in mmr.cannot_evaluate))
         check("f4-module-record-not-false-invalid",
               mmr is not None and not any("not a supported record type" in f for f in mmr.findings))
 
