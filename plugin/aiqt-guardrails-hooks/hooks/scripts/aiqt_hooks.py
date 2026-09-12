@@ -10,7 +10,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   diff_source_pretool PreToolUse  cnsdif  deny a Bash command that dumps a bare console diff
   commit_identity     PreToolUse  cmtidn  deny a git authoring command that names an AI identity
   absolute_paths      PreToolUse  abspth  deny a relative path where a typed-path tool requires absolute
-  bash_absolute_paths PreToolUse  abspth  allow+note a relative cd/pushd operand or redirect target in Bash
+  bash_absolute_paths PreToolUse  abspth  allow+note a relative cd/pushd operand or redirect target in Bash; deny a truncating redirect to a relative/opaque target
   git_explicit_binding PreToolUse expbnd allow+note an ambient git target or broad scope before relocation/publish
   git_discard         PreToolUse  prsunc  allow / snapshot-then-allow / deny a git command that discards work
   branch_root         PreToolUse  brnrot  deny branch creation from an orphaned or unprovable start point
@@ -557,21 +557,55 @@ def _parse_heredoc_delim(command, at, n):
         j += 1
     if j >= n:
         return None
-    c = command[j]
-    if c in ("'", '"'):
-        k = command.find(c, j + 1)
-        if k < 0:
-            return None
-        return (True, command[j + 1:k], strip_tabs, k + 1)
+    # A heredoc delimiter is ONE shell word: the concatenation of adjacent quoted, escaped, and unquoted
+    # fragments per shell word rules (round-3 finding 7). So <<'EO'F, <<EO'F', and <<E"OF" all resolve to
+    # the delimiter EOF - the shell joins the adjacent fragments before comparing lines to it. Reading only
+    # the first fragment (the pre-round-3 behaviour) mis-parsed a partially-quoted delimiter and let its true
+    # closing line swallow a following command as heredoc body. The body is LITERAL (no expansion) when ANY
+    # fragment was quoted or backslash-escaped; a fully-unquoted delimiter (<<EOF) leaves the body
+    # interpolating. The three fully-quoted forms (<<'EOF'/<<"EOF"/<<\\EOF) still resolve exactly as before.
     quoted = False
-    if c == "\\":               # <<\EOF: the backslash quotes the delimiter -> literal body
-        quoted = True
-        j += 1
+    started = False
     delim_chars = []
-    while j < n and command[j] not in " \t\n" and command[j] not in _METACHARS:
-        delim_chars.append(command[j])
+    while j < n:
+        c = command[j]
+        if c in " \t\n" or c in _METACHARS:
+            break                       # an unquoted separator/whitespace ends the delimiter word
+        started = True
+        if c == "'":                    # single quote: literal to the next "'"
+            quoted = True
+            k = command.find("'", j + 1)
+            if k < 0:
+                return None
+            delim_chars.append(command[j + 1:k])
+            j = k + 1
+            continue
+        if c == '"':                    # double quote: literal to the next '"', honouring \" \\ \$ \` escapes
+            quoted = True
+            k = j + 1
+            frag = []
+            while k < n and command[k] != '"':
+                if command[k] == "\\" and k + 1 < n and command[k + 1] in '"\\$`':
+                    frag.append(command[k + 1])
+                    k += 2
+                    continue
+                frag.append(command[k])
+                k += 1
+            if k >= n:
+                return None
+            delim_chars.append("".join(frag))
+            j = k + 1
+            continue
+        if c == "\\":                   # backslash quotes the next character -> literal body
+            quoted = True
+            if j + 1 >= n:
+                return None
+            delim_chars.append(command[j + 1])
+            j += 2
+            continue
+        delim_chars.append(c)           # an ordinary unquoted character
         j += 1
-    if not delim_chars:
+    if not started:
         return None
     return (quoted, "".join(delim_chars), strip_tabs, j)
 
@@ -3586,6 +3620,18 @@ def _take_snapshot(repo, top, verb):
         swt = _recovery_git(repo, ["write-tree"], env_extra=env, timeout=10)
         if swt.returncode == 0 and swt.stdout.strip():
             staged_tree = swt.stdout.strip()
+        elif "staged" in classes:
+            # ROUND-3 FINDING 3: the pure-index (staged) write-tree FAILED, yet the index carries staged
+            # content (index differs from HEAD) that a `git restore --staged`, `git rm --cached`, or a
+            # default/mixed `git reset` discards and that the worktree overlay tree below cannot recover
+            # (staged-ONLY content is absent from the worktree). Without this capture the recovery ref would
+            # NOT contain that payload, so advertising a snapshot would falsely claim it recoverable. FAIL
+            # CLOSED (the caller DENIES) rather than note a snapshot missing the staged-only state. Earlier
+            # this was best-effort (proceed with the worktree overlay only), which under-protected a
+            # staged-only discard when the pure-index write-tree could not run (e.g. unmerged index entries).
+            return ("fail", "the staged (index) state could not be captured (git write-tree on the pure "
+                            "index failed) while staged content is present, so a staged-only discard would "
+                            "be unrecoverable")
         if _recovery_git(repo, ["add", "--all"], env_extra=env, timeout=20).returncode != 0:
             return ("fail", "git add --all into the temp index failed")
         wt = _recovery_git(repo, ["write-tree"], env_extra=env, timeout=10)
@@ -3632,8 +3678,14 @@ def _take_snapshot(repo, top, verb):
     finally:
         if tmpdir is not None:
             shutil.rmtree(tmpdir, ignore_errors=True)
+    # ROUND-3 FINDING 8: the staged (index) commit is the snapshot commit's SECOND parent only when a HEAD
+    # parent precedes it; in an UNBORN-HEAD repo there is no HEAD parent, so the staged commit is the FIRST
+    # parent. Record which, so the recovery pointer advertises the parent that actually resolves to the
+    # preserved staged content (previously it always said '^2', which does not exist on an unborn HEAD).
+    staged_pointer = ("^2" if parent else "^1") if staged_commit else ""
     return ("ok", {"ref": ref, "sha": sha, "classes": sorted(classes),
-                   "restore": "git checkout {} -- :/".format(ref), "staged": bool(staged_commit)})
+                   "restore": "git checkout {} -- :/".format(ref), "staged": bool(staged_commit),
+                   "staged_pointer": staged_pointer})
 
 
 def _recovery_ledger_path():
@@ -3713,8 +3765,13 @@ def _recovery_pointer(info):
     as the ref's SECOND PARENT, so a `git restore --staged` / `git rm --cached` / default-`git reset` that
     discards staged-only content is recoverable from there too."""
     covered = ", ".join(info["classes"]) if info["classes"] else "the working tree"
-    staged = (" The pre-command STAGED (index) state is preserved as the ref's second parent (recover a file "
-              "with 'git show {0}^2:<path>' or 'git checkout {0}^2 -- <path>').".format(info["ref"])
+    # ROUND-3 FINDING 8: use the recorded staged-parent pointer ('^2' with a HEAD parent, '^1' on an unborn
+    # HEAD) so the pointer names the parent that actually resolves to the preserved staged content; default
+    # to '^2' for a snapshot taken before this field existed.
+    sp = info.get("staged_pointer") or "^2"
+    staged = (" The pre-command STAGED (index) state is preserved as the ref's {1} parent (recover a file "
+              "with 'git show {0}{2}:<path>' or 'git checkout {0}{2} -- <path>').".format(
+                  info["ref"], "first" if sp == "^1" else "second", sp)
               if info.get("staged") else "")
     return ("A pre-command recovery snapshot was saved ({}) at ref {}; restore it with '{}' (overlay mode: "
             "it brings back modified and new content but does NOT re-apply a file deletion recorded in the "
@@ -3791,6 +3848,31 @@ def _discard_recovery_result(kind, detail, snap, optout=None):
         "reflog-recoverable), so it is allowed; ensure any work you need is saved.".format(kind, detail))
 
 
+def _stash_drop_clear_outcome(repo, stash_op):
+    """Preserve every stash entry of `repo` under durable refs/aiqt-recovery/ refs, then return the no-ask
+    decision for a 'git stash drop'/'clear' (ROUND-2 FINDING 6, generalized in round-3 finding 2 to the
+    -C/compound/redirected forms): 'none' -> ALLOW (no entries to lose), 'ok' -> ALLOW-WITH-NOTE (entries
+    preserved under durable refs), 'fail' -> DENY (the entries could not be preserved, so the discard would
+    be unrecoverable). The caller has already established `repo` is the repository the command will actually
+    clear (drop/clear is NOT reflog-recoverable afterwards, so a worktree snapshot cannot protect it)."""
+    st = _record_stash_recovery(repo)
+    if st[0] == "none":
+        return _allow()  # no stash entries: drop/clear loses nothing
+    if st[0] == "fail":
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash entries and is "
+            "NOT reflog-recoverable afterwards, and this guard could not preserve the stash entries under a "
+            "recovery ref first ({}), so the discard would be unrecoverable; denied rather than run. Commit "
+            "or apply your stash first, then retry. {}".format(stash_op, st[1], _DISCARD_ALTS),
+            "AIQT guardrail: denied an unrecoverable git stash drop/clear - the stash entries could not be "
+            "preserved (rule prsunc); apply or commit the stash first, then retry.")
+    return _allow_note(
+        "AIQT guardrail (rule prsunc, preserve-uncommitted-work): git stash {} discards saved stash entries "
+        "(not reflog-recoverable afterwards). {} stash entr{} were first preserved under durable refs so they "
+        "remain recoverable ({}); recover one with 'git stash apply <ref>'. It is allowed.".format(
+            stash_op, st[1]["count"], "y" if st[1]["count"] == 1 else "ies", ", ".join(st[1]["refs"])))
+
+
 def _deny_with_recovery(kind, snap):
     """A DENY (a confirmed whole-tree clobber on a dirty tree) whose reason folds in the recovery outcome,
     mirroring _discard_recovery_result."""
@@ -3801,6 +3883,152 @@ def _deny_with_recovery(kind, snap):
         obj["hookSpecificOutput"]["permissionDecisionReason"] += (
             " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1]))
     return (code, obj, err)
+
+
+def _cd_target_dir(tokens, cw, base):
+    """Resolve the destination directory of a top-level `cd`/`pushd` segment (`cw` is the command word),
+    against the current effective directory `base`. Returns an absolute-normalized directory path when it
+    can be resolved simply, or None when it cannot (a `popd`, a bare `cd`/`pushd` with no operand, a `cd -`,
+    a relative operand with no `base` to anchor it, or an operand this guard cannot treat as a literal path).
+    Only a single simple literal operand is honoured; anything else is unresolvable so the caller treats the
+    subsequent discard target as unresolved (round-3 finding 1: a discard after a cd it cannot resolve must
+    not be snapshotted against the wrong directory)."""
+    if cw == "popd":
+        return None                                   # returns to an unknowable dir off the pushd stack
+    cwidx = _command_word_index(tokens)
+    operands = [t for t in tokens[cwidx + 1:] if not t.startswith("-")]
+    if len(operands) != 1 or not operands[0] or operands[0] == "-":
+        return None                                   # no operand (HOME/rotate), 'cd -', or ambiguous
+    d = operands[0]
+    if os.path.isabs(d):
+        return os.path.normpath(d)
+    if base is None:
+        return None                                   # a relative cd with no cwd to anchor it
+    return os.path.normpath(os.path.join(base, d))
+
+
+def _segment_has_gitdir_redirect(tokens):
+    """True when a git segment carries a --git-dir / GIT_DIR= redirect. Unlike --work-tree (which moves only
+    the worktree), --git-dir/GIT_DIR names a DIFFERENT repository, so it changes which repo a `git stash
+    drop`/`clear` acts on. The stash-recovery paths use this to REFUSE (deny) a stash discard whose target
+    repository this guard cannot confidently resolve to a plain `git -C <dir>` invocation, rather than
+    preserve the wrong repo's stash (round-3 finding 2)."""
+    cw = _command_word_index(tokens)
+    for tok in tokens[:cw]:
+        if tok.startswith("GIT_DIR="):
+            return True
+    i = cw + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            break                                     # the subcommand
+        if tok == "--git-dir" or tok.startswith("--git-dir="):
+            return True
+        if "=" not in tok and tok in _GIT_ARG_OPTS:   # a separated value-consuming global option: skip both
+            i += 2
+            continue
+        i += 1
+    return False
+
+
+def _nonpristine_discard_actions(segments, cwd):
+    """ROUND-3 FINDINGS 1 and 2. Walk a NON-PRISTINE in-scope command's segments and resolve, for each
+    VISIBLE git discard segment, the effective worktree/repository the discard ACTUALLY acts on, so the
+    recovery snapshot (a worktree discard) or the stash preservation (a `git stash drop`/`clear`) lands on
+    that target rather than blindly on the session cwd. The shell cwd is tracked across TOP-LEVEL `cd`/`pushd`
+    (a `&&`-gated cd applies to the next command with certainty; a `;`/`||`-sequenced one does NOT gate
+    success so the cwd becomes uncertain; a backgrounded `cd &` and a cd inside a subshell `( )` do NOT change
+    the foreground cwd), and each git segment's own -C/--work-tree/GIT_WORK_TREE= redirect is resolved against
+    that cwd. Returns a dict:
+      { 'snapshot_bases': [dir, ...]  # distinct worktree dirs a snappable destructive discard acts on
+        'stash_ops':      [(dir, op)] # each stash drop/clear paired with the repo dir it acts on
+        'unresolved':     bool        # a visible discard whose target could NOT be resolved with certainty
+        'saw_actionable': bool }      # any visible worktree-destructive or stash drop/clear discard
+    A caller with unresolved=True DENIES (fail closed: it cannot snapshot/preserve the exact target). Where a
+    destructive segment acts on the plain session cwd (no cd, no redirect) that cwd is added to
+    snapshot_bases so it is snapshotted through the same path; where no actionable discard is visible
+    (obfuscated verbs, soft/ref-level forms, or an unknown cwd) saw_actionable is False and the caller keeps
+    its existing best-effort session-cwd snapshot."""
+    depth = 0
+    session_cwd = cwd if isinstance(cwd, str) and cwd else None
+    eff = session_cwd
+    eff_certain = True
+    cd_happened = False
+    snapshot_bases = []
+    stash_ops = []
+    unresolved = False
+    saw_actionable = False
+    targets_session = False
+
+    def _add(seq, item):
+        if item not in seq:
+            seq.append(item)
+
+    for tokens, sep in segments:
+        cw = _command_word(tokens)
+        if depth == 0 and cw == "git":
+            sub, args = _git_sub_and_args(tokens)
+            if sub is not None:
+                role, _kind = _discard_role(sub, args)
+                if role != "allow":
+                    if sub in _SNAPSHOTTABLE_VERBS:
+                        saw_actionable = True
+                        if not eff_certain:
+                            unresolved = True
+                        else:
+                            wt = _segment_redirect_worktree(tokens, eff)
+                            if wt == "opaque":
+                                unresolved = True
+                            elif wt is not None:
+                                _add(snapshot_bases, wt)
+                            elif eff is None:
+                                if cd_happened:
+                                    unresolved = True     # a cd to an unresolvable dir preceded the discard
+                                # else: cwd unknown -> keep the best-effort session path (not unresolved)
+                            elif cd_happened:
+                                _add(snapshot_bases, eff)  # a cd'd-into concrete dir
+                            else:
+                                targets_session = True     # plain session cwd
+                    elif sub == "stash":
+                        stash_op = next((a for a in args if not a.startswith("-")), None)
+                        if stash_op in ("drop", "clear"):
+                            saw_actionable = True
+                            if not eff_certain or _segment_has_gitdir_redirect(tokens):
+                                unresolved = True
+                            else:
+                                wt = _segment_redirect_worktree(tokens, eff)
+                                if wt == "opaque":
+                                    unresolved = True
+                                elif wt is not None:
+                                    _add(stash_ops, (wt, stash_op))
+                                elif eff is None:
+                                    if cd_happened:
+                                        unresolved = True
+                                    # else: cwd unknown -> best-effort session path
+                                else:
+                                    _add(stash_ops, (eff, stash_op))
+                    # a force branch delete/move/copy/reset or stash export is ref-level/reflog-recoverable:
+                    # a worktree snapshot cannot capture it, so no target is resolved here (the existing
+                    # allow-note covers it).
+        elif depth == 0 and cw in ("cd", "pushd", "popd"):
+            if sep == "&":
+                pass                                   # backgrounded: no foreground cwd change
+            elif sep in ("&&", ""):
+                nd = _cd_target_dir(tokens, cw, eff)
+                eff = nd                               # a resolvable dir, or None (subsequent target opaque)
+                cd_happened = True
+            else:                                      # ';' or '||': cd success does not gate the next
+                eff_certain = False
+        if sep == "(":
+            depth += 1
+        elif sep == ")":
+            depth = max(0, depth - 1)
+
+    if targets_session and session_cwd is not None:
+        _add(snapshot_bases, session_cwd)              # a plain session-cwd discard: snapshot the cwd too
+    return {"snapshot_bases": snapshot_bases, "stash_ops": stash_ops,
+            "unresolved": unresolved, "saw_actionable": saw_actionable}
 
 
 def git_discard(data):
@@ -3937,15 +4165,67 @@ def git_discard(data):
         # under-protection). The np_verb label is best-effort from any visible snappable sub.
         np_cwd = data.get("cwd")
         np_base = np_cwd if isinstance(np_cwd, str) and np_cwd else None
+        np_verb = next(iter(sorted(np_subs & _SNAPSHOTTABLE_VERBS)), "discard")
+        # ROUND-3 FINDINGS 1 and 2: resolve the effective worktree/repository EACH visible discard acts on
+        # (tracking top-level cd/pushd and each git segment's own -C/--work-tree/GIT_WORK_TREE= redirect), so
+        # the snapshot/stash-preservation lands on the repo the command will actually mutate, not blindly on
+        # the session cwd. A `git -C T restore ...; :` or `cd T && git restore ...` now snapshots T, and a
+        # `git -C T stash clear` or `git stash clear; :` now preserves the stash of the repo it clears. Where
+        # the effective target cannot be resolved with certainty (an unresolvable redirect/cd, a ;/||-gated
+        # cd whose success is not guaranteed, or a --git-dir/GIT_DIR-redirected stash), the discard DENIES
+        # (fail closed) rather than note a recovery that would not contain the discarded state.
+        actions = _nonpristine_discard_actions(segments, np_base)
+        if actions["unresolved"]:
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs in a compound/redirected command "
+                "whose effective target worktree or repository this guard cannot resolve with certainty (an "
+                "unresolvable -C/--work-tree/GIT_WORK_TREE= or --git-dir/GIT_DIR redirect, or a cd/pushd "
+                "whose success does not gate the discard), so it cannot snapshot or preserve the exact target "
+                "the command will discard from; denied rather than run on a possibly unrecoverable discard. "
+                "Re-issue it as a plain 'git <verb>' command from the target repository, or commit or stash "
+                "your work first. {}".format(kind, _DISCARD_ALTS),
+                "AIQT guardrail: denied a compound/redirected git discard whose target this guard cannot "
+                "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
+        # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo whose
+        # stash cannot be preserved), so a `git -C T stash clear` / `git stash clear; :` no longer notes a
+        # recovery that omits the cleared stash (round-3 finding 2).
+        for _b, _op in actions["stash_ops"]:
+            _st = _record_stash_recovery(_b)
+            if _st[0] == "fail":
+                return _deny(
+                    "AIQT rule prsunc (preserve-uncommitted-work): git stash {} would discard the saved "
+                    "stash entries of {} (not reflog-recoverable afterwards), which this guard could not "
+                    "preserve first ({}), so the discard would be unrecoverable; denied rather than run. "
+                    "Apply or commit the stash first, then retry. {}"
+                    .format(_op, _b, _st[1], _DISCARD_ALTS),
+                    "AIQT guardrail: denied an unrecoverable compound/redirected git stash drop/clear (rule "
+                    "prsunc); apply or commit the stash first, then retry.")
+        # Snapshot every worktree the command discards from: each RESOLVED redirect/cd target (round-3 finding
+        # 1) PLUS the session cwd itself, which stays a best-effort catch-all because a snappable verb hidden
+        # by shell quoting/eval/substitution may still discard the cwd (the rec-c6 residual). Any warranted
+        # snapshot that FAILS denies (fail closed), never a note over a target with no recovery point.
+        _bases = list(actions["snapshot_bases"])
+        if np_base is not None and np_base not in _bases:
+            _bases.append(np_base)
         np_snap = None
-        if np_base is not None and _tree_is_clean(np_base) is not True:
-            np_verb = next(iter(sorted(np_subs & _SNAPSHOTTABLE_VERBS)), "discard")
-            np_snap = _record_recovery(np_base, np_verb)
+        for _b in _bases:
+            if _tree_is_clean(_b) is not True:
+                _s = _record_recovery(_b, np_verb)
+                if _s[0] == "fail":
+                    return _deny(
+                        "AIQT rule prsunc (preserve-uncommitted-work): {} would discard from {}, which this "
+                        "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
+                        "than run. Re-issue it from the target repository, or commit or stash your work "
+                        "first. {}".format(kind, _b, _s[1], _DISCARD_ALTS),
+                        "AIQT guardrail: denied an unrecoverable compound/redirected git discard (rule "
+                        "prsunc); run it from the target repo, or commit or stash first.")
+                if np_snap is None and _s[0] == "ok":
+                    np_snap = _s
         return _discard_recovery_result(
             kind, "is not a pristine single bare 'git <verb>' invocation (it carries a shell "
                   "metacharacter, wrapper, redirect, reserved word, a second command, or a command word "
-                  "that is not literally 'git'), so this guard will not trust a clean probe on it", np_snap,
-            _OPTOUT_REISSUE)
+                  "that is not literally 'git'); a recovery snapshot targets the effective worktree(s) it "
+                  "resolved plus the session directory before allowing", np_snap, _OPTOUT_REISSUE)
 
     # A pristine single bare git command. Honour a truthy LEADING opt-out on it (an explicit override).
     # This short-circuits BEFORE the recovery layer, so an opt-out discard is NOT snapshot-backed: the
@@ -3982,6 +4262,38 @@ def git_discard(data):
         # case (unreadable from the command) keeps its disclosed best-effort session-cwd snapshot.
         redir_wt = None if ambient_override else _segment_redirect_worktree(pristine, cwd_base)
         destructive = sub in _SNAPSHOTTABLE_VERBS and role != "allow"
+        # ROUND-3 FINDING 2: a redirected/ambient 'git stash drop'/'clear' must PRESERVE the stash of the
+        # repository it actually clears (drop/clear is NOT reflog-recoverable afterwards) or DENY when that
+        # repository cannot be resolved. stash is not snapshottable, so the destructive/worktree logic below
+        # does not cover it; a `git -C T stash clear` used to allow-note with NO stash preservation. Resolve
+        # the target repo from the -C/--work-tree redirect and preserve there; an ambient GIT_* view-override,
+        # an opaque redirect, or a --git-dir/GIT_DIR naming a repo this guard cannot map -> DENY.
+        if sub == "stash":
+            stash_op = next((a for a in args if not a.startswith("-")), None)
+            if stash_op in ("drop", "clear"):
+                if ambient_override or redir_wt == "opaque" or _segment_has_gitdir_redirect(pristine):
+                    return _deny(
+                        "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash "
+                        "entries (not reflog-recoverable afterwards) and this command carries an ambient "
+                        "GIT_* view-override or a --git-dir/GIT_DIR redirect naming a repository this guard "
+                        "cannot resolve, so it cannot preserve the stash the command will actually clear; "
+                        "denied rather than run on an unrecoverable discard. Re-issue it as a plain git "
+                        "command from the target repository, or apply or commit the stash first. {}"
+                        .format(stash_op, _DISCARD_ALTS),
+                        "AIQT guardrail: denied a redirected git stash drop/clear whose repository this guard "
+                        "cannot resolve to preserve (rule prsunc); run it from the target repo, or apply or "
+                        "commit the stash first.")
+                stash_repo = redir_wt if redir_wt is not None else cwd_base
+                if stash_repo is None:
+                    return _deny(
+                        "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash "
+                        "entries and is NOT reflog-recoverable afterwards, and no target repository could be "
+                        "resolved to preserve them first; denied rather than run on an unrecoverable discard. "
+                        "Re-issue it from the target repository, or leave the stash in place. {}"
+                        .format(stash_op, _DISCARD_ALTS),
+                        "AIQT guardrail: denied a git stash drop/clear with no resolvable repository to "
+                        "preserve the stash first (rule prsunc).")
+                return _stash_drop_clear_outcome(stash_repo, stash_op)
         if redir_wt == "opaque":
             if destructive:
                 return _deny(
@@ -4124,25 +4436,7 @@ def git_discard(data):
                         "in place. {}".format(stash_op, _DISCARD_ALTS),
                         "AIQT guardrail: denied an unrecoverable git stash drop/clear with no session "
                         "directory to preserve the stash first (rule prsunc).")
-                st = _record_stash_recovery(base)
-                if st[0] == "none":
-                    return _allow()  # no stash entries: drop/clear loses nothing
-                if st[0] == "fail":
-                    return _deny(
-                        "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash "
-                        "entries and is NOT reflog-recoverable afterwards, and this guard could not preserve "
-                        "the stash entries under a recovery ref first ({}), so the discard would be "
-                        "unrecoverable; denied rather than run. Commit or apply your stash first, then retry. "
-                        "{}".format(stash_op, st[1], _DISCARD_ALTS),
-                        "AIQT guardrail: denied an unrecoverable git stash drop/clear - the stash entries "
-                        "could not be preserved (rule prsunc); apply or commit the stash first, then retry.")
-                return _allow_note(
-                    "AIQT guardrail (rule prsunc, preserve-uncommitted-work): git stash {} discards saved "
-                    "stash entries (not reflog-recoverable afterwards). {} stash entr{} were first preserved "
-                    "under durable refs so they remain recoverable ({}); recover one with 'git stash apply "
-                    "<ref>'. It is allowed.".format(
-                        stash_op, st[1]["count"], "y" if st[1]["count"] == 1 else "ies",
-                        ", ".join(st[1]["refs"])))
+                return _stash_drop_clear_outcome(base, stash_op)
             # stash export / other ask-classified stash forms discard no stash entry: keep the allow-note.
             return _discard_recovery_result(kind, "cannot be proven safe offline", snap)
         # A force branch delete/move/copy/reset: a branch ref is a separate, reflog-recoverable asset a
@@ -4702,12 +4996,17 @@ def _commit_on_protected(tokens, cwd, switched_to=None):
     stale pre-command session branch when a switch precedes it, and never a blanket allow-note for a
     same-repo `git -C <repo> commit` that actually lands on the protected line. Only a CONFIRMED direct
     commit on the protected branch is denied; a genuine cannot-prove case is allowed with a note."""
-    if switched_to is not None:
-        # An earlier same-command branch switch determines the POST-command branch this commit lands on.
+    if switched_to is not None and _segment_dir_simple(tokens) and not _ambient_repo_view_override():
+        # ROUND-3 FINDING 4: an earlier same-command branch switch determines the POST-command branch this
+        # commit lands on ONLY when THIS commit runs in the SAME (session) repository the switch acted on.
+        # The switch was recorded only for a session-repo switch (no -C, no ambient override), so a commit
+        # that carries its OWN -C/--work-tree redirect (or runs under an ambient GIT_* view-override) lands
+        # in a DIFFERENT repository the switch never touched; it must NOT inherit the switch's exemption but
+        # be classified against that other repository's actual HEAD below.
         if _is_protected_ref(switched_to):
             return ("deny", "would commit on the protected branch {!r} that an earlier segment of this "
                             "command switched to".format(switched_to))
-        return None  # switched to a non-protected branch -> the commit lands off the protected line
+        return None  # switched to a non-protected branch in the same repo -> the commit lands off it
     if _ambient_repo_view_override():
         return ("note",
                 "runs under a non-cosmetic ambient GIT_* variable, so this guard cannot prove which "
@@ -4828,9 +5127,13 @@ def protected_line(data):
     saw_git = False     # did any parsed segment have 'git' as its command word?
     # ROUND-2 FINDING 13: track the branch an earlier same-command 'git switch'/'checkout -b' moved HEAD to,
     # so a following commit is classified against the branch it will ACTUALLY land on (not the stale
-    # pre-command session branch). Only a determinable switch on the SESSION repo (no -C redirect) that
-    # propagates to the next command (via '&&'/';'/end, never '||' where the commit runs on switch FAILURE)
-    # updates it.
+    # pre-command session branch). Only a determinable switch on the SESSION repo (no -C redirect) whose
+    # SUCCESS GATES the following command updates it. ROUND-3 FINDING 5: only '&&' gates success - a
+    # ';'/'||'-sequenced switch runs the commit REGARDLESS of whether the switch succeeded (a failed
+    # 'git switch missing; git commit' lands the commit on the still-protected branch), so a ';'/'||' switch
+    # never establishes the branch moved and the commit is classified against the pre-command (protected)
+    # branch instead. This is a deliberate safe-direction over-deny for the ';' case (the guard cannot prove
+    # a bare-';' switch succeeded); re-issue the switch and commit joined by '&&' to exempt it.
     switched_to = None
     for tokens, _sep in segments:
         if _command_word(tokens) != "git":
@@ -4842,7 +5145,7 @@ def protected_line(data):
         if sub in ("switch", "checkout") and _segment_dir_simple(tokens) \
                 and not _ambient_repo_view_override():
             target = _commit_post_switch_branch(sub, args)
-            if target is not None and _sep in ("&&", ";", ""):
+            if target is not None and _sep == "&&":  # only '&&' gates the switch's success (finding 5)
                 switched_to = target
             continue
         if sub == "push":
@@ -4967,6 +5270,7 @@ def _checkout_creation_start(args, switch=False):
     branch_name = None      # the trigger's value (new branch name); None => none seen yet
     operands = []           # positional start-point candidates
     saw_eoo = False
+    track_seen = False      # a --track/-t upstream-tracking request (ROUND-3 FINDING 6)
 
     i = 0
     n = len(args)
@@ -5006,6 +5310,7 @@ def _checkout_creation_start(args, switch=False):
             # (e.g. the 'origin/main' in 'git switch -c topic --track origin/main') remains the operand and
             # its ancestry is checked. Tolerate it here instead of routing the whole form to a fail-safe deny.
             if name == "--track":
+                track_seen = True
                 i += 1
                 continue
             # any other long option: unknown, value-taking, negation, abbreviation,
@@ -5018,6 +5323,8 @@ def _checkout_creation_start(args, switch=False):
             while j < len(chars):
                 ch = chars[j]
                 if ch in _CLEAN_SHORT_LETTERS or ch == "t":  # 't' is -t (--track): enables tracking only
+                    if ch == "t":
+                        track_seen = True                    # a -t upstream-tracking request (finding 6)
                     j += 1
                     continue
                 if ch in short_triggers and not created:
@@ -5044,6 +5351,15 @@ def _checkout_creation_start(args, switch=False):
         if branch_name is None:
             return None                                 # trigger with no name: git error, no ref
         return operands[0] if operands else "HEAD"
+
+    # ROUND-3 FINDING 6: a '--track'/'-t' checkout/switch WITHOUT an explicit -c/-B trigger and with a single
+    # positional operand still CREATES a local branch (git's DWIM tracking creation) rooted at that operand
+    # when the local branch does not yet exist, so its start point IS branch-creating and its ancestry must
+    # be probed - a genuine orphan start (e.g. 'git switch --track origin/retired', merge-base with the
+    # protected line empty) DENIES, a rooted upstream ('origin/main') ALLOWS, an unresolvable one notes.
+    # Previously the missing explicit trigger made this a silent non-creation allow that skipped the probe.
+    if track_seen and len(operands) == 1:
+        return operands[0]
 
     # no creation trigger: a checkout/switch of an existing ref -> allow silently
     return None
@@ -5321,12 +5637,16 @@ def branch_root(data):
     start DENIES, and a form this guard cannot prove rooted (an ambiguous/--orphan creation form, a
     dir-change or ambient repository-view override, an unresolved ancestry) also DENIES-and-educates
     fail-safe, naming the reachable correct action. ROUND-2 FINDING 12 (keep-working): it is -C-AWARE - a
-    command-local '-C <dir>'/'--work-tree' redirect resolves the target and its ancestry is checked THERE
-    (the -C fleet convention is honoured, not blocked); a '--track <ref>' names a rooted real start and
-    ALLOWS; a MISSING protected line (no origin/HEAD and no local main/master) is NOT evidence a plain local
-    branch is orphaned, so a resolvable-start creation ALLOWS; and a command-local redirect whose target
-    cannot be resolved ALLOWS-WITH-NOTE (the CI branch-root gate remains the backstop) rather than denying.
-    It never asks."""
+    command-local '-C <dir>'/'--work-tree' redirect that RESOLVES to a concrete directory has its ancestry
+    checked THERE (the -C fleet convention is honoured, not blocked): a rooted start ALLOWS, while a target
+    that is not a rooted repository DENIES fail-safe via the ancestry-unknown path ('-C $VAR', '-C
+    /nonexistent', '-C /etc', '--work-tree=/etc' all deny, since the probe finds no origin/HEAD merge base).
+    A CHECKOUT/SWITCH '--track <ref>' names a rooted real start and ALLOWS (a 'git branch --track' is an
+    unclassifiable form and DENIES, not an allow). A MISSING protected line (no origin/HEAD and no local
+    main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS.
+    ONLY a redirect whose worktree this guard cannot pin at all - a --git-dir/GIT_DIR/-c form, or a
+    value-less/empty/relative-with-no-cwd -C/--work-tree that resolves 'opaque' - ALLOWS-WITH-NOTE (the CI
+    branch-root gate remains the backstop) rather than denying. It never asks."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -5406,10 +5726,13 @@ def branch_root(data):
             continue
         if not _segment_dir_simple(tokens):
             # ROUND-2 FINDING 12: a COMMAND-LOCAL redirect. Honour the -C fleet convention: resolve the
-            # -C/--work-tree target and check ancestry THERE. A target that cannot be resolved (opaque, or a
-            # --git-dir/GIT_DIR/-c form whose worktree this guard cannot pin) ALLOWS-WITH-NOTE rather than
-            # denying (the CI branch-root gate remains the backstop) - never a hard block of a legitimate
-            # explicit-target creation.
+            # -C/--work-tree target and check ancestry THERE. A target that RESOLVES to a concrete directory
+            # is PROBED there, so one that is not a rooted repo ('-C /nonexistent', '-C /etc', '--work-tree=
+            # /etc', a '-C $VAR' that joins to a bogus path) DENIES via the ancestry-unknown fail-safe below.
+            # ONLY a target this guard cannot pin to a worktree at all - a --git-dir/GIT_DIR/-c form, or a
+            # value-less/empty/relative-with-no-cwd -C/--work-tree that resolves 'opaque' - ALLOWS-WITH-NOTE
+            # rather than denying (the CI branch-root gate remains the backstop), never a hard block of a
+            # legitimate explicit-target creation.
             wt = _segment_redirect_worktree(tokens, cwd0)
             if isinstance(wt, str) and wt != "opaque":
                 probe_repo = wt

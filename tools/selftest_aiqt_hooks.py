@@ -1907,6 +1907,113 @@ def main():
         if not _recovery_refs(rec_c6c):
             failures.append("(rec-c6-nosnap-snap) expected a recovery ref: any non-pristine in-scope command "
                             "on a dirty tree is snapshot-backed (accepted over-snapshot)")
+
+        # ROUND-3 FINDING 1: a NON-PRISTINE discard whose effective worktree is a -C redirect or a cd'd-into
+        # target must snapshot THAT target (so the recovery ref contains the state the command discards), not
+        # blindly the session cwd. Revert _nonpristine_discard_actions and the ref lands only in the session
+        # repo while the target (T) has NONE -> the note would falsely claim recovery. Discriminates on ref
+        # LOCATION: the target repo must carry a recovery ref.
+        r3f1_sess = _init_repo(tmp / "r3f1-sess")
+        (r3f1_sess / "file.txt").write_text("committed line\nsess dirty\n", encoding="utf-8")
+        r3f1_T = _init_repo(tmp / "r3f1-T")
+        (r3f1_T / "file.txt").write_text("committed line\nT uncommitted\n", encoding="utf-8")
+        expect("(r3f1a) 'git -C T restore file.txt; :' allows",
+               "git -C {} restore file.txt; :".format(str(r3f1_T)), "allow", cwd=str(r3f1_sess))
+        if not _recovery_refs(r3f1_T):
+            failures.append("(r3f1a-snap) expected a recovery ref in the -C TARGET repo T, not only the "
+                            "session repo (finding 1: the compound '-C T' discard was snapshotting the cwd)")
+        r3f1_T2 = _init_repo(tmp / "r3f1-T2")
+        (r3f1_T2 / "file.txt").write_text("committed line\nT2 uncommitted\n", encoding="utf-8")
+        expect("(r3f1b) 'cd T2 && git restore file.txt' allows",
+               "cd {} && git restore file.txt".format(str(r3f1_T2)), "allow", cwd=str(r3f1_sess))
+        if not _recovery_refs(r3f1_T2):
+            failures.append("(r3f1b-snap) expected a recovery ref in the cd'd-into TARGET repo T2 (finding 1: "
+                            "the 'cd T2 && git restore' discard was snapshotting the session cwd)")
+
+        # ROUND-3 FINDING 2: a redirected/compound 'git stash drop'/'clear' must PRESERVE the stash of the
+        # repo it actually clears (a refs/aiqt-recovery/*-stash* ref in THAT repo), or DENY. Revert the
+        # non-pristine stash handling / the redirect-path stash handling and the stash is not preserved (no
+        # stash ref) while the note still claims recovery. Discriminates on the presence of a stash ref.
+        def _stash_refs(repo):
+            return [r for r in _recovery_refs(repo) if "stash" in r]
+        r3f2_sess = _init_repo(tmp / "r3f2-sess")
+        r3f2_T = _init_repo(tmp / "r3f2-T")
+        (r3f2_T / "file.txt").write_text("committed line\nstash me\n", encoding="utf-8")
+        _git(r3f2_T, "stash", env_identity=True)             # one stash entry to preserve
+        expect("(r3f2a) 'git -C T stash clear' allows", "git -C {} stash clear".format(str(r3f2_T)),
+               "allow", cwd=str(r3f2_sess))
+        if not _stash_refs(r3f2_T):
+            failures.append("(r3f2a-snap) expected a stash recovery ref in the -C TARGET repo T (finding 2: "
+                            "the redirected 'git -C T stash clear' preserved no stash)")
+        r3f2_T2 = _init_repo(tmp / "r3f2-T2")
+        (r3f2_T2 / "file.txt").write_text("committed line\nstash me 2\n", encoding="utf-8")
+        _git(r3f2_T2, "stash", env_identity=True)
+        expect("(r3f2b) 'git stash clear; :' allows", "git stash clear; :", "allow", cwd=str(r3f2_T2))
+        if not _stash_refs(r3f2_T2):
+            failures.append("(r3f2b-snap) expected a stash recovery ref for the compound 'git stash clear; :' "
+                            "(finding 2: the compound stash clear preserved no stash)")
+
+        # ROUND-3 FINDING 3: when the pure-index (staged) write-tree FAILS while staged content is present,
+        # the snapshot cannot contain the staged-only payload a --staged/--cached/default-reset discard drops,
+        # so it must FAIL (the caller DENIES) rather than advertise a snapshot missing it. Fault-inject the
+        # FIRST write-tree (the pure-index capture) to fail. Revert the 'elif "staged" in classes' guard and
+        # _take_snapshot returns 'ok' (advertising a snapshot without the staged payload).
+        r3f3 = _init_repo(tmp / "r3f3-staged")
+        _git(r3f3, "rm", "--cached", "clean.txt")            # simplify: leave one tracked file
+        _git(r3f3, "commit", "-q", "-m", "trim", env_identity=True)
+        (r3f3 / "file.txt").write_text("STAGED payload\n", encoding="utf-8")
+        _git(r3f3, "add", "file.txt")                        # staged change (index != HEAD)
+        (r3f3 / "file.txt").write_text("WORKTREE differs\n", encoding="utf-8")  # staged-only content at risk
+        _orig_rg = aiqt_hooks._recovery_git
+        _wt_state = {"n": 0}
+
+        def _faulty_recovery_git(repo, args, env_extra=None, timeout=10):
+            if args and args[0] == "write-tree":
+                _wt_state["n"] += 1
+                if _wt_state["n"] == 1:                      # the pure-index (staged) write-tree
+                    return subprocess.CompletedProcess(["git"], 1, "", "injected write-tree failure")
+            return _orig_rg(repo, args, env_extra=env_extra, timeout=timeout)
+
+        aiqt_hooks._recovery_git = _faulty_recovery_git
+        try:
+            _r3f3_res = aiqt_hooks._take_snapshot(str(r3f3), str(r3f3), "restore")
+        finally:
+            aiqt_hooks._recovery_git = _orig_rg
+        if _r3f3_res[0] != "fail":
+            failures.append("(r3f3) with staged content and a failing pure-index write-tree, _take_snapshot "
+                            "must FAIL (fail closed), got {!r} (finding 3)".format(_r3f3_res[0]))
+
+        # ROUND-3 FINDING 8: in an UNBORN-HEAD repo the staged (index) commit is the snapshot's FIRST parent
+        # (there is no HEAD parent), so the recovery pointer must advertise '^1', not '^2'. Stage a file, then
+        # differ the worktree so the staged content is staged-only; take the snapshot and confirm the pointer
+        # names '^1' and that '<ref>^1' resolves to the staged content (while '^2' does not exist). Revert the
+        # staged_pointer computation and the pointer says '^2', which does not resolve on an unborn HEAD.
+        r3f8 = tmp / "r3f8-unborn"
+        r3f8.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(r3f8)], check=True, capture_output=True,
+                       text=True, timeout=30)
+        (r3f8 / "f").write_text("STAGED-ONLY\n", encoding="utf-8")
+        _git(r3f8, "add", "f")                               # staged in an unborn-HEAD index
+        (r3f8 / "f").write_text("WORKTREE\n", encoding="utf-8")   # worktree differs -> staged-only content
+        _r3f8_res = aiqt_hooks._take_snapshot(str(r3f8), str(r3f8), "rm")
+        if _r3f8_res[0] != "ok":
+            failures.append("(r3f8-snap) expected an ok unborn-HEAD staged snapshot, got {!r}".format(
+                _r3f8_res[0]))
+        else:
+            _info = _r3f8_res[1]
+            if _info.get("staged_pointer") != "^1":
+                failures.append("(r3f8-ptr) unborn-HEAD staged parent must be '^1', got {!r} (finding 8)"
+                                .format(_info.get("staged_pointer")))
+            _show1 = subprocess.run(["git", "-C", str(r3f8), "show", "{}^1:f".format(_info["ref"])],
+                                    capture_output=True, text=True, timeout=30)
+            if _show1.returncode != 0 or _show1.stdout != "STAGED-ONLY\n":
+                failures.append("(r3f8-resolve) '<ref>^1:f' must resolve to the staged-only content on an "
+                                "unborn HEAD (finding 8), got rc={} {!r}".format(_show1.returncode,
+                                                                                 _show1.stdout))
+            if "^1" not in aiqt_hooks._recovery_pointer(_info):
+                failures.append("(r3f8-pointer-text) the recovery pointer must advertise '^1' on an unborn "
+                                "HEAD (finding 8)")
+
         # === protected_line (prtbrn/artbr1): force-push to a protected ref + direct protected commit ===
         plg = aiqt_hooks.protected_line
 
@@ -2026,6 +2133,24 @@ def main():
         # ... and still ALLOWS when the -C target is on a feature branch (the honoured explicit-target form).
         pexpect("(pl-f13f) 'git -C <repo-on-feature> commit' ALLOWS (the -C target HEAD is non-protected)",
                 "git -C {} commit -m x".format(plf), "allow", cwd=plr)
+
+        # ROUND-3 FINDING 4: an earlier same-command switch exempts a following commit ONLY when that commit
+        # runs in the SAME (session) repository the switch acted on. A 'git switch -c feature && git -C <T>
+        # commit' switches the SESSION repo but commits in repo T (on main); the switch must NOT exempt the
+        # -C commit, which is classified against T's actual HEAD and DENIES. Revert the '_segment_dir_simple'
+        # qualifier on the switched_to branch and this flips to 'allow' (the session switch wrongly exempts
+        # the cross-repo commit on the protected line).
+        pexpect("(pl-r3f4) switch -c feature (session) && commit -C <repo-on-main> DENIES (cross-repo, "
+                "finding 4)", "git switch -c newfeat && git -C {} commit --allow-empty -m qa".format(plr),
+                "deny", cwd=plf)
+
+        # ROUND-3 FINDING 5: only '&&' gates a switch's success. A ';'-sequenced switch runs the commit
+        # REGARDLESS of whether the switch succeeded ('git switch missing; git commit' lands on the still-
+        # protected branch when the switch fails), so a ';' switch never exempts the following commit: it is
+        # classified against the pre-command (protected) branch and DENIES. Revert the "_sep == '&&'" gate
+        # (restoring ';' to the propagation set) and this flips to 'allow' (the failed switch wrongly exempts).
+        pexpect("(pl-r3f5) switch missing; commit on main HEAD DENIES (';' does not gate switch success, "
+                "finding 5)", "git switch missing; git commit --allow-empty -m qa", "deny", cwd=plr)
 
         # Probe failure is fail-to-ASK for both surfaces (mocked like _tree_is_clean above).
         _orig_head = aiqt_hooks._head_branch
@@ -2163,6 +2288,19 @@ def main():
                 "git diff -S --stat", "allow")
         dexpect("(f117r7-j) genuine git log -p still denies (confirmed console patch)", "git log -p", "deny")
 
+        # ROUND-3 FINDING 7 (heredoc delimiter concatenation): a PARTIALLY-QUOTED heredoc delimiter is the
+        # concatenation of its adjacent quoted+unquoted fragments (bash word rules), so <<'EO'F closes on the
+        # line 'EOF'. The lexer previously read only the first fragment ('EO'), so the true 'EOF' closing line
+        # was consumed as heredoc body and a trailing 'git diff' console dump was HIDDEN and silently ALLOWED.
+        # It must now resolve the delimiter to 'EOF', see the following 'git diff', and DENY the dump. Revert
+        # the _parse_heredoc_delim fragment loop and this flips to 'allow' (the diff is swallowed again).
+        dexpect("(r3f7-a) partially-quoted heredoc delimiter does not hide a trailing git diff dump",
+                "cat <<'EO'F\nbody\nEOF\ngit diff", "deny")
+        dexpect("(r3f7-b) trailing-quoted-fragment heredoc delimiter does not hide a git diff dump",
+                "cat <<EO'F'\nbody\nEOF\ngit diff", "deny")
+        dexpect("(r3f7-c) fully-quoted heredoc delimiter still resolves correctly (preserved)",
+                "cat <<'EOF'\nbody\nEOF\ngit diff", "deny")
+
         # === branch_root (brnrot): H1-H5 structured branch-creation decisions =================
         brg = aiqt_hooks.branch_root
         br_repo = _init_repo(tmp / "branch-root-repo")
@@ -2262,6 +2400,24 @@ def main():
                  "git switch -c topic --track origin/main", "allow")
         brexpect("(f12-track-orphan) switch -c topic --track <orphan> still DENIES (--track does not rescue "
                  "an orphan start)", "git switch -c topic --track orphan-start", "deny")
+
+        # ROUND-3 FINDING 6: a '--track'/'-t' checkout/switch WITHOUT an explicit -c/-B still CREATES a local
+        # branch (git's DWIM tracking creation) rooted at the operand, so its ancestry MUST be probed. An
+        # orphan operand DENIES; a rooted operand (origin/main, H9a-c above) still ALLOWS. Revert the
+        # track-creation branch in _checkout_creation_start and these flip to 'allow' (the missing -c wrongly
+        # read as a non-creation that skips the probe).
+        brexpect("(r3f6a) switch --track <orphan> (no -c) DENIES (DWIM tracking creation off an orphan)",
+                 "git switch --track orphan-start", "deny")
+        brexpect("(r3f6b) checkout --track <orphan> (no -c) DENIES (DWIM tracking creation off an orphan)",
+                 "git checkout --track orphan-start", "deny")
+        brexpect("(r3f6c) checkout -t <orphan> (short --track, no -b) DENIES",
+                 "git checkout -t orphan-start", "deny")
+        # (banner support) a -C/--work-tree target that RESOLVES to a concrete NON-repo directory is probed
+        # there and DENIES via the ancestry-unknown fail-safe (not allow-with-note); only a --git-dir/GIT_dir
+        # or a truly opaque -C notes. /etc is a real dir that is not a git repo.
+        if _decision(brg, "git -C /etc checkout -b x", cwd=brr) != "deny":
+            failures.append("(r3-C-nonrepo) a -C target that resolves to a non-repo concrete dir (/etc) must "
+                            "DENY via the ancestry-unknown fail-safe, not allow-with-note")
         # -C-AWARENESS: with the session cwd a NON-git dir, a '-C <repo>' creation resolves the TARGET and
         # checks ancestry THERE. A rooted HEAD ALLOWS (was a fail-safe deny before finding 12 - the flip
         # discriminates the fix), while an orphan start under the same -C target is still caught and DENIES.
@@ -5547,8 +5703,12 @@ def main():
           "switch's target or a -C target's HEAD (finding 13). brnrot (branch_root) DENIES a branch "
           "created from an orphaned start and DENIES-and-educates a form it cannot prove rooted (an "
           "--orphan form, an unresolved ancestry), is -C-AWARE (resolves and probes the -C/--work-tree "
-          "target), treats a missing origin/HEAD and a --track of a real ref as rooted, and ALLOWS-WITH-NOTE "
-          "an unresolvable redirect target (finding 12); a rooted creation and non-creation commands ALLOW. "
+          "target, so a -C/--work-tree target that resolves to a non-rooted concrete dir - nonexistent, "
+          "/etc - DENIES via the ancestry-unknown fail-safe), treats a missing origin/HEAD as rooted and a "
+          "CHECKOUT/SWITCH --track of a real rooted ref as a rooted creation (a git-branch --track is an "
+          "unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a redirect whose worktree it cannot pin "
+          "(a --git-dir/GIT_DIR/-c form or an opaque -C/--work-tree) (finding 12); a rooted creation and "
+          "non-creation commands ALLOW. "
           "gatdis (gate_weakening) DENIES a --no-verify bypass and ALLOWS-WITH-NOTE a checker-shaped segment "
           "whose failure is swallowed (|| true) or truncated (| head/tail) - the heuristic is too broad to "
           "deny (finding 14). sectvl "
