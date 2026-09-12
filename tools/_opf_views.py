@@ -1859,13 +1859,17 @@ def self_test():
         check("write-preserves-existing-restrictive-mode",
               stat.S_IMODE(os.stat(str(_mpview)).st_mode) == 0o600
               and _mpview.read_text(encoding="utf-8") == "NEW\n")
-        # F12: the two ledger-refuses pins ("worklog"/"version" -> None) are removed as non-discriminating.
-        # Neither ledger name is in _opf_schema.BASELINE_SPECS, so _mirror_type's final fallthrough returns
-        # None for them regardless of the _LEDGER_SOURCES guard; the assertion held for any state of that
-        # guard (and even a broken _MIRROR_RE, which also returns None), so it pinned no fix. The positive
-        # mapping below DOES discriminate: backlog_item IS a baseline type, so a broken regex or baseline
-        # lookup flips it from "backlog_item" to None.
+        # The positive mapping DISCRIMINATES the regex/baseline lookup: backlog_item IS a baseline type, so a
+        # broken regex or baseline lookup flips it from "backlog_item" to None.
         check("mirror-type-resolves-record-type", _mirror_type("BACKLOG_ITEM-INDEX.md") == "backlog_item")
+        # ROUND-6 codex: the _LEDGER_SOURCES exclusion (line ~985) IS load-bearing and needs its own
+        # discriminating pin. "worklog" IS a key in _opf_schema.BASELINE_SPECS (a prior F12 note wrongly said
+        # neither ledger name was), so WITHOUT the exclusion _mirror_type("WORKLOG-INDEX.md") would fall
+        # through to the baseline lookup and return "worklog" (a ledger reads its own worklog.toml, it has no
+        # <type>.index.toml to mirror). The exclusion returns None; removing it flips this pin from None to
+        # "worklog". ("version" is NOT a baseline key, so a VERSION-INDEX.md pin would not discriminate.)
+        check("mirror-type-worklog-ledger-rejected", _mirror_type("WORKLOG-INDEX.md") is None)
+        check("mirror-type-worklog-is-baseline-key", "worklog" in _opf_schema.BASELINE_SPECS)
         _f5_bb, _f5_hid = join_actionability([dict(id="BI-1", status="open")],
                                              [dict(status="active", scopes=["BI-1"])])
         check("idless-block-hides-nothing", _f5_bb == {} and _f5_hid == set())

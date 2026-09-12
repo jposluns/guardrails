@@ -618,6 +618,25 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         # sentinel WITHOUT invoking the thunk (never run it unbounded); the caller fails closed because the
         # sentinel is never equal to an expected verdict token.
         return "SETUP-ERROR:NoFork"
+    import resource
+    # Reject an UNBOUNDED or INVALID control BEFORE forking/running the thunk (codex round-6): a
+    # timeout_s <= 0 installs setitimer(0, 0) which DISARMS the timer (no wall-clock bound at all), and a
+    # mem_bytes of RLIM_INFINITY (or <= 0) installs no usable address-space cap, yet the child would still
+    # run the thunk unbounded and its successful no-op setrlimit/setitimer would read as "bounds installed".
+    # A control that cannot bound the child is a cannot-evaluate, so return the SETUP-ERROR sentinel here
+    # rather than let the thunk run unbounded (guard-input-soundness; no-concealed-failure; a bool is not a
+    # valid numeric control).
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
+        return "SETUP-ERROR:BadTimeout"
+    # RLIM_INFINITY is the "no cap" sentinel; its integer representation is platform-dependent (it is -1
+    # on Linux, a large positive on others), so reject it by identity AND by the <= 0 / >= positive-sentinel
+    # bounds, rather than assuming one sign. Either way an unbounded or non-positive address-space control
+    # is a cannot-evaluate, never a silently-uncapped child.
+    _rlim_inf = resource.RLIM_INFINITY
+    if (isinstance(mem_bytes, bool) or not isinstance(mem_bytes, int)
+            or mem_bytes <= 0 or mem_bytes == _rlim_inf
+            or (_rlim_inf > 0 and mem_bytes >= _rlim_inf)):
+        return "SETUP-ERROR:BadMemBound"
     rfd, wfd = os.pipe()
     try:
         pid = os.fork()
@@ -674,9 +693,24 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
             os.close(rfd)
         finally:
             _wpid, wstatus = os.waitpid(pid, 0)
-    if not data:
-        if os.WIFSIGNALED(wstatus) and os.WTERMSIG(wstatus) == signal.SIGALRM:
+    return _bounded_child_result(data, wstatus)
+
+
+def _bounded_child_result(data, wstatus):
+    """Decide run_bounded's result from the child's pipe bytes AND its TERMINATION STATUS, inspecting the
+    status FIRST regardless of any bytes already buffered (codex round-6): a child can write its token and
+    THEN be killed by the SIGALRM timer (or any signal), so a complete or partial token in the pipe is NOT
+    proof of a clean result. A signal death is the watchdog firing and is therefore the sentinel (SIGALRM
+    -> TIMEOUT, any other signal -> CHILD-DIED), never the buffered token read as success; only a child
+    that exited NORMALLY with bytes returns those bytes (no-concealed-failure). Kept as a pure module-level
+    function so the status-precedence is exercised directly with a real signaled wait-status."""
+    import os
+    import signal
+    if os.WIFSIGNALED(wstatus):
+        if os.WTERMSIG(wstatus) == signal.SIGALRM:
             return "TIMEOUT"
+        return "CHILD-DIED"
+    if not data:
         return "CHILD-DIED"
     return data.decode("utf-8", "replace")
 
@@ -950,6 +984,87 @@ def self_test():
         failures.append("identity-guard/shared-dag: a shared DAG did not compare equal to itself under the "
                         "identity short-circuit (got {!r}; a regressed short-circuit trips the watchdog)"
                         .format(_idg))
+
+    # ===== ROUND-6 codex: run_bounded watchdog hardening (this is the shared implementation imported by
+    # _opf_check and _opf_release, so proving it here holds for all three self-tests) ====================
+    import os as _os6
+    import signal as _sig6
+    import resource as _res6
+    # (4) an UNBOUNDED or INVALID control must yield a distinct SETUP-ERROR sentinel WITHOUT running the
+    # thunk: timeout_s <= 0 disarms the timer (setitimer(0,0)) and mem_bytes == RLIM_INFINITY / <= 0
+    # installs no address-space cap, yet pre-fix the thunk still ran and its result ("RAN") was returned as
+    # a clean pass. Reverting the control-validation makes each of these return "RAN".
+    if run_bounded(lambda: "RAN", timeout_s=0) != "SETUP-ERROR:BadTimeout":
+        failures.append("run_bounded/bad-timeout-zero: timeout_s=0 did not fail closed to SETUP-ERROR")
+    if run_bounded(lambda: "RAN", timeout_s=-1) != "SETUP-ERROR:BadTimeout":
+        failures.append("run_bounded/bad-timeout-neg: a negative timeout did not fail closed to SETUP-ERROR")
+    if run_bounded(lambda: "RAN", mem_bytes=_res6.RLIM_INFINITY) != "SETUP-ERROR:BadMemBound":
+        failures.append("run_bounded/bad-mem-infinity: an RLIM_INFINITY mem cap did not fail closed")
+    if run_bounded(lambda: "RAN", mem_bytes=0) != "SETUP-ERROR:BadMemBound":
+        failures.append("run_bounded/bad-mem-zero: a non-positive mem cap did not fail closed")
+    # regression: a VALID control still runs the thunk and returns its token.
+    if run_bounded(lambda: "RAN") != "RAN":
+        failures.append("run_bounded/valid-control: a valid bounded run did not return the thunk result")
+
+    if hasattr(_os6, "fork"):
+        # (5) a child that has bytes buffered in the pipe AND is killed by SIGALRM must return TIMEOUT, not
+        # the buffered token: the termination status is inspected FIRST. Build a REAL SIGALRM-signaled
+        # wait-status (a child that raises SIGALRM on itself under SIG_DFL) and pair it with a leftover
+        # token. Pre-fix (bytes checked first) this returned the token; post-fix the signal wins -> TIMEOUT.
+        _pid5 = _os6.fork()
+        if _pid5 == 0:
+            _sig6.signal(_sig6.SIGALRM, _sig6.SIG_DFL)
+            _os6.kill(_os6.getpid(), _sig6.SIGALRM)
+            _os6.pause()
+            _os6._exit(0)                                  # unreachable: SIGALRM/SIG_DFL terminates first
+        _, _wst5 = _os6.waitpid(_pid5, 0)
+        if not (_os6.WIFSIGNALED(_wst5) and _os6.WTERMSIG(_wst5) == _sig6.SIGALRM):
+            failures.append("run_bounded/status-first-setup: the fixture child was not SIGALRM-signaled")
+        elif _bounded_child_result(b"LEFTOVER-TOKEN", _wst5) != "TIMEOUT":
+            failures.append("run_bounded/status-first: a token-then-SIGALRM child returned the buffered "
+                            "token instead of TIMEOUT (termination status not inspected first)")
+        # regression: a child that exited NORMALLY with bytes returns those bytes (the fix does not swallow
+        # a legitimate result).
+        _pid5b = _os6.fork()
+        if _pid5b == 0:
+            _os6._exit(0)
+        _, _wst5b = _os6.waitpid(_pid5b, 0)
+        if _bounded_child_result(b"TOKEN", _wst5b) != "TOKEN":
+            failures.append("run_bounded/status-first-normal: a normal-exit child with bytes did not "
+                            "return its token")
+
+        # (9) the parent must CLOSE the pipe read fd (rfd) after reaping, or every run_bounded call leaks a
+        # descriptor. Capture the rfd os.pipe hands out, run one bounded call, and confirm the parent's rfd
+        # is CLOSED afterward (fstat -> EBADF). Removing the parent os.close(rfd) leaves it open, which this
+        # detects (and then closes so the self-test itself leaks nothing).
+        _pipe_real6 = _os6.pipe
+        _cap6 = {}
+
+        def _cap_pipe6():
+            _r, _w = _pipe_real6()
+            _cap6["rfd"] = _r
+            return _r, _w
+
+        try:
+            _os6.pipe = _cap_pipe6
+            _leak_res = run_bounded(lambda: "LEAKCHK")
+        finally:
+            _os6.pipe = _pipe_real6
+        _rfd6 = _cap6.get("rfd")
+        _leaked6 = False
+        if _rfd6 is not None:
+            try:
+                _os6.fstat(_rfd6)
+                _leaked6 = True                            # still open: the parent close was removed
+            except OSError:
+                _leaked6 = False
+            if _leaked6:
+                _pipe_real6 and _os6.close(_rfd6)          # close the leak the test just detected
+        if _leak_res != "LEAKCHK":
+            failures.append("run_bounded/leak-check-setup: the capture run did not return its token")
+        if _leaked6:
+            failures.append("run_bounded/parent-rfd-leak: the parent did not close the pipe read fd "
+                            "(a descriptor leaks per call)")
 
     # _model_equal type-strictness pins: the exact-type clause is the sole carrier of the strictness that
     # makes the round-trip proof meaningful rather than merely plausible. A mutant dropping that clause
@@ -1466,12 +1581,24 @@ def self_test():
         pass
 
     rejects["hostile-metaclass-nonstr-name-value"] = {"k": _HostileNameInt(1)}
-    for name, document in rejects.items():
-        try:
-            if not _rejects(document):
-                failures.append("reject/{}: was accepted but is outside the subset".format(name))
-        except Exception as exc:  # noqa: BLE001 - a non-EmitError is a fail-open escape, a defect
-            failures.append("reject/{}: raised {!r} instead of a fail-closed EmitError".format(name, exc))
+    # PIN the int-str-conversion limit to the default (4300) around the reject sweep (test-hermeticity): the
+    # "oversized-int" fixture (10 ** 4301, a 4302-digit int) is rejected fail-closed ONLY because str() of it
+    # trips CPython's base-10 digit limit, so a hostile ambient of 0 (unlimited) or 5001 would render it as a
+    # valid TOML integer and it would be accepted (breaking reject/oversized-int). At the pinned 4300 str()
+    # trips, so the emitter's guard is exercised and reverting it lets the raw ValueError escape (caught by
+    # the loop's except). Pinning to 4300 is the CPython default, so it is a no-op for every other fixture in
+    # the sweep (none of which constructs an over-limit int). Restored in finally.
+    _rej_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        for name, document in rejects.items():
+            try:
+                if not _rejects(document):
+                    failures.append("reject/{}: was accepted but is outside the subset".format(name))
+            except Exception as exc:  # noqa: BLE001 - a non-EmitError is a fail-open escape, a defect
+                failures.append("reject/{}: raised {!r} instead of a fail-closed EmitError".format(name, exc))
+    finally:
+        sys.set_int_max_str_digits(_rej_prev_idlimit)
 
     # HONORED CONTROL-FLOW residual: a hostile metaclass whose __getattribute__ raises a GENUINE control-flow
     # signal (KeyboardInterrupt) on the __name__ lookup. Unlike every hostile-input vector above (each a
@@ -1527,13 +1654,21 @@ def self_test():
     # with the generic value-free message, so a bare-EmitError assertion cannot tell the guard from the
     # backstop. Asserting the guard's own wording turns a guard-removal mutant red, matching the
     # cycle-message pin pattern above.
+    # PIN the int-str-conversion limit to the default (4300) here for the same reason as the reject sweep:
+    # 10 ** 4301 (4302 digits) trips str()'s base-10 limit only at or below the default, so a hostile ambient
+    # of 0 (unlimited) or 5001 would render it cleanly and the guard would never fire. Restored in finally.
+    _ovm_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
     try:
-        emit({"k": 10 ** 4301})
-        failures.append("oversized-int-message: an oversized int was not rejected")
-    except EmitError as exc:
-        if "too large to render" not in str(exc):
-            failures.append("oversized-int-message: rejected, but not by the specific oversized-int guard "
-                            "({})".format(exc))
+        try:
+            emit({"k": 10 ** 4301})
+            failures.append("oversized-int-message: an oversized int was not rejected")
+        except EmitError as exc:
+            if "too large to render" not in str(exc):
+                failures.append("oversized-int-message: rejected, but not by the specific oversized-int guard "
+                                "({})".format(exc))
+    finally:
+        sys.set_int_max_str_digits(_ovm_prev_idlimit)
 
     # CLI mode selection validates the WHOLE argument vector, not mere membership: exactly one recognized
     # flag runs the self-test, and anything else (an unknown or extra token, a duplicated flag, a bare

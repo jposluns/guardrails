@@ -985,6 +985,58 @@ def self_test():
             failures.append("_restore_preimage truncated/overwrote a swapped-in victim regular file")
         checked += 1
 
+        # (N) FRAMES.LOG HARDLINK DEFENCE (codex round-6): a frames.log that is a HARD LINK to an out-of-tree
+        #     victim regular file passes O_NOFOLLOW + S_ISREG (a hardlink IS a regular file), so pre-fix
+        #     publish would APPEND its frame onto the victim's inode and recover's _truncate_log would
+        #     FTRUNCATE it. The per-open st_nlink==1 identity check refuses a link count above 1 on the
+        #     publish (append), read, AND truncate (recover) paths; reverted, publish rewrites and
+        #     _truncate_log zeroes the victim, flipping the victim-intact assert red.
+        nroot = tmp / "frameslink" / "root"; nroot.mkdir(parents=True)
+        njr = tmp / "frameslink" / "journal"; (njr / "t1").mkdir(parents=True)
+        nvictim = tmp / "frameslink" / "victim"; nvictim.write_bytes(b"VICTIM-INTACT")
+        os.link(str(nvictim), str(njr / "t1" / "frames.log"))   # frames.log: a hard link to the victim
+        njr_fd = os.open(str(njr), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _pub_refused = False
+            try:
+                _journal.publish(njr_fd, njr / "t1", _journal.F_INTENT,
+                                 {"txn": "t1", "header": {}, "ops": []})
+            except _journal.JournalError:
+                _pub_refused = True
+            if not _pub_refused:
+                failures.append("publish must refuse a hard-linked frames.log (st_nlink!=1), not append to "
+                                "the out-of-tree victim")
+            _tr_refused = False
+            try:
+                _journal._truncate_log(njr_fd, njr / "t1", 0)
+            except _journal.JournalError:
+                _tr_refused = True
+            if not _tr_refused:
+                failures.append("_truncate_log (recover) must refuse a hard-linked frames.log (st_nlink!=1), "
+                                "not truncate the out-of-tree victim")
+            _rd_msg = ""
+            try:
+                _journal.read_frames(njr_fd, njr / "t1")
+                failures.append("read_frames must refuse a hard-linked frames.log (st_nlink!=1)")
+            except _journal.JournalError as exc:
+                _rd_msg = str(exc)
+            if "hard link" not in _rd_msg:
+                failures.append("read_frames refused a hard-linked frames.log for the wrong reason "
+                                "(expected an st_nlink identity refusal, got {!r})".format(_rd_msg))
+        finally:
+            os.close(njr_fd)
+        if nvictim.read_bytes() != b"VICTIM-INTACT":
+            failures.append("a hard-linked frames.log was appended-to/truncated through the shared inode "
+                            "(victim not intact)")
+        checked += 1
+
+        # (O) FRAMES.LOG EXCLUSIVE FIRST-CREATE (codex round-6): a full cutover creates frames.log with
+        #     O_CREAT|O_EXCL in the fresh txn dir, so a pre-planted entry at that name is refused. Here that
+        #     path is exercised indirectly by the crash-injection cutovers below (every cutover creates its
+        #     frames.log exclusively); a direct pre-plant is not reachable because each cutover mints a fresh
+        #     txn id whose dir is created by us. The st_nlink==1 check in (N) is the reopen-time identity
+        #     guarantee that complements it.
+
         # (F2) FIX #3 OWNERSHIP-CHECKED RELEASE: a lock NOT owned by this process is never unlinked.
         jr2 = tmp / "foreignlock" / JOURNAL_REL
         jr2.mkdir(parents=True)

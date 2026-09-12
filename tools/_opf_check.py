@@ -47,6 +47,7 @@ over synthetic whole stores; the observation seam under test is exercised direct
 """
 import bisect
 import hashlib
+import ipaddress
 import os
 import stat
 import sys
@@ -411,11 +412,30 @@ def _close_fd_quietly(fd):
     """Close a descriptor on a cleanup / teardown path, swallowing an OSError so a close that raises
     (EINTR / EIO / EBADF) during teardown cannot crash the validator. The store verdict is already computed
     (or an exception is already in flight) by the time these closes run, so a cleanup-close irregularity is
-    never itself the store's verdict (fail-closed teardown; S1-F1 / S4-F3)."""
+    never itself the store's verdict (fail-closed teardown; S1-F1 / S4-F3).
+
+    A raising close is swallowed but never lets a genuine descriptor leak pass CONCEALED (codex round-6;
+    no-concealed-failure): a close that raises does not by itself prove the fd is retained, since on Linux
+    close() releases the descriptor even on EINTR/EIO and EBADF means it was already gone. So on a raise we
+    CONFIRM the descriptor is actually gone (fstat); only when it is genuinely STILL open do we close it
+    once more (fstat has just proven the fd valid, so this is not a blind double-close) and, if even that
+    cannot release it, surface the leak to stderr rather than the old silent pass that could not tell
+    closed-then-errored from still-open."""
     try:
         os.close(fd)
+        return
+    except OSError as exc:
+        first = exc
+    try:
+        os.fstat(fd)
     except OSError:
-        pass
+        return                                            # confirmed gone: the raise was benign teardown noise
+    try:
+        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
+        return
+    except OSError as exc2:
+        print("warning: cleanup close of fd {} failed to release it ({} / {}); fail-surfaced"
+              .format(fd, first, exc2), file=sys.stderr)
 
 
 def _list_contained(root_fd, reldir):
@@ -514,6 +534,25 @@ def _canonical_contained(p):
     return "/".join(out)
 
 
+def _bracketed_host_ok(tok):
+    """True only when `tok` is a well-formed bracketed IP-literal host `[addr]` (RFC 3986 host):
+    the token is bracketed and its interior parses as an IP address (an IPv6 literal in practice,
+    the only host form brackets carry). A malformed interior (`[nonsense]`, `[2001/db8::1]`) is NOT
+    a resolvable host, so it canonicalizes to nothing rather than a spurious ('[nonsense]', path)
+    pair that could falsely agree (codex round-6; guard-input-soundness: a membership question about
+    a host is answered by parsing the address, not by matching the bracket tokens)."""
+    if not (tok.startswith("[") and tok.endswith("]")):
+        return False
+    inner = tok[1:-1]
+    if not inner:
+        return False
+    try:
+        ipaddress.ip_address(inner)
+    except ValueError:
+        return False
+    return True
+
+
 def _canonical_remote(url):
     """Canonicalize a git remote URL to a (host, path) pair for host+path equivalence (spec 5.5/5.6),
     covering https/http/ssh/git scheme URLs and scp-style git@host:path, with or without a trailing
@@ -552,6 +591,10 @@ def _canonical_remote(url):
             if rb <= 1 or host[rb + 1:rb + 2] not in ("", ":"):
                 return None
             hostpart, portsep, hport = host[:rb + 1], host[rb + 1:rb + 2], host[rb + 2:]
+            # The bracketed interior must be a well-formed IP literal; '[nonsense]' is unresolvable
+            # rather than a spurious host that could falsely agree (codex round-6).
+            if not _bracketed_host_ok(hostpart):
+                return None
         else:
             # An UNBRACKETED multi-colon authority is an IPv6 literal that MUST be bracketed; unbracketed it
             # is unresolvable rather than mis-read with a trailing '::22' consumed as a port (F5b).
@@ -572,6 +615,11 @@ def _canonical_remote(url):
                 # An all-ASCII-digit run long enough to trip CPython's int-conversion digit limit (>4300
                 # digits) is not a real port: unresolvable rather than a ValueError escaping the barrier
                 # (ROUND-2 codex-2, the LENGTH sibling of the Unicode-digit case the isdigit guard closes).
+                return None
+            # A TCP port is 1..65535; an out-of-range run of digits ('0', '65536', '99999999') is not a
+            # real port, so it is unresolvable rather than a spurious 'host:65536' endpoint that could
+            # falsely agree (codex round-6; a range membership answered by a bounds test, not the tokens).
+            if not (1 <= port_i <= 65535):
                 return None
             if _default_port is not None and port_i == int(_default_port):
                 host = hostpart
@@ -602,6 +650,11 @@ def _canonical_remote(url):
         if "@" in authority:
             authority = authority.rsplit("@", 1)[1]
         host = authority
+        # A scp-style bracketed host carries no port, so the whole authority is the '[addr]' token;
+        # its interior must be a well-formed IP literal. 'git@[nonsense]:p' is unresolvable rather than
+        # a spurious host (codex round-6; class sibling of the scheme-URL bracket check above).
+        if host.startswith("[") and not _bracketed_host_ok(host):
+            return None
     if not host:
         return None
     p = path.strip("/")
@@ -3588,6 +3641,37 @@ def self_test():
         check("s1-listcontained-finally-close-guarded",
               _s1c_outcome == "returned" and _s1c_sub == ["child"] and _s1c_files == ["afile"])
 
+        # --- ROUND-6 codex: _close_fd_quietly must not CONCEAL a genuine descriptor leak. A close that
+        # raises WITHOUT releasing the fd (a "still open" close error) must be detected and the fd actually
+        # closed, not silently passed. Patch os.close so its FIRST call raises WITHOUT closing (fd stays
+        # open) and later calls really close; after _close_fd_quietly the fd must be GONE (fstat -> EBADF).
+        # Pre-fix (`except OSError: pass`) the single raising close left the fd open and fstat succeeded. --
+        _q_dir = base / "q-close"
+        _q_dir.mkdir()
+        _q_fd = os.open(str(_q_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _q_real_close = os.close
+        _q_state = {"n": 0}
+
+        def _q_boom_close(fd):
+            _q_state["n"] += 1
+            if _q_state["n"] == 1:
+                raise OSError(5, "EIO (self-test injected, fd left open)")  # raise WITHOUT closing
+            return _q_real_close(fd)
+
+        try:
+            os.close = _q_boom_close
+            _close_fd_quietly(_q_fd)
+        finally:
+            os.close = _q_real_close
+        try:
+            os.fstat(_q_fd)
+            _q_still_open = True
+        except OSError:
+            _q_still_open = False
+        if _q_still_open:                                  # would leak under the old silent pass; close it now
+            _q_real_close(_q_fd)
+        check("r6-close-fd-quietly-no-silent-leak", _q_still_open is False)
+
         # --- S4-F3: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
         # the B6 barrier, so a close that raises during teardown (EINTR / EIO / an invalid fd) must be
         # swallowed rather than crash the validator after the verdict is already computed. Exercised by
@@ -3928,6 +4012,19 @@ def self_test():
         # regression: a real bracketed IPv6 authority still canonicalizes (the empty-bracket guard is tight)
         check("f3-canonical-nonempty-bracket-preserved",
               _canonical_remote("ssh://[2001:db8::1]/p") == ("[2001:db8::1]", "p"))
+        # ROUND-6 codex: an out-of-range port and a malformed bracketed host are cannot-evaluate (None),
+        # never a spurious endpoint that yields a clean C-SYNC-AGREE. Pre-fix these returned a (host, path)
+        # pair (('host:65536','org/repo'), ('[nonsense]','org/repo'), etc). Removing either guard fails these.
+        check("r6-canonical-port-over-range-none", _canonical_remote("ssh://host:65536/org/repo") is None)
+        check("r6-canonical-port-zero-none", _canonical_remote("ssh://host:0/org/repo") is None)
+        check("r6-canonical-port-huge-none", _canonical_remote("ssh://host:99999999/p") is None)
+        check("r6-canonical-bad-bracket-scheme-none", _canonical_remote("ssh://[nonsense]/org/repo") is None)
+        check("r6-canonical-bad-bracket-scp-none", _canonical_remote("git@[nonsense]:org/repo") is None)
+        # regression: an in-range non-default port and a valid IPv6 bracket still canonicalize.
+        check("r6-canonical-port-max-preserved",
+              _canonical_remote("ssh://host:65535/p") == ("host:65535", "p"))
+        check("r6-canonical-good-bracket-preserved",
+              _canonical_remote("ssh://[2001:db8::22]/org/repo") == ("[2001:db8::22]", "org/repo"))
         _r2wd = build(pr_machine, product=pr_product)
         os.makedirs(str(_r2wd / ".working" / "toml" / "worklog"), exist_ok=False)
         _r2wdr = validate_store(resolve_store(_r2wd), observations=pr_obs)

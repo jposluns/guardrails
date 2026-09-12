@@ -430,6 +430,34 @@ def _frame(ftype, payload):
     return header + payload + b"\n"
 
 
+def _create_frames_excl(jr_fd, txn_dir):
+    """Create the txn's frames.log EXACTLY ONCE, EXCLUSIVELY, inside the freshly-made txn dir (contained
+    beneath the trusted journal-root fd). O_CREAT|O_EXCL refuses ANY pre-existing entry at that name (a
+    planted hardlink to a victim, or a plain regular file), so the log is provably freshly created by us
+    before the first publish ever appends (codex round-6; the FIRST-creation half of the hardlink defence,
+    complementing the per-open st_nlink==1 identity check on every reopen/append/read/truncate). The empty
+    file is fsync'd and its dir entry made durable through the same contained fd."""
+    try:
+        txnfd = _open_txn_beneath(jr_fd, txn_dir)
+    except OSError as exc:
+        raise JournalError("cannot open journal txn dir {!r} contained no-follow ({})"
+                           .format(str(txn_dir), exc))
+    try:
+        try:
+            fd = os.open("frames.log", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                         dir_fd=txnfd)
+        except OSError as exc:
+            raise JournalError("cannot exclusively create journal frames.log; a pre-existing entry at that "
+                               "name is refused (fail-closed) ({})".format(exc))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.fsync(txnfd)                                   # the new dir entry durable through the CONTAINED fd
+    finally:
+        os.close(txnfd)
+
+
 def publish(jr_fd, txn_dir, ftype, obj):
     """Append one checksummed-framed record (9.3 steps 4 and 7 discipline), fsync the log and the txn
     directory. A torn write of THIS frame is detectably-unwritten to read_frames; the torn:<TYPE>
@@ -461,8 +489,18 @@ def publish(jr_fd, txn_dir, ftype, obj):
         except OSError as exc:
             raise JournalError("cannot open journal frames.log no-follow for append ({})".format(exc))
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+            _st = os.fstat(fd)
+            if not stat.S_ISREG(_st.st_mode):
                 raise JournalError("journal frames.log is not a regular file (no-follow append)")
+            # O_NOFOLLOW refuses a SYMLINK but a HARDLINK is a regular file that passes S_ISREG, so a
+            # frames.log hardlinked to an out-of-tree victim would be appended-to on the victim's inode. A
+            # frames.log we created is unlinked (exactly one link); a link count above 1 means a second name
+            # references this inode (a planted hardlink to a victim), so refuse it (codex round-6;
+            # SECI-symlink-resolution: confirm the opened object's identity, a hardlink is not a swap-in-name
+            # a symlink defence catches).
+            if _st.st_nlink != 1:
+                raise JournalError("journal frames.log has {} hard links; refusing to append (a hardlink "
+                                   "to an out-of-tree victim, never our unlinked log)".format(_st.st_nlink))
             if torn:
                 half = frame[: max(1, len(frame) // 2)]
                 _write_all(fd, half)
@@ -508,6 +546,12 @@ def read_frames(jr_fd, txn_dir):
             _st = os.fstat(ffd)
             if not stat.S_ISREG(_st.st_mode):
                 raise JournalError("journal frames.log is not a regular file (no-follow)")
+            # A HARDLINK to an out-of-tree victim passes O_NOFOLLOW and S_ISREG; a link count above 1 means
+            # another name references this inode, so refuse it rather than read a victim's bytes into the
+            # frame parse (codex round-6; SECI-symlink-resolution identity confirmation).
+            if _st.st_nlink != 1:
+                raise JournalError("journal frames.log has {} hard links; refusing to read (a hardlink to "
+                                   "an out-of-tree victim, never our unlinked log)".format(_st.st_nlink))
             # MINOR-1: pre-open-size fast-reject on the fstat already taken, then a capped read whose
             # incremental post-read re-check catches a file grown/swapped past this size (SECA
             # resource-bounds; mirrors the store cap). frames.log holds only INTENT op-list metadata.
@@ -572,8 +616,15 @@ def _truncate_log(jr_fd, txn_dir, good_len):
         except OSError as exc:
             raise JournalError("cannot open journal frames.log no-follow for truncate ({})".format(exc))
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+            _st = os.fstat(fd)
+            if not stat.S_ISREG(_st.st_mode):
                 raise JournalError("journal frames.log is not a regular file (no-follow truncate)")
+            # A HARDLINK to an out-of-tree victim passes O_NOFOLLOW and S_ISREG; refusing a link count above
+            # 1 stops the ftruncate from truncating a victim's inode (codex round-6; recovery is the
+            # destructive path this most needs, SECI-symlink-resolution identity confirmation).
+            if _st.st_nlink != 1:
+                raise JournalError("journal frames.log has {} hard links; refusing to truncate (a hardlink "
+                                   "to an out-of-tree victim, never our unlinked log)".format(_st.st_nlink))
             os.ftruncate(fd, good_len)
             os.fsync(fd)
         finally:
@@ -1405,6 +1456,9 @@ def run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops, staged_re
     except OSError as exc:
         raise JournalError("cannot create contained journal txn dir {!r} ({})".format(txn_id, exc))
     os.fsync(jr_fd)
+    # Create frames.log EXCLUSIVELY in the fresh txn dir before any publish appends to it, so a pre-planted
+    # entry (a hardlink to a victim or a plain regular file) is refused at creation (codex round-6).
+    _create_frames_excl(jr_fd, txn_dir)
     capture_preimages(jr_fd, txn_dir, root_fd, ops)
     publish(jr_fd, txn_dir, F_INTENT, {"txn": txn_id, "header": header, "ops": ops})
     try:

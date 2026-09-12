@@ -2728,24 +2728,37 @@ def self_test():
         # string-conversion ceiling raises a bare ValueError from tomllib, OUTSIDE the OSError family the
         # backstop enumerated. The class-complete ValueError backstop converts it to verdict 2, never an
         # uncaught crash. Reverting the `except ValueError` backstop lets the raw ValueError escape.
-        big_int = "9" * 5000
-        rootG1, mG1 = build_store(sources={"a.txt": src})
-        (mG1 / "counters.toml").write_text(
-            "schema = 1\n\n[counters]\nBI = " + big_int + "\nLF = 0\nWL = 0\n", encoding="utf-8")
+        # PIN the int-str-conversion limit to the default (4300) around this block (test-hermeticity): the
+        # ValueError these vectors exercise is raised only when tomllib converts the 5000-digit literal and
+        # trips CPython's base-10 digit limit. A hostile ambient of 0 (unlimited) or 5001 would parse the
+        # 5000-digit int cleanly, so the counters vector would never reach the ValueError backstop (its
+        # verdict would not be 2), and the manifest vector would reach verdict 2 by an unrelated structural
+        # path rather than the ValueError backstop it means to discriminate. At the pinned 4300 both trip the
+        # limit, so both exercise the ValueError backstop and reverting it lets the raw ValueError escape
+        # (vG1/vG1m == "escaped"). Restored in finally.
+        _g1_prev_idlimit = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(4300)
         try:
-            vG1 = stage_import(rootG1, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict
-        except ValueError:
-            vG1 = "escaped"
-        check("G1-huge-int-counters-cannot-eval", vG1 == 2)
-        # the same ceiling in the MANIFEST (read via load_manifest/resolve, not the _read_toml wrapper) is
-        # caught by the SAME top-level backstop, proving the fix covers every store-TOML read surface.
-        rootG1m, mG1m = build_store(sources={"a.txt": src})
-        (mG1m / "manifest.toml").write_text(manifest_text() + "big = " + big_int + "\n", encoding="utf-8")
-        try:
-            vG1m = stage_import(rootG1m, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict
-        except ValueError:
-            vG1m = "escaped"
-        check("G1-huge-int-manifest-cannot-eval", vG1m == 2)
+            big_int = "9" * 5000
+            rootG1, mG1 = build_store(sources={"a.txt": src})
+            (mG1 / "counters.toml").write_text(
+                "schema = 1\n\n[counters]\nBI = " + big_int + "\nLF = 0\nWL = 0\n", encoding="utf-8")
+            try:
+                vG1 = stage_import(rootG1, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict
+            except ValueError:
+                vG1 = "escaped"
+            check("G1-huge-int-counters-cannot-eval", vG1 == 2)
+            # the same ceiling in the MANIFEST (read via load_manifest/resolve, not the _read_toml wrapper) is
+            # caught by the SAME top-level backstop, proving the fix covers every store-TOML read surface.
+            rootG1m, mG1m = build_store(sources={"a.txt": src})
+            (mG1m / "manifest.toml").write_text(manifest_text() + "big = " + big_int + "\n", encoding="utf-8")
+            try:
+                vG1m = stage_import(rootG1m, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict
+            except ValueError:
+                vG1m = "escaped"
+            check("G1-huge-int-manifest-cannot-eval", vG1m == 2)
+        finally:
+            sys.set_int_max_str_digits(_g1_prev_idlimit)
 
         # G2 (ValueError family, filesystem name codec): a declared source path carrying a lone surrogate
         # passes the lexical containment and control-character guards but makes the os.stat filename encode

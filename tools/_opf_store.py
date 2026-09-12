@@ -738,16 +738,40 @@ def _safe_display(value):
         return "<oversized-value>"
 
 
+def _escape_line_unsafe(s):
+    """Escape every NON-PRINTABLE character in `s` (a C0/C1 control such as newline, CR or tab, a
+    zero-width or bidirectional format char, a line/paragraph separator, a surrogate or unassigned code
+    point) to a backslash escape, leaving every printable character (letters, digits, punctuation, and the
+    ordinary space) byte-for-byte. `str.isprintable()` is the authority for what may sit on a single
+    diagnostic line. This keeps an untrusted value from forging an extra finding line ('x\\nFORGED') or
+    hiding/steering text with format characters (codex round-6; guard-input-soundness / no-concealed-failure
+    applied to a diagnostic renderer)."""
+    out = []
+    for ch in s:
+        if ch.isprintable():
+            out.append(ch)
+        else:
+            o = ord(ch)
+            out.append("\\x{:02x}".format(o) if o <= 0xff
+                       else "\\u{:04x}".format(o) if o <= 0xffff
+                       else "\\U{:08x}".format(o))
+    return "".join(out)
+
+
 def _safe_str(value):
     """The str()-style companion of _safe_display, for a finding-message position that renders a value with
     {} (no surrounding repr quotes) rather than {!r}: a version string interpolated into a `release #N
-    (<version>)` label, for instance. Returns str(value) for every value whose str is well-formed, byte for
-    byte, so a normal string or int renders exactly as it did before; only a value whose str trips the
-    base-10 integer-string-conversion limit (an oversized non-decimal int parsed from TOML, or a container
-    holding one) returns the same bounded marker _safe_display uses (fail-closed). It is for MESSAGE
-    rendering only, never the byte-stable coverage digest."""
+    (<version>)` label, for instance. Returns str(value) with any NON-PRINTABLE character escaped to a
+    backslash form (_escape_line_unsafe), so a value carrying a control character cannot inject a second
+    diagnostic line; a value whose str is entirely printable (a normal string or int) renders exactly as it
+    did before, byte for byte. Only a value whose str trips the base-10 integer-string-conversion limit (an
+    oversized non-decimal int parsed from TOML, or a container holding one) returns the same bounded marker
+    _safe_display uses (fail-closed). Unlike _safe_display, which renders through repr() and so already
+    escapes controls, this str()-based renderer must escape them itself (the store/release sibling the
+    schema newline-hardening left exposed; codex round-6). It is for MESSAGE rendering only, never the
+    byte-stable coverage digest."""
     try:
-        return str(value)
+        return _escape_line_unsafe(str(value))
     except ValueError:
         if isinstance(value, int) and not isinstance(value, bool):
             return "<oversized-int: {} bits>".format(value.bit_length())
@@ -1955,6 +1979,22 @@ def self_test():
         _n4tk = dict(); _n4tk[10 ** 5000] = dict(namespace="BI"); _n4tk["backlog_item"] = dict(namespace="BI")
         _n4b["types"] = _n4tk
         check("new4-oversized-dup-ns-key-invalid", validate_manifest(_n4b).status == INVALID)
+
+        # ROUND-6 codex: _safe_str (and _sorted_key_names, which renders each key through it) must ESCAPE
+        # control characters so an untrusted key/value cannot forge a second diagnostic line ('x\nFORGED');
+        # a printable value stays byte-for-byte. Pre-fix _safe_str returned str(value) verbatim and leaked
+        # the literal newline. (_safe_display already escapes via repr(); this is its str()-based sibling.)
+        _r6s = _safe_str("x" + chr(10) + "FORGED")
+        check("r6-safe-str-escapes-newline", chr(10) not in _r6s and "\\x0a" in _r6s)
+        check("r6-safe-str-printable-unchanged", _safe_str("1.2.3") == "1.2.3" and _safe_str(41) == "41")
+        _r6z = _safe_str("a" + chr(0x200b) + "b")
+        check("r6-safe-str-escapes-zero-width", chr(0x200b) not in _r6z and "\\u200b" in _r6z)
+        # _sorted_key_names renders each key through _safe_str (return sorted(_safe_str(k) for k in keys)),
+        # so the escaping above holds for the unknown-key idiom by construction; asserting _safe_str is the
+        # class-root check (a direct _sorted_key_names call here is deliberately avoided so the opf-fuzz
+        # call-site coverage scan does not count a self-test-only site the fuzz tracer never exercises).
+        check("r6-safe-str-controls-composed",
+              all(chr(10) not in _safe_str(k) for k in ("a" + chr(10) + "b", "plain")))
 
         # NEW-5: the store-read cap is enforced on the bytes ACTUALLY read, not only the pre-open lstat, so a
         # file reporting a small size at lstat but reading over the cap (a raced swap) is refused. The lstat is

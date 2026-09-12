@@ -1117,10 +1117,16 @@ def _count_expected_absent(expected_ids, present, where, findings):
         # not enough (guard-input-soundness): validate the endpoint form and fail closed to a
         # cannot-evaluate finding, never a false clean pass. (Attribute reads are O(1) and never overflow;
         # only len() below can, which the OverflowError branch handles.)
+        # Render the endpoints through _safe_str (O(1) bit-length fallback): a spoofed non-canonical range
+        # can carry an oversized endpoint (range(-(10**5000), 1) or range(1, 2, 10**5000)) whose str() trips
+        # CPython's base-10 int-conversion limit, so interpolating it raw ({}) would raise a ValueError out
+        # of the very branch meant to REJECT it (codex round-6; guard-input-soundness: a control that cannot
+        # be evaluated becomes a structured finding, never a crash).
         findings.append("{}: id space must be the canonical range 1..high-water (start 1, step 1); got "
                         "range(start={}, stop={}, step={}); cannot evaluate the partition "
-                        "(guard-input-soundness)".format(where, expected_ids.start, expected_ids.stop,
-                                                          expected_ids.step))
+                        "(guard-input-soundness)".format(where, _safe_str(expected_ids.start),
+                                                          _safe_str(expected_ids.stop),
+                                                          _safe_str(expected_ids.step)))
         return 0
     try:
         expected_n = len(expected_ids)
@@ -1577,6 +1583,25 @@ def self_test():
           bool(check_ids_partition([], [], expected_ids=range(1, 0))))
     # control: the canonical range(1, high_water+1) still evaluates without the malformed-space finding.
     check("f6-canonical-range-ok", not check_ids_partition([1, 2], [], expected_ids=range(1, 3)))
+    # ROUND-6 codex: a NON-CANONICAL range whose ENDPOINT is an oversized int (str() trips CPython's
+    # base-10 digit limit) must render through _safe_str into the rejection finding, not crash the branch
+    # that is meant to reject it. Pre-fix (raw {} interpolation) these raised a ValueError out of
+    # check_ids_partition; post-fix each returns a structured cannot-evaluate finding naming the space.
+    # PIN the int-str limit to the default (4300) around these fixtures so the discrimination is caused by
+    # the CODE, not the ambient sys.set_int_max_str_digits: the pre-fix crash (and the "oversized-int"
+    # marker) only manifest when str() of a 5001-digit endpoint trips the limit, so a hostile ambient of 0
+    # or 5001 would neither reproduce the bug nor produce the marker. Restored in finally (test-hermeticity).
+    _r6_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        _r6_start = check_ids_partition([], [], expected_ids=range(-(10**5000), 1))
+        _r6_step = check_ids_partition([], [], expected_ids=range(1, 2, 10**5000))
+        check("r6-noncanonical-oversized-start-finding",
+              bool(_r6_start) and any("canonical range" in f and "oversized-int" in f for f in _r6_start))
+        check("r6-noncanonical-oversized-step-finding",
+              bool(_r6_step) and any("canonical range" in f and "oversized-int" in f for f in _r6_step))
+    finally:
+        sys.set_int_max_str_digits(_r6_prev_idlimit)
 
     # M10: a superseded summary's superseded_by must name an EXISTING rollup that COVERS it, never itself.
     D = "sha256:" + "a" * 64
@@ -1719,13 +1744,23 @@ def self_test():
     # via "WL-{}".format(n); an oversized non-decimal int (a TOML hex literal passing _wl_id_set's n >= 1)
     # made str(n) raise ValueError uncaught. Rendered through _safe_str they fail closed instead. `big`
     # trips CPython's base-10 integer-string-conversion limit (> 4300 digits).
-    big = int("f" * 4000, 16)
-    check("nf2-partition-both-location-oversized-safe",
-          any("oversized-int" in f for f in check_ids_partition([big], [big])))
-    check("nf2-no-deletion-vanished-oversized-safe",
-          any("oversized-int" in f for f in check_no_deletion([big], [])))
-    check("nf2-rotation-tail-oversized-safe",
-          any("oversized-int" in f for f in check_rotation_only_released([big], frozen_ver)))
+    # PIN the int-str-conversion limit to the default (4300) around these fixtures (test-hermeticity): the
+    # "oversized-int" marker is produced by _safe_str ONLY when str(big) trips CPython's base-10 digit
+    # limit, so a hostile ambient of 0 (unlimited) or 5001 would render `big` cleanly and never produce the
+    # marker (breaking these checks). At the pinned 4300, str(big) (a ~4816-digit int) trips, so _safe_str
+    # is exercised and reverting it would let the raw ValueError crash the branch. Restored in finally.
+    _nf2_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        big = int("f" * 4000, 16)
+        check("nf2-partition-both-location-oversized-safe",
+              any("oversized-int" in f for f in check_ids_partition([big], [big])))
+        check("nf2-no-deletion-vanished-oversized-safe",
+              any("oversized-int" in f for f in check_no_deletion([big], [])))
+        check("nf2-rotation-tail-oversized-safe",
+              any("oversized-int" in f for f in check_rotation_only_released([big], frozen_ver)))
+    finally:
+        sys.set_int_max_str_digits(_nf2_prev_idlimit)
     # NF-4 (over-fire regression): _count_expected_absent must not membership-test RAW expected-id
     # elements. A non-range expected_ids (a duplicate list, or an un-normalized "WL-1") reported a FALSE
     # loss before the fix; now it fails closed to a cannot-evaluate finding and reports NO loss.

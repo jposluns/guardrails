@@ -1650,155 +1650,167 @@ def self_test():
     # ----- reconcile-draft fixes (U2 retro: Fable + codex). The fixN1/fixA3/fixA4-subepsilon/fix10/fix8/
     # fixB1 vectors discriminate a fix landed in THIS commit (they fail or crash pre-fix); the remaining
     # fix2/fix3/fix4/fix5*/fix6/fixC6/fixD1 vectors are retained regression guards, not fail-to-pass. -----
-    _big = 10 ** 5000
-    nl_env = envelope("backlog_item", 1, "open", id="BI-1" + chr(10), created_at=TS + chr(10), updated_at=TS + chr(10))
-    check("fixN1-newline-record-invalid", validate_record(nl_env).status == INVALID)
-    check("fixN1-newline-id-shape-none", _valid_id_shape("BI-1" + chr(10)) is None)
-    check("fixN1-newline-ts-false", not _valid_timestamp(TS + chr(10)))
-    check("fixN1-newline-unique-distinct", bool(check_unique_ids(["BI-1", "BI-1" + chr(10)])))
-    check("fixA3-nonascii-digit-ts-false", not _valid_timestamp("202" + chr(0x666) + "-01-02T03:04:05Z"))
-    # fixA4 replaced a FLOAT fractional-seconds key with a decimal-string one. The distinct-key (.11/.12)
-    # and trailing-zero-equal (.5/.50) vectors were removed as false pins: a float key ALSO distinguishes
-    # .11/.12 and equates .5/.50, so they passed with or without the fix and discriminated nothing. Only the
-    # sub-epsilon vector below discriminates: two fractions differing beyond double precision collapse to one
-    # float (updated_at == created_at, a clean chronology) but stay distinct as strings (updated_at precedes
-    # created_at, INVALID), so it fails pre-fix and passes post-fix.
-    check("fixA4-subepsilon-regression-invalid",
-          validate_record(envelope("backlog_item", 1, "open",
-                                   created_at="2026-08-12T09:14:02.12345678901234567892Z",
-                                   updated_at="2026-08-12T09:14:02.12345678901234567891Z")).status == INVALID)
-    check("fix10-u2028-title-invalid",
-          validate_record(envelope("finding", 1, "open", title="a" + chr(0x2028) + "b")).status == INVALID)
-    check("fix10-u2028-summary-invalid",
-          validate_record(dict(wl, summary="a" + chr(0x2028) + "b"), expected_type="worklog").status == INVALID)
-    _hw8, f8 = validate_counters(dict(schema=1, counters=dict(BI=_big)))
-    check("fix8-oversized-counter-flagged", bool(f8) and "BI" not in _hw8)
+    # ROUND-6 codex: PIN the int-str-conversion limit to the default (4300) around the oversized-int
+    # fixtures so their verdicts come from the CODE under test, not the ambient sys.set_int_max_str_digits
+    # (a hostile caller could set 0/5001/640, breaking fix8-*/r2fix3-*); restored in finally so this
+    # self-test leaves the process limit UNCHANGED (test-hermeticity). At the pinned 4300, _nines (4300
+    # digits) passes counter-map validation but the allocated next id (4301 digits) trips the
+    # _genuine_high_water(n) guard, so removing that guard reaches the raw str(n) 'Exceeds the limit'
+    # and r2fix3-next-id-boundary-refused catches it regardless of the ambient limit.
+    _prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
     try:
-        next_id(dict(BI=_big), "BI", known_complete=True)
-        check("fix8-next-id-oversized-refused", False)
-    except ValueError as _e8:
-        # self-test-discrimination: assert the module's OWN named counter-validation diagnostic, not merely
-        # "some ValueError". Pre-fix, next_id let str(n) trip CPython's raw "Exceeds the limit ... integer
-        # string conversion" ValueError, which a bare `except ValueError` would ALSO satisfy; requiring the
-        # named reason means the uncontrolled CPython crash no longer passes as a clean refusal.
-        check("fix8-next-id-oversized-refused",
-              "must be a genuine non-negative int" in str(_e8))
-    check("fix2-unique-oversized-clean", bool(check_unique_ids([_big])))
-    check("fix2-within-oversized-clean", bool(check_ids_within_counters([_big], dict())))
-    check("fix2-monotonic-oversized-key-clean", bool(check_monotonic(dict(), {_big: 1})))
-    check("fix2-transition-oversized-preproposal-clean",
-          validate_transition("backlog_item", "dropped/proposed", "open", "maintainer",
-                              pre_proposal_state=_big, reason="x").status == INVALID)
-    check("fixB1-empty-registered-kind-invalid",
-          validate_record(dict(wl, kind=""), expected_type="worklog", registered_kinds=[""]).status == INVALID)
-    _rvbad = envelope("finding", 8, "open")
-    _rvbad["x-aiqt"] = dict(a=1)
-    check("fix3-malformed-registered-vendors-invalid",
-          validate_record(_rvbad, registered_vendors="x-aiqt,x-evil").status == INVALID)
-    check("fix5c-counters-bool-schema-flagged",
-          any("schema must be an integer" in f
-              for f in validate_counters(dict(schema=True, counters=dict(BI=1)))[1]))
-    try:
-        next_id(dict(BI=5), "FN", known_complete="no")
-        check("fix4-known-complete-nonbool-refused", False)
-    except ValueError:
-        check("fix4-known-complete-nonbool-refused", True)
-    try:
-        next_id(dict(BI=-1), "BI", known_complete=True)
-        check("fix6-negative-map-next-id-refused", False)
-    except ValueError:
-        check("fix6-negative-map-next-id-refused", True)
-    check("fix5b-reject-whitespace-reason-invalid",
-          validate_transition("finding", "fixed/proposed", "open", "maintainer",
-                              pre_proposal_state="open", reason="   ").status == INVALID)
-    check("fixC6-ad-missing-action-only-invalid",
-          validate_record(envelope("autonomous_decision", 1, "recorded",
-                                   actor=dict(kind="assistant"), classification="ACT")).status == INVALID)
-    check("fixC6-ad-missing-classification-only-invalid",
-          validate_record(envelope("autonomous_decision", 1, "recorded",
-                                   actor=dict(kind="assistant"), action="merged")).status == INVALID)
-    _d1 = validate_transition("backlog_item", "done/proposed", "dropped", "maintainer",
-                              pre_proposal_state="dropped", reason="isolate terminal-target")
-    check("fixD1-reject-to-terminal-isolated-invalid", _d1.status == INVALID)
-    check("fixD1-reject-to-terminal-isolated-named",
-          any("rejection to a working state" in f for f in _d1.findings))
-    # ----- round-2 reconcile additions (Fable ff-QA MINOR 1-5 + gemini finding 3 at this module's
-    # shared-helper call sites). Each fix has a discriminating vector that fails or crashes pre-fix;
-    # r2fix4-normal-title-still-ok and r2fix5-wellformed-vendors-no-finding are over-reach guards. -------
-    # test-hermeticity: build the 4300-digit boundary fixture by ARITHMETIC (10**4300 - 1), not int("9"*4300).
-    # int() of a 4300-digit string trips CPython's int-to-str conversion limit if a caller lowered
-    # sys.set_int_max_str_digits below 4300, crashing this suite before its summary; pow/subtraction is never
-    # subject to that limit, so the fixture is constructible regardless of the ambient limit (value identical).
-    _nines = 10 ** 4300 - 1
-    _a_nl = dict(kind="maintainer"); _a_nl["x" + chr(10) + "y"] = 1
-    _r2f1 = validate_record(envelope("finding", 50, "open", actor=_a_nl))
-    check("r2fix1-unknownkey-newline-escaped",
-          _r2f1.status == INVALID and all(chr(10) not in f for f in _r2f1.findings))
-    _a_big = dict(kind="maintainer"); _a_big[_big] = 1
-    check("r2fix1-oversized-int-key-no-crash",
-          validate_record(envelope("finding", 51, "open", actor=_a_big)).status == INVALID)
-    _d_big = dict(); _d_big[_big] = 1
-    check("r2fix1-counters-oversized-int-key-no-crash", bool(validate_counters(_d_big)[1]))
-    _tc_nl = validate_transition("finding", "open", "fixed/proposed", "m" + chr(10) + "FORGED")
-    check("r2fix2-txn-actorkind-newline-escaped",
-          _tc_nl.status == INVALID and all(chr(10) not in f for f in _tc_nl.findings))
-    try:
-        next_id(dict(BI=_nines), "BI", known_complete=True)
-        check("r2fix3-next-id-boundary-refused", False)
-    except ValueError as _e:
-        check("r2fix3-next-id-boundary-refused",
-              "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
-    check("r2fix4-blank-title-invalid",
-          validate_record(envelope("finding", 52, "open", title="   ")).status == INVALID)
-    check("r2fix4-blank-summary-invalid",
-          validate_record(dict(wl, summary="   "), expected_type="worklog").status == INVALID)
-    check("r2fix4-normal-title-still-ok",
-          validate_record(envelope("finding", 53, "open", title="A real title")).status == VALID)
-    _r2f5 = validate_record(envelope("finding", 54, "open"), registered_vendors="x-aiqt")
-    check("r2fix5-malformed-vendors-surfaced",
-          _r2f5.status == INVALID and any("registered_vendors must be a collection" in f
-                                          for f in _r2f5.findings))
-    _r2f5b = envelope("finding", 55, "open")
-    _r2f5b["x-aiqt"] = dict(v="ok")
-    check("r2fix5-wellformed-vendors-no-finding",
-          not any("registered_vendors must be a collection" in f
-                  for f in validate_record(_r2f5b, registered_vendors=REG).findings))
+        _big = 10 ** 5000
+        nl_env = envelope("backlog_item", 1, "open", id="BI-1" + chr(10), created_at=TS + chr(10), updated_at=TS + chr(10))
+        check("fixN1-newline-record-invalid", validate_record(nl_env).status == INVALID)
+        check("fixN1-newline-id-shape-none", _valid_id_shape("BI-1" + chr(10)) is None)
+        check("fixN1-newline-ts-false", not _valid_timestamp(TS + chr(10)))
+        check("fixN1-newline-unique-distinct", bool(check_unique_ids(["BI-1", "BI-1" + chr(10)])))
+        check("fixA3-nonascii-digit-ts-false", not _valid_timestamp("202" + chr(0x666) + "-01-02T03:04:05Z"))
+        # fixA4 replaced a FLOAT fractional-seconds key with a decimal-string one. The distinct-key (.11/.12)
+        # and trailing-zero-equal (.5/.50) vectors were removed as false pins: a float key ALSO distinguishes
+        # .11/.12 and equates .5/.50, so they passed with or without the fix and discriminated nothing. Only the
+        # sub-epsilon vector below discriminates: two fractions differing beyond double precision collapse to one
+        # float (updated_at == created_at, a clean chronology) but stay distinct as strings (updated_at precedes
+        # created_at, INVALID), so it fails pre-fix and passes post-fix.
+        check("fixA4-subepsilon-regression-invalid",
+              validate_record(envelope("backlog_item", 1, "open",
+                                       created_at="2026-08-12T09:14:02.12345678901234567892Z",
+                                       updated_at="2026-08-12T09:14:02.12345678901234567891Z")).status == INVALID)
+        check("fix10-u2028-title-invalid",
+              validate_record(envelope("finding", 1, "open", title="a" + chr(0x2028) + "b")).status == INVALID)
+        check("fix10-u2028-summary-invalid",
+              validate_record(dict(wl, summary="a" + chr(0x2028) + "b"), expected_type="worklog").status == INVALID)
+        _hw8, f8 = validate_counters(dict(schema=1, counters=dict(BI=_big)))
+        check("fix8-oversized-counter-flagged", bool(f8) and "BI" not in _hw8)
+        try:
+            next_id(dict(BI=_big), "BI", known_complete=True)
+            check("fix8-next-id-oversized-refused", False)
+        except ValueError as _e8:
+            # self-test-discrimination: assert the module's OWN named counter-validation diagnostic, not merely
+            # "some ValueError". Pre-fix, next_id let str(n) trip CPython's raw "Exceeds the limit ... integer
+            # string conversion" ValueError, which a bare `except ValueError` would ALSO satisfy; requiring the
+            # named reason means the uncontrolled CPython crash no longer passes as a clean refusal.
+            check("fix8-next-id-oversized-refused",
+                  "must be a genuine non-negative int" in str(_e8))
+        check("fix2-unique-oversized-clean", bool(check_unique_ids([_big])))
+        check("fix2-within-oversized-clean", bool(check_ids_within_counters([_big], dict())))
+        check("fix2-monotonic-oversized-key-clean", bool(check_monotonic(dict(), {_big: 1})))
+        check("fix2-transition-oversized-preproposal-clean",
+              validate_transition("backlog_item", "dropped/proposed", "open", "maintainer",
+                                  pre_proposal_state=_big, reason="x").status == INVALID)
+        check("fixB1-empty-registered-kind-invalid",
+              validate_record(dict(wl, kind=""), expected_type="worklog", registered_kinds=[""]).status == INVALID)
+        _rvbad = envelope("finding", 8, "open")
+        _rvbad["x-aiqt"] = dict(a=1)
+        check("fix3-malformed-registered-vendors-invalid",
+              validate_record(_rvbad, registered_vendors="x-aiqt,x-evil").status == INVALID)
+        check("fix5c-counters-bool-schema-flagged",
+              any("schema must be an integer" in f
+                  for f in validate_counters(dict(schema=True, counters=dict(BI=1)))[1]))
+        try:
+            next_id(dict(BI=5), "FN", known_complete="no")
+            check("fix4-known-complete-nonbool-refused", False)
+        except ValueError:
+            check("fix4-known-complete-nonbool-refused", True)
+        try:
+            next_id(dict(BI=-1), "BI", known_complete=True)
+            check("fix6-negative-map-next-id-refused", False)
+        except ValueError:
+            check("fix6-negative-map-next-id-refused", True)
+        check("fix5b-reject-whitespace-reason-invalid",
+              validate_transition("finding", "fixed/proposed", "open", "maintainer",
+                                  pre_proposal_state="open", reason="   ").status == INVALID)
+        check("fixC6-ad-missing-action-only-invalid",
+              validate_record(envelope("autonomous_decision", 1, "recorded",
+                                       actor=dict(kind="assistant"), classification="ACT")).status == INVALID)
+        check("fixC6-ad-missing-classification-only-invalid",
+              validate_record(envelope("autonomous_decision", 1, "recorded",
+                                       actor=dict(kind="assistant"), action="merged")).status == INVALID)
+        _d1 = validate_transition("backlog_item", "done/proposed", "dropped", "maintainer",
+                                  pre_proposal_state="dropped", reason="isolate terminal-target")
+        check("fixD1-reject-to-terminal-isolated-invalid", _d1.status == INVALID)
+        check("fixD1-reject-to-terminal-isolated-named",
+              any("rejection to a working state" in f for f in _d1.findings))
+        # ----- round-2 reconcile additions (Fable ff-QA MINOR 1-5 + gemini finding 3 at this module's
+        # shared-helper call sites). Each fix has a discriminating vector that fails or crashes pre-fix;
+        # r2fix4-normal-title-still-ok and r2fix5-wellformed-vendors-no-finding are over-reach guards. -------
+        # test-hermeticity: build the 4300-digit boundary fixture by ARITHMETIC (10**4300 - 1), not int("9"*4300).
+        # int() of a 4300-digit string trips CPython's int-to-str conversion limit if a caller lowered
+        # sys.set_int_max_str_digits below 4300, crashing this suite before its summary; pow/subtraction is never
+        # subject to that limit, so the fixture is constructible regardless of the ambient limit (value identical).
+        _nines = 10 ** 4300 - 1
+        _a_nl = dict(kind="maintainer"); _a_nl["x" + chr(10) + "y"] = 1
+        _r2f1 = validate_record(envelope("finding", 50, "open", actor=_a_nl))
+        check("r2fix1-unknownkey-newline-escaped",
+              _r2f1.status == INVALID and all(chr(10) not in f for f in _r2f1.findings))
+        _a_big = dict(kind="maintainer"); _a_big[_big] = 1
+        check("r2fix1-oversized-int-key-no-crash",
+              validate_record(envelope("finding", 51, "open", actor=_a_big)).status == INVALID)
+        _d_big = dict(); _d_big[_big] = 1
+        check("r2fix1-counters-oversized-int-key-no-crash", bool(validate_counters(_d_big)[1]))
+        _tc_nl = validate_transition("finding", "open", "fixed/proposed", "m" + chr(10) + "FORGED")
+        check("r2fix2-txn-actorkind-newline-escaped",
+              _tc_nl.status == INVALID and all(chr(10) not in f for f in _tc_nl.findings))
+        try:
+            next_id(dict(BI=_nines), "BI", known_complete=True)
+            check("r2fix3-next-id-boundary-refused", False)
+        except ValueError as _e:
+            check("r2fix3-next-id-boundary-refused",
+                  "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+        check("r2fix4-blank-title-invalid",
+              validate_record(envelope("finding", 52, "open", title="   ")).status == INVALID)
+        check("r2fix4-blank-summary-invalid",
+              validate_record(dict(wl, summary="   "), expected_type="worklog").status == INVALID)
+        check("r2fix4-normal-title-still-ok",
+              validate_record(envelope("finding", 53, "open", title="A real title")).status == VALID)
+        _r2f5 = validate_record(envelope("finding", 54, "open"), registered_vendors="x-aiqt")
+        check("r2fix5-malformed-vendors-surfaced",
+              _r2f5.status == INVALID and any("registered_vendors must be a collection" in f
+                                              for f in _r2f5.findings))
+        _r2f5b = envelope("finding", 55, "open")
+        _r2f5b["x-aiqt"] = dict(v="ok")
+        check("r2fix5-wellformed-vendors-no-finding",
+              not any("registered_vendors must be a collection" in f
+                      for f in validate_record(_r2f5b, registered_vendors=REG).findings))
 
-    # ----- round-3 residual sweep (Fable ff-QA F2 crash-class siblings, F3 message-integrity siblings,
-    # F4 blank-string siblings). Each vector discriminates a fix landed HERE: the F2/F3 vectors CRASH the
-    # validator with the raw CPython int-to-str ValueError pre-fix (aborting self_test), and the F4 vectors
-    # validate VALID pre-fix; each is INVALID/refused post-fix, with the *-still-ok guards catching over-reach.
-    # F2 (crash-class): an oversized non-decimal int key renders through _safe_display, never a raw {!r},
-    # at the three unknown-key/roster render sites the r2fix1 sweep left open. Each returns a structured
-    # INVALID/finding rather than aborting self_test with an uncontrolled ValueError.
-    _f2a = envelope("finding", 60, "open"); _f2a[_big] = 1
-    check("f2a-toplevel-oversized-int-key-no-crash", validate_record(_f2a).status == INVALID)
-    check("f2b-counters-inner-oversized-int-key-no-crash",
-          bool(validate_counters({"counters": {_big: 1}})[1]))
-    check("f2c-unsupported-type-oversized-specs-key-no-crash",
-          validate_record({"type": "artifact", "id": "AR-1"},
-                          specs={_big: BASELINE_SPECS["finding"]}).status == INVALID)
-    # F3 (message-integrity): a refusal handed an oversized non-decimal int control keeps this module's OWN
-    # named ValueError, never the raw CPython "Exceeds the limit"/"integer string conversion" text. Pre-fix
-    # the {!r} render raises that CPython ValueError while building the message; assert the module's message.
-    try:
-        next_id({}, _big, known_complete=True)
-        check("f3-next-id-oversized-ns-named", False)
-    except ValueError as _e:
-        check("f3-next-id-oversized-ns-named",
-              "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
-    try:
-        next_id({}, "BI", known_complete=_big)
-        check("f3-known-complete-oversized-named", False)
-    except ValueError as _e:
-        check("f3-known-complete-oversized-named",
-              "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
-    try:
-        next_id({_big: 1}, "BI", known_complete=True)
-        check("f3-counter-map-oversized-ns-named", False)
-    except ValueError as _e:
-        check("f3-counter-map-oversized-ns-named",
-              "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+        # ----- round-3 residual sweep (Fable ff-QA F2 crash-class siblings, F3 message-integrity siblings,
+        # F4 blank-string siblings). Each vector discriminates a fix landed HERE: the F2/F3 vectors CRASH the
+        # validator with the raw CPython int-to-str ValueError pre-fix (aborting self_test), and the F4 vectors
+        # validate VALID pre-fix; each is INVALID/refused post-fix, with the *-still-ok guards catching over-reach.
+        # F2 (crash-class): an oversized non-decimal int key renders through _safe_display, never a raw {!r},
+        # at the three unknown-key/roster render sites the r2fix1 sweep left open. Each returns a structured
+        # INVALID/finding rather than aborting self_test with an uncontrolled ValueError.
+        _f2a = envelope("finding", 60, "open"); _f2a[_big] = 1
+        check("f2a-toplevel-oversized-int-key-no-crash", validate_record(_f2a).status == INVALID)
+        check("f2b-counters-inner-oversized-int-key-no-crash",
+              bool(validate_counters({"counters": {_big: 1}})[1]))
+        check("f2c-unsupported-type-oversized-specs-key-no-crash",
+              validate_record({"type": "artifact", "id": "AR-1"},
+                              specs={_big: BASELINE_SPECS["finding"]}).status == INVALID)
+        # F3 (message-integrity): a refusal handed an oversized non-decimal int control keeps this module's OWN
+        # named ValueError, never the raw CPython "Exceeds the limit"/"integer string conversion" text. Pre-fix
+        # the {!r} render raises that CPython ValueError while building the message; assert the module's message.
+        try:
+            next_id({}, _big, known_complete=True)
+            check("f3-next-id-oversized-ns-named", False)
+        except ValueError as _e:
+            check("f3-next-id-oversized-ns-named",
+                  "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+        try:
+            next_id({}, "BI", known_complete=_big)
+            check("f3-known-complete-oversized-named", False)
+        except ValueError as _e:
+            check("f3-known-complete-oversized-named",
+                  "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+        try:
+            next_id({_big: 1}, "BI", known_complete=True)
+            check("f3-counter-map-oversized-ns-named", False)
+        except ValueError as _e:
+            check("f3-counter-map-oversized-ns-named",
+                  "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+    finally:
+        sys.set_int_max_str_digits(_prev_idlimit)
     # F4 (blank-string): a whitespace-only required payload is semantically blank and INVALID, harmonizing
     # the Fable-M4 stance across actor.id, ref.locator, finding.severity, pending_decision.decision/
     # decided_by, and autonomous_decision.classification/action. A real value still validates VALID.

@@ -27,6 +27,7 @@ Run standalone (`python3 -I -B tools/_opf_fuzz.py`) or as the `opf-fuzz` leg of 
 Returns 0 clean, 1 on a failed assertion, 2 on a harness/fail-closed error. Judged on returned
 status/finding VALUES and on raised exception TYPES, never by grepping output (the isolate-verifiers rule).
 """
+import ast
 import re
 import sys
 import tomllib
@@ -103,12 +104,43 @@ def _scan_sites(predicate):
 _KEY_NAME_RENDER_TOKENS = ("_sorted_key_names(", "_safe_key_names(")
 
 
+def _ast_call_sites_in(source, filename, names):
+    """The call sites of the helper `names` in `source`, enumerated over the PARSED AST: every ast.Call
+    whose callee resolves to one of `names` (a bare Name `_safe_key_names(...)` or an attribute
+    `mod._safe_key_names(...)`) contributes a (filename, lineno). Returns {name: set of (filename, lineno)}.
+    Because it walks the call grammar rather than matching a literal `<name>(` substring, a call written with
+    whitespace or other formatting between the name and its '(' -- e.g. `_safe_key_names (extra)` -- is
+    still counted; a substring proxy structurally cannot see it and would UNDER-count the coverage
+    denominator, letting an un-exercised site escape (codex round-6; guard-input-soundness). A source that
+    cannot be parsed raises SyntaxError (fail-closed loud), never a silent empty scan."""
+    hits = {n: set() for n in names}
+    tree = ast.parse(source, filename=filename)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name):
+                callee = fn.id
+            elif isinstance(fn, ast.Attribute):
+                callee = fn.attr
+            else:
+                callee = None
+            if callee in hits:
+                hits[callee].add((filename, node.lineno))
+    return hits
+
+
 def _skn_call_sites():
-    # The key-name-render CALL sites per helper token: the token followed by '(', excluding its own `def`
-    # line (and the bare-name import lines, which carry no '('). Keyed by token so each class's own
-    # non-emptiness can be asserted (a class that scans to zero is a drifted or broken authoritative index).
-    return {tok: _scan_sites(lambda ln, tok=tok: tok in ln and not ln.lstrip().startswith("def "))
-            for tok in _KEY_NAME_RENDER_TOKENS}
+    # The key-name-render CALL sites per registered token, enumerated via the AST (see _ast_call_sites_in)
+    # so a whitespace/formatting call variant is counted rather than escaping a literal-token substring scan.
+    # Keyed by token so each class's own non-emptiness can be asserted (a class that scans to zero is a
+    # drifted or broken authoritative index). The callee name is the token minus its trailing '('.
+    name_to_tok = {tok[:-1]: tok for tok in _KEY_NAME_RENDER_TOKENS}
+    sites = {tok: set() for tok in _KEY_NAME_RENDER_TOKENS}
+    for fname, path in _MODULE_PATHS.items():
+        hits = _ast_call_sites_in(path.read_text(encoding="utf-8"), fname, set(name_to_tok))
+        for name, s in hits.items():
+            sites[name_to_tok[name]] |= s
+    return sites
 
 
 # A render helper follows the `*_key_names` naming convention (_sorted_key_names / _safe_key_names). The
@@ -719,22 +751,33 @@ def run():
 
     # CLASS 2: an OVERSIZED numeric string (CPython refuses int() beyond 4300 digits) is reachable as an id
     # numeric suffix or a SemVer field: a clean finding / None, never an uncontrolled ValueError crash.
-    big = "9" * 4301
-    _returns_no_raise("valid_id_shape-oversized-None",
-                      lambda: _opf_schema._valid_id_shape("BI-" + big), lambda v: v is None)
-    _returns_no_raise("parse_semver-oversized-core-None",
-                      lambda: _opf_release.parse_semver(big + ".0.0"), lambda v: v is None)
-    _returns_no_raise("parse_semver-oversized-prerelease-None",
-                      lambda: _opf_release.parse_semver("1.0.0-" + big), lambda v: v is None)
-    _returns_no_raise("validate_record-oversized-id-INVALID",
-                      lambda: _opf_schema.validate_record(_full_record(id="BI-" + big),
-                                                          expected_type="backlog_item"),
-                      lambda r: hasattr(r, "status") and r.status == INVALID)
-    _returns_no_raise("validate_version-oversized-version-INVALID",
-                      lambda: _opf_release.validate_version(
-                          {"schema": 1, "release": [{"version": big + ".0.0", "date": TS,
-                           "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64}]}),
-                      lambda r: hasattr(r, "status") and r.status == INVALID)
+    # PIN the int-str-conversion limit to the default (4300) around these CLASS 2 probes (test-hermeticity):
+    # each function fails closed (None / INVALID) only because int() of the 4301-digit numeric suffix trips
+    # CPython's base-10 digit limit. A hostile ambient of 0 (unlimited) or 5001 would parse the 4301-digit
+    # value cleanly, so the functions would return an unexpected non-None / non-INVALID value (breaking these
+    # probes). At the pinned 4300 the 4301-digit int() trips, so the fail-closed path is exercised and
+    # reverting it would surface here. Restored in finally.
+    _c2_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        big = "9" * 4301
+        _returns_no_raise("valid_id_shape-oversized-None",
+                          lambda: _opf_schema._valid_id_shape("BI-" + big), lambda v: v is None)
+        _returns_no_raise("parse_semver-oversized-core-None",
+                          lambda: _opf_release.parse_semver(big + ".0.0"), lambda v: v is None)
+        _returns_no_raise("parse_semver-oversized-prerelease-None",
+                          lambda: _opf_release.parse_semver("1.0.0-" + big), lambda v: v is None)
+        _returns_no_raise("validate_record-oversized-id-INVALID",
+                          lambda: _opf_schema.validate_record(_full_record(id="BI-" + big),
+                                                              expected_type="backlog_item"),
+                          lambda r: hasattr(r, "status") and r.status == INVALID)
+        _returns_no_raise("validate_version-oversized-version-INVALID",
+                          lambda: _opf_release.validate_version(
+                              {"schema": 1, "release": [{"version": big + ".0.0", "date": TS,
+                               "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64}]}),
+                          lambda r: hasattr(r, "status") and r.status == INVALID)
+    finally:
+        sys.set_int_max_str_digits(_c2_prev_idlimit)
 
     # CLASS 3: a specs roster whose VALUE is not a TypeSpec (a hand-built Python control) must be a clean
     # CANNOT-EVALUATE, never an AttributeError on spec.namespace (typed record) or espec.reduced (reduced).
@@ -765,17 +808,29 @@ def run():
             return False
         return False        # a silent return is a fail-open: a digest computed over an uncovered value
 
-    probe("fix1-canonical-oversized-int-ReleaseError",
-          _raises_release_error(lambda: _opf_release._canonical(_OVERSIZED_INT)))
-    probe("fix1-coverage_digest-oversized-int-field-ReleaseError",
-          _raises_release_error(lambda: _opf_release.coverage_digest(
-              [_worklog_entry(1, note=_OVERSIZED_INT)])))
-    probe("fix1-coverage_digest-oversized-int-in-ext-ReleaseError",
-          _raises_release_error(lambda: _opf_release.coverage_digest(
-              [_worklog_entry(1, **{"x-aiqt": {"score": _OVERSIZED_INT}})])))
-    probe("fix1-compute_span_digest-oversized-int-in-ext-ReleaseError",
-          _raises_release_error(lambda: _opf_release.compute_span_digest(
-              {1: _worklog_entry(1, **{"x-aiqt": {"score": _OVERSIZED_INT}})}, (1, 1))))
+    # PIN the int-str-conversion limit to the default (4300) around the fix1 probes (test-hermeticity):
+    # _OVERSIZED_INT (10 ** 4301) drives the module's ReleaseError only because str() of it trips CPython's
+    # base-10 digit limit at the digest path. A hostile ambient of 0 (unlimited) or 5001 would render it
+    # cleanly, so no ReleaseError would be raised (breaking these probes). At the pinned 4300 str() trips, so
+    # the controlled-ReleaseError path is exercised and reverting the FIX-1 guard would surface here (the raw
+    # ValueError is a non-ReleaseError). The fix2 deep-nested probes below are limit-independent, so the limit
+    # is restored before them. Restored in finally.
+    _fix1_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        probe("fix1-canonical-oversized-int-ReleaseError",
+              _raises_release_error(lambda: _opf_release._canonical(_OVERSIZED_INT)))
+        probe("fix1-coverage_digest-oversized-int-field-ReleaseError",
+              _raises_release_error(lambda: _opf_release.coverage_digest(
+                  [_worklog_entry(1, note=_OVERSIZED_INT)])))
+        probe("fix1-coverage_digest-oversized-int-in-ext-ReleaseError",
+              _raises_release_error(lambda: _opf_release.coverage_digest(
+                  [_worklog_entry(1, **{"x-aiqt": {"score": _OVERSIZED_INT}})])))
+        probe("fix1-compute_span_digest-oversized-int-in-ext-ReleaseError",
+              _raises_release_error(lambda: _opf_release.compute_span_digest(
+                  {1: _worklog_entry(1, **{"x-aiqt": {"score": _OVERSIZED_INT}})}, (1, 1))))
+    finally:
+        sys.set_int_max_str_digits(_fix1_prev_idlimit)
     probe("fix2-canonical-deep-nested-ReleaseError",
           _raises_release_error(lambda: _opf_release._canonical(_deep_nest(_DEEP_DEPTH))))
     probe("fix2-coverage_digest-deep-nested-field-ReleaseError",
@@ -942,6 +997,19 @@ def run():
         if not sites:
             fail("coverage scan found no {} call site(s): the authoritative-index scan under-counts or "
                  "has drifted".format(tok))
+    # ROUND-6 codex DISCRIMINATION: the call-site enumeration must count a call written with WHITESPACE
+    # between the helper name and its '(' -- the exact variant a literal `<name>(` substring scan misses.
+    # Feed a synthetic source through the SAME enumerator run() uses (_ast_call_sites_in) and require the
+    # spaced call to be counted; reverting the enumeration to substring matching drops it and fails here.
+    assertions += 1
+    _syn_src = ("x = _safe_key_names (extra)\n"          # spaced call: no literal '_safe_key_names(' token
+                "y = _sorted_key_names(k)\n")
+    _syn_hits = _ast_call_sites_in(_syn_src, "synthetic", {"_safe_key_names", "_sorted_key_names"})
+    if (("synthetic", 1) not in _syn_hits["_safe_key_names"]
+            or ("synthetic", 2) not in _syn_hits["_sorted_key_names"]
+            or "_safe_key_names(" in _syn_src.splitlines()[0]):   # the substring proxy genuinely cannot see it
+        fail("coverage enumeration is non-discriminating: a render-helper call written with whitespace "
+             "before '(' was not counted (a literal-token scan would miss it; the AST enumeration must not)")
     # Reconcile the vocabulary against the authoritative source: every `*_key_names` render helper DEFINED
     # in the three modules must be registered in _KEY_NAME_RENDER_TOKENS. A renamed or newly-added helper
     # absent from the vocabulary is drift (fail-closed), rather than silently dropping out of both the
