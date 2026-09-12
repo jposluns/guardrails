@@ -557,8 +557,14 @@ def main():
                "GIT_DIR=/tmp git reset --soft", "allow", cwd=rp)
         expect("(r13-3b) -C on a plain switch (allow form) now asks",
                "git -C /tmp switch other", "allow", cwd=rp)
-        expect("(r13-3c) --git-dir= on reset --hard asks",
-               "git --git-dir=/x reset --hard", "allow", cwd=rp)
+        # ROUND-6 FINDING 5 (supersedes the round-13 view-uncertainty ASK for this case): a DESTRUCTIVE
+        # discard under a --git-dir/GIT_DIR redirect to a repository that is NOT provably the session repo
+        # (here '/x' != rp/.git) destroys that OTHER repository's index/refs, which a session-worktree+index
+        # snapshot cannot capture, so it now DENIES rather than allow on a session-snapshot basis. Revert the
+        # finding-5 gitdir-redirect deny and this flips back to 'allow' (the old unsound session-snapshot
+        # allow that lost the redirected index). Same-repo --git-dir still allows (dir-e/dir-f below).
+        expect("(r13-3c-f5) --git-dir to a DIFFERENT repo on reset --hard now DENIES (finding 5)",
+               "git --git-dir=/x reset --hard", "deny", cwd=rp)
         # No regression: a plain non-destructive form with NO redirect and NO opt-out still ALLOWs on a dirty
         # tree (recovery-snapshot-backed), exactly as before Fix 3.
         expect("(r13-4a) plain reset --soft with no redirect still allows", "git reset --soft", "allow",
@@ -2014,6 +2020,98 @@ def main():
                 failures.append("(r3f8-pointer-text) the recovery pointer must advertise '^1' on an unborn "
                                 "HEAD (finding 8)")
 
+        # === ROUND-6 findings 3/4/6/7: fail-closed the git_discard forms that lost a redirected target =====
+        # A separate DIRTY target repo T the session cwd (repo, dirty) is NOT: the old code snapshotted the
+        # session cwd for these forms, whose ref would NOT contain T's discarded state. Each new DENY flips to
+        # 'allow' (the old unsound behaviour) if its fix is reverted, and no session-cwd ref is created.
+        try:
+            r6t = _init_repo(tmp / "r6-target")
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the round-6 target repo: {}".format(exc), file=sys.stderr)
+            return 2
+        (r6t / "file.txt").write_text("committed line\nr6 target dirty\n", encoding="utf-8")  # dirty T
+        r6tc = str(r6t)
+        # FINDING 3a: a lossy git discard INSIDE a subshell that cd'd to T loses T; the walk cannot model the
+        # subshell cwd -> DENY (was allow-with-a-session-cwd snapshot). No ref may land in the session repo.
+        _r6_sess_before = len(_recovery_refs(repo))
+        expect("(r6-f3-subshell) '(cd T && git restore)' whose subshell cd moves the target DENIES (finding 3)",
+               "(cd {} && git restore -- file.txt)".format(r6tc), "deny", cwd=rp)
+        if len(_recovery_refs(repo)) != _r6_sess_before:
+            failures.append("(r6-f3-subshell-noref) a denied subshell-redirected discard must NOT snapshot the "
+                            "session cwd (finding 3)")
+        # FINDING 3b: a WRAPPED git carrying a -C redirect to T loses T -> DENY (was allow-with-session-snap).
+        expect("(r6-f3-wrapper) 'env git -C T restore' (wrapped + redirect) DENIES (finding 3)",
+               "env git -C {} restore -- file.txt".format(r6tc), "deny", cwd=rp)
+        # CONTROL: a subshell/substitution or wrapper with NO redirect targets the FOREGROUND session cwd, so it
+        # is snapshot-backed and ALLOWS (the C6 design). These flip to DENY if finding-3 over-fires on depth
+        # alone rather than on a moved target, so they lock the fix's precision.
+        expect("(r6-f3-ctl-subshell-nocd) '(git reset --hard)' with no internal cd still allows (foreground cwd)",
+               "(git reset --hard)", "allow", cwd=rp)
+        expect("(r6-f3-ctl-substitution) 'echo $(git checkout -f)' still allows (runs at the foreground cwd)",
+               "echo $(git checkout -f)", "allow", cwd=rp)
+        expect("(r6-f3-ctl-wrap-noredirect) 'env git reset --hard' with no redirect still allows (session cwd)",
+               "env git reset --hard", "allow", cwd=rp)
+        # FINDING 4: an UNPARSEABLE (unquoted heredoc) discard carrying a -C to a DIFFERENT dirty repo, on a
+        # CLEAN session cwd, no longer allows on the clean-cwd basis -> DENY (was a silent allow at :3349).
+        r6clean = _init_repo(tmp / "r6-clean")   # session cwd is CLEAN
+        expect("(r6-f4-fallback-redirect) unparseable 'git -C Tdirty restore <<EOF' on a clean cwd DENIES "
+               "(finding 4)", "git -C {} restore -- file.txt <<EOF\nx\nEOF".format(r6tc), "deny",
+               cwd=str(r6clean))
+        # CONTROL: an unparseable lossy discard with NO redirect still allows on a clean cwd (no target moved).
+        expect("(r6-f4-ctl-noredirect) unparseable 'git checkout -- x <<EOF' with no redirect still allows",
+               "git checkout -- file.txt <<EOF\nx\nEOF", "allow", cwd=str(r6clean))
+        # FINDING 5: a --git-dir/GIT_DIR STAGED discard to a DIFFERENT repo destroys that repo's index, which a
+        # session snapshot cannot capture -> DENY (was allow-with-session-snap). (reset --hard case: r13-3c-f5.)
+        r6stg = _init_repo(tmp / "r6-staged")
+        (r6stg / "file.txt").write_text("committed line\nr6 staged\n", encoding="utf-8")
+        _git(r6stg, "add", "file.txt")   # staged content in T's index
+        expect("(r6-f5-gitdir-staged) 'git --git-dir=T/.git restore --staged' to a DIFFERENT repo DENIES "
+               "(finding 5)", "git --git-dir={}/.git restore --staged -- file.txt".format(str(r6stg)),
+               "deny", cwd=rp)
+        # FINDING 6: a staged-index commit-tree failure while distinct staged content is present must FAIL the
+        # snapshot (fail closed), not silently drop the staged payload. Fault-inject the staged commit-tree.
+        r6f6 = tmp / "r6-f6-staged"
+        r6f6.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(r6f6)], check=True, capture_output=True,
+                       text=True, timeout=30)
+        (r6f6 / "s.txt").write_text("committed\n", encoding="utf-8")
+        _git(r6f6, "add", "s.txt")
+        _git(r6f6, "commit", "-q", "-m", "seed", env_identity=True)
+        (r6f6 / "s.txt").write_text("STAGED payload\n", encoding="utf-8")
+        _git(r6f6, "add", "s.txt")                              # index != HEAD (staged)
+        (r6f6 / "s.txt").write_text("WORKTREE differs\n", encoding="utf-8")  # staged-only content at risk
+        _orig_rg6 = aiqt_hooks._recovery_git
+
+        def _faulty_staged_ct(repo, args, env_extra=None, timeout=10):
+            # fail ONLY the staged (index) snapshot commit-tree; the write-trees still succeed.
+            if args and args[0] == "commit-tree" and any("staged (index) snapshot" in a for a in args):
+                return subprocess.CompletedProcess(["git"], 1, "", "injected staged commit-tree failure")
+            return _orig_rg6(repo, args, env_extra=env_extra, timeout=timeout)
+
+        aiqt_hooks._recovery_git = _faulty_staged_ct
+        try:
+            _r6f6_res = aiqt_hooks._take_snapshot(str(r6f6), str(r6f6), "restore")
+        finally:
+            aiqt_hooks._recovery_git = _orig_rg6
+        if _r6f6_res[0] != "fail":
+            failures.append("(r6-f6-staged-ct) a failing staged (index) commit-tree with distinct staged "
+                            "content must FAIL the snapshot (fail closed), got {!r} (finding 6)"
+                            .format(_r6f6_res[0]))
+        # FINDING 7: a recovery snapshot taken against a redirected TARGET repo advertises restore commands
+        # bound to that repo ('git -C <target> ...'), not a bare form that would fail from the session cwd.
+        _r6f7 = aiqt_hooks._take_snapshot(r6tc, r6tc, "reset")
+        if _r6f7[0] != "ok":
+            failures.append("(r6-f7-snap) expected an ok target-repo snapshot for the pointer test, got {!r}"
+                            .format(_r6f7[0]))
+        else:
+            _ptr = aiqt_hooks._recovery_pointer(_r6f7[1])
+            if "git -C {}".format(r6tc) not in _ptr:
+                failures.append("(r6-f7-pointer-repo) the recovery pointer must bind its restore command to "
+                                "the target repo 'git -C {} ...' (finding 7); got {!r}".format(r6tc, _ptr))
+            if "restore it with 'git checkout " in _ptr:
+                failures.append("(r6-f7-pointer-bare) the recovery pointer must NOT advertise a bare "
+                                "'git checkout <ref>' that fails from another cwd (finding 7)")
+
         # === protected_line (prtbrn/artbr1): force-push to a protected ref + direct protected commit ===
         plg = aiqt_hooks.protected_line
 
@@ -2151,6 +2249,54 @@ def main():
         # (restoring ';' to the propagation set) and this flips to 'allow' (the failed switch wrongly exempts).
         pexpect("(pl-r3f5) switch missing; commit on main HEAD DENIES (';' does not gate switch success, "
                 "finding 5)", "git switch missing; git commit --allow-empty -m qa", "deny", cwd=plr)
+
+        # ROUND-6 FINDING 1 (B-class): the switch->commit exemption must hold ONLY on an UNBROKEN '&&' chain
+        # from the switch through the commit. A '&& ... ||' retains the recorded switch target across the '||'
+        # even though the commit runs when the switch FAILED (HEAD still on protected main), so it must DENY.
+        # Revert the sw_pure_and / non-'&&'-clears-switched_to gating and this flips to 'allow' (the retained
+        # exemption wrongly classifies the commit against the non-protected 'missing' the switch named).
+        pexpect("(pl-r6f1) 'switch missing && true || commit' on main HEAD DENIES (commit runs on switch "
+                "failure; exemption must not survive the '||', finding 1)",
+                "git switch missing && true || git commit --allow-empty -m x", "deny", cwd=plr)
+        # A '||' BEFORE the switch also lets the commit run without the switch ('x || switch && commit' runs
+        # the commit when x succeeds and the switch is skipped), so the switch never gates it -> DENY.
+        pexpect("(pl-r6f1b) 'true || switch -c feat && commit' DENIES (switch skipped when 'true' succeeds)",
+                "true || git switch -c feat && git commit --allow-empty -m x", "deny", cwd=plr)
+        # No regression: a pure '&&' chain through the commit still exempts it (lands on the switched branch).
+        pexpect("(pl-r6f1c) 'switch -c feat && true && commit' still ALLOWS (unbroken '&&' chain)",
+                "git switch -c feat && true && git commit --allow-empty -m x", "allow", cwd=plr)
+        # A new and-or list boundary (';') resets the pure-'&&' prefix, so 'x ; switch -c feat && commit' still
+        # exempts (the commit IS '&&'-gated on the switch within its own list).
+        pexpect("(pl-r6f1d) 'true ; switch -c feat && commit' still ALLOWS ('&&'-gated within its own list)",
+                "true ; git switch -c feat && git commit --allow-empty -m x", "allow", cwd=plr)
+
+        # ROUND-6 FINDING 2 (Lens E): an ANSI-C ($'...') heredoc delimiter must resolve to its LITERAL value,
+        # so the lexer ends the heredoc body at the real EOF line and a FOLLOWING command stays executable
+        # (previously '$' was ordinary, building the delimiter '$EOF' that never matched, so every following
+        # line was swallowed as body and a hidden --no-verify commit / force-push escaped every guard).
+        _f2cmd = "cat <<$'EOF'\nnote body\nEOF\ngit push --force origin main"
+        try:
+            _f2segs = [s.argv for s in aiqt_hooks._lex_command(_f2cmd) if s.argv]
+        except ValueError:
+            _f2segs = None
+        if _f2segs != [["cat"], ["git", "push", "--force", "origin", "main"]]:
+            failures.append("(pl-r6f2-lex) an ANSI-C $'EOF' heredoc delimiter must resolve to EOF, ending the "
+                            "body at the real EOF line so the following 'git push' is a visible segment; got "
+                            "{!r} (finding 2)".format(_f2segs))
+        # And the guard now SEES and DENIES the previously-hidden protected force-push.
+        pexpect("(pl-r6f2-guard) a force-push hidden after an ANSI-C $'EOF' heredoc is now seen and DENIES "
+                "(finding 2)", _f2cmd, "deny", cwd=plr)
+
+        # CLAUDE-F1: the protected_line raw FALLBACK strips QUOTED-heredoc bodies before scanning, so a
+        # 'git push --force ... main' that appears only inside a quoted heredoc body (literal data, here forced
+        # to the fallback by a process substitution the lexer cannot parse) no longer FALSE-DENIES. Revert the
+        # _strip_quoted_heredoc_bodies pass in the fallback and this flips to 'deny' (the body over-matches).
+        pexpect("(pl-cf1) push-force inside a QUOTED heredoc body (fallback) does not false-deny (CLAUDE-F1)",
+                "cat <(echo x) <<'EOF'\ngit push -f origin main\nEOF", "allow", cwd=plr)
+        # DISCRIMINATION: a REAL force-push OUTSIDE the quoted heredoc body, on the same unparseable command,
+        # is preserved by the body-strip and still DENIES (no under-deny introduced).
+        pexpect("(pl-cf1-outside) a real force-push OUTSIDE the quoted heredoc body still DENIES (CLAUDE-F1)",
+                "git push -f origin main <(echo x)", "deny", cwd=plr)
 
         # Probe failure is fail-to-ASK for both surfaces (mocked like _tree_is_clean above).
         _orig_head = aiqt_hooks._head_branch
@@ -5491,6 +5637,45 @@ def main():
                      "companion store DENIES (registry freeze precedes companion allow; finding 2)",
                      "deny", "Write", str(cs_reg), cs_sess)
             cs_reg.unlink()
+            # --- CLAUDE-F2 (round-6): a frozen-floor TREE entry with a symlink BELOW it into the declared
+            # store. A covered Write to '<tree>/sub/x' where '<tree>/sub' symlinks into the store REALPATHS
+            # into the store (so the realpath-based floor match misses it and the companion allow WOULD fire),
+            # but its LEXICAL path is inside the frozen tree, so the new lexical-tree match DENIES it. Revert
+            # _wrtscp_lexical_tree_hit and this flips to 'allow' (the symlink-below-a-tree-entry escape).
+            cs_set([store_root])
+            _f2tree = cs_sess / ".aiqt" / "frozen-tree"
+            _f2tree.mkdir(parents=True, exist_ok=True)          # a real dir so the tree entry resolves
+            (cs_store / "frozensubdir").mkdir(parents=True, exist_ok=True)
+            (cs_sess / ".aiqt" / "frozen.json").write_text(
+                json.dumps({"version": 1, "frozen": [".aiqt/frozen-tree/"]}), encoding="utf-8")
+            _f2link = _f2tree / "sub"
+            if _f2link.is_symlink() or _f2link.exists():
+                _f2link.unlink()
+            os.symlink(str(cs_store / "frozensubdir"), str(_f2link))  # a symlink BELOW the frozen tree entry
+            _f2target = str(_f2link / "file.md")                 # lexical: inside the frozen tree
+            # Sanity: the REALPATH floor match MISSES it (target resolves out into the store), so without the
+            # lexical check the companion allow would fire - this is what makes the case discriminate.
+            _f2root_c = os.path.realpath(str(cs_sess))
+            if aiqt_hooks._wrtscp_target_matches([("tree", ".aiqt/frozen-tree")],
+                                                 os.path.realpath(_f2target), _f2root_c) is not False:
+                failures.append("(ws-cf2-setup) the realpath floor match must MISS the symlinked-out tree "
+                                "target, else CLAUDE-F2 does not discriminate")
+            wsexpect("(ws-cf2-tree-symlink) a covered Write whose LEXICAL path is inside a frozen-floor TREE "
+                     "entry but whose symlink resolves OUT into the declared store DENIES (CLAUDE-F2 lexical "
+                     "tree match)", "deny", "Write", _f2target, cs_sess)
+            # CONTROL: a NON-frozen sibling tree with the same symlink-into-store shape still ALLOWS as a
+            # companion write (the lexical match is scoped to frozen TREE entries only, no over-deny).
+            _f2ok = cs_sess / ".aiqt" / "open-tree"
+            _f2ok.mkdir(parents=True, exist_ok=True)
+            _f2oklink = _f2ok / "sub"
+            if _f2oklink.is_symlink() or _f2oklink.exists():
+                _f2oklink.unlink()
+            os.symlink(str(cs_store / "frozensubdir"), str(_f2oklink))
+            wsexpect("(ws-cf2-open-ctl) a symlink into the store BELOW a NON-frozen tree still ALLOWS "
+                     "(companion write; lexical match is frozen-tree-scoped)",
+                     "allow", "Write", str(_f2oklink / "file.md"), cs_sess)
+            _f2link.unlink(); _f2oklink.unlink()
+            (cs_sess / ".aiqt" / "frozen.json").unlink()
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

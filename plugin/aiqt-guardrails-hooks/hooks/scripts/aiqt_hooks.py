@@ -603,6 +603,45 @@ def _parse_heredoc_delim(command, at, n):
             delim_chars.append(command[j + 1])
             j += 2
             continue
+        if c == "$" and j + 1 < n and command[j + 1] == "'":
+            # ROUND-6 FINDING 2 (Lens E). ANSI-C quoting $'...' as (part of) a heredoc delimiter word.
+            # bash ANSI-C-expands the word, so <<$'EOF' resolves to the LITERAL delimiter EOF, and its body
+            # is literal (quoted). Treating '$' as an ordinary char (the pre-round-6 bug) built the delimiter
+            # "$EOF", which never matched the real EOF line, so the lexer SWALLOWED every following executable
+            # line as heredoc body and hid a later --no-verify commit / lossy discard. We resolve only the
+            # ESCAPE-FREE content to its literal; a backslash inside the ANSI-C body is a form this parser does
+            # not fully decode, so it returns None (the FAIL-CLOSED backstop: the caller then raises/scans the
+            # remainder as still-executable rather than swallowing it under a guessed delimiter).
+            quoted = True
+            k = command.find("'", j + 2)
+            if k < 0:
+                return None
+            frag = command[j + 2:k]
+            if "\\" in frag:
+                return None  # an ANSI-C escape we do not decode -> fail closed (scan the remainder)
+            delim_chars.append(frag)
+            j = k + 1
+            continue
+        if c == "$" and j + 1 < n and command[j + 1] == '"':
+            # $"..." locale translation as (part of) a heredoc delimiter word: bash quote-removal yields the
+            # inner text (the C-locale identity), so <<$"EOF" resolves to the literal delimiter EOF. Parsed
+            # like a double-quoted fragment (honouring \" \\ \$ \` escapes) so it resolves to its literal
+            # content; a form it cannot close returns None (fail closed, per the ANSI-C branch above).
+            quoted = True
+            k = j + 2
+            frag = []
+            while k < n and command[k] != '"':
+                if command[k] == "\\" and k + 1 < n and command[k + 1] in '"\\$`':
+                    frag.append(command[k + 1])
+                    k += 2
+                    continue
+                frag.append(command[k])
+                k += 1
+            if k >= n:
+                return None
+            delim_chars.append("".join(frag))
+            j = k + 1
+            continue
         delim_chars.append(c)           # an ordinary unquoted character
         j += 1
     if not started:
@@ -3296,6 +3335,22 @@ def _segment_redirect_worktree(tokens, cwd):
     return None
 
 
+# ROUND-6 FINDING 4. Raw indicators, on the UNPARSEABLE fallback path only, that a lossy git command's
+# target is NOT the session cwd but a redirected worktree/repository the guard cannot resolve (it could not
+# even parse the command): a `git -C <dir>`, a --git-dir/--work-tree redirect, a leading/ambient
+# GIT_DIR=/GIT_WORK_TREE= assignment, or a cd/pushd in the chain. When any is present the session-cwd
+# cleanliness/snapshot basis is UNSOUND (a clean session cwd does not prove the redirected target clean, and
+# a session snapshot would not capture it), so the fallback DENIES-and-educates rather than allow on that
+# basis. Conservative and over-matching (a keyword in prose over-denies, the safe direction), mirroring the
+# other raw fallbacks; it is consulted only after _raw_has_lossy_git has already flagged the command in scope.
+_RAW_DISCARD_REDIRECT_RE = re.compile(
+    r"(?i)(?:^|[\s'\";&|()])(?:cd|pushd)(?=$|[\s'\";&|()])"
+    r"|(?:^|[\s'\";&|()])-C(?=[\s'\"=]|$)"
+    r"|--git-dir\b|--work-tree\b"
+    r"|(?:^|[\s'\";&|()])GIT_DIR="
+    r"|(?:^|[\s'\";&|()])GIT_WORK_TREE=")
+
+
 def _git_discard_fallback(command, cwd=None):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): we cannot
     segment safely, so scan the RAW string. The opt-out is NOT consulted here: the guard cannot parse the
@@ -3317,6 +3372,22 @@ def _git_discard_fallback(command, cwd=None):
     the failure surfaced."""
     if not _raw_has_lossy_git(command):
         return _allow()  # no git, or no recognized work-losing verb: the true boundary
+    if _RAW_DISCARD_REDIRECT_RE.search(command):
+        # ROUND-6 FINDING 4: the unparseable command carries a target redirect (a -C/--git-dir/--work-tree,
+        # a leading/ambient GIT_DIR=/GIT_WORK_TREE=, or a cd/pushd), so its discard target is NOT provably the
+        # session cwd. A clean session cwd cannot prove the redirected target clean and a session snapshot
+        # would not capture it, so it must NOT allow on that basis: DENY-and-educate. Re-issue it as a plain,
+        # parseable 'git <verb>' command run FROM the target repository, or commit or stash first.
+        return _deny(
+            "AIQT rule prsunc (preserve-uncommitted-work): the command could not be parsed by the shell "
+            "lexer and it names a git work-losing verb together with a target redirect (a -C/--git-dir/"
+            "--work-tree, a GIT_DIR=/GIT_WORK_TREE= assignment, or a cd/pushd), so its discard targets a "
+            "worktree or repository this guard cannot resolve; a clean session directory does not prove that "
+            "target clean and a session snapshot would not capture it, so this discard could be "
+            "unrecoverable and is denied rather than run. Re-issue it as a plain, parseable 'git <verb>' "
+            "command from the target repository, or commit or stash your work first. {}".format(_DISCARD_ALTS),
+            "AIQT guardrail: denied an unparseable git discard carrying a target redirect this guard cannot "
+            "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
     base = cwd if isinstance(cwd, str) and cwd else None
     snap = None
     if base is not None and _tree_is_clean(base) is not True:  # dirty or probe-uncertain: snapshot first
@@ -3604,8 +3675,16 @@ def _take_snapshot(repo, top, verb):
         tmp_index = os.path.join(tmpdir, "index")
         # Seed the temp index from the REAL index (so staged content is the baseline). git add --all then
         # overlays the worktree (tracked-modified) and untracked files; ignored files are excluded.
-        real_index = _recovery_git(
-            repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], timeout=5).stdout.strip()
+        # ROUND-6 FINDING 6 (subprocess-status sweep): the index-path rev-parse status is now CHECKED. A
+        # non-zero return means the real index could not be located to seed the temp index, so a staged-only
+        # snapshot would be built over an EMPTY index (write-tree would "succeed" on it and silently drop
+        # staged-only content); fail closed so the caller DENIES rather than advertise a snapshot missing it.
+        ri = _recovery_git(
+            repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], timeout=5)
+        if ri.returncode != 0:
+            return ("fail", "the repository index path could not be resolved to seed the staged snapshot "
+                            "(git rev-parse --git-path index failed)")
+        real_index = ri.stdout.strip()
         if real_index and os.path.exists(real_index):
             shutil.copyfile(real_index, tmp_index)  # else: git creates a fresh temp index on add --all
         env = {"GIT_INDEX_FILE": tmp_index}
@@ -3649,8 +3728,17 @@ def _take_snapshot(repo, top, verb):
                 sct_args += ["-p", parent]
             sct_args += ["-m", "aiqt-guardrails staged (index) snapshot before git {}".format(verb)]
             sct = _recovery_git(repo, sct_args, timeout=10)
-            if sct.returncode == 0 and sct.stdout.strip():
-                staged_commit = sct.stdout.strip()
+            # ROUND-6 FINDING 6: the staged (index) commit-tree status is now CHECKED. Distinct staged-only
+            # content EXISTS here (staged_tree != tree, the worktree overlay), and it lives ONLY on this
+            # commit's tree, so if commit-tree FAILS the staged tree object is unreferenced (GC-eligible) and
+            # the recovery ref would NOT preserve the staged-only payload. Advertising the snapshot anyway
+            # would falsely claim a staged-only discard recoverable, so FAIL CLOSED (the caller DENIES),
+            # matching the round-3 finding-3 handling of the pure-index write-tree failure.
+            if sct.returncode != 0 or not sct.stdout.strip():
+                return ("fail", "the staged (index) snapshot commit could not be created (git commit-tree on "
+                                "the pure index failed) while distinct staged content is present, so a "
+                                "staged-only discard would be unrecoverable")
+            staged_commit = sct.stdout.strip()
         commit_args = ["commit-tree", tree]
         if parent:
             commit_args += ["-p", parent]  # parent HEAD when present; an unborn HEAD makes a rootless snapshot
@@ -3683,8 +3771,13 @@ def _take_snapshot(repo, top, verb):
     # parent. Record which, so the recovery pointer advertises the parent that actually resolves to the
     # preserved staged content (previously it always said '^2', which does not exist on an unborn HEAD).
     staged_pointer = ("^2" if parent else "^1") if staged_commit else ""
-    return ("ok", {"ref": ref, "sha": sha, "classes": sorted(classes),
-                   "restore": "git checkout {} -- :/".format(ref), "staged": bool(staged_commit),
+    # ROUND-6 FINDING 7: the recovery ref lives in the TARGET repository's ref store (`top`), which may NOT be
+    # the session cwd (a -C/--work-tree redirect, or a resolved cd target). Bind every advertised recovery
+    # command to that repo with `git -C <top> ...`, so 'git checkout <ref> -- :/' run from a DIFFERENT session
+    # cwd no longer fails to find the ref. `top` is the resolved toplevel; -C accepts it, and ref operations
+    # resolve identically from anywhere in the repo. _recovery_pointer reads info['repo'] for the same binding.
+    return ("ok", {"ref": ref, "sha": sha, "classes": sorted(classes), "repo": top,
+                   "restore": "git -C {} checkout {} -- :/".format(top, ref), "staged": bool(staged_commit),
                    "staged_pointer": staged_pointer})
 
 
@@ -3769,15 +3862,22 @@ def _recovery_pointer(info):
     # HEAD) so the pointer names the parent that actually resolves to the preserved staged content; default
     # to '^2' for a snapshot taken before this field existed.
     sp = info.get("staged_pointer") or "^2"
+    # ROUND-6 FINDING 7: bind every advertised recovery command to the TARGET repository the snapshot was
+    # taken against (info['repo'], the resolved toplevel), so a command copied from an ASK/DENY reason and run
+    # from a DIFFERENT session cwd still finds the ref (a bare 'git checkout <ref> ...' from session A fails
+    # when the ref lives in the redirected target T). `-C <repo>` is prefixed on the staged-recover and the
+    # isolated-branch forms; info['restore'] already carries it (built in _take_snapshot). Snapshots taken
+    # before this field existed fall back to a bare form (no regression).
+    repo_c = " -C {}".format(info["repo"]) if info.get("repo") else ""
     staged = (" The pre-command STAGED (index) state is preserved as the ref's {1} parent (recover a file "
-              "with 'git show {0}{2}:<path>' or 'git checkout {0}{2} -- <path>').".format(
-                  info["ref"], "first" if sp == "^1" else "second", sp)
+              "with 'git{3} show {0}{2}:<path>' or 'git{3} checkout {0}{2} -- <path>').".format(
+                  info["ref"], "first" if sp == "^1" else "second", sp, repo_c)
               if info.get("staged") else "")
     return ("A pre-command recovery snapshot was saved ({}) at ref {}; restore it with '{}' (overlay mode: "
             "it brings back modified and new content but does NOT re-apply a file deletion recorded in the "
-            "snapshot), or for an exact, deletion-inclusive restore put it on an isolated branch with 'git "
+            "snapshot), or for an exact, deletion-inclusive restore put it on an isolated branch with 'git{} "
             "switch -c aiqt-recover-<id> {}'.{}".format(
-                covered, info["ref"], info["restore"], info["ref"], staged))
+                covered, info["ref"], info["restore"], repo_c, info["ref"], staged))
 
 
 def _record_stash_recovery(repo):
@@ -3932,6 +4032,98 @@ def _segment_has_gitdir_redirect(tokens):
     return False
 
 
+def _segment_gitdir_value(tokens):
+    """The --git-dir / leading GIT_DIR= value (raw, unresolved) of a git segment, or None. Reads the leading
+    GIT_DIR= env assignment and the git global --git-dir/--git-dir= option before the subcommand; last-wins
+    for repeats, mirroring the shell/git. Used only to decide whether a --git-dir redirect names the SESSION
+    repository (round-6 finding 5)."""
+    cw = _command_word_index(tokens)
+    val = None
+    for tok in tokens[:cw]:
+        if tok.startswith("GIT_DIR="):
+            val = tok[len("GIT_DIR="):]  # last-wins
+    i = cw + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            break
+        if tok == "--git-dir":
+            if i + 1 < n:
+                val = tokens[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--git-dir="):
+            val = tok[len("--git-dir="):]
+            i += 1
+            continue
+        if "=" not in tok and tok in _GIT_ARG_OPTS:
+            i += 2
+            continue
+        i += 1
+    return val
+
+
+def _gitdir_is_session_repo(tokens, cwd):
+    """ROUND-6 FINDING 5. True/False/None: whether a segment's --git-dir/GIT_DIR redirect names the SAME git
+    repository as the session cwd, so a session-cwd worktree+index snapshot WOULD capture what the redirected
+    command discards. Compares the realpath of the redirected git-dir (resolved against cwd) to the session
+    repo's own absolute git dir (via the scrubbed rev-parse primitive, so an ambient decoy cannot redirect the
+    probe). None when either side cannot be resolved (a fault) - the caller then fails closed. A --git-dir to a
+    DIFFERENT repo means the destroyed INDEX/refs live elsewhere than the session worktree the snapshot
+    captures, so a destructive discard there is unrecoverable via a session snapshot and must DENY."""
+    val = _segment_gitdir_value(tokens)
+    if not val:
+        return None
+    base = cwd if isinstance(cwd, str) and cwd else None
+    if base is None:
+        return None
+    gd = val if os.path.isabs(val) else os.path.join(base, val)
+    try:
+        gd_c = os.path.realpath(gd)
+    except (OSError, ValueError):
+        return None
+    try:
+        r = _recovery_git(base, ["rev-parse", "--absolute-git-dir"], timeout=5)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    try:
+        sess_c = os.path.realpath(r.stdout.strip())
+    except (OSError, ValueError):
+        return None
+    return gd_c == sess_c
+
+
+def _wrapped_git_index(tokens):
+    """ROUND-6 FINDING 3. The index of the first STANDALONE 'git' command token (its basename is 'git') in a
+    segment whose own command word is NOT git, i.e. a WRAPPED git invocation (env/sudo/xargs/timeout/... git
+    <verb>), or None. Matches a real token equal to 'git' (or '/usr/bin/git'), so a 'git <verb>' buried inside
+    a single QUOTED argument ('sh -c "git reset --hard"', 'eval "git reset"') has no standalone git token and
+    is NOT matched here (that fragmented/quoted form stays the disclosed best-effort residual). Purely lexical."""
+    for i, tok in enumerate(tokens):
+        if tok.rsplit("/", 1)[-1] == "git":
+            return i
+    return None
+
+
+def _segment_carries_target_redirect(tokens):
+    """ROUND-6 FINDING 3. True when a segment carries a git TARGET-redirect token: a '-C', a
+    --git-dir/--work-tree (bare or '='-attached), or a leading/inline GIT_DIR=/GIT_WORK_TREE= assignment. Used
+    only for a WRAPPED git discard the walk cannot resolve as a depth-0 literal-git segment: such a redirect
+    moves the discard OFF the session cwd, so the session-cwd best-effort snapshot cannot capture it and the
+    discard fails closed (DENY). A wrapped discard with NO redirect acts on the effective cwd, which that
+    best-effort snapshot covers, so it is not flagged here. Conservative token scan (over-detection only
+    over-denies)."""
+    for tok in tokens:
+        if tok == "-C" or tok.startswith("--git-dir") or tok.startswith("--work-tree"):
+            return True
+        if tok.startswith("GIT_DIR=") or tok.startswith("GIT_WORK_TREE="):
+            return True
+    return False
+
+
 def _nonpristine_discard_actions(segments, cwd):
     """ROUND-3 FINDINGS 1 and 2. Walk a NON-PRISTINE in-scope command's segments and resolve, for each
     VISIBLE git discard segment, the effective worktree/repository the discard ACTUALLY acts on, so the
@@ -3943,9 +4135,15 @@ def _nonpristine_discard_actions(segments, cwd):
     that cwd. Returns a dict:
       { 'snapshot_bases': [dir, ...]  # distinct worktree dirs a snappable destructive discard acts on
         'stash_ops':      [(dir, op)] # each stash drop/clear paired with the repo dir it acts on
-        'unresolved':     bool        # a visible discard whose target could NOT be resolved with certainty
+        'unresolved':     bool        # a visible depth-0 discard whose target could NOT be resolved
+        'hidden':         bool        # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve to a
+                                      #   snapshottable target - a git inside a subshell whose cwd a prior
+                                      #   internal cd moved, or a WRAPPED git (env/sudo/... git) carrying a
+                                      #   -C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE= redirect - so its
+                                      #   target cannot be snapshotted with certainty
         'saw_actionable': bool }      # any visible worktree-destructive or stash drop/clear discard
-    A caller with unresolved=True DENIES (fail closed: it cannot snapshot/preserve the exact target). Where a
+    A caller with unresolved=True OR hidden=True DENIES (fail closed: it cannot snapshot/preserve the exact
+    target). Where a
     destructive segment acts on the plain session cwd (no cd, no redirect) that cwd is added to
     snapshot_bases so it is snapshotted through the same path; where no actionable discard is visible
     (obfuscated verbs, soft/ref-level forms, or an unknown cwd) saw_actionable is False and the caller keeps
@@ -3960,6 +4158,10 @@ def _nonpristine_discard_actions(segments, cwd):
     unresolved = False
     saw_actionable = False
     targets_session = False
+    hidden = False   # ROUND-6 FINDING 3: a lossy discard the walk cannot resolve as a depth-0 literal-git
+    # segment (a subshell-internal cd moved its target, or a WRAPPED git carries a target redirect) -> DENY.
+    subshell_cd_seen = False  # a cd/pushd occurred at depth>0 in the current subshell nesting: a git discard
+    # then running inside that subshell acts on a moved, un-modelled cwd. Reset when depth returns to 0.
 
     def _add(seq, item):
         if item not in seq:
@@ -3967,12 +4169,21 @@ def _nonpristine_discard_actions(segments, cwd):
 
     for tokens, sep in segments:
         cw = _command_word(tokens)
-        if depth == 0 and cw == "git":
+        if cw == "git":
             sub, args = _git_sub_and_args(tokens)
             if sub is not None:
                 role, _kind = _discard_role(sub, args)
                 if role != "allow":
-                    if sub in _SNAPSHOTTABLE_VERBS:
+                    if depth != 0 and subshell_cd_seen:
+                        # ROUND-6 FINDING 3: a lossy git discard inside a subshell '( ... )' where a cd/pushd
+                        # earlier in that subshell moved the cwd the walk does not model (e.g.
+                        # '(cd T && git restore -- f)'), so its target cannot be resolved and the session
+                        # snapshot would not capture it -> fail closed (the caller denies). A subshell/command
+                        # substitution with NO internal cd runs at the foreground cwd, so it falls through to
+                        # the normal resolution below and is snapshot-backed there (the C6 design).
+                        hidden = True
+                        saw_actionable = True
+                    elif sub in _SNAPSHOTTABLE_VERBS:
                         saw_actionable = True
                         if not eff_certain:
                             unresolved = True
@@ -4020,14 +4231,39 @@ def _nonpristine_discard_actions(segments, cwd):
                 cd_happened = True
             else:                                      # ';' or '||': cd success does not gate the next
                 eff_certain = False
+        elif cw in ("cd", "pushd", "popd"):
+            # a cd/pushd at depth>0 (a subshell-internal cd, e.g. '(cd T && ...)'): the walk does not model
+            # the subshell's cwd, so note it, and a later same-subshell git discard fails closed (finding 3).
+            subshell_cd_seen = True
+        else:
+            # ROUND-6 FINDING 3: a segment whose command word is neither git nor a cd-family builtin. A
+            # STANDALONE 'git' token here is a WRAPPED git discard (env/sudo/xargs/timeout/... git <verb>).
+            # When it carries a target redirect (-C/--git-dir/--work-tree/GIT_DIR=/GIT_WORK_TREE=), or runs
+            # inside a subshell whose cwd a prior internal cd moved, its target is off the session cwd (or
+            # unmodellable) and the session snapshot would not capture it, so it cannot be resolved+snapshotted
+            # -> fail closed. A wrapped discard with NO redirect and no moved-subshell-cwd acts on the effective
+            # cwd, which the best-effort session snapshot covers, so it is NOT flagged (e.g. 'env git reset
+            # --hard', or '$(echo git checkout -f)' which runs at the foreground cwd). A git verb
+            # fragmented/quoted into a single token (no standalone 'git') stays the disclosed best-effort residual.
+            gi = _wrapped_git_index(tokens)
+            if gi is not None:
+                wsub, wargs = _git_sub_and_args(tokens[gi:])
+                if wsub is not None:
+                    wrole, _wk = _discard_role(wsub, wargs)
+                    if wrole != "allow" and (_segment_carries_target_redirect(tokens)
+                                             or (depth != 0 and subshell_cd_seen)):
+                        hidden = True
+                        saw_actionable = True
         if sep == "(":
             depth += 1
         elif sep == ")":
             depth = max(0, depth - 1)
+            if depth == 0:
+                subshell_cd_seen = False   # left the subshell nesting: its internal cd no longer applies
 
     if targets_session and session_cwd is not None:
         _add(snapshot_bases, session_cwd)              # a plain session-cwd discard: snapshot the cwd too
-    return {"snapshot_bases": snapshot_bases, "stash_ops": stash_ops,
+    return {"snapshot_bases": snapshot_bases, "stash_ops": stash_ops, "hidden": hidden,
             "unresolved": unresolved, "saw_actionable": saw_actionable}
 
 
@@ -4186,6 +4422,23 @@ def git_discard(data):
                 "your work first. {}".format(kind, _DISCARD_ALTS),
                 "AIQT guardrail: denied a compound/redirected git discard whose target this guard cannot "
                 "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
+        if actions["hidden"]:
+            # ROUND-6 FINDING 3: a lossy discard the walk could not resolve as a depth-0 literal-git segment
+            # (inside a subshell '( ... )', or a WRAPPED 'git' carrying a -C/--git-dir/--work-tree/GIT_DIR=/
+            # GIT_WORK_TREE= redirect off the session cwd). Its target cannot be snapshotted with certainty and
+            # the best-effort session-cwd snapshot would not capture it, so it fails closed: DENY-and-educate
+            # (re-issue it as a plain, unwrapped 'git <verb>' command from the target repository).
+            return _deny(
+                "AIQT rule prsunc (preserve-uncommitted-work): {} runs inside a subshell, or as a wrapped "
+                "'git' invocation (env/sudo/... git) carrying a -C/--git-dir/--work-tree/GIT_DIR=/"
+                "GIT_WORK_TREE= redirect, so its effective target worktree or repository is off the session "
+                "directory and this guard cannot resolve or snapshot it with certainty; denied rather than "
+                "run on a possibly unrecoverable discard. Re-issue it as a plain, unwrapped 'git <verb>' "
+                "command from the target repository, or commit or stash your work first. {}"
+                .format(kind, _DISCARD_ALTS),
+                "AIQT guardrail: denied a subshell/wrapped-and-redirected git discard whose target this guard "
+                "cannot resolve to snapshot (rule prsunc); run it unwrapped from the target repo, or commit or "
+                "stash first.")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo whose
         # stash cannot be preserved), so a `git -C T stash clear` / `git stash clear; :` no longer notes a
         # recovery that omits the cleared stash (round-3 finding 2).
@@ -4262,6 +4515,27 @@ def git_discard(data):
         # case (unreadable from the command) keeps its disclosed best-effort session-cwd snapshot.
         redir_wt = None if ambient_override else _segment_redirect_worktree(pristine, cwd_base)
         destructive = sub in _SNAPSHOTTABLE_VERBS and role != "allow"
+        # ROUND-6 FINDING 5: a destructive discard carrying a --git-dir/GIT_DIR redirect (which does NOT move
+        # the worktree, so redir_wt is None and the code below would snapshot the SESSION worktree) destroys
+        # the REDIRECTED repository's INDEX/refs - which a session-worktree+index snapshot does NOT capture -
+        # when that git-dir names a DIFFERENT repository than the session cwd (e.g. 'git --git-dir=T/.git
+        # restore --staged'). Resolving the worktree alone cannot identify the redirected index, so a
+        # --git-dir staged/worktree discard whose git-dir is not PROVABLY the session repo DENIES rather than
+        # allow-note a session snapshot lacking that index. A --git-dir naming the SAME repo as cwd (the
+        # session index IS the one discarded) still allows via the session snapshot below (dir-e).
+        if destructive and _segment_has_gitdir_redirect(pristine):
+            if _gitdir_is_session_repo(pristine, cwd_base) is not True:
+                return _deny(
+                    "AIQT rule prsunc (preserve-uncommitted-work): {} carries a --git-dir/GIT_DIR redirect to "
+                    "a repository this guard cannot prove is the session repository, so the index and refs "
+                    "the command would discard live in a DIFFERENT repository than the session worktree; a "
+                    "session snapshot cannot capture that redirected index, so this discard could be "
+                    "unrecoverable and is denied rather than run. Re-issue it as a plain 'git -C <repo> "
+                    "<verb>' command run from the target repository, or commit or stash your work first. {}"
+                    .format(kind or "a git work-losing verb", _DISCARD_ALTS),
+                    "AIQT guardrail: denied a --git-dir/GIT_DIR-redirected git discard whose repository this "
+                    "guard cannot resolve to snapshot (rule prsunc); run it from the target repo, or commit "
+                    "or stash first.")
         # ROUND-3 FINDING 2: a redirected/ambient 'git stash drop'/'clear' must PRESERVE the stash of the
         # repository it actually clears (drop/clear is NOT reflog-recoverable afterwards) or DENY when that
         # repository cannot be resolved. stash is not snapshottable, so the destructive/worktree logic below
@@ -5047,11 +5321,20 @@ def _protected_line_fallback(command):
     An apparent git commit is NOT hazard-class (a direct commit is recoverable and server-side protection is
     the real gate), so it ALLOWS with a note. Anything else ALLOWS (the true boundary). It OVER-MATCHES by
     design (a keyword in prose or an unrelated '+' or '-d' token trips it), the documented posture of the
-    sibling fallbacks (_diff_source_fallback, _git_discard_fallback)."""
-    if _RAW_PUSH_RE.search(command) and (_RAW_PUSH_FORCE_RE.search(command)
-                                         or _RAW_PUSH_DELETE_RE.search(command)
-                                         or _RAW_PUSH_MIRRORCFG_RE.search(command)):
-        named = " a protected branch" if _RAW_PROTECTED_RE.search(command) else " a target this guard cannot read"
+    sibling fallbacks (_diff_source_fallback, _git_discard_fallback).
+
+    CLAUDE-F1 (round-6): the raw scans run over the command with QUOTED-heredoc bodies STRIPPED (the same
+    _strip_quoted_heredoc_bodies pass git_discard's unconditional raw scan uses), so a 'git push --force ...'
+    or a branch-deletion spelling that appears only INSIDE a quoted heredoc body (literal data, e.g. a
+    'cat <(x) <<'EOF' ... EOF' whose process substitution forced this fallback) no longer produces a
+    false-positive DENY. It is body-STRIP only: a real force-push/deletion OUTSIDE a quoted heredoc body is
+    preserved verbatim and still DENIES, and an UNQUOTED heredoc body (which interpolates) is not stripped, so
+    no under-deny is introduced (the strip is conservative: on any ambiguity the text is left in place)."""
+    scan = _strip_quoted_heredoc_bodies(command)
+    if _RAW_PUSH_RE.search(scan) and (_RAW_PUSH_FORCE_RE.search(scan)
+                                      or _RAW_PUSH_DELETE_RE.search(scan)
+                                      or _RAW_PUSH_MIRRORCFG_RE.search(scan)):
+        named = " a protected branch" if _RAW_PROTECTED_RE.search(scan) else " a target this guard cannot read"
         return _deny(
             "AIQT rule prtbrn (protected-branch-integrity): this command could not be fully parsed by the "
             "shell lexer (unbalanced quotes) or hides git under a command-word wrapper, and it appears to "
@@ -5060,7 +5343,7 @@ def _protected_line_fallback(command):
             "Re-issue it as a plain, parseable, non-force git command. {}".format(named, _PROTECTED_ALTS),
             "AIQT guardrail: denied an apparent force-push or branch deletion this guard cannot fully parse "
             "(rule prtbrn, fail-safe); push to a feature branch and merge on green.")
-    if _RAW_COMMIT_RE.search(command):
+    if _RAW_COMMIT_RE.search(scan):
         return _allow_note(
             "AIQT guardrail (rule artbr1, branch-and-merge-on-green): the command could not be parsed by the "
             "shell lexer and it appears to run git commit; this guard cannot prove the commit lands off the "
@@ -5135,7 +5418,25 @@ def protected_line(data):
     # branch instead. This is a deliberate safe-direction over-deny for the ';' case (the guard cannot prove
     # a bare-';' switch succeeded); re-issue the switch and commit joined by '&&' to exempt it.
     switched_to = None
-    for tokens, _sep in segments:
+    # ROUND-6 FINDING 1 (B-class). The switch->commit exemption holds ONLY when the commit is UNCONDITIONALLY
+    # gated on the switch's success: an unbroken '&&' chain from the start of the switch's and-or list through
+    # the commit. `sw_pure_and` tracks whether the CURRENT and-or list has had only '&&' separators so far
+    # (True at a list boundary ';'/'&'/newline, cleared by any '||'/'|'/'|&'), so a switch is recorded only
+    # when it is itself guaranteed to run (a pure '&&' prefix) AND is '&&'-joined to what follows; and
+    # switched_to is CLEARED the moment a non-'&&' separator precedes a later segment, because then the commit
+    # can run despite a failed/absent switch ('switch && true || commit', 'switch ; commit',
+    # 'x || switch && commit'). Fail toward protected: a cleared exemption classifies the commit against the
+    # pre-command (possibly protected) HEAD, which DENIES when that HEAD is protected.
+    sw_pure_and = True
+    for _idx, (tokens, _sep) in enumerate(segments):
+        prev_sep = segments[_idx - 1][1] if _idx > 0 else None
+        if prev_sep is not None:
+            if prev_sep in (";", "&", ""):     # a new and-or list begins: a prior switch cannot gate it
+                sw_pure_and = True
+                switched_to = None
+            elif prev_sep != "&&":             # '||'/'|'/'|&': the chain no longer requires the switch
+                sw_pure_and = False
+                switched_to = None
         if _command_word(tokens) != "git":
             continue
         saw_git = True
@@ -5145,7 +5446,10 @@ def protected_line(data):
         if sub in ("switch", "checkout") and _segment_dir_simple(tokens) \
                 and not _ambient_repo_view_override():
             target = _commit_post_switch_branch(sub, args)
-            if target is not None and _sep == "&&":  # only '&&' gates the switch's success (finding 5)
+            # Record the exemption only when this switch is itself guaranteed to run (an unbroken '&&' prefix
+            # of its list) AND is '&&'-joined to what follows, so a following commit is unconditionally gated
+            # on the switch's success (finding 5 + round-6 finding 1).
+            if target is not None and _sep == "&&" and sw_pure_and:
                 switched_to = target
             continue
         if sub == "push":
@@ -9060,6 +9364,30 @@ def _wrtscp_parse_entry(raw):
     return ("tree" if is_tree else "file", body)
 
 
+def _wrtscp_lexical_tree_hit(file_path, root, root_c, floor):
+    """CLAUDE-F2 (round-6). True when the LEXICAL (unresolved, symlink-NOT-followed) absolute file_path lies
+    at or under a frozen-floor TREE entry, anchored on BOTH the raw session root and its realpath. This closes
+    the symlink-below-a-tree-entry escape the realpath-based _wrtscp_target_matches cannot see: a symlink UNDER
+    a frozen tree entry can make os.path.realpath(file_path) resolve OFF the entry's realpath subtree (even
+    into a declared companion store), so the realpath match returns no-hit and the write is admitted, though
+    its LEXICAL path names a location inside the frozen tree. The realpath match above still covers a symlinked
+    ROOT; this lexical match covers a symlink strictly below the entry. Fail-closed by construction: it only
+    ADDS denials for a write whose lexical name is inside a frozen tree (the safe direction) and never lowers
+    the floor. File entries need no lexical companion (the realpath file-equality match already closes their
+    symlink case, since both the target and the entry follow the same alias)."""
+    lex = os.path.normpath(file_path)
+    for kind, body in floor:
+        if kind != "tree":
+            continue
+        for anchor in (root_c, root):
+            if not anchor:
+                continue
+            entry = os.path.normpath(os.path.join(anchor, body))
+            if lex == entry or lex.startswith(entry + os.sep):
+                return True
+    return False
+
+
 def _wrtscp_read_json_artifact(path, max_bytes):
     """The shared lstat-before-open / S_ISREG / byte-bounded / strict-UTF-8 / strict-JSON reader for BOTH
     the out-of-tree declaration and the in-tree floor, in the _load_gensrc_registry idiom. Returns
@@ -9544,7 +9872,12 @@ def write_scope_guard(data):
     # companion-store allow to run first, a symlinked .aiqt/orchestration.local.json (or a floor entry)
     # resolving into a declared store would win a HEAD ALLOW and bypass the freeze. Each layer fires in BOTH
     # regimes and independent of the other, so an absent/deleted/permissive .aiqt/frozen.json and a permissive
-    # scope declaration alike cannot let a covered write reach a frozen registry file. ---
+    # scope declaration alike cannot let a covered write reach a frozen registry file. COVERAGE (CLAUDE-F2):
+    # for a FILE entry the realpath equality match closes the symlink case (target and entry follow the same
+    # alias). For a floor TREE entry, coverage is enforced on BOTH the realpath'd target (a symlinked ROOT is
+    # caught by _wrtscp_target_matches) AND the LEXICAL, unresolved file_path (_wrtscp_lexical_tree_hit,
+    # below), so a symlink BELOW a frozen tree entry that would let os.path.realpath escape the entry's
+    # subtree - even into a declared companion store - is denied by the lexical match rather than admitted. ---
     always_frozen_hit = _wrtscp_target_matches(_WRTSCP_ALWAYS_FROZEN, target, root_c)
     if always_frozen_hit is None:
         return _wrtscp_deny(root, "always-frozen containment fault",
@@ -9597,6 +9930,18 @@ def write_scope_guard(data):
                                 "the scope declaration (deny over allow); edit the source and regenerate."
                                 .format(target),
                                 "denied a {} to a frozen path".format(tool_name))            # rows 8/18
+        # CLAUDE-F2 (round-6): ALSO deny when the LEXICAL (unresolved) file_path lies inside a frozen TREE
+        # entry, so a symlink BELOW the entry cannot let os.path.realpath escape the entry's coverage and be
+        # admitted (e.g. as a companion-store write). The realpath match above covers a symlinked ROOT; this
+        # lexical check closes the symlink-below-the-entry sibling. Fail-closed (adds denials only for a
+        # lexical name inside a frozen tree), evaluated BEFORE the companion-store admission below.
+        if _wrtscp_lexical_tree_hit(file_path, root, root_c, floor):
+            return _wrtscp_deny(root, "frozen tree (lexical)",
+                                "the write target's lexical path ({}) is inside a frozen-floor TREE entry; a "
+                                "symlink below the entry must not let it resolve off the frozen tree and be "
+                                "admitted. The floor outranks the scope declaration (deny over allow); edit "
+                                "the source and regenerate.".format(file_path),
+                                "denied a {} whose lexical path is inside a frozen tree".format(tool_name))
     # --- Structural other-repo / nested-repo denial, in BOTH regimes once the root resolves (rows 7, 16).
     # Reached only AFTER the frozen denials above, so the companion-store ALLOW can never override a frozen
     # registry file or a frozen-floor target that happens to resolve into a declared store. ---
