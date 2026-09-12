@@ -3150,8 +3150,10 @@ def _discard_role(sub, args):
 # --- outcome text ------------------------------------------------------------------------------------
 
 def _discard_ask_reason(kind, detail, optout=None):
-    """The (reason, banner) pair for an ASK. Stored by the handler and emitted via _ask if no segment
-    DENIES first, so a confirmed loss still wins over a recoverable ask. `optout` selects the PATH-AWARE
+    """The (reason, banner) pair for an ASK. Stored by the handler and carried into the no-ask decision
+    the role dispatch determines (deny, allow-with-note, or snapshot-then-allow), so a confirmed loss
+    still wins over a recoverable discard; the "ASK" here is historical shorthand per the module's
+    READING KEY FOR "ASK"/"ASKS", not a live outcome. `optout` selects the PATH-AWARE
     opt-out guidance folded into the reason and the banner: _OPTOUT_PRISTINE (the default) on a pristine
     bare command, INCLUDING a pristine repository-view-redirected form (its leading GUARDRAIL_ALLOW_DISCARD=1
     prefix opts THIS command out, short-circuiting even the redirect gate), or _OPTOUT_REISSUE on a

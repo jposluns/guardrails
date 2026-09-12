@@ -18,9 +18,10 @@
 #   event    a known Claude Code hook event (Stop, PreToolUse, ...); whitelisted by the generator
 #   matcher  the tool-name pattern for tool events; OMITTED for non-tool events such as Stop
 #   handler  the function in scripts/aiqt_hooks.py that implements the control (unique per control)
-#   default  "block" (hard deny / exit 2), "ask", or "warn" (a non-blocking surfacing warn, exit 0,
+#   default  "block" (hard deny / exit 2) or "warn" (a non-blocking surfacing warn, exit 0,
 #            legal on a WARN_EVENTS event: PostToolUse, UserPromptSubmit, Stop, SubagentStop,
-#            SessionStart, or under an explicit bake stage); most slice-1 controls are lexical and
+#            SessionStart, or under an explicit bake stage); "ask" is no longer an accepted default
+#            (the generator rejects it); most slice-1 controls are lexical and
 #            zero-intent, so they ship at block
 #   class    the EN-5 enforceability letter (a deterministic-gate, b hook-detectable, c partial,
 #            d judgement), carried through so the surface traces to its enforceability claim
