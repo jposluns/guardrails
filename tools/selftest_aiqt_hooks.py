@@ -2229,8 +2229,15 @@ def main():
                 failures.append("{}: expected {}, got {}".format(label, want, got))
 
         pl_repo = _init_repo(tmp / "pl-repo")  # HEAD is main (a protected name) by construction
+        # Give both protected-line fixtures a configured remote, so a direct commit on their protected
+        # HEAD is denied as a REMOTE-BACKED repo (the whole existing commit-on-protected suite is the
+        # regression guard that the no-remote exemption below does not weaken remote-backed protection).
+        # A local path url suffices: `git remote add` only writes config, it fetches no refs, so
+        # origin/HEAD stays unresolved and the branch-root probes are unaffected.
+        _git(pl_repo, "remote", "add", "origin", str(tmp / "pl-remote.git"))
         plr = str(pl_repo)
         pl_feat = _init_repo(tmp / "pl-feat")
+        _git(pl_feat, "remote", "add", "origin", str(tmp / "pl-feat-remote.git"))
         _git(pl_feat, "switch", "other")       # HEAD is the non-protected 'other'
         plf = str(pl_feat)
 
@@ -2317,6 +2324,34 @@ def main():
                     "git commit -m 'fix'", "allow", cwd=plr)
         finally:
             os.environ.pop("GIT_DIR", None)
+
+        # === No-remote exemption (artbr1): a repo with NO configured remote has no server-side branch
+        # protection and no PR/CI path, so direct-to-main is its only model (a local record store's handoff
+        # commit) and the COMMIT guard exempts it; a remote-backed repo stays protected exactly as before,
+        # and an unresolvable remote probe fails CLOSED (still denied). ==================================
+        nr_remote = _init_repo(tmp / "pl-nr-remote")   # main HEAD, WITH a configured remote
+        _git(nr_remote, "remote", "add", "origin", str(tmp / "pl-nr-remote.git"))
+        nr_none = _init_repo(tmp / "pl-nr-none")       # main HEAD, NO remote configured
+        # (i) Regression guard: a direct commit on main in a REMOTE-BACKED repo STILL DENIES (the exemption
+        # must not weaken a repo that has a remote). Reverting the exemption keeps this deny; over-firing it
+        # (exempting a remote-backed repo) reds this.
+        pexpect("(pl-nr1) commit on main in a repo WITH a remote still DENIES (remote-backed, unchanged)",
+                "git commit -m 'fix'", "deny", cwd=str(nr_remote))
+        # (ii) The exemption: a direct commit on main in a repo with NO remote configured ALLOWS. Removing
+        # the exemption block reds this (it reverts to deny).
+        pexpect("(pl-nr2) commit on main in a repo with NO remote ALLOWS (no-remote exemption)",
+                "git commit -m 'fix'", "allow", cwd=str(nr_none))
+        # (iii) Fail-closed leg: when the remote probe cannot be evaluated the guard DENIES, never allows on
+        # an unverified basis. Inject _branch_root_git -> None (the primitive _repo_has_remote calls) so the
+        # probe is undecidable over the SAME no-remote repo that (ii) allows; the deny here proves the None
+        # path fails closed rather than exempting. Over-firing the exemption on None reds this.
+        _orig_brg = aiqt_hooks._branch_root_git
+        aiqt_hooks._branch_root_git = lambda repo, *args: None
+        try:
+            pexpect("(pl-nr3) commit on main DENIES when the remote probe cannot be evaluated (fail-closed)",
+                    "git commit -m 'fix'", "deny", cwd=str(nr_none))
+        finally:
+            aiqt_hooks._branch_root_git = _orig_brg
 
         # === ROUND-2 FINDING 13: classify a commit against the branch it will ACTUALLY land on ===========
         # Direction 1 (false-DENY fix): a 'git switch -c <feature> && git commit' on a main HEAD lands on the
@@ -3100,6 +3135,25 @@ def main():
             failures.append("(l11-blob-cls4) _is_diff_producer must be False when every operand is a blob selector")
         if not aiqt_hooks._is_diff_producer(["git", "show", ":/text"]):
             failures.append("(l11-blob-cls5) _is_diff_producer must be True for a ':/<text>' commit-message search")
+        # ROUND-2 no-patch precision (cnsdif): 'git show -s' / '--no-patch' SUPPRESSES the patch (git prints
+        # only the commit metadata + message, no diff), the same non-diff class as the --stat/--name-only
+        # summary forms cnsdif already allows -> ALLOW. A co-present patch flag (-p/-u/--patch*) re-enables the
+        # diff, so '-s -p' stays covered. Each -s ALLOW is fail-to-pass under a revert of the _has_no_patch_flag
+        # show branch (the OLD code classified any bare-ref 'git show ...' as a producer and DENIED it); the
+        # '-s -p' DENY goes RED if the exemption ignores the patch flag. Judged by the structured verdict.
+        dexpect("(cnsdif-nopatch1) git show -s --format metadata read allows (--no-patch class, no diff)",
+                "git show -s --format='%H %an' HEAD", "allow")
+        dexpect("(cnsdif-nopatch2) git show -s -p DENIES (co-present patch flag re-enables the diff)",
+                "git show -s -p HEAD", "deny")
+        dexpect("(cnsdif-nopatch3) bare git show HEAD still DENIES (regression guard; no -s)",
+                "git show HEAD", "deny")
+        # classifier witnesses: -s/--no-patch (without a patch flag) is NOT a producer; -s -p IS.
+        if aiqt_hooks._is_diff_producer(["git", "show", "-s", "HEAD"]):
+            failures.append("(cnsdif-nopatch-cls1) _is_diff_producer must be False for 'git show -s <ref>'")
+        if aiqt_hooks._is_diff_producer(["git", "show", "--no-patch", "HEAD"]):
+            failures.append("(cnsdif-nopatch-cls2) _is_diff_producer must be False for 'git show --no-patch <ref>'")
+        if not aiqt_hooks._is_diff_producer(["git", "show", "-s", "-p", "HEAD"]):
+            failures.append("(cnsdif-nopatch-cls3) _is_diff_producer must be True for 'git show -s -p <ref>' (patch flag re-enables)")
         dexpect("(l11-d4) sudo git diff asks (wrapper)", "sudo git diff", "allow")
         dexpect("(l11-d5) command /usr/bin/git show asks (wrapper + path)",
                 "command /usr/bin/git show", "allow")

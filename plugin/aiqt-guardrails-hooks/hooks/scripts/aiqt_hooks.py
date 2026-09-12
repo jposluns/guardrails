@@ -1191,6 +1191,13 @@ def _has_patch_flag(tokens):
     return any(t in _PATCH_FLAGS or t.startswith("--patch") for t in tokens)
 
 
+def _has_no_patch_flag(tokens):
+    """True when a segment carries -s or its long form --no-patch, which SUPPRESSES the patch git would
+    otherwise print (git show/log -s prints only the commit metadata and message, no diff). Exact tokens
+    only; a clustered short form is a disclosed lexical residual (F-119), matching _has_patch_flag."""
+    return any(t in ("-s", "--no-patch") for t in tokens)
+
+
 def _has_summary_flag(tokens):
     """True when a segment carries a summary/listing flag (--stat, --name-only, --name-status, --numstat,
     --shortstat), in either the bare or the '=value' shape. A summary flag is a listing rather than a raw
@@ -1220,7 +1227,15 @@ def _is_diff_producer(tokens):
         return True
     if sub == "show":
         # A blob selector (<ref>:<path> / :<path>) makes git show a file read, not a diff dump.
-        return not _show_blob_selector(rest)
+        if _show_blob_selector(rest):
+            return False
+        # -s / --no-patch SUPPRESSES the patch (git prints only the commit metadata and message, no diff),
+        # the same non-diff class as the --stat/--name-only summary forms cnsdif already allows - UNLESS a
+        # co-present patch flag (-p/-u/--patch*) re-enables it (git show -s -p), matching the summary-flag
+        # gating. cleanlanguage adopter report 2026-09-12.
+        if _has_no_patch_flag(tokens) and not _has_patch_flag(tokens):
+            return False
+        return True
     if sub in ("log", "diff-tree", "diff-index", "diff-files"):
         return _has_patch_flag(tokens)
     if sub == "format-patch":
@@ -5482,6 +5497,19 @@ def _commit_post_switch_branch(sub, args):
     return None
 
 
+def _repo_has_remote(repo):
+    """True when `repo` has at least one configured git remote, False when it provably has NONE, None when
+    the scrubbed read-only probe could not decide. A repo with NO remote has no server-side branch
+    protection and no PR/CI path, so direct-to-main is its only model; the protected-branch COMMIT guard
+    exempts it (a local record store's handoff commit). Keys on remote ABSENCE via the same scrubbed
+    _branch_root_git primitive the branch-root probe uses, and the caller fails CLOSED on None, so every
+    remote-backed repo stays protected exactly as before."""
+    r = _branch_root_git(repo, "remote")
+    if r is None or r.returncode != 0:
+        return None
+    return bool(r.stdout.strip())
+
+
 def _commit_on_protected(tokens, cwd, switched_to=None):
     """Classify a git commit segment against the protected line. Returns None (provably a non-protected
     branch: silent allow), ("deny", detail) when the commit will PROVABLY land on a protected branch (a
@@ -5533,6 +5561,13 @@ def _commit_on_protected(tokens, cwd, switched_to=None):
                 "directory, a detached HEAD, or a failed probe), so it cannot prove the commit lands "
                 "off the protected line")
     if _is_protected_ref(head):
+        # No-remote exemption (cleanlanguage adopter report, 2026-09-12): a repo with NO configured remote
+        # has no server-side branch protection and no PR/CI path, so direct-to-main is its only model (a
+        # local record store committed once per session at handoff). Only a PROVABLE remote-absence exempts;
+        # an unresolvable probe fails CLOSED (still denied). A repo WITH a remote stays protected exactly as
+        # before, including on a branch with no upstream.
+        if _repo_has_remote(base) is False:
+            return None
         return ("deny", "would commit directly on the protected branch {!r}".format(head))
     return None
 
