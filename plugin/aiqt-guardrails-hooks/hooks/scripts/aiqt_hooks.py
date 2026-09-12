@@ -1445,23 +1445,82 @@ def _final_stdout_dest(redirects):
     return dest
 
 
+# Patch-ENABLING short option letters the summary classifier recognizes: -p/-u and -U (unified). It
+# deliberately EXCLUDES the combined-diff letters -c/-cc, which emit a patch ONLY on a MERGE commit and are
+# NOPATCH on the ordinary (non-merge) commit the classifier sees; treating them as enablers would over-deny
+# the common `git show -c --stat` / `git show --cc --stat` summary form (verified NOPATCH against real git,
+# F-R2-5), so they stay summary-only allow-notes. The merge-commit --cc/-c-with-summary patch is a disclosed
+# residual (the guard cannot see whether the ref is a merge), not chased here. -U is an enabler whatever its
+# attached value (`-U`, `-U3`); git rejects the separated `-U 3` form outright, so no separated value is skipped.
+_SUMMARY_PATCH_SHORT = frozenset(("p", "u", "U"))
+
+
+def _argv_has_patch_enabler(argv):
+    """Argument-aware: True when a git producer's OPTION region (before a '--'/'--end-of-options' boundary)
+    carries a patch-ENABLING option - one that makes git emit a patch even alongside a summary selector.
+    Enablers: -p/-u, -U/--unified, the --patch* long family, and any short-option CLUSTER reaching a p/u/U
+    letter. It reuses the same option sets and value-argument/'--'-boundary parsing as the git-show no-patch
+    exemption (mirroring _show_no_patch_exempt / _show_short_cluster_kind): a value-taking option
+    (-L/-S/-G/-O/-o, and the separated-value long options _SHOW_LONG_REQ_VALUE) consumes its value, so a
+    p/u/U spelled inside that value is not miscounted, and the '--' boundary ends the option region. It
+    narrows the short patch-letter set to _SUMMARY_PATCH_SHORT (p/u/U, excluding the merge-only -c letter;
+    see that constant), and the long enablers to the --patch*/--unified* prefixes (excluding --cc, the
+    merge-only combined-diff form). Any other (unknown) option is not a patch enabler; this predicate
+    answers only 'is a patch forced on', leaving every other classification to the caller (F-R2-5)."""
+    i = 0
+    n = len(argv)
+    while i < n:
+        tok = argv[i]
+        if tok in _DIFF_END_OF_OPTIONS:
+            break  # every remaining token is an operand (a pathspec/ref), never an option
+        if not tok.startswith("-") or tok == "-":
+            i += 1
+            continue  # a bare operand (git, the subcommand, a ref) is not an option
+        if tok.startswith("--"):
+            base = tok.split("=", 1)[0]
+            if any(base.startswith(p) for p in _SHOW_LONG_PATCH_PREFIXES):
+                return True                      # --patch* / --unified* long enabler
+            if base in _SHOW_LONG_REQ_VALUE:
+                i += 1 if "=" in tok else 2      # skip a recognized required-value option's separated value
+                continue
+            i += 1                               # any other long option is not a summary patch enabler
+            continue
+        # a short cluster: scan its letters, honouring a value-taking letter that consumes the rest/next token
+        j = 1
+        m = len(tok)
+        consumes_next = False
+        found = False
+        while j < m:
+            ch = tok[j]
+            if ch in _SUMMARY_PATCH_SHORT:
+                found = True
+                break
+            if ch in _SHOW_SHORT_VALUE_LETTERS:
+                consumes_next = j + 1 >= m       # a value letter as the LAST char takes the NEXT token
+                break                            # the rest of this token is that letter's value
+            j += 1
+        if found:
+            return True
+        i += 2 if consumes_next else 1
+    return False
+
+
 def _diff_emits_only_summary(argv):
     """Role-aware: True when a producer's OPTION region (before a '--'/'--end-of-options' boundary) carries
     a summary selector (--stat/--name-only/--name-status/--numstat/--shortstat, bare or '=value') and NO
-    patch flag (-p/-u/--patch*). Distinguishes a genuine summary listing (git diff -M --stat, which is not a
-    console patch dump and so ASKS rather than DENIES) from a summary token in a NON-option position (git
-    diff -- --stat, a pathspec: a real dump) and from a summary with a co-present patch flag (git diff
-    --stat -p, still a full patch dump)."""
+    patch enabler. Distinguishes a genuine summary listing (git diff -M --stat, which is not a console patch
+    dump and so ASKS rather than DENIES) from a summary token in a NON-option position (git diff -- --stat, a
+    pathspec: a real dump) and from a summary with a co-present patch enabler (git diff --stat -p, or the
+    argument-aware -U/--unified and p/u/U-cluster forms, still a full patch dump). Patch-enabler recognition
+    is argument-aware via _argv_has_patch_enabler, so -U/--unified and a p/u short cluster (git show -s --stat
+    -U3 / --unified=3 / -sp) are no longer mistaken for summary-only (F-R2-5)."""
     has_summary = False
-    has_patch = False
     for word in argv:
         if word in _DIFF_END_OF_OPTIONS:
             break
         if word.split("=", 1)[0] in _SUMMARY_FLAGS:
             has_summary = True
-        if word in _PATCH_FLAGS or word.startswith("--patch"):
-            has_patch = True
-    return has_summary and not has_patch
+    return has_summary and not _argv_has_patch_enabler(argv)
 
 
 def _seg_stdout_reaches_console(seg, segments, index):

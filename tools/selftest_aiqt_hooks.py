@@ -3294,6 +3294,43 @@ def main():
             if aiqt_hooks._is_diff_producer(["git", "show"] + _wargs):
                 failures.append("(fr2-show-cls) _is_diff_producer must be False for 'git show {}' ({})"
                                 .format(" ".join(_wargs), _wlbl))
+        # === F-R2-5 (cnsdif SUMMARY classifier): _diff_emits_only_summary is now ARGUMENT-AWARE about patch
+        # enablers, so a summary flag co-present with -U/--unified or a p/u short cluster is NOT summary-only
+        # (git EMITS a patch, verified against real git) and DENIES rather than allow-noting. Judged by the
+        # structured verdict, never prose. The three escapes below were ALLOW-with-note pre-fix. ===
+        dexpect("(fr2-sum-d1) git show -s --stat -U3 HEAD DENIES (-U enables a patch; ESCAPE pre-fix)",
+                "git show -s --stat -U3 HEAD", "deny")
+        dexpect("(fr2-sum-d2) git show --no-patch --stat --unified=3 HEAD DENIES (--unified enables; ESCAPE)",
+                "git show --no-patch --stat --unified=3 HEAD", "deny")
+        dexpect("(fr2-sum-d3) git show -s --stat -sp HEAD DENIES (a p short cluster re-enables; ESCAPE)",
+                "git show -s --stat -sp HEAD", "deny")
+        dexpect("(fr2-sum-d4) git show -s --stat -p HEAD DENIES (-p patch flag; regression guard, was deny)",
+                "git show -s --stat -p HEAD", "deny")
+        dexpect("(fr2-sum-a1) git show -s --stat HEAD allows (genuine summary-only, no patch enabler)",
+                "git show -s --stat HEAD", "allow")
+        # classifier witnesses: _diff_emits_only_summary must be FALSE (not summary-only) for the escapes and
+        # TRUE for a genuine summary-only command; _argv_has_patch_enabler discriminates the enabler directly.
+        for _sargs, _slbl in (
+                (["-s", "--stat", "-U3", "HEAD"], "-U cluster enables a patch"),
+                (["--no-patch", "--stat", "--unified=3", "HEAD"], "--unified enables a patch"),
+                (["-s", "--stat", "-sp", "HEAD"], "a p short cluster re-enables"),
+                (["-s", "--stat", "-p", "HEAD"], "-p patch flag")):
+            if aiqt_hooks._diff_emits_only_summary(["git", "show"] + _sargs):
+                failures.append("(fr2-sum-cls) _diff_emits_only_summary must be False for 'git show {}' ({})"
+                                .format(" ".join(_sargs), _slbl))
+            if not aiqt_hooks._argv_has_patch_enabler(["git", "show"] + _sargs):
+                failures.append("(fr2-sum-enb) _argv_has_patch_enabler must be True for 'git show {}' ({})"
+                                .format(" ".join(_sargs), _slbl))
+        for _sargs, _slbl in (
+                (["-s", "--stat", "HEAD"], "summary + suppress, no enabler"),
+                (["--cc", "--stat", "HEAD"], "--cc is merge-only, NOPATCH on a non-merge, stays summary"),
+                (["-M", "--stat", "HEAD"], "-M rename detection is not a patch enabler")):
+            if not aiqt_hooks._diff_emits_only_summary(["git", "show"] + _sargs):
+                failures.append("(fr2-sum-cls) _diff_emits_only_summary must be True for 'git show {}' ({})"
+                                .format(" ".join(_sargs), _slbl))
+            if aiqt_hooks._argv_has_patch_enabler(["git", "show"] + _sargs):
+                failures.append("(fr2-sum-enb) _argv_has_patch_enabler must be False for 'git show {}' ({})"
+                                .format(" ".join(_sargs), _slbl))
         dexpect("(l11-d4) sudo git diff asks (wrapper)", "sudo git diff", "allow")
         dexpect("(l11-d5) command /usr/bin/git show asks (wrapper + path)",
                 "command /usr/bin/git show", "allow")
@@ -3313,7 +3350,8 @@ def main():
         dexpect("(l11-s4) git diff --stat --no-patch allows (--no-patch is the sole extra option)",
                 "git diff --stat --no-patch", "allow")
         dexpect("(l11-s5) -M --stat asks", "git diff -M --stat", "allow")
-        dexpect("(l11-s6) -U3 --stat asks", "git diff -U3 --stat", "allow")
+        dexpect("(l11-s6) -U3 --stat DENIES (-U enables a patch even with --stat; verified PATCH vs real "
+                "git, F-R2-5)", "git diff -U3 --stat", "deny")
         dexpect("(l11-s7) --cc --stat asks", "git show --cc --stat", "allow")
         dexpect("(l11-s8) --stat=80 asks (not an exact selector)", "git diff --stat=80", "allow")
         dexpect("(l11-s9) --stat -p denies (patch flag)", "git diff --stat -p", "deny")
