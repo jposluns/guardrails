@@ -108,6 +108,7 @@ import datetime
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -880,8 +881,14 @@ def main():
         expect("(pfr-reset) reset --pathspec-from-file --soft asks (--soft is the file, not the mode)",
                "git reset --pathspec-from-file --soft", "allow", cwd=rp)
         # An inline git alias that expands to a work-losing verb cannot be resolved -> ASK.
-        expect("(alias-inline) git -c alias.x=reset x --hard asks", "git -c alias.x=reset x --hard", "allow",
-               cwd=rp)
+        # CLAUDE-F1 (round-7): an inline '-c alias.<name>=' invoking a NON-builtin subcommand ('x') enters the
+        # view-override branch ('-c' makes the command not dir-simple); its raw scan flags 'reset' but the
+        # resolved sub 'x' is outside the recognized lossy-verb set, so it cannot be proven non-destructive or
+        # snapshotted and now DENIES (previously it ALLOWED with no snapshot - the alias could expand to a
+        # work-losing verb and destroy uncommitted work unrecoverably). Reverting the view-override
+        # unrecognized-verb deny reds this case.
+        expect("(alias-inline) git -c alias.x=reset x --hard DENIES (CLAUDE-F1)",
+               "git -c alias.x=reset x --hard", "deny", cwd=rp)
         # A glob char (*?[) can bash-expand an option name (in a dir with a file named --hard, '--h*' becomes
         # '--hard'), so any lossy command carrying one is not pristine -> ASK.
         expect("(glob-opt) reset --soft --h* asks (glob defeats the pristine gate)", "git reset --soft --h*",
@@ -2112,6 +2119,102 @@ def main():
                 failures.append("(r6-f7-pointer-bare) the recovery pointer must NOT advertise a bare "
                                 "'git checkout <ref>' that fails from another cwd (finding 7)")
 
+        # === ROUND-7 codex findings 3/4: advertised recovery commands shell-quote the interpolated repo
+        # PATH (a space/metacharacter cannot break or inject), and the redirected-stash recovery command
+        # binds to the target repo with 'git -C <repo> stash apply'. Reverting either reds these. ========
+        try:
+            cf3 = tmp / "cf3 space repo"          # a repo whose path carries a SPACE (and a ';' would inject)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(cf3)],
+                           check=True, capture_output=True, text=True, timeout=30)
+            (cf3 / "f.txt").write_text("x\n", encoding="utf-8")
+            _git(cf3, "add", "f.txt")
+            _git(cf3, "commit", "-q", "-m", "seed", env_identity=True)
+            (cf3 / "f.txt").write_text("y\n", encoding="utf-8")   # dirty so the snapshot has content
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the spaced-path recovery fixture: {}".format(exc),
+                  file=sys.stderr)
+            return 2
+        _cf3top = os.path.realpath(str(cf3))
+        _cf3snap = aiqt_hooks._take_snapshot(str(cf3), _cf3top, "reset")
+        if _cf3snap[0] != "ok":
+            failures.append("(cf3-snap) expected an ok snapshot for the quoting test, got {!r}"
+                            .format(_cf3snap[0]))
+        else:
+            _cf3q = shlex.quote(_cf3top)
+            if _cf3q not in _cf3snap[1]["restore"]:
+                failures.append("(cf3-restore-quoted) the advertised restore command must shell-quote the "
+                                "repo PATH (codex finding 3); got {!r}".format(_cf3snap[1]["restore"]))
+            if "git -C {} checkout".format(_cf3top) in _cf3snap[1]["restore"]:
+                failures.append("(cf3-restore-unquoted) the restore command interpolated the repo path "
+                                "UNQUOTED (a space would break it, a ';' inject); got {!r}"
+                                .format(_cf3snap[1]["restore"]))
+            if _cf3q not in aiqt_hooks._recovery_pointer(_cf3snap[1]):
+                failures.append("(cf3-pointer-quoted) the recovery pointer must shell-quote the repo PATH "
+                                "(codex finding 3)")
+        # F4: the redirected-stash recovery command binds to 'git -C <quoted repo> stash apply <ref>'.
+        try:
+            _git(cf3, "stash", "push", "-m", "wip", env_identity=True)   # one stash entry to preserve
+            _cf3stashok = True
+        except (OSError, subprocess.SubprocessError):
+            _cf3stashok = False
+        if _cf3stashok:
+            _cf3code, _cf3obj, _ = aiqt_hooks._stash_drop_clear_outcome(str(cf3), "clear")
+            _cf3msg = _cf3obj.get("systemMessage", "") if isinstance(_cf3obj, dict) else ""
+            _cf3bind = "git -C {} stash apply".format(shlex.quote(str(cf3)))
+            if _cf3bind not in _cf3msg:
+                failures.append("(cf4-stash-bound) the stash recovery command must bind to the target repo "
+                                "'git -C <quoted repo> stash apply' (codex finding 4); got {!r}"
+                                .format(_cf3msg))
+
+        # === ROUND-7 codex finding 1: git_discard resolves the REPO an index/ref/stash discard acts on from
+        # -C/ambient, treating --work-tree as worktree-only, so the snapshot/stash preservation lands on the
+        # ACTUAL repo git acts on (the ambient session repo), NOT the --work-tree value; a WORKTREE-CONTENT
+        # discard whose --work-tree is OUTSIDE the ambient repo fails closed. Reverting reds these. =========
+        try:
+            cf1_decoy = _init_repo(tmp / "cf1-decoy")     # a clean SEPARATE repo used as the --work-tree value
+            cf1_idx = _init_repo(tmp / "cf1-idx")         # ambient repo A with STAGED content (index discard)
+            (cf1_idx / "file.txt").write_text("staged change\n", encoding="utf-8")
+            _git(cf1_idx, "add", "file.txt")
+            cf1_stash = _init_repo(tmp / "cf1-stash")     # ambient repo A with a STASH entry
+            (cf1_stash / "file.txt").write_text("to stash\n", encoding="utf-8")
+            _git(cf1_stash, "stash", "push", "-m", "wip", env_identity=True)
+            cf1_wt = _init_repo(tmp / "cf1-wt")           # ambient repo A, dirty worktree (worktree discard)
+            (cf1_wt / "file.txt").write_text("dirty\n", encoding="utf-8")
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the --work-tree recovery fixtures: {}".format(exc),
+                  file=sys.stderr)
+            return 2
+        # F1a: 'git --work-tree=<decoy> restore --staged file.txt' (INDEX-only) from cf1_idx must snapshot
+        # the AMBIENT repo cf1_idx (which holds the discarded staged content), NOT the decoy --work-tree repo.
+        expect("(cf1a-index-allows) --work-tree index discard allows (snapshot the ambient repo)",
+               "git --work-tree={} restore --staged file.txt".format(str(cf1_decoy)), "allow", cwd=str(cf1_idx))
+        if not _recovery_refs(cf1_idx):
+            failures.append("(cf1a-snap-ambient) a --work-tree index discard must snapshot the AMBIENT repo "
+                            "(codex finding 1): expected a recovery ref in cf1-idx, found none")
+        if _recovery_refs(cf1_decoy):
+            failures.append("(cf1a-not-decoy) a --work-tree index discard must NOT snapshot the --work-tree "
+                            "value repo (codex finding 1): found a stray recovery ref in cf1-decoy")
+        # F1b: 'git --work-tree=<decoy> stash clear' from cf1_stash must preserve the AMBIENT repo's stash,
+        # NOT the decoy's. The ambient repo gains a durable '-stash' recovery ref; the decoy stays empty.
+        expect("(cf1b-stash-allows) --work-tree stash clear allows (preserve the ambient repo's stash)",
+               "git --work-tree={} stash clear".format(str(cf1_decoy)), "allow", cwd=str(cf1_stash))
+        if not any(r.endswith("stash0") or "stash" in r for r in _recovery_refs(cf1_stash)):
+            failures.append("(cf1b-stash-ambient) a --work-tree stash clear must preserve the AMBIENT repo's "
+                            "stash (codex finding 1): expected a stash recovery ref in cf1-stash, found none")
+        if _recovery_refs(cf1_decoy):
+            failures.append("(cf1b-not-decoy) a --work-tree stash clear must NOT preserve the --work-tree "
+                            "value repo's stash (codex finding 1): stray ref in cf1-decoy")
+        # F1c: 'git --work-tree=<decoy repo, OUTSIDE the ambient repo> reset --hard' destroys WORKTREE content
+        # in the decoy while the index stays in the ambient repo: a single snapshot cannot capture the split,
+        # so it DENIES. (Before the fix it snapshotted the clean decoy and allow-noted a false recovery.)
+        expect("(cf1c-worktree-split-denies) --work-tree (outside) worktree discard DENIES (split state)",
+               "git --work-tree={} reset --hard".format(str(cf1_decoy)), "deny", cwd=str(cf1_wt))
+
+        # === CLAUDE-F1: a redirected/ambient 'checkout-index' (sub outside the recognized lossy-verb set,
+        # flagged by the raw scan) entering the view-override branch DENIES (was allowed with no snapshot). ==
+        expect("(clf1-checkout-index) a -C-redirected 'checkout-index -a -f' DENIES (CLAUDE-F1)",
+               "git -C {} checkout-index -a -f".format(rp), "deny", cwd=rp)
+
         # === protected_line (prtbrn/artbr1): force-push to a protected ref + direct protected commit ===
         plg = aiqt_hooks.protected_line
 
@@ -2201,6 +2304,13 @@ def main():
         pexpect("(pl-j4) commit --amend on main asks", "git commit --amend --no-edit", "deny", cwd=plr)
         pexpect("(pl-j5) 'git -C <dir> commit' asks (redirected repository view)",
                 "git -C {} commit -m 'fix'".format(plf), "allow", cwd=plr)
+        # ROUND-7 (codex finding 2): --work-tree relocates ONLY the worktree, never which repository a commit
+        # lands on, so 'git --work-tree=<feat> commit' from the main-HEAD session repo is classified against
+        # the SESSION repo's protected HEAD (main) and DENIES - not against the --work-tree repo's non-protected
+        # HEAD. Before the fix it probed the --work-tree value (pl_feat, HEAD 'other') and allow-noted. Reverting
+        # reds this (it becomes an allow).
+        pexpect("(pl-j5wt) 'git --work-tree=<feat> commit' from main HEAD DENIES (codex finding 2)",
+                "git --work-tree={} commit -m 'fix'".format(plf), "deny", cwd=plr)
         os.environ["GIT_DIR"] = str(pl_feat / ".git")
         try:
             pexpect("(pl-j6) commit under an ambient GIT_DIR asks (unprovable view)",
@@ -2483,6 +2593,21 @@ def main():
         _git(br_repo, "update-ref", "refs/heads/orphan-start", br_orphan)
         brexpect("(H2) checkout -b from orphan denies",
                  "git checkout -b x orphan-start", "deny")
+
+        # ROUND-7 (codex finding 2): --work-tree relocates only the worktree, never the repository a branch is
+        # created in. A second repo (br_wt) has a ROOTED branch 'orphan-start'; the session repo br_repo has an
+        # ORPHANED 'orphan-start'. 'git --work-tree=<br_wt> checkout -b x orphan-start' from br_repo creates the
+        # branch in br_repo from br_repo's ORPHANED start, so it must DENY. Before the fix the guard probed the
+        # --work-tree value (br_wt, where 'orphan-start' is rooted) and ALLOWED. Reverting reds this (-> allow).
+        br_wt = _init_repo(tmp / "br-wt")
+        _brwt_tip = subprocess.run(["git", "-C", str(br_wt), "rev-parse", "HEAD"],
+                                   check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+        _git(br_wt, "update-ref", "refs/remotes/origin/main", _brwt_tip)
+        _git(br_wt, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        _git(br_wt, "branch", "orphan-start")   # a ROOTED branch (shares origin/HEAD) of the SAME name
+        brexpect("(H2wt) --work-tree to a repo with a rooted 'orphan-start' still DENIES (codex finding 2: "
+                 "the branch is created in the ambient repo's ORPHANED start)",
+                 "git --work-tree={} checkout -b x orphan-start".format(str(br_wt)), "deny")
 
         # H6: the switch long-form create (--create/--force-create) is now recognized, so an orphan
         # start denies just like the short -c/-C form (previously the long forms were unhandled and the
@@ -5524,6 +5649,21 @@ def main():
                  "allow", "Write", os.path.join(str(cs_store), "s.md"), cs_sess)
         wsexpect("(ws-cs-allow-deep) a write deep in the DECLARED store ALLOWS",
                  "allow", "Edit", os.path.join(str(cs_store), "recs", "a", "b.md"), cs_sess)
+        # CLAUDE-F2 (round-7): the registry freeze follows TRANSITIVELY into a declared companion store's OWN
+        # orchestration registry. A covered write to <store>/.aiqt/orchestration.local.json (or
+        # orchestration.json) would complete a cross-session companion_stores self-widening chain through the
+        # exact guarded-tool path the freeze closes, so it DENIES - even though a NON-registry write to the
+        # same store ALLOWS above. Reverting the transitive-freeze check reds the two deny cases (they become
+        # routine companion-store allows).
+        wsexpect("(ws-cs-store-reg-local) a covered write to the store's OWN orchestration.local.json DENIES "
+                 "(CLAUDE-F2, transitive freeze)", "deny",
+                 "Write", os.path.join(str(cs_store), ".aiqt", "orchestration.local.json"), cs_sess)
+        wsexpect("(ws-cs-store-reg-committed) a covered write to the store's OWN orchestration.json DENIES "
+                 "(CLAUDE-F2, transitive freeze)", "deny",
+                 "Edit", os.path.join(str(cs_store), ".aiqt", "orchestration.json"), cs_sess)
+        wsexpect("(ws-cs-store-nonreg-allows) a NON-registry write to the declared store still ALLOWS "
+                 "(CLAUDE-F2 does not break legitimate store writes)", "allow",
+                 "Write", os.path.join(str(cs_store), ".aiqt", "notes.md"), cs_sess)
         # An UNDECLARED other repo still DENIES (the floor holds for genuine aiming errors).
         wsexpect("(ws-cs-other-deny) a write to an UNDECLARED other repo DENIES",
                  "deny", "Write", os.path.join(str(cs_other), "x.md"), cs_sess)

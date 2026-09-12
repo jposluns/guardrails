@@ -633,6 +633,18 @@ def main(report_path=None):
         # the truncating sink is caught through subshell/brace wrappers too (class width).
         check("trunc/subshell-tail-denies", _verdict(bg("( python3 build.py | tail )")), "deny")
         check("trunc/brace-tail-denies", _verdict(bg("{ python3 build.py | tail; }")), "deny")
+        # ROUND-7 (codex finding 5): the sink is resolved THROUGH shell command-modifier wrappers
+        # (command/env/nice/stdbuf/... with their own option/assignment args), so a truncating sink hidden
+        # behind a wrapper is still caught; a genuine NON-truncating wrapped command still allows-with-note.
+        # Reverting to the un-wrapped command-word read reds the four deny cases (they become "warn").
+        check("trunc/wrap-command-head-denies", _verdict(bg("python3 build.py | command head -5")), "deny")
+        check("trunc/wrap-env-head-denies", _verdict(bg("python3 build.py | env head -5")), "deny")
+        check("trunc/wrap-env-assign-tail-denies", _verdict(bg("python3 build.py | env FOO=1 tail")), "deny")
+        check("trunc/wrap-nice-sep-head-denies", _verdict(bg("python3 build.py | nice -n 0 head")), "deny")
+        check("trunc/wrap-stdbuf-attached-head-denies",
+              _verdict(bg("python3 build.py | stdbuf -oL head")), "deny")
+        check("trunc/wrap-command-cat-allows-note", _verdict(bg("python3 build.py | command cat")), "warn")
+        check("trunc/wrap-env-grep-allows-note", _verdict(bg("python3 build.py | env grep x")), "warn")
         check("trunc/dollar-var-allows-note", _verdict(bg("python3 build.py > $OUT")), "warn")
         check("trunc/cmdsub-allows-note", _verdict(bg("python3 build.py > $(date).log")), "warn")
         check("trunc/backtick-allows-note", _verdict(bg("python3 build.py > `date`.log")), "warn")
