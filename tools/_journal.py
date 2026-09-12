@@ -759,6 +759,16 @@ def read_lock_owner(journal_root):
             _st = os.fstat(lfd)
             if not stat.S_ISREG(_st.st_mode):
                 raise JournalError("journal lock is not a regular file (fail-closed)")
+            # O_NOFOLLOW refuses a SYMLINK but a HARDLINK is a regular file that passes S_ISREG, so a `lock`
+            # hardlinked to an out-of-tree victim would be READ through the victim's inode. A lock acquire_lock
+            # created is singly-linked (O_CREAT|O_EXCL, exactly one name); a link count above 1 means a second
+            # name references this inode (a planted hardlink), so refuse it fail-closed, class-consistent with
+            # the other journal opens' st_nlink==1 identity guards (frames.log reopen/append/read/truncate,
+            # the product-file prestate checks, and the lock.break arbitration inode). Round-12 F4: this closes
+            # read_lock_owner, the last unguarded acceptor of a hardlinked inode in the journal.
+            if _st.st_nlink != 1:
+                raise JournalError("journal lock has {} hard links; refusing to read (a hardlink to an "
+                                   "out-of-tree victim, never our singly-linked lock)".format(_st.st_nlink))
             # MINOR-1: the same journal-read cap bounds the lock (a small owner record); an oversize plant
             # is refused fail-closed rather than slurped (SECA resource-bounds; pre-open-size fast-reject
             # plus the capped read's incremental post-read re-check).
@@ -929,9 +939,10 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
         # A MULTIPLY-LINKED arbitration inode (st_nlink > 1) is a second name for the same inode, so a
         # foreign flock holder on that other name can block this LOCK_EX indefinitely and wedge stale-lock
         # recovery; a legitimate, singly-created lock.break has exactly one link. Refuse it, class-consistent
-        # with the journal WRITE-path nlink==1 identity guards (frames.log reopen/append/read/truncate and
-        # the product-file prestate checks), so the ONLY unguarded acceptor of a hardlinked inode left in the
-        # journal is closed (round-10 F3; fails closed, never breaks a hardlinked lock).
+        # with the journal nlink==1 identity guards on every other inode open (frames.log
+        # reopen/append/read/truncate, the product-file prestate checks, and read_lock_owner's own `lock`
+        # open), so no unguarded acceptor of a hardlinked inode remains in the journal (round-10 F3, extended
+        # by round-12 F4 which closed read_lock_owner; fails closed, never breaks a hardlinked lock).
         if _ast.st_nlink != 1:
             raise JournalError("arbitration file {} has {} hard links (expected exactly 1); a multiply-linked "
                                "arbitration inode lets a foreign flock holder block stale-lock recovery, so we "

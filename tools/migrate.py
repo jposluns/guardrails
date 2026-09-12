@@ -1430,6 +1430,37 @@ def self_test():
             os.close(f3fd)
         checked += 1
 
+        # (O3) F4 (round-12): read_lock_owner refuses a MULTIPLY-LINKED `lock` inode, class-consistent with
+        #      the frames.log/product-file/lock.break nlink==1 identity guards. A `lock` hardlinked to an
+        #      out-of-tree victim (st_nlink > 1) passes O_NOFOLLOW + S_ISREG (a hardlink is a regular file,
+        #      not the symlink O_NOFOLLOW catches), so pre-fix it was read through the victim's inode. The
+        #      nlink==1 guard fires right after the fstat, before the size/JSON read, refusing with a
+        #      JournalError that names the link count; reverting it lets the hardlinked lock be read. A
+        #      singly-linked lock (nlink==1) is still read normally, so the guard does not over-reject.
+        f4root = tmp / "f4-hardlink-lock"
+        f4jr = f4root / JOURNAL_REL
+        f4jr.mkdir(parents=True)
+        _f4_owner = {"uid": os.getuid(), "pid": os.getpid(), "session": "s",
+                     "pid-start": _journal._pid_start(os.getpid()),
+                     "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        (f4jr / "lock").write_text(json.dumps(_f4_owner, sort_keys=True), encoding="utf-8")
+        os.link(str(f4jr / "lock"), str(f4root / "evil-lock-hardlink"))   # a SECOND hard link -> nlink==2
+        try:
+            _journal.read_lock_owner(f4jr)
+            failures.append("F4: read_lock_owner must refuse a hardlinked (nlink>1) lock")
+        except _journal.JournalError as exc:
+            if "hard link" not in str(exc):
+                failures.append("F4: the hardlinked-lock refusal must name the hard-link count "
+                                "(got {!r})".format(str(exc)))
+        # regression: a singly-linked lock (the normal case) is still read, so the guard does not over-reject.
+        f4ok = tmp / "f4-single-lock"
+        f4okjr = f4ok / JOURNAL_REL
+        f4okjr.mkdir(parents=True)
+        (f4okjr / "lock").write_text(json.dumps(_f4_owner, sort_keys=True), encoding="utf-8")
+        if _journal.read_lock_owner(f4okjr) is None:
+            failures.append("F4: read_lock_owner must still read a singly-linked lock (no over-reject)")
+        checked += 1
+
         # (P) C7: an unknown --unit (not a connected component of the crosswalk) is REJECTED before locking
         #     (exit 2), leaving no journal lock behind.
         ukroot = _build_case_root(tmp / "unknown-unit" / "root", "flat-files")

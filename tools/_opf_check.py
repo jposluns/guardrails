@@ -535,21 +535,53 @@ def _canonical_contained(p):
 
 
 def _bracketed_host_ok(tok):
-    """True only when `tok` is a well-formed bracketed IP-literal host `[addr]` (RFC 3986 host):
-    the token is bracketed and its interior parses as an IP address (an IPv6 literal in practice,
-    the only host form brackets carry). A malformed interior (`[nonsense]`, `[2001/db8::1]`) is NOT
-    a resolvable host, so it canonicalizes to nothing rather than a spurious ('[nonsense]', path)
-    pair that could falsely agree (codex round-6; guard-input-soundness: a membership question about
-    a host is answered by parsing the address, not by matching the bracket tokens)."""
+    """True only when `tok` is a well-formed bracketed host `[addr]` (RFC 3986 host): the token is
+    bracketed and its interior parses as an IPv6 literal. Brackets in a URI/scp host delimit an IPv6
+    address SPECIFICALLY (RFC 3986 IP-literal); an IPv4 dotted-quad is never bracketed, so `[127.0.0.1]`
+    is a malformed authority, not a resolvable host, and must canonicalize to nothing rather than a
+    spurious ('[127.0.0.1]', path) pair that could falsely satisfy C-SYNC-AGREE (codex round-12 F1:
+    `ipaddress.ip_address()` accepting an IPv4 inside brackets was the structural bug; require IPv6 for
+    the bracket form). A malformed interior (`[nonsense]`, `[2001/db8::1]`) is likewise unresolvable
+    (codex round-6; guard-input-soundness: a membership question about a host is answered by parsing the
+    address as its bracket form promises, not by matching the bracket tokens)."""
     if not (tok.startswith("[") and tok.endswith("]")):
         return False
     inner = tok[1:-1]
     if not inner:
         return False
     try:
-        ipaddress.ip_address(inner)
-    except ValueError:
+        ipaddress.IPv6Address(inner)     # the bracket form is an IPv6 literal ONLY; an IPv4 in brackets is rejected
+    except ValueError:                   # AddressValueError subclasses ValueError (IPv4/junk interior -> unresolvable)
         return False
+    return True
+
+
+def _dns_or_ipv4_ok(name):
+    """True only when an UNBRACKETED host `name` (port and brackets already handled by the caller) is a
+    STRUCTURALLY valid bare IPv4 literal or DNS name. The character allowlist (_HOST_AUTHORITY_ALLOWED)
+    bounds the code points; this bounds the STRUCTURE, so a host that is character-clean but structurally
+    malformed (an empty DNS label from `..`, a label over 63 characters, an over-long name) is
+    UNRESOLVABLE -> the caller returns None -> CANNOT-EVALUATE, never a spurious host that could falsely
+    satisfy C-SYNC-AGREE even when the manifest target and observed remote strings match (codex round-12
+    F1). This COMPLETES the host class the allowlist began: chars (character set) + structure (this) =
+    the whole host surface, so a newly-hostile structural class is refused by a positive grammar rather
+    than a fresh negative clause. A bare IPv4 dotted-quad is a valid host as-is; any other form is
+    validated as a DNS name per RFC 1035: total length <= 253, no leading or trailing dot, and every
+    label non-empty and <= 63 characters (so `a..b` yields an empty label and is rejected). The caller
+    has already stripped any `:port` and excluded the bracketed IPv6 form, so `name` here carries neither
+    a port nor brackets."""
+    try:
+        ipaddress.IPv4Address(name)      # a bare IPv4 dotted-quad is a valid host as-is
+        return True
+    except ValueError:
+        pass
+    if not name or len(name) > 253:      # RFC 1035 total-name ceiling; an empty name is not a host
+        return False
+    if name.startswith(".") or name.endswith("."):   # no leading/trailing dot (an empty first/last label)
+        return False
+    for label in name.split("."):
+        if not label or len(label) > 63:  # every DNS label is non-empty (rejects `..`) and <= 63 characters
+            return False
     return True
 
 
@@ -639,6 +671,13 @@ def _canonical_remote(url):
             if host.count(":") > 1:
                 return None
             hostpart, portsep, hport = host.rpartition(":")
+            # STRUCTURAL host validation (codex round-12 F1): the bare host must be a well-formed bare IPv4
+            # literal or DNS name; a character-clean but structurally malformed host (`a..b`, a label over 63
+            # chars, an over-long name) is unresolvable rather than a spurious pair that could falsely satisfy
+            # C-SYNC-AGREE. When no ':' is present rpartition leaves the whole host in `hport`, so the bare
+            # host is `hostpart` only when a port separator was found; the port itself is range-checked below.
+            if not _dns_or_ipv4_ok(hostpart if portsep else hport):
+                return None
         # A port is a run of ASCII digits: a default port (incl. a leading-zero spelling, ':022' == ':22')
         # names the port-less endpoint and is dropped; a non-default numeric port is re-emitted without
         # leading zeros so its spelling cannot cause a false disagreement (ROUND-2 codex-4). A colon whose
@@ -698,11 +737,17 @@ def _canonical_remote(url):
         if host.startswith("["):
             if not _bracketed_host_ok(host):
                 return None
-        elif "[" in host or "]" in host:
+        else:
             # A STRAY bracket in an UNBRACKETED scp host ('git@host]:p') is unbalanced and not a valid host:
             # unresolvable rather than a spurious 'host]' endpoint (codex round-8, scp sibling of the
             # scheme-URL stray-bracket check).
-            return None
+            if "[" in host or "]" in host:
+                return None
+            # STRUCTURAL host validation (codex round-12 F1, scp sibling of the scheme-URL check): an scp host
+            # carries no port (the ':' is the host:path separator), so the whole authority is the bare host;
+            # it must be a well-formed bare IPv4 literal or DNS name, else unresolvable -> CANNOT-EVALUATE.
+            if not _dns_or_ipv4_ok(host):
+                return None
     if not host:
         return None
     p = path.strip("/")
@@ -4110,6 +4155,36 @@ def self_test():
         check("f1-canonical-host-newline-still-none", _canonical_remote("ssh://host\nFORGED/p") is None)
         check("f1-canonical-ipv6-port-preserved",
               _canonical_remote("ssh://[2001:db8::22]:2222/p") == ("[2001:db8::22]:2222", "p"))
+        # ROUND-12 F1 (MODERATE): host STRUCTURAL validation completes the host class (chars + structure).
+        # After the character allowlist, the host STRUCTURE is validated: an empty DNS label (`a..b`), a
+        # label over 63 characters, and an IPv4 address inside brackets (`[127.0.0.1]`) are each a malformed
+        # remote and must be CANNOT-EVALUATE (None), never a spurious (host, path) pair that could falsely
+        # satisfy C-SYNC-AGREE even when the manifest target and observed remote strings match. Pre-fix each
+        # returned a pair (('a..b','p'), (64-char label, 'p'), ('[127.0.0.1]','p')); reverting the structural
+        # checks (_dns_or_ipv4_ok, or _bracketed_host_ok's IPv6-only parse) reds them. Covered in both the
+        # scheme-URL and scp host positions.
+        check("f1r12-canonical-empty-dns-label-scheme-none", _canonical_remote("ssh://a..b/p") is None)
+        check("f1r12-canonical-empty-dns-label-scp-none", _canonical_remote("git@a..b:p") is None)
+        check("f1r12-canonical-oversize-label-scheme-none",
+              _canonical_remote("ssh://" + "a" * 64 + ".example/p") is None)
+        check("f1r12-canonical-oversize-label-scp-none",
+              _canonical_remote("git@" + "a" * 64 + ".example:p") is None)
+        check("f1r12-canonical-ipv4-in-brackets-scheme-none", _canonical_remote("ssh://[127.0.0.1]/p") is None)
+        check("f1r12-canonical-ipv4-in-brackets-scp-none", _canonical_remote("git@[127.0.0.1]:p") is None)
+        check("f1r12-canonical-leading-dot-none", _canonical_remote("ssh://.lead/p") is None)
+        check("f1r12-canonical-trailing-dot-none", _canonical_remote("ssh://trail./p") is None)
+        # regression (legit controls the structural checks must NOT red): a valid DNS host, a bracketed IPv6
+        # literal carrying a non-default port, a bare IPv4 dotted-quad (scheme and scp), and a maximal 63-char
+        # label all still canonicalize to a real (host, path) pair.
+        check("f1r12-canonical-dns-host-preserved", _canonical_remote("ssh://good.host/p") == ("good.host", "p"))
+        check("f1r12-canonical-ipv6-port-preserved",
+              _canonical_remote("ssh://[2001:db8::1]:2222/p") == ("[2001:db8::1]:2222", "p"))
+        check("f1r12-canonical-bare-ipv4-scheme-preserved",
+              _canonical_remote("ssh://203.0.113.5/p") == ("203.0.113.5", "p"))
+        check("f1r12-canonical-bare-ipv4-scp-preserved",
+              _canonical_remote("git@203.0.113.5:p") == ("203.0.113.5", "p"))
+        check("f1r12-canonical-max-label-preserved",
+              _canonical_remote("ssh://" + "a" * 63 + ".example/p") == ("a" * 63 + ".example", "p"))
         _r2wd = build(pr_machine, product=pr_product)
         os.makedirs(str(_r2wd / ".working" / "toml" / "worklog"), exist_ok=False)
         _r2wdr = validate_store(resolve_store(_r2wd), observations=pr_obs)

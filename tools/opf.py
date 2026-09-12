@@ -83,6 +83,7 @@ def _watchdog_hostile_ambient_self_test():
     import io as _io
     import signal as _signal
     import contextlib as _ctx
+    import time as _time
     if not (hasattr(_signal, "pthread_sigmask") and hasattr(_signal, "setitimer")
             and hasattr(_signal, "SIGALRM") and hasattr(_signal, "ITIMER_REAL")):
         print("opf watchdog hostile-ambient self-test: SKIP (no POSIX SIGALRM/itimer on this platform)")
@@ -94,16 +95,27 @@ def _watchdog_hostile_ambient_self_test():
     def _benign(_s, _f):                                          # a caller handler the watchdog must restore
         pass
 
+    # F3 (round-12): the fixture ITIMER installed before each affected self-test carries a KNOWN value AND a
+    # NONZERO REPEATING interval, so the discrimination below can assert the watchdog restored the interval
+    # AND value (elapsed-aware, per F2), not merely that some positive time remains. A one-shot fixture (zero
+    # interval) let a dropped interval-restoration survive: 0 restored == 0 ambient. A distinct nonzero
+    # interval makes that mutant observable (restored interval 0 != the fixture interval).
+    _FIX_VAL = 3600.0        # the KNOWN fixture ITIMER value the helper watchdog must preserve (elapsed-aware)
+    _FIX_INT = 1800.0        # the KNOWN nonzero REPEATING interval the helper watchdog must restore verbatim
+
     ok = True
     for label, fn in affected:
         _prev_disp = _signal.getsignal(_signal.SIGALRM)
         _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, set())
         _prev_val, _prev_int = _signal.getitimer(_signal.ITIMER_REAL)
+        _t0 = _time.monotonic()                                   # F2: elapsed baseline for the caller-timer restore
         try:
-            # Hostile ambient: install a benign handler, ARM a long ITIMER the watchdog must preserve, BLOCK
-            # SIGALRM, then self-signal so a SIGALRM is left PENDING-and-BLOCKED (timer already fired).
+            # Hostile ambient: install a benign handler, ARM a long ITIMER the watchdog must preserve (a KNOWN
+            # value AND a nonzero repeating interval, F3), BLOCK SIGALRM, then self-signal so a SIGALRM is left
+            # PENDING-and-BLOCKED (timer already fired).
             _signal.signal(_signal.SIGALRM, _benign)
-            _signal.setitimer(_signal.ITIMER_REAL, 3600.0)
+            _signal.setitimer(_signal.ITIMER_REAL, _FIX_VAL, _FIX_INT)
+            _t_arm = _time.monotonic()                            # F3: elapsed baseline for the fixture-value bound
             _signal.pthread_sigmask(_signal.SIG_BLOCK, {_signal.SIGALRM})
             _os.kill(_os.getpid(), _signal.SIGALRM)
             _pending_ok = _signal.SIGALRM in _signal.sigpending()
@@ -115,9 +127,10 @@ def _watchdog_hostile_ambient_self_test():
             except BaseException as exc:                          # a watchdog crash is the pre-fix failure
                 _crashed = repr(exc)
                 rc = None
+            _fn_elapsed = _time.monotonic() - _t_arm              # upper bound on the elapsed the watchdog subtracts
             _blocked_after = _signal.SIGALRM in _signal.pthread_sigmask(_signal.SIG_BLOCK, set())
             _disp_after = _signal.getsignal(_signal.SIGALRM)
-            _val_after, _ = _signal.getitimer(_signal.ITIMER_REAL)
+            _val_after, _int_after = _signal.getitimer(_signal.ITIMER_REAL)
             if not _pending_ok:
                 print("opf watchdog self-test: {}: setup did not leave SIGALRM pending".format(label),
                       file=sys.stderr)
@@ -138,23 +151,129 @@ def _watchdog_hostile_ambient_self_test():
                 print("opf watchdog self-test: {}: did not restore the caller SIGALRM disposition".format(
                     label), file=sys.stderr)
                 ok = False
-            if _val_after <= 0.0:
-                print("opf watchdog self-test: {}: did not restore the caller's armed ITIMER_REAL".format(
-                    label), file=sys.stderr)
+            # F3 (round-12): the watchdog must restore the caller's ITIMER VALUE (elapsed-aware, per F2) AND
+            # its REPEATING INTERVAL, not merely leave some positive time. The value lies in
+            # (_FIX_VAL - _fn_elapsed, _FIX_VAL]: the watchdog subtracts an elapsed >= 0 and <= the whole
+            # fn() run, so a restored value below that band means the value was not preserved and one above
+            # _FIX_VAL means the elapsed was not subtracted at all. A small float slack absorbs monotonic
+            # jitter. The interval must be restored exactly to the fixture's _FIX_INT; a dropped
+            # interval-restoration leaves 0 and reds this (the mutant a one-shot fixture hid).
+            if not (_FIX_VAL - _fn_elapsed - 1e-3 <= _val_after <= _FIX_VAL + 1e-3):
+                print("opf watchdog self-test: {}: did not restore the caller's ITIMER_REAL value "
+                      "elapsed-aware (got {!r}, expected within ({:.6f}, {:.6f}]) (F2/F3)".format(
+                          label, _val_after, _FIX_VAL - _fn_elapsed, _FIX_VAL), file=sys.stderr)
+                ok = False
+            if abs(_int_after - _FIX_INT) > 1e-6:
+                print("opf watchdog self-test: {}: did not restore the caller's ITIMER_REAL repeating "
+                      "interval (got {!r}, expected {!r}) (F3)".format(label, _int_after, _FIX_INT),
+                      file=sys.stderr)
                 ok = False
         finally:
             _signal.setitimer(_signal.ITIMER_REAL, 0)             # disarm the fixture timer
             _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)     # discard any still-pending SIGALRM
             _signal.signal(_signal.SIGALRM, _prev_disp)           # restore the real caller disposition
             _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
+            # F2 (round-12, fix-induced by the round-11 watchdog work): restore the caller's ITIMER_REAL with
+            # ELAPSED TIME SUBTRACTED (the round-9 run_bounded / three-site pattern), preserving the interval,
+            # so the 3 helper runs do NOT pause or extend the caller's deadline (a 50ms deadline set before
+            # the test must still fire, not sit ~50ms away after ~300ms of test). A deadline that would have
+            # expired DURING the test still fires (clamp to a tiny positive so it is not silently swallowed),
+            # never re-armed to its full original value.
             if _prev_val > 0.0:
-                _signal.setitimer(_signal.ITIMER_REAL, _prev_val, _prev_int)
+                _rem = _prev_val - (_time.monotonic() - _t0)
+                _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, _prev_int)
     if not ok:
         print("opf watchdog hostile-ambient self-test: FAIL (a FIFO-probe watchdog did not survive a "
               "blocked+pending ambient SIGALRM with state restored)", file=sys.stderr)
         return EXIT_FINDING
     print("opf watchdog hostile-ambient self-test: PASS (changelog/views/store watchdogs survive a "
           "blocked+pending SIGALRM with mask, disposition, and timer restored)")
+    return EXIT_OK
+
+
+def _watchdog_wrapper_caller_deadline_self_test():
+    """Guard F2 (round-12, fix-induced): _watchdog_hostile_ambient_self_test must restore the CALLER's
+    ITIMER_REAL with ELAPSED TIME SUBTRACTED, so running it neither PAUSES nor EXTENDS a caller's deadline
+    (the pre-fix wrapper restored the caller value VERBATIM, so a 50ms deadline was still ~50ms away after
+    the ~sub-second test and never fired). The three helper restore sites carry their own elapsed-aware
+    discrimination inside the wrapper (the fixture value+interval check); this covers the WRAPPER's own
+    caller-timer restore, which the default self-test never exercises because it arms no caller deadline.
+
+    Arm a short (50ms) caller deadline with a firing-recorder handler, run the wrapper (which holds the
+    caller timer across its 3 helper self-test runs, well over 50ms in total), and assert the deadline was
+    HONOURED: elapsed-aware, the wrapper drives it below zero and it FIRES during the run (the recorder sees
+    it) and reads as expired afterwards; the pre-fix verbatim restore leaves it sitting at its full 50ms,
+    unfired. Returns 0 clean, 1 on failure; SKIPS clean on a platform without POSIX SIGALRM/itimer."""
+    import io as _io
+    import signal as _signal
+    import contextlib as _ctx
+    import time as _time
+    if not (hasattr(_signal, "setitimer") and hasattr(_signal, "SIGALRM")
+            and hasattr(_signal, "ITIMER_REAL")):
+        print("opf watchdog wrapper-deadline self-test: SKIP (no POSIX SIGALRM/itimer on this platform)")
+        return EXIT_OK
+    _deadline = 0.05                                             # a 50ms caller deadline the wrapper outlasts
+    _fired = []
+
+    def _recorder(_s, _f):
+        _fired.append(_time.monotonic())
+
+    # This test controls its OWN signal environment (test-hermeticity): it must UNBLOCK SIGALRM so its own
+    # deadline can be delivered, and DISCARD any inherited pending SIGALRM under SIG_IGN first so a hostile
+    # ambient (SIGALRM blocked with an already-fired alarm pending) cannot pre-fire the recorder or suppress
+    # delivery of this test's deadline. The caller's disposition, mask, and timer are captured and restored.
+    _have_mask = hasattr(_signal, "pthread_sigmask")
+    _prev_disp = _signal.getsignal(_signal.SIGALRM)
+    _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, set()) if _have_mask else None
+    _prev_val, _prev_int = _signal.getitimer(_signal.ITIMER_REAL)
+    ok = True
+    try:
+        _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)         # discard any inherited pending SIGALRM
+        _signal.signal(_signal.SIGALRM, _recorder)
+        if _have_mask:
+            _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
+        _signal.setitimer(_signal.ITIMER_REAL, _deadline)
+        _t0 = _time.monotonic()
+        _buf = _io.StringIO()
+        with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
+            _rc = _watchdog_hostile_ambient_self_test()          # the wrapper under test
+        _elapsed = _time.monotonic() - _t0
+        _val_after, _ = _signal.getitimer(_signal.ITIMER_REAL)
+        if _rc != EXIT_OK:
+            print("opf watchdog wrapper-deadline self-test: the inner hostile-ambient wrapper returned {!r} "
+                  "(expected 0)".format(_rc), file=sys.stderr)
+            ok = False
+        # The wrapper ran far longer than the deadline, so an elapsed-aware restore drove the deadline below
+        # zero: it FIRED during the run (recorder saw it) and reads as expired (~0) afterwards. A verbatim
+        # restore (the pre-fix bug) leaves it at its full 50ms, unfired: _elapsed > _deadline guards the test.
+        if _elapsed <= _deadline:
+            print("opf watchdog wrapper-deadline self-test: the wrapper ran {:.4f}s, not longer than the {}s "
+                  "deadline; the fixture cannot discriminate".format(_elapsed, _deadline), file=sys.stderr)
+            ok = False
+        if not _fired:
+            print("opf watchdog wrapper-deadline self-test: the caller's {}s deadline never FIRED across a "
+                  "{:.4f}s run; the wrapper paused/extended it instead of restoring it elapsed-aware "
+                  "(F2)".format(_deadline, _elapsed), file=sys.stderr)
+            ok = False
+        if _val_after >= _deadline:
+            print("opf watchdog wrapper-deadline self-test: the caller's ITIMER_REAL was restored to {!r} "
+                  ">= its full {}s value; the elapsed time was not subtracted (F2)".format(
+                      _val_after, _deadline), file=sys.stderr)
+            ok = False
+    finally:
+        _signal.setitimer(_signal.ITIMER_REAL, 0)                # disarm before restoring the caller state
+        _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)         # discard any still-pending SIGALRM
+        _signal.signal(_signal.SIGALRM, _prev_disp)
+        if _have_mask:
+            _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)   # restore the caller's exact mask
+        if _prev_val > 0.0:
+            _signal.setitimer(_signal.ITIMER_REAL, _prev_val, _prev_int)
+    if not ok:
+        print("opf watchdog wrapper-deadline self-test: FAIL (the wrapper did not restore the caller's "
+              "ITIMER_REAL elapsed-aware; a caller deadline was paused/extended)", file=sys.stderr)
+        return EXIT_FINDING
+    print("opf watchdog wrapper-deadline self-test: PASS (a caller ITIMER_REAL deadline is honoured "
+          "elapsed-aware across the hostile-ambient wrapper, not paused or extended)")
     return EXIT_OK
 
 
@@ -171,6 +290,7 @@ SELF_TESTS = (
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-watchdog-hostile-ambient", _watchdog_hostile_ambient_self_test),
+    ("opf-watchdog-wrapper-deadline", _watchdog_wrapper_caller_deadline_self_test),
     ("opf-aggregator", _aggregator_self_test),
 )
 
