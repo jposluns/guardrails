@@ -1401,6 +1401,35 @@ def self_test():
             os.close(c1fd)
         checked += 1
 
+        # (O2) F3 (round-10): reconcile_and_claim_stale refuses a MULTIPLY-LINKED arbitration inode. A
+        #      hardlinked <journal>/lock.break (st_nlink > 1) is a second name for the same inode, so a
+        #      foreign flock holder on the other name could block the LOCK_EX indefinitely and wedge
+        #      stale-lock recovery. The nlink==1 guard (class-consistent with the frames.log/product-file
+        #      write-path nlink checks) fires right after the open, before flock/owner-read, so it refuses
+        #      with a JournalError. Reverting the guard lets the break proceed (no live lock -> "acquired"),
+        #      flipping this red.
+        f3root = tmp / "f3-hardlink-lockbreak"
+        f3jr = f3root / JOURNAL_REL
+        f3jr.mkdir(parents=True)
+        (f3jr / "lock.break").write_bytes(b"")               # a regular arbitration file...
+        os.link(str(f3jr / "lock.break"), str(f3root / "evil-hardlink"))  # ...with a SECOND hard link
+        f3fd = os.open(str(f3root), os.O_RDONLY | os.O_DIRECTORY)
+        f3jrfd = _journal.open_journal_root_fd(f3fd, JOURNAL_REL)
+        try:
+            try:
+                _journal.reconcile_and_claim_stale(f3jr, f3jrfd, f3fd, session_id="recover")
+                failures.append("F3: reconcile_and_claim_stale must refuse a hardlinked (nlink>1) lock.break")
+            except _journal.JournalError as exc:
+                if "hard link" not in str(exc):
+                    failures.append("F3: the hardlinked-lock.break refusal must name the hard-link count "
+                                    "(got {!r})".format(str(exc)))
+            if (f3jr / "lock").exists():
+                failures.append("F3: a refused hardlinked-lock.break break must NOT acquire a fresh lock")
+        finally:
+            os.close(f3jrfd)
+            os.close(f3fd)
+        checked += 1
+
         # (P) C7: an unknown --unit (not a connected component of the crosswalk) is REJECTED before locking
         #     (exit 2), leaving no journal lock behind.
         ukroot = _build_case_root(tmp / "unknown-unit" / "root", "flat-files")

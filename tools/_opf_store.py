@@ -1883,14 +1883,24 @@ def self_test():
             already passed re-arms to fire at once, never silently dropped). SIGALRM is UNBLOCKED for the probe
             so the watchdog fires even if the caller had it blocked, then the exact caller mask is restored, so
             this probe never cancels a caller's running timer nor unblocks its SIGALRM."""
-            _prev = _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(_HangMarker()))
+            _prev = _signal.getsignal(_signal.SIGALRM)           # capture WITHOUT installing yet (F2)
             _have_mask = hasattr(_signal, "pthread_sigmask")
             _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
             _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
             _t0 = _time.monotonic()
-            if _have_mask:
-                _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
+            # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
+            # finally restores the caller's mask, disposition, and timer even if a signal fires during setup.
+            # An ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would
+            # otherwise be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the
+            # try/finally, would raise _HangMarker out of the probe uncaught AND leave the caller's mask
+            # corrupted (SIGALRM unblocked). Any inherited pending SIGALRM is first DISCARDED under SIG_IGN
+            # (POSIX: setting SIG_IGN discards a pending signal whether or not it is blocked) so it cannot
+            # fire the marker handler spuriously and read as a false hang.
             try:
+                _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)  # discard any inherited pending SIGALRM
+                _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(_HangMarker()))
+                if _have_mask:
+                    _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
                 _signal.setitimer(_signal.ITIMER_REAL, 2.0)
                 try:
                     thunk()

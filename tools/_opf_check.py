@@ -553,20 +553,32 @@ def _bracketed_host_ok(tok):
     return True
 
 
+# The ONLY characters a git remote host authority (host[:port], userinfo already stripped) may carry:
+# DNS/IPv4 hostname characters [A-Za-z0-9.-], the ':' that separates a port (and appears inside an IPv6
+# literal), and the '[' ']' that bracket an IPv6 literal (its hex digits and '.' are already in the DNS
+# set). This is an ALLOWLIST: any other code point is rejected by default.
+_HOST_AUTHORITY_ALLOWED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-:[]")
+
+
 def _host_authority_ok(authority):
-    """The `host[:port]` authority (userinfo already stripped) carries no WHITESPACE and no CONTROL
-    character. Such a byte is never valid anywhere in a host or a port, so it is a forged or mis-parsed
-    authority (`ssh://h ost/p` with an embedded space, `ssh://host\\nFORGED/p` with a newline/control), and a
-    remote carrying one must be UNRESOLVABLE (the caller returns None -> CANNOT-EVALUATE) rather than a
+    """The `host[:port]` authority (userinfo already stripped) carries ONLY characters from the host
+    ALLOWLIST (_HOST_AUTHORITY_ALLOWED): DNS/IPv4 hostname characters, the port/IPv6 ':', and the IPv6
+    brackets. ANY other character -- whitespace, an ASCII control or DEL, a Unicode FORMAT/zero-width/bidi
+    character (category Cf, e.g. U+200B ZERO WIDTH SPACE or U+202E RIGHT-TO-LEFT OVERRIDE), or any other
+    non-ASCII code point -- is never valid in a host or a port, so a remote carrying one is a forged or
+    mis-parsed authority and must be UNRESOLVABLE (the caller returns None -> CANNOT-EVALUATE) rather than a
     spurious host that could falsely satisfy C-SYNC-AGREE even when the manifest target and observed remote
-    strings match (codex round-8; guard-input-soundness: the WHOLE host token is validated, not just its
-    bracket/port shape). A bracketed IPv6 authority is validated separately by _bracketed_host_ok (its
-    ip_address parse already rejects an interior space/control), so this needs cover only the whitespace and
-    control classes; the stray/unbalanced-bracket class is rejected at the unbracketed branches below."""
-    for ch in authority:
-        if ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f:
-            return False
-    return True
+    strings match. This ALLOWLIST replaces the earlier whitespace/control BLOCKLIST, which admitted every
+    character it did not enumerate and so had to be widened at each new hostile class (port/bracket ->
+    whitespace/control -> Cf/zero-width/bidi: the host-validation whack-a-mole, round-10 F1). An allowlist
+    structurally ends it: a newly-hostile character class is outside the allowlist by default rather than
+    needing a fresh blocklist clause (guard-input-soundness: the WHOLE host token is validated by a positive
+    grammar, not a growing set of negatives). The bracket-BALANCE, IPv6-literal parse (_bracketed_host_ok),
+    and port-RANGE checks stay in _canonical_remote: this bounds only the character set; the structure is
+    still validated there. An empty authority carries no character (all() is vacuously True) and is handled
+    by the caller's own emptiness guard (host falsiness), unchanged."""
+    return all(ch in _HOST_AUTHORITY_ALLOWED for ch in authority)
 
 
 def _canonical_remote(url):
@@ -4081,6 +4093,23 @@ def self_test():
               _canonical_remote("ssh://git@good.host/p") == ("good.host", "p"))
         check("r8-canonical-bracket-host-still-ok",
               _canonical_remote("git@[2001:db8::1]:path@x") == ("[2001:db8::1]", "path@x"))
+        # ROUND-10 F1 (MODERATE): the host-token validation is now an ALLOWLIST, so a Unicode FORMAT
+        # character (category Cf: zero-width, bidi) in the host is CANNOT-EVALUATE (None), never a clean
+        # (host, path) pair that could falsely satisfy C-SYNC-AGREE. The earlier blocklist (whitespace /
+        # control / DEL only) admitted these and canonicalized `ssh://ho<ZWSP>st/p` to ('ho<ZWSP>st', 'p');
+        # each check reverts red if the allowlist is weakened back to a blocklist. Covers a zero-width space
+        # (U+200B) and a right-to-left override (U+202E) in both the scheme-URL and scp host positions.
+        check("f1-canonical-host-zwsp-scheme-none", _canonical_remote("ssh://ho\u200bst/p") is None)
+        check("f1-canonical-host-bidi-scheme-none", _canonical_remote("ssh://ho\u202est/p") is None)
+        check("f1-canonical-host-zwsp-scp-none", _canonical_remote("git@ho\u200bst:p") is None)
+        check("f1-canonical-host-bidi-scp-none", _canonical_remote("git@ho\u202est:p") is None)
+        # regression: the round-8/9 whitespace/control/stray-bracket forms STILL reject under the allowlist,
+        # and a legitimate bracketed IPv6 literal carrying a non-default PORT is still preserved (the
+        # allowlist admits the brackets, ':' and digits; the structure checks in _canonical_remote pass it).
+        check("f1-canonical-host-space-still-none", _canonical_remote("ssh://h ost/p") is None)
+        check("f1-canonical-host-newline-still-none", _canonical_remote("ssh://host\nFORGED/p") is None)
+        check("f1-canonical-ipv6-port-preserved",
+              _canonical_remote("ssh://[2001:db8::22]:2222/p") == ("[2001:db8::22]:2222", "p"))
         _r2wd = build(pr_machine, product=pr_product)
         os.makedirs(str(_r2wd / ".working" / "toml" / "worklog"), exist_ok=False)
         _r2wdr = validate_store(resolve_store(_r2wd), observations=pr_obs)

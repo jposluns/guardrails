@@ -67,6 +67,97 @@ def _aggregator_self_test():
     return EXIT_OK
 
 
+def _watchdog_hostile_ambient_self_test():
+    """Guard F2 (round-10, class-width): the FIFO-probe watchdogs in _opf_changelog / _opf_views /
+    _opf_store must survive a HOSTILE ambient SIGALRM state and leave it exactly as they found it. The
+    hostile ambient is SIGALRM BLOCKED with an already-fired (PENDING) alarm AND an armed ITIMER_REAL -
+    the exact "timer already fired" state. Pre-fix each watchdog unblocked SIGALRM OUTSIDE its try/finally,
+    so the pending alarm was delivered the instant SIGALRM unblocked, raised out of the self-test uncaught,
+    AND left SIGALRM unblocked (a corrupted caller mask). This runs each affected self-test under that exact
+    ambient and asserts a clean, state-restored outcome (rc 0; caller mask, SIGALRM disposition, and interval
+    timer all restored); reverting any one site's try/finally (or its pending-drain) re-reds it. Returns 0
+    clean, 1 on a failure. On a platform without POSIX SIGALRM/itimer the watchdogs no-op, so this SKIPS
+    clean. Runs the affected self-tests a second time (once here under the hostile ambient, once in the
+    registry under the default ambient), the price of exercising the real sites rather than a copy."""
+    import os as _os
+    import io as _io
+    import signal as _signal
+    import contextlib as _ctx
+    if not (hasattr(_signal, "pthread_sigmask") and hasattr(_signal, "setitimer")
+            and hasattr(_signal, "SIGALRM") and hasattr(_signal, "ITIMER_REAL")):
+        print("opf watchdog hostile-ambient self-test: SKIP (no POSIX SIGALRM/itimer on this platform)")
+        return EXIT_OK
+    affected = (("opf-changelog", _opf_changelog.self_test),
+                ("opf-views", _opf_views.self_test),
+                ("opf-store", _opf_store.self_test))
+
+    def _benign(_s, _f):                                          # a caller handler the watchdog must restore
+        pass
+
+    ok = True
+    for label, fn in affected:
+        _prev_disp = _signal.getsignal(_signal.SIGALRM)
+        _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, set())
+        _prev_val, _prev_int = _signal.getitimer(_signal.ITIMER_REAL)
+        try:
+            # Hostile ambient: install a benign handler, ARM a long ITIMER the watchdog must preserve, BLOCK
+            # SIGALRM, then self-signal so a SIGALRM is left PENDING-and-BLOCKED (timer already fired).
+            _signal.signal(_signal.SIGALRM, _benign)
+            _signal.setitimer(_signal.ITIMER_REAL, 3600.0)
+            _signal.pthread_sigmask(_signal.SIG_BLOCK, {_signal.SIGALRM})
+            _os.kill(_os.getpid(), _signal.SIGALRM)
+            _pending_ok = _signal.SIGALRM in _signal.sigpending()
+            _crashed = None
+            _buf = _io.StringIO()
+            try:
+                with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
+                    rc = fn()
+            except BaseException as exc:                          # a watchdog crash is the pre-fix failure
+                _crashed = repr(exc)
+                rc = None
+            _blocked_after = _signal.SIGALRM in _signal.pthread_sigmask(_signal.SIG_BLOCK, set())
+            _disp_after = _signal.getsignal(_signal.SIGALRM)
+            _val_after, _ = _signal.getitimer(_signal.ITIMER_REAL)
+            if not _pending_ok:
+                print("opf watchdog self-test: {}: setup did not leave SIGALRM pending".format(label),
+                      file=sys.stderr)
+                ok = False
+            if _crashed is not None:
+                print("opf watchdog self-test: {}: RAISED under blocked+pending SIGALRM ({}); the unblock "
+                      "escaped its try/finally (F2)".format(label, _crashed), file=sys.stderr)
+                ok = False
+            elif rc != EXIT_OK:
+                print("opf watchdog self-test: {}: returned {!r} under the hostile ambient (expected "
+                      "0)".format(label, rc), file=sys.stderr)
+                ok = False
+            if not _blocked_after:
+                print("opf watchdog self-test: {}: left SIGALRM UNBLOCKED; the caller mask was corrupted "
+                      "(F2)".format(label), file=sys.stderr)
+                ok = False
+            if _disp_after is not _benign:
+                print("opf watchdog self-test: {}: did not restore the caller SIGALRM disposition".format(
+                    label), file=sys.stderr)
+                ok = False
+            if _val_after <= 0.0:
+                print("opf watchdog self-test: {}: did not restore the caller's armed ITIMER_REAL".format(
+                    label), file=sys.stderr)
+                ok = False
+        finally:
+            _signal.setitimer(_signal.ITIMER_REAL, 0)             # disarm the fixture timer
+            _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)     # discard any still-pending SIGALRM
+            _signal.signal(_signal.SIGALRM, _prev_disp)           # restore the real caller disposition
+            _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
+            if _prev_val > 0.0:
+                _signal.setitimer(_signal.ITIMER_REAL, _prev_val, _prev_int)
+    if not ok:
+        print("opf watchdog hostile-ambient self-test: FAIL (a FIFO-probe watchdog did not survive a "
+              "blocked+pending ambient SIGALRM with state restored)", file=sys.stderr)
+        return EXIT_FINDING
+    print("opf watchdog hostile-ambient self-test: PASS (changelog/views/store watchdogs survive a "
+          "blocked+pending SIGALRM with mask, disposition, and timer restored)")
+    return EXIT_OK
+
+
 # Registered helper self-tests, run by `opf.py --self-test`. Each is (label, callable) returning a
 # 0/1/2 exit code (0 clean, 1 finding, 2 cannot-evaluate). Later units append their own helper here.
 SELF_TESTS = (
@@ -79,6 +170,7 @@ SELF_TESTS = (
     ("opf-import", _opf_import.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
+    ("opf-watchdog-hostile-ambient", _watchdog_hostile_ambient_self_test),
     ("opf-aggregator", _aggregator_self_test),
 )
 

@@ -922,9 +922,20 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
         raise JournalError("cannot open arbitration file {} ({}); refusing to break the stale lock "
                            "(fails closed)".format(arb, exc))
     try:
-        if not stat.S_ISREG(os.fstat(afd).st_mode):          # trust it as the arbitration inode only if regular
+        _ast = os.fstat(afd)
+        if not stat.S_ISREG(_ast.st_mode):                   # trust it as the arbitration inode only if regular
             raise JournalError("arbitration file {} is not a regular file; refusing to break the stale "
                                "lock (fails closed)".format(arb))
+        # A MULTIPLY-LINKED arbitration inode (st_nlink > 1) is a second name for the same inode, so a
+        # foreign flock holder on that other name can block this LOCK_EX indefinitely and wedge stale-lock
+        # recovery; a legitimate, singly-created lock.break has exactly one link. Refuse it, class-consistent
+        # with the journal WRITE-path nlink==1 identity guards (frames.log reopen/append/read/truncate and
+        # the product-file prestate checks), so the ONLY unguarded acceptor of a hardlinked inode left in the
+        # journal is closed (round-10 F3; fails closed, never breaks a hardlinked lock).
+        if _ast.st_nlink != 1:
+            raise JournalError("arbitration file {} has {} hard links (expected exactly 1); a multiply-linked "
+                               "arbitration inode lets a foreign flock holder block stale-lock recovery, so we "
+                               "refuse to break the stale lock (fails closed)".format(arb, _ast.st_nlink))
         fcntl.flock(afd, fcntl.LOCK_EX)
         try:
             current = read_lock_owner(journal_root)          # RE-READ the CURRENT owner under the lock

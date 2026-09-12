@@ -1054,14 +1054,23 @@ def self_test():
         # C (test-hermeticity): snapshot the caller's SIGALRM disposition, mask, and ITIMER_REAL; unblock
         # SIGALRM for the probe; and restore all three (timer minus elapsed) so this watchdog leaves the
         # ambient alarm state unchanged (never cancelling a caller's timer or unblocking its SIGALRM).
-        _old_alarm = _signal.signal(_signal.SIGALRM, _fifo_watchdog)
+        _old_alarm = _signal.getsignal(_signal.SIGALRM)          # capture WITHOUT installing yet (F2)
         _have_mask = hasattr(_signal, "pthread_sigmask")
         _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
         _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
         _t0 = _time.monotonic()
-        if _have_mask:
-            _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
+        # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
+        # finally restores the caller's mask, disposition, and timer even if a signal fires during setup. An
+        # ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would otherwise
+        # be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the try/finally, would
+        # raise out of the watchdog uncaught AND leave the caller's mask corrupted (SIGALRM unblocked). Any
+        # inherited pending SIGALRM is first DISCARDED under SIG_IGN (POSIX: setting SIG_IGN discards a
+        # pending signal whether or not it is blocked) so it cannot fire the probe handler spuriously.
         try:
+            _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)     # discard any inherited pending SIGALRM
+            _signal.signal(_signal.SIGALRM, _fifo_watchdog)      # now install the watchdog handler
+            if _have_mask:
+                _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
             _signal.setitimer(_signal.ITIMER_REAL, 5)
             r_fifo = evaluate(fifo_root)
         finally:
