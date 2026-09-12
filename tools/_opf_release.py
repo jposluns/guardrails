@@ -1649,8 +1649,12 @@ def self_test():
     check("blocker-partition-huge-expected-bounded",
           run_bounded(lambda: "LOSS" if check_ids_partition(
               [1], [], expected_ids=range(1, 1000000001)) else "NO-LOSS") == "LOSS")
+    # self-test-discrimination: range(1, 3) is {1, 2} with only WL-1 present, so WL-2 is absent in NEITHER
+    # location and a loss MUST be reported (a truthy findings list). The prior range(1, 2) is {1} with {1}
+    # present -> zero absent, so it asserted NO loss despite the name and exercised no loss detection at all;
+    # this vector exercises small-range loss detection directly and fails if the expected-id loss check regresses.
     check("partition-huge-expected-still-detects-loss",
-          not check_ids_partition([1], [], expected_ids=range(1, 2)))
+          check_ids_partition([1], [], expected_ids=range(1, 3)))
 
     # MAJOR (FAIL-OPEN, format gate): a trailing newline no longer passes the digest / SemVer regex
     # (`$` matched before a final newline; `\Z` anchors the whole string).

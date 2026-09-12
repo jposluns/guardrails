@@ -1256,8 +1256,22 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
             if st is None:
                 _recreate_file(pfd, name, data, prestate["mode"])
             elif stat.S_ISREG(st.st_mode):
-                fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=pfd)
+                fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
                 try:
+                    # SECI-symlink-resolution: the S_ISREG decision above rests on the PRE-open lstat, which
+                    # describes a name that may no longer point where it did. O_NOFOLLOW refuses a symlink but
+                    # NOT a hardlink or a regular-file swap raced in between the lstat and this open (both are
+                    # regular files, so a post-open S_ISREG alone would not catch it). Before truncating and
+                    # rewriting, confirm on the OPENED fd that it is STILL a regular file AND the SAME object
+                    # (st_ino/st_dev) the lstat saw; a mismatch means a different inode was swapped in and is
+                    # refused fail-closed rather than truncating and overwriting an unintended victim. This
+                    # mirrors the apply path's _verify_fd_prestate post-open confirmation, which the restore
+                    # path previously lacked. (O_NONBLOCK matches the contained-reader pattern: a no-op for a
+                    # regular file, and it keeps a raced-in FIFO from blocking the open.)
+                    fst = os.fstat(fd)
+                    if not stat.S_ISREG(fst.st_mode) or fst.st_ino != st.st_ino or fst.st_dev != st.st_dev:
+                        raise JournalError("cannot restore {!r}: the regular file was swapped for a different "
+                                           "object between the pre-open check and the open (fail-closed)".format(path))
                     os.ftruncate(fd, 0)
                     os.lseek(fd, 0, os.SEEK_SET)
                     _write_all(fd, data)

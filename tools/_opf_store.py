@@ -1718,15 +1718,21 @@ def self_test():
         # MAJOR 2 relative-root path) exactly as before, but with no mutation of this process's cwd.
         import subprocess
         import json
+        # test-hermeticity: launch the child ISOLATED (-I ignores PYTHON* env like PYTHONHOME/PYTHONPATH and
+        # user site; -B suppresses __pycache__ writes into the tools dir), so a hostile ambient PYTHONHOME the
+        # parent inherits cannot break the child interpreter, and supply the sibling-import path EXPLICITLY
+        # inside the child (since -I ignores PYTHONPATH), so the child's verdict comes from store resolution,
+        # not the ambient interpreter env.
         _child_src = (
             "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1])\n"
             "import _opf_store as S\n"
-            "r = S.resolve_store(sys.argv[1])\n"
+            "r = S.resolve_store(sys.argv[2])\n"
             "sys.stdout.write(json.dumps([r.status, None if r.store_root is None else str(r.store_root)]))\n")
-        _child_env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parent),
-                          PYTHONDONTWRITEBYTECODE="1")
-        _child = subprocess.run([sys.executable, "-c", _child_src, rel_prod.name],
-                                cwd=str(base), env=_child_env, capture_output=True, text=True)
+        _child = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", _child_src,
+             str(Path(__file__).resolve().parent), rel_prod.name],
+            cwd=str(base), capture_output=True, text=True)
         _rel_status, _rel_store = (json.loads(_child.stdout)
                                    if _child.returncode == 0 and _child.stdout else (None, None))
         check("relative-root-resolves", _rel_status == RESOLVED)
@@ -1843,10 +1849,23 @@ def self_test():
         class _HangMarker(Exception):
             pass
 
+        import time as _time
+
         def _refused_no_hang(thunk):
             """True when thunk() fails closed with a JournalError inside a 2s alarm; False when it HANGS (the
-            marker fires) so a writer-less-FIFO blocking-open regression is a check failure, not a hung suite."""
+            marker fires) so a writer-less-FIFO blocking-open regression is a check failure, not a hung suite.
+            Test-hermeticity: snapshot the caller's SIGALRM disposition, its signal mask, and its ITIMER_REAL,
+            and RESTORE all three in the finally (the timer minus the probe's elapsed time; a caller deadline
+            already passed re-arms to fire at once, never silently dropped). SIGALRM is UNBLOCKED for the probe
+            so the watchdog fires even if the caller had it blocked, then the exact caller mask is restored, so
+            this probe never cancels a caller's running timer nor unblocks its SIGALRM."""
             _prev = _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(_HangMarker()))
+            _have_mask = hasattr(_signal, "pthread_sigmask")
+            _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
+            _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
+            _t0 = _time.monotonic()
+            if _have_mask:
+                _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
             try:
                 _signal.setitimer(_signal.ITIMER_REAL, 2.0)
                 try:
@@ -1859,6 +1878,11 @@ def self_test():
             finally:
                 _signal.setitimer(_signal.ITIMER_REAL, 0)
                 _signal.signal(_signal.SIGALRM, _prev)
+                if _have_mask:
+                    _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
+                if _prev_value > 0.0:                     # restore the caller's timer, minus elapsed
+                    _rem = _prev_value - (_time.monotonic() - _t0)
+                    _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, _prev_interval)
 
         # M2: _read_contained does not hang on a writer-less FIFO (the raced regular-file->FIFO swap); it
         # returns a fail-closed JournalError at once. The non-OSError marker makes a blocking regression a

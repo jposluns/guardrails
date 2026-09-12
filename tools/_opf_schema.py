@@ -1676,8 +1676,13 @@ def self_test():
     try:
         next_id(dict(BI=_big), "BI", known_complete=True)
         check("fix8-next-id-oversized-refused", False)
-    except ValueError:
-        check("fix8-next-id-oversized-refused", True)
+    except ValueError as _e8:
+        # self-test-discrimination: assert the module's OWN named counter-validation diagnostic, not merely
+        # "some ValueError". Pre-fix, next_id let str(n) trip CPython's raw "Exceeds the limit ... integer
+        # string conversion" ValueError, which a bare `except ValueError` would ALSO satisfy; requiring the
+        # named reason means the uncontrolled CPython crash no longer passes as a clean refusal.
+        check("fix8-next-id-oversized-refused",
+              "must be a genuine non-negative int" in str(_e8))
     check("fix2-unique-oversized-clean", bool(check_unique_ids([_big])))
     check("fix2-within-oversized-clean", bool(check_ids_within_counters([_big], dict())))
     check("fix2-monotonic-oversized-key-clean", bool(check_monotonic(dict(), {_big: 1})))
@@ -1720,7 +1725,11 @@ def self_test():
     # ----- round-2 reconcile additions (Fable ff-QA MINOR 1-5 + gemini finding 3 at this module's
     # shared-helper call sites). Each fix has a discriminating vector that fails or crashes pre-fix;
     # r2fix4-normal-title-still-ok and r2fix5-wellformed-vendors-no-finding are over-reach guards. -------
-    _nines = int("9" * 4300)
+    # test-hermeticity: build the 4300-digit boundary fixture by ARITHMETIC (10**4300 - 1), not int("9"*4300).
+    # int() of a 4300-digit string trips CPython's int-to-str conversion limit if a caller lowered
+    # sys.set_int_max_str_digits below 4300, crashing this suite before its summary; pow/subtraction is never
+    # subject to that limit, so the fixture is constructible regardless of the ambient limit (value identical).
+    _nines = 10 ** 4300 - 1
     _a_nl = dict(kind="maintainer"); _a_nl["x" + chr(10) + "y"] = 1
     _r2f1 = validate_record(envelope("finding", 50, "open", actor=_a_nl))
     check("r2fix1-unknownkey-newline-escaped",

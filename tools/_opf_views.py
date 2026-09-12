@@ -1068,27 +1068,33 @@ def _write_contained(root_fd, relpath, text, check):
         # file. Created 0o600 so the in-flight temp is not world-readable before the real mode is applied.
         tmpname = ".{}.opf-tmp.{}.{}".format(name, os.getpid(), os.urandom(8).hex())
         fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=pfd)
+        # Wrap the WHOLE temp-file lifetime so ANY failure before the atomic rename succeeds (fchmod,
+        # _write_all, fsync, or the rename itself) unlinks the temp descriptor-relative, never leaving an
+        # orphan behind. The cleanup is best-effort and never masks the ORIGINAL error: the exception in
+        # flight propagates through this finally unchanged (mapped to a ViewsError by the outer handler).
+        _renamed = False
         try:
-            # PRESERVE the destination's EXISTING mode across the atomic replace: installing the temp's
-            # create mode would silently WIDEN a restrictive view (e.g. a 0600 target -> 0644). fchmod the
-            # temp fd to the destination's current mode, or to the intended default for a new file, BEFORE
-            # the rename. fchmod is not umask-masked, so the installed mode is deterministic regardless of
-            # the process umask (test-hermeticity).
-            os.fchmod(fd, stat.S_IMODE(st.st_mode) if st is not None else _VIEW_FILE_MODE)
-            _journal._write_all(fd, new_bytes)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        try:
-            os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)   # atomic entry replace, no truncation
-        except OSError:
             try:
-                os.unlink(tmpname, dir_fd=pfd)             # never leave a temp behind on a failed rename
-            except OSError:
-                pass
-            raise
-        os.fsync(pfd)                                     # the rename (a directory entry change) is durable
-        return False
+                # PRESERVE the destination's EXISTING mode across the atomic replace: installing the temp's
+                # create mode would silently WIDEN a restrictive view (e.g. a 0600 target -> 0644). fchmod the
+                # temp fd to the destination's current mode, or to the intended default for a new file, BEFORE
+                # the rename. fchmod is not umask-masked, so the installed mode is deterministic regardless of
+                # the process umask (test-hermeticity).
+                os.fchmod(fd, stat.S_IMODE(st.st_mode) if st is not None else _VIEW_FILE_MODE)
+                _journal._write_all(fd, new_bytes)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)   # atomic entry replace, no truncation
+            _renamed = True
+            os.fsync(pfd)                                 # the rename (a directory entry change) is durable
+            return False
+        finally:
+            if not _renamed:
+                try:
+                    os.unlink(tmpname, dir_fd=pfd)         # never leave a temp behind on ANY pre-rename failure
+                except OSError:
+                    pass
     except _journal.JournalError as exc:                  # a swapped-in non-regular file at read time
         raise ViewsError("cannot write {} ({})".format(relpath, exc))
     except OSError as exc:                                 # ELOOP (a component/target raced to a symlink), etc.
@@ -1672,6 +1678,7 @@ def self_test():
         check("filter-predicate-closed", raises_views_error(lambda: t_filter([], "bogus")))
 
         import signal as _signal
+        import time as _time
         _fifo_dir = base / "fifo-src"; _fifo_dir.mkdir()
         os.mkfifo(str(_fifo_dir / "blk.index.toml"))
         _ffd = os.open(str(_fifo_dir), os.O_RDONLY | os.O_DIRECTORY)
@@ -1679,7 +1686,27 @@ def self_test():
             pass
         def _boom(_s, _f):
             raise _Watchdog()
+        # G (self-test-discrimination): the LOCAL pre-open S_ISREG guard in _read_raw_and_parsed, not the
+        # hardened downstream _journal._read_contained (which ALSO refuses a non-regular file with an
+        # identical "not a regular file" diagnostic), must be what refuses the FIFO. Record whether the
+        # downstream reader is reached: with the local guard present it is NEVER called, so removing that
+        # guard (letting the FIFO fall through to _read_contained) flips this check red.
+        _rc_calls = []
+        _orig_rc = _journal._read_contained
+        def _recording_rc(root_fd, relpath):
+            _rc_calls.append(relpath)
+            return _orig_rc(root_fd, relpath)
+        _journal._read_contained = _recording_rc
+        # C (test-hermeticity): snapshot the caller's SIGALRM disposition, mask, and ITIMER_REAL; unblock
+        # SIGALRM for the probe; and restore all three (timer minus elapsed) so this watchdog leaves the
+        # ambient alarm state unchanged (never cancelling a caller's timer or unblocking its SIGALRM).
         _prev = _signal.signal(_signal.SIGALRM, _boom)
+        _have_mask = hasattr(_signal, "pthread_sigmask")
+        _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
+        _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
+        _t0 = _time.monotonic()
+        if _have_mask:
+            _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
         _fifo_ok = False
         try:
             _signal.setitimer(_signal.ITIMER_REAL, 5)
@@ -1692,8 +1719,14 @@ def self_test():
         finally:
             _signal.setitimer(_signal.ITIMER_REAL, 0)
             _signal.signal(_signal.SIGALRM, _prev)
+            if _have_mask:
+                _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
+            if _prev_value > 0.0:
+                _rem = _prev_value - (_time.monotonic() - _t0)
+                _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, _prev_interval)
+            _journal._read_contained = _orig_rc
             os.close(_ffd)
-        check("fifo-source-fails-closed-not-hang", _fifo_ok)
+        check("fifo-source-fails-closed-not-hang", _fifo_ok and not _rc_calls)
         _slp = base / "symparent"; _slp.mkdir(); (_slp / "real").mkdir()
         (_slp / "real" / "x.index.toml").write_text("schema = 1\n", encoding="utf-8")
         (_slp / "toml").symlink_to("real")
@@ -1783,6 +1816,31 @@ def self_test():
               _utplanted.exists() and _utplanted.read_text(encoding="utf-8") == "ANOTHER-CALLERS-TEMP")
         check("write-unique-temp-dest-updated",
               (_utdir / "TODO.md").read_text(encoding="utf-8") == "NEW\n")
+        # F(temp-cleanup): a failure DURING the temp-file lifetime (fchmod / write / fsync), BEFORE the atomic
+        # rename, must leave NO temp behind and must re-raise the ORIGINAL error unmasked. Inject an ENOSPC
+        # mid-write; post-fix the descriptor-relative unlink removes the orphan while the ViewsError-mapped
+        # ENOSPC still surfaces. Pre-fix (cleanup only on a failed rename) the temp file leaks, so the
+        # no-temp-leak assertion flips red.
+        _tcdir = base / "temp-cleanup"; _tcdir.mkdir()
+        (_tcdir / "TODO.md").write_text("OLD\n", encoding="utf-8")
+        _tcfd = os.open(str(_tcdir), os.O_RDONLY | os.O_DIRECTORY)
+        _tc_orig_write_all = _journal._write_all
+        _journal._write_all = lambda fd, data: (_ for _ in ()).throw(OSError(28, "No space left on device"))
+        _tcsaved_gate = _WRITE_GATE_COMPOSED
+        _tc_err = None
+        try:
+            _WRITE_GATE_COMPOSED = True
+            _write_contained(_tcfd, "TODO.md", "NEW\n", False)
+        except ViewsError as _e:
+            _tc_err = str(_e)
+        finally:
+            _journal._write_all = _tc_orig_write_all
+            _WRITE_GATE_COMPOSED = _tcsaved_gate
+            os.close(_tcfd)
+        check("write-midfailure-surfaces-original-error",
+              _tc_err is not None and "No space left" in _tc_err)
+        check("write-midfailure-no-temp-leak",
+              not any(".opf-tmp." in _n for _n in os.listdir(str(_tcdir))))
         # F(mode-preserve): the atomic replace PRESERVES the destination's existing mode; a restrictive 0600
         # view is not widened to the temp's create mode. The prestate mode is set explicitly (fchmod, not
         # umask), so the assertion is hermetic. Pre-fix the temp's 0644 create mode became the view's mode on

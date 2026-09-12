@@ -946,6 +946,45 @@ def self_test():
                             "(failure was {!r}, expected a read-cap refusal)".format(_lmsg))
         checked += 1
 
+        # (M) RESTORE-PATH POST-OPEN IDENTITY: the regular-file restore decides S_ISREG from the PRE-open
+        #     lstat, then opens the name O_NOFOLLOW and ftruncate+rewrites it. O_NOFOLLOW refuses a symlink
+        #     but NOT a hardlink or a regular-file swap raced in between the lstat and the open (both regular,
+        #     so a post-open S_ISREG alone would not catch it). The fix re-fstats the OPENED fd and refuses
+        #     (JournalError) unless it is the SAME object (S_ISREG + st_ino/st_dev) the lstat saw, mirroring
+        #     the apply path's _verify_fd_prestate. Simulate the swap by making _lstat_at return a DECOY
+        #     regular file's stat (a different inode) while the real name on disk is the victim: post-fix the
+        #     identity mismatch is refused and the victim's bytes are intact; reverted (no post-open check)
+        #     the victim is truncated and overwritten through the swapped-in inode, flipping both asserts red.
+        mroot = tmp / "restoreswap" / "root"; mroot.mkdir(parents=True)
+        mvictim = mroot / "dataA"; mvictim.write_bytes(b"VICTIM-INTACT")
+        mdecoy = tmp / "restoreswap" / "decoy"; mdecoy.write_bytes(b"decoy")   # a DIFFERENT inode, regular
+        mjr = tmp / "restoreswap" / "journal"; (mjr / "t1" / "preimages").mkdir(parents=True)
+        _mpre = b"restored\n"
+        (mjr / "t1" / "preimages" / "0").write_bytes(_mpre)
+        _mop = {"op": "write", "path": "dataA",
+                "prestate": {"kind": "file", "mode": 0o644, "size": len(_mpre), "payload": "0",
+                             "sha256": hashlib.sha256(_mpre).hexdigest()}}
+        _decoy_st = os.lstat(str(mdecoy))          # regular, but a DIFFERENT st_ino/st_dev than the victim
+        _orig_lstat_at = _journal._lstat_at
+        _journal._lstat_at = lambda pfd, name: _decoy_st
+        mjr_fd = os.open(str(mjr), os.O_RDONLY | os.O_DIRECTORY)
+        mroot_fd = os.open(str(mroot), os.O_RDONLY | os.O_DIRECTORY)
+        _m_refused = False
+        try:
+            _journal._restore_preimage(mjr_fd, mjr / "t1", mroot_fd, _mop)
+        except _journal.JournalError:
+            _m_refused = True
+        finally:
+            _journal._lstat_at = _orig_lstat_at
+            os.close(mjr_fd)
+            os.close(mroot_fd)
+        if not _m_refused:
+            failures.append("_restore_preimage must refuse a regular-file/hardlink swap detected on the "
+                            "opened fd (post-open identity check missing)")
+        if mvictim.read_bytes() != b"VICTIM-INTACT":
+            failures.append("_restore_preimage truncated/overwrote a swapped-in victim regular file")
+        checked += 1
+
         # (F2) FIX #3 OWNERSHIP-CHECKED RELEASE: a lock NOT owned by this process is never unlinked.
         jr2 = tmp / "foreignlock" / JOURNAL_REL
         jr2.mkdir(parents=True)

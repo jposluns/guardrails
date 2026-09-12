@@ -3247,11 +3247,14 @@ def self_test():
             # (no unblock), the pending timer never fires and the sleep runs to completion, so the thunk's
             # own result returns instead of TIMEOUT.
             if hasattr(_sig7, "pthread_sigmask"):
-                _sig7.pthread_sigmask(_sig7.SIG_BLOCK, {_sig7.SIGALRM})
+                # test-hermeticity: SNAPSHOT the caller's mask and RESTORE it exactly (SIG_SETMASK), never a
+                # blind SIG_UNBLOCK -- a caller that had SIGALRM blocked must stay blocked afterward, so this
+                # probe leaves the ambient signal mask as it found it. SIG_BLOCK returns the prior mask.
+                _prev_mask7 = _sig7.pthread_sigmask(_sig7.SIG_BLOCK, {_sig7.SIGALRM})
                 try:
                     _tb = run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], timeout_s=1)
                 finally:
-                    _sig7.pthread_sigmask(_sig7.SIG_UNBLOCK, {_sig7.SIGALRM})
+                    _sig7.pthread_sigmask(_sig7.SIG_SETMASK, _prev_mask7)
                 check("f7-inherited-blocked-sigalrm-still-times-out", _tb == "TIMEOUT")
 
         # --- io fail-closed ---------------------------------------------------------------------------

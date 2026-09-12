@@ -1034,19 +1034,48 @@ def self_test():
         # os.open) so the suite fails fast; post-fix the guard returns a "not a regular file" cannot-evaluate
         # well within it, and the alarm never fires.
         import signal as _signal
+        import time as _time
         fifo_root = build_store(version_text, worklog_text, None)
         os.mkfifo(str(fifo_root / CHANGELOG_REL))
         def _fifo_watchdog(_signum, _frame):
             raise TimeoutError("evaluate() blocked on the FIFO changelog (pre-fix hang)")
+        # G (self-test-discrimination): the LOCAL pre-open S_ISREG guard in _load_inputs, not the hardened
+        # downstream _journal._read_contained (which ALSO refuses a non-regular file with an identical "not a
+        # regular file" diagnostic), must refuse the FIFO. Record whether the downstream reader is reached:
+        # only CHANGELOG.md flows through _read_contained (version/worklog/manifest use _read_toml_contained),
+        # and with the local guard present it is NEVER called, so removing that guard flips this check red.
+        _rc_calls = []
+        _orig_rc = _journal._read_contained
+        def _recording_rc(root_fd, relpath):
+            if relpath == CHANGELOG_REL:                  # only the CHANGELOG.md read is the guarded path here
+                _rc_calls.append(relpath)                 # (version/worklog/manifest also route through _read_contained)
+            return _orig_rc(root_fd, relpath)
+        _journal._read_contained = _recording_rc
+        # C (test-hermeticity): snapshot the caller's SIGALRM disposition, mask, and ITIMER_REAL; unblock
+        # SIGALRM for the probe; and restore all three (timer minus elapsed) so this watchdog leaves the
+        # ambient alarm state unchanged (never cancelling a caller's timer or unblocking its SIGALRM).
         _old_alarm = _signal.signal(_signal.SIGALRM, _fifo_watchdog)
-        _signal.alarm(5)
+        _have_mask = hasattr(_signal, "pthread_sigmask")
+        _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
+        _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
+        _t0 = _time.monotonic()
+        if _have_mask:
+            _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
         try:
+            _signal.setitimer(_signal.ITIMER_REAL, 5)
             r_fifo = evaluate(fifo_root)
         finally:
-            _signal.alarm(0)
+            _signal.setitimer(_signal.ITIMER_REAL, 0)
             _signal.signal(_signal.SIGALRM, _old_alarm)
+            if _have_mask:
+                _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
+            if _prev_value > 0.0:
+                _rem = _prev_value - (_time.monotonic() - _t0)
+                _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, _prev_interval)
+            _journal._read_contained = _orig_rc
         check("f1-fifo-changelog-not-regular-fail-closed",
-              r_fifo.status == CANNOT_EVALUATE and any("not a regular file" in f for f in r_fifo.findings))
+              r_fifo.status == CANNOT_EVALUATE and any("not a regular file" in f for f in r_fifo.findings)
+              and not _rc_calls)
 
         # F-A (RANGE-BOUNDS, hostile store-file on disk): an OVERSIZE CHANGELOG.md is refused by
         # _load_inputs on the pre-open st.st_size ceiling BEFORE the whole file is read into memory,
