@@ -2353,6 +2353,47 @@ def main():
         finally:
             aiqt_hooks._branch_root_git = _orig_brg
 
+        # === F-R2-1: the no-remote exemption is restricted to a LONE, directly-bound `git commit`. A COMPOUND
+        # command's pre-command remote-absence probe is STALE (a `cd remote-repo && commit` lands in a repo the
+        # probe never saw; a `git remote add && commit` adds the remote AFTER the probe ran), so a compound /
+        # multi-segment / cd-bearing / redirected commit is handled EXACTLY as before the exemption: DENY when
+        # it lands on a protected branch. Each DENY below runs from a no-remote main-HEAD session cwd (nr_none),
+        # so it is fail-to-pass under a revert - reverting the lone_direct restriction makes the exemption
+        # (nr_none has no remote) ALLOW these compound/redirected commits (the over-fire the finding reported).
+        # nr_all1/nr_all2 exercise the remote-spelling coverage: a remote-backed repo in ANY spelling still
+        # DENIES a lone protected commit (the exemption must not weaken it). Judged by the structured verdict. ==
+        nr_upstream = _init_repo(tmp / "pl-nr-upstream")   # main HEAD, a remote named 'upstream'
+        _git(nr_upstream, "remote", "add", "upstream", str(tmp / "pl-nr-upstream.git"))
+        nr_fileurl = _init_repo(tmp / "pl-nr-fileurl")     # main HEAD, a file:// URL remote
+        _git(nr_fileurl, "remote", "add", "origin", "file://" + str(tmp / "pl-nr-fileurl.git"))
+        nr_backup = _init_repo(tmp / "pl-nr-backup")       # main HEAD, a 'backup' path remote
+        _git(nr_backup, "remote", "add", "backup", str(tmp / "pl-nr-backup.git"))
+        # Positive control (the exemption still works for the lone form): a lone bare commit on main in a
+        # no-remote repo ALLOWS. This contrasts the compound denials below (the denial is the compound-ness,
+        # not the repo), and reds if the lone-form exemption is broken.
+        pexpect("(pl-fr1-0) lone 'git commit' on main in a no-remote repo ALLOWS (the exemption, lone form)",
+                "git commit -m x", "allow", cwd=str(nr_none))
+        # cd into a (remote-backed) repo then commit: compound -> exemption withheld -> DENY. Reverting reds it.
+        pexpect("(pl-fr1-1) 'cd <remote-repo> && git commit' DENIES (compound; pre-command state is stale)",
+                "cd {} && git commit --allow-empty -m qa".format(nr_remote), "deny", cwd=str(nr_none))
+        # add a remote then commit: the pre-add no-remote state is stale -> DENY. Reverting reds it.
+        pexpect("(pl-fr1-2) 'git remote add X <url> && git commit' DENIES (preceding remote mutation)",
+                "git remote add upstream {} && git commit -m x".format(tmp / "x.git"), "deny",
+                cwd=str(nr_none))
+        # any other compound spelling (';'-sequenced) -> DENY (cover as before).
+        pexpect("(pl-fr1-3) 'git commit ; echo done' DENIES (';'-compound, multi-segment)",
+                "git commit -m x ; echo done", "deny", cwd=str(nr_none))
+        # a redirected commit -> DENY (cover as before; the exemption is only for a lone bare commit).
+        pexpect("(pl-fr1-4) 'git commit > out' DENIES (redirected commit)",
+                "git commit -m x > out.txt", "deny", cwd=str(nr_none))
+        # remote-backed repo in ANY spelling still DENIES a lone direct protected commit (regression guards).
+        pexpect("(pl-fr1-5) lone commit on main with an 'upstream' remote DENIES (remote-backed)",
+                "git commit -m x", "deny", cwd=str(nr_upstream))
+        pexpect("(pl-fr1-6) lone commit on main with a file:// URL remote DENIES (remote-backed)",
+                "git commit -m x", "deny", cwd=str(nr_fileurl))
+        pexpect("(pl-fr1-7) lone commit on main with a 'backup' path remote DENIES (remote-backed)",
+                "git commit -m x", "deny", cwd=str(nr_backup))
+
         # === ROUND-2 FINDING 13: classify a commit against the branch it will ACTUALLY land on ===========
         # Direction 1 (false-DENY fix): a 'git switch -c <feature> && git commit' on a main HEAD lands on the
         # NEW branch, so it ALLOWS (was denied on the stale pre-command main HEAD). Discriminates: without the
@@ -3138,9 +3179,10 @@ def main():
         # ROUND-2 no-patch precision (cnsdif): 'git show -s' / '--no-patch' SUPPRESSES the patch (git prints
         # only the commit metadata + message, no diff), the same non-diff class as the --stat/--name-only
         # summary forms cnsdif already allows -> ALLOW. A co-present patch flag (-p/-u/--patch*) re-enables the
-        # diff, so '-s -p' stays covered. Each -s ALLOW is fail-to-pass under a revert of the _has_no_patch_flag
+        # diff, so '-s -p' stays covered. Each -s ALLOW is fail-to-pass under a revert of the _show_no_patch_exempt
         # show branch (the OLD code classified any bare-ref 'git show ...' as a producer and DENIED it); the
         # '-s -p' DENY goes RED if the exemption ignores the patch flag. Judged by the structured verdict.
+        # (The F-R2-2/F-R2-3 position/argument/cluster-aware discrimination rows are added further below.)
         dexpect("(cnsdif-nopatch1) git show -s --format metadata read allows (--no-patch class, no diff)",
                 "git show -s --format='%H %an' HEAD", "allow")
         dexpect("(cnsdif-nopatch2) git show -s -p DENIES (co-present patch flag re-enables the diff)",
@@ -3154,6 +3196,76 @@ def main():
             failures.append("(cnsdif-nopatch-cls2) _is_diff_producer must be False for 'git show --no-patch <ref>'")
         if not aiqt_hooks._is_diff_producer(["git", "show", "-s", "-p", "HEAD"]):
             failures.append("(cnsdif-nopatch-cls3) _is_diff_producer must be True for 'git show -s -p <ref>' (patch flag re-enables)")
+        # === F-R2-2/F-R2-3 (cnsdif git show): the no-patch exemption is POSITION/ARGUMENT/CLUSTER-aware. Each
+        # ALLOW row emits NO patch (git prints only metadata) and is fail-to-pass under a revert of
+        # _show_no_patch_exempt (the exemption removed -> the producer is DENIED); each DENY row DOES emit a
+        # patch (or carries a patch-enabler / ambiguous / unknown / value-argument spelling that the OLD
+        # exact-token scan mistook for non-diff) and is fail-to-pass under a revert (the OLD code exempted and
+        # ALLOWED it - a console-diff ESCAPE). The GATE step-4 executed check runs the real `git show ...` and
+        # confirms patch-vs-no-patch against these decisions. Judged by the structured verdict, never prose. ===
+        # ALLOW: a genuine suppression flag, no patch enabler, only recognized non-patch options.
+        dexpect("(fr2-show-a1) git show -s HEAD allows", "git show -s HEAD", "allow")
+        dexpect("(fr2-show-a2) git show -s --format quoted allows (token path; quotes fail metachar proofs)",
+                "git show -s --format='%H' HEAD", "allow")
+        dexpect("(fr2-show-a3) git show --no-patch HEAD allows", "git show --no-patch HEAD", "allow")
+        dexpect("(fr2-show-a4) git show -s --stat HEAD allows (summary + suppress)",
+                "git show -s --stat HEAD", "allow")
+        dexpect("(fr2-show-a5) git show --stat -s HEAD allows (order-independent)",
+                "git show --stat -s HEAD", "allow")
+        dexpect("(fr2-show-a6) git show -s --raw HEAD allows (raw listing + suppress)",
+                "git show -s --raw HEAD", "allow")
+        # DENY: a patch enabler present (a full or combined patch is emitted), or an ambiguous/unknown/value-
+        # argument spelling that must NOT earn the exemption (conservative cover).
+        dexpect("(fr2-show-d1) git show -s -p HEAD DENIES (patch enabler)", "git show -s -p HEAD", "deny")
+        dexpect("(fr2-show-d2) git show -p -s HEAD DENIES (patch enabler, order-independent)",
+                "git show -p -s HEAD", "deny")
+        dexpect("(fr2-show-d3) git show -sp HEAD DENIES (short cluster containing p)",
+                "git show -sp HEAD", "deny")
+        dexpect("(fr2-show-d4) git show HEAD -p DENIES (-p in an option position after an operand)",
+                "git show HEAD -p", "deny")
+        dexpect("(fr2-show-d5) git show -s --patch-with-stat HEAD DENIES (--patch* enabler)",
+                "git show -s --patch-with-stat HEAD", "deny")
+        dexpect("(fr2-show-d6) git show -s --patch-with-raw HEAD DENIES (--patch* enabler)",
+                "git show -s --patch-with-raw HEAD", "deny")
+        dexpect("(fr2-show-d7) git show -s --patch HEAD DENIES (--patch enabler)",
+                "git show -s --patch HEAD", "deny")
+        dexpect("(fr2-show-d8) git show -s --patch=true HEAD DENIES (--patch* family)",
+                "git show -s --patch=true HEAD", "deny")
+        dexpect("(fr2-show-d9) git show -s -U3 HEAD DENIES (-U emits a patch; ESCAPE pre-fix)",
+                "git show -s -U3 HEAD", "deny")
+        dexpect("(fr2-show-d10) git show --no-patch --unified=3 HEAD DENIES (--unified emits a patch; ESCAPE)",
+                "git show --no-patch --unified=3 HEAD", "deny")
+        dexpect("(fr2-show-d11) git show -s -sp HEAD DENIES (a later cluster with p re-enables; ESCAPE)",
+                "git show -s -sp HEAD", "deny")
+        dexpect("(fr2-show-d12) git show HEAD -- file.txt -s DENIES (the -s is a post-'--' pathspec; ESCAPE)",
+                "git show HEAD -- file.txt -s", "deny")
+        dexpect("(fr2-show-d13) git show -S -s HEAD DENIES (the -s is -S's pickaxe ARGUMENT; ESCAPE)",
+                "git show -S -s HEAD", "deny")
+        dexpect("(fr2-show-d14) git show -G --no-patch HEAD DENIES (the --no-patch is -G's ARGUMENT; ESCAPE)",
+                "git show -G --no-patch HEAD", "deny")
+        dexpect("(fr2-show-d15) git show HEAD -- file.txt --no-patch DENIES (post-'--' pathspec; ESCAPE)",
+                "git show HEAD -- file.txt --no-patch", "deny")
+        dexpect("(fr2-show-d16) git show HEAD -- -s DENIES (a tracked file named -s, an operand; ESCAPE)",
+                "git show HEAD -- -s", "deny")
+        # classifier witnesses at _is_diff_producer for the key escapes (True == producer == covered):
+        for _wargs, _wlbl in (
+                (["-s", "-U3", "HEAD"], "-U emits a patch"),
+                (["--no-patch", "--unified=3", "HEAD"], "--unified emits a patch"),
+                (["-s", "-sp", "HEAD"], "a later p-cluster re-enables"),
+                (["HEAD", "--", "file.txt", "-s"], "-s is a post-'--' pathspec"),
+                (["-S", "-s", "HEAD"], "-s is -S's argument"),
+                (["-G", "--no-patch", "HEAD"], "--no-patch is -G's argument")):
+            if not aiqt_hooks._is_diff_producer(["git", "show"] + _wargs):
+                failures.append("(fr2-show-cls) _is_diff_producer must be True for 'git show {}' ({})"
+                                .format(" ".join(_wargs), _wlbl))
+        for _wargs, _wlbl in (
+                (["-s", "HEAD"], "suppress only"),
+                (["--no-patch", "HEAD"], "suppress only"),
+                (["-s", "--raw", "HEAD"], "suppress + raw listing"),
+                (["-s", "--stat", "HEAD"], "suppress + summary")):
+            if aiqt_hooks._is_diff_producer(["git", "show"] + _wargs):
+                failures.append("(fr2-show-cls) _is_diff_producer must be False for 'git show {}' ({})"
+                                .format(" ".join(_wargs), _wlbl))
         dexpect("(l11-d4) sudo git diff asks (wrapper)", "sudo git diff", "allow")
         dexpect("(l11-d5) command /usr/bin/git show asks (wrapper + path)",
                 "command /usr/bin/git show", "allow")
