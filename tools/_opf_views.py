@@ -1697,14 +1697,14 @@ def self_test():
             _rc_calls.append(relpath)
             return _orig_rc(root_fd, relpath)
         _journal._read_contained = _recording_rc
-        # C (test-hermeticity): snapshot the caller's SIGALRM disposition, mask, and ITIMER_REAL; unblock
-        # SIGALRM for the probe; and restore all three (timer minus elapsed) so this watchdog leaves the
-        # ambient alarm state unchanged (never cancelling a caller's timer or unblocking its SIGALRM).
+        # C (test-hermeticity): snapshot the caller's SIGALRM disposition and mask, and its ITIMER_REAL +
+        # pending state through the SHARED _opf_store.snapshot_caller_alarm helper; unblock SIGALRM for the
+        # probe; and restore all of them so this watchdog leaves the ambient alarm state unchanged (never
+        # cancelling a caller's timer, unblocking its SIGALRM, nor destroying its pending alarm).
         _prev = _signal.getsignal(_signal.SIGALRM)               # capture WITHOUT installing yet (F2)
         _have_mask = hasattr(_signal, "pthread_sigmask")
         _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
-        _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
-        _t0 = _time.monotonic()
+        _alarm_snap = _opf_store.snapshot_caller_alarm()         # ITIMER value/interval + pending (shared helper)
         _fifo_ok = False
         # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
         # finally restores the caller's mask, disposition, and timer even if a signal fires during setup. An
@@ -1712,7 +1712,9 @@ def self_test():
         # be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the try/finally, would
         # raise _Watchdog out of the probe uncaught AND leave the caller's mask corrupted (SIGALRM
         # unblocked). Any inherited pending SIGALRM is first DISCARDED under SIG_IGN (POSIX: setting SIG_IGN
-        # discards a pending signal whether or not it is blocked) so it cannot fire _boom spuriously.
+        # discards a pending signal whether or not it is blocked) so it cannot fire _boom spuriously; the
+        # shared restore_caller_alarm RE-POSTS it on exit (round-15 F2) so the caller's pending alarm is
+        # preserved, not destroyed.
         try:
             _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)     # discard any inherited pending SIGALRM
             _signal.signal(_signal.SIGALRM, _boom)               # now install the watchdog handler
@@ -1730,9 +1732,7 @@ def self_test():
             _signal.signal(_signal.SIGALRM, _prev)
             if _have_mask:
                 _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
-            if _prev_value > 0.0:
-                _rem = _prev_value - (_time.monotonic() - _t0)
-                _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, _prev_interval)
+            _opf_store.restore_caller_alarm(*_alarm_snap)        # shared elapsed-aware timer + pending restore
             _journal._read_contained = _orig_rc
             os.close(_ffd)
         check("fifo-source-fails-closed-not-hang", _fifo_ok and not _rc_calls)

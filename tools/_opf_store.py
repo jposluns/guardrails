@@ -174,6 +174,49 @@ _NAMESPACE_OK = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _EXTENSION_VENDOR_OK = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")   # ASCII x-<vendor> slug alphabet
 
 
+def snapshot_caller_alarm():
+    """Snapshot the caller's SIGALRM timing state for a hermetic FIFO-probe watchdog, the SINGLE source of
+    truth the opf-side watchdogs share (round-15 F1, so no per-site save/restore can diverge again and
+    re-induce the watchdog-timer class). Captures the caller's ITIMER_REAL value and repeating interval, a
+    monotonic baseline for the elapsed-aware restore, and whether a SIGALRM was already PENDING on entry.
+    Returns an opaque tuple to hand to restore_caller_alarm() in the watchdog's finally. Call it BEFORE the
+    probe installs its own handler / unblocks / arms its timer (so the pending reading is the caller's, not
+    the probe's)."""
+    import signal as _signal
+    import time as _time
+    _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
+    _was_pending = (hasattr(_signal, "sigpending")
+                    and _signal.SIGALRM in _signal.sigpending())
+    return (_prev_value, _prev_interval, _time.monotonic(), _was_pending)
+
+
+def restore_caller_alarm(prev_value, prev_interval, t0, was_pending):
+    """Restore the caller's SIGALRM timing state a FIFO-probe watchdog borrowed, the SINGLE elapsed-aware
+    save/restore every opf-side watchdog shares (round-15 F1, so no per-site verbatim restore can diverge
+    and re-induce the watchdog-timer class the round-13 fix closed once). Two moves:
+      (1) ITIMER_REAL is re-armed ELAPSED-AWARE: the caller's remaining value MINUS the wall time the
+          watchdog held it (interval preserved), so running the watchdog neither PAUSES nor EXTENDS a
+          caller deadline. A deadline that would have expired during the probe clamps to a tiny positive so
+          it still FIRES rather than being silently dropped, never re-armed to its full original value.
+      (2) a SIGALRM the caller had PENDING on entry is RE-POSTED (round-15 F2): the probe's SIG_IGN discards
+          any inherited pending alarm so it cannot fire the watchdog spuriously, which would otherwise
+          DESTROY a blocked+pending ambient SIGALRM the caller still owns; re-posting it here leaves the
+          caller's pending state unchanged, matching the ambient-preserving contract the watchdog docstrings
+          promise. Re-posting happens after the mask is restored (caller blocked => it re-pends; caller
+          unblocked => it delivers at once, as it would have).
+    Call it AFTER restoring the caller's SIGALRM disposition and signal mask, in the watchdog's finally.
+    The pending arguments come from snapshot_caller_alarm(); a test may pass an explicit (value, interval,
+    t0, was_pending) to exercise the elapsed-aware restore directly."""
+    import signal as _signal
+    import time as _time
+    import os as _os
+    if prev_value > 0.0:
+        _rem = prev_value - (_time.monotonic() - t0)
+        _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, prev_interval)
+    if was_pending:
+        _os.kill(_os.getpid(), _signal.SIGALRM)
+
+
 class StoreError(Exception):
     """A store-side read or resolution cannot be completed (unreadable, unparseable, a refused symlink).
     Callers map it to a CANNOT-EVALUATE outcome: fail-closed, never a silent empty store."""
@@ -1878,16 +1921,18 @@ def self_test():
         def _refused_no_hang(thunk):
             """True when thunk() fails closed with a JournalError inside a 2s alarm; False when it HANGS (the
             marker fires) so a writer-less-FIFO blocking-open regression is a check failure, not a hung suite.
-            Test-hermeticity: snapshot the caller's SIGALRM disposition, its signal mask, and its ITIMER_REAL,
-            and RESTORE all three in the finally (the timer minus the probe's elapsed time; a caller deadline
-            already passed re-arms to fire at once, never silently dropped). SIGALRM is UNBLOCKED for the probe
-            so the watchdog fires even if the caller had it blocked, then the exact caller mask is restored, so
-            this probe never cancels a caller's running timer nor unblocks its SIGALRM."""
+            Test-hermeticity: snapshot the caller's SIGALRM disposition and signal mask, and snapshot its
+            ITIMER_REAL + pending state through the SHARED snapshot_caller_alarm helper; RESTORE all of them
+            in the finally (disposition and mask directly, the timer + any pending SIGALRM through the shared
+            restore_caller_alarm helper: the timer elapsed-aware with its interval, a caller deadline already
+            passed re-armed to fire at once never silently dropped, and a caller SIGALRM that was pending
+            re-posted). SIGALRM is UNBLOCKED for the probe so the watchdog fires even if the caller had it
+            blocked, then the exact caller mask is restored, so this probe never cancels a caller's running
+            timer, unblocks its SIGALRM, nor destroys its pending alarm."""
             _prev = _signal.getsignal(_signal.SIGALRM)           # capture WITHOUT installing yet (F2)
             _have_mask = hasattr(_signal, "pthread_sigmask")
             _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
-            _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
-            _t0 = _time.monotonic()
+            _alarm_snap = snapshot_caller_alarm()                # ITIMER value/interval + pending (shared helper)
             # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
             # finally restores the caller's mask, disposition, and timer even if a signal fires during setup.
             # An ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would
@@ -1895,7 +1940,8 @@ def self_test():
             # try/finally, would raise _HangMarker out of the probe uncaught AND leave the caller's mask
             # corrupted (SIGALRM unblocked). Any inherited pending SIGALRM is first DISCARDED under SIG_IGN
             # (POSIX: setting SIG_IGN discards a pending signal whether or not it is blocked) so it cannot
-            # fire the marker handler spuriously and read as a false hang.
+            # fire the marker handler spuriously and read as a false hang; the shared restore_caller_alarm
+            # RE-POSTS it on exit (round-15 F2) so the caller's pending alarm is preserved, not destroyed.
             try:
                 _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)  # discard any inherited pending SIGALRM
                 _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(_HangMarker()))
@@ -1914,9 +1960,7 @@ def self_test():
                 _signal.signal(_signal.SIGALRM, _prev)
                 if _have_mask:
                     _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
-                if _prev_value > 0.0:                     # restore the caller's timer, minus elapsed
-                    _rem = _prev_value - (_time.monotonic() - _t0)
-                    _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, _prev_interval)
+                restore_caller_alarm(*_alarm_snap)        # shared elapsed-aware timer + pending restore
 
         # M2: _read_contained does not hang on a writer-less FIFO (the raced regular-file->FIFO swap); it
         # returns a fail-closed JournalError at once. The non-OSError marker makes a blocking regression a

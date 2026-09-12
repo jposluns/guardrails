@@ -625,8 +625,11 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     # run the thunk unbounded and its successful no-op setrlimit/setitimer would read as "bounds installed".
     # A control that cannot bound the child is a cannot-evaluate, so return the SETUP-ERROR sentinel here
     # rather than let the thunk run unbounded (guard-input-soundness; no-concealed-failure; a bool is not a
-    # valid numeric control).
-    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
+    # valid numeric control). A NaN or an infinity cannot arm a finite itimer either (setitimer raises on it
+    # in the child), so reject them PRE-FORK too for symmetry: never fork a child that could only fail setup
+    # (NaN is !=-itself; +inf is caught explicitly, -inf by the <= 0 test).
+    if (isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
+            or timeout_s != timeout_s or timeout_s == float("inf") or timeout_s <= 0):
         return "SETUP-ERROR:BadTimeout"
     # RLIM_INFINITY is the "no cap" sentinel; its integer representation is platform-dependent (it is -1
     # on Linux, a large positive on others), so reject it by identity AND by the <= 0 / >= positive-sentinel
@@ -1033,6 +1036,13 @@ def self_test():
         failures.append("run_bounded/bad-timeout-zero: timeout_s=0 did not fail closed to SETUP-ERROR")
     if run_bounded(lambda: "RAN", timeout_s=-1) != "SETUP-ERROR:BadTimeout":
         failures.append("run_bounded/bad-timeout-neg: a negative timeout did not fail closed to SETUP-ERROR")
+    # A NaN or an infinity cannot arm a finite itimer, so it is rejected PRE-FORK as BadTimeout (never forked
+    # to fail setup in the child). Pre-fix these forked and returned a child SETUP-ERROR:<ValueError|Overflow>
+    # instead, so asserting the BadTimeout token reds a reverted pre-fork reject (round-15 hygiene).
+    if run_bounded(lambda: "RAN", timeout_s=float("nan")) != "SETUP-ERROR:BadTimeout":
+        failures.append("run_bounded/bad-timeout-nan: a NaN timeout did not fail closed PRE-FORK to BadTimeout")
+    if run_bounded(lambda: "RAN", timeout_s=float("inf")) != "SETUP-ERROR:BadTimeout":
+        failures.append("run_bounded/bad-timeout-inf: an infinite timeout did not fail closed PRE-FORK to BadTimeout")
     if run_bounded(lambda: "RAN", mem_bytes=_res6.RLIM_INFINITY) != "SETUP-ERROR:BadMemBound":
         failures.append("run_bounded/bad-mem-infinity: an RLIM_INFINITY mem cap did not fail closed")
     if run_bounded(lambda: "RAN", mem_bytes=0) != "SETUP-ERROR:BadMemBound":

@@ -65,6 +65,7 @@ from _opf_store import (  # noqa: E402
     _read_toml_contained, _open_store_root_fd, _open_root_fd, validate_manifest, classify_target,
     _sorted_key_names, _safe_display, _is_contained_relpath,
     BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES, KNOWN_MODULES,
+    restore_caller_alarm,   # round-15 F2: the shared caller-SIGALRM re-post used by the watchdog/fixture sweep
 )
 # U2 supplies the record validator, the counter guards, the transition validator, and the type specs.
 from _opf_schema import (  # noqa: E402
@@ -569,7 +570,17 @@ def _dns_or_ipv4_ok(name):
     validated as a DNS name per RFC 1035: total length <= 253, no leading or trailing dot, and every
     label non-empty and <= 63 characters (so `a..b` yields an empty label and is rejected). The caller
     has already stripped any `:port` and excluded the bracketed IPv6 form, so `name` here carries neither
-    a port nor brackets."""
+    a port nor brackets.
+
+    The DNS-name structure enforces the RFC 1035/1123 LDH ("letters-digits-hyphen") shape the allowlist's
+    character set cannot by itself: every label is non-empty and <= 63 characters, AND no label begins or
+    ends with a HYPHEN (`-lead`, `trail-`, a hyphen-edge interior label). The FINAL (top-level) label is
+    never ALL-NUMERIC: such a name is neither a valid bare IPv4 literal (handled above) nor a resolvable
+    hostname, which is also how an IPv4-LOOKALIKE is refused here. An out-of-range octet (`256.0.113.5`) or a
+    leading-zero octet (`203.0.113.05`) makes IPv4Address raise, so the string falls through to the DNS path
+    as a dotted run of numeric labels; its all-numeric final label is rejected, so it is accepted neither as
+    a bare IPv4 nor as a DNS name, never a spurious host that could falsely satisfy C-SYNC-AGREE (round-15
+    F3, completing the host structural class the round-12 fix began)."""
     try:
         ipaddress.IPv4Address(name)      # a bare IPv4 dotted-quad is a valid host as-is
         return True
@@ -579,9 +590,19 @@ def _dns_or_ipv4_ok(name):
         return False
     if name.startswith(".") or name.endswith("."):   # no leading/trailing dot (an empty first/last label)
         return False
-    for label in name.split("."):
+    labels = name.split(".")
+    for label in labels:
         if not label or len(label) > 63:  # every DNS label is non-empty (rejects `..`) and <= 63 characters
             return False
+        if label.startswith("-") or label.endswith("-"):   # LDH: no label begins or ends with a hyphen
+            return False
+    # The final (top-level) label is never all-numeric: a bare all-numeric name is neither a valid IPv4
+    # literal (handled above) nor a resolvable hostname, and this is how an IPv4-lookalike with an
+    # out-of-range or leading-zero octet (which IPv4Address rejects) is refused rather than admitted as a
+    # DNS name. isascii() pairs with isdigit() so only ASCII 0-9 count (the allowlist already bounds the
+    # character set; this mirrors the port-parse idiom and never treats a Unicode digit as numeric).
+    if labels[-1].isascii() and labels[-1].isdigit():
+        return False
     return True
 
 
@@ -3379,11 +3400,17 @@ def self_test():
             # watchdog: with SIGALRM ignored in the parent, a thunk that sleeps past the timeout must still
             # TIMEOUT (the child resets SIG_DFL). Reverted (no reset), the ignored timer lets the sleep run
             # to completion and the thunk's own result returns instead of TIMEOUT.
+            # Test-hermeticity (round-15 F2, the fixture sweep): setting SIG_IGN DISCARDS a caller SIGALRM
+            # that was pending on entry (POSIX), so this fixture snapshots that pending and RE-POSTS it after
+            # restoring the disposition (the shared restore_caller_alarm helper; a 0.0 timer means this
+            # fixture borrowed no ITIMER, only the disposition), leaving the caller's pending alarm unchanged.
+            _was_pending7 = (hasattr(_sig7, "sigpending") and _sig7.SIGALRM in _sig7.sigpending())
             _prev7 = _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
             try:
                 _to = run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], timeout_s=1)
             finally:
                 _sig7.signal(_sig7.SIGALRM, _prev7)
+                restore_caller_alarm(0.0, 0.0, _t7.monotonic(), _was_pending7)   # re-post a discarded pending (F2)
             check("f7-inherited-ignored-sigalrm-still-times-out", _to == "TIMEOUT")
             # (d) the child must also UNBLOCK SIGALRM, not merely reset its DISPOSITION: a caller with
             # SIGALRM BLOCKED in its signal mask passes that blocked mask across the fork, so the timer's
@@ -4185,6 +4212,32 @@ def self_test():
               _canonical_remote("git@203.0.113.5:p") == ("203.0.113.5", "p"))
         check("f1r12-canonical-max-label-preserved",
               _canonical_remote("ssh://" + "a" * 63 + ".example/p") == ("a" * 63 + ".example", "p"))
+        # ROUND-15 F3 (MINOR): the host structural class is COMPLETED. 15 RFC-invalid forms still
+        # canonicalized clean after round-12: a DNS label with a HYPHEN EDGE (LDH: a label may not begin or
+        # end with '-'), an ALL-NUMERIC final label (neither a valid IPv4 literal nor a resolvable hostname),
+        # and an IPv4-LOOKALIKE with an out-of-range (>255) or leading-zero octet (IPv4Address rejects it, so
+        # it fell through as a dotted numeric DNS name). Each must now be CANNOT-EVALUATE (None), never a
+        # spurious (host, path) pair that could falsely satisfy C-SYNC-AGREE even when the manifest target and
+        # observed remote strings match. Pre-fix each returned a clean pair; reverting the LDH/all-numeric
+        # checks in _dns_or_ipv4_ok reds them. Covered in both the scheme-URL and scp host positions. IP
+        # fixtures use RFC-5737 doc-range or plainly-invalid octets (never a private RFC-1918 address).
+        for _bad in ("ssh://-lead.example/p", "git@-lead.example:p",        # hyphen-edge: leading '-'
+                     "ssh://trail-.example/p", "git@trail-.example:p",      # hyphen-edge: trailing '-'
+                     "ssh://mid.-inner.example/p", "ssh://a-.b.example/p",  # hyphen-edge: interior label
+                     "ssh://host.123/p", "git@host.123:p",                  # all-numeric final label
+                     "ssh://example.0/p",                                   # all-numeric final label (single digit)
+                     "ssh://256.0.113.5/p", "git@256.0.113.5:p",            # IPv4-lookalike: octet > 255
+                     "ssh://999.999.999.999/p", "git@999.999.999.999:p",    # IPv4-lookalike: all octets > 255
+                     "ssh://203.0.113.05/p", "git@203.0.113.05:p"):         # IPv4-lookalike: leading-zero octet
+            check("f3r15-canonical-rfc-invalid-host-none:" + _bad, _canonical_remote(_bad) is None)
+        # regression (legit controls the structural checks must NOT red): a hyphen INTERIOR to a label, an
+        # all-numeric NON-final label (valid under a real final label), and a bare IPv4 all still canonicalize.
+        check("f3r15-canonical-hyphen-interior-preserved",
+              _canonical_remote("ssh://a-b.example/p") == ("a-b.example", "p"))
+        check("f3r15-canonical-numeric-nonfinal-label-preserved",
+              _canonical_remote("ssh://123.example/p") == ("123.example", "p"))
+        check("f3r15-canonical-bare-ipv4-still-preserved",
+              _canonical_remote("ssh://203.0.113.5/p") == ("203.0.113.5", "p"))
         _r2wd = build(pr_machine, product=pr_product)
         os.makedirs(str(_r2wd / ".working" / "toml" / "worklog"), exist_ok=False)
         _r2wdr = validate_store(resolve_store(_r2wd), observations=pr_obs)

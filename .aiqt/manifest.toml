@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "7772383ddf1d968b9c165b7dc82a8add812ecb14285134a408ca8a3565d73924"
+tree-sha256 = "67c7b2ebc7d750c7e394115c18fe39fb2a2df6b6d916ce5ab2130c9445991e2c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2551,18 +2551,18 @@ sha256 = "16262677615ae9ec6b9f64a332de1109c7d83f67096151d46cd3bfee6e4d9eea"
 
 [[sources]]
 path = "tools/_opf_changelog.py"
-bytes = 78931
-sha256 = "ba9a0a243957ad905782c33ddd1c1121524d5b6a59bddc8298a4fcf449dae014"
+bytes = 79100
+sha256 = "3012d7ee58d8984da42b31a16400f80d99dfa6278fe86d27077de00cb8d5b393"
 
 [[sources]]
 path = "tools/_opf_check.py"
-bytes = 260863
-sha256 = "59c3f7c325a11a441eeea8354e63fc5d1e95405a7c1eb9d2b2e35f026d0c3683"
+bytes = 265853
+sha256 = "72618d68c1f448f2b4f54f002d6ead4169053451df74fad6ac8f67bf3aac4594"
 
 [[sources]]
 path = "tools/_opf_emit.py"
-bytes = 115002
-sha256 = "a7a9ef4b0c12f5079ea8bb1254f5cfca3fe6e625728d6b369fc8ef2af932a54e"
+bytes = 116063
+sha256 = "9c0562e19c58c042750777a9f86f906f99fc94b89dada295faa41fdbfe719966"
 
 [[sources]]
 path = "tools/_opf_fuzz.py"
@@ -2586,13 +2586,13 @@ sha256 = "ed98d4af84392b3f80a95675123e68bac62e17b0384d47542478f4ca8d276ff6"
 
 [[sources]]
 path = "tools/_opf_store.py"
-bytes = 130278
-sha256 = "1c44f93640a4cde2811f5c85fd13114d48906154b16960916db4933caa7de648"
+bytes = 133525
+sha256 = "902e2319da49e983d5e78550343f07bca1dea8e13e4ea2fc42ea16471dba9648"
 
 [[sources]]
 path = "tools/_opf_views.py"
-bytes = 210067
-sha256 = "fc56d91de2127121cbd6e165c97311b517ac2bf1f95745567e50a01ea9d3379f"
+bytes = 210236
+sha256 = "ef37c56ace93d185a8ccbe5ea00d52348a4bd3ae089bae66f38cfb3837e884f8"
 
 [[sources]]
 path = "tools/_qa_adapter.py"
@@ -3106,8 +3106,8 @@ sha256 = "fb02d597da643fdedb42959e039356ad1df0c5502d3b7ad323c3b1bc1f92d5dd"
 
 [[sources]]
 path = "tools/opf.py"
-bytes = 23571
-sha256 = "fd502e9ae3d5013b047439011caa19aaf0052baf64d43be8d7fd083e85fa6eb7"
+bytes = 28753
+sha256 = "360bed94ff86f0e665df5367c13ecb8ef13c29bd98fbcdcb493f334b8386b342"
 
 [[sources]]
 path = "tools/opf_render.py"
