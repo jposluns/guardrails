@@ -65,7 +65,8 @@ from _opf_store import (  # noqa: E402
     _read_toml_contained, _open_store_root_fd, _open_root_fd, validate_manifest, classify_target,
     _sorted_key_names, _safe_display, _is_contained_relpath,
     BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES, KNOWN_MODULES,
-    restore_caller_alarm,   # round-15 F2: the shared caller-SIGALRM re-post used by the watchdog/fixture sweep
+    snapshot_caller_alarm,  # round-17 F-R16-1: capture caller ITIMER+pending before a fixture borrows SIGALRM
+    restore_caller_alarm,   # round-15 F2 + round-17 F-R16-1: shared elapsed-aware caller-alarm save/restore
 )
 # U2 supplies the record validator, the counter guards, the transition validator, and the type specs.
 from _opf_schema import (  # noqa: E402
@@ -3400,17 +3401,22 @@ def self_test():
             # watchdog: with SIGALRM ignored in the parent, a thunk that sleeps past the timeout must still
             # TIMEOUT (the child resets SIG_DFL). Reverted (no reset), the ignored timer lets the sleep run
             # to completion and the thunk's own result returns instead of TIMEOUT.
-            # Test-hermeticity (round-15 F2, the fixture sweep): setting SIG_IGN DISCARDS a caller SIGALRM
-            # that was pending on entry (POSIX), so this fixture snapshots that pending and RE-POSTS it after
-            # restoring the disposition (the shared restore_caller_alarm helper; a 0.0 timer means this
-            # fixture borrowed no ITIMER, only the disposition), leaving the caller's pending alarm unchanged.
-            _was_pending7 = (hasattr(_sig7, "sigpending") and _sig7.SIGALRM in _sig7.sigpending())
+            # Test-hermeticity (round-15 F2 + round-17 F-R16-1): installing SIG_IGN over this ~1s window both
+            # DISCARDS a caller SIGALRM pending on entry (POSIX) AND silently drops a caller ITIMER_REAL
+            # deadline that EXPIRES inside the window (the timer's generated SIGALRM is ignored, never
+            # re-armed). So this fixture snapshots the caller's FULL alarm state (ITIMER value+interval and
+            # pending) BEFORE installing SIG_IGN and hands it to the shared restore_caller_alarm helper in the
+            # finally: the timer is re-armed elapsed-aware (an in-window-expired deadline clamps to a tiny
+            # positive so it still FIRES rather than being destroyed), and a discarded pending is re-posted,
+            # leaving the caller's alarm state unchanged. A prior 0.0 stand-in restored only the pending and
+            # let an in-window caller deadline vanish (F-R16-1).
+            _snap7 = snapshot_caller_alarm()   # caller ITIMER + pending, captured BEFORE SIG_IGN (F-R16-1)
             _prev7 = _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
             try:
                 _to = run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], timeout_s=1)
             finally:
                 _sig7.signal(_sig7.SIGALRM, _prev7)
-                restore_caller_alarm(0.0, 0.0, _t7.monotonic(), _was_pending7)   # re-post a discarded pending (F2)
+                restore_caller_alarm(*_snap7)   # elapsed-aware ITIMER restore + re-post pending (F2 + F-R16-1)
             check("f7-inherited-ignored-sigalrm-still-times-out", _to == "TIMEOUT")
             # (d) the child must also UNBLOCK SIGALRM, not merely reset its DISPOSITION: a caller with
             # SIGALRM BLOCKED in its signal mask passes that blocked mask across the fork, so the timer's
