@@ -54,6 +54,7 @@ import json
 import os
 import re
 import stat
+import sys
 import time
 from pathlib import Path
 
@@ -144,6 +145,39 @@ def _check_rel(relpath):
     return parts
 
 
+def _close_fd_quietly(fd):
+    """Close a descriptor on a cleanup / teardown path, swallowing an OSError so a close that raises
+    (EINTR / EIO / EBADF) mid-teardown cannot ABORT the remaining cleanup and leak the sibling fds after
+    it in the loop, nor propagate a raw OSError out of a `finally` in place of the JournalError the engine
+    maps every other failure to. Used by the contained-walk cleanup loops (_open_parent, _open_dir_contained,
+    ensure_journal_dirs), each of which closes SEVERAL opened fds in a `finally`: a raw `os.close` there,
+    when one close raised, abandoned the rest (codex round-8, the sibling of _opf_check._close_fd_quietly).
+
+    A raising close is swallowed but never lets a genuine descriptor leak pass CONCEALED
+    (no-concealed-failure): a close that raises does not by itself prove the fd is retained, since on Linux
+    close() releases the descriptor even on EINTR/EIO and EBADF means it was already gone. So on a raise we
+    CONFIRM the descriptor is actually gone (fstat); only when it is genuinely STILL open do we close it once
+    more (fstat has just proven the fd valid, so this is not a blind double-close) and, if even that cannot
+    release it, surface the leak to stderr rather than a silent pass that could not tell closed-then-errored
+    from still-open. This mirrors _opf_check._close_fd_quietly byte-for-byte; _journal cannot import it (the
+    dependency runs the other way), so the idiom is duplicated rather than shared."""
+    try:
+        os.close(fd)
+        return
+    except OSError as exc:
+        first = exc
+    try:
+        os.fstat(fd)
+    except OSError:
+        return                                            # confirmed gone: the raise was benign teardown noise
+    try:
+        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
+        return
+    except OSError as exc2:
+        print("warning: cleanup close of fd {} failed to release it ({} / {}); fail-surfaced"
+              .format(fd, first, exc2), file=sys.stderr)
+
+
 def _open_parent(root_fd, relpath):
     """Open the parent directory of relpath by walking each intermediate component beneath root_fd with
     O_DIRECTORY|O_NOFOLLOW (a symlinked component raises rather than redirects the walk). Returns
@@ -168,7 +202,7 @@ def _open_parent(root_fd, relpath):
         pfd = os.dup(cur)
     finally:
         for fd in opened:
-            os.close(fd)
+            _close_fd_quietly(fd)                         # guarded: a raising close never aborts the rest
     return pfd, parts[-1]
 
 
@@ -356,7 +390,7 @@ def ensure_journal_dirs(root_fd, journal_rel):
             cur = nfd
     finally:
         for fd in opened:
-            os.close(fd)
+            _close_fd_quietly(fd)                         # guarded: a raising close never aborts the rest
 
 
 def _open_dir_contained(root_fd, relpath):
@@ -384,7 +418,7 @@ def _open_dir_contained(root_fd, relpath):
         result = os.dup(cur)
     finally:
         for fd in opened:
-            os.close(fd)
+            _close_fd_quietly(fd)                         # guarded: a raising close never aborts the rest
     return result
 
 
@@ -990,6 +1024,17 @@ def capture_preimages(parent_fd, txn_dir, root_fd, ops):
                         raise JournalError("{}: expected an existing regular file before {}"
                                            .format(op["path"], kind))
                     data, _fst = _read_contained(root_fd, op["path"])
+                    if kind == "write" and _fst.st_nlink != 1:
+                        # DEFENCE IN DEPTH (codex round-8): a `write` op mutates the product file in place at
+                        # apply/restore, so a multiply-linked target would corrupt an out-of-tree victim through
+                        # the shared inode. The authoritative refusal is on the OPENED fd at apply
+                        # (_verify_fd_prestate) and at restore, but reject a hard-linked write target HERE too
+                        # (on the contained-read fstat) so a hard-linked product file never even enters the
+                        # transaction. A `remove` unlinks its own name only (the victim keeps its content), so
+                        # a link count above 1 is not a mutation hazard there and is not refused.
+                        raise JournalError("{}: product file has {} hard links (>1); a `write` op refuses a "
+                                           "multiply-linked target (a second name would be mutated through the "
+                                           "shared inode)".format(op["path"], _fst.st_nlink))
                     ref = str(seq)
                     # payload written dir-fd-relative to the CONTAINED preimages fd, EXCLUSIVELY created
                     # (O_EXCL, no O_TRUNC): a pre-planted FIFO or a hard link to a victim regular file at the
@@ -1040,6 +1085,15 @@ def _verify_fd_prestate(fd, prestate, where):
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
         raise JournalError("{}: target is not a regular file at apply time".format(where))
+    if st.st_nlink != 1:
+        # A product file with a link count above 1 shares its inode with another name (an out-of-tree
+        # victim, or a second in-tree name): the ftruncate+rewrite below would mutate that other name
+        # THROUGH the shared inode. Refuse fail-closed on the OPENED fd (the race-safe measurement, not a
+        # pre-open lstat) BEFORE any truncation, exactly as the frames.log nlink==1 identity check does for
+        # the journal log (the PRODUCT-FILE sibling of that defence; SECI-symlink-resolution / codex round-8).
+        raise JournalError("{}: product file has {} hard links (>1); refusing to truncate/write a multiply-"
+                           "linked file (a second name would mutate an out-of-tree victim through the shared "
+                           "inode)".format(where, st.st_nlink))
     if stat.S_IMODE(st.st_mode) != prestate["mode"]:
         raise JournalError("{}: mode changed since preimage capture".format(where))
     if st.st_size != prestate["size"]:
@@ -1323,6 +1377,15 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                     if not stat.S_ISREG(fst.st_mode) or fst.st_ino != st.st_ino or fst.st_dev != st.st_dev:
                         raise JournalError("cannot restore {!r}: the regular file was swapped for a different "
                                            "object between the pre-open check and the open (fail-closed)".format(path))
+                    if fst.st_nlink != 1:
+                        # A multiply-linked target shares its inode with another name, so the ftruncate+rewrite
+                        # below would mutate that out-of-tree victim through the shared inode. Refuse on the
+                        # OPENED fd BEFORE truncating, the same product-file nlink==1 defence _verify_fd_prestate
+                        # applies on the apply path (SECI-symlink-resolution / codex round-8).
+                        raise JournalError("cannot restore {!r}: product file has {} hard links (>1); refusing "
+                                           "to truncate/write a multiply-linked file (a second name would "
+                                           "mutate an out-of-tree victim through the shared inode)".format(
+                                               path, fst.st_nlink))
                     os.ftruncate(fd, 0)
                     os.lseek(fd, 0, os.SEEK_SET)
                     _write_all(fd, data)

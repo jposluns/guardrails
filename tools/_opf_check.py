@@ -553,6 +553,22 @@ def _bracketed_host_ok(tok):
     return True
 
 
+def _host_authority_ok(authority):
+    """The `host[:port]` authority (userinfo already stripped) carries no WHITESPACE and no CONTROL
+    character. Such a byte is never valid anywhere in a host or a port, so it is a forged or mis-parsed
+    authority (`ssh://h ost/p` with an embedded space, `ssh://host\\nFORGED/p` with a newline/control), and a
+    remote carrying one must be UNRESOLVABLE (the caller returns None -> CANNOT-EVALUATE) rather than a
+    spurious host that could falsely satisfy C-SYNC-AGREE even when the manifest target and observed remote
+    strings match (codex round-8; guard-input-soundness: the WHOLE host token is validated, not just its
+    bracket/port shape). A bracketed IPv6 authority is validated separately by _bracketed_host_ok (its
+    ip_address parse already rejects an interior space/control), so this needs cover only the whitespace and
+    control classes; the stray/unbalanced-bracket class is rejected at the unbracketed branches below."""
+    for ch in authority:
+        if ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f:
+            return False
+    return True
+
+
 def _canonical_remote(url):
     """Canonicalize a git remote URL to a (host, path) pair for host+path equivalence (spec 5.5/5.6),
     covering https/http/ssh/git scheme URLs and scp-style git@host:path, with or without a trailing
@@ -574,6 +590,10 @@ def _canonical_remote(url):
         authority, path = rest.split("/", 1)
         if "@" in authority:
             authority = authority.rsplit("@", 1)[1]
+        # Reject a whitespace/control character anywhere in the host:port authority: it is never a valid
+        # host and marks a forged/mis-parsed remote, unresolvable rather than a spurious host (codex round-8).
+        if not _host_authority_ok(authority):
+            return None
         host = authority     # KEEP the port: host:port is part of the endpoint identity (codex-4),
         # EXCEPT a port that spells the scheme's DEFAULT names the same endpoint as the port-less form
         # (spec 5.6 host+path equivalence): https://h:443/p, ssh://h:22/p and github:org/repo are one
@@ -596,6 +616,12 @@ def _canonical_remote(url):
             if not _bracketed_host_ok(hostpart):
                 return None
         else:
+            # A STRAY bracket in an UNBRACKETED authority (`ssh://host]/p`) is not a valid host: the only
+            # legitimate brackets delimit an IPv6 literal and are handled by the startswith('[') branch above,
+            # so any '[' or ']' here is an unbalanced/stray bracket, unresolvable rather than a spurious
+            # 'host]' endpoint that could falsely agree (codex round-8; whole-host-token validation).
+            if "[" in host or "]" in host:
+                return None
             # An UNBRACKETED multi-colon authority is an IPv6 literal that MUST be bracketed; unbracketed it
             # is unresolvable rather than mis-read with a trailing '::22' consumed as a port (F5b).
             if host.count(":") > 1:
@@ -650,10 +676,20 @@ def _canonical_remote(url):
         if "@" in authority:
             authority = authority.rsplit("@", 1)[1]
         host = authority
+        # Reject a whitespace/control character anywhere in the host authority: never a valid host, and the
+        # scp-style sibling of the scheme-URL check above (codex round-8; whole-host-token validation).
+        if not _host_authority_ok(host):
+            return None
         # A scp-style bracketed host carries no port, so the whole authority is the '[addr]' token;
         # its interior must be a well-formed IP literal. 'git@[nonsense]:p' is unresolvable rather than
         # a spurious host (codex round-6; class sibling of the scheme-URL bracket check above).
-        if host.startswith("[") and not _bracketed_host_ok(host):
+        if host.startswith("["):
+            if not _bracketed_host_ok(host):
+                return None
+        elif "[" in host or "]" in host:
+            # A STRAY bracket in an UNBRACKETED scp host ('git@host]:p') is unbalanced and not a valid host:
+            # unresolvable rather than a spurious 'host]' endpoint (codex round-8, scp sibling of the
+            # scheme-URL stray-bracket check).
             return None
     if not host:
         return None
@@ -4025,6 +4061,26 @@ def self_test():
               _canonical_remote("ssh://host:65535/p") == ("host:65535", "p"))
         check("r6-canonical-good-bracket-preserved",
               _canonical_remote("ssh://[2001:db8::22]/org/repo") == ("[2001:db8::22]", "org/repo"))
+        # ROUND-8 codex (finding 2): the WHOLE host token is validated. A host carrying WHITESPACE, a
+        # CONTROL character, or a STRAY/unbalanced bracket is not a real host, so it is CANNOT-EVALUATE
+        # (None), never a spurious ('h ost', ...) / ('host\nforged', ...) / ('host]', ...) pair that could
+        # falsely satisfy C-SYNC-AGREE when the manifest target and observed remote strings match. Each
+        # reverted host-token guard flips one of these red.
+        check("r8-canonical-host-space-none", _canonical_remote("ssh://h ost/p") is None)
+        check("r8-canonical-host-tab-none", _canonical_remote("ssh://ho\tst/p") is None)
+        check("r8-canonical-host-newline-none", _canonical_remote("ssh://host\nFORGED/p") is None)
+        check("r8-canonical-host-control-none", _canonical_remote("ssh://ho\x01st/p") is None)
+        check("r8-canonical-host-stray-bracket-scheme-none", _canonical_remote("ssh://host]/p") is None)
+        check("r8-canonical-host-stray-open-bracket-scheme-none", _canonical_remote("ssh://ho[st/p") is None)
+        check("r8-canonical-host-stray-bracket-scp-none", _canonical_remote("git@host]:p") is None)
+        check("r8-canonical-host-space-scp-none", _canonical_remote("git@ho st:p") is None)
+        # regression: an ordinary host, a userinfo form, and a valid IPv6 bracket are UNAFFECTED by the token
+        # validation (no false positive on a legitimate host).
+        check("r8-canonical-plain-host-preserved", _canonical_remote("ssh://good.host/p") == ("good.host", "p"))
+        check("r8-canonical-userinfo-host-preserved",
+              _canonical_remote("ssh://git@good.host/p") == ("good.host", "p"))
+        check("r8-canonical-bracket-host-still-ok",
+              _canonical_remote("git@[2001:db8::1]:path@x") == ("[2001:db8::1]", "path@x"))
         _r2wd = build(pr_machine, product=pr_product)
         os.makedirs(str(_r2wd / ".working" / "toml" / "worklog"), exist_ok=False)
         _r2wdr = validate_store(resolve_store(_r2wd), observations=pr_obs)

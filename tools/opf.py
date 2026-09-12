@@ -86,14 +86,44 @@ SELF_TESTS = (
 KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync")
 
 
+# Helper self-tests that pin sys.set_int_max_str_digits(4300) inside a fixture and MUST restore the ambient
+# value in a finally (the round-7 int-limit hermeticity work). run_self_tests guards that RESTORE half below.
+_INT_LIMIT_SELF_TESTS = frozenset({"opf-release", "opf-emit", "opf-schema", "opf-fuzz", "opf-import"})
+
+
 def run_self_tests(tests=SELF_TESTS):
     """Run every registered helper self-test in order, forwarding each result. The aggregate exit code
     is the WORST outcome (2 cannot-evaluate > 1 finding > 0 clean): one degraded or failing helper fails
-    the whole leg, never masked by a later clean one."""
+    the whole leg, never masked by a later clean one.
+
+    Int-limit hermeticity guard (finding 8-4): each helper in _INT_LIMIT_SELF_TESTS pins the int-string
+    conversion limit to 4300 inside its fixtures and must RESTORE the ambient value afterward. That restore
+    had no fails-if-reverted check: under the DEFAULT ambient (already 4300) a dropped restore leaves 4300
+    and is invisible. So around each such helper we set a distinct SENTINEL limit (!= 4300 and != the real
+    ambient) and, after it runs, require the limit to STILL be that sentinel before restoring the real
+    ambient; a dropped restore in any of those helpers leaves 4300 != sentinel and fails the leg closed.
+    These helpers are hermetic w.r.t. the ambient int-limit by construction (they pin their own 4300), so
+    running them under the sentinel is exactly the hostile-ambient contract they already satisfy."""
     worst = EXIT_OK
+    _idlimit_orig = sys.get_int_max_str_digits()
+    _idlimit_sentinel = 271828 if _idlimit_orig != 271828 else 314159   # distinct from 4300 AND from ambient
     for label, fn in tests:
         print("== opf self-test: {} ==".format(label))
-        code = fn()
+        _guard_idlimit = label in _INT_LIMIT_SELF_TESTS
+        if _guard_idlimit:
+            sys.set_int_max_str_digits(_idlimit_sentinel)
+            try:
+                code = fn()
+            finally:
+                _idlimit_after = sys.get_int_max_str_digits()
+                sys.set_int_max_str_digits(_idlimit_orig)   # restore the real ambient regardless of outcome
+            if _idlimit_after != _idlimit_sentinel:
+                print("opf self-test: {} left sys.get_int_max_str_digits at {} (expected the sentinel {}); a "
+                      "dropped int-limit restore is a hermeticity leak, failing closed (finding 8-4)".format(
+                          label, _idlimit_after, _idlimit_sentinel), file=sys.stderr)
+                worst = EXIT_MALFORMED
+        else:
+            code = fn()
         if not (type(code) is int and code in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED)):
             # A helper whose return is not an int of exactly {0,1,2} is itself a fault: fail closed (the
             # worst outcome) rather than letting an unrecognized code read as clean. `type(code) is int`

@@ -410,14 +410,14 @@ def compute_span_digest(entries_by_id, span):
         # `span` is a (start, end) pair of WL-numbers or None (guarded above). A non-pair would crash on
         # the unpacking or on range(); fail closed (ReleaseError) rather than a TypeError (spec 6.1).
         raise ReleaseError("cannot digest a span: span must be a (start, end) pair of WL-numbers or "
-                           "None, got {!r}".format(span))
+                           "None, got {}".format(_safe_display(span)))
     start, end = span
     covered = []
     for n in range(start, end + 1):
         entry = entries_by_id.get(n)
         if entry is None:
             raise ReleaseError("worklog entry WL-{} covered by a span is absent (merge the archive; "
-                               "spec 12)".format(n))
+                               "spec 12)".format(_safe_str(n)))
         covered.append(entry)
     return coverage_digest(covered)
 
@@ -986,7 +986,8 @@ def tail_ids(releases, worklog_ids):
     tail = []
     for n in worklog_ids:
         if not (isinstance(n, int) and not isinstance(n, bool)):
-            raise ReleaseError("cannot compute the tail: worklog id {!r} is not a WL-number".format(n))
+            raise ReleaseError("cannot compute the tail: worklog id {} is not a WL-number".format(
+                _safe_display(n)))
         if n < 1:
             # A WL-number is a POSITIVE integer (spec 8.2); a non-positive id (WL-0, a negative) is
             # malformed, not a tail member to be silently dropped by the `n > end` filter, which would let
@@ -1602,6 +1603,38 @@ def self_test():
               bool(_r6_step) and any("canonical range" in f and "oversized-int" in f for f in _r6_step))
     finally:
         sys.set_int_max_str_digits(_r6_prev_idlimit)
+
+    # ROUND-8 codex (finding 5): compute_span_digest and tail_ids were the class-width MISS of the round-7
+    # oversized-int rendering fix (which hardened check_ids_partition). They raw-interpolated a
+    # possibly-oversized int control into an exception message; with the int-str limit pinned to 4300, str()
+    # of a 5001-digit endpoint (site 420) and repr() of a malformed span holding one (site 413), and repr()
+    # of a non-int container holding one in tail_ids (site 989), trip CPython's base-10 limit. Pre-fix each
+    # raised a RAW ValueError out of the guard (before the intended ReleaseError); post-fix each renders
+    # through _safe_str / _safe_display and returns the controlled ReleaseError with the bounded marker.
+    # Reverting any of the three .format wrappers flips its check red. Limit restored in finally.
+    _r8_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        def _outcome(thunk):
+            try:
+                thunk()
+                return "no-error"
+            except ReleaseError as exc:
+                return "release:" + str(exc)
+            except ValueError:
+                return "raw-valueerror"
+
+        _r8a = _outcome(lambda: compute_span_digest({}, (10 ** 5000, 10 ** 5000)))   # site 420: str(n)
+        check("r8-span-digest-oversized-start-releaseerror",
+              _r8a.startswith("release:") and "oversized-int" in _r8a)
+        _r8b = _outcome(lambda: compute_span_digest({}, (1, 2, 10 ** 5000)))         # site 413: repr(span)
+        check("r8-span-digest-malformed-oversized-releaseerror",
+              _r8b.startswith("release:") and "oversized-value" in _r8b)
+        _r8c = _outcome(lambda: tail_ids([], [[10 ** 5000]]))                        # site 989: repr(n)
+        check("r8-tail-ids-oversized-nonint-releaseerror",
+              _r8c.startswith("release:") and "oversized-value" in _r8c)
+    finally:
+        sys.set_int_max_str_digits(_r8_prev_idlimit)
 
     # M10: a superseded summary's superseded_by must name an EXISTING rollup that COVERS it, never itself.
     D = "sha256:" + "a" * 64

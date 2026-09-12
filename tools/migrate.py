@@ -1035,7 +1035,163 @@ def self_test():
         #     path is exercised indirectly by the crash-injection cutovers below (every cutover creates its
         #     frames.log exclusively); a direct pre-plant is not reachable because each cutover mints a fresh
         #     txn id whose dir is created by us. The st_nlink==1 check in (N) is the reopen-time identity
-        #     guarantee that complements it.
+        #     guarantee that complements it. (P2) below now covers the exclusive-create DIRECTLY (finding 4).
+
+        # (P) PRODUCT-FILE HARDLINK DEFENCE (codex round-8, finding 1): a product file (a root/data file the
+        #     engine mutates) that is a HARD LINK to an out-of-tree victim passes O_NOFOLLOW + S_ISREG (a
+        #     hardlink IS a regular file), so pre-fix capture_preimages accepted the nlink-2 target, apply_ops
+        #     (ftruncate+write) mutated the victim through the shared inode, and _restore_preimage
+        #     (ftruncate+rewrite) did the same. The st_nlink==1 product-file check on the OPENED fd (apply:
+        #     _verify_fd_prestate; restore: the post-open identity check) and the capture-time early reject
+        #     refuse a link count above 1; reverted, the victim's bytes are clobbered, flipping the
+        #     victim-intact asserts red. This is the PRODUCT-FILE sibling of the frames.log defence in (N).
+        _pw_bytes = b"VICTIM-INTACT"
+        _pw_sha = hashlib.sha256(_pw_bytes).hexdigest()
+        # (P-apply) apply_ops must REFUSE a hard-linked write target and leave the victim intact.
+        aproot = tmp / "prodlink-apply" / "root"; aproot.mkdir(parents=True)
+        avictim = tmp / "prodlink-apply" / "victim"; avictim.write_bytes(_pw_bytes)
+        os.chmod(str(avictim), 0o644)
+        os.link(str(avictim), str(aproot / "dataA"))          # dataA: a hard link to the out-of-tree victim
+        _apply_op = {"op": "write", "path": "dataA",
+                     "prestate": {"kind": "file", "mode": 0o644, "size": len(_pw_bytes), "payload": "0",
+                                  "sha256": _pw_sha},
+                     "poststate": {"content-sha256": hashlib.sha256(b"NEWDATA").hexdigest()}}
+        aproot_fd = os.open(str(aproot), os.O_RDONLY | os.O_DIRECTORY)
+        _apply_refused = False
+        try:
+            _journal.apply_ops(aproot_fd, [_apply_op], lambda _o: b"NEWDATA")
+        except _journal.JournalError:
+            _apply_refused = True
+        finally:
+            os.close(aproot_fd)
+        if not _apply_refused:
+            failures.append("apply_ops must refuse a hard-linked product file (st_nlink!=1), not write "
+                            "through the shared inode to an out-of-tree victim")
+        if avictim.read_bytes() != _pw_bytes:
+            failures.append("apply_ops truncated/overwrote a hard-linked out-of-tree victim (product file)")
+        checked += 1
+        # (P-capture) capture_preimages must REFUSE a hard-linked write target (defence in depth).
+        cproot = tmp / "prodlink-cap" / "root"; cproot.mkdir(parents=True)
+        cvictim = tmp / "prodlink-cap" / "victim"; cvictim.write_bytes(_pw_bytes)
+        os.chmod(str(cvictim), 0o644)
+        os.link(str(cvictim), str(cproot / "dataA"))
+        cjr = tmp / "prodlink-cap" / "journal"; (cjr / "t1").mkdir(parents=True)
+        cproot_fd = os.open(str(cproot), os.O_RDONLY | os.O_DIRECTORY)
+        cjr_fd = os.open(str(cjr), os.O_RDONLY | os.O_DIRECTORY)
+        _cap_refused = False
+        try:
+            _journal.capture_preimages(cjr_fd, cjr / "t1", cproot_fd, [{"op": "write", "path": "dataA"}])
+        except _journal.JournalError:
+            _cap_refused = True
+        finally:
+            os.close(cproot_fd)
+            os.close(cjr_fd)
+        if not _cap_refused:
+            failures.append("capture_preimages must refuse a hard-linked `write` target (st_nlink!=1) "
+                            "before the transaction opens")
+        if cvictim.read_bytes() != _pw_bytes:
+            failures.append("capture_preimages disturbed a hard-linked out-of-tree victim")
+        checked += 1
+        # (P-restore) _restore_preimage must REFUSE a hard-linked target and leave the victim intact.
+        rproot = tmp / "prodlink-restore" / "root"; rproot.mkdir(parents=True)
+        rvictim = tmp / "prodlink-restore" / "victim"; rvictim.write_bytes(_pw_bytes)
+        os.chmod(str(rvictim), 0o644)
+        os.link(str(rvictim), str(rproot / "dataA"))
+        rjr = tmp / "prodlink-restore" / "journal"; (rjr / "t1" / "preimages").mkdir(parents=True)
+        _rpre = b"RESTORED-BYTES\n"
+        (rjr / "t1" / "preimages" / "0").write_bytes(_rpre)
+        _restore_op = {"op": "write", "path": "dataA",
+                       "prestate": {"kind": "file", "mode": 0o644, "size": len(_rpre), "payload": "0",
+                                    "sha256": hashlib.sha256(_rpre).hexdigest()}}
+        rjr_fd = os.open(str(rjr), os.O_RDONLY | os.O_DIRECTORY)
+        rproot_fd = os.open(str(rproot), os.O_RDONLY | os.O_DIRECTORY)
+        _restore_refused = False
+        try:
+            _journal._restore_preimage(rjr_fd, rjr / "t1", rproot_fd, _restore_op)
+        except _journal.JournalError:
+            _restore_refused = True
+        finally:
+            os.close(rjr_fd)
+            os.close(rproot_fd)
+        if not _restore_refused:
+            failures.append("_restore_preimage must refuse a hard-linked product file (st_nlink!=1), not "
+                            "rewrite through the shared inode to an out-of-tree victim")
+        if rvictim.read_bytes() != _pw_bytes:
+            failures.append("_restore_preimage truncated/overwrote a hard-linked out-of-tree victim")
+        checked += 1
+
+        # (P2) FRAMES.LOG EXCLUSIVE FIRST-CREATE, DIRECT (codex round-8, finding 4): the (O) note said a
+        #     pre-plant was "not reachable" because each cutover mints a fresh txn dir, so removing O_EXCL from
+        #     _create_frames_excl left this self-test at exit 0 (the discrimination GAP). Cover it DIRECTLY:
+        #     pre-plant a frames.log in a txn dir, then call _create_frames_excl in-process (so THIS self-test
+        #     process, which imports _journal, catches the mutant). O_CREAT|O_EXCL must REFUSE the pre-existing
+        #     entry (JournalError); reverted (O_EXCL dropped), the open succeeds, no JournalError is raised,
+        #     and this flips red.
+        xroot = tmp / "exclcreate" / "journal"; (xroot / "t1").mkdir(parents=True)
+        (xroot / "t1" / "frames.log").write_bytes(b"PRE-PLANTED")     # a pre-existing entry at that name
+        xjr_fd = os.open(str(xroot), os.O_RDONLY | os.O_DIRECTORY)
+        _excl_refused = False
+        try:
+            _journal._create_frames_excl(xjr_fd, xroot / "t1")
+        except _journal.JournalError:
+            _excl_refused = True
+        finally:
+            os.close(xjr_fd)
+        if not _excl_refused:
+            failures.append("_create_frames_excl must refuse a pre-existing frames.log (O_CREAT|O_EXCL); a "
+                            "dropped O_EXCL silently accepts a pre-planted log (finding 4)")
+        checked += 1
+
+        # (P3) CONTAINED-WALK CLEANUP-CLOSE GUARD (codex round-8, finding 8-2): the contained-walk cleanup
+        #     loops (_open_parent / _open_dir_contained / ensure_journal_dirs) close several opened dir fds in
+        #     a `finally`. A raw os.close there, when one close raised (EINTR/EIO), abandoned the REMAINING
+        #     sibling fds (a leak) and let a raw OSError escape the finally. The guarded close
+        #     (_journal._close_fd_quietly) confirms-and-continues so the walk COMPLETES and no sibling leaks.
+        #     Inject a first-close-raises-without-releasing into a DEEP _open_parent walk (>=2 intermediate
+        #     dirs => >=2 opened fds): post-fix _open_parent returns and the process fd count is unchanged;
+        #     pre-fix the first raise aborts the loop, the second fd leaks, and the raw OSError escapes.
+        wroot = tmp / "walkclose" / "root"; (wroot / "a" / "b").mkdir(parents=True)
+        (wroot / "a" / "b" / "dataA").write_bytes(b"x")
+        wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
+        _w_real_close = os.close
+        _w_state = {"n": 0}
+
+        def _w_boom_close(fd):
+            _w_state["n"] += 1
+            if _w_state["n"] == 1:
+                raise OSError(5, "EIO (self-test injected, fd left open)")   # raise WITHOUT releasing
+            return _w_real_close(fd)
+
+        def _fdcount():
+            try:
+                return len(os.listdir("/proc/self/fd"))
+            except OSError:
+                return None
+
+        _w_before = _fdcount()
+        _w_outcome = None
+        _w_pfd = None
+        try:
+            os.close = _w_boom_close
+            try:
+                _w_pfd, _w_name = _journal._open_parent(wroot_fd, "a/b/dataA")
+                _w_outcome = "returned"
+            except OSError:
+                _w_outcome = "raised"
+        finally:
+            os.close = _w_real_close
+        if _w_pfd is not None:
+            _w_real_close(_w_pfd)                            # real close so the test itself leaks nothing
+        os.close(wroot_fd)
+        _w_after = _fdcount()
+        _w_leak_ok = True
+        if _w_before is not None and _w_after is not None:
+            _w_leak_ok = (_w_after <= _w_before)            # a leaked sibling fd makes after > before
+        if not (_w_outcome == "returned" and _w_leak_ok):
+            failures.append("_open_parent contained-walk cleanup must GUARD each close so a raising close "
+                            "neither aborts the walk nor leaks a sibling fd (outcome={}, before={}, after={}; "
+                            "finding 8-2)".format(_w_outcome, _w_before, _w_after))
+        checked += 1
 
         # (F2) FIX #3 OWNERSHIP-CHECKED RELEASE: a lock NOT owned by this process is never unlinked.
         jr2 = tmp / "foreignlock" / JOURNAL_REL

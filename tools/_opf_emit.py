@@ -675,10 +675,16 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         except OSError:
             pass
         os._exit(0)
-    os.close(wfd)                                        # parent
+    # parent
     data = b""
     wstatus = None
     try:
+        # Close the parent's WRITE end INSIDE the enclosing try, as the FIRST step, so that if this close
+        # raises (OSError EIO) the finally still closes rfd AND reaps the child, rather than leaking the read
+        # fd and orphaning the child as a close ahead of the try/finally did (codex round-8 finding 7). It
+        # must still precede the read loop: while the parent holds wfd open, os.read(rfd) would never see EOF
+        # after the child exits and would block forever.
+        os.close(wfd)
         while True:
             chunk = os.read(rfd, 200)
             if not chunk:
@@ -709,6 +715,13 @@ def _bounded_child_result(data, wstatus):
     if os.WIFSIGNALED(wstatus):
         if os.WTERMSIG(wstatus) == signal.SIGALRM:
             return "TIMEOUT"
+        return "CHILD-DIED"
+    # A run_bounded child ALWAYS os._exit(0) after writing its token (a real result, ERROR:, SETUP-ERROR:,
+    # or OOM), so a NONZERO normal exit is an abnormal death and its buffered bytes are NOT proof of a clean
+    # result. Require a SUCCESSFUL exit (WIFEXITED + status 0) before the payload may be returned; anything
+    # else is CHILD-DIED. Pre-fix a child that wrote its token then exited nonzero (exit 7) still returned the
+    # buffered token (no-concealed-failure; codex round-8 finding 6). Signal death is handled above.
+    if not (os.WIFEXITED(wstatus) and os.WEXITSTATUS(wstatus) == 0):
         return "CHILD-DIED"
     if not data:
         return "CHILD-DIED"
@@ -990,6 +1003,28 @@ def self_test():
     import os as _os6
     import signal as _sig6
     import resource as _res6
+    import time as _time6
+
+    def _reap_bounded(pid, timeout_s=5.0):
+        """Reap `pid`, but BOUNDED so a wedged fixture child can never hang the whole self-test runner
+        (codex round-8 finding 3(c)): poll waitpid(WNOHANG) until the child is reaped or the deadline
+        passes; on timeout SIGKILL it and reap for real, returning that terminal status. A correctly-behaving
+        fixture child (it self-signals SIGALRM under SIG_DFL with SIGALRM UNBLOCKED) dies at once, so the
+        poll returns immediately; the bound exists only so a build/ambient that ever left the child parked
+        surfaces as a reported failure (a non-SIGALRM status) instead of an unbounded parent waitpid."""
+        deadline = _time6.monotonic() + timeout_s
+        while True:
+            wpid, wstatus = _os6.waitpid(pid, _os6.WNOHANG)
+            if wpid == pid:
+                return wstatus
+            if _time6.monotonic() >= deadline:
+                try:
+                    _os6.kill(pid, _sig6.SIGKILL)
+                except OSError:
+                    pass
+                _wpid, wstatus = _os6.waitpid(pid, 0)      # blocking reap AFTER SIGKILL: bounded (the kill lands)
+                return wstatus
+            _time6.sleep(0.005)
     # (4) an UNBOUNDED or INVALID control must yield a distinct SETUP-ERROR sentinel WITHOUT running the
     # thunk: timeout_s <= 0 disarms the timer (setitimer(0,0)) and mem_bytes == RLIM_INFINITY / <= 0
     # installs no address-space cap, yet pre-fix the thunk still ran and its result ("RAN") was returned as
@@ -1011,15 +1046,44 @@ def self_test():
         # the buffered token: the termination status is inspected FIRST. Build a REAL SIGALRM-signaled
         # wait-status (a child that raises SIGALRM on itself under SIG_DFL) and pair it with a leftover
         # token. Pre-fix (bytes checked first) this returned the token; post-fix the signal wins -> TIMEOUT.
-        _pid5 = _os6.fork()
-        if _pid5 == 0:
-            _sig6.signal(_sig6.SIGALRM, _sig6.SIG_DFL)
-            _os6.kill(_os6.getpid(), _sig6.SIGALRM)
-            _os6.pause()
-            _os6._exit(0)                                  # unreachable: SIGALRM/SIG_DFL terminates first
-        _, _wst5 = _os6.waitpid(_pid5, 0)
+        #
+        # DISCRIMINATION for finding 3: run this fixture with SIGALRM BLOCKED in the parent, the exact hostile
+        # ambient the child must survive. The child resets SIG_DFL and UNBLOCKS SIGALRM in ITS OWN process, so
+        # it still dies by SIGALRM here; reverting the child's unblock (or signal.pause -> the nonexistent
+        # os.pause) leaves the self-signal pending-and-blocked so the child parks and _reap_bounded times out
+        # to a SIGKILL, flipping the status-first-setup assertion red even under a DEFAULT ambient. The parent
+        # mask is restored in the finally, so the self-test leaves the ambient SIGALRM mask unchanged.
+        _blocked_prev = None
+        if hasattr(_sig6, "pthread_sigmask"):
+            _blocked_prev = _sig6.pthread_sigmask(_sig6.SIG_BLOCK, {_sig6.SIGALRM})
+        try:
+            _pid5 = _os6.fork()
+            if _pid5 == 0:
+                # child (its OWN process): reset SIGALRM to SIG_DFL AND UNBLOCK it in THIS child's mask before
+                # self-signalling. An INHERITED blocked SIGALRM (the ambient this fixture deliberately sets,
+                # and the hostile ambient the whole self-test may run under, finding 3) would otherwise leave
+                # the self-sent SIGALRM pending-and-blocked, so the child would never die and would PARK in
+                # signal.pause() forever, hanging the parent's reap. Unblocked under SIG_DFL the self-signal
+                # terminates the child at once, so signal.pause() (the correct call; os.pause does not exist,
+                # finding 3(a)) is unreachable and is only a belt-and-braces park. A setup failure exits
+                # cleanly rather than escaping into the parent runner.
+                try:
+                    _sig6.signal(_sig6.SIGALRM, _sig6.SIG_DFL)
+                    if hasattr(_sig6, "pthread_sigmask"):
+                        _sig6.pthread_sigmask(_sig6.SIG_UNBLOCK, {_sig6.SIGALRM})
+                    _os6.kill(_os6.getpid(), _sig6.SIGALRM)
+                    _sig6.pause()
+                except BaseException:                      # noqa: BLE001 (child boundary: never unwind into the parent)
+                    pass
+                _os6._exit(0)                              # unreachable under SIG_DFL+unblocked; a clean exit otherwise
+            _wst5 = _reap_bounded(_pid5)
+        finally:
+            if _blocked_prev is not None:
+                _sig6.pthread_sigmask(_sig6.SIG_SETMASK, _blocked_prev)  # restore the ambient mask
         if not (_os6.WIFSIGNALED(_wst5) and _os6.WTERMSIG(_wst5) == _sig6.SIGALRM):
-            failures.append("run_bounded/status-first-setup: the fixture child was not SIGALRM-signaled")
+            failures.append("run_bounded/status-first-setup: the fixture child was not SIGALRM-signaled "
+                            "under a blocked-SIGALRM parent (the child must unblock SIGALRM in its own "
+                            "process and use signal.pause; finding 3)")
         elif _bounded_child_result(b"LEFTOVER-TOKEN", _wst5) != "TIMEOUT":
             failures.append("run_bounded/status-first: a token-then-SIGALRM child returned the buffered "
                             "token instead of TIMEOUT (termination status not inspected first)")
@@ -1032,6 +1096,21 @@ def self_test():
         if _bounded_child_result(b"TOKEN", _wst5b) != "TOKEN":
             failures.append("run_bounded/status-first-normal: a normal-exit child with bytes did not "
                             "return its token")
+
+        # (finding 6) a child that wrote its token then exited NONZERO (exit 7) must NOT have those bytes
+        # returned as a clean result: a run_bounded child ALWAYS os._exit(0) after writing, so a nonzero
+        # normal exit is an abnormal death. Build a real exit-7 wait-status and pair it with a leftover token;
+        # post-fix _bounded_child_result requires WIFEXITED+status 0 and returns CHILD-DIED, pre-fix (only the
+        # signal case was checked) it returned the buffered token.
+        _pid7 = _os6.fork()
+        if _pid7 == 0:
+            _os6._exit(7)
+        _, _wst7 = _os6.waitpid(_pid7, 0)
+        if not (_os6.WIFEXITED(_wst7) and _os6.WEXITSTATUS(_wst7) == 7):
+            failures.append("run_bounded/nonzero-exit-setup: the fixture child did not exit 7")
+        elif _bounded_child_result(b"TOKEN", _wst7) != "CHILD-DIED":
+            failures.append("run_bounded/nonzero-exit: a token-then-exit-7 child returned the buffered "
+                            "token instead of CHILD-DIED (a successful exit was not required)")
 
         # (9) the parent must CLOSE the pipe read fd (rfd) after reaping, or every run_bounded call leaks a
         # descriptor. Capture the rfd os.pipe hands out, run one bounded call, and confirm the parent's rfd
@@ -1065,6 +1144,82 @@ def self_test():
         if _leaked6:
             failures.append("run_bounded/parent-rfd-leak: the parent did not close the pipe read fd "
                             "(a descriptor leaks per call)")
+
+        # (finding 7) the parent's wfd close was moved INSIDE the read/cleanup try/finally, so a wfd close that
+        # RAISES (OSError EIO) still runs the finally that closes rfd AND reaps the child, rather than leaking
+        # the read fd and orphaning the child as a close ahead of the try did. Fault-inject a wfd close that
+        # really releases the fd then raises (a hostile teardown close), capturing the pipe fds and the child
+        # pid. Post-fix: rfd is closed and the child is reaped (waitpid -> ECHILD). Pre-fix: run_bounded
+        # skipped both, so rfd stayed open and the child was left unreaped.
+        _pipe_real7 = _os6.pipe
+        _close_real7 = _os6.close
+        _fork_real7 = _os6.fork
+        _cap7 = {}
+
+        def _cap_pipe7():
+            _r, _w = _pipe_real7()
+            _cap7["rfd"], _cap7["wfd"] = _r, _w
+            return _r, _w
+
+        def _cap_fork7():
+            _p = _fork_real7()
+            if _p > 0:
+                _cap7["pid"] = _p
+            return _p
+
+        def _boom_close7(fd):
+            if fd == _cap7.get("wfd") and not _cap7.get("wfd_closed"):
+                _cap7["wfd_closed"] = True
+                try:
+                    _close_real7(fd)                       # really release the wfd (no leak) ...
+                except OSError:
+                    pass
+                raise OSError(5, "EIO (self-test injected wfd close)")   # ... then raise, as a hostile close would
+            return _close_real7(fd)
+
+        try:
+            _os6.pipe = _cap_pipe7
+            _os6.fork = _cap_fork7
+            _os6.close = _boom_close7
+            try:
+                run_bounded(lambda: "WFDCHK")              # the wfd close raises; the finally must still run
+            except OSError:
+                pass                                       # a propagated teardown OSError is acceptable; cleanup is what matters
+        finally:
+            _os6.pipe = _pipe_real7
+            _os6.fork = _fork_real7
+            _os6.close = _close_real7
+        _rfd7 = _cap7.get("rfd")
+        _rfd7_open = False
+        if _rfd7 is not None:
+            try:
+                _os6.fstat(_rfd7)
+                _rfd7_open = True                          # still open: the finally's rfd close was skipped
+            except OSError:
+                _rfd7_open = False
+            if _rfd7_open:
+                _os6.close(_rfd7)                          # close the leak the test just detected
+        if _rfd7_open:
+            failures.append("run_bounded/wfd-close-raise-rfd-leak: a raising parent wfd close skipped the "
+                            "rfd cleanup (read fd leaked; finding 7)")
+        _pid7c = _cap7.get("pid")
+        if _pid7c is not None:
+            _reaped7 = False
+            try:
+                _os6.waitpid(_pid7c, _os6.WNOHANG)         # ECHILD iff run_bounded already reaped it
+                # NOT raised: the child was NOT reaped by run_bounded; clean it up so the self-test leaks none
+                try:
+                    _os6.kill(_pid7c, _sig6.SIGKILL)
+                    _os6.waitpid(_pid7c, 0)
+                except OSError:
+                    pass
+            except ChildProcessError:
+                _reaped7 = True
+            except OSError:
+                _reaped7 = True
+            if not _reaped7:
+                failures.append("run_bounded/wfd-close-raise-unreaped-child: a raising parent wfd close "
+                                "skipped the child reap (zombie left; finding 7)")
 
     # _model_equal type-strictness pins: the exact-type clause is the sole carrier of the strictness that
     # makes the round-trip proof meaningful rather than merely plausible. A mutant dropping that clause
