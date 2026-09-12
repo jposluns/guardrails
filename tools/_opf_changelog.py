@@ -922,6 +922,21 @@ def self_test():
     check("f6-surrogate-changelog-cannot-eval",
           run_gates(vbase, worklog, cl + chr(0xD800)).status == CANNOT_EVALUATE)
 
+    # F-R17-B3: a lone surrogate in a WORKLOG entry field is not encodable as UTF-8 when the coverage digest
+    # is recomputed; the exported release gate surfaces it as a structured coverage FINDING rather than
+    # letting the raw UnicodeEncodeError escape.
+    surrogate_worklog = {"schema": worklog["schema"],
+                         "entry": [dict(item) for item in worklog["entry"]]}
+    surrogate_worklog["entry"][0]["summary"] = chr(0xD800)
+    try:
+        surrogate_gate = run_gates(vbase, surrogate_worklog, cl, registered_vendors=frozenset())
+    except UnicodeEncodeError:
+        surrogate_gate = None
+    check("b3-surrogate-worklog-coverage-finding",
+          surrogate_gate is not None
+          and surrogate_gate.status == FINDING
+          and any("coverage" in f.lower() for f in surrogate_gate.findings))
+
     # codex slice-2: an unresolvable --root (os.path.abspath raising, as when the process cwd was removed)
     # is a fail-closed CANNOT-EVALUATE, not an escaping crash. Inject the raise (matching the M1 style).
     saved_abspath = os.path.abspath
@@ -1046,10 +1061,10 @@ def self_test():
         # and with the local guard present it is NEVER called, so removing that guard flips this check red.
         _rc_calls = []
         _orig_rc = _journal._read_contained
-        def _recording_rc(root_fd, relpath):
+        def _recording_rc(root_fd, relpath, **_kw):
             if relpath == CHANGELOG_REL:                  # only the CHANGELOG.md read is the guarded path here
                 _rc_calls.append(relpath)                 # (version/worklog/manifest also route through _read_contained)
-            return _orig_rc(root_fd, relpath)
+            return _orig_rc(root_fd, relpath, **_kw)
         _journal._read_contained = _recording_rc
         # C (test-hermeticity): snapshot the caller's SIGALRM disposition and mask, and its ITIMER_REAL +
         # pending state through the SHARED _opf_store.snapshot_caller_alarm helper; unblock SIGALRM for the

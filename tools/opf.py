@@ -310,7 +310,11 @@ def _watchdog_shared_restore_self_test():
     if not (hasattr(_signal, "setitimer") and hasattr(_signal, "ITIMER_REAL")):
         print("opf watchdog shared-restore self-test: SKIP (no POSIX itimer on this platform)")
         return EXIT_OK
-    _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)   # the real caller timer, restored at end
+    # F-R17-C2: capture the caller's alarm (value/interval, t0, pending) at the TOP through the SHARED
+    # snapshot helper, for an elapsed-aware restore in the finally. The prior form read getitimer here and
+    # passed restore-time monotonic() as t0 at the end, subtracting ~no elapsed and EXTENDING a caller
+    # deadline held across this wrapper (the F-R16-1 sibling).
+    _caller_snap = _opf_store.snapshot_caller_alarm()
     ok = True
     try:
         _signal.setitimer(_signal.ITIMER_REAL, 0)               # quiet baseline for the probe
@@ -330,10 +334,10 @@ def _watchdog_shared_restore_self_test():
                   "(F1)".format(_int_after, _known_int), file=sys.stderr)
             ok = False
     finally:
-        if _prev_value > 0.0:
-            _opf_store.restore_caller_alarm(_prev_value, _prev_interval, _time.monotonic(), False)
-        else:
-            _signal.setitimer(_signal.ITIMER_REAL, 0)
+        # F-R17-C2: disarm any probe timer, then restore the caller's alarm ELAPSED-AWARE from the
+        # capture-time snapshot, so a caller deadline held across this wrapper is not extended.
+        _signal.setitimer(_signal.ITIMER_REAL, 0)
+        _opf_store.restore_caller_alarm(*_caller_snap)
     if not ok:
         print("opf watchdog shared-restore self-test: FAIL (the shared caller-timer restore is not "
               "elapsed-aware; a per-site verbatim restore could re-induce the watchdog-timer class)",
@@ -341,6 +345,58 @@ def _watchdog_shared_restore_self_test():
         return EXIT_FINDING
     print("opf watchdog shared-restore self-test: PASS (the single shared restore helper is elapsed-aware: "
           "a caller timer comes back reduced by the time held, interval preserved)")
+    return EXIT_OK
+
+
+def _watchdog_shared_restore_deadline_self_test():
+    """F-R17-C2 / F-R16-1 (durable executed-proof half): arm a REAL caller ITIMER_REAL across
+    _watchdog_shared_restore_self_test and confirm its finally restores that caller timer ELAPSED-AWARE, not
+    verbatim. The shared-restore self-test snapshots the caller alarm at the TOP and restores via
+    restore_caller_alarm(*snap); a regression that passes RESTORE-time monotonic() as t0 subtracts ~no
+    elapsed and EXTENDS the caller's deadline. This arms a large ~10s caller deadline that never fires, runs
+    the wrapped self-test, and asserts at least half the wrapped call's wall duration was subtracted from the
+    restored ITIMER value, so a restore-time-t0 / verbatim revert (which subtracts ~0) reds. SKIPS clean
+    without POSIX itimer."""
+    import signal as _signal
+    import time as _time
+    import io as _io
+    import contextlib as _ctx
+    if not (hasattr(_signal, "setitimer") and hasattr(_signal, "ITIMER_REAL")):
+        print("opf watchdog shared-restore deadline self-test: SKIP (no POSIX itimer on this platform)")
+        return EXIT_OK
+    _armed = 10.0                                                # large: never fires, reduction is measurable
+    _prev_disp = _signal.getsignal(_signal.SIGALRM)
+    _caller_snap = _opf_store.snapshot_caller_alarm()
+    ok = True
+    try:
+        _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)        # a fired deadline here is harmless (ignored)
+        _signal.setitimer(_signal.ITIMER_REAL, _armed, 0.0)
+        _t0 = _time.monotonic()
+        _buf = _io.StringIO()
+        with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
+            _rc = _watchdog_shared_restore_self_test()
+        _dur = _time.monotonic() - _t0
+        _val_after, _ = _signal.getitimer(_signal.ITIMER_REAL)
+        if _rc != EXIT_OK:
+            print("opf watchdog shared-restore deadline self-test: inner self-test returned {!r} (expected "
+                  "0)".format(_rc), file=sys.stderr)
+            ok = False
+        # An elapsed-aware restore subtracts ~the whole wrapped-call duration; a restore-time-t0 / verbatim
+        # revert subtracts ~0 and leaves the deadline near its full armed value.
+        if not (_val_after <= _armed - _dur * 0.5):
+            print("opf watchdog shared-restore deadline self-test: caller ITIMER restored to {!r} across a "
+                  "{:.4f}s call; the elapsed was not subtracted (a restore-time-t0 / verbatim restore extends "
+                  "a caller deadline, F-R17-C2)".format(_val_after, _dur), file=sys.stderr)
+            ok = False
+    finally:
+        _signal.setitimer(_signal.ITIMER_REAL, 0)
+        _signal.signal(_signal.SIGALRM, _prev_disp)
+        _opf_store.restore_caller_alarm(*_caller_snap)
+    if not ok:
+        print("opf watchdog shared-restore deadline self-test: FAIL", file=sys.stderr)
+        return EXIT_FINDING
+    print("opf watchdog shared-restore deadline self-test: PASS (the shared-restore self-test restores a "
+          "caller ITIMER_REAL elapsed-aware, not extended)")
     return EXIT_OK
 
 
@@ -359,6 +415,7 @@ SELF_TESTS = (
     ("opf-watchdog-hostile-ambient", _watchdog_hostile_ambient_self_test),
     ("opf-watchdog-wrapper-deadline", _watchdog_wrapper_caller_deadline_self_test),
     ("opf-watchdog-shared-restore", _watchdog_shared_restore_self_test),
+    ("opf-watchdog-shared-restore-deadline", _watchdog_shared_restore_deadline_self_test),
     ("opf-aggregator", _aggregator_self_test),
 )
 

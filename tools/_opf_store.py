@@ -341,7 +341,12 @@ def _read_toml_contained(root_fd, relpath):
         raise StoreError("{} is {} bytes, over the {}-byte store-read cap (fail-closed)".format(
             relpath, st.st_size, MAX_STORE_READ_BYTES))
     try:
-        data, _ = _journal._read_contained(root_fd, relpath)
+        # F-R17-A1: a STORE control file (a manifest or a `.opf.toml`/`.opf.local.toml` pointer) is refused
+        # when it is multiply-linked. The decision is made on the OPENED fd's stat inside _read_contained,
+        # not the pre-open _lstat_contained probe above, so a hardlink to an out-of-tree victim cannot let a
+        # resolved store posture silently track the victim inode. This reader serves ONLY manifest and pointer
+        # paths, so the single-link requirement covers both without touching generic product reads.
+        data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True)
     except (_journal.JournalError, OSError) as exc:
         # _read_contained maps its open/read errors to JournalError, but its post-open os.fstat can still
         # raise a BARE OSError (a device/EIO-level failure) that would otherwise escape resolve_store
@@ -2011,7 +2016,7 @@ def self_test():
         # -> CANNOT-EVALUATE, never an uncaught OSError out of resolve_store.
         n3_root = build_store(manifest=manifest_text())
         _real_rc = _journal._read_contained
-        def _rc_oserror(_rfd_arg, _rel_arg):
+        def _rc_oserror(_rfd_arg, _rel_arg, **_kw):
             raise OSError(5, "injected EIO on read")
         _journal._read_contained = _rc_oserror
         try:
@@ -2189,6 +2194,71 @@ def self_test():
                   not (_f1root / "decoy" / "capt" / "preimages").exists())
         finally:
             os.close(_f1_rootfd)
+
+        # ---- F-R17-A1: a store CONTROL file hardlinked to an out-of-tree victim is refused ----------------
+        # A manifest or pointer hardlinked to an external file passes O_NOFOLLOW and S_ISREG, so without the
+        # opened-fd nlink==1 guard its resolved posture would track the victim inode. The manifest case masks
+        # _lstat_contained to report a single link, proving the decision uses the OPENED fd, not the pre-open
+        # lstat probe. A GENERIC product read keeps an intentional hardlink (the guard is opt-in, off by
+        # default), so nlink==2 product reads are not over-restricted.
+        a1_root = build_store(manifest=manifest_text())
+        check("a1-precondition-resolved", resolve_store(a1_root).status == RESOLVED)
+        a1_manifest = a1_root / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME
+        a1_victim = base / "a1-manifest-victim.toml"
+        a1_victim.write_text(manifest_text(), encoding="utf-8")
+        a1_manifest.unlink()
+        os.link(str(a1_victim), str(a1_manifest))              # manifest now nlink == 2
+        _a1_real_lstat = _journal._lstat_contained
+
+        def _a1_masked_lstat(root_fd, relpath):
+            st = _a1_real_lstat(root_fd, relpath)
+            if st is None or not relpath.endswith(MANIFEST_NAME):
+                return st
+            fields = list(st)
+            fields[stat.ST_NLINK] = 1                          # hide the extra link from the pre-open probe
+            return os.stat_result(fields)
+
+        _journal._lstat_contained = _a1_masked_lstat
+        try:
+            a1_manifest_result = load_manifest(resolve_store(a1_root))
+        finally:
+            _journal._lstat_contained = _a1_real_lstat
+        check("a1-hardlinked-manifest-cannot-eval",
+              a1_manifest_result.status == CANNOT_EVALUATE)
+
+        # a hardlinked COMMITTED pointer is refused during resolution
+        a1_pstore = base / "a1-pointer-store"
+        (a1_pstore / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR).mkdir(parents=True)
+        (a1_pstore / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME).write_text(
+            manifest_text(), encoding="utf-8")
+        a1_pr = build_store(make_working=False)
+        a1_pvictim = base / "a1-pointer-victim.toml"
+        a1_pvictim.write_text('[store]\ntarget = "dir:{}"\n'.format(a1_pstore), encoding="utf-8")
+        os.link(str(a1_pvictim), str(a1_pr / POINTER_REL))     # committed pointer now nlink == 2
+        check("a1-hardlinked-committed-pointer-cannot-eval",
+              resolve_store(a1_pr).status == CANNOT_EVALUATE)
+
+        # a hardlinked LOCAL pointer is refused during resolution
+        a1_lpr = build_store(make_working=False)
+        a1_lpvictim = base / "a1-local-pointer-victim.toml"
+        a1_lpvictim.write_text('[store]\ntarget = "dir:{}"\n'.format(a1_pstore), encoding="utf-8")
+        os.link(str(a1_lpvictim), str(a1_lpr / LOCAL_POINTER_REL))   # local pointer now nlink == 2
+        check("a1-hardlinked-local-pointer-cannot-eval",
+              resolve_store(a1_lpr).status == CANNOT_EVALUATE)
+
+        # a GENERIC product hardlink read is NOT over-restricted (the guard is opt-in, off by default)
+        a1_generic = base / "a1-generic-root"
+        a1_generic.mkdir()
+        a1_gvictim = base / "a1-generic-victim"
+        a1_gvictim.write_bytes(b"intentional product hardlink")
+        os.link(str(a1_gvictim), str(a1_generic / "product-data"))
+        a1_gfd = os.open(str(a1_generic), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            a1_gdata, a1_gst = _journal._read_contained(a1_gfd, "product-data")
+        finally:
+            os.close(a1_gfd)
+        check("a1-generic-product-hardlink-allowed",
+              a1_gdata == b"intentional product hardlink" and a1_gst.st_nlink == 2)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

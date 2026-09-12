@@ -27,6 +27,7 @@ Staged-unit contract (the off-path tree a verified, green step-2/3 build produce
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -357,9 +358,17 @@ def do_recover(root):
     jr_fd = None
     try:
         journal_root = root / JOURNAL_REL
-        if not journal_root.is_dir():
+        # F-R17-C1: classify the journal path no-follow. Only a CONFIRMED-absent journal is exit-0
+        # "nothing to recover"; a regular file or a symlink (dangling or not) at the journal path is
+        # MALFORMED and fails closed (exit 2), never silently followed or read as absent.
+        journal_state = _classify_journal(root_fd)
+        if journal_state == "absent":
             print("recover: no journal at {} (nothing to recover)".format(JOURNAL_REL))
             return 0
+        if journal_state == "malformed":
+            print("error: journal path {} is present but is not a directory (a regular file or a symlink is "
+                  "refused, not followed); fail-closed".format(JOURNAL_REL), file=sys.stderr)
+            return 2
         # F1: reach the journal root ONCE by a contained no-follow walk from the trusted root fd, and
         # thread that stable handle to the lock reconcile and every recover() so each txn journal is read
         # and its terminal frames written beneath it, never through a re-resolved txn-dir absolute path.
@@ -382,7 +391,12 @@ def do_recover(root):
                   .format((owner or {}).get("pid")), file=sys.stderr)
             return 1
         outcomes = {}
-        for txn_dir in _txn_dirs(journal_root):
+        try:
+            recover_txns = _txn_dirs(journal_root)          # F-R17-C1: a symlinked txn entry raises here
+        except _journal.JournalError as exc:
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return 2                                        # lock RETAINED: the journal is not terminal
+        for txn_dir in recover_txns:
             try:
                 outcomes[txn_dir.name] = _journal.recover(jr_fd, txn_dir, root_fd)
             except _journal.JournalError as exc:
@@ -404,9 +418,24 @@ def do_recover(root):
 
 def do_status(root):
     journal_root = root / JOURNAL_REL
-    if not journal_root.is_dir():
+    # E3 / F-R17-C1: open and VALIDATE --root FIRST (O_NOFOLLOW), then classify the journal path no-follow.
+    # A regular file or a symlink (dangling or not) at the journal path is MALFORMED and fails closed (exit
+    # 2), never silently read as "not adopted"; only a CONFIRMED-absent journal is exit-0 "not adopted".
+    root_fd, err = _open_root_or_none(root)
+    if err:
+        print("error: {}".format(err), file=sys.stderr)
+        return 2
+    try:
+        journal_state = _classify_journal(root_fd)
+    finally:
+        os.close(root_fd)
+    if journal_state == "absent":
         print("status: not adopted (no journal)")
         return 0
+    if journal_state == "malformed":
+        print("error: journal path {} is present but is not a directory (a regular file or a symlink is "
+              "refused, not followed); fail-closed".format(JOURNAL_REL), file=sys.stderr)
+        return 2
     try:                                                  # F1: read each txn journal contained beneath a
         jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)   # trusted journal-root handle
     except (_journal.JournalError, OSError) as exc:
@@ -414,7 +443,12 @@ def do_status(root):
         return 2
     open_txns = []
     try:
-        for txn_dir in _txn_dirs(journal_root):
+        try:
+            status_txns = _txn_dirs(journal_root)         # F-R17-C1: a symlinked txn entry raises here
+        except _journal.JournalError as exc:
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return 2
+        for txn_dir in status_txns:
             try:
                 terminal = _journal.is_terminal(jr_fd, txn_dir)
             except _journal.JournalError as exc:
@@ -436,12 +470,29 @@ def do_status(root):
     return 0
 
 
+def _classify_journal(root_fd):
+    """Classify the cutover journal path beneath the trusted root fd by CONTAINED no-follow inspection,
+    aligning migrate's recover/status with the store reader. Returns 'absent' (CONFIRMED no journal: the
+    only 'nothing to recover' exit-0 case), 'present' (a real directory), or 'malformed' (present but not a
+    directory: a regular file, or a symlink -- dangling or not -- refused, not followed; or a symlinked
+    intermediate component). A read error is 'malformed' (fail-closed), never silently 'absent'; the old
+    Path.is_dir() conflated all of these into False (F-R17-C1)."""
+    try:
+        st = _journal._lstat_contained(root_fd, JOURNAL_REL)
+    except (_journal.JournalError, OSError):
+        return "malformed"
+    if st is None:
+        return "absent"
+    if stat.S_ISDIR(st.st_mode):
+        return "present"
+    return "malformed"
+
+
 def _txn_dirs(journal_root):
-    out = []
-    for entry in sorted(Path(journal_root).iterdir()):
-        if entry.is_dir():
-            out.append(entry)
-    return out
+    """The journal's transaction subdirectories, sorted, classified no-follow so a symlinked entry is
+    REFUSED (JournalError -> the caller exits 2), never followed or silently skipped, aligning with the
+    _journal sibling (F-R17-C1). Raises JournalError on an unreadable listing (fail-closed)."""
+    return _journal._journal_txn_dirs(journal_root)
 
 
 def _slug(value):
@@ -642,14 +693,29 @@ def _run(argv, kill=None):
 
 def _all_terminal(root):
     journal_root = Path(root) / JOURNAL_REL
-    if not journal_root.is_dir():
+    # F-R17-C1: classify the journal path no-follow. Absent -> nothing open (True); a malformed path (a
+    # regular file or a symlink) fails closed (False), never silently "all terminal".
+    root_fd, err = _open_root_or_none(root)
+    if err or root_fd is None:
+        return False
+    try:
+        journal_state = _classify_journal(root_fd)
+    finally:
+        os.close(root_fd)
+    if journal_state == "absent":
         return True
+    if journal_state == "malformed":
+        return False
     try:
         jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
     except (_journal.JournalError, OSError):
         return False
     try:
-        for txn_dir in _txn_dirs(journal_root):
+        try:
+            terminals = _txn_dirs(journal_root)             # F-R17-C1: a symlinked txn entry raises here
+        except _journal.JournalError:
+            return False
+        for txn_dir in terminals:
             try:
                 if not _journal.is_terminal(jr_fd, txn_dir):
                     return False
@@ -1888,6 +1954,70 @@ def self_test():
                             "journal subtree is crash-durable (a crash before it is durable must not make "
                             "recovery falsely report no journal to recover)")
         checked += 1
+
+        # (F-R17-A2) journal budget: a transaction whose serialized INTENT+rollback frames would exceed the
+        # recovery reader's cap is REFUSED before any product mutation and before the txn dir is created. A
+        # 17 MiB header is the padding vector; a reverted budget check would APPLY (mutating the tree), which
+        # this detects, and would leave a journal recovery could not re-read.
+        a2root = _build_case_root(tmp / "a2-root", "flat-files")    # dataA = old-A\n
+        a2jr = a2root / JOURNAL_REL
+        a2jr.mkdir(parents=True, exist_ok=True)
+        a2fd = os.open(str(a2root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        a2jrfd = _journal.open_journal_root_fd(a2fd, JOURNAL_REL)
+        try:
+            pre_a2 = _snapshot(a2root)
+            big_header = {"unit": "x", "kind": "cutover", "pad": "P" * (17 << 20)}   # >16 MiB serialized
+            a2plan = {"op": "write", "path": "dataA",
+                      "poststate": {"kind": "file",
+                                    "content-sha256": hashlib.sha256(b"PLANNED-A\n").hexdigest()}}
+            try:
+                _journal.run_transaction(a2fd, a2jrfd, a2jr, "a2txn", big_header, [a2plan],
+                                         lambda op: b"PLANNED-A\n", "a2")
+                failures.append("A2: an over-cap transaction journal must be refused, not applied")
+            except _journal.JournalError:
+                pass
+            if _snapshot(a2root) != pre_a2:
+                failures.append("A2: an over-cap transaction must NOT mutate the product tree")
+            if (a2jr / "a2txn").exists():
+                failures.append("A2: an over-cap transaction must be refused BEFORE creating the txn dir")
+            if not (17 << 20) > _journal._MAX_JOURNAL_READ_BYTES:
+                failures.append("A2: fixture header is not actually over the reader cap (test is inert)")
+        finally:
+            os.close(a2jrfd)
+            os.close(a2fd)
+        checked += 1
+
+        # (F-R17-C1) journal-state classification: recover/status distinguish a CONFIRMED-absent journal
+        # (exit 0) from a MALFORMED one (a regular file OR a symlink at the journal path, exit 2), and REFUSE
+        # a symlinked txn entry (exit 2). The old Path.is_dir() conflated absent/regular/symlink into False.
+        c1_absent = tmp / "c1-absent"
+        c1_absent.mkdir()
+        if _run(["recover", "--root", str(c1_absent)]) != 0:
+            failures.append("C1: recover on a confirmed-absent journal must exit 0")
+        if _run(["status", "--root", str(c1_absent)]) != 0:
+            failures.append("C1: status on a confirmed-absent journal must exit 0")
+        checked += 1
+        for _kind in ("regular", "dangling"):
+            c1_root = tmp / ("c1-" + _kind)
+            (c1_root / JOURNAL_REL).parent.mkdir(parents=True)
+            _jpath = c1_root / JOURNAL_REL
+            if _kind == "regular":
+                _jpath.write_bytes(b"not a directory")
+            else:
+                os.symlink("missing-journal-target", str(_jpath))
+            if _run(["status", "--root", str(c1_root)]) != 2:
+                failures.append("C1: status must exit 2 on a {} journal path".format(_kind))
+            if _run(["recover", "--root", str(c1_root)]) != 2:
+                failures.append("C1: recover must exit 2 on a {} journal path".format(_kind))
+            checked += 1
+        c1_txn = tmp / "c1-symlink-txn"
+        (c1_txn / JOURNAL_REL).mkdir(parents=True)
+        os.symlink("missing-txn-target", str(c1_txn / JOURNAL_REL / "txn-link"))
+        if _run(["status", "--root", str(c1_txn)]) != 2:
+            failures.append("C1: status must refuse a symlinked txn entry (exit 2)")
+        if _run(["recover", "--root", str(c1_txn)]) != 2:
+            failures.append("C1: recover must refuse a symlinked txn entry (exit 2)")
+        checked += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1913,8 +2043,19 @@ def self_test():
 def _latest_txn(root):
     journal_root = Path(root) / JOURNAL_REL
     best = None
-    if not journal_root.is_dir():
+    # F-R17-C1: classify the journal path no-follow. Absent -> None; a malformed path (a regular file or a
+    # symlink) fails closed rather than being followed or read as absent.
+    root_fd, err = _open_root_or_none(root)
+    if err or root_fd is None:
+        raise _journal.JournalError("cannot safely open product root for _latest_txn")
+    try:
+        journal_state = _classify_journal(root_fd)
+    finally:
+        os.close(root_fd)
+    if journal_state == "absent":
         return None
+    if journal_state == "malformed":
+        raise _journal.JournalError("journal path is present but is not a directory (fail-closed)")
     jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
     try:
         for txn_dir in _txn_dirs(journal_root):

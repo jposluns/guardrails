@@ -101,6 +101,44 @@ RECORD_NAMESPACES = (
 )
 
 
+# The section-8.1 taxonomy as one name -> normative-namespace map (baseline + module-tier + importer). A
+# caller-supplied `specs` roster is reconciled against this before either validator trusts it, so a MISBOUND
+# roster cannot validate a record or transition under the wrong type's grammar (F-R17-A3).
+_TAXONOMY_NAMESPACES = dict(BASELINE_TYPES)
+_TAXONOMY_NAMESPACES.update({_name: _ns for _name, (_ns, _module) in MODULE_TYPES.items()})
+_TAXONOMY_NAMESPACES.update(IMPORTER_TYPES)
+
+
+def _specs_roster_error(specs):
+    """Reconcile a caller-supplied `specs` roster against the section-8.1 taxonomy BEFORE either validator
+    uses it. Each mapping KEY must be a string that equals its spec's own declared `name`, that name must be
+    a real section-8.1 record type, and the spec's `namespace` must be exactly the one the taxonomy binds to
+    it. A roster that misbinds a key to a spec of a different type ({"finding": <backlog_item spec>}) would
+    otherwise let a type=finding / BI-1 record and a finding open->active transition validate under
+    backlog_item's grammar: the roster is the guard's input, and a control that cannot answer for the type it
+    is keyed under is a cannot-evaluate, not a silent pass (guard-input-soundness; F-R17-A3). Returns None
+    when every entry reconciles, else a finding message naming the first contradiction. The default
+    BASELINE_SPECS and the importer roster (legacy_fragment/LF) reconcile cleanly; only a hand-constructed
+    misbound roster is newly rejected."""
+    if not isinstance(specs, dict):
+        return "the type-spec roster is not a mapping (fail-closed)"
+    for key, spec in specs.items():
+        if type(key) is not str:
+            return "the type-spec roster contains a non-string key (fail-closed)"
+        if not isinstance(spec, TypeSpec):
+            return "the type-spec roster contains a non-TypeSpec value (fail-closed)"
+        expected_namespace = _TAXONOMY_NAMESPACES.get(key)
+        if expected_namespace is None:
+            return ("the type-spec roster names a type absent from the section-8.1 taxonomy: {!r} "
+                    "(fail-closed)".format(key))
+        if getattr(spec, "name", None) != key:
+            return "the type-spec roster key {!r} contradicts its TypeSpec name (fail-closed)".format(key)
+        if getattr(spec, "namespace", None) != expected_namespace:
+            return ("the type-spec roster namespace for {!r} contradicts the section-8.1 taxonomy "
+                    "(fail-closed)".format(key))
+    return None
+
+
 # --- envelope vocabularies (spec 8.3, 8.6) -----------------------------------------------------------
 
 ACTOR_KINDS = ("maintainer", "assistant", "automation", "importer")
@@ -649,17 +687,16 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     an identified record violates its schema; VALID otherwise."""
     if specs is None:
         specs = BASELINE_SPECS
-    elif not isinstance(specs, dict):
-        # `specs` is a control (the type roster); a non-mapping would crash on specs.get() below. Fail
-        # closed rather than allocate against an unreadable roster (guard-input-soundness; spec 8.3).
-        return RecordValidation(CANNOT_EVALUATE, ["specs roster is not a mapping (fail-closed)"])
-    elif not all(isinstance(s, TypeSpec) for s in specs.values()):
-        # Each roster VALUE is a TypeSpec; a non-TypeSpec value (e.g. a hand-constructed {name: 7}) would
-        # crash on `espec.reduced` / `spec.namespace` / `spec.reduced` below. Fail closed with a clean
-        # cannot-evaluate rather than an AttributeError (guard-input-soundness; spec 8.1/8.4). parse_status
-        # already guards its own spec, so validate_transition is unaffected; this closes validate_record's
-        # direct attribute access.
-        return RecordValidation(CANNOT_EVALUATE, ["specs roster has a non-TypeSpec value (fail-closed)"])
+    else:
+        # `specs` is a control (the type roster). The value-is-a-TypeSpec check alone confirmed each value
+        # is a spec but not that it is the spec for the type it is keyed under; F-R17-A3 reconciles the
+        # roster key/spec-name/spec-namespace against the section-8.1 taxonomy so a misbound roster
+        # ({"finding": <backlog_item spec>}) is a cannot-evaluate, never a silent pass under the wrong type's
+        # grammar (guard-input-soundness; spec 8.1/8.3/8.4). A non-mapping, a non-string key, or a
+        # non-TypeSpec value is subsumed here and fails closed. BASELINE_SPECS reconciles cleanly.
+        roster_error = _specs_roster_error(specs)
+        if roster_error is not None:
+            return RecordValidation(CANNOT_EVALUATE, [roster_error])
     if not isinstance(record, dict):
         return RecordValidation(CANNOT_EVALUATE, ["record is not a table"])
     if expected_type is not None and not isinstance(expected_type, str):
@@ -806,10 +843,14 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
     """
     if specs is None:
         specs = BASELINE_SPECS
-    elif not isinstance(specs, dict):
-        # `specs` is a control (the type roster); a non-mapping would crash on specs.get() below. Fail
-        # closed rather than evaluate a transition against an unreadable roster (guard-input-soundness).
-        return TransitionCheck(CANNOT_EVALUATE, ["specs roster is not a mapping (fail-closed)"])
+    else:
+        # F-R17-A3: reconcile a caller-supplied roster against the section-8.1 taxonomy before it is used, so
+        # a misbound roster ({"finding": <backlog_item spec>}) cannot make a finding open->active transition
+        # validate under backlog_item's transition table (guard-input-soundness). A non-mapping, a non-string
+        # key, or a non-TypeSpec value is subsumed here and fails closed.
+        roster_error = _specs_roster_error(specs)
+        if roster_error is not None:
+            return TransitionCheck(CANNOT_EVALUATE, [roster_error])
     if not isinstance(type_name, str):
         # A non-string type_name (e.g. a TOML-valid list/dict) is unhashable and would raise on the
         # specs.get() dict lookup below: guard by type first and fail closed with a clean finding, never
@@ -928,13 +969,17 @@ def validate_counters(data, known_namespaces=None):
     if extra:
         findings.append("counters.toml unknown top-level key(s): {}".format(
             ", ".join(_safe_key_names(extra))))
-    if "schema" in data:
-        if type(data.get("schema")) is not int:
-            findings.append("counters.toml schema must be an integer")
-        elif data.get("schema") != SUPPORTED_SCHEMA:
-            findings.append("counters.toml schema {} is not the supported schema version {} (fail-closed; "
-                            "do not parse under v{} assumptions)".format(
-                                _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+    # F-R17-D1: counters.toml is a schema-bearing machine document and MUST carry the exact integer marker,
+    # mirroring the index rule (absent -> finding, wrong -> fail-closed). A missing marker is no longer a
+    # silent clean pass.
+    if "schema" not in data:
+        findings.append("counters.toml is missing the required schema marker (spec 8.2)")
+    elif type(data.get("schema")) is not int:
+        findings.append("counters.toml schema must be an integer")
+    elif data.get("schema") != SUPPORTED_SCHEMA:
+        findings.append("counters.toml schema {} is not the supported schema version {} (fail-closed; "
+                        "do not parse under v{} assumptions)".format(
+                            _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
     counters = data.get("counters")
     if counters is None:
         # An absent [counters] table is a finding when namespaces are known to require a high-water each
@@ -1359,9 +1404,9 @@ def self_test():
     # 10: counters. Schema, monotonic allocation, no reset, ids-within-high-water, uniqueness.
     hw, cfindings = validate_counters({"schema": 1, "counters": {"BI": 42, "FN": 7, "WL": 131}})
     check("counters-schema-ok", not cfindings and hw == {"BI": 42, "FN": 7, "WL": 131})
-    _, bad_cf = validate_counters({"counters": {"BI": -1}})
+    _, bad_cf = validate_counters({"schema": 1, "counters": {"BI": -1}})
     check("counters-negative-invalid", bad_cf)
-    _, bool_cf = validate_counters({"counters": {"BI": True}})   # bool is not a high-water int
+    _, bool_cf = validate_counters({"schema": 1, "counters": {"BI": True}})   # bool is not a high-water int
     check("counters-bool-invalid", bool_cf)
     nid, newhw = next_id({"BI": 42}, "BI")
     check("counters-allocate-increments", nid == "BI-43" and newhw == 43)
@@ -1492,11 +1537,11 @@ def self_test():
     # namespace with no high-water is a MISSING finding; a complete table is clean.
     _, m3a = validate_counters({"schema": 1}, known_namespaces={"BI"})
     check("counters-absent-table-with-known-ns-invalid", bool(m3a))
-    _, m3b = validate_counters({"counters": {"BI": 5}}, known_namespaces={"BI", "FN"})
+    _, m3b = validate_counters({"schema": 1, "counters": {"BI": 5}}, known_namespaces={"BI", "FN"})
     check("counters-missing-known-ns-invalid", any("missing a high-water" in f for f in m3b))
-    _, m3c = validate_counters({"counters": {"BI": 5, "FN": 2}}, known_namespaces={"BI", "FN"})
+    _, m3c = validate_counters({"schema": 1, "counters": {"BI": 5, "FN": 2}}, known_namespaces={"BI", "FN"})
     check("counters-complete-known-ns-ok", not m3c)
-    _, m3d = validate_counters({}, known_namespaces=None)   # no known ns: an empty file is not a finding
+    _, m3d = validate_counters({"schema": 1}, known_namespaces=None)   # no known ns: an empty file is not a finding
     check("counters-empty-no-known-ns-ok", not m3d)
 
     # 21 (M8): a schema field other than the supported version fails closed, not parsed under v1.
@@ -1555,9 +1600,9 @@ def self_test():
 
     # M5: counters validate namespaces against the taxonomy even without known_namespaces; next_id refuses
     # a non-taxonomy namespace.
-    _, m5a = validate_counters({"counters": {"ZZ": 1}})
+    _, m5a = validate_counters({"schema": 1, "counters": {"ZZ": 1}})
     check("m5-counters-nontaxonomy-ns-invalid", any("section 8.1 taxonomy" in f for f in m5a))
-    _, m5b = validate_counters({"counters": {"BI": 1}})
+    _, m5b = validate_counters({"schema": 1, "counters": {"BI": 1}})
     check("m5-counters-taxonomy-ns-ok", not m5b)
     try:
         next_id({}, "ZZ")
@@ -1785,9 +1830,12 @@ def self_test():
         check("f2a-toplevel-oversized-int-key-no-crash", validate_record(_f2a).status == INVALID)
         check("f2b-counters-inner-oversized-int-key-no-crash",
               bool(validate_counters({"counters": {_big: 1}})[1]))
+        # An oversized non-decimal int roster key is now a non-string key: F-R17-A3 reconciles the roster
+        # first, so this is a fail-closed CANNOT-EVALUATE (updating the old INVALID expectation), still with
+        # no raw CPython int-to-str crash.
         check("f2c-unsupported-type-oversized-specs-key-no-crash",
               validate_record({"type": "artifact", "id": "AR-1"},
-                              specs={_big: BASELINE_SPECS["finding"]}).status == INVALID)
+                              specs={_big: BASELINE_SPECS["finding"]}).status == CANNOT_EVALUATE)
         # F3 (message-integrity): a refusal handed an oversized non-decimal int control keeps this module's OWN
         # named ValueError, never the raw CPython "Exceeds the limit"/"integer string conversion" text. Pre-fix
         # the {!r} render raises that CPython ValueError while building the message; assert the module's message.
@@ -1838,6 +1886,40 @@ def self_test():
     check("f4-ad-action-whitespace-invalid",
           validate_record(envelope("autonomous_decision", 68, "recorded", actor={"kind": "assistant"},
                                    classification="ACT", action="   ")).status == INVALID)
+
+    # ----- F-R17-A3: a MISBOUND caller-supplied roster is a cannot-evaluate, never a silent pass under the
+    # wrong type's grammar. The reconciliation runs in BOTH validate_record and validate_transition and
+    # admits the baseline and importer/module taxonomy extensions unchanged.
+    def _a3_spec(name, namespace):
+        s = object.__new__(TypeSpec)
+        s.name = name
+        s.namespace = namespace
+        return s
+
+    _a3_misbound = {"finding": BASELINE_SPECS["backlog_item"]}
+    check("a3-misbound-roster-record-cannot-eval",
+          validate_record({"type": "finding", "id": "FN-1", "status": "open"},
+                          specs=_a3_misbound).status == CANNOT_EVALUATE)
+    check("a3-misbound-roster-transition-cannot-eval",
+          validate_transition("finding", "open", "fixed", "maintainer",
+                              specs=_a3_misbound).status == CANNOT_EVALUATE)
+    check("a3-contradicting-namespace-cannot-eval",
+          validate_record({"type": "finding", "id": "FN-1", "status": "open"},
+                          specs={"finding": _a3_spec("finding", "BI")}).status == CANNOT_EVALUATE)
+    check("a3-absent-taxonomy-type-cannot-eval",
+          _specs_roster_error({"not_a_type": _a3_spec("not_a_type", "ZZ")}) is not None)
+    check("a3-baseline-roster-reconciles", _specs_roster_error(BASELINE_SPECS) is None)
+    _a3_extended = dict(BASELINE_SPECS)
+    _a3_extended["legacy_fragment"] = _a3_spec("legacy_fragment", IMPORTER_TYPES["legacy_fragment"])
+    _a3_extended["artifact"] = _a3_spec("artifact", MODULE_TYPES["artifact"][0])
+    check("a3-taxonomy-extension-reconciles", _specs_roster_error(_a3_extended) is None)
+    check("a3-baseline-record-still-ok",
+          validate_record(envelope("backlog_item", 90, "open")).status == VALID)
+
+    # ----- F-R17-D1: counters.toml requires the exact integer schema marker; an absent marker is a finding,
+    # not a silent clean pass; a present marker still validates clean.
+    check("d1-counters-absent-schema-finding", bool(validate_counters({"counters": {}})[1]))
+    check("d1-counters-present-schema-ok", not validate_counters({"schema": 1, "counters": {}})[1])
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))

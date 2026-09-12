@@ -2286,7 +2286,7 @@ def self_test():
         # Reverting the backstop lets the raw OSError escape (caught here as "escaped").
         rootBK, mBK = build_store(sources={"a.txt": src})
         _saved_rc = _journal._read_contained
-        _journal._read_contained = (lambda root_fd, relpath:
+        _journal._read_contained = (lambda root_fd, relpath, **_kw:
                                     (_ for _ in ()).throw(OSError(errno.EIO, "simulated raw read-path error")))
         try:
             try:

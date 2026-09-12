@@ -3436,6 +3436,45 @@ def self_test():
                     _sig7.pthread_sigmask(_sig7.SIG_SETMASK, _prev_mask7)
                 check("f7-inherited-blocked-sigalrm-still-times-out", _tb == "TIMEOUT")
 
+            # F-R17-COV1: the f7 checks above assert only the CHILD's TIMEOUT outcome, so the module
+            # self-test passed even with the caller-timer snapshot reverted to zeros -- the timer-restore
+            # class (F-R16-1 / F-R17-C2) went undiscriminated in-suite. Close that gap: arm a REAL caller
+            # ITIMER_REAL that EXPIRES inside the ~1s SIG_IGN window this fixture holds, run the SAME
+            # snapshot -> SIG_IGN -> run_bounded -> restore_caller_alarm sequence, and assert the caller's
+            # deadline is PRESERVED: it fires PROMPTLY after the elapsed-aware restore (which clamps an
+            # in-window-expired deadline to a tiny positive) rather than being DESTROYED (a zeros revert never
+            # re-arms -> never fires) or EXTENDED (a verbatim revert re-arms to the full 0.3s -> fires late).
+            # Deterministic: the ~1s window >> the 0.3s deadline, so a correct restore always clamps.
+            # SKIP when SIGALRM is currently BLOCKED (the hostile-ambient wrapper re-runs this self-test with
+            # SIGALRM blocked-and-pending): the probe needs the deadline DELIVERED, and unblocking would
+            # consume the caller's pending SIGALRM the wrapper asserts must survive. In the normal run SIGALRM
+            # is deliverable, so the discrimination still holds where it matters.
+            _cov_blocked = (hasattr(_sig7, "pthread_sigmask")
+                            and _sig7.SIGALRM in _sig7.pthread_sigmask(_sig7.SIG_BLOCK, set()))
+            if hasattr(_sig7, "setitimer") and hasattr(_sig7, "ITIMER_REAL") and not _cov_blocked:
+                _cov_fired = []
+                _cov_outer = snapshot_caller_alarm()
+                _cov_prev = _sig7.signal(_sig7.SIGALRM,
+                                         lambda _s, _f: _cov_fired.append(_t7.monotonic()))
+                try:
+                    _sig7.setitimer(_sig7.ITIMER_REAL, 0)          # quiet baseline
+                    _sig7.setitimer(_sig7.ITIMER_REAL, 0.3, 0.0)   # a caller deadline inside the window
+                    _cov_snap = snapshot_caller_alarm()            # captured BEFORE SIG_IGN (F-R16-1)
+                    _cov_ign = _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
+                    try:
+                        run_bounded(lambda: (_t7.sleep(1), "COV-SLEPT")[1], timeout_s=1)   # ~1s > 0.3s
+                    finally:
+                        _sig7.signal(_sig7.SIGALRM, _cov_ign)      # re-install the counting handler
+                        restore_caller_alarm(*_cov_snap)           # elapsed-aware: clamps the expiry
+                    _cov_stop = _t7.monotonic() + 0.5              # a correct restore fires ~now
+                    while not _cov_fired and _t7.monotonic() < _cov_stop:
+                        _t7.sleep(0.005)
+                    check("cov1-caller-itimer-preserved-across-f7-fixture", bool(_cov_fired))
+                finally:
+                    _sig7.setitimer(_sig7.ITIMER_REAL, 0)
+                    _sig7.signal(_sig7.SIGALRM, _cov_prev)
+                    restore_caller_alarm(*_cov_outer)
+
         # --- io fail-closed ---------------------------------------------------------------------------
         f = clean_machine()
         f["version.toml"] = "not valid toml === ["

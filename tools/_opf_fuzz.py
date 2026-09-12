@@ -28,7 +28,6 @@ Returns 0 clean, 1 on a failed assertion, 2 on a harness/fail-closed error. Judg
 status/finding VALUES and on raised exception TYPES, never by grepping output (the isolate-verifiers rule).
 """
 import ast
-import re
 import sys
 import tomllib
 from pathlib import Path
@@ -147,21 +146,34 @@ def _skn_call_sites():
 # vocabulary above is RECONCILED against every such definition in the three module sources so a renamed or
 # newly-added helper cannot silently escape the coverage vocabulary (an authoritative-index reconciliation,
 # not a trusted hand list). `_instant_key` / `_check_keyset` do not match and are correctly excluded.
-_KEY_NAME_RENDER_DEF_RE = re.compile(r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*_key_names)\s*\(")
+def _ast_key_name_defs_in(source, filename):
+    """The call token `<name>(` of every `*_key_names` render-helper DEFINITION in `source`, enumerated over
+    the PARSED AST: every ast.FunctionDef/ast.AsyncFunctionDef whose name ends with `_key_names`. Walking the
+    def grammar rather than a per-line `^\\s*def ...(` regex sees a def whose name and '(' are split across a
+    backslash line continuation (`def _x_key_names \\<newline>(...)`), which a per-line scan misses -- letting
+    such a helper escape BOTH the coverage numerator and denominator (F-R17-B5; the sibling of the AST
+    call-site discovery, guard-input-soundness). A source that cannot be parsed raises SyntaxError
+    (fail-closed loud), never a silent empty scan."""
+    tree = ast.parse(source, filename=filename)
+    return {node.name + "("
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.endswith("_key_names")}
 
 
-def _key_name_render_defs():
+def _key_name_render_defs(sources=None):
     """The call token `<name>(` of every `*_key_names` render helper DEFINED in the three target module
-    sources. Reconciling this discovered set against _KEY_NAME_RENDER_TOKENS surfaces a renamed or added
-    helper that is absent from the vocabulary (a cannot-evaluate / fail-closed drift), rather than letting
-    it drop silently out of both the coverage numerator and denominator. It cannot discover a key set
-    rendered INLINE without such a helper (the disclosed residual noted above)."""
+    sources, discovered over the parsed AST (see _ast_key_name_defs_in). Reconciling this discovered set
+    against _KEY_NAME_RENDER_TOKENS surfaces a renamed or added helper that is absent from the vocabulary (a
+    cannot-evaluate / fail-closed drift), rather than letting it drop silently out of both the coverage
+    numerator and denominator. It cannot discover a key set rendered INLINE without such a helper (the
+    disclosed residual noted above). `sources` (a {filename: text} map) overrides the on-disk read so the
+    self-test can inject a fixture def (F-R17-B5)."""
+    if sources is None:
+        sources = {fname: path.read_text(encoding="utf-8") for fname, path in _MODULE_PATHS.items()}
     defs = set()
-    for path in _MODULE_PATHS.values():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            m = _KEY_NAME_RENDER_DEF_RE.match(line)
-            if m:
-                defs.add(m.group(1) + "(")
+    for fname, source in sources.items():
+        defs |= _ast_key_name_defs_in(source, fname)
     return defs
 
 
@@ -1031,13 +1043,21 @@ def run():
     # `_defs != _vocab` reconciliation (returning no drift) makes THIS assertion FAIL, not merely a separate
     # throwaway expression as the prior form did.
     assertions += 1
-    _rogue = _KEY_NAME_RENDER_DEF_RE.match("def _rogue_key_names(keys):")
-    _rogue_tok = None if _rogue is None else _rogue.group(1) + "("
+    _rogue_defs = _key_name_render_defs({"<rogue>": "def _rogue_key_names(keys):\n    return sorted(keys)\n"})
+    _rogue_tok = next(iter(_rogue_defs)) if _rogue_defs else None
     _rogue_unreg = set() if _rogue_tok is None else _render_vocab_drift(_defs | {_rogue_tok}, _vocab)[0]
-    if _rogue_tok is None or _rogue_tok not in _rogue_unreg:
+    if _rogue_tok != "_rogue_key_names(" or _rogue_tok not in _rogue_unreg:
         fail("coverage reconciliation is non-discriminating: an unregistered `*_key_names` render helper fed "
-             "through the reconciliation was not reported as drift (the def-scan predicate or the "
+             "through the reconciliation was not reported as drift (the AST def-scan or the "
              "_render_vocab_drift reconciliation has been weakened)")
+    # F-R17-B5: a backslash-continued `def _x_key_names \<newline>(...)` is discovered by the AST scan; a
+    # per-line regex scan (the reverted form) misses it, so such a helper would escape the coverage
+    # vocabulary reconciliation while the suite still reported full coverage.
+    assertions += 1
+    _cont_src = "def _demo_key_names \\\n        (keys):\n    return sorted(keys)\n"
+    if _key_name_render_defs({"<continued-def>": _cont_src}) != {"_demo_key_names("}:
+        fail("coverage def-discovery is non-discriminating: a backslash-continued `def _x_key_names "
+             "\\<nl>(...)` was not discovered (a per-line regex scan misses it; the AST discovery must not)")
     skn_missed = sorted(skn_sites - executed)
     assertions += 1
     if skn_missed:

@@ -294,10 +294,15 @@ def _read_at(pfd, name, relpath, cap=None):
         os.close(fd)
 
 
-def _read_contained(root_fd, relpath):
+def _read_contained(root_fd, relpath, require_single_link=False):
     """Read a contained regular file's bytes through an O_NOFOLLOW fd, confirming on the opened fd that
     it is a regular file. JournalError on a symlink, a non-regular file, a missing path, or a read
-    error."""
+    error. When require_single_link is set the OPENED-fd stat must show exactly one hard link BEFORE any
+    byte is read: a store CONTROL file (a manifest or `.opf.toml`/`.opf.local.toml` pointer) hardlinked to
+    an out-of-tree victim passes O_NOFOLLOW and S_ISREG, and its resolved posture would then track the
+    victim's inode, so it is refused here class-consistent with the journal's own frames.log nlink==1
+    identity guard (SECI-symlink-resolution). The default is OFF, so a generic product read keeps an
+    intentional hardlink (F-R17-A1)."""
     try:
         pfd, name = _open_parent(root_fd, relpath)
     except OSError as exc:                                 # includes FileNotFoundError
@@ -315,6 +320,14 @@ def _read_contained(root_fd, relpath):
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise JournalError("contained path {!r} is not a regular file".format(relpath))
+        if require_single_link and st.st_nlink != 1:
+            # A HARDLINK to an out-of-tree victim passes O_NOFOLLOW and S_ISREG; a link count above 1 means
+            # a second name references this inode. Refuse a multiply-linked CONTROL file on the OPENED fd
+            # BEFORE reading a byte, so its posture cannot track a victim inode (codex round-6 sibling;
+            # F-R17-A1).
+            raise JournalError("contained control file {!r} has {} hard links; refusing to read a "
+                               "multiply-linked control file (a hardlink to an out-of-tree victim, never "
+                               "our singly-linked control file)".format(relpath, st.st_nlink))
         return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
     finally:
         os.close(fd)
@@ -535,6 +548,17 @@ def publish(jr_fd, txn_dir, ftype, obj):
             if _st.st_nlink != 1:
                 raise JournalError("journal frames.log has {} hard links; refusing to append (a hardlink "
                                    "to an out-of-tree victim, never our unlinked log)".format(_st.st_nlink))
+            # A2 (cumulative append bound, defence in depth): the recovery reader caps frames.log at
+            # _MAX_JOURNAL_READ_BYTES, so a publish that would carry the log past that cap produces a journal
+            # recovery refuses as oversize. Refuse the append here, fail-closed, so no publish path (INTENT,
+            # the terminal frames from run_transaction, or the terminal frames from recover()) can ever write
+            # an unreadable journal (F-R17-A2). run_transaction's pre-mutation budget check reserves the whole
+            # INTENT+rollback envelope so a legitimate transaction never trips this.
+            if _st.st_size + len(frame) > _MAX_JOURNAL_READ_BYTES:
+                raise JournalError("journal frames.log would reach {} bytes after a {}-byte {} frame, over "
+                                   "the {}-byte journal-read cap; refusing so recovery can always re-read it "
+                                   "(fail-closed)".format(_st.st_size + len(frame), len(frame), ftype,
+                                                          _MAX_JOURNAL_READ_BYTES))
             if torn:
                 half = frame[: max(1, len(frame) // 2)]
                 _write_all(fd, half)
@@ -895,10 +919,17 @@ def release_lock(journal_root):
 
 def _journal_txn_dirs(journal_root):
     """The transaction subdirectories of a journal root, sorted (the reconcile order). Skips the lock and
-    arbitration files and any stray non-directory entry."""
+    arbitration files and any stray non-directory entry. A symlinked entry is REFUSED (JournalError), not
+    followed or silently skipped, class-consistent with doctor.assert_open_journal and migrate._txn_dirs so
+    a symlinked/dangling txn entry cannot slip through the stale-lock reconcile as 'all terminal'
+    (SECI-symlink-resolution; F-R17-C1 sibling)."""
     out = []
     for entry in sorted(Path(journal_root).iterdir()):
-        if entry.is_dir():
+        est = os.lstat(entry)
+        if stat.S_ISLNK(est.st_mode):
+            raise JournalError("a symlinked journal entry {!r} is refused, not followed "
+                               "(fail-closed)".format(entry.name))
+        if stat.S_ISDIR(est.st_mode):
             out.append(entry)
     return out
 
@@ -1533,6 +1564,25 @@ def run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops, staged_re
     record is published beneath the trusted journal-root fd (jr_fd), reached by a contained walk, so no
     txn-dir absolute path is re-resolved for the frame writes (F1 / SECI-symlink-resolution)."""
     txn_dir = Path(journal_root) / txn_id
+    # A2: enforce a transaction-wide serialized journal BUDGET before any product mutation and before the
+    # txn dir is even created. The recovery reader caps frames.log at _MAX_JOURNAL_READ_BYTES; the largest
+    # terminal log this transaction can produce is INTENT + ROLLBACK-IN-PROGRESS + ROLLBACK-COMPLETE (the
+    # rollback path, larger than INTENT + COMPLETE), so reserve room for all three HERE. Over budget => raise
+    # BEFORE any mutation, so a crash can never leave an applied tree beside a journal recovery would refuse
+    # as oversize (F-R17-A2). The frames are serialized exactly as publish() does.
+    def _budget_frame(ftype, obj):
+        payload = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        return _frame(ftype, payload)
+    _journal_budget = (
+        len(_budget_frame(F_INTENT, {"txn": txn_id, "header": header, "ops": ops}))
+        + len(_budget_frame(F_RIP, {"txn": txn_id}))
+        + len(_budget_frame(F_RC, {"txn": txn_id}))
+    )
+    if _journal_budget > _MAX_JOURNAL_READ_BYTES:
+        raise JournalError("transaction journal frames would total {} bytes (INTENT+ROLLBACK), over the "
+                           "{}-byte journal-read cap; refusing BEFORE any mutation so a crash leaves a "
+                           "recoverable journal (fail-closed)".format(_journal_budget,
+                                                                      _MAX_JOURNAL_READ_BYTES))
     # F1: create the txn dir (a single component) CONTAINED beneath the trusted journal-root fd, and make
     # its dir entry durable by fsync'ing THAT contained fd, never a re-resolved absolute journal_root path.
     # os.mkdir raises FileExistsError on a collision, preserving the exist_ok=False refusal.

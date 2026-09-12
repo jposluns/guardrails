@@ -330,8 +330,12 @@ def _canonical(value, _depth=0):
         # and turns the uncanonicalizable table into a controlled refusal (guard-input-soundness; M2).
         for k in value:
             if not isinstance(k, str):
-                raise ReleaseError("cannot canonicalize a table with a non-string key {!r} (type {}); a "
-                                   "worklog entry table has string keys only".format(k, type(k).__name__))
+                # F-R17-B4: render the offending key through _safe_display, never {!r}: an oversized
+                # non-decimal int key (a hand-constructed / hex-literal table) would trip CPython's int->str
+                # limit and raise a raw ValueError while BUILDING this ReleaseError message.
+                raise ReleaseError("cannot canonicalize a table with a non-string key {} (type {}); a "
+                                   "worklog entry table has string keys only".format(
+                                       _safe_display(k), type(k).__name__))
         return "{" + ",".join(
             json.dumps(k, ensure_ascii=False) + ":" + _canonical(v, _depth + 1)
             for k, v in sorted(value.items())) + "}"
@@ -363,7 +367,14 @@ def coverage_digest(entries):
     keyed.sort(key=lambda t: t[0])
     parts = [COVERAGE_SCHEME]
     parts.extend(_canonical(entry) for _, entry in keyed)
-    payload = "\n".join(parts).encode("utf-8")
+    # F-R17-B3: canonical content that is not UTF-8-encodable (a lone surrogate such as "\ud800" in a
+    # worklog field) fails closed with a ReleaseError, so an exported caller (release_cut /
+    # check_frozen_coverage / run_gates) returns its structured failure instead of a raw UnicodeEncodeError.
+    try:
+        payload = "\n".join(parts).encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ReleaseError("canonical worklog content is not encodable as UTF-8 (a lone surrogate or other "
+                           "unencodable code point; fail-closed): {}".format(exc))
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
@@ -412,12 +423,31 @@ def compute_span_digest(entries_by_id, span):
         raise ReleaseError("cannot digest a span: span must be a (start, end) pair of WL-numbers or "
                            "None, got {}".format(_safe_display(span)))
     start, end = span
+    # F-R17-B1: a covered span is a positive, non-reversed WL interval. A reversed span ((2, 1)) would make
+    # range() empty and silently return the empty-coverage digest, and a non-positive start would digest a
+    # phantom index-zero entry; both are fail-closed here (None stays the explicit empty-span, handled above).
+    if start < 1 or end < start:
+        raise ReleaseError("cannot digest a span: a (start, end) span must satisfy 1 <= start <= end, got "
+                           "({}, {})".format(_safe_str(start), _safe_str(end)))
     covered = []
     for n in range(start, end + 1):
         entry = entries_by_id.get(n)
         if entry is None:
             raise ReleaseError("worklog entry WL-{} covered by a span is absent (merge the archive; "
                                "spec 12)".format(_safe_str(n)))
+        # F-R17-B2: reconcile the map KEY against the entry's own parsed WL identity. A map that binds key n
+        # to an entry whose id is WL-m (m != n) is a corrupt/misbound basis, and digesting it would certify a
+        # frozen span against the wrong entry's bytes (a stored digest matching WL-m would read VALID in
+        # check_frozen_coverage). The key is the guard's input; a key that cannot answer for the entry under
+        # it is a cannot-evaluate, not a silent pass (guard-input-soundness; spec 6.1/8.2). A non-table entry
+        # fails closed here rather than crashing on .get() (coverage_digest re-checks it too).
+        if not isinstance(entry, dict):
+            raise ReleaseError("worklog entry map contains a non-table entry for WL-{} (fail-closed)".format(
+                _safe_str(n)))
+        actual = _wl_num(entry.get("id"))
+        if actual != n:
+            raise ReleaseError("worklog entry map binds key WL-{} to an entry whose id is {} (a misbound "
+                               "coverage basis; spec 6.1/8.2)".format(n, _safe_display(entry.get("id"))))
         covered.append(entry)
     return coverage_digest(covered)
 
@@ -465,8 +495,14 @@ def _releases_or_finding(version_data, findings):
     if not isinstance(version_data, dict):
         findings.append("cannot evaluate: version ledger is not a table")
         return None
+    # F-R17-D1: a schema-bearing ledger MUST declare its schema. An absent marker is a cannot-evaluate,
+    # mirroring the index rule, so the standalone guards never read a marker-less ledger as clean.
     schema = version_data.get("schema")
-    if schema is not None and (type(schema) is not int or schema != SUPPORTED_SCHEMA):
+    if schema is None:
+        findings.append("cannot evaluate: version.toml is missing the required `schema` key (fail-closed; a "
+                        "schema-bearing ledger declares its schema; D1)")
+        return None
+    if type(schema) is not int or schema != SUPPORTED_SCHEMA:
         findings.append("cannot evaluate: version.toml schema {} is not the supported schema version {} "
                         "(fail-closed; do not parse under v{} assumptions; M3)".format(
                             _safe_display(schema), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
@@ -525,13 +561,17 @@ def validate_version(data):
     if extra:
         findings.append("version.toml unknown top-level key(s): {}".format(
             ", ".join(_sorted_key_names(extra))))
-    if "schema" in data:
-        if type(data.get("schema")) is not int:
-            findings.append("version.toml schema must be an integer")
-        elif data.get("schema") != SUPPORTED_SCHEMA:
-            findings.append("version.toml schema {} is not the supported schema version {} (fail-closed; "
-                            "do not parse under v{} assumptions)".format(
-                                _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+    # F-R17-D1: version.toml is a schema-bearing machine document and MUST carry the exact integer marker
+    # (absent -> INVALID, wrong -> fail-closed), mirroring the index rule.
+    if "schema" not in data:
+        findings.append("version.toml is missing the required `schema` key (a schema-bearing store file "
+                        "declares its schema, mirroring the index rule; D1)")
+    elif type(data.get("schema")) is not int:
+        findings.append("version.toml schema must be an integer")
+    elif data.get("schema") != SUPPORTED_SCHEMA:
+        findings.append("version.toml schema {} is not the supported schema version {} (fail-closed; "
+                        "do not parse under v{} assumptions)".format(
+                            _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
 
     releases = data.get("release", [])
     if not isinstance(releases, list):
@@ -759,13 +799,17 @@ def validate_worklog(data, registered_vendors=frozenset(), registered_kinds=None
     if extra:
         findings.append("worklog.toml unknown top-level key(s): {}".format(
             ", ".join(_sorted_key_names(extra))))
-    if "schema" in data:
-        if type(data.get("schema")) is not int:
-            findings.append("worklog.toml schema must be an integer")
-        elif data.get("schema") != SUPPORTED_SCHEMA:
-            findings.append("worklog.toml schema {} is not the supported schema version {} (fail-closed; "
-                            "do not parse under v{} assumptions)".format(
-                                _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+    # F-R17-D1: worklog.toml (active AND archive) is a schema-bearing machine document and MUST carry the
+    # exact integer marker (absent -> INVALID, wrong -> fail-closed), mirroring the index rule.
+    if "schema" not in data:
+        findings.append("worklog.toml is missing the required `schema` key (a schema-bearing store file "
+                        "declares its schema, mirroring the index rule; D1)")
+    elif type(data.get("schema")) is not int:
+        findings.append("worklog.toml schema must be an integer")
+    elif data.get("schema") != SUPPORTED_SCHEMA:
+        findings.append("worklog.toml schema {} is not the supported schema version {} (fail-closed; "
+                        "do not parse under v{} assumptions)".format(
+                            _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
 
     entries = data.get("entry", [])
     if not isinstance(entries, list):
@@ -954,9 +998,10 @@ def release_cut(version_data, worklog_data, new_version, date,
     }
     # Build a NEW version.toml value: append the release row, carry schema and summaries unchanged. The
     # summary/changelog rollup is a separate curated step (U5); the cut touches the release ledger only.
-    new_version_data = {}
-    if "schema" in version_data:
-        new_version_data["schema"] = version_data["schema"]
+    # F-R17-D1: validate_version (called above) now REQUIRES the schema marker, so the cut only reaches here
+    # from a ledger that carries it; carry it forward unconditionally so the cut output is itself
+    # schema-bearing.
+    new_version_data = {"schema": version_data["schema"]}
     new_version_data["release"] = list(vv.releases) + [new_row]
     if "summary" in version_data:
         new_version_data["summary"] = list(version_data["summary"])
@@ -1288,7 +1333,7 @@ def self_test():
     check("semver-bad-rejected", parse_semver("1.0") is None and parse_semver("01.0.0") is None)
 
     # --- 3 & 5: a REWRITE / MUTATION of a released (frozen) span is detected --------------------------
-    frozen_ver = {"release": [
+    frozen_ver = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
          "worklog_span": ["WL-1", "WL-2"], "coverage_digest": dig12},
     ]}
@@ -1323,12 +1368,12 @@ def self_test():
     check("cut-inconsistent-ledger-invalid", release_cut(v_nonmono, worklog, "3.0.0", "2026-06-15T00:00:00Z").status == INVALID)
 
     # --- empty-span release: a cut with no new worklog entries yields an empty span -------------------
-    worklog_all = {"entry": [entry(1), entry(2), entry(3), entry(4)]}
+    worklog_all = {"schema": 1, "entry": [entry(1), entry(2), entry(3), entry(4)]}
     empty_cut = release_cut(cut.version_data, worklog_all, "1.2.0", "2026-07-01T00:00:00Z")
     check("empty-cut-valid", empty_cut.status == VALID)
     check("empty-cut-empty-span", empty_cut.frozen_span == [])
     check("empty-cut-digest", empty_cut.coverage_digest == coverage_digest([]))
-    empty_ver = {"release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+    empty_ver = {"schema": 1, "release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
                              "worklog_span": [], "coverage_digest": coverage_digest([])}]}
     check("empty-span-release-valid", validate_version(empty_ver).status == VALID)
 
@@ -1525,7 +1570,7 @@ def self_test():
     check("version-good-schema-ok", validate_version({"schema": 1, "release": []}).status == VALID)
 
     # --- M4: a manifest-registered worklog kind validates through validate_worklog --------------------
-    wl_custom = {"entry": [entry(1, kind="perf")]}
+    wl_custom = {"schema": 1, "entry": [entry(1, kind="perf")]}
     check("release-worklog-manifest-kind-ok",
           validate_worklog(wl_custom, registered_kinds=["perf"]).status == VALID)
     check("release-worklog-manifest-kind-unregistered-invalid",
@@ -1643,7 +1688,7 @@ def self_test():
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [], "coverage_digest": EMPTY},
         {"version": "1.1.0", "date": "2026-06-02T00:00:00Z", "worklog_span": [], "coverage_digest": EMPTY},
     ]
-    sup_base = {"release": sup_releases, "summary": [
+    sup_base = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": "unreleased", "status": "working"},
         {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"},
         {"covers": "1.1.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"},
@@ -1762,7 +1807,7 @@ def self_test():
     # len(tail). An interior-gap tail (WL-1, WL-3 over an empty ledger) must cut INVALID with the
     # not-contiguous finding; removing the clause degrades it to CANNOT-EVALUATE with a different message.
     wl_gap_tail = {"schema": 1, "entry": [entry(1), entry(3)]}
-    gap_cut = release_cut({"release": []}, wl_gap_tail, "1.0.0", "2026-06-15T00:00:00Z")
+    gap_cut = release_cut({"schema": 1, "release": []}, wl_gap_tail, "1.0.0", "2026-06-15T00:00:00Z")
     check("cut-interior-gap-tail-invalid", gap_cut.status == INVALID)
     check("cut-interior-gap-tail-named", any("not contiguous" in f for f in gap_cut.findings))
 
@@ -1810,6 +1855,65 @@ def self_test():
     check("nf4-unnormalized-expected-no-false-loss",
           any("must be a range id space" in f for f in nf4_norm)
           and not any("NEITHER" in f for f in nf4_norm))
+
+    # ----- F-R17 round-18 discrimination tests ------------------------------------------------------
+    # B1: a reversed / non-positive span is fail-closed, not a silent empty-coverage digest.
+    for _b1_bad in ((2, 1), (0, 0)):
+        try:
+            compute_span_digest(by_id, _b1_bad)
+            check("b1-invalid-span-raises", False)
+        except ReleaseError as _b1e:
+            check("b1-invalid-span-raises", "1 <= start <= end" in str(_b1e))
+    check("b1-valid-span-still-ok",
+          compute_span_digest(by_id, (1, 2)) == compute_span_digest(by_id, (1, 2)))
+    check("b1-none-empty-span-ok", compute_span_digest(by_id, None) == coverage_digest([]))
+
+    # B2: a map that binds key WL-1 to an entry whose id is WL-2 is a misbound basis (fail-closed), not
+    # silently digested; check_frozen_coverage surfaces it as a finding rather than certifying clean.
+    try:
+        compute_span_digest({1: entry(2)}, (1, 1))
+        check("b2-misbound-map-raises", False)
+    except ReleaseError:
+        check("b2-misbound-map-raises", True)
+    _b2_ver = {"schema": 1, "release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+         "worklog_span": ["WL-1", "WL-1"], "coverage_digest": coverage_digest([entry(2)])}]}
+    check("b2-frozen-coverage-misbound-map-finding",
+          bool(check_frozen_coverage(_b2_ver, {1: entry(2)})))
+
+    # B3: canonical content that is not UTF-8-encodable (a lone surrogate) fails closed with a ReleaseError,
+    # never a raw UnicodeEncodeError out of the exported digest API; the release gate surfaces it structured.
+    try:
+        coverage_digest([entry(1, summary="\ud800")])
+        check("b3-surrogate-raises-releaseerror", False)
+    except ReleaseError:
+        check("b3-surrogate-raises-releaseerror", True)
+    except UnicodeEncodeError:
+        check("b3-surrogate-raises-releaseerror", False)
+    _b3_ver = {"schema": 1, "release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+         "worklog_span": ["WL-1", "WL-1"], "coverage_digest": "sha256:" + "0" * 64}]}
+    check("b3-frozen-coverage-surrogate-finding",
+          bool(check_frozen_coverage(_b3_ver, {1: entry(1, summary="\ud800")})))
+
+    # B4: an oversized non-string nested key renders through _safe_display (a ReleaseError), never a raw
+    # ValueError from {!r} tripping the int->str limit.
+    try:
+        _canonical({"x-acme": {10 ** 4301: "x"}})
+        check("b4-oversized-key-raises-releaseerror", False)
+    except ReleaseError:
+        check("b4-oversized-key-raises-releaseerror", True)
+    except ValueError:
+        check("b4-oversized-key-raises-releaseerror", False)
+
+    # D1: version.toml / worklog.toml require the exact integer schema marker; an absent marker is INVALID
+    # per file kind, a present marker validates VALID, and the standalone guard path fails closed too.
+    check("d1-version-absent-schema-invalid", validate_version({"release": []}).status == INVALID)
+    check("d1-worklog-absent-schema-invalid", validate_worklog({"entry": []}).status == INVALID)
+    check("d1-version-present-schema-ok", validate_version({"schema": 1, "release": []}).status == VALID)
+    check("d1-worklog-present-schema-ok", validate_worklog({"schema": 1, "entry": []}).status == VALID)
+    check("d1-standalone-guard-absent-schema-finding",
+          bool(check_frozen_coverage({"release": []}, {})))
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
