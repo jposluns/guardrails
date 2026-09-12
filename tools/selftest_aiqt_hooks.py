@@ -2422,6 +2422,49 @@ def main():
                 'git commit --allow-empty -m "$(git -C {} commit --allow-empty -m injected; echo qa)"'
                 .format(nr_upstream), "deny", cwd=str(nr_none))
 
+        # === F-R2-7a / F-R2-7b: _repo_has_remote must be COMPREHENSIVE across EVERY mechanism git resolves a
+        # remote by, and fail closed otherwise, or the no-remote exemption ALLOWS a direct protected commit in
+        # a repo that actually HAS a remote. Two NEW-REGRESSION vectors the round-2 fix-4 re-QA found:
+        #   (7a) LEGACY on-disk remotes git resolves and pushes through but `git remote` does NOT enumerate:
+        #        <git-common-dir>/remotes/<name> (URL:/Push:) and the very-legacy <git-common-dir>/branches/
+        #        <name>. Verified at source: `git remote` prints nothing yet `git remote get-url origin`
+        #        resolves the URL, so a repo backed only by a legacy remote read as no-remote and wrongly
+        #        exempted a protected commit.
+        #   (7b) a remote whose NAME is pure WHITESPACE (a space, a tab). `git remote add` validates the name,
+        #        but a hand-written [remote " "] config section is accepted and git resolves it (get-url
+        #        returns the URL). `git remote` then prints a whitespace LINE that .strip() erases to '' while
+        #        splitlines() keeps, so the old bool(stdout.strip()) read the repo as no-remote.
+        # Each commit runs on a main HEAD from a repo that HAS a remote, so it is fail-to-pass: dropping the
+        # legacy-dir check re-ALLOWS the 7a cases, and restoring bool(stdout.strip()) re-ALLOWS the 7b case.
+        # A genuine no-remote control still ALLOWS (the comprehensive detection must not over-fire). ==========
+        nr_legr = _init_repo(tmp / "pl-nr-legacy-remotes")   # main HEAD, a legacy .git/remotes/<name> only
+        _legr_dir = nr_legr / ".git" / "remotes"
+        _legr_dir.mkdir(parents=True, exist_ok=True)
+        (_legr_dir / "origin").write_text(
+            "URL: {}\nPush: refs/heads/main:refs/heads/main\n".format(tmp / "pl-nr-legacy-remotes.git"),
+            encoding="utf-8")
+        pexpect("(pl-fr7a-1) lone commit on main with a legacy .git/remotes/<name> DENIES (git resolves it; "
+                "`git remote` does not list it)", "git commit --allow-empty -m x", "deny", cwd=str(nr_legr))
+        nr_legb = _init_repo(tmp / "pl-nr-legacy-branches")  # main HEAD, a very-legacy .git/branches/<name>
+        _legb_dir = nr_legb / ".git" / "branches"
+        _legb_dir.mkdir(parents=True, exist_ok=True)
+        (_legb_dir / "origin").write_text(
+            "{}\n".format(tmp / "pl-nr-legacy-branches.git"), encoding="utf-8")
+        pexpect("(pl-fr7a-2) lone commit on main with a very-legacy .git/branches/<name> DENIES",
+                "git commit --allow-empty -m x", "deny", cwd=str(nr_legb))
+        nr_ws = _init_repo(tmp / "pl-nr-whitespace")   # main HEAD, remotes NAMED ' ' and '\t' (config-written)
+        with open(nr_ws / ".git" / "config", "a", encoding="utf-8") as _wscfg:
+            _wscfg.write('[remote " "]\n\turl = {}\n'.format(tmp / "pl-nr-ws-space.git"))
+            _wscfg.write('[remote "\t"]\n\turl = {}\n'.format(tmp / "pl-nr-ws-tab.git"))
+        pexpect("(pl-fr7b-1) lone commit on main with WHITESPACE-named remotes DENIES (a whitespace line "
+                ".strip() erases but splitlines() keeps)", "git commit --allow-empty -m x", "deny",
+                cwd=str(nr_ws))
+        # Genuine no-remote control: no config remote, no legacy dir, no whitespace remote -> the exemption
+        # still ALLOWS. Reds only if the comprehensive detection over-fires on a truly remote-less repo.
+        nr_ctl = _init_repo(tmp / "pl-nr-genuine")   # main HEAD, genuinely NO remote by any mechanism
+        pexpect("(pl-fr7c-0) lone commit on main in a genuinely no-remote repo ALLOWS (exemption intact)",
+                "git commit --allow-empty -m x", "allow", cwd=str(nr_ctl))
+
         # === ROUND-2 FINDING 13: classify a commit against the branch it will ACTUALLY land on ===========
         # Direction 1 (false-DENY fix): a 'git switch -c <feature> && git commit' on a main HEAD lands on the
         # NEW branch, so it ALLOWS (was denied on the stale pre-command main HEAD). Discriminates: without the

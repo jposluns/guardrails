@@ -5651,16 +5651,54 @@ def _commit_post_switch_branch(sub, args):
 
 
 def _repo_has_remote(repo):
-    """True when `repo` has at least one configured git remote, False when it provably has NONE, None when
-    the scrubbed read-only probe could not decide. A repo with NO remote has no server-side branch
-    protection and no PR/CI path, so direct-to-main is its only model; the protected-branch COMMIT guard
-    exempts it (a local record store's handoff commit). Keys on remote ABSENCE via the same scrubbed
-    _branch_root_git primitive the branch-root probe uses, and the caller fails CLOSED on None, so every
-    remote-backed repo stays protected exactly as before."""
+    """True when `repo` has a remote by ANY mechanism git resolves, False ONLY when every check is
+    evaluable AND finds none, None when any check is unevaluable (the caller fails CLOSED on None, so a
+    None denies). A repo with NO remote has no server-side branch protection and no PR/CI path, so
+    direct-to-main is its only model; the protected-branch COMMIT guard exempts it (a local record store's
+    handoff commit). The detection is COMPREHENSIVE across the ways git resolves a remote:
+      (a) CONFIG remotes (`[remote "<name>"]`), which `git remote` lists. Counted by LINES via
+          stdout.splitlines(), NOT stdout.strip() (F-R2-7b): a remote whose NAME is pure whitespace - which
+          git accepts and pushes through - prints a non-empty line that .strip() would erase, so a
+          line-presence test keeps it while a stripped test drops it. Zero remotes print no lines.
+      (b) LEGACY remotes that git resolves and pushes through but `git remote` does NOT enumerate
+          (F-R2-7a): the on-disk <git-common-dir>/remotes/<name> (URL:/Push:) and the very-legacy
+          <git-common-dir>/branches/<name> definitions. The git common dir is resolved via the same
+          scrubbed _branch_root_git primitive (common-dir, not git-dir, so a linked worktree sees the
+          main repo's legacy dirs), and each subdir is listed for ANY entry.
+    Fails CLOSED (None) when the config probe, the git-common-dir resolution, or a legacy-dir listing is
+    unevaluable (probe None/nonzero, an empty/opaque path, or an OSError other than absence). Inspection is
+    no-follow-safe: a symlinked legacy dir is not followed out, it fails closed to None; and only entry
+    NAMES are listed, never followed. Keys on remote ABSENCE, so every remote-backed repo stays protected
+    exactly as before."""
     r = _branch_root_git(repo, "remote")
     if r is None or r.returncode != 0:
         return None
-    return bool(r.stdout.strip())
+    if r.stdout.splitlines():
+        return True  # (a) at least one config remote (a whitespace-named one is still a line)
+    # (b) legacy on-disk remote definitions git resolves but `git remote` does not list. Resolve the git
+    # COMMON dir (shared by all linked worktrees) via the scrubbed primitive; a relative path is anchored
+    # to repo, matching git's -C-relative output.
+    gd = _branch_root_git(repo, "rev-parse", "--git-common-dir")
+    if gd is None or gd.returncode != 0:
+        return None
+    common = gd.stdout.strip()
+    if not common:
+        return None
+    if not os.path.isabs(common):
+        common = os.path.join(repo, common)
+    for legacy in ("remotes", "branches"):
+        d = os.path.join(common, legacy)
+        if os.path.islink(d):
+            return None  # do not follow a symlinked legacy dir out; fail closed (deny)
+        try:
+            entries = os.listdir(d)
+        except FileNotFoundError:
+            continue  # the legacy dir is genuinely absent: no legacy remote by this mechanism
+        except OSError:
+            return None  # an unreadable legacy dir is a cannot-evaluate, not an absence
+        if entries:
+            return True  # a legacy remote (or branch shorthand) git resolves and pushes through
+    return False
 
 
 def _commit_on_protected(tokens, cwd, switched_to=None, lone_direct=False):
