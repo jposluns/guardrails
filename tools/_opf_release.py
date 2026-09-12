@@ -65,7 +65,9 @@ following where sections 6 and 7 leave a gap:
     (ReleaseError), never a silent digest over a lossy serialization. An EMPTY span digests the header alone, a
     well-defined constant (spec 6.1 permits an empty span for a release with no worklog entries; spec 14.3
     pre-migration releases). The finalizer may re-fix the scheme in one place if adopters need another.
-  - version.toml / worklog.toml FILE SHAPE is defined here as an optional top-level `schema` int plus the
+  - version.toml / worklog.toml FILE SHAPE is defined here as a REQUIRED top-level `schema` int (the exact
+    supported integer marker; an absent or wrong marker is fail-closed per file kind, including archived
+    worklogs, D1) plus the
     `[[release]]` / `[[summary]]` (version.toml) or `[[entry]]` (worklog.toml) arrays of tables, matching
     Appendix B/C; unknown top-level keys and unknown row keys are fail-closed findings (closed keyset,
     spec 8.3 discipline applied to the ledgers). SemVer is validated to SemVer 2.0.0 precedence including
@@ -447,7 +449,7 @@ def compute_span_digest(entries_by_id, span):
         actual = _wl_num(entry.get("id"))
         if actual != n:
             raise ReleaseError("worklog entry map binds key WL-{} to an entry whose id is {} (a misbound "
-                               "coverage basis; spec 6.1/8.2)".format(n, _safe_display(entry.get("id"))))
+                               "coverage basis; spec 6.1/8.2)".format(_safe_str(n), _safe_display(entry.get("id"))))
         covered.append(entry)
     return coverage_digest(covered)
 
@@ -1314,13 +1316,16 @@ def self_test():
     check("valid-version-releases", len(vv.releases) == 1)
 
     # --- 2: a NON-MONOTONIC version is rejected -------------------------------------------------------
-    v_nonmono = {"release": [
+    # F-R18-D1MASK: every markerless negative fixture below carries "schema": 1 so its INVALID verdict rests
+    # on the INTENDED guard (order/uniqueness/tiling/summary/supersession), not on the missing-schema finding
+    # D1 adds -- otherwise reverting the intended guard would still read INVALID via the absent marker.
+    v_nonmono = {"schema": 1, "release": [
         {"version": "2.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
         {"version": "1.0.0", "date": "2026-06-02T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
     ]}
     check("non-monotonic-invalid", validate_version(v_nonmono).status == INVALID)
     # a duplicate version is also a monotonicity/uniqueness failure
-    v_dup = {"release": [
+    v_dup = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
         {"version": "1.0.0", "date": "2026-06-02T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
     ]}
@@ -1378,17 +1383,17 @@ def self_test():
     check("empty-span-release-valid", validate_version(empty_ver).status == VALID)
 
     # --- tiling gap / overlap ------------------------------------------------------------------------
-    gap = {"release": [
+    gap = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-1", "WL-2"], "coverage_digest": dig12},
         {"version": "1.1.0", "date": "2026-06-02T00:00:00Z", "worklog_span": ["WL-4", "WL-5"], "coverage_digest": "sha256:" + "0" * 64},
     ]}
     check("tiling-gap-invalid", validate_version(gap).status == INVALID)
-    overlap = {"release": [
+    overlap = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-1", "WL-3"], "coverage_digest": "sha256:" + "0" * 64},
         {"version": "1.1.0", "date": "2026-06-02T00:00:00Z", "worklog_span": ["WL-3", "WL-5"], "coverage_digest": "sha256:" + "0" * 64},
     ]}
     check("tiling-overlap-invalid", validate_version(overlap).status == INVALID)
-    not_start_one = {"release": [
+    not_start_one = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-2", "WL-3"], "coverage_digest": "sha256:" + "0" * 64},
     ]}
     check("tiling-not-start-one-invalid", validate_version(not_start_one).status == INVALID)
@@ -1447,11 +1452,11 @@ def self_test():
     # --- worklog / version fail-closed on non-tables --------------------------------------------------
     check("worklog-not-table-cannot-eval", validate_worklog([]).status == CANNOT_EVALUATE)
     check("version-not-table-cannot-eval", validate_version([]).status == CANNOT_EVALUATE)
-    check("worklog-bad-entry-invalid", validate_worklog({"entry": [{"id": "WL-1"}]}).status == INVALID)
+    check("worklog-bad-entry-invalid", validate_worklog({"schema": 1, "entry": [{"id": "WL-1"}]}).status == INVALID)
     check("summary-covers-unknown-invalid", validate_version(
-        {"release": [], "summary": [{"covers": "9.9.9", "status": "working"}]}).status == INVALID)
+        {"schema": 1, "release": [], "summary": [{"covers": "9.9.9", "status": "working"}]}).status == INVALID)
     check("summary-published-needs-digest-invalid", validate_version(
-        {"release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [],
+        {"schema": 1, "release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [],
                       "coverage_digest": coverage_digest([])}],
          "summary": [{"covers": "1.0.0", "status": "published"}]}).status == INVALID)
 
@@ -1695,13 +1700,13 @@ def self_test():
         {"covers": "1.0.0..1.1.0", "status": "published", "digest": D},
     ]}
     check("m10-valid-supersession-ok", validate_version(sup_base).status == VALID)
-    sup_self = {"release": sup_releases, "summary": [
+    sup_self = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0"}]}
     check("m10-self-reference-invalid", validate_version(sup_self).status == INVALID)
-    sup_missing = {"release": sup_releases, "summary": [
+    sup_missing = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"}]}
     check("m10-nonexistent-rollup-invalid", validate_version(sup_missing).status == INVALID)
-    sup_notcover = {"release": sup_releases, "summary": [
+    sup_notcover = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": "1.1.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0"},
         {"covers": "1.0.0", "status": "published", "digest": D}]}
     check("m10-rollup-not-covering-invalid", validate_version(sup_notcover).status == INVALID)
@@ -1728,7 +1733,7 @@ def self_test():
     # MINOR (SELF-TEST DISCRIMINATION): a reversed span in a NON-FIRST position (start > end) tiles its
     # start against the cursor but drives coverage backward; the _parse_span a > b guard is the sole
     # layer against it. Pin the guard: without it this ledger fails OPEN to VALID.
-    reversed_span_ver = {"release": [
+    reversed_span_ver = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
          "worklog_span": ["WL-1", "WL-2"], "coverage_digest": dig12},
         {"version": "1.1.0", "date": "2026-06-02T00:00:00Z",
@@ -1737,7 +1742,7 @@ def self_test():
     # MAJOR (FAIL-OPEN): superseded_by must not name the working 'unreleased' tail. With an
     # 'unreleased' summary row present the token sits in covers_index and _covers_range returns None,
     # so the covering check is skipped and the row failed OPEN to VALID before the fix; now INVALID.
-    sup_by_unreleased = {"release": sup_releases, "summary": [
+    sup_by_unreleased = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": "unreleased", "status": "working"},
         {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "unreleased"}]}
     check("m10-superseded-by-unreleased-invalid", validate_version(sup_by_unreleased).status == INVALID)
@@ -1769,11 +1774,11 @@ def self_test():
     # so validate_version returns INVALID instead of an uncontrolled ValueError from repr().
     big_int_status = int("f" * 4000, 16)   # a >4300-decimal-digit int; repr() trips CPython's limit
     check("summary-oversized-int-status-invalid", validate_version(
-        {"release": [], "summary": [{"covers": "unreleased", "status": big_int_status}]}).status == INVALID)
+        {"schema": 1, "release": [], "summary": [{"covers": "unreleased", "status": big_int_status}]}).status == INVALID)
 
     # MAJOR (fail-CRASH -> fail-closed): an UNHASHABLE covers value no longer crashes the covering check
     # (`covers in covers_index`); the malformed covers is a finding and the row is INVALID.
-    covers_unhashable = {"release": sup_releases, "summary": [
+    covers_unhashable = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": [], "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"},
         {"covers": "1.0.0..1.1.0", "status": "published", "digest": D}]}
     check("covers-unhashable-invalid", validate_version(covers_unhashable).status == INVALID)
@@ -1781,7 +1786,7 @@ def self_test():
     # MAJOR (FAIL-OPEN): a supersession whose rollup range EQUALS the superseded row's own range (distinct
     # tokens "1.0.0" and "1.0.0..1.0.0" for the same range) is a cycle with no surviving rollup; the
     # token-level self-reference guard missed it, the range-equality guard catches it (INVALID).
-    sup_cycle = {"release": sup_releases, "summary": [
+    sup_cycle = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.0.0"},
         {"covers": "1.0.0..1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0"}]}
     check("m10-equal-range-supersession-cycle-invalid", validate_version(sup_cycle).status == INVALID)
@@ -1897,14 +1902,41 @@ def self_test():
           bool(check_frozen_coverage(_b3_ver, {1: entry(1, summary="\ud800")})))
 
     # B4: an oversized non-string nested key renders through _safe_display (a ReleaseError), never a raw
-    # ValueError from {!r} tripping the int->str limit.
+    # ValueError from {!r} tripping the int->str limit. F-R18-B4TEST: pin the int->str limit to 4300
+    # LOCALLY (save/set/restore) so the fixture discriminates under ANY ambient limit; without the pin a
+    # process run with an unlimited limit lets the reverted _canonical render the key and never raise, so
+    # the test would not red on its revert.
+    _b4_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
     try:
-        _canonical({"x-acme": {10 ** 4301: "x"}})
-        check("b4-oversized-key-raises-releaseerror", False)
-    except ReleaseError:
-        check("b4-oversized-key-raises-releaseerror", True)
-    except ValueError:
-        check("b4-oversized-key-raises-releaseerror", False)
+        try:
+            _canonical({"x-acme": {10 ** 4301: "x"}})
+            check("b4-oversized-key-raises-releaseerror", False)
+        except ReleaseError:
+            check("b4-oversized-key-raises-releaseerror", True)
+        except ValueError:
+            check("b4-oversized-key-raises-releaseerror", False)
+    finally:
+        sys.set_int_max_str_digits(_b4_prev_idlimit)
+
+    # F-R18-B2REND: the B2 misbound-key mismatch message renders the span index `n` through _safe_str, never
+    # a raw .format(n): an OVERSIZED int key (a spoofed WL-<huge>) would trip CPython's int->str limit and
+    # raise a raw ValueError before the ReleaseError. Pin the limit to 4300 locally so the fixture
+    # discriminates under any ambient limit; a reverted `.format(n)` reds via the except ValueError branch.
+    _b2r_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        _b2r_big = 10 ** 4301                       # str(_b2r_big) trips the 4300-digit limit
+        _b2r_map = {_b2r_big: entry(1)}             # key WL-<huge> bound to an entry whose id is WL-1 (misbound)
+        try:
+            compute_span_digest(_b2r_map, (_b2r_big, _b2r_big))
+            check("b2rend-oversized-misbound-key-releaseerror", False)
+        except ReleaseError:
+            check("b2rend-oversized-misbound-key-releaseerror", True)
+        except ValueError:
+            check("b2rend-oversized-misbound-key-releaseerror", False)   # raw ValueError = the reverted .format(n)
+    finally:
+        sys.set_int_max_str_digits(_b2r_prev_idlimit)
 
     # D1: version.toml / worklog.toml require the exact integer schema marker; an absent marker is INVALID
     # per file kind, a present marker validates VALID, and the standalone guard path fails closed too.

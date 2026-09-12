@@ -3410,13 +3410,20 @@ def self_test():
             # positive so it still FIRES rather than being destroyed), and a discarded pending is re-posted,
             # leaving the caller's alarm state unchanged. A prior 0.0 stand-in restored only the pending and
             # let an in-window caller deadline vanish (F-R16-1).
-            _snap7 = snapshot_caller_alarm()   # caller ITIMER + pending, captured BEFORE SIG_IGN (F-R16-1)
-            _prev7 = _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
-            try:
-                _to = run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], timeout_s=1)
-            finally:
-                _sig7.signal(_sig7.SIGALRM, _prev7)
-                restore_caller_alarm(*_snap7)   # elapsed-aware ITIMER restore + re-post pending (F2 + F-R16-1)
+            # F-R18-COV1TEST: the SINGLE snapshot -> SIG_IGN -> run_bounded -> restore path that BOTH the f7
+            # ignored-sigalrm check and the COV1 caller-deadline-preservation probe exercise, so a revert of
+            # the caller-timer snapshot/restore here (e.g. zeroing _snap7) reds the COV1 probe below rather
+            # than passing on the probe's own separate copy. The caller's FULL alarm is snapshotted BEFORE
+            # SIG_IGN and restored elapsed-aware after (F-R16-1 / F2).
+            def _f7_ignore_window(_thunk, _timeout_s):
+                _snap7 = snapshot_caller_alarm()   # caller ITIMER + pending, captured BEFORE SIG_IGN
+                _prev7 = _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
+                try:
+                    return run_bounded(_thunk, timeout_s=_timeout_s)
+                finally:
+                    _sig7.signal(_sig7.SIGALRM, _prev7)
+                    restore_caller_alarm(*_snap7)   # elapsed-aware ITIMER restore + re-post pending
+            _to = _f7_ignore_window(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], 1)
             check("f7-inherited-ignored-sigalrm-still-times-out", _to == "TIMEOUT")
             # (d) the child must also UNBLOCK SIGALRM, not merely reset its DISPOSITION: a caller with
             # SIGALRM BLOCKED in its signal mask passes that blocked mask across the fork, so the timer's
@@ -3436,15 +3443,17 @@ def self_test():
                     _sig7.pthread_sigmask(_sig7.SIG_SETMASK, _prev_mask7)
                 check("f7-inherited-blocked-sigalrm-still-times-out", _tb == "TIMEOUT")
 
-            # F-R17-COV1: the f7 checks above assert only the CHILD's TIMEOUT outcome, so the module
-            # self-test passed even with the caller-timer snapshot reverted to zeros -- the timer-restore
-            # class (F-R16-1 / F-R17-C2) went undiscriminated in-suite. Close that gap: arm a REAL caller
-            # ITIMER_REAL that EXPIRES inside the ~1s SIG_IGN window this fixture holds, run the SAME
-            # snapshot -> SIG_IGN -> run_bounded -> restore_caller_alarm sequence, and assert the caller's
-            # deadline is PRESERVED: it fires PROMPTLY after the elapsed-aware restore (which clamps an
-            # in-window-expired deadline to a tiny positive) rather than being DESTROYED (a zeros revert never
-            # re-arms -> never fires) or EXTENDED (a verbatim revert re-arms to the full 0.3s -> fires late).
-            # Deterministic: the ~1s window >> the 0.3s deadline, so a correct restore always clamps.
+            # F-R17-COV1 / F-R18-COV1TEST: the f7 checks above assert only the CHILD's TIMEOUT outcome, so the
+            # module self-test passed even with the caller-timer snapshot reverted to zeros -- the
+            # timer-restore class (F-R16-1 / F-R17-C2) went undiscriminated in-suite. Close that gap: arm a
+            # REAL caller ITIMER_REAL that EXPIRES inside the ~1s SIG_IGN window, and run the caller deadline
+            # through the SHARED _f7_ignore_window callable (the ACTUAL f7 restoration path), so zeroing the
+            # snapshot/restore reds this probe. Assert the caller's deadline is PRESERVED and fires PROMPTLY
+            # after the elapsed-aware restore (which clamps an in-window-expired deadline to a tiny positive),
+            # within a TIGHT bound that distinguishes a prompt clamp (fires within a few ms) from a fresh 0.3s
+            # deadline: a zeros revert never re-arms (never fires) and a verbatim revert re-arms the full 0.3s
+            # (fires ~0.3s after the restore, outside the bound) -- both red. The prior 0.5s window admitted a
+            # verbatim-restored 0.3s timer, so it did not discriminate a verbatim revert.
             # SKIP when SIGALRM is currently BLOCKED (the hostile-ambient wrapper re-runs this self-test with
             # SIGALRM blocked-and-pending): the probe needs the deadline DELIVERED, and unblocking would
             # consume the caller's pending SIGALRM the wrapper asserts must survive. In the normal run SIGALRM
@@ -3458,17 +3467,17 @@ def self_test():
                                          lambda _s, _f: _cov_fired.append(_t7.monotonic()))
                 try:
                     _sig7.setitimer(_sig7.ITIMER_REAL, 0)          # quiet baseline
-                    _sig7.setitimer(_sig7.ITIMER_REAL, 0.3, 0.0)   # a caller deadline inside the window
-                    _cov_snap = snapshot_caller_alarm()            # captured BEFORE SIG_IGN (F-R16-1)
-                    _cov_ign = _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
-                    try:
-                        run_bounded(lambda: (_t7.sleep(1), "COV-SLEPT")[1], timeout_s=1)   # ~1s > 0.3s
-                    finally:
-                        _sig7.signal(_sig7.SIGALRM, _cov_ign)      # re-install the counting handler
-                        restore_caller_alarm(*_cov_snap)           # elapsed-aware: clamps the expiry
-                    _cov_stop = _t7.monotonic() + 0.5              # a correct restore fires ~now
+                    _sig7.setitimer(_sig7.ITIMER_REAL, 0.3, 0.0)   # a caller deadline that EXPIRES in-window
+                    # Exercise the ACTUAL f7 restoration via the shared callable (it snapshots BEFORE its
+                    # SIG_IGN and restores elapsed-aware, then re-installs the counting handler captured as the
+                    # pre-SIG_IGN disposition), so the clamped deadline fires under the counting handler.
+                    _f7_ignore_window(lambda: (_t7.sleep(1), "COV-SLEPT")[1], 1)   # ~1s > 0.3s
+                    # TIGHT bound (0.12s): a prompt clamp fires within a few ms of the restore; a verbatim
+                    # revert's fresh 0.3s deadline fires ~0.3s later (outside 0.12s) and a zeros revert never
+                    # fires -- both red.
+                    _cov_stop = _t7.monotonic() + 0.12
                     while not _cov_fired and _t7.monotonic() < _cov_stop:
-                        _t7.sleep(0.005)
+                        _t7.sleep(0.002)
                     check("cov1-caller-itimer-preserved-across-f7-fixture", bool(_cov_fired))
                 finally:
                     _sig7.setitimer(_sig7.ITIMER_REAL, 0)

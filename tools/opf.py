@@ -293,7 +293,7 @@ def _watchdog_wrapper_caller_deadline_self_test():
     return EXIT_OK
 
 
-def _watchdog_shared_restore_self_test():
+def _watchdog_shared_restore_self_test(_hold_s=0.0):
     """Guard F1 (round-15, break the watchdog-timer re-induction loop): every opf-side watchdog restores a
     borrowed caller ITIMER_REAL through the ONE shared _opf_store.restore_caller_alarm helper, the single
     source of truth, so no per-site verbatim restore can diverge again and re-introduce the watchdog-timer
@@ -304,7 +304,13 @@ def _watchdog_shared_restore_self_test():
 
     Deterministic, not timing-dependent: the elapsed is a fixed baseline in the past (monotonic() - 5s), so
     the restored value is ~95s for a 100s caller value regardless of machine speed; a verbatim restore yields
-    the full 100s, far outside the elapsed-aware band."""
+    the full 100s, far outside the elapsed-aware band.
+
+    F-R18-C2TEST: `_hold_s` (default 0.0) injects a CONTROLLED measurable delay AFTER the top snapshot and
+    BEFORE the finally-restore of the caller's borrowed timer, so a caller deadline held across this wrapper
+    is restored reduced by ~`_hold_s`. The deadline wrapper below arms a real caller ITIMER, calls this with
+    a non-zero `_hold_s`, and asserts that specific elapsed was deducted (elapsed-aware) versus ~0 for a
+    restore-time-t0 / verbatim revert. The default 0.0 keeps the standalone registered run unchanged."""
     import signal as _signal
     import time as _time
     if not (hasattr(_signal, "setitimer") and hasattr(_signal, "ITIMER_REAL")):
@@ -333,6 +339,11 @@ def _watchdog_shared_restore_self_test():
             print("opf watchdog shared-restore self-test: restored ITIMER interval {!r}; expected {!r} "
                   "(F1)".format(_int_after, _known_int), file=sys.stderr)
             ok = False
+        # F-R18-C2TEST: hold the borrowed caller timer for a CONTROLLED, measurable interval before the
+        # finally restores it elapsed-aware, so the deadline wrapper can assert this exact elapsed was
+        # deducted (a restore-time-t0 / verbatim revert deducts ~0). Default 0.0 => no delay.
+        if _hold_s:
+            _time.sleep(_hold_s)
     finally:
         # F-R17-C2: disarm any probe timer, then restore the caller's alarm ELAPSED-AWARE from the
         # capture-time snapshot, so a caller deadline held across this wrapper is not extended.
@@ -354,9 +365,17 @@ def _watchdog_shared_restore_deadline_self_test():
     verbatim. The shared-restore self-test snapshots the caller alarm at the TOP and restores via
     restore_caller_alarm(*snap); a regression that passes RESTORE-time monotonic() as t0 subtracts ~no
     elapsed and EXTENDS the caller's deadline. This arms a large ~10s caller deadline that never fires, runs
-    the wrapped self-test, and asserts at least half the wrapped call's wall duration was subtracted from the
-    restored ITIMER value, so a restore-time-t0 / verbatim revert (which subtracts ~0) reds. SKIPS clean
-    without POSIX itimer."""
+    the wrapped self-test with a CONTROLLED hold, and asserts that specific held interval was subtracted from
+    the restored ITIMER value, so a restore-time-t0 / verbatim revert (which subtracts ~0) reds. SKIPS clean
+    without POSIX itimer.
+
+    F-R18-C2TEST: the discrimination is driven by an explicit `_hold_s` the wrapped call sleeps while it
+    holds the borrowed caller timer, NOT by the wrapped call's own (microsecond) wall time. The prior form
+    measured the wrapped call's `_dur` and asserted `_val_after <= _armed - _dur*0.5`; because `_dur` was
+    sub-millisecond, that band was measurement noise and a restore-time-t0 / verbatim revert stayed green.
+    Here the held interval is a controlled ~0.2s, well above scheduling jitter, and the assertion requires
+    that at least half of it was deducted -- the exact PARENT-FUNCTION revert (restore-time-t0 / verbatim)
+    deducts ~0 and reds."""
     import signal as _signal
     import time as _time
     import io as _io
@@ -365,28 +384,29 @@ def _watchdog_shared_restore_deadline_self_test():
         print("opf watchdog shared-restore deadline self-test: SKIP (no POSIX itimer on this platform)")
         return EXIT_OK
     _armed = 10.0                                                # large: never fires, reduction is measurable
+    _hold_s = 0.2                                                # a controlled, measurable held interval
     _prev_disp = _signal.getsignal(_signal.SIGALRM)
     _caller_snap = _opf_store.snapshot_caller_alarm()
     ok = True
     try:
         _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)        # a fired deadline here is harmless (ignored)
         _signal.setitimer(_signal.ITIMER_REAL, _armed, 0.0)
-        _t0 = _time.monotonic()
         _buf = _io.StringIO()
         with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
-            _rc = _watchdog_shared_restore_self_test()
-        _dur = _time.monotonic() - _t0
+            _rc = _watchdog_shared_restore_self_test(_hold_s=_hold_s)
         _val_after, _ = _signal.getitimer(_signal.ITIMER_REAL)
         if _rc != EXIT_OK:
             print("opf watchdog shared-restore deadline self-test: inner self-test returned {!r} (expected "
                   "0)".format(_rc), file=sys.stderr)
             ok = False
-        # An elapsed-aware restore subtracts ~the whole wrapped-call duration; a restore-time-t0 / verbatim
-        # revert subtracts ~0 and leaves the deadline near its full armed value.
-        if not (_val_after <= _armed - _dur * 0.5):
-            print("opf watchdog shared-restore deadline self-test: caller ITIMER restored to {!r} across a "
-                  "{:.4f}s call; the elapsed was not subtracted (a restore-time-t0 / verbatim restore extends "
-                  "a caller deadline, F-R17-C2)".format(_val_after, _dur), file=sys.stderr)
+        # An elapsed-aware restore subtracts ~the whole held interval (>= _hold_s); a restore-time-t0 /
+        # verbatim revert subtracts ~0 and leaves the deadline near its full armed value. Require at least
+        # half the controlled hold to have been deducted, a band well clear of scheduling jitter.
+        if not (_val_after <= _armed - _hold_s * 0.5):
+            print("opf watchdog shared-restore deadline self-test: caller ITIMER restored to {!r} after a "
+                  "controlled {:.3f}s hold; that elapsed was not subtracted (a restore-time-t0 / verbatim "
+                  "restore extends a caller deadline, F-R17-C2 / F-R18-C2TEST)".format(_val_after, _hold_s),
+                  file=sys.stderr)
             ok = False
     finally:
         _signal.setitimer(_signal.ITIMER_REAL, 0)

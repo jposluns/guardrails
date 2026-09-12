@@ -917,20 +917,39 @@ def release_lock(journal_root):
     _fsync_path_dir(journal_root)
 
 
-def _journal_txn_dirs(journal_root):
+def _journal_txn_dirs(jr_fd, journal_root):
     """The transaction subdirectories of a journal root, sorted (the reconcile order). Skips the lock and
     arbitration files and any stray non-directory entry. A symlinked entry is REFUSED (JournalError), not
     followed or silently skipped, class-consistent with doctor.assert_open_journal and migrate._txn_dirs so
     a symlinked/dangling txn entry cannot slip through the stale-lock reconcile as 'all terminal'
-    (SECI-symlink-resolution; F-R17-C1 sibling)."""
+    (SECI-symlink-resolution; F-R17-C1 sibling).
+
+    F-R18-JTOCTOU: enumerate and classify FD-RELATIVE to the TRUSTED, already-open journal-root descriptor
+    (os.scandir(jr_fd), os.lstat(name, dir_fd=jr_fd)), never by re-resolving the journal PATH. A path-based
+    Path(journal_root).iterdir() FOLLOWS the journal path at enumeration time, so a swapped journal ANCESTOR
+    (a symlink to an empty decoy) planted between the open and the listing would report false-clean (an open
+    txn is missed and the caller reads the journal as 'all terminal'). Binding the enumeration to jr_fd keeps
+    it on the same directory identity every other journal op is bound to; `journal_root` is used only to build
+    the returned entry paths whose basenames the contained per-txn opens resolve beneath jr_fd.
+    F-R18-OSESC: a listing or entry-stat OSError (e.g. EIO) is wrapped in a contextual JournalError
+    (fail-closed), never left to escape as a raw OSError (CLI exit 1 + traceback); the CLI maps it to exit 2,
+    _all_terminal to False, and _latest_txn to its documented failure."""
     out = []
-    for entry in sorted(Path(journal_root).iterdir()):
-        est = os.lstat(entry)
+    try:
+        with os.scandir(jr_fd) as it:
+            names = sorted(e.name for e in it)
+    except OSError as exc:
+        raise JournalError("cannot list journal dir contained ({}); fail-closed".format(exc))
+    for name in names:
+        try:
+            est = os.lstat(name, dir_fd=jr_fd)
+        except OSError as exc:
+            raise JournalError("cannot stat journal entry {!r} contained ({}); fail-closed".format(name, exc))
         if stat.S_ISLNK(est.st_mode):
             raise JournalError("a symlinked journal entry {!r} is refused, not followed "
-                               "(fail-closed)".format(entry.name))
+                               "(fail-closed)".format(name))
         if stat.S_ISDIR(est.st_mode):
-            out.append(entry)
+            out.append(Path(journal_root) / name)
     return out
 
 
@@ -988,9 +1007,9 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
                 return "possibly-live"                       # a concurrent recoverer re-acquired: never break
             # (b) reconcile every transaction to terminal BEFORE breaking the stale lock (spec 1262), the
             # stale lease RETAINED throughout so a crash mid-reconcile leaves the stale lock in place.
-            for txn_dir in _journal_txn_dirs(journal_root):
+            for txn_dir in _journal_txn_dirs(jr_fd, journal_root):
                 recover(jr_fd, txn_dir, root_fd)
-            for txn_dir in _journal_txn_dirs(journal_root):
+            for txn_dir in _journal_txn_dirs(jr_fd, journal_root):
                 if not is_terminal(jr_fd, txn_dir):
                     raise JournalError("journal {} did not reconcile to terminal; refusing to break the "
                                        "stale lock (fail-closed)".format(txn_dir.name))
@@ -1595,6 +1614,25 @@ def run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops, staged_re
     # entry (a hardlink to a victim or a plain regular file) is refused at creation (codex round-6).
     _create_frames_excl(jr_fd, txn_dir)
     capture_preimages(jr_fd, txn_dir, root_fd, ops)
+    # F-R18-A2BUD: capture_preimages MUTATES each op in place, adding its prestate metadata, so the INTENT
+    # actually published now carries MORE bytes than the pre-mutation budget above reserved. Re-check the
+    # FINALIZED serialized envelope (the post-capture INTENT plus the two rollback terminal frames, the
+    # largest terminal log) against the reader cap HERE, BEFORE INTENT is published and BEFORE apply_ops
+    # touches the product tree. A boundary transaction whose pre-capture ops fit the cap but whose
+    # post-capture INTENT+ROLLBACK does not would otherwise apply the mutation, then fail to publish a
+    # terminal frame (over the append cap), leaving an applied tree beside a journal recovery cannot complete
+    # (unrecoverable). Refuse fail-closed before any product mutation reaches a non-terminal state; the txn
+    # dir carries only preimages and no INTENT, so recovery reads it as nothing-opened (terminal).
+    _final_budget = (
+        len(_budget_frame(F_INTENT, {"txn": txn_id, "header": header, "ops": ops}))
+        + len(_budget_frame(F_RIP, {"txn": txn_id}))
+        + len(_budget_frame(F_RC, {"txn": txn_id}))
+    )
+    if _final_budget > _MAX_JOURNAL_READ_BYTES:
+        raise JournalError("finalized transaction journal frames would total {} bytes (post-capture "
+                           "INTENT+ROLLBACK), over the {}-byte journal-read cap; refusing BEFORE any product "
+                           "mutation so a crash leaves a recoverable journal (fail-closed; F-R18-A2BUD)".format(
+                               _final_budget, _MAX_JOURNAL_READ_BYTES))
     publish(jr_fd, txn_dir, F_INTENT, {"txn": txn_id, "header": header, "ops": ops})
     try:
         apply_ops(root_fd, ops, staged_reader)

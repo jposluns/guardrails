@@ -392,7 +392,7 @@ def do_recover(root):
             return 1
         outcomes = {}
         try:
-            recover_txns = _txn_dirs(journal_root)          # F-R17-C1: a symlinked txn entry raises here
+            recover_txns = _txn_dirs(jr_fd, journal_root)   # F-R17-C1 / F-R18-JTOCTOU: fd-relative, symlink raises
         except _journal.JournalError as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2                                        # lock RETAINED: the journal is not terminal
@@ -444,7 +444,7 @@ def do_status(root):
     open_txns = []
     try:
         try:
-            status_txns = _txn_dirs(journal_root)         # F-R17-C1: a symlinked txn entry raises here
+            status_txns = _txn_dirs(jr_fd, journal_root)  # F-R17-C1 / F-R18-JTOCTOU: fd-relative, symlink raises
         except _journal.JournalError as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
@@ -488,11 +488,14 @@ def _classify_journal(root_fd):
     return "malformed"
 
 
-def _txn_dirs(journal_root):
+def _txn_dirs(jr_fd, journal_root):
     """The journal's transaction subdirectories, sorted, classified no-follow so a symlinked entry is
     REFUSED (JournalError -> the caller exits 2), never followed or silently skipped, aligning with the
-    _journal sibling (F-R17-C1). Raises JournalError on an unreadable listing (fail-closed)."""
-    return _journal._journal_txn_dirs(journal_root)
+    _journal sibling (F-R17-C1). Raises JournalError on an unreadable listing (fail-closed). F-R18-JTOCTOU:
+    enumeration is bound to the TRUSTED already-open journal-root descriptor `jr_fd` (fd-relative), never a
+    re-resolved journal path, so a swapped journal ancestor between open and enumerate cannot redirect the
+    listing onto a decoy and report false-clean."""
+    return _journal._journal_txn_dirs(jr_fd, journal_root)
 
 
 def _slug(value):
@@ -712,7 +715,7 @@ def _all_terminal(root):
         return False
     try:
         try:
-            terminals = _txn_dirs(journal_root)             # F-R17-C1: a symlinked txn entry raises here
+            terminals = _txn_dirs(jr_fd, journal_root)      # F-R17-C1 / F-R18-JTOCTOU: fd-relative, symlink raises
         except _journal.JournalError:
             return False
         for txn_dir in terminals:
@@ -1312,7 +1315,7 @@ def self_test():
         nonterminal = False
         _jr_fd = _journal.open_journal_root_from_path(rbroot, JOURNAL_REL)
         try:
-            for td in _txn_dirs(jr):
+            for td in _txn_dirs(_jr_fd, jr):
                 try:
                     if not _journal.is_terminal(_jr_fd, td):
                         nonterminal = True
@@ -1987,6 +1990,167 @@ def self_test():
             os.close(a2fd)
         checked += 1
 
+        # (F-R18-A2BUD) FINALIZED-envelope budget re-check: capture_preimages grows each op with prestate
+        # metadata AFTER the pre-mutation budget, so a BOUNDARY transaction whose PRE-capture ops fit the
+        # reader cap but whose POST-capture INTENT+ROLLBACK does not must be refused BEFORE any product
+        # mutation. Construct exactly that boundary: pad the header so the pre-capture budget EQUALS the cap
+        # (passes the pre-check), while the post-capture INTENT+RIP+RC exceeds it. A reverted re-check would
+        # publish INTENT, APPLY (mutating dataA), then fail to publish the terminal frame over the append cap;
+        # the tree changing detects that. WITH the re-check the tree is untouched and the journal is terminal.
+        abroot = _build_case_root(tmp / "a2bud-root", "flat-files")   # dataA = old-A\n
+        abjr = abroot / JOURNAL_REL
+        abjr.mkdir(parents=True, exist_ok=True)
+        _ab_cap = _journal._MAX_JOURNAL_READ_BYTES
+
+        def _ab_bf(ftype, obj):
+            return _journal._frame(ftype, json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                                                     ensure_ascii=True).encode())
+
+        _ab_txn = "a2budtxn"
+        _ab_data = (abroot / "dataA").read_bytes()
+        _ab_mode = stat.S_IMODE(os.stat(str(abroot / "dataA")).st_mode)
+        _ab_prestate = {"kind": "file", "mode": _ab_mode, "size": len(_ab_data),
+                        "payload": "0", "sha256": hashlib.sha256(_ab_data).hexdigest()}
+        _ab_op_wo = {"op": "write", "path": "dataA",
+                     "poststate": {"kind": "file",
+                                   "content-sha256": hashlib.sha256(b"PLANNED-A\n").hexdigest()}}
+        _ab_op_w = dict(_ab_op_wo)
+        _ab_op_w["prestate"] = _ab_prestate           # exactly what capture_preimages adds (seq 0 -> payload "0")
+        _ab_rip = len(_ab_bf(_journal.F_RIP, {"txn": _ab_txn}))
+        _ab_rc = len(_ab_bf(_journal.F_RC, {"txn": _ab_txn}))
+        _ab_complete = len(_ab_bf(_journal.F_COMPLETE, {"txn": _ab_txn}))
+        _ab_delta = (len(_ab_bf(_journal.F_INTENT, {"txn": _ab_txn, "header": {}, "ops": [_ab_op_w]}))
+                     - len(_ab_bf(_journal.F_INTENT, {"txn": _ab_txn, "header": {}, "ops": [_ab_op_wo]})))
+        # Solve the header pad so the PRE-capture budget (INTENT_pre + RIP + RC) lands at the cap. The solve
+        # must ITERATE because _frame embeds str(len(payload)) whose decimal width grows with the pad, so a
+        # single linear estimate is off by the width change; converge until INTENT_pre == cap - RIP - RC.
+        _ab_want_pre = _ab_cap - _ab_rip - _ab_rc
+        _ab_pad = _ab_want_pre - len(_ab_bf(_journal.F_INTENT,
+                                            {"txn": _ab_txn, "header": {"unit": "x", "kind": "cutover", "pad": ""},
+                                             "ops": [_ab_op_wo]}))
+        for _ab_iter in range(8):
+            _ab_cur = len(_ab_bf(_journal.F_INTENT,
+                                 {"txn": _ab_txn,
+                                  "header": {"unit": "x", "kind": "cutover", "pad": "P" * max(0, _ab_pad)},
+                                  "ops": [_ab_op_wo]}))
+            if _ab_cur == _ab_want_pre:
+                break
+            _ab_pad += _ab_want_pre - _ab_cur
+        # never let the pre-capture budget exceed the cap (that would refuse before capture, not at the re-check).
+        while (len(_ab_bf(_journal.F_INTENT,
+                          {"txn": _ab_txn,
+                           "header": {"unit": "x", "kind": "cutover", "pad": "P" * max(0, _ab_pad)},
+                           "ops": [_ab_op_wo]})) + _ab_rip + _ab_rc) > _ab_cap and _ab_pad > 0:
+            _ab_pad -= 1
+        # discrimination window: INTENT_post < cap (INTENT publishes -> apply) AND INTENT_post + COMPLETE > cap
+        # (terminal publish fails) hold iff delta < RIP+RC and delta + COMPLETE > RIP+RC.
+        if _ab_pad < 0:
+            failures.append("A2BUD: fixture cannot reach the cap boundary (pad negative; test inert)")
+        if not (_ab_delta < _ab_rip + _ab_rc and _ab_delta + _ab_complete > _ab_rip + _ab_rc):
+            failures.append("A2BUD: prestate delta does not straddle the terminal-frame boundary (test inert)")
+        _ab_header = {"unit": "x", "kind": "cutover", "pad": "P" * max(0, _ab_pad)}
+        abfd = os.open(str(abroot), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        abjrfd = _journal.open_journal_root_fd(abfd, JOURNAL_REL)
+        try:
+            pre_ab = _snapshot(abroot)
+            try:
+                _journal.run_transaction(abfd, abjrfd, abjr, _ab_txn, _ab_header, [dict(_ab_op_wo)],
+                                         lambda op: b"PLANNED-A\n", "a2bud")
+                failures.append("A2BUD: an over-cap FINALIZED envelope must be refused, not applied")
+            except _journal.JournalError:
+                pass
+            if _snapshot(abroot) != pre_ab:
+                failures.append("A2BUD: a boundary transaction must NOT mutate the product tree (the "
+                                "post-capture re-check must refuse BEFORE apply)")
+            if not (abjr / _ab_txn).exists():
+                failures.append("A2BUD: expected the txn dir to exist (the refusal must be at the "
+                                "post-capture re-check, after the pre-capture check passed)")
+            elif not _journal.is_terminal(abjrfd, abjr / _ab_txn):
+                failures.append("A2BUD: a refused boundary transaction must leave a terminal (recoverable) "
+                                "journal, not an open one")
+        finally:
+            os.close(abjrfd)
+            os.close(abfd)
+        checked += 1
+
+        # (F-R18-APPCAP) the publish() cumulative append-cap admits an EXACT-FIT terminal frame and REFUSES a
+        # ONE-OVER one, so no recovery publish (COMPLETE / RIP / RC) can ever write a journal it cannot
+        # re-read. Pre-fill frames.log to (cap - frame_len [+0 exact / +1 over]) and publish each terminal
+        # frame type. A reverted append-cap would ADMIT the one-over append (an unrecoverable over-cap log).
+        for _ap_ftype in (_journal.F_COMPLETE, _journal.F_RIP, _journal.F_RC):
+            for _ap_label, _ap_extra, _ap_expect_ok in (("exact-fit", 0, True), ("one-over", 1, False)):
+                _ap_root = _build_case_root(tmp / ("appcap-" + _ap_ftype + "-" + _ap_label) / "root",
+                                            "flat-files")
+                _ap_jr = _ap_root / JOURNAL_REL
+                (_ap_jr / "aptxn").mkdir(parents=True, exist_ok=True)
+                _ap_frame = _journal._frame(_ap_ftype, json.dumps({"txn": "aptxn"}, sort_keys=True,
+                                                                  separators=(",", ":")).encode())
+                _ap_fill = _journal._MAX_JOURNAL_READ_BYTES - len(_ap_frame) + _ap_extra
+                (_ap_jr / "aptxn" / "frames.log").write_bytes(b"x" * _ap_fill)
+                _ap_fd = os.open(str(_ap_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                _ap_jrfd = _journal.open_journal_root_fd(_ap_fd, JOURNAL_REL)
+                try:
+                    try:
+                        _journal.publish(_ap_jrfd, _ap_jr / "aptxn", _ap_ftype, {"txn": "aptxn"})
+                        _ap_got_ok = True
+                    except _journal.JournalError:
+                        _ap_got_ok = False
+                finally:
+                    os.close(_ap_jrfd)
+                    os.close(_ap_fd)
+                if _ap_got_ok != _ap_expect_ok:
+                    failures.append("APPCAP {} {}: publish append-cap expected {}".format(
+                        _ap_ftype, _ap_label, "success" if _ap_expect_ok else "refusal"))
+                checked += 1
+
+        # (F-R18-JTOCTOU) fd-relative enumeration: _journal_txn_dirs enumerates on the TRUSTED already-open
+        # journal descriptor, so a journal path SWAPPED to an empty decoy AFTER the open cannot hide an open
+        # txn. Open jr_fd on a journal holding one txn, then replace the journal dir at its path with an empty
+        # decoy; fd-relative enumeration still sees the real txn. A path-based revert (iterdir on the path)
+        # would follow to the decoy and report zero -> false-clean.
+        _jt_root = tmp / "jtoctou" / "root"
+        (_jt_root / JOURNAL_REL / "txn1").mkdir(parents=True)
+        _jt_rfd = os.open(str(_jt_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _jt_jrfd = _journal.open_journal_root_fd(_jt_rfd, JOURNAL_REL)
+        try:
+            _jt_jpath = _jt_root / JOURNAL_REL
+            os.rename(str(_jt_jpath), str(_jt_root / "journal-real"))   # move the real journal aside
+            _jt_jpath.mkdir()                                           # empty decoy at the journal path
+            _jt_dirs = _journal._journal_txn_dirs(_jt_jrfd, _jt_jpath)
+            if not (len(_jt_dirs) == 1 and _jt_dirs[0].name == "txn1"):
+                failures.append("JTOCTOU: fd-relative enumeration must see the open txn on the trusted "
+                                "descriptor, not a swapped-in empty decoy (got {})".format(
+                                    [d.name for d in _jt_dirs]))
+        finally:
+            os.close(_jt_jrfd)
+            os.close(_jt_rfd)
+        checked += 1
+
+        # (F-R18-OSESC) an enumeration OSError (e.g. EIO) escapes as a CONTEXTUAL JournalError, not a raw
+        # OSError, so the CLI maps it to exit 2 and _all_terminal to False. Inject a scandir failure.
+        _ose_root = tmp / "osesc" / "root"
+        (_ose_root / JOURNAL_REL).mkdir(parents=True)
+        _ose_rfd = os.open(str(_ose_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _ose_jrfd = _journal.open_journal_root_fd(_ose_rfd, JOURNAL_REL)
+        _ose_real_scandir = os.scandir
+
+        def _ose_boom(*_a, **_k):
+            raise OSError(5, "injected-eio")                            # EIO
+        os.scandir = _ose_boom
+        try:
+            try:
+                _journal._journal_txn_dirs(_ose_jrfd, _ose_root / JOURNAL_REL)
+                failures.append("OSESC: an enumeration OSError must be wrapped in JournalError")
+            except _journal.JournalError:
+                pass
+            except OSError:
+                failures.append("OSESC: a raw OSError escaped enumeration (must be a contextual JournalError)")
+        finally:
+            os.scandir = _ose_real_scandir
+            os.close(_ose_jrfd)
+            os.close(_ose_rfd)
+        checked += 1
+
         # (F-R17-C1) journal-state classification: recover/status distinguish a CONFIRMED-absent journal
         # (exit 0) from a MALFORMED one (a regular file OR a symlink at the journal path, exit 2), and REFUSE
         # a symlinked txn entry (exit 2). The old Path.is_dir() conflated absent/regular/symlink into False.
@@ -2018,6 +2182,28 @@ def self_test():
         if _run(["recover", "--root", str(c1_txn)]) != 2:
             failures.append("C1: recover must refuse a symlinked txn entry (exit 2)")
         checked += 1
+
+        # (F-R18-C1HELP) the _all_terminal and _latest_txn helpers each fail closed on a MALFORMED journal
+        # INDEPENDENTLY of the CLI: a regular file where the journal dir belongs, and a symlinked txn ENTRY
+        # under a real journal dir. _all_terminal must return False (never "all terminal" -> True) and
+        # _latest_txn must RAISE its documented JournalError (never silently return None). Reverting either
+        # helper's malformed handling to the parent reds the matching assertion.
+        for _c1h_kind in ("regular", "symlink-txn"):
+            _c1h_root = tmp / ("c1help-" + _c1h_kind)
+            if _c1h_kind == "regular":
+                (_c1h_root / JOURNAL_REL).parent.mkdir(parents=True)
+                (_c1h_root / JOURNAL_REL).write_bytes(b"not a directory")
+            else:
+                (_c1h_root / JOURNAL_REL).mkdir(parents=True)
+                os.symlink("missing-txn-target", str(_c1h_root / JOURNAL_REL / "txn-link"))
+            if _all_terminal(_c1h_root) is not False:
+                failures.append("C1HELP: _all_terminal must return False on a {} journal".format(_c1h_kind))
+            try:
+                _latest_txn(_c1h_root)
+                failures.append("C1HELP: _latest_txn must RAISE on a {} journal".format(_c1h_kind))
+            except _journal.JournalError:
+                pass
+            checked += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2058,7 +2244,7 @@ def _latest_txn(root):
         raise _journal.JournalError("journal path is present but is not a directory (fail-closed)")
     jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
     try:
-        for txn_dir in _txn_dirs(journal_root):
+        for txn_dir in _txn_dirs(jr_fd, journal_root):
             if "unadopt" in txn_dir.name:
                 continue
             try:

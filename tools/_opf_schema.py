@@ -1900,8 +1900,13 @@ def self_test():
     check("a3-misbound-roster-record-cannot-eval",
           validate_record({"type": "finding", "id": "FN-1", "status": "open"},
                           specs=_a3_misbound).status == CANNOT_EVALUATE)
+    # F-R18-A3TEST: use open->active, NOT open->fixed. Under the misbound backlog_item grammar `open->active`
+    # is a LEGAL transition, so the OLD impl (roster check reverted) returns VALID here; the roster
+    # reconciliation is the ONLY layer that turns it into CANNOT-EVALUATE, so reverting that guard reds this.
+    # `open->fixed` did NOT discriminate: `fixed` is not a backlog_item state, so the OLD impl already
+    # CANNOT-EVALUATEs the unparseable target regardless of the roster check.
     check("a3-misbound-roster-transition-cannot-eval",
-          validate_transition("finding", "open", "fixed", "maintainer",
+          validate_transition("finding", "open", "active", "maintainer",
                               specs=_a3_misbound).status == CANNOT_EVALUATE)
     check("a3-contradicting-namespace-cannot-eval",
           validate_record({"type": "finding", "id": "FN-1", "status": "open"},
