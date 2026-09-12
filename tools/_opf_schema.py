@@ -77,6 +77,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The shared --outcome-report seam lets the discrimination-audit gate (tools/check_discrimination_audit.py)
+# read this suite's per-id outcomes as structured evidence. It is a no-op unless --outcome-report is passed,
+# so this module's normal 0/1 exit and output are unchanged.
+from _audit_outcome import OutcomeReport  # noqa: E402
 # U1 supplies the outcome model, the section-8.1 type->namespace taxonomy, and the namespace/x-vendor
 # shape helpers; reuse them rather than re-declaring (match-surrounding-code, single source of truth).
 from _opf_store import (  # noqa: E402
@@ -695,6 +699,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
         # grammar (guard-input-soundness; spec 8.1/8.3/8.4). A non-mapping, a non-string key, or a
         # non-TypeSpec value is subsumed here and fails closed. BASELINE_SPECS reconciles cleanly.
         roster_error = _specs_roster_error(specs)
+        # audit-guard: a3-misbound-roster-record-cannot-eval neuter=block-to-pass
         if roster_error is not None:
             return RecordValidation(CANNOT_EVALUATE, [roster_error])
     if not isinstance(record, dict):
@@ -849,6 +854,7 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
         # validate under backlog_item's transition table (guard-input-soundness). A non-mapping, a non-string
         # key, or a non-TypeSpec value is subsumed here and fails closed.
         roster_error = _specs_roster_error(specs)
+        # audit-guard: a3-misbound-roster-transition-cannot-eval neuter=block-to-pass
         if roster_error is not None:
             return TransitionCheck(CANNOT_EVALUATE, [roster_error])
     if not isinstance(type_name, str):
@@ -1198,12 +1204,16 @@ def self_test():
     the returned status/finding values, never by grepping output (spec 8; the isolate-verifiers rule)."""
     failures = []
     checked = 0
+    # The discrimination-audit gate reads this suite's per-id outcomes through the shared seam; a no-op
+    # unless --outcome-report was passed, so the normal run is unchanged.
+    _outcome = OutcomeReport("opf-schema")
 
     def check(name, cond):
         nonlocal checked
         checked += 1
         if not cond:
             failures.append(name)
+        _outcome.record(name, bool(cond))
 
     TS = "2026-08-12T09:14:02Z"
     REG = frozenset({"x-aiqt"})
@@ -1926,6 +1936,7 @@ def self_test():
     check("d1-counters-absent-schema-finding", bool(validate_counters({"counters": {}})[1]))
     check("d1-counters-present-schema-ok", not validate_counters({"schema": 1, "counters": {}})[1])
 
+    _outcome.write()
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
         for f in failures:

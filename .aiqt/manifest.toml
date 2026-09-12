@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "68226d72e8a5fef58e8c046e86040774c103f02d7f40b74c007188615ff3ac2b"
+tree-sha256 = "3e30097b0841266c9ca3627ed79efaebb25e43bfc3cf4726b0d10f2e360a49d4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2181,8 +2181,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 37296
-sha256 = "08f325ab9b1cba3a89418adb7fd8d8a782b27fbf44c49b2eabb9796ae96d6e23"
+bytes = 37380
+sha256 = "f112d3e562c144d09c6b9c2d3272b675a5d3a70485edb2cee3317f8e8cfccf65"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2530,6 +2530,11 @@ bytes = 1122
 sha256 = "c57746b75ebb827bbf7eaa8d876aabef23c3ee347c373a60df5a13cc80ee4358"
 
 [[sources]]
+path = "tools/_audit_outcome.py"
+bytes = 5740
+sha256 = "d5d16a995d9ed99e2d4e191653bc263dbf75fa44ca3a5343d3449fe028299799"
+
+[[sources]]
 path = "tools/_commonmark_headings.py"
 bytes = 28539
 sha256 = "1d53c0c86bd141c27b0b233c5477294ef3483bb5ba40327b8d3467a040e316b0"
@@ -2581,8 +2586,8 @@ sha256 = "8716109b7b039900d572afc25c7d7d6a84822a200b73c912ef88027a7c267acf"
 
 [[sources]]
 path = "tools/_opf_schema.py"
-bytes = 127628
-sha256 = "0a180fd115d92a7f80acbe66df5ec121f4911702b5045a99300b968b9b102782"
+bytes = 128413
+sha256 = "b1972ff327d3f38a18a5dcada1a07d0e87665ddeb295dc9bd6853cb443a765bf"
 
 [[sources]]
 path = "tools/_opf_store.py"
@@ -2813,6 +2818,11 @@ sha256 = "83ce849663fbdc521de2e33de5555b1bab83f6824a0119a3b2db612b5e2b6b9f"
 path = "tools/check_derived_command_parameters.py"
 bytes = 48272
 sha256 = "1089c8073bffac5bbfc8eebf2166f882e471bff26a48100f1a2d1ad4db2eef9f"
+
+[[sources]]
+path = "tools/check_discrimination_audit.py"
+bytes = 62468
+sha256 = "d987c0ef44c2e13b96e3a933ddbb90428473dd4d093d25f860f3ba2e0d9ef712"
 
 [[sources]]
 path = "tools/check_footer.py"
