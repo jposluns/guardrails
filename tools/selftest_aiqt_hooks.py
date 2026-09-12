@@ -2394,6 +2394,34 @@ def main():
         pexpect("(pl-fr1-7) lone commit on main with a 'backup' path remote DENIES (remote-backed)",
                 "git commit -m x", "deny", cwd=str(nr_backup))
 
+        # === F-R2-4: a LONE single segment with no redirects is NOT sufficient to prove the commit's
+        # repo/remote context is stable - an executable command/process substitution INSIDE the commit
+        # (a double-quoted `$(...)`, an unquoted backtick) can mutate that context (add a remote, run a
+        # nested git) before git runs, so the pre-command no-remote probe is stale. The exemption must
+        # require the commit segment be FREE of such substitution (opaque_shell False). Each DENY below
+        # runs from a no-remote main-HEAD cwd (nr_none) and is fail-to-pass under a revert: dropping the
+        # opaque_shell qualifier from lone_direct_commit re-ALLOWS these substitution-bearing commits
+        # (the bypass the finding reported). The positive control (pl-fr1-0 above) proves the exemption
+        # still ALLOWS the genuine lone bare commit, so these denials are the substitution, not the repo.
+        pexpect("(pl-fr4-1) 'git commit -m \"$(git remote add ...)\"' DENIES (command substitution in "
+                "the commit segment; no-remote probe is stale)",
+                'git commit --allow-empty -m "$(git remote add origin /some/path; echo qa)"',
+                "deny", cwd=str(nr_none))
+        pexpect("(pl-fr4-2) 'git commit -m `git remote add ...`' DENIES (backtick command substitution)",
+                "git commit --allow-empty -m `git remote add origin /some/path && echo qa`",
+                "deny", cwd=str(nr_none))
+        # A LONE single-segment backtick (no internal metachar to split on) is the strict fail-to-pass
+        # for the backtick vector on the opaque_shell qualifier: pl-fr4-2's payload denies via multi-
+        # segment (its internal '&&' splits it) even without the qualifier, whereas this one is a single
+        # segment whose ONLY disqualifier is opaque_shell, so reverting the qualifier re-ALLOWS it.
+        pexpect("(pl-fr4-2b) lone single-segment backtick commit DENIES (opaque_shell command "
+                "substitution; strict fail-to-pass for the qualifier)",
+                "git commit --allow-empty -m `whoami`", "deny", cwd=str(nr_none))
+        pexpect("(pl-fr4-3) 'git commit -m \"$(git -C <repo> commit ...)\"' DENIES (nested-git command "
+                "substitution)",
+                'git commit --allow-empty -m "$(git -C {} commit --allow-empty -m injected; echo qa)"'
+                .format(nr_upstream), "deny", cwd=str(nr_none))
+
         # === ROUND-2 FINDING 13: classify a commit against the branch it will ACTUALLY land on ===========
         # Direction 1 (false-DENY fix): a 'git switch -c <feature> && git commit' on a main HEAD lands on the
         # NEW branch, so it ALLOWS (was denied on the stale pre-command main HEAD). Discriminates: without the

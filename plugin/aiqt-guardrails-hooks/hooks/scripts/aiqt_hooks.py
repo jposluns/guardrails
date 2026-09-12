@@ -5659,7 +5659,9 @@ def _commit_on_protected(tokens, cwd, switched_to=None, lone_direct=False):
         # has no server-side branch protection and no PR/CI path, so direct-to-main is its only model (a
         # local record store committed once per session at handoff). F-R2-1 (2026-09-12): it is granted ONLY
         # for a LONE, directly-bound `git commit` whose repo/remote context is provable - lone_direct (a single
-        # simple command: no compound &&/;/|, no preceding cd or remote mutation, no redirect) AND
+        # simple command: no compound &&/;/|, no preceding cd or remote mutation, no redirect, and (F-R2-4) no
+        # executable command/process substitution in the segment, which could mutate the repo/remote before git
+        # runs) AND
         # _segment_dir_simple (base is the session cwd the commit actually runs in, not a -C/redirect target).
         # A compound/cd-bearing/redirected commit is denied here EXACTLY as before the exemption, since its
         # pre-command remote-absence probe is stale (a `cd remote-repo && commit` or a `git remote add && commit`
@@ -5770,7 +5772,17 @@ def protected_line(data):
     # then stale (cd changes the repo git commits to; `git remote add && commit` adds the remote after the
     # probe ran). The commit segment must ALSO be _segment_dir_simple (base == the session cwd it actually runs
     # in) for the exemption to apply; that is checked in _commit_on_protected.
-    lone_direct_commit = len(seg_records) == 1 and not seg_records[0].redirects
+    # F-R2-4: a single segment with no redirects is NOT sufficient to prove the commit's repo/remote
+    # context is stable - an executable command/process substitution inside the command (a `$(...)`,
+    # a backtick, or a `<(`/`>(` process substitution) can mutate that context before git runs (e.g.
+    # `git commit -m "$(git remote add origin /path; echo qa)"` adds a remote the pre-command probe
+    # never saw). The segment's opaque_shell flag is exactly "an unquoted expansion/substitution the
+    # ALLOW proof may not rest on" (it is set for a double-quoted `$(...)` and an unquoted backtick;
+    # a `<(`/`>(` process substitution raises in the lexer and takes the fallback path), so a lone
+    # commit whose segment is opaque_shell is NOT exempted and falls through to the normal protected-
+    # branch deny. Conservative by direction: an opaque commit on a no-remote protected branch denies.
+    lone_direct_commit = (len(seg_records) == 1 and not seg_records[0].redirects
+                          and not seg_records[0].opaque_shell)
     cwd = data.get("cwd")
     # No-ask posture: a CONFIRMED protected-line rewrite (force-push/delete of a protected ref, or a commit
     # provably on the protected branch) DENIES-and-educates and returns immediately. A push this guard cannot
