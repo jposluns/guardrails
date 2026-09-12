@@ -68,7 +68,7 @@ HOOK_KEYS = {"id", "rules", "platform", "event", "matcher", "handler", "default"
 REQUIRED_HOOK_KEYS = HOOK_KEYS - {"matcher", "stage"}
 PLUGIN_KEYS = ("name", "version", "description", "author-name", "author-email", "homepage")
 PLATFORMS = {"claude-code"}
-DEFAULTS = {"block", "ask", "warn"}
+DEFAULTS = {"block", "warn"}  # no-ask posture: "ask" is not a permitted default
 CLASSES = {"a", "b", "c", "d"}
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")     # a stable kebab-case control id
@@ -607,13 +607,24 @@ def self_test_main():
                                 "(default is authoring metadata, not rendered output)")
 
         # 13. A malformed/unknown default keyword fails closed (the default whitelist), so a typo can
-        #     never silently select an unintended enforcement posture.
+        #     never silently select an unintended enforcement posture. Under the no-ask posture "ask" is
+        #     no longer a permitted default and is rejected exactly like any other unknown keyword.
+        #     Asserting both that "ask" is absent from DEFAULTS and that a manifest default = "ask"
+        #     fails closed makes a revert of the no-ask removal fail this self-test (discrimination).
+        if "ask" in DEFAULTS:
+            failures.append("no-ask posture: 'ask' must not be a permitted default (DEFAULTS whitelist)")
         baddefault = tmp / "baddefault"
         baddefault.mkdir()
         _build_tree(baddefault)
         _mutate(baddefault, 'default = "block"', 'default = "nonesuch"')
         if run_quiet(baddefault, check=True) != 2:
             failures.append("unknown default keyword expected exit 2 (fail-closed)")
+        askdefault = tmp / "askdefault"
+        askdefault.mkdir()
+        _build_tree(askdefault)
+        _mutate(askdefault, 'default = "block"', 'default = "ask"')
+        if run_quiet(askdefault, check=True) != 2:
+            failures.append("no-ask posture: manifest default = \"ask\" expected exit 2 (fail-closed)")
 
         # 14. 'warn' on PreToolUse is legal ONLY under the explicit recorded stage = "bake" posture.
         bake = tmp / "bake"

@@ -28,7 +28,8 @@ keys except `version` are optional; an undeclared surface simply removes the pro
   "mistakes_register": "path",
   "attestations": "path",
   "staleness": {"external_hours": 24, "task_hours": 24},
-  "escape": {"path": "path"}
+  "escape": {"path": "path"},
+  "companion_stores": ["/abs/path/to/a/store/repo/root"]
 }
 ```
 
@@ -48,6 +49,36 @@ the next resume audit. Where operator and assistant share one uid, no file eithe
 so the clean-ALLOW escape channel is unavailable there: recovery is a differently-owned sentinel
 (for example root-owned), registry or mode maintenance by the operator, or the bounded, marked exit;
 split-uid deployment is the recommended posture.
+
+`companion_stores` is an optional list of ABSOLUTE paths to git repo TOPLEVELS beside the session
+repo that the write-scope guard (wrtscp) treats as SANCTIONED cross-repo write targets: the most
+common case is the sole orchestrator's own durable store, which is by design a SECOND git repo next
+to the code repo. A guarded Write/Edit/MultiEdit whose target resolves, by EXACT repo-root match
+(the target's own resolved git toplevel EQUALS a declared store root, never a prefix or substring),
+into a declared store is ALLOWED and AUDITED (a `guard-events.jsonl` row, kind `wrtscp`, decision
+`allow`) instead of denied as an out-of-repo aiming error. It is honoured only when well-formed:
+each entry must be a non-empty absolute string resolving to a real git toplevel that IS the declared
+root itself; a malformed, unresolvable, non-repo, or non-root entry is fail-closed (dropped, so the
+cross-repo write still denies), and a bad entry can only ever remove a would-be allow, never open a
+hole. Declaring a store does not let a write escape into a repo nested inside it (a nested repo's
+toplevel differs) nor defeat the frozen-floor or nested-in-session denials. Like every registry key
+it is adopter/harness-controlled config the guard READS; the guard never self-widens, and integrity
+of the registry file itself is the harness's to hold.
+
+Declaring a companion store is a GUARDRAIL-CONFIGURATION change, not a routine edit: `companion_stores`
+widens where the write-scope guard permits covered writes to land (a cross-repo scope widening), so it
+is governed by the SAME human-authorization discipline as any other scope widening (the
+guardrail-config-integrity rule) and is set by the operator/harness on the registry surface, never by
+the constrained actor. To enforce that, the write-scope guard freezes the machine-local registry
+`.aiqt/orchestration.local.json` against the actor's OWN covered writes: a guarded Write/Edit/MultiEdit
+targeting it is DENIED in both the armed and un-armed regimes and independent of the committed frozen
+floor, so the actor cannot self-declare a companion-store (or yield-tool) widening through a covered
+tool. This is defence in depth on the covered-tool path; a Bash-mediated write (a redirect, `sed -i`)
+remains the disclosed write-scope residual, closed only by an OS-level write sandbox. A `companion_stores`
+declaration takes effect only inside a VERSION-1 registry object: a registry whose `version` key is
+missing or not `1` is read as bad (a cannot-evaluate), so a declaration that omits `"version": 1` yields
+no stores and every cross-repo write FAILS CLOSED (denies) rather than the declaration silently taking
+effect.
 
 A declared `attestations` register is a chained, append-only row file (AT-N ids; the
 mistakes-register machinery under a different prefix: `tools/orch_register.py append --prefix AT`

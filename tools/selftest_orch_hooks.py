@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
 """Behavioural self-test for the GD-112 orchestrator-integrity handlers in
 .aiqt/core/hooks/scripts/aiqt_hooks.py (the section-e acceptance vectors; authored BEFORE the core,
-test-first). Filesystem-write hermetic in its fixtures: every case runs against throwaway fixtures
+test-first).
+
+NO-ASK READING KEY (disclose-accuracy): the enforcement hooks NO LONGER emit permissionDecision "ask"
+(the _ask constructor is removed and selftest_aiqt_hooks.py's global invariant asserts it). The
+orch_truncation_guard cases that historically ASKED are now: a background dispatch carrying shell syntax
+or a reserved word -> ALLOW-WITH-NOTE (the _verdict reducer labels this "warn": a systemMessage with no
+permissionDecision), because denying legitimate background fan-out that redirects/pipes its own output
+would stall an unattended run; a foreground bare-& detach -> DENY-and-educate (use the tracked background
+dispatch, or run it foreground and wait), including the wait-loop degrade path where the classifier is
+'indeterminate' and the truncation guard decides. The value "ask" survives only in the reducer's
+vocabulary and never as a handler outcome; where prose or a case label still says "ASK"/"asks", read it
+as that resolution (a "-allows-note" case reduces to "warn", a "-denies" case to "deny"). The separate
+unattended-ask blocker (orch_ask_guard) is unrelated: it DENIES a manufactured ask in unattended mode,
+and its "ask/*" case names refer to that blocked ask, not to a guard asking.
+
+Filesystem-write hermetic in its fixtures: every case runs against throwaway fixtures
 under a per-case temp dir (its own git repo, its own registry, its own enumerator stub, its own
 state dir), removed in a finally, and the fixtures write nowhere else. A DIRECT invocation is NOT
 read-hermetic: the fixtures' git calls still read the ambient per-user git configuration (the
@@ -593,46 +608,68 @@ def main(report_path=None):
         bg = lambda cmd, rib=True: aiqt_hooks.orch_truncation_guard(
             t.payload("PreToolUse", "Bash",
                       {"command": cmd, "run_in_background": rib}))
-        # AIRTIGHT-NARROW truncation guard (round 32): ALLOW only a plain metacharacter-free background
-        # command; ANY shell metacharacter -> ASK; foreground out of scope; only the no-command case DENIES.
+        # AIRTIGHT-NARROW truncation guard (round 32): ALLOW (silent) only a plain metacharacter-free
+        # background command; ANY OTHER shell metacharacter -> ALLOW-WITH-NOTE (the reducer labels it "warn":
+        # denying a background dispatch that redirects or pipes its own output would block legitimate
+        # fan-out, so the guard proceeds and notes the durable-capture guidance instead of prompting;
+        # historically this ASKED); foreground out of scope; the no-command case DENIES.
+        # ROUND-2 FINDING 9 EXCEPTION: a background dispatch that pipes a PRODUCER into a TRUNCATING SINK
+        # (head/tail) discards the producer's full output AND its exit status (the completion signal binds to
+        # the truncated view, a failing producer reads clean), so it DENIES-and-educates - a proven false-clean
+        # hazard, not a merely-unprovable capture. cat/tee pass output through, so they stay "warn".
         check("trunc/plain-bg-allows", _verdict(bg("python3 build.py")), "allow")
         check("trunc/plain-args-allows", _verdict(bg("pytest -q tests/unit")), "allow")
         check("trunc/plain-flag-eq-allows", _verdict(bg("python3 build.py --out=dist/log")), "allow")
         check("trunc/plain-envprefix-allows", _verdict(bg("PYTHONPATH=src python3 build.py")), "allow")
-        check("trunc/pipe-asks", _verdict(bg("python3 build.py | tail -5")), "ask")
-        check("trunc/head-asks", _verdict(bg("python3 build.py | head -20")), "ask")
-        check("trunc/tee-asks", _verdict(bg("python3 build.py | tee full.out")), "ask")
-        check("trunc/redirect-asks", _verdict(bg("python3 build.py > out.txt")), "ask")
-        check("trunc/quoted-redirect-asks", _verdict(bg("grep '>' index.html | head -5")), "ask")
-        check("trunc/quoted-pipe-asks", _verdict(bg("grep '|' file")), "ask")
-        check("trunc/amp-asks", _verdict(bg("python3 build.py | tail &")), "ask")
-        check("trunc/semicolon-asks", _verdict(bg("python3 a.py ; python3 b.py")), "ask")
-        check("trunc/subshell-asks", _verdict(bg("( python3 build.py | tail )")), "ask")
-        check("trunc/brace-asks", _verdict(bg("{ python3 build.py | tail; }")), "ask")
-        check("trunc/dollar-var-asks", _verdict(bg("python3 build.py > $OUT")), "ask")
-        check("trunc/cmdsub-asks", _verdict(bg("python3 build.py > $(date).log")), "ask")
-        check("trunc/backtick-asks", _verdict(bg("python3 build.py > `date`.log")), "ask")
-        check("trunc/coproc-asks", _verdict(bg("coproc producer")), "ask")
-        check("trunc/reserved-time-asks", _verdict(bg("time python3 build.py")), "ask")
-        check("trunc/reserved-for-asks", _verdict(bg("for x in a b")), "ask")
-        check("trunc/glob-asks", _verdict(bg("cat *.log")), "ask")
-        check("trunc/comment-asks", _verdict(bg("python3 build.py # note")), "ask")
-        check("trunc/shell-c-asks", _verdict(bg("bash -c 'python3 build.py | tail'")), "ask")
-        check("trunc/tilde-asks", _verdict(bg("cat ~/notes.txt")), "ask")
+        check("trunc/pipe-tail-denies", _verdict(bg("python3 build.py | tail -5")), "deny")
+        check("trunc/head-denies", _verdict(bg("python3 build.py | head -20")), "deny")
+        check("trunc/tee-allows-note", _verdict(bg("python3 build.py | tee full.out")), "warn")
+        check("trunc/redirect-allows-note", _verdict(bg("python3 build.py > out.txt")), "warn")
+        # a producer piped into head is a truncating sink even with a quoted-redirect earlier stage -> DENY.
+        check("trunc/quoted-redirect-head-denies", _verdict(bg("grep '>' index.html | head -5")), "deny")
+        check("trunc/quoted-pipe-allows-note", _verdict(bg("grep '|' file")), "warn")
+        check("trunc/amp-tail-denies", _verdict(bg("python3 build.py | tail &")), "deny")
+        check("trunc/semicolon-allows-note", _verdict(bg("python3 a.py ; python3 b.py")), "warn")
+        # the truncating sink is caught through subshell/brace wrappers too (class width).
+        check("trunc/subshell-tail-denies", _verdict(bg("( python3 build.py | tail )")), "deny")
+        check("trunc/brace-tail-denies", _verdict(bg("{ python3 build.py | tail; }")), "deny")
+        # ROUND-7 (codex finding 5): the sink is resolved THROUGH shell command-modifier wrappers
+        # (command/env/nice/stdbuf/... with their own option/assignment args), so a truncating sink hidden
+        # behind a wrapper is still caught; a genuine NON-truncating wrapped command still allows-with-note.
+        # Reverting to the un-wrapped command-word read reds the four deny cases (they become "warn").
+        check("trunc/wrap-command-head-denies", _verdict(bg("python3 build.py | command head -5")), "deny")
+        check("trunc/wrap-env-head-denies", _verdict(bg("python3 build.py | env head -5")), "deny")
+        check("trunc/wrap-env-assign-tail-denies", _verdict(bg("python3 build.py | env FOO=1 tail")), "deny")
+        check("trunc/wrap-nice-sep-head-denies", _verdict(bg("python3 build.py | nice -n 0 head")), "deny")
+        check("trunc/wrap-stdbuf-attached-head-denies",
+              _verdict(bg("python3 build.py | stdbuf -oL head")), "deny")
+        check("trunc/wrap-command-cat-allows-note", _verdict(bg("python3 build.py | command cat")), "warn")
+        check("trunc/wrap-env-grep-allows-note", _verdict(bg("python3 build.py | env grep x")), "warn")
+        check("trunc/dollar-var-allows-note", _verdict(bg("python3 build.py > $OUT")), "warn")
+        check("trunc/cmdsub-allows-note", _verdict(bg("python3 build.py > $(date).log")), "warn")
+        check("trunc/backtick-allows-note", _verdict(bg("python3 build.py > `date`.log")), "warn")
+        check("trunc/coproc-allows-note", _verdict(bg("coproc producer")), "warn")
+        check("trunc/reserved-time-allows-note", _verdict(bg("time python3 build.py")), "warn")
+        check("trunc/reserved-for-allows-note", _verdict(bg("for x in a b")), "warn")
+        check("trunc/glob-allows-note", _verdict(bg("cat *.log")), "warn")
+        check("trunc/comment-allows-note", _verdict(bg("python3 build.py # note")), "warn")
+        check("trunc/shell-c-allows-note", _verdict(bg("bash -c 'python3 build.py | tail'")), "warn")
+        check("trunc/tilde-allows-note", _verdict(bg("cat ~/notes.txt")), "warn")
         check("trunc/foreground-plain-allows", _verdict(bg("python3 build.py", rib=False)), "allow")
         check("trunc/foreground-pipe-allows", _verdict(bg("python3 build.py | tail -5", rib=False)), "allow")
         check("trunc/foreground-tee-allows", _verdict(bg("python3 build.py | tee f", rib=False)), "allow")
         check("trunc/empty-bg-denies", _verdict(bg("")), "deny")
         # L-GS1 / trkasy: foreground bare-& detach coverage. A plain foreground call stays out of scope, but
-        # a bare `&` detaches a child into untracked async work -> ASK. The shell forms that also carry an
-        # ampersand but do NOT detach (&&, &>, &>>, <&, >&, |&, and any quoted or escaped &) stay ALLOW; the
-        # narrow scanner over-asks (never silently allows) on grammar it cannot model.
-        check("trunc/fg-detach-trailing-asks", _verdict(bg("long_job &", rib=False)), "ask")
-        check("trunc/fg-detach-between-asks", _verdict(bg("worker & echo done", rib=False)), "ask")
-        check("trunc/fg-detach-grouped-asks", _verdict(bg("( long_job & )", rib=False)), "ask")
-        check("trunc/fg-detach-newline-asks", _verdict(bg("long_job &\necho next", rib=False)), "ask")
+        # a bare `&` detaches a child into untracked async work -> DENY-and-educate (use the tracked
+        # background dispatch, or run it foreground and wait; historically this ASKED). The shell forms that
+        # also carry an ampersand but do NOT detach (&&, &>, &>>, <&, >&, |&, and any quoted or escaped &)
+        # stay ALLOW; the narrow scanner over-denies (never silently allows) on grammar it cannot model.
+        check("trunc/fg-detach-trailing-denies", _verdict(bg("long_job &", rib=False)), "deny")
+        check("trunc/fg-detach-between-denies", _verdict(bg("worker & echo done", rib=False)), "deny")
+        check("trunc/fg-detach-grouped-denies", _verdict(bg("( long_job & )", rib=False)), "deny")
+        check("trunc/fg-detach-newline-denies", _verdict(bg("long_job &\necho next", rib=False)), "deny")
         # a later `wait` does not clear it: the lexical hook cannot prove the correct child is awaited.
-        check("trunc/fg-detach-then-wait-asks", _verdict(bg("worker & wait", rib=False)), "ask")
+        check("trunc/fg-detach-then-wait-denies", _verdict(bg("worker & wait", rib=False)), "deny")
         check("trunc/fg-logical-and-allows", _verdict(bg("build && test", rib=False)), "allow")
         check("trunc/fg-amp-redirect-allows", _verdict(bg("build &> out.log", rib=False)), "allow")
         check("trunc/fg-amp-redirect-append-allows", _verdict(bg("build &>> out.log", rib=False)), "allow")
@@ -647,15 +684,17 @@ def main(report_path=None):
         check("trunc/scan-quoted-redirect-detach", aiqt_hooks._orch_foreground_detach('echo ">" &'), True)
         check("trunc/scan-escaped-gt-then-detach", aiqt_hooks._orch_foreground_detach("echo \\>&"), True)
         check("trunc/scan-real-dup-not-detach", aiqt_hooks._orch_foreground_detach("cmd 2>&1"), False)
-        # finding E (unbalanced/ambiguous quoting fails toward ASK, never a silent allow of a real `&`): a
+        # finding E (unbalanced/ambiguous quoting fails toward treating it as a detach - now a DENY, once an
+        # ASK - never a silent allow of a real `&`): a
         # scan that ends still inside a quote (an unbalanced quote, or an ANSI-C $'...' construct this scan
         # does not model) could hide a real trailing `&`, so it reports a detach. Without the fix each of
         # these ended `inside quotes` and returned False, silently allowing the real `&`.
         check("trunc/scan-ansi-c-hidden-detach", aiqt_hooks._orch_foreground_detach(r"echo $'a\'b' & echo x"), True)
         check("trunc/scan-unbalanced-single-asks", aiqt_hooks._orch_foreground_detach("echo 'oops & bg"), True)
-        check("trunc/fg-ansi-c-hidden-detach-asks", _verdict(bg(r"echo $'a\'b' & echo x", rib=False)), "ask")
+        check("trunc/fg-ansi-c-hidden-detach-denies", _verdict(bg(r"echo $'a\'b' & echo x", rib=False)), "deny")
         # finding F (an unquoted word-start `#` comment is dropped, so a commented-out `&` does not prompt):
-        # without the fix the `&` in comment text was scanned as an operator and over-ASKED.
+        # without the fix the `&` in comment text was scanned as an operator and over-fired (historically an
+        # over-ASK, now an over-deny).
         check("trunc/scan-comment-amp-not-detach", aiqt_hooks._orch_foreground_detach("echo done # & comment"), False)
         check("trunc/scan-comment-leading-hash-not-detach", aiqt_hooks._orch_foreground_detach("# long_job &"), False)
         # L-GS1 fix-round: a `#` comment runs only to the end of ITS line, never to the end of a multi-line
@@ -663,7 +702,7 @@ def main(report_path=None):
         # the fix the whole scan broke at the first `#`, so these two silently ALLOWED (returned False).
         check("trunc/scan-comment-then-detach-nextline", aiqt_hooks._orch_foreground_detach("echo hi  # note\nsleep 100 &"), True)
         check("trunc/scan-leading-comment-then-detach", aiqt_hooks._orch_foreground_detach("# lead comment\nsleep 100 &"), True)
-        check("trunc/fg-comment-then-detach-asks", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "ask")
+        check("trunc/fg-comment-then-detach-denies", _verdict(bg("echo hi  # note\nsleep 100 &", rib=False)), "deny")
         check("trunc/fg-comment-amp-allows", _verdict(bg("echo done # & comment", rib=False)), "allow")
         # inert when the orchestration registry is absent: a foreground bare-& acquires no new prompt.
         ti = Fixture(tmp, "trunc-inert")
@@ -694,7 +733,8 @@ def main(report_path=None):
         check("wl/deny-watch-token",
               clf("while true; do run_check --watch; sleep 5; done &"), "match")
         # GD-137 PR1 round 2: a nested loop is no longer force-attributed to one canonical shape (that was
-        # the B2-class false positive). Two raw-unquoted headers -> 'indeterminate', deferring to the ASK.
+        # the B2-class false positive). Two raw-unquoted headers -> 'indeterminate', deferring to the
+        # truncation guard on the same event (now deny for a detach / allow-note for shell syntax; once an ASK).
         check("wl/nested-indeterminate",
               clf("while outer; do while inner; do gh api x; sleep 1; done; done &"), "indeterminate")
         # GD-137 PR1 round 2: the codex false-positive BLOCKERs the redesign eliminates. A 'match' on any of
@@ -744,7 +784,8 @@ def main(report_path=None):
         ]:
             check(cid, clf(cmd), "none")
         # indeterminate cases -> 'indeterminate' here (never this deny), and still reach the truncation
-        # guard's ASK on the same event (the degrade path).
+        # guard's decision on the same event (the degrade path); for a foreground bare-& detach that
+        # decision is now DENY-and-educate (historically an ASK).
         HEREDOC = "cat <<EOF > poll.sh\nwhile true; do gh pr checks 42; sleep 30; done &\nEOF\n"
         UNBAL = "while true; do gh pr checks 42; sleep 30; done ' &"     # unbalanced quote before the &
         GROUPED = "( while true; do gh pr checks 42; sleep 30; done ) &"  # subshell-grouped detach
@@ -752,16 +793,17 @@ def main(report_path=None):
                          ("wl/indeterminate-unbalanced", UNBAL),
                          ("wl/indeterminate-grouped", GROUPED)]:
             check(cid, clf(cmd), "indeterminate")
-        # degrade path: this guard emits nothing (allow) while the truncation guard ASKs on the bare-& detach.
+        # degrade path: this guard emits nothing (allow) while the truncation guard DENIES-and-educates the
+        # foreground bare-& detach on the same event (historically an ASK).
         wl = lambda cmd, rib=False: aiqt_hooks.orch_untracked_wait_loop(
             w.payload("PreToolUse", "Bash", {"command": cmd, "run_in_background": rib}))
         tg = lambda cmd, rib=False: aiqt_hooks.orch_truncation_guard(
             w.payload("PreToolUse", "Bash", {"command": cmd, "run_in_background": rib}))
         for guard_cid, trunc_cid, cmd in [
-                ("wl/degrade-unbalanced-guard-allows", "wl/degrade-unbalanced-trunc-asks", UNBAL),
-                ("wl/degrade-grouped-guard-allows", "wl/degrade-grouped-trunc-asks", GROUPED)]:
+                ("wl/degrade-unbalanced-guard-allows", "wl/degrade-unbalanced-trunc-denies", UNBAL),
+                ("wl/degrade-grouped-guard-allows", "wl/degrade-grouped-trunc-denies", GROUPED)]:
             check(guard_cid, _verdict(wl(cmd)), "allow")
-            check(trunc_cid, _verdict(tg(cmd)), "ask")
+            check(trunc_cid, _verdict(tg(cmd)), "deny")
         # handler DENY: the three brief DENY fixtures, plus the first with run_in_background:true.
         check("wl/handler-deny-while", _verdict(wl("while true; do gh pr checks 42; sleep 30; done &")),
               "deny")
@@ -1518,10 +1560,13 @@ def main(report_path=None):
           "schedule path denies on cannot-evaluate with a three-denial cap and "
           "wake hygiene, and the measured quiet figure beats a claimed one; the unattended-ask "
           "blocker reproduces the host hook's regression vectors with an idempotent redacted pending "
-          "row; the truncation guard allows a plain metacharacter-free background command and asks on "
-          "any shell syntax or reserved word, asks on a foreground bare-& detach while dropping a "
-          "word-start `#` comment and failing an unbalanced/ANSI-C quote toward ASK rather than a silent "
-          "allow; the ledger records launches and completions; the resume "
+          "row; the truncation guard allows (silently) a plain metacharacter-free background command and "
+          "ALLOWS-WITH-NOTE (reducer 'warn') any other shell syntax or reserved word, DENIES-and-educates a "
+          "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
+          "producer's full output and exit status) and a "
+          "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
+          "and failing an unbalanced/ANSI-C quote toward treating it as a detach (now a deny) rather than a "
+          "silent allow; the ledger records launches and completions; the resume "
           "audit arms and clears the mutation barrier on real record state; the prompt stamp "
           "resets guard counters from genuine human input; an actor-owned, symlinked, or writable "
           "escape sentinel is ignored, recorded, and surfaced once at resume; a declared attestation "
