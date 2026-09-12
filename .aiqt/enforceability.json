@@ -17,7 +17,7 @@
         },
         {
           "class": "b",
-          "default": "ask",
+          "default": "block",
           "event": "PreToolUse",
           "id": "abs-paths-bash",
           "matcher": "Bash",
@@ -448,7 +448,7 @@
       "hooks": [
         {
           "class": "b",
-          "default": "ask",
+          "default": "block",
           "event": "PreToolUse",
           "id": "git-discard",
           "matcher": "Bash",
@@ -457,7 +457,7 @@
         },
         {
           "class": "b",
-          "default": "ask",
+          "default": "block",
           "event": "PreToolUse",
           "id": "git-explicit-binding",
           "matcher": "Bash",
@@ -688,7 +688,7 @@
       "hooks": [
         {
           "class": "c",
-          "default": "ask",
+          "default": "block",
           "event": "PreToolUse",
           "id": "gensrc-edit-guard",
           "matcher": "Write|Edit|MultiEdit",
@@ -864,7 +864,7 @@
       "hooks": [
         {
           "class": "b",
-          "default": "ask",
+          "default": "block",
           "event": "PreToolUse",
           "id": "git-discard",
           "matcher": "Bash",
@@ -1423,7 +1423,7 @@
       "hooks": [
         {
           "class": "b",
-          "default": "ask",
+          "default": "block",
           "event": "PreToolUse",
           "id": "commit-msg-subst",
           "matcher": "Bash",

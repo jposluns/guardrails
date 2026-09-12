@@ -376,6 +376,33 @@ def _read_word(command, i, n):
                 i += 1
             all_digits = False
             continue
+        if c == "$" and i + 1 < n and command[i + 1] == "'":
+            # ANSI-C quoting $'...': the content is LITERAL - bash performs NO command substitution,
+            # parameter expansion, or globbing inside it - so a backtick or $( inside is NOT executable
+            # (round-2 finding 15). It is read like a single quote (literal, NOT opaque); a backslash escapes
+            # the next character (so an escaped \' does not end the string, and \\ is one backslash). The
+            # common ANSI-C escapes are not expanded to their control bytes (the guards that consume this
+            # judge substitution/expansion, not exact content), but the marker-bearing value is no longer
+            # flagged opaque, so a literal $'...msg...' commit message is allowed.
+            if tilde_prefix_open:
+                leading_tilde = False
+                tilde_prefix_open = False
+            i += 2
+            while True:
+                if i >= n:
+                    raise ValueError("unterminated ANSI-C ($'...') quote")
+                d = command[i]
+                if d == "\\" and i + 1 < n:
+                    chars.append(command[i + 1])
+                    i += 2
+                    continue
+                if d == "'":
+                    i += 1
+                    break
+                chars.append(d)
+                i += 1
+            all_digits = False
+            continue
         if c == "\\":  # unquoted escape: the next character is literal (a backslash-newline continuation
             # was already consumed above, before the word could start)
             if tilde_prefix_open:  # an escape inside the tilde-prefix disables bash expansion: stays relative
@@ -515,11 +542,95 @@ def _target_class(target, t_opaque):
     return "file-real"
 
 
+def _parse_heredoc_delim(command, at, n):
+    """ROUND-2 FINDING 17. Parse a heredoc delimiter spec starting immediately after '<<' (index `at`).
+    Returns (quoted, delim, strip_tabs, next_i) or None when it cannot be parsed (so the caller keeps the
+    conservative unsupported-construct raise). `quoted` is True for the <<'EOF' / <<"EOF" / <<\\EOF forms,
+    whose body bash treats as LITERAL DATA with no expansion or command substitution; `strip_tabs` is True
+    for the <<- form; `next_i` is the index just past the delimiter spec (still on the same line)."""
+    j = at
+    strip_tabs = False
+    if j < n and command[j] == "-":
+        strip_tabs = True
+        j += 1
+    while j < n and command[j] in " \t":
+        j += 1
+    if j >= n:
+        return None
+    c = command[j]
+    if c in ("'", '"'):
+        k = command.find(c, j + 1)
+        if k < 0:
+            return None
+        return (True, command[j + 1:k], strip_tabs, k + 1)
+    quoted = False
+    if c == "\\":               # <<\EOF: the backslash quotes the delimiter -> literal body
+        quoted = True
+        j += 1
+    delim_chars = []
+    while j < n and command[j] not in " \t\n" and command[j] not in _METACHARS:
+        delim_chars.append(command[j])
+        j += 1
+    if not delim_chars:
+        return None
+    return (quoted, "".join(delim_chars), strip_tabs, j)
+
+
+def _skip_heredoc_bodies(command, i, n, heredocs):
+    """Advance past the bodies of a run of QUOTED heredocs (in the order their '<<' operators appeared on the
+    line), each ending at a line that is EXACTLY its delimiter (leading tabs stripped for the <<- form). An
+    unterminated heredoc consumes the rest of the command (bash would still be reading input). Returns the
+    index just past the last consumed body. The bodies are literal data and are excluded from analysis."""
+    for delim, strip_tabs in heredocs:
+        while i < n:
+            nl = command.find("\n", i)
+            line = command[i:(nl if nl != -1 else n)]
+            cand = line.lstrip("\t") if strip_tabs else line
+            i = n if nl == -1 else nl + 1
+            if cand == delim:
+                break
+    return i
+
+
+def _strip_quoted_heredoc_bodies(command):
+    """ROUND-2 FINDING 17. Return `command` with the BODIES of QUOTED heredocs (<<'EOF'/<<"EOF"/<<\\EOF)
+    removed, so a RAW (regex) scan that runs unconditionally - e.g. git_discard's _raw_has_lossy_git - does
+    not match shell syntax quoted inside heredoc prose. Everything OUTSIDE the quoted-heredoc bodies is
+    preserved verbatim (a real 'git reset --hard <<'EOF'...' still scans as lossy). UNQUOTED heredoc bodies
+    interpolate and stay in scope. Best-effort and conservative: on any ambiguity the text is left in place
+    (the raw scan then over-matches, the safe direction), and multiple heredocs stacked on one line beyond
+    the first are a disclosed over-match residual, never an under-match."""
+    n = len(command)
+    out = []
+    i = 0
+    while i < n:
+        lt = command.find("<<", i)
+        if lt < 0:
+            out.append(command[i:])
+            break
+        parsed = _parse_heredoc_delim(command, lt + 2, n)
+        if parsed is None or not parsed[0]:
+            out.append(command[i:lt + 2])   # not a quoted heredoc: keep the '<<' and continue past it
+            i = lt + 2
+            continue
+        _q, delim, strip_tabs, next_i = parsed
+        nl = command.find("\n", next_i)
+        if nl < 0:
+            out.append(command[i:next_i])    # the opening line has no body yet (no newline): keep, done
+            i = next_i
+            continue
+        out.append(command[i:nl + 1])        # keep through the opening line's newline
+        i = _skip_heredoc_bodies(command, nl + 1, n, [(delim, strip_tabs)])  # drop the body region
+    return "".join(out)
+
+
 def _lex_command(command, partial=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
-    escape, a NUL, or an unsupported construct (a heredoc/here-string, a process substitution, a '{fd}>'
-    redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on a
-    partially-cleaned command. Linear, non-recursive, stdlib-only.
+    escape, a NUL, or an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
+    '{fd}>' redirect, or a malformed redirect), so the caller falls back conservatively rather than acting on
+    a partially-cleaned command. A QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) is NOT unsupported: its literal
+    body is EXCLUDED from analysis (round-2 finding 17) so a guard never fires on shell syntax quoted inside
+    heredoc prose. Linear, non-recursive, stdlib-only.
 
     When partial is True the raise-on-error contract is replaced by a best-effort one: instead of raising,
     the lexer returns (segments, complete), where segments are the COMPLETE segments recovered before the
@@ -536,6 +647,7 @@ def _lex_command(command, partial=False):
     redirects = []
     opaque = [False]
     seg_start = [0]
+    pending_heredocs = []  # queued (delim, strip_tabs) for QUOTED heredocs whose bodies to skip (finding 17)
 
     def end_segment(sep, op_start, next_start):
         segments.append(_Segment(list(argv), sep, list(redirects),
@@ -574,6 +686,12 @@ def _lex_command(command, partial=False):
             if c == "\n":
                 end_segment("", i, i + 1)
                 i += 1
+                if pending_heredocs:
+                    # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
+                    # literal data (finding 17), then resume lexing after the closing delimiter line(s).
+                    i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
+                    del pending_heredocs[:]
+                    seg_start[0] = i
                 continue
             if c == "#":
                 # An unquoted '#' at a WORD BOUNDARY starts a comment to end of line (bash): the rest of
@@ -590,6 +708,17 @@ def _lex_command(command, partial=False):
                     i += oplen
                     continue
                 if kind == "cannot":
+                    if op == "<<":
+                        parsed = _parse_heredoc_delim(command, i + oplen, n)
+                        if parsed is not None and parsed[0]:
+                            # a QUOTED heredoc: queue its delimiter; the literal body is skipped at the next
+                            # newline (finding 17). The delimiter spec is consumed here; the current line's
+                            # remaining tokens (e.g. 'cat <<'EOF' > out') keep being lexed normally. An
+                            # UNQUOTED heredoc (parsed[0] False) interpolates and stays the unsupported raise.
+                            _quoted, _delim, _strip, _next_i = parsed
+                            pending_heredocs.append((_delim, _strip))
+                            i = _next_i
+                            continue
                     raise ValueError("unsupported shell construct: {}".format(op))
                 i = consume_redirect(op, oplen, i, None)
                 continue
@@ -726,6 +855,19 @@ def _blob_selector_token(tok):
     return ":" in tok and not tok.startswith(":/")
 
 
+# ROUND-2 FINDING 16: git-show options that CONSUME a following SEPARATED token as their VALUE. That value
+# may itself contain a ':' (e.g. 'git show -L 1,3:file' renders a line-range DIFF), so it must be skipped,
+# never read as a blob-selector operand - otherwise the diff producer is misread as a pure blob read and a
+# console diff dump slips through. The attached '--opt=val' / '-Xval' forms carry the value in the same token
+# and are already skipped whole. This is the named set (-L/-U/--output/-O/--pretty/--format/-S/-G and kin);
+# an unlisted value-taking option remains the disclosed F-119-class residual below.
+_SHOW_VALUE_OPTS = frozenset((
+    "-L", "-U", "-S", "-G", "-O", "-o",
+    "--unified", "--output", "--output-indicator-new", "--output-indicator-old",
+    "--output-indicator-context", "--pretty", "--format", "--color", "--line-prefix",
+    "--src-prefix", "--dst-prefix", "--anchored"))
+
+
 def _show_blob_selector(args):
     """True when a git-show argument list (the tokens AFTER the 'show' subcommand) is a pure BLOB READ:
     it has AT LEAST ONE non-option operand and EVERY non-option operand is a blob selector (a
@@ -755,7 +897,13 @@ def _show_blob_selector(args):
                 seen_operand = True
             return seen_operand
         if tok.startswith("-"):
-            i += 1
+            # ROUND-2 FINDING 16: skip a value-taking option AND its separated value, so a value containing a
+            # ':' (e.g. '-L 1,3:file') is not misread as a blob selector. Attached '--opt=val'/'-Xval' forms
+            # carry the value in-token and are skipped whole here.
+            if tok in _SHOW_VALUE_OPTS and i + 1 < n:
+                i += 2
+            else:
+                i += 1
             continue
         if not _blob_selector_token(tok):
             return False  # a bare ref/commit or ':/' search operand -> git renders a diff
@@ -1636,6 +1784,12 @@ def absolute_paths(data):
 # judged, to avoid over-firing). A relative or unresolvable such position ASKS; an absolute position, and
 # a command carrying neither, allow. It never denies: the human confirming is the opt-out.
 _CD_BUILTINS = frozenset(("cd", "pushd"))
+# ROUND-2 FINDING 10: redirect operators that TRUNCATE (zero) their file target on open. A truncating
+# redirect to a relative/opaque target can destroy the WRONG file if the ambient cwd differs, so abspth
+# denies it. The append forms ('>>', '&>>') and the read/read-write forms ('<', '<>', '<&') do NOT truncate
+# and stay a convention nudge; '>&' is included only for its csh both-streams-TO-A-FILE form (a descriptor
+# target is skipped before this set is consulted).
+_ABSPTH_TRUNCATING_OPS = frozenset((">", ">|", "&>", ">&"))
 # cd/pushd option tokens that name NO destination path: the real option flags (cd -L/-P/-e/-@, pushd -n,
 # and bundled combos like -LP), which are a limited closed set, NOT any '-'/'+'-prefixed token. A lone '-'
 # is cd's $OLDPWD previous-directory shortcut (an absolute prior dir, cwd-independent); '--' ENDS option
@@ -1720,11 +1874,14 @@ def _cd_destination_reason(word, argv, argv_leading_tilde):
 
 def bash_absolute_paths(data):
     """abspth (quali/absolute-paths) Bash floor, PreToolUse on Bash: NO-ASK posture. Where a Bash command
-    shifts the working directory through a relative cd/pushd operand, or names a relative redirection target
-    (either resolves against a working directory that can silently differ between calls), it ALLOWS with an
-    informational note. Absolute paths are a convention, not a hazard, so this floor never asks and never
-    denies: it judges only those two cwd-dependent positions, notes any relative or unresolvable one, and
-    does not judge an arbitrary command operand."""
+    shifts the working directory through a relative cd/pushd operand, or names a relative/opaque
+    NON-destructive redirection target (an append '>>', a read '<'/'<>', or a relative cd - each resolves
+    against a working directory that can silently differ between calls), it ALLOWS with an informational
+    note: those are a convention, not a hazard, so the floor never asks on them. The ONE exception
+    (round-2 finding 10): a DESTRUCTIVE TRUNCATING redirect ('>', '>|', '&>', or a '>&' to a file) to a
+    RELATIVE or OPAQUE target DENIES-and-educates - truncation ZEROES its target, so aiming it at a
+    cwd-dependent relative/unverified path can destroy the WRONG file, the exact data-loss the absolute-paths
+    rule prevents. It never asks, and it does not judge an arbitrary command operand."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: bash_absolute_paths wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -1748,7 +1905,8 @@ def bash_absolute_paths(data):
     # unparseable construct is left to the human's own permission flow (a disclosed residual), rather than
     # over-asking on every such command. This is the conservative-floor boundary, not a proof of safety.
     segments = _lex_command(command, partial=True)[0]
-    reasons = []
+    reasons = []       # relative/opaque cd or NON-destructive redirect: an allow-note convention nudge
+    deny_reasons = []  # a DESTRUCTIVE truncating redirect to a relative/opaque target: fail-closed deny
     for seg in segments:
         word = _command_word(seg.argv)
         if word in _CD_BUILTINS:
@@ -1761,7 +1919,28 @@ def bash_absolute_paths(data):
             if redirect.target_leading_tilde:
                 continue  # an unquoted current-user '~'/'~/x' target expands to $HOME (absolute), as cd's
             if redirect.target_class == "opaque" or not _is_absolute(redirect.target):
-                reasons.append("a relative redirection target {!r}".format(redirect.target))
+                if redirect.op in _ABSPTH_TRUNCATING_OPS:
+                    # ROUND-2 FINDING 10: a TRUNCATING redirect zeroes its target, so aiming it at a
+                    # cwd-dependent relative/opaque path can destroy the WRONG file -> deny-and-educate.
+                    deny_reasons.append("a truncating redirection ('{}') to the relative or unverified "
+                                        "target {!r}".format(redirect.op, redirect.target))
+                else:
+                    reasons.append("a relative redirection target {!r}".format(redirect.target))
+    if deny_reasons:
+        seen = []
+        for reason in deny_reasons:
+            if reason not in seen:
+                seen.append(reason)
+        return _deny(
+            "AIQT rule abspth (absolute-paths): this command carries {} that resolve(s) against the current "
+            "working directory, which can silently differ between calls. A truncating redirect ZEROES its "
+            "target, so aimed at a cwd-dependent relative or unverified path it can destroy the WRONG file; "
+            "it is denied rather than run on an unverified destructive target. Name an ABSOLUTE, verified "
+            "target for the truncating redirect (for example '> /abs/path/out'), or confirm the working "
+            "directory. (A relative cd, an append '>>', or a read '<' redirect is only a convention nudge, "
+            "not denied.)".format("; ".join(seen)),
+            "AIQT guardrail: denied a truncating redirect to a relative/unverified target that could zero the "
+            "wrong file (rule abspth); name an absolute, verified target.")
     if reasons:
         seen = []
         for reason in reasons:  # de-duplicate while preserving order so the banner stays bounded
@@ -2287,9 +2466,29 @@ def _expbnd_target_ask(verb):
 def _expbnd_breadth_ask(verb):
     return _allow_note(
         "AIQT guardrail (rule expbnd, explicit-binding): git '{}' takes its scope from the whole ambient "
-        "tree and this command relocates or publishes it. This is a binding convention, not a hazard, so it "
+        "tree and this command relocates it. This is a binding convention, not a hazard, so it "
         "is allowed; prefer enumerated pathspecs over -A/-a/'.', or ensure the whole-tree scope is "
         "intended.".format(verb))
+
+
+def _expbnd_breadth_publish_deny(verb):
+    """ROUND-2 FINDING 11: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all') FOLLOWED BY
+    a PUBLISH ('git push') in the SAME command is denied-and-educated. The breadth selector stages whatever
+    the tree currently holds - including unrelated modified or untracked content - and the push then
+    publishes that swept-in content irreversibly to a remote; that is exactly the ambient-whole-tree scope
+    the explicit-binding rule forbids for a broad operation, made worse by immediate publication. A plain
+    'git commit -m' and a scoped 'git add <path>' are NOT breadth and are unaffected; a breadth stage with
+    NO publish in the command is only the convention nudge (allow-note), not this deny."""
+    return _deny(
+        "AIQT rule expbnd (explicit-binding-over-ambient-context): this command stages the whole ambient "
+        "tree with git '{}' (-A/-a/'.') and then PUBLISHES it with 'git push' in the same command, so any "
+        "unrelated modified or untracked content the tree currently holds is swept into the commit and "
+        "pushed to a remote (an ambient-whole-tree scope for a broad, published operation). It is denied. "
+        "Stage the specific paths the change touches with enumerated pathspecs ('git add <path> ...'), "
+        "commit, then push as a separate step after reviewing what is staged; never pair a whole-tree "
+        "breadth stage with a push in one command.".format(verb),
+        "AIQT guardrail: denied a whole-tree breadth stage ('{}') paired with a push in one command (rule "
+        "expbnd); stage explicit paths and push as a reviewed separate step.".format(verb))
 
 
 def _expbnd_fallback(command):
@@ -2298,15 +2497,19 @@ def _expbnd_fallback(command):
             (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command))):
         return _expbnd_target_ask("mutation")
     if _RAW_EXPBND_BREADTH_RE.search(command) and _RAW_EXPBND_PUSH_RE.search(command):
-        return _expbnd_breadth_ask("breadth operation")
+        return _expbnd_breadth_publish_deny("breadth operation")  # finding 11: breadth + publish -> deny
     return _allow()
 
 
 def git_explicit_binding(data):
     """expbnd (integ/explicit-binding-over-ambient-context), PreToolUse/Bash. NO-ASK posture: an ambient git
-    target or a whole-tree breadth+publish is a binding CONVENTION where the orchestrator normally binds its
-    own target, not a hazard, so every in-scope case (and an unreadable command) ALLOWS with an informational
-    note rather than prompting; it never denies."""
+    target, or a whole-tree breadth stage that merely RELOCATES (a breadth op after a cd, with no publish),
+    is a binding CONVENTION where the orchestrator normally binds its own target, so those ALLOW with an
+    informational note rather than prompting. The ONE deny (round-2 finding 11): a whole-tree BREADTH stage
+    ('git add -A/./:/', 'git commit -a/--all') FOLLOWED BY a PUBLISH ('git push') in the SAME command
+    DENIES-and-educates - the breadth selector sweeps in unrelated modified/untracked content and the push
+    then publishes it irreversibly, so it is not waved through. A plain 'git commit -m' and a scoped
+    'git add <path>' are not breadth and are unaffected. It never asks."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -2327,17 +2530,34 @@ def git_explicit_binding(data):
     except ValueError:
         return _expbnd_fallback(command)
 
+    # ROUND-2 FINDING 11 PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
+    # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the command DENIES-and-educates, regardless of any
+    # cd/pushd between them. This runs BEFORE the dir-change/target logic below so a preceding cd (which would
+    # otherwise short-circuit to the relocate allow-note) cannot mask the breadth+publish hazard. A push
+    # BEFORE the breadth stage publishes only the pre-breadth state and does not fire.
+    breadth_before_push = None
+    for tokens, _sep in segments:
+        eff = _expbnd_effective_tokens(tokens)
+        if _command_word(eff) != "git":
+            continue
+        s, a = _git_sub_and_args(eff)
+        if s is None:
+            continue
+        if s == "push" and breadth_before_push is not None:
+            return _expbnd_breadth_publish_deny(breadth_before_push)
+        if _git_is_breadth(s, a):
+            breadth_before_push = s
+
     # A cd/pushd/popd SHIFTS the target out of the session cwd (popd lands on an unknowable stack-top
     # directory, so it too confuses a following git segment). The shift confuses a git segment only when it
-    # PRECEDES it, and the breadth+publish hazard is a whole-tree breadth op PRECEDING a push (a push before
-    # the breadth op publishes only the pre-breadth state). So saw_dir_change and breadth_sub are read at the
-    # point each git segment is processed (segments iterate in command order), not accumulated and tested at
-    # the end: "git commit && cd /x" and "git push && git add -A" leave the mutation unconfused and are
-    # exempt, while "cd /x && git commit", "popd && git commit", and "git add -A && git push" are not. A shift reached
+    # PRECEDES it, so saw_dir_change is read at the point each git segment is processed (segments iterate in
+    # command order), not accumulated and tested at the end: "git commit && cd /x" leaves the mutation
+    # unconfused and is exempt, while "cd /x && git commit" and "popd && git commit" are not. A shift reached
     # only through a "||" (git runs only on the prior command's failure, so the cwd is unchanged) or a "|"
-    # (a subshell cd) is conservatively treated as preceding: a safe over-ASK, not a silent allow.
+    # (a subshell cd) is conservatively treated as preceding: a safe over-ASK, not a silent allow. The
+    # breadth+publish deny is handled by the pre-scan above; a breadth op after a cd with NO publish is only
+    # the relocate convention nudge.
     saw_dir_change = False
-    breadth_sub = None
     for tokens, _sep in segments:
         eff = _expbnd_effective_tokens(tokens)
         word = _command_word(eff)
@@ -2354,10 +2574,6 @@ def git_explicit_binding(data):
             return _expbnd_target_ask(sub)
         if _git_is_breadth(sub, args) and saw_dir_change:
             return _expbnd_breadth_ask(sub)
-        if sub == "push" and breadth_sub is not None:
-            return _expbnd_breadth_ask(breadth_sub)
-        if _git_is_breadth(sub, args):
-            breadth_sub = sub
     return _allow()
 
 
@@ -2976,6 +3192,76 @@ def _segment_dir_simple(tokens):
     return True
 
 
+def _segment_redirect_worktree(tokens, cwd):
+    """ROUND-2 FINDING 4. For a PRISTINE single-bare git command that carries a command-local worktree-
+    CHANGING redirect, resolve the effective WORKTREE DIRECTORY the command will act on, so a destructive
+    discard can be snapshotted against its ACTUAL target rather than the session cwd. Returns:
+      - None            : no worktree-changing redirect. A bare command, or one carrying only --git-dir /
+                          GIT_DIR / -c, leaves the session cwd as the worktree, so the caller uses cwd.
+      - a directory str : the effective worktree dir (a -C target, or a --work-tree / GIT_WORK_TREE value),
+                          resolved against cwd (compounded -C dirs are applied left to right, as git does).
+      - "opaque"        : a worktree-changing redirect is present but its target cannot be resolved (a
+                          value-less flag, or a relative value with no cwd to anchor it), so the caller
+                          cannot snapshot the target and DENIES a destructive discard rather than allow-note
+                          a recovery ref that would not contain the discarded state.
+    git applies -C left to right and chdirs there; a bare -C dir (with no --work-tree) then IS the worktree.
+    A command-line --work-tree overrides an inline GIT_WORK_TREE=; a --git-dir / GIT_DIR alone does NOT move
+    the worktree (git uses the cwd). Only the command-local redirect is read here; an ambient process-env
+    GIT_* var is handled by the caller's fail-safe (it is unreadable from the command)."""
+    cw = _command_word_index(tokens)
+    env_wt = None
+    for tok in tokens[:cw]:
+        if tok.startswith("GIT_WORK_TREE="):
+            env_wt = tok[len("GIT_WORK_TREE="):]      # last-wins mirrors the shell
+    c_dirs = []
+    opt_wt = None
+    saw_redirect = env_wt is not None
+    i = cw + 1
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            break                                     # the subcommand
+        if tok == "-C":
+            if i + 1 >= n:
+                return "opaque"                       # a value-less -C: cannot resolve the target
+            c_dirs.append(tokens[i + 1]); saw_redirect = True; i += 2; continue
+        if tok == "--work-tree":
+            if i + 1 >= n:
+                return "opaque"
+            opt_wt = tokens[i + 1]; saw_redirect = True; i += 2; continue
+        if tok.startswith("--work-tree="):
+            opt_wt = tok[len("--work-tree="):]; saw_redirect = True; i += 1; continue
+        if "=" not in tok and tok in _GIT_ARG_OPTS:   # a separated value-consuming global option: skip both
+            i += 2; continue
+        i += 1
+    if not saw_redirect:
+        return None                                   # only --git-dir/GIT_DIR/-c (or nothing): worktree == cwd
+    base = cwd
+    for d in c_dirs:
+        if not d:
+            return "opaque"
+        if os.path.isabs(d):
+            base = d
+        elif base is None:
+            return "opaque"                           # a relative -C with no cwd to anchor it
+        else:
+            base = os.path.join(base, d)
+    wt = opt_wt if opt_wt is not None else env_wt     # a command-line --work-tree overrides GIT_WORK_TREE=
+    if wt is not None:
+        if not wt:
+            return "opaque"
+        if os.path.isabs(wt):
+            return wt
+        wt_base = base if base is not None else cwd
+        if wt_base is None:
+            return "opaque"
+        return os.path.join(wt_base, wt)
+    if c_dirs:
+        return base if base is not None else "opaque"  # a bare -C dir is itself the worktree
+    return None
+
+
 def _git_discard_fallback(command, cwd=None):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): we cannot
     segment safely, so scan the RAW string. The opt-out is NOT consulted here: the guard cannot parse the
@@ -3289,6 +3575,17 @@ def _take_snapshot(repo, top, verb):
         if real_index and os.path.exists(real_index):
             shutil.copyfile(real_index, tmp_index)  # else: git creates a fresh temp index on add --all
         env = {"GIT_INDEX_FILE": tmp_index}
+        # ROUND-2 FINDING 5: capture the PURE STAGED (index) tree NOW, BEFORE `git add --all` overlays the
+        # worktree over the seeded index. A blob staged but differing from - or absent from - the worktree is
+        # staged-only content that `git restore --staged`, `git rm --cached`, or a default/mixed `git reset`
+        # discards; add --all re-stages the worktree over it, so without this the recovery ref (built from the
+        # worktree tree) would NOT contain it. Threading the staged tree in as a SECOND PARENT of the snapshot
+        # commit keeps its blobs reachable from the ref (GC-safe). Best-effort: if the pure-index write-tree
+        # fails (e.g. unmerged index entries), the snapshot still captures the worktree overlay.
+        staged_tree = ""
+        swt = _recovery_git(repo, ["write-tree"], env_extra=env, timeout=10)
+        if swt.returncode == 0 and swt.stdout.strip():
+            staged_tree = swt.stdout.strip()
         if _recovery_git(repo, ["add", "--all"], env_extra=env, timeout=20).returncode != 0:
             return ("fail", "git add --all into the temp index failed")
         wt = _recovery_git(repo, ["write-tree"], env_extra=env, timeout=10)
@@ -3297,9 +3594,22 @@ def _take_snapshot(repo, top, verb):
         tree = wt.stdout.strip()
         head = _recovery_git(repo, ["rev-parse", "--verify", "-q", "HEAD^{commit}"], timeout=5)
         parent = head.stdout.strip() if head.returncode == 0 else ""
+        # Build the staged-index commit only when the staged tree differs from the worktree overlay (else the
+        # staged content is already captured by `tree`); it becomes the snapshot commit's second parent.
+        staged_commit = ""
+        if staged_tree and staged_tree != tree:
+            sct_args = ["commit-tree", staged_tree]
+            if parent:
+                sct_args += ["-p", parent]
+            sct_args += ["-m", "aiqt-guardrails staged (index) snapshot before git {}".format(verb)]
+            sct = _recovery_git(repo, sct_args, timeout=10)
+            if sct.returncode == 0 and sct.stdout.strip():
+                staged_commit = sct.stdout.strip()
         commit_args = ["commit-tree", tree]
         if parent:
             commit_args += ["-p", parent]  # parent HEAD when present; an unborn HEAD makes a rootless snapshot
+        if staged_commit:
+            commit_args += ["-p", staged_commit]  # second parent: the pre-command staged (index) state
         commit_args += ["-m", "aiqt-guardrails recovery snapshot before git {}".format(verb)]
         ct = _recovery_git(repo, commit_args, timeout=10)
         if ct.returncode != 0 or not ct.stdout.strip():
@@ -3323,7 +3633,7 @@ def _take_snapshot(repo, top, verb):
         if tmpdir is not None:
             shutil.rmtree(tmpdir, ignore_errors=True)
     return ("ok", {"ref": ref, "sha": sha, "classes": sorted(classes),
-                   "restore": "git checkout {} -- :/".format(ref)})
+                   "restore": "git checkout {} -- :/".format(ref), "staged": bool(staged_commit)})
 
 
 def _recovery_ledger_path():
@@ -3398,13 +3708,61 @@ def _recovery_pointer(info):
     """A one-line human pointer to a saved snapshot for an ASK/DENY reason. Says a snapshot was SAVED, not
     that work was discarded (PreToolUse cannot know the command ran). Discloses that the primary restore is
     OVERLAY mode (it brings back modified and new content but does NOT re-apply a recorded file deletion),
-    and points to the isolated-branch form for an exact, deletion-inclusive restore."""
+    and points to the isolated-branch form for an exact, deletion-inclusive restore. When the snapshot also
+    captured a distinct STAGED (index) state (round-2 finding 5), the pre-command staged content is preserved
+    as the ref's SECOND PARENT, so a `git restore --staged` / `git rm --cached` / default-`git reset` that
+    discards staged-only content is recoverable from there too."""
     covered = ", ".join(info["classes"]) if info["classes"] else "the working tree"
+    staged = (" The pre-command STAGED (index) state is preserved as the ref's second parent (recover a file "
+              "with 'git show {0}^2:<path>' or 'git checkout {0}^2 -- <path>').".format(info["ref"])
+              if info.get("staged") else "")
     return ("A pre-command recovery snapshot was saved ({}) at ref {}; restore it with '{}' (overlay mode: "
             "it brings back modified and new content but does NOT re-apply a file deletion recorded in the "
             "snapshot), or for an exact, deletion-inclusive restore put it on an isolated branch with 'git "
-            "switch -c aiqt-recover-<id> {}'.".format(
-                covered, info["ref"], info["restore"], info["ref"]))
+            "switch -c aiqt-recover-<id> {}'.{}".format(
+                covered, info["ref"], info["restore"], info["ref"], staged))
+
+
+def _record_stash_recovery(repo):
+    """ROUND-2 FINDING 6. Preserve every stash entry under DURABLE refs/aiqt-recovery/ refs before a
+    'git stash drop' / 'git stash clear', which is NOT reflog-recoverable after the fact (drop/clear delete
+    the stash reflog entry, leaving the stash commit unreachable and GC-eligible). Returns:
+      - ('none', None)  : the repo has NO stash entries, so a drop/clear loses nothing (allow).
+      - ('ok', info)    : every stash entry was preserved under a durable ref; info = {refs, count}.
+      - ('fail', reason): the repo/entries could not be enumerated, or a durable ref could not be written.
+    Reads the stash reflog and writes only private refs (no working state) through the scrubbed _recovery_git
+    primitive (every ambient GIT_* removed), so it keeps the inert, decoy-proof posture of _take_snapshot;
+    the create-only update-ref backstops a name collision as a failure rather than an overwrite. Any
+    snapshot-path fault is caught and downgraded to a ('fail') so it can never crash the guard."""
+    try:
+        top = _recovery_toplevel(repo)
+        if not top:
+            return ("fail", "the repository toplevel could not be resolved (a bare or broken git dir)")
+        # `stash list` over the reflog: one line per entry. An absent refs/stash yields an empty list (no
+        # stashes), a genuine 'none'. A non-zero return is a fault -> fail (never a false 'none').
+        verify = _recovery_git(repo, ["rev-parse", "--verify", "-q", "refs/stash"], timeout=5)
+        if verify.returncode != 0 or not verify.stdout.strip():
+            return ("none", None)                     # no stash ref at all: nothing to preserve
+        listing = _recovery_git(repo, ["reflog", "show", "--no-abbrev", "--format=%H", "refs/stash"],
+                                timeout=10)
+        if listing.returncode != 0:
+            return ("fail", "the stash reflog could not be enumerated (rc={})".format(listing.returncode))
+        shas = [ln.strip() for ln in listing.stdout.splitlines() if ln.strip()]
+        if not shas:
+            return ("none", None)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        refs = []
+        for idx, sha in enumerate(shas):
+            ref = "{}/{}-{}-stash{}".format(_RECOVERY_REF_NS, stamp, os.getpid(), idx)
+            # create-only (expected-old ""): a colliding name fails rather than clobbering a prior recovery.
+            if _recovery_git(repo, ["update-ref", ref, sha, ""], timeout=5).returncode != 0:
+                return ("fail", "git update-ref for a stash recovery ref failed (a create-only collision or "
+                                "a ref-store error), so a stash entry was not preserved")
+            refs.append(ref)
+    except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
+        return ("fail", "the stash recovery snapshot could not be taken ({}: {})".format(
+            type(exc).__name__, exc))
+    return ("ok", {"refs": refs, "count": len(refs)})
 
 
 def _discard_recovery_result(kind, detail, snap, optout=None):
@@ -3540,7 +3898,11 @@ def git_discard(data):
     # setsid/eval defeated the list), so any raw 'git' + work-losing verb is in scope even when the precise
     # `lossy` list is empty (a wrapped or quoted git verb). A non-lossy git command still routes through the
     # pristine path below and allows. Residual: git renamed out of the string (alias/function) -> recovery layer.
-    raw_lossy = _raw_has_lossy_git(command)
+    # ROUND-2 FINDING 17: the unconditional raw scan runs on a copy with QUOTED-heredoc bodies stripped, so a
+    # lossy-verb keyword quoted inside heredoc prose (a 'git reset --hard' example in a here-doc) does not
+    # falsely route the harmless outer command (e.g. 'cat <<'EOF'...') into the discard machinery. A real
+    # lossy verb OUTSIDE the heredoc body is preserved and still caught.
+    raw_lossy = _raw_has_lossy_git(_strip_quoted_heredoc_bodies(command))
     if not lossy and not raw_lossy:
         return _allow()  # boundary: no git + work-losing verb anywhere
 
@@ -3607,20 +3969,55 @@ def git_discard(data):
     # the SESSION CWD is still taken on a not-provably-clean snappable tree (the cwd is known even when the
     # target is not): it is inert and provides recovery IF the command acts on the cwd (the common benign
     # non-redirecting case), but may NOT capture a redirected tree.
-    if _ambient_repo_view_override() or not _segment_dir_simple(pristine):
+    ambient_override = _ambient_repo_view_override()
+    if ambient_override or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
-        ao_base = ao_cwd if isinstance(ao_cwd, str) and ao_cwd else None
+        cwd_base = ao_cwd if isinstance(ao_cwd, str) and ao_cwd else None
+        # ROUND-2 FINDING 4: for a COMMAND-LOCAL worktree redirect (-C/--work-tree/GIT_WORK_TREE=) with NO
+        # ambient GIT_* override, resolve the ACTUAL target worktree and snapshot THAT repo, not the session
+        # cwd, so the recovery ref contains the state the command will discard. If the redirect target cannot
+        # be resolved, or a destructive verb's target cannot be snapshotted, DENY - never allow-note a discard
+        # whose recovery ref does not contain the discarded state. A --git-dir/GIT_DIR/-c redirect (which does
+        # NOT move the worktree) resolves to None and keeps the sound session-cwd snapshot; the ambient-GIT_*
+        # case (unreadable from the command) keeps its disclosed best-effort session-cwd snapshot.
+        redir_wt = None if ambient_override else _segment_redirect_worktree(pristine, cwd_base)
+        destructive = sub in _SNAPSHOTTABLE_VERBS and role != "allow"
+        if redir_wt == "opaque":
+            if destructive:
+                return _deny(
+                    "AIQT rule prsunc (preserve-uncommitted-work): {} carries a command-local worktree "
+                    "redirect (-C/--work-tree/GIT_WORK_TREE) whose target this guard cannot resolve, so it "
+                    "cannot snapshot the repository the command will actually discard from; denied rather "
+                    "than run on a possibly unrecoverable discard. Re-issue it as a plain git command from "
+                    "the target repository, or commit or stash your work first. {}".format(
+                        kind or "a git work-losing verb", _DISCARD_ALTS),
+                    "AIQT guardrail: denied a worktree-redirected git discard whose target this guard cannot "
+                    "resolve to snapshot (rule prsunc); run it from the target repo, or commit or stash first.")
+            return _allow_note(
+                "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} carries a command-local "
+                "repository redirect this guard cannot resolve, but it is a non-destructive form, so it is "
+                "allowed.".format(kind or "a git command"))
+        target_base = redir_wt if redir_wt is not None else cwd_base
+        target_desc = ("the -C/--work-tree target ({})".format(redir_wt) if redir_wt is not None
+                       else "the session directory")
         ao_snap = None
-        if ao_base is not None and sub in _SNAPSHOTTABLE_VERBS and _tree_is_clean(ao_base) is not True:
-            ao_snap = _record_recovery(ao_base, sub)
+        if target_base is not None and destructive and _tree_is_clean(target_base) is not True:
+            ao_snap = _record_recovery(target_base, sub)
+            if ao_snap is not None and ao_snap[0] == "fail":
+                return _deny(
+                    "AIQT rule prsunc (preserve-uncommitted-work): {} would discard from {}, which this "
+                    "guard could not snapshot ({}), so the discard would be unrecoverable; denied rather "
+                    "than run. Re-issue it as a plain git command from the target repository, or commit or "
+                    "stash your work first. {}".format(kind or "a git work-losing verb", target_desc,
+                                                       ao_snap[1], _DISCARD_ALTS),
+                    "AIQT guardrail: denied an unrecoverable worktree-redirected git discard (rule prsunc); "
+                    "run it from the target repo, or commit or stash first.")
         return _discard_recovery_result(
             kind or "a git work-losing verb",
             "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
-            "(-C/--git-dir/--work-tree or an inline GIT_DIR=/GIT_WORK_TREE= assignment), so this guard "
-            "cannot prove the command's repository view is the session directory (the probe scrubs an "
-            "ambient var, but the actual command still inherits it, and a command-local redirect points "
-            "elsewhere); any recovery snapshot is best-effort against the session cwd and may not capture "
-            "a redirected tree", ao_snap, _OPTOUT_PRISTINE)
+            "(-C/--git-dir/--work-tree or an inline GIT_DIR=/GIT_WORK_TREE= assignment); the recovery "
+            "snapshot targets {} (a --git-dir/GIT_DIR alone leaves the worktree at the session directory)"
+            .format(target_desc), ao_snap, _OPTOUT_PRISTINE)
 
     if role == "allow" and any(t.lower().startswith(("alias.", "-calias.")) for t in pristine):
         return _deny(
@@ -3690,9 +4087,66 @@ def git_discard(data):
 
     if role == "ask":
         # A softer discard (a real clean of untracked files, stash drop/clear, a force branch delete/move/
-        # copy/reset): ASK regardless of the tracked-tree probe, which does not see the asset these verbs
-        # destroy (a branch ref is a separate, reflog-recoverable asset). A clean may have been
-        # snapshotted above (git add --all captures untracked); stash/branch are not snapshottable.
+        # copy/reset): the tracked-tree probe does not see the asset these verbs destroy.
+        if sub == "clean":
+            # ROUND-2 FINDING 7: 'clean' is snapshottable (git add --all captures untracked) and destroys
+            # WORKING-TREE CONTENT, so a clean whose worktree cannot be snapshotted is unrecoverable and must
+            # DENY for parity with reset/checkout - never an allow-note with no recovery point (the old
+            # role-ask fall-through allow-noted an unresolvable-worktree clean while reset/checkout denied it).
+            if clean is True:
+                return _allow()  # provably clean: nothing to remove, no snapshot needed
+            if not resolvable:
+                return _deny(
+                    "AIQT rule prsunc (preserve-uncommitted-work): {} targets a working tree this guard "
+                    "cannot resolve to the session directory with certainty, so it can neither prove the "
+                    "tree clean nor take a recovery snapshot; denied rather than run on a possible "
+                    "unrecoverable discard of untracked content. Re-issue it as a plain git command from the "
+                    "target repository, or commit or stash your work first. {}".format(kind, _DISCARD_ALTS),
+                    "AIQT guardrail: denied a git clean whose working tree this guard cannot resolve to "
+                    "snapshot (rule prsunc); re-issue from the target repo, or commit or stash first.")
+            # resolvable + not provably clean: a snapshot was taken above; fold its outcome in (ok ->
+            # allow-note, fail -> deny), so a clean with no recovery point never silently allows.
+            return _discard_recovery_result(kind, "removes untracked files, which cannot be recovered", snap)
+        if sub == "stash":
+            # ROUND-2 FINDING 6: 'git stash drop'/'clear' is NOT reflog-recoverable after the fact (it deletes
+            # the stash reflog entry, orphaning the stash commit), so a worktree snapshot cannot protect it.
+            # Preserve every stash entry under DURABLE refs/aiqt-recovery/ refs FIRST, then allow; deny if the
+            # entries cannot be enumerated or preserved. 'stash export'/other forms discard no stash entry and
+            # keep their allow-note. ('stash' is not snapshottable, so `snap` is None here.)
+            stash_op = next((a for a in args if not a.startswith("-")), None)
+            if stash_op in ("drop", "clear"):
+                if base is None:
+                    return _deny(
+                        "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash "
+                        "entries and is NOT reflog-recoverable afterwards, and no session working directory "
+                        "is available to preserve the stash entries first; denied rather than run on an "
+                        "unrecoverable discard. Re-issue it from the target repository, or leave the stash "
+                        "in place. {}".format(stash_op, _DISCARD_ALTS),
+                        "AIQT guardrail: denied an unrecoverable git stash drop/clear with no session "
+                        "directory to preserve the stash first (rule prsunc).")
+                st = _record_stash_recovery(base)
+                if st[0] == "none":
+                    return _allow()  # no stash entries: drop/clear loses nothing
+                if st[0] == "fail":
+                    return _deny(
+                        "AIQT rule prsunc (preserve-uncommitted-work): git stash {} discards saved stash "
+                        "entries and is NOT reflog-recoverable afterwards, and this guard could not preserve "
+                        "the stash entries under a recovery ref first ({}), so the discard would be "
+                        "unrecoverable; denied rather than run. Commit or apply your stash first, then retry. "
+                        "{}".format(stash_op, st[1], _DISCARD_ALTS),
+                        "AIQT guardrail: denied an unrecoverable git stash drop/clear - the stash entries "
+                        "could not be preserved (rule prsunc); apply or commit the stash first, then retry.")
+                return _allow_note(
+                    "AIQT guardrail (rule prsunc, preserve-uncommitted-work): git stash {} discards saved "
+                    "stash entries (not reflog-recoverable afterwards). {} stash entr{} were first preserved "
+                    "under durable refs so they remain recoverable ({}); recover one with 'git stash apply "
+                    "<ref>'. It is allowed.".format(
+                        stash_op, st[1]["count"], "y" if st[1]["count"] == 1 else "ies",
+                        ", ".join(st[1]["refs"])))
+            # stash export / other ask-classified stash forms discard no stash entry: keep the allow-note.
+            return _discard_recovery_result(kind, "cannot be proven safe offline", snap)
+        # A force branch delete/move/copy/reset: a branch ref is a separate, reflog-recoverable asset a
+        # worktree snapshot cannot capture, so it keeps the allow-note.
         return _discard_recovery_result(kind, "cannot be proven safe offline", snap)
 
     # A scoped or clobber form (all snapshottable): gate on the clean probe, which must resolve to the
@@ -4196,23 +4650,80 @@ def _push_protected(tokens, args, cwd):
                         "itself".format(act, head), act_noun)
     return None  # HEAD provably a non-protected branch: the forced or deleted target is off the protected line
 
-def _commit_on_protected(tokens, cwd):
-    """Classify a git commit segment against the protected line. Returns None (HEAD provably a
-    non-protected branch: silent allow), ("deny", detail) when HEAD is PROVABLY a protected branch (a
+def _commit_post_switch_branch(sub, args):
+    """ROUND-2 FINDING 13. The branch HEAD ends up on after a 'git switch'/'git checkout' segment, so a
+    LATER commit in the SAME compound command is classified against the branch it will ACTUALLY land on, not
+    the pre-command branch. Returns the resulting branch name (a -c/-C/-b/-B new-branch name, or a plain
+    'switch <branch>' operand), or None when it cannot be determined confidently (a detached checkout, '-',
+    a '--' pathspec form, an option-only or ambiguous 'checkout <arg>' that may be a pathspec). Deliberately
+    conservative: an undetermined switch leaves the caller to fall back to the pre-command HEAD probe."""
+    if sub not in ("switch", "checkout"):
+        return None
+    triggers = ("-c", "-C") if sub == "switch" else ("-b", "-B")
+    pre, post, _had = _split_pre_post(args)
+    if post:
+        return None  # a '--' pathspec form: not a plain branch switch
+    operands = []
+    i = 0
+    n = len(pre)
+    while i < n:
+        tok = pre[i]
+        if tok in ("-", "--detach", "--orphan"):
+            return None  # detached / orphan / previous-branch: HEAD is not a named protected/non-protected
+        for tr in triggers:
+            if tok == tr:  # separated value: -c NAME
+                return pre[i + 1] if i + 1 < n else None
+            if tok.startswith(tr) and len(tok) > len(tr) and not tok.startswith("--"):
+                return tok[len(tr):]  # attached short value: -cNAME
+        if sub == "switch" and tok in ("--create", "--force-create"):
+            return pre[i + 1] if i + 1 < n else None
+        if sub == "switch" and (tok.startswith("--create=") or tok.startswith("--force-create=")):
+            return tok.split("=", 1)[1]
+        if tok.startswith("-"):
+            i += 1
+            continue  # some other option (a flag or an option we do not model): skip it
+        operands.append(tok)
+        i += 1
+    if sub == "switch" and len(operands) == 1:
+        return operands[0]  # a plain 'git switch <branch>': HEAD moves to that branch
+    # 'git checkout <arg>' is ambiguous (a branch OR a pathspec), so it is not treated as a definite switch.
+    return None
+
+
+def _commit_on_protected(tokens, cwd, switched_to=None):
+    """Classify a git commit segment against the protected line. Returns None (provably a non-protected
+    branch: silent allow), ("deny", detail) when the commit will PROVABLY land on a protected branch (a
     confirmed direct commit on the protected line: deny-and-educate), or ("note", detail) when the guard
     merely CANNOT PROVE the commit lands off the protected line (an unprovable repository view, a missing
-    session cwd, or an unresolvable HEAD: allow with an informational note). The split reflects the new
-    no-ask posture: only a CONFIRMED direct commit on the protected branch is a hazard denied-and-educated;
-    a cannot-prove case (a normal 'git -C <repo> commit', a detached-HEAD commit, a probe miss) is a
-    common, legitimate commit and is allowed with a note rather than blocked, since server-side branch
-    protection remains the real gate for the accidental direct commit this client guard targets. A 'cd' in
-    an EARLIER segment of the same compound command is NOT modelled (the probe reads the session cwd)."""
-    if _ambient_repo_view_override() or not _segment_dir_simple(tokens):
+    session cwd, or an unresolvable HEAD: allow with an informational note). ROUND-2 FINDING 13: the
+    classification is against the branch the commit will ACTUALLY land on - `switched_to` (a branch an
+    earlier same-command 'git switch'/'checkout -b' moved HEAD to) when supplied, else the -C/--work-tree
+    TARGET repository's HEAD when the segment carries such a redirect, else the session cwd's HEAD - never the
+    stale pre-command session branch when a switch precedes it, and never a blanket allow-note for a
+    same-repo `git -C <repo> commit` that actually lands on the protected line. Only a CONFIRMED direct
+    commit on the protected branch is denied; a genuine cannot-prove case is allowed with a note."""
+    if switched_to is not None:
+        # An earlier same-command branch switch determines the POST-command branch this commit lands on.
+        if _is_protected_ref(switched_to):
+            return ("deny", "would commit on the protected branch {!r} that an earlier segment of this "
+                            "command switched to".format(switched_to))
+        return None  # switched to a non-protected branch -> the commit lands off the protected line
+    if _ambient_repo_view_override():
         return ("note",
-                "runs under a non-cosmetic ambient GIT_* variable or carries a command-local redirect "
-                "(-C/--git-dir/--work-tree or a leading env assignment), so this guard cannot prove "
-                "which repository's HEAD it would commit on")
+                "runs under a non-cosmetic ambient GIT_* variable, so this guard cannot prove which "
+                "repository's HEAD it would commit on")
     base = cwd if isinstance(cwd, str) and cwd else None
+    if not _segment_dir_simple(tokens):
+        # A command-local redirect: resolve a -C/--work-tree TARGET and probe ITS HEAD (finding 13); a
+        # --git-dir/GIT_DIR/-c form, or an unresolvable target, stays a cannot-prove note.
+        wt = _segment_redirect_worktree(tokens, base)
+        if isinstance(wt, str) and wt != "opaque":
+            base = wt
+        else:
+            return ("note",
+                    "carries a command-local redirect (--git-dir/GIT_DIR/-c, or an unresolvable "
+                    "-C/--work-tree target), so this guard cannot pin which repository's HEAD it would "
+                    "commit on")
     head = _head_branch(base) if base is not None else None
     if head is None:
         return ("note",
@@ -4315,6 +4826,12 @@ def protected_line(data):
     pending_deny = None
     pending_note = None
     saw_git = False     # did any parsed segment have 'git' as its command word?
+    # ROUND-2 FINDING 13: track the branch an earlier same-command 'git switch'/'checkout -b' moved HEAD to,
+    # so a following commit is classified against the branch it will ACTUALLY land on (not the stale
+    # pre-command session branch). Only a determinable switch on the SESSION repo (no -C redirect) that
+    # propagates to the next command (via '&&'/';'/end, never '||' where the commit runs on switch FAILURE)
+    # updates it.
+    switched_to = None
     for tokens, _sep in segments:
         if _command_word(tokens) != "git":
             continue
@@ -4322,6 +4839,12 @@ def protected_line(data):
         if _has_info_flag(tokens):
             continue  # a --help/-h segment shows help, it pushes and commits nothing (see diff_source)
         sub, args = _git_sub_and_args(tokens)
+        if sub in ("switch", "checkout") and _segment_dir_simple(tokens) \
+                and not _ambient_repo_view_override():
+            target = _commit_post_switch_branch(sub, args)
+            if target is not None and _sep in ("&&", ";", ""):
+                switched_to = target
+            continue
         if sub == "push":
             outcome = _push_protected(tokens, args, cwd)
             if outcome is None:
@@ -4344,7 +4867,7 @@ def protected_line(data):
                     "AIQT guardrail: denied a git push this guard cannot prove misses the protected branch "
                     "(rule prtbrn); push to a feature branch and merge on green.")
         elif sub == "commit":
-            result = _commit_on_protected(tokens, cwd)
+            result = _commit_on_protected(tokens, cwd, switched_to=switched_to)
             if result is None:
                 continue
             severity, detail = result
@@ -4478,8 +5001,15 @@ def _checkout_creation_start(args, switch=False):
             if name in _CLEAN_LONG_BOOLEANS and not has_value:
                 i += 1
                 continue
+            # ROUND-2 FINDING 12: '--track' only ENABLES upstream tracking; it consumes no operand (its
+            # optional value is the attached '--track=direct|inherit' form), so the positional start-point
+            # (e.g. the 'origin/main' in 'git switch -c topic --track origin/main') remains the operand and
+            # its ancestry is checked. Tolerate it here instead of routing the whole form to a fail-safe deny.
+            if name == "--track":
+                i += 1
+                continue
             # any other long option: unknown, value-taking, negation, abbreviation,
-            # a second trigger, --orphan, --detach, --track, --patch, ... -> ASK
+            # a second trigger, --orphan, --detach, --patch, ... -> ASK
             return _ASK_START
 
         if tok.startswith("-") and len(tok) > 1:
@@ -4487,7 +5017,7 @@ def _checkout_creation_start(args, switch=False):
             j = 0
             while j < len(chars):
                 ch = chars[j]
-                if ch in _CLEAN_SHORT_LETTERS:
+                if ch in _CLEAN_SHORT_LETTERS or ch == "t":  # 't' is -t (--track): enables tracking only
                     j += 1
                     continue
                 if ch in short_triggers and not created:
@@ -4723,19 +5253,46 @@ def _branch_root_git(repo, *args):
         return None
 
 
+# ROUND-2 FINDING 12: the protected line resolves from origin/HEAD FIRST, then falls back to a local
+# main/master, so a repo with no remote (origin/HEAD unset) is not treated as having no protected line while
+# a local main/master exists. When NONE of these resolves, there is genuinely no protected line to root
+# against, and a MISSING protected line is not evidence a plain local branch is orphaned.
+_BRANCH_ROOT_PROTECTED_REFS = ("origin/HEAD", "main", "master")
+
+
+def _branch_root_protected_commit(repo):
+    """The protected line's commit sha, trying origin/HEAD then a local main/master (finding 12), or None
+    when no protected ref resolves at all (a repo with no origin/HEAD and no local main/master)."""
+    for ref in _BRANCH_ROOT_PROTECTED_REFS:
+        p = _branch_root_git(
+            repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "{}^{{commit}}".format(ref))
+        if p is not None and p.returncode == 0 and p.stdout.strip():
+            return p.stdout.strip()
+    return None
+
+
 def _branch_root_probe(repo, start):
-    """Return ('rooted'|'orphaned'|'unknown', detail), based only on unmasked git exit statuses."""
-    protected = _branch_root_git(
-        repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "origin/HEAD^{commit}")
-    if protected is None or protected.returncode != 0 or not protected.stdout.strip():
-        return ("unknown", "origin/HEAD cannot be resolved")
+    """Return ('rooted'|'orphaned'|'unknown'|'no-protected-ref', detail), based only on unmasked git exit
+    statuses. 'no-protected-ref' (round-2 finding 12): no protected line (origin/HEAD or a local main/master)
+    resolves, so the start cannot be shown orphaned; provided the start itself resolves to a real commit, the
+    creation is allowed rather than denied (a missing origin is not orphan evidence)."""
+    protected = _branch_root_protected_commit(repo)
+    if protected is None:
+        start_probe = _branch_root_git(
+            repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "{}^{{commit}}".format(start))
+        if start_probe is not None and start_probe.returncode == 0 and start_probe.stdout.strip():
+            return ("no-protected-ref", "no protected line (origin/HEAD or a local main/master) resolves, "
+                                        "and a plain local branch from a resolvable start is not evidence of "
+                                        "an orphan")
+        return ("unknown", "no protected line resolves and the start point {!r} cannot be resolved either"
+                           .format(start))
     start_probe = _branch_root_git(
         repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
         "{}^{{commit}}".format(start))
     if start_probe is None or start_probe.returncode != 0 or not start_probe.stdout.strip():
         return ("unknown", "the branch start point {!r} cannot be resolved".format(start))
     merge = _branch_root_git(
-        repo, "merge-base", protected.stdout.strip(), start_probe.stdout.strip())
+        repo, "merge-base", protected, start_probe.stdout.strip())
     if merge is None:
         return ("unknown", "git merge-base could not be launched")
     if merge.returncode == 0 and merge.stdout.strip():
@@ -4761,10 +5318,15 @@ def _branch_root_probe(repo, start):
 def branch_root(data):
     """brnrot PreToolUse/Bash guard over recognized branch-creation forms. NO-ASK posture: branch rooting is
     a hazard class (an orphan/unrooted branch dispatches work onto a retired root), so a confirmed orphan
-    start DENIES, and a form this guard cannot prove rooted (an ambiguous/--track/--orphan creation form, a
-    dir-change or repository-view override, an unresolved ancestry) also DENIES-and-educates fail-safe,
-    naming the reachable correct action (an explicit start point, a plain command from the target repo, or
-    restoring origin/HEAD). It never asks."""
+    start DENIES, and a form this guard cannot prove rooted (an ambiguous/--orphan creation form, a
+    dir-change or ambient repository-view override, an unresolved ancestry) also DENIES-and-educates
+    fail-safe, naming the reachable correct action. ROUND-2 FINDING 12 (keep-working): it is -C-AWARE - a
+    command-local '-C <dir>'/'--work-tree' redirect resolves the target and its ancestry is checked THERE
+    (the -C fleet convention is honoured, not blocked); a '--track <ref>' names a rooted real start and
+    ALLOWS; a MISSING protected line (no origin/HEAD and no local main/master) is NOT evidence a plain local
+    branch is orphaned, so a resolvable-start creation ALLOWS; and a command-local redirect whose target
+    cannot be resolved ALLOWS-WITH-NOTE (the CI branch-root gate remains the backstop) rather than denying.
+    It never asks."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block(
             "aiqt_hooks: branch_root wired to unexpected event {!r}; failing closed"
@@ -4799,6 +5361,7 @@ def branch_root(data):
     # origin/HEAD). A confirmed orphan returns immediately; a cannot-prove deny is held in pending_deny so a
     # confirmed orphan elsewhere wins first.
     pending_deny = None
+    pending_note = None
     saw_dir_change = False
     for tokens, _sep in segments:
         word = _command_word(tokens)
@@ -4817,31 +5380,52 @@ def branch_root(data):
             if pending_deny is None:
                 pending_deny = _deny(
                     "AIQT rule brnrot (branch-rooted-on-live-main): this command uses a branch/worktree form "
-                    "this guard cannot classify with confidence (a --track/-t tracking form, an --orphan, an "
-                    "abbreviated or negated option, or an option of unknown arity); it may create a branch "
+                    "this guard cannot classify with confidence (an --orphan, an abbreviated or negated "
+                    "option, or an option of unknown arity); it may create a branch "
                     "from an unverified or orphaned start, so its ancestry cannot be checked here and it is "
                     "denied fail-safe. Re-issue it with an explicit start point (e.g. 'git switch -c <name> "
                     "origin/HEAD'); the CI branch-root gate remains the authoritative backstop.",
                     "AIQT guardrail: denied a branch-creation form whose start point is ambiguous "
                     "(rule brnrot); re-issue with an explicit start point.")
             continue
-        if saw_dir_change or _ambient_repo_view_override() or not _segment_dir_simple(tokens):
+        cwd0 = data.get("cwd")
+        cwd0 = cwd0 if isinstance(cwd0, str) and cwd0 else None
+        probe_repo = cwd0
+        if saw_dir_change or _ambient_repo_view_override():
+            # a cd/pushd/popd earlier, or a non-cosmetic ambient GIT_* override: the repository view cannot be
+            # reconciled with the session cwd and is NOT the honoured explicit-target form -> deny fail-safe.
             if pending_deny is None:
                 pending_deny = _deny(
                     "AIQT rule brnrot (branch-rooted-on-live-main): this branch-creation command runs under "
-                    "a directory change or a repository-view override this guard cannot reconcile with the "
-                    "session repository (a cd/pushd in an earlier segment, a non-cosmetic ambient GIT_* "
-                    "variable, or a command-local -C/--git-dir/--work-tree redirect), so its ancestry cannot "
-                    "be checked and it is denied fail-safe. Re-issue it as a plain git command from the "
-                    "target repository.",
+                    "a directory change or an ambient repository-view override this guard cannot reconcile "
+                    "with the session repository (a cd/pushd in an earlier segment, or a non-cosmetic ambient "
+                    "GIT_* variable), so its ancestry cannot be checked and it is denied fail-safe. Re-issue "
+                    "it as a plain git command from the target repository.",
                     "AIQT guardrail: denied a branch creation whose repository this guard cannot reconcile "
                     "(rule brnrot); re-issue as a plain command from the target repo.")
             continue
-        cwd = data.get("cwd")
-        if not isinstance(cwd, str) or not cwd:
+        if not _segment_dir_simple(tokens):
+            # ROUND-2 FINDING 12: a COMMAND-LOCAL redirect. Honour the -C fleet convention: resolve the
+            # -C/--work-tree target and check ancestry THERE. A target that cannot be resolved (opaque, or a
+            # --git-dir/GIT_DIR/-c form whose worktree this guard cannot pin) ALLOWS-WITH-NOTE rather than
+            # denying (the CI branch-root gate remains the backstop) - never a hard block of a legitimate
+            # explicit-target creation.
+            wt = _segment_redirect_worktree(tokens, cwd0)
+            if isinstance(wt, str) and wt != "opaque":
+                probe_repo = wt
+            else:
+                if pending_note is None:
+                    pending_note = _allow_note(
+                        "AIQT guardrail (rule brnrot, branch-rooted-on-live-main): this branch creation "
+                        "carries a command-local repository redirect whose target this guard cannot resolve "
+                        "(a --git-dir/GIT_DIR/-c form, or an unresolvable -C/--work-tree target), so it "
+                        "cannot check the start point's ancestry here; it is allowed and the CI branch-root "
+                        "gate remains the backstop. Prefer an explicit '-C <dir>' target and start point.")
+                continue
+        if probe_repo is None:
             outcome, detail = ("unknown", "the session repository directory is unavailable")
         else:
-            outcome, detail = _branch_root_probe(cwd, start)
+            outcome, detail = _branch_root_probe(probe_repo, start)
         if outcome == "orphaned":
             return _deny(
                 "AIQT rule brnrot (branch-rooted-on-live-main): start point {!r} has no merge base "
@@ -4856,7 +5440,11 @@ def branch_root(data):
                 "repository and start point.".format(detail),
                 "AIQT guardrail: denied a branch creation whose root ancestry is unresolved (rule brnrot); "
                 "restore origin/HEAD, then retry.")
-    return pending_deny if pending_deny is not None else _allow()
+    if pending_deny is not None:
+        return pending_deny  # a confirmed orphan / cannot-prove-rooted deny outranks an allow-note
+    if pending_note is not None:
+        return pending_note  # a command-local redirect whose target could not be resolved (finding 12)
+    return _allow()
 
 
 # --- gatdis (EN-5 PR-B): a Bash command that weakens a verification gate -------------------------------
@@ -5049,14 +5637,15 @@ def _gate_weakening_fallback(command):
             "(rule gatdis, fail-safe); run the hooks, do not bypass them.")
     if _RAW_CHECKER_RE.search(command) and (
             _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)):
-        return _deny(
-            "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
-            "(likely unbalanced quotes) and it appears to swallow or truncate a checker's failure "
-            "signal ('|| true', '|| :', '| head', '| tail'); it is denied fail-safe. Run the checker bare "
-            "and let its exit status stand (redirect output to a file and read that if you need to page "
-            "it), rather than discarding its failure signal. {}".format(_GATE_ALTS),
-            "AIQT guardrail: denied an unparseable command that appears to discard a checker's failure "
-            "signal (rule gatdis, fail-safe); run the gate bare, do not swallow or truncate it.")
+        # ROUND-2 FINDING 14: the swallow/truncate checker-shape heuristic is too broad (a benign optional
+        # probe is common), so even on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; only
+        # the --no-verify bypass spellings above (a deliberate, unambiguous gate bypass) still deny fail-safe.
+        return _allow_note(
+            "AIQT guardrail (rule gatdis, gate-discipline): the command could not be parsed by the shell "
+            "lexer (likely unbalanced quotes) and it appears to swallow or truncate a checker's failure "
+            "signal ('|| true', '|| :', '| head', '| tail'). If it gates this work, run the checker bare and "
+            "let its exit status stand (redirect output to a file if you need to page it), rather than "
+            "discarding its failure signal; if it is a benign optional probe, this is allowed.")
     return _allow()
 
 
@@ -5065,14 +5654,12 @@ def gate_weakening(data):
     verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
     that accepts it (commit, merge, push, pull, rebase, am), or the short -n on the two verbs where
     -n IS --no-verify (commit, am; on push -n is --dry-run and on merge/pull it is --no-stat, so it
-    is deliberately not flagged there). NO-ASK posture: also DENY-and-educate a checker-shaped segment whose
-    failure signal is discarded: swallowed by an immediately following '|| true' or '|| :', or piped into a
-    truncating sink (head, tail) whose exit status replaces the checker's under default pipeline semantics.
-    Gate discipline is a hazard class (a concealed failing check), so although 'what is a gate' is not
-    lexically certain, the reachable correct action is clear (run the gate bare and let its exit status
-    stand, or redirect to a file), so a mis-shaped name costs a deny the caller self-corrects, never a stall.
-    A --no-verify bypass deny is certain and returns immediately; the heuristic swallow/truncate deny is held
-    so the certain deny wins first (mirrors protected_line)."""
+    is deliberately not flagged there). ROUND-2 FINDING 14: the checker-shape HEURISTIC (a checker-shaped
+    segment whose failure signal is swallowed by a following '|| true'/'|| :', or piped into a truncating
+    sink head/tail) is too broad - a benign optional probe ('test -d /cache || true', 'pytest || true' while
+    iterating) is common and is not a gate bypass - so it ALLOWS-WITH-NOTE (educating to run the gate bare if
+    it genuinely gates the work), not deny. Only the CONFIRMED --no-verify bypass, a deliberate and
+    unambiguous gate bypass, still DENIES (certain, returned immediately)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -5091,7 +5678,7 @@ def gate_weakening(data):
         segments = _segments(command)
     except ValueError:
         return _gate_weakening_fallback(command)
-    pending_deny = None  # the first heuristic gate-weakening deny; a certain --no-verify deny wins first
+    pending_note = None  # the first heuristic gate-weakening allow-note; a certain --no-verify deny wins first
     for index, (tokens, sep_after) in enumerate(segments):
         if _command_word(tokens) == "git" and not _has_info_flag(tokens):
             sub, args = _git_sub_and_args(tokens)
@@ -5109,35 +5696,35 @@ def gate_weakening(data):
         # The "immediately following" segment, advancing PAST any EMPTY segments (a bare
         # line-continuation/newline inserts a segment with no tokens, so 'pytest ||\n true' and
         # 'pytest |\n head' would otherwise read as having no following swallow/sink and miss the
-        # ASK). Only genuinely empty segments are skipped; a real intervening command (a non-empty
+        # note). Only genuinely empty segments are skipped; a real intervening command (a non-empty
         # segment) still breaks adjacency and is NOT skipped.
         nxt_index = index + 1
         while nxt_index < len(segments) and not segments[nxt_index][0]:
             nxt_index += 1
         nxt = segments[nxt_index][0] if nxt_index < len(segments) else []
+        # ROUND-2 FINDING 14: the checker-shape swallow ('|| true'/'|| :') and truncating-pipe ('| head/tail')
+        # HEURISTIC is too broad - a benign optional probe ('test -d /cache || true', 'pytest || true' while
+        # iterating, 'make | head' to glance at output) is common and is not a gate bypass - so it becomes an
+        # ALLOW-WITH-NOTE, not a deny. Only the CONFIRMED --no-verify bypass above (a deliberate, unambiguous
+        # gate bypass) still DENIES.
         if sep_after == "||" and _command_word(nxt) in _EXIT_SWALLOWS:
-            if pending_deny is None:
-                pending_deny = _deny(
-                    "AIQT rule gatdis (gate-discipline): {!r} looks like a verification gate and its "
-                    "failure is swallowed by the following '|| {}', so a failing check would read as a pass; "
-                    "it is denied. If it gates this work, run it bare and let the exit status stand. If this "
-                    "command is genuinely not a gate, run it without the '|| {}' swallow. {}"
-                    .format(_command_word(tokens), _command_word(nxt), _command_word(nxt), _GATE_ALTS),
-                    "AIQT guardrail: denied a checker-shaped command whose failure is swallowed ('|| true') "
-                    "(rule gatdis); run the gate bare and let its exit status stand.")
+            if pending_note is None:
+                pending_note = _allow_note(
+                    "AIQT guardrail (rule gatdis, gate-discipline): {!r} looks like a verification gate and "
+                    "its failure would be swallowed by the following '|| {}'. If it genuinely gates this "
+                    "work, do not swallow it: run it bare and let the exit status stand, so a failing check "
+                    "does not read as a pass. If it is only a benign optional probe, this is allowed."
+                    .format(_command_word(tokens), _command_word(nxt)))
         elif sep_after == "|" and _command_word(nxt) in _TRUNCATING_SINKS:
-            if pending_deny is None:
-                pending_deny = _deny(
-                    "AIQT rule gatdis (gate-discipline): {!r} looks like a verification gate and is "
-                    "piped into '{}', a truncating sink: under default pipeline semantics the "
-                    "pipeline reports the sink's exit status, not the checker's, and the truncation "
-                    "can also cut the failing output, so the gate's failure signal is discarded; it is "
-                    "denied. Run it bare, or redirect the output to a file and read that. {}"
-                    .format(_command_word(tokens), _command_word(nxt), _GATE_ALTS),
-                    "AIQT guardrail: denied a checker-shaped command piped into a truncating sink "
-                    "(| head/tail) (rule gatdis); run the gate bare or redirect to a file.")
-    if pending_deny is not None:
-        return pending_deny
+            if pending_note is None:
+                pending_note = _allow_note(
+                    "AIQT guardrail (rule gatdis, gate-discipline): {!r} looks like a verification gate and "
+                    "is piped into '{}', a truncating sink whose exit status replaces the checker's under "
+                    "default pipeline semantics. If it gates this work, run it bare (or redirect the output "
+                    "to a file and read that) so its failure signal is not discarded; if it is only a benign "
+                    "output glance, this is allowed.".format(_command_word(tokens), _command_word(nxt)))
+    if pending_note is not None:
+        return pending_note
     return _allow()
 
 
@@ -5276,9 +5863,8 @@ def commit_msg_subst(data):
             "AIQT rule sectvl (tool-argument-validation): this git commit argument {!r} carries {} in a "
             "lexical context that may substitute. Bash executes the marker BEFORE git processes the "
             "argument when it is double-quoted or unquoted, so it is denied. Re-issue with single quotes, "
-            "escape the marker as \\` or \\$(, or write the message to a file and use git commit -F <file>. "
-            "The shared lexer conservatively flags marker-bearing $'...' values even though Bash does not "
-            "substitute inside them."
+            "escape the marker as \\` or \\$(, wrap the message in ANSI-C $'...' quoting, or write the "
+            "message to a file and use git commit -F <file>."
             .format(argument[:80], marker),
             "AIQT guardrail: denied a git commit argument that appears to carry an executable command "
             "substitution (rule sectvl); re-issue single-quoted, escaped, or via -F <file>.")
@@ -5732,12 +6318,16 @@ def gensrc_guard(data):
     EXCLUDED (a path guard cannot see which lines an edit touches); Bash is EXCLUDED by design
     (regeneration itself runs through Bash), so the matcher is Write|Edit|MultiEdit only. NO-ASK posture:
     a CONFIRMED registry match DENIES and names the source to edit and the regenerate command (a reachable
-    correct action). The cannot-evaluate branches (see _gensrc_fail_ask: a malformed/empty/list/bool
+    correct action). A PRESENT-but-unreadable/malformed registry ALSO DENIES, fail-closed (round-2 finding
+    8): a corrupted registry must not silently disable the generated-artefact protection, so a cannot-read of
+    a PRESENT .aiqt/gensrc.json is a cannot-evaluate resolved to the safe (deny) outcome for this protective
+    guard. The remaining cannot-evaluate branches (see _gensrc_fail_ask: a malformed/empty/list/bool
     tool_name, a control-char payload field, no session cwd, a non-git session, an outside-repo target, an
-    unreadable/malformed registry, an unresolvable target, a containment fault) are NOT confirmed
-    generated-artefact edits and have no "edit the source" action to name, so they ALLOW with an
-    informational note rather than block a legitimate edit; the CI generated-artefact drift gate remains the
-    authoritative backstop. Only a missing tool_name denies under the shared fail-closed contract. The repo
+    unresolvable target, a containment fault) are NOT confirmed generated-artefact edits, have no
+    "edit the source" action to name, and are outside any expected coverage, so they ALLOW with an
+    informational note rather than block a legitimate edit; a genuinely-ABSENT registry is likewise the inert
+    ALLOW (adopters author their own). The CI generated-artefact drift gate remains the authoritative
+    backstop. Only a missing tool_name denies under the shared fail-closed contract. The repo
     root is the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
     _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
     if data.get("hook_event_name") != PRETOOL:
@@ -5774,7 +6364,22 @@ def gensrc_guard(data):
     if status == "absent":
         return _allow()  # the inert boundary: no registry, no coverage (adopters author their own)
     if status == "bad":
-        return _gensrc_fail_ask("the .aiqt/gensrc.json registry could not be cleared ({})".format(payload))
+        # ROUND-2 FINDING 8: a PRESENT-but-unreadable/malformed registry is a cannot-evaluate for a
+        # PROTECTIVE guard, so it fails CLOSED (DENY), never allow-note. Allow-noting it let a crippled or
+        # corrupted .aiqt/gensrc.json disable the generated-artefact restriction outright (garble the
+        # registry, then hand-edit any generated file). Only a genuinely-ABSENT registry (adopters author
+        # their own) and a non-git session, where no generated-file protection is expected, stay allow /
+        # allow-note; a PRESENT registry that cannot be read denies and names the (Bash-side) fix.
+        return _deny(
+            "AIQT rule gensrc (generated-artefact-source-only): the .aiqt/gensrc.json registry is PRESENT "
+            "but could not be read ({}), so this guard cannot tell whether the target is a generated "
+            "artefact. It fails closed and denies the edit rather than let a corrupted or unreadable "
+            "registry silently disable the generated-artefact protection. Regenerate or repair "
+            ".aiqt/gensrc.json (its generator runs through Bash, which this guard does not cover), then "
+            "retry.".format(payload),
+            "AIQT guardrail: denied a {} because .aiqt/gensrc.json is present but unreadable/malformed, a "
+            "fail-closed cannot-evaluate (rule gensrc); regenerate or repair the registry, then retry."
+            .format(tool_name))
     entries = payload
     if not entries:
         return _allow()  # a registry of only block entries has nothing this path guard can match
@@ -7149,6 +7754,12 @@ def _orch_foreground_detach(command):
     return in_single or in_double
 
 
+# ROUND-2 FINDING 9: sinks that TRUNCATE their input, so a producer piped into one loses both its full
+# output and (absent `pipefail`) its exit status. A subset of _CONSOLE_SINKS: cat/tee pass output through
+# (tee can even durably capture to a real file), so only head/tail are truncating.
+_ORCH_TRUNCATING_SINKS = frozenset(("head", "tail"))
+
+
 def orch_truncation_guard(data):
     """trkasy/vrfdlv/nocncl, PreToolUse Bash, scoped to run_in_background dispatches. AIRTIGHT-NARROW: it
     performs NO shell parsing, so no lexical or quoting edge can fabricate a capture. A background dispatch
@@ -7202,6 +7813,37 @@ def orch_truncation_guard(data):
             "AIQT guardrail: denied an unreadable background dispatch (fail-closed).")
     if _ORCH_PLAIN_COMMAND_RE.fullmatch(command) and not (_ORCH_SHELL_KEYWORDS & set(command.split())):
         return _allow()  # no metacharacter and no reserved word: the full stdout reaches the harness capture
+    # ROUND-2 FINDING 9: a background dispatch that pipes a PRODUCER into a TRUNCATING SINK (head/tail)
+    # discards the producer's output AND its failure - the pipeline's completion signal binds to the sink's
+    # truncated output and the pipeline exit is the sink's (0, absent `pipefail`), so a failing producer reads
+    # as a clean, finished run (the exact false-clean vrfdlv/trkasy forbid: "a tracked deliverable whose
+    # output is captured only through a truncating filter is not observable completion"). This is a proven
+    # hazard, not a merely-unprovable capture, so it DENIES-and-educates (use full durable capture, or keep
+    # it foreground) rather than allow-note. Detected lexically: any head/tail stage fed by an upstream `|`
+    # producer. A parse error falls through to the unprovable allow-note below (nothing proven).
+    try:
+        _segs = _segments(command)
+    except ValueError:
+        _segs = None
+    if _segs:
+        for _i, (_argv, _sep) in enumerate(_segs):
+            if _i == 0:
+                continue
+            if _segs[_i - 1][1] not in ("|", "|&"):
+                continue  # this stage is not fed by a pipe from the previous stage
+            _cw = _command_word(_argv)
+            if _cw in _ORCH_TRUNCATING_SINKS:
+                return _deny(
+                    "AIQT rules trkasy/vrfdlv (track-launched-work / verifier-delivery-completeness): this "
+                    "background dispatch pipes a producer into a truncating sink ('{}'), so the producer's "
+                    "full output AND its exit status are discarded - the completion signal would bind to the "
+                    "truncated output and a failing producer would read as a clean, finished run. It is "
+                    "denied. Capture the producer's FULL output durably instead: redirect its own stdout to a "
+                    "real file (producer > out.log) and read the file, or run it in the foreground and wait; "
+                    "never bind a tracked dispatch's completion to a head/tail-truncated view.".format(_cw),
+                    "AIQT guardrail: denied a background dispatch piped into a truncating sink ({}) that "
+                    "discards the producer's output and failure (rules trkasy/vrfdlv); capture the full "
+                    "output to a real file, or run it foreground.".format(_cw))
     return _allow_note(
         "AIQT guardrail (rules trkasy/vrfdlv): this background dispatch uses shell syntax (a pipe, redirect, "
         "separator, quote, expansion, or grouping), so this guard does not parse it to prove the full output "
@@ -8051,18 +8693,25 @@ _WRTSCP_MAX_BYTES = 64 * 1024                    # 64 KB: both artifacts are sma
 # Hook-side ALWAYS-FROZEN entries (repo-root-relative, same grammar as the committed floor): frozen against
 # the constrained actor's own covered Write/Edit/MultiEdit in BOTH regimes and INDEPENDENT of the committed
 # .aiqt/frozen.json floor, so an absent, deleted, or permissive floor cannot unfreeze them and a permissive
-# scope declaration cannot lower them. The orchestration LOCAL registry (.aiqt/orchestration.local.json)
-# carries write-scope-adjacent GUARDRAIL CONFIGURATION: the `companion_stores` cross-repo allow-list and the
+# scope declaration cannot lower them. EVERY orchestration registry file in _ORCH_REGISTRY_FILES (the
+# machine-local .aiqt/orchestration.local.json AND the committed .aiqt/orchestration.json) carries
+# write-scope-adjacent GUARDRAIL CONFIGURATION: the `companion_stores` cross-repo allow-list and the
 # yield-tool roster. Declaring a companion store is a scope-widening, guardrail-configuration change under the
 # SAME human-authorization discipline as any other scope widening (guardrail-config-integrity), so the actor
 # must not be able to self-declare a companion-store widening through a covered write; freezing the registry
 # against its own covered writes closes that self-widening residual (raised independently by our own QA and
-# the cleanlanguage adopter). The committed .aiqt/orchestration.json is out of this set: it is an ordinary
-# committed artefact whose companion_stores declaration lands through pull-request review plus the drift
-# gate, which IS the human-authorization path. The general Bash-write residual (a `sed -i`, a shell redirect,
-# any write outside the Write|Edit|MultiEdit matcher) is UNCHANGED and stays the disclosed wrtscp residual;
-# this hook-side freeze is defence in depth on the covered-tool path, not a categorical lock on the file.
-_WRTSCP_ALWAYS_FROZEN = (("file", ".aiqt/orchestration.local.json"),)
+# the cleanlanguage adopter). BOTH registry files are frozen, not only the LOCAL one: _wrtscp_companion_stores
+# reads companion_stores from EITHER file (via _orch_registry, which falls back to the committed
+# .aiqt/orchestration.json when the LOCAL file is absent), so freezing only the LOCAL file left a covered
+# Write of companion_stores into .aiqt/orchestration.json to take effect IN-SESSION (its cross-repo allow
+# read at decision time) before the CI drift gate could ever see it - a self-widening bypass. Freezing every
+# _ORCH_REGISTRY_FILES entry closes it, so no registry file that can source companion_stores/the yield-roster
+# is writable via a covered tool; the committed file's authorized change still lands through the general
+# Bash-write path (a `git`/editor write outside the Write|Edit|MultiEdit matcher) plus pull-request review and
+# the drift gate, which IS the human-authorization path. The general Bash-write residual (a `sed -i`, a shell
+# redirect, any write outside the Write|Edit|MultiEdit matcher) is UNCHANGED and stays the disclosed wrtscp
+# residual; this hook-side freeze is defence in depth on the covered-tool path, not a categorical lock.
+_WRTSCP_ALWAYS_FROZEN = tuple(("file", _rel) for _rel in _ORCH_REGISTRY_FILES)
 
 
 def _wrtscp_parse_entry(raw):
@@ -8565,6 +9214,69 @@ def write_scope_guard(data):
                             "unverified write",
                             "denied a {} (containment fault)".format(tool_name))  # row 11 (fault -> deny)
     slice_name = decl["slice"] if armed else None
+    # --- FROZEN DENIALS FIRST (round-2 finding 2): the ALWAYS-FROZEN registry set AND the committed frozen
+    # floor are evaluated BEFORE the companion-store admission and the structural other-repo allow below, so a
+    # target that is a frozen registry file, or on the floor, DENIES even when it resolves (via a symlink, or
+    # a floor entry that resolves) OUTSIDE the session repo INTO a declared companion store. Were the
+    # companion-store allow to run first, a symlinked .aiqt/orchestration.local.json (or a floor entry)
+    # resolving into a declared store would win a HEAD ALLOW and bypass the freeze. Each layer fires in BOTH
+    # regimes and independent of the other, so an absent/deleted/permissive .aiqt/frozen.json and a permissive
+    # scope declaration alike cannot let a covered write reach a frozen registry file. ---
+    always_frozen_hit = _wrtscp_target_matches(_WRTSCP_ALWAYS_FROZEN, target, root_c)
+    if always_frozen_hit is None:
+        return _wrtscp_deny(root, "always-frozen containment fault",
+                            "an always-frozen registry entry could not be resolved for containment, so a "
+                            "no-match cannot be proven",
+                            "denied a {} (always-frozen containment fault)".format(tool_name))
+    if always_frozen_hit:
+        return _wrtscp_deny(root, "frozen registry",
+                            "the write target is an orchestration registry file ({}), which carries "
+                            "guardrail configuration (the companion_stores cross-repo allow-list and the "
+                            "yield-tool roster) read from EITHER .aiqt/orchestration.local.json or the "
+                            "committed .aiqt/orchestration.json. Declaring a companion store is a "
+                            "scope-widening, guardrail-configuration change under human authorization, so "
+                            "every registry file is frozen against the actor's own covered writes in both "
+                            "regimes (independent of the committed frozen floor, un-lowerable by a scope "
+                            "declaration, and evaluated BEFORE the companion-store allow so a symlink into a "
+                            "declared store cannot bypass it) and cannot be self-widened through a guarded "
+                            "tool; set it through the harness/adopter orchestration-registry surface instead."
+                            .format(target),
+                            "denied a {} to a frozen orchestration registry file".format(tool_name))
+    # --- Frozen-floor denial (rows 8, 9, 10, 17, 18): fires whenever a floor is PRESENT, and an armed
+    # session additionally requires one; only an un-armed session with a genuinely-absent floor is inert ---
+    floor_status, floor = _load_frozen_floor(root)
+    if floor_status == "bad":
+        return _wrtscp_deny(root, "floor bad",
+                            "{}; a present-but-unreadable floor is a cannot-evaluate and denies (an absent "
+                            "floor is inert un-armed)".format(floor),
+                            "denied a {} because the frozen floor could not be read".format(tool_name))  # rows 9/17
+    if floor_status == "absent":
+        if armed:
+            return _wrtscp_deny(root, "floor absent (armed)",
+                                "an armed session requires a committed frozen floor (.aiqt/frozen.json; an "
+                                "explicit empty list is valid), so a deleted floor cannot silently downgrade "
+                                "an armed session",
+                                "denied a {} because an armed session has no frozen floor".format(tool_name))  # row 17
+        # Un-armed with no floor: the frozen layer is inert; the structural denials below still apply.
+        # (Fall through to the un-armed ALLOW below, row 10 -> row 12.)
+        floor = []
+    else:
+        on_floor = _wrtscp_target_matches(floor, target, root_c)
+        if on_floor is None:
+            return _wrtscp_deny(root, "floor containment fault",
+                                "a frozen-floor entry could not be resolved for containment, so a "
+                                "no-match cannot be proven",
+                                "denied a {} (floor containment fault)".format(tool_name))   # rows 9/17 (fault)
+        if on_floor:
+            return _wrtscp_deny(root, "frozen target",
+                                "the write target is on the frozen floor ({}): a generated output or frozen "
+                                "rotation data, never hand-written through a guarded tool. The floor outranks "
+                                "the scope declaration (deny over allow); edit the source and regenerate."
+                                .format(target),
+                                "denied a {} to a frozen path".format(tool_name))            # rows 8/18
+    # --- Structural other-repo / nested-repo denial, in BOTH regimes once the root resolves (rows 7, 16).
+    # Reached only AFTER the frozen denials above, so the companion-store ALLOW can never override a frozen
+    # registry file or a frozen-floor target that happens to resolve into a declared store. ---
     if within == "out":
         # SANCTIONED COMPANION-STORE path: a write into an adopter-DECLARED companion-store repo (an exact
         # repo-root match; e.g. the sole orchestrator's own durable store beside the code repo) is the single
@@ -8604,59 +9316,6 @@ def write_scope_guard(data):
                             "this repo ({}); it is denied as a floor the scope declaration cannot lower. "
                             "Run the write from a session rooted in that repo.".format(target),
                             "denied a {} to a nested or foreign repository".format(tool_name))  # rows 7/16
-    # --- Hook-side ALWAYS-FROZEN denial (registry freeze): fires in BOTH regimes and independent of the
-    # committed floor, BEFORE the data-floor logic, so an absent/deleted/permissive .aiqt/frozen.json and a
-    # permissive scope declaration alike cannot let a covered write reach .aiqt/orchestration.local.json. This
-    # closes the companion-store self-widening residual (see _WRTSCP_ALWAYS_FROZEN). ---
-    always_frozen_hit = _wrtscp_target_matches(_WRTSCP_ALWAYS_FROZEN, target, root_c)
-    if always_frozen_hit is None:
-        return _wrtscp_deny(root, "always-frozen containment fault",
-                            "an always-frozen registry entry could not be resolved for containment, so a "
-                            "no-match cannot be proven",
-                            "denied a {} (always-frozen containment fault)".format(tool_name))
-    if always_frozen_hit:
-        return _wrtscp_deny(root, "frozen registry",
-                            "the write target is the orchestration LOCAL registry ({}), which carries "
-                            "guardrail configuration (the companion_stores cross-repo allow-list and the "
-                            "yield-tool roster). Declaring a companion store is a scope-widening, "
-                            "guardrail-configuration change under human authorization, so the registry is "
-                            "frozen against the actor's own covered writes in both regimes (independent of "
-                            "the committed frozen floor and un-lowerable by a scope declaration) and cannot "
-                            "be self-widened through a guarded tool; set it through the harness/adopter "
-                            "orchestration-registry surface instead.".format(target),
-                            "denied a {} to the frozen orchestration registry".format(tool_name))
-    # --- Frozen-floor denial (rows 8, 9, 10, 17, 18): fires whenever a floor is PRESENT, and an armed
-    # session additionally requires one; only an un-armed session with a genuinely-absent floor is inert ---
-    floor_status, floor = _load_frozen_floor(root)
-    if floor_status == "bad":
-        return _wrtscp_deny(root, "floor bad",
-                            "{}; a present-but-unreadable floor is a cannot-evaluate and denies (an absent "
-                            "floor is inert un-armed)".format(floor),
-                            "denied a {} because the frozen floor could not be read".format(tool_name))  # rows 9/17
-    if floor_status == "absent":
-        if armed:
-            return _wrtscp_deny(root, "floor absent (armed)",
-                                "an armed session requires a committed frozen floor (.aiqt/frozen.json; an "
-                                "explicit empty list is valid), so a deleted floor cannot silently downgrade "
-                                "an armed session",
-                                "denied a {} because an armed session has no frozen floor".format(tool_name))  # row 17
-        # Un-armed with no floor: the frozen layer is inert; the structural denial already applied.
-        # (Fall through to the un-armed ALLOW below, row 10 -> row 12.)
-        floor = []
-    else:
-        on_floor = _wrtscp_target_matches(floor, target, root_c)
-        if on_floor is None:
-            return _wrtscp_deny(root, "floor containment fault",
-                                "a frozen-floor entry could not be resolved for containment, so a "
-                                "no-match cannot be proven",
-                                "denied a {} (floor containment fault)".format(tool_name))   # rows 9/17 (fault)
-        if on_floor:
-            return _wrtscp_deny(root, "frozen target",
-                                "the write target is on the frozen floor ({}): a generated output or frozen "
-                                "rotation data, never hand-written through a guarded tool. The floor outranks "
-                                "the scope declaration (deny over allow); edit the source and regenerate."
-                                .format(target),
-                                "denied a {} to a frozen path".format(tool_name))            # rows 8/18
     if not armed:
         return _allow()  # row 12: un-armed, structural cleared, not frozen -> no slice confinement in effect
     # --- ARMED slice confinement (rows 19, 20, 21) ---

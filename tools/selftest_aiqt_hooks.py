@@ -598,29 +598,143 @@ def main():
         # No regression (opt-b, co-a, rs-a above): a plain parseable opt-out still ALLOWs; a plain lossy form
         # with no opt-out still ASKS (co-a) and a dirty whole-tree clobber still DENIES (rs-a).
 
-        # === EN-6 round-19 Fix B: the redirect/ambient ASK emits the _OPTOUT_PRISTINE guidance ======
-        # A pristine repository-view-redirected form (a 'git -C <dir> <verb>' whose opt-out short-circuits
-        # BEFORE the redirect gate) is opted out by prefixing the command AS ISSUED, keeping its -C. So its
-        # ASK must carry the _OPTOUT_PRISTINE ("prefix this command") guidance, NOT the _OPTOUT_REISSUE
-        # ("re-issue it as a parseable pristine bare 'git <verb>'") text, which drops the -C and is false here.
-        data_bopt = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                     "tool_input": {"command": "git -C /tmp reset --hard"}, "cwd": rp}
-        code_bopt, obj_bopt, _ = handler(data_bopt)
-        dec_bopt = obj_bopt.get("hookSpecificOutput", {}).get("permissionDecision") \
-            if isinstance(obj_bopt, dict) else None
-        reason_bopt = obj_bopt.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
-            if isinstance(obj_bopt, dict) else ""
-        banner_bopt = obj_bopt.get("systemMessage", "") if isinstance(obj_bopt, dict) else ""
-        # No-ask posture: the redirect/ambient view-uncertainty case is now SNAPSHOT-THEN-ALLOW (a best-effort
-        # session-cwd snapshot on a dirty tree, else nothing to snapshot on a clean tree), surfaced as an
-        # informational allow-note (no permissionDecision). The former opt-out guidance (_OPTOUT_PRISTINE vs
-        # _OPTOUT_REISSUE) applied only to the ASK/DENY reason and is not carried on an allow-note.
-        if not (code_bopt == 0 and dec_bopt is None and banner_bopt):
-            failures.append("(r19b-1) redirect/ambient view-uncertainty must snapshot-then-allow with an "
-                            "informational note (no permissionDecision), got code={!r} dec={!r} note={!r}"
-                            .format(code_bopt, dec_bopt, bool(banner_bopt)))
-        if "prsunc" not in banner_bopt:
-            failures.append("(r19b-2) the redirect allow-note must name the prsunc rule")
+        # === ROUND-2 FINDING 4: a command-local worktree redirect (-C/--work-tree/GIT_WORK_TREE) on a
+        # === DESTRUCTIVE discard snapshots the ACTUAL TARGET repo, not the session cwd; when the target
+        # === cannot be snapshotted the discard DENIES (never allow-note a recovery ref that lacks the state).
+        # (a) -C into a DIFFERENT real repo: the recovery snapshot lands in the TARGET, NOT the session cwd.
+        # This discriminates the fix - the old code snapshotted the session cwd, whose ref would NOT contain
+        # the -C target's discarded state (the exact codex P1). Both ref-count assertions flip if reverted.
+        try:
+            f4_target = _init_repo(tmp / "f4target")
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the finding-4 target repo: {}".format(exc),
+                  file=sys.stderr)
+            return 2
+        (f4_target / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")  # dirty it
+        f4_before_target = len(_recovery_refs(f4_target))
+        f4_before_sess = len(_recovery_refs(repo))
+        expect("(f4-C-otherrepo) -C into a DIFFERENT dirty repo snapshots the TARGET and allows",
+               "git -C {} reset --hard".format(str(f4_target)), "allow", cwd=rp)
+        if len(_recovery_refs(f4_target)) != f4_before_target + 1:
+            failures.append("(f4-C-target-ref) the recovery snapshot for a -C-redirected discard must land "
+                            "in the -C TARGET repo (finding 4): expected exactly one new ref there")
+        if len(_recovery_refs(repo)) != f4_before_sess:
+            failures.append("(f4-C-not-cwd) the recovery snapshot for a -C-redirected discard must NOT land "
+                            "in the session cwd repo (finding 4; the old code snapshotted the wrong repo)")
+        # (b) -C into a NON-repo target cannot be snapshotted -> DENY (was an allow-note in round 1).
+        expect("(f4-C-nonrepo) -C into a NON-repo target DENIES (the target snapshot cannot be taken)",
+               "git -C {} reset --hard".format(str(tmp / "f4nonrepo")), "deny", cwd=rp)
+        # (c) -C into the SAME repo as the session cwd still ALLOWS (target resolves to the session repo).
+        expect("(f4-C-samerepo) -C into the SAME repo as cwd still allows (target == session repo)",
+               "git -C {} reset --hard".format(rp), "allow", cwd=rp)
+        # (d) a --work-tree redirect to a NON-repo dir also DENIES a destructive discard.
+        expect("(f4-worktree-nonrepo) --work-tree to a non-repo dir DENIES a destructive discard",
+               "git --work-tree={0} --git-dir={0}/.git reset --hard".format(str(tmp / "f4nonrepo2")),
+               "deny", cwd=rp)
+        # (e) a NON-destructive redirected form (reset --soft) still ALLOWS regardless of the target.
+        expect("(f4-soft-redirect) a non-destructive reset --soft under -C to a non-repo still allows",
+               "git -C {} reset --soft".format(str(tmp / "f4nonrepo")), "allow", cwd=rp)
+        # (f) the same-repo -C allow-note still names the prsunc rule (round-19 Fix B carry-forward).
+        _f4d = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "git -C {} reset --hard".format(rp)}, "cwd": rp}
+        _f4c, _f4o, _ = handler(_f4d)
+        _f4banner = _f4o.get("systemMessage", "") if isinstance(_f4o, dict) else ""
+        if "prsunc" not in _f4banner:
+            failures.append("(f4-note-rule) the same-repo -C redirect allow-note must name the prsunc rule")
+
+        # === ROUND-2 FINDING 5: the recovery snapshot preserves the STAGED (index) state as the ref's
+        # === SECOND PARENT, so staged-only content a `git restore --staged` discards stays recoverable.
+        try:
+            f5 = _init_repo(tmp / "f5")
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the finding-5 repo: {}".format(exc), file=sys.stderr)
+            return 2
+        (f5 / "file.txt").write_text("STAGED-A\n", encoding="utf-8")
+        _git(f5, "add", "file.txt")                                   # stage version A
+        (f5 / "file.txt").write_text("WORKTREE-B\n", encoding="utf-8")  # worktree diverges to B
+        _f5top = aiqt_hooks._recovery_toplevel(str(f5))
+        _f5st, _f5info = aiqt_hooks._take_snapshot(str(f5), _f5top, "restore")
+        if _f5st != "ok":
+            failures.append("(f5-snap) the recovery snapshot must succeed on a staged-vs-worktree repo; "
+                            "got {} {}".format(_f5st, _f5info))
+        else:
+            if not _f5info.get("staged"):
+                failures.append("(f5-staged-flag) the snapshot must flag a distinct STAGED state (finding 5)")
+            _f5staged = subprocess.run(
+                ["git", "-C", str(f5), "show", "{}^2:file.txt".format(_f5info["ref"])],
+                capture_output=True, text=True, timeout=30)
+            if _f5staged.returncode != 0 or _f5staged.stdout != "STAGED-A\n":
+                failures.append("(f5-staged-recover) the discarded STAGED version A must be recoverable from "
+                                "the ref's second parent (finding 5); got rc={} out={!r}"
+                                .format(_f5staged.returncode, _f5staged.stdout))
+            _f5wt = subprocess.run(
+                ["git", "-C", str(f5), "show", "{}:file.txt".format(_f5info["ref"])],
+                capture_output=True, text=True, timeout=30)
+            if _f5wt.stdout != "WORKTREE-B\n":
+                failures.append("(f5-worktree) the snapshot's primary tree must hold the worktree version B; "
+                                "got {!r}".format(_f5wt.stdout))
+
+        # === ROUND-2 FINDING 6: 'git stash drop'/'clear' (NOT reflog-recoverable afterwards) preserves every
+        # === stash entry under durable refs BEFORE allowing; denies when it cannot preserve them.
+        try:
+            f6 = _init_repo(tmp / "f6")
+        except (OSError, subprocess.SubprocessError) as exc:
+            print("SELF-TEST ERROR: could not build the finding-6 repo: {}".format(exc), file=sys.stderr)
+            return 2
+        # No stash entries yet: a clear loses nothing -> plain ALLOW (no preservation refs).
+        _f6_empty_before = len(_recovery_refs(f6))
+        expect("(f6-clear-empty) stash clear with no stashes allows (nothing to preserve)",
+               "git stash clear", "allow", cwd=str(f6))
+        if len(_recovery_refs(f6)) != _f6_empty_before:
+            failures.append("(f6-clear-empty-refs) an empty stash clear must create no recovery refs")
+        # Create two stashes, then a clear must preserve BOTH under durable refs before allowing.
+        (f6 / "file.txt").write_text("committed line\nstash-1\n", encoding="utf-8")
+        _git(f6, "stash", "push", "-m", "s1", env_identity=True)
+        (f6 / "file.txt").write_text("committed line\nstash-2\n", encoding="utf-8")
+        _git(f6, "stash", "push", "-m", "s2", env_identity=True)
+        _f6_before = len(_recovery_refs(f6))
+        expect("(f6-clear-allows) stash clear allows once the entries are preserved",
+               "git stash clear", "allow", cwd=str(f6))
+        _f6_new = [r for r in _recovery_refs(f6) if r.endswith(("stash0", "stash1"))]
+        if len(_recovery_refs(f6)) != _f6_before + 2 or len(_f6_new) != 2:
+            failures.append("(f6-clear-refs) stash clear must preserve BOTH stash entries under durable "
+                            "refs before allowing (finding 6); expected two new refs")
+        else:
+            # the preserved MOST-RECENT stash (stash@{0} = s2) must be recoverable from its ref
+            _f6ref0 = sorted(_f6_new)[0]  # ...-stash0
+            _f6show = subprocess.run(["git", "-C", str(f6), "show", "{}:file.txt".format(_f6ref0)],
+                                     capture_output=True, text=True, timeout=30)
+            if "stash-2" not in _f6show.stdout:
+                failures.append("(f6-clear-recover) a preserved stash entry must carry the stashed worktree "
+                                "content (finding 6); got {!r}".format(_f6show.stdout))
+        # stash drop on a repo with a stash also preserves it before allowing.
+        (f6 / "file.txt").write_text("committed line\nstash-3\n", encoding="utf-8")
+        _git(f6, "stash", "push", "-m", "s3", env_identity=True)
+        _f6_before2 = len(_recovery_refs(f6))
+        expect("(f6-drop-allows) stash drop allows once the entry is preserved", "git stash drop", "allow",
+               cwd=str(f6))
+        # _record_stash_recovery conservatively preserves EVERY stash entry (a worktree snapshot cannot tell
+        # which one drop targets), so the count rises by at least one; without the fix it would not rise.
+        if len(_recovery_refs(f6)) <= _f6_before2:
+            failures.append("(f6-drop-refs) stash drop must preserve the stash entries under durable refs "
+                            "before allowing (finding 6); expected at least one new recovery ref")
+        # No session cwd: the stash entries cannot be preserved -> DENY (was an allow-note in round 1).
+        expect("(f6-clear-nocwd) stash clear with no session cwd DENIES (cannot preserve the stash)",
+               "git stash clear", "deny")
+
+        # === ROUND-2 FINDING 7: 'git clean' whose worktree is UNRESOLVABLE DENIES for parity with
+        # === reset/checkout (was an allow-note via the role-ask fall-through with no recovery snapshot).
+        expect("(f7-clean-nocwd) git clean with no resolvable worktree DENIES (parity with reset/checkout)",
+               "git clean -fd", "deny")
+        # Parity witness: reset --hard with no cwd also denies (unchanged), so clean now matches it.
+        expect("(f7-reset-nocwd-parity) reset --hard with no cwd denies too (parity witness)",
+               "git reset --hard", "deny")
+        # A resolvable dirty tree still ALLOWS (snapshot-backed), so the fix denies ONLY the unrecoverable
+        # unresolvable-worktree case, not a normal clean.
+        _f7 = _init_repo(tmp / "f7")
+        (_f7 / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        expect("(f7-clean-resolvable) git clean on a resolvable dirty tree still allows (snapshot-backed)",
+               "git clean -fd", "allow", cwd=str(_f7))
 
         # === a pathspec-from-file source is worktree-scoped -> ASK on a dirty tree ===========
         expect("(pff-a) restore --pathspec-from-file asks on dirty tree",
@@ -1889,6 +2003,30 @@ def main():
         finally:
             os.environ.pop("GIT_DIR", None)
 
+        # === ROUND-2 FINDING 13: classify a commit against the branch it will ACTUALLY land on ===========
+        # Direction 1 (false-DENY fix): a 'git switch -c <feature> && git commit' on a main HEAD lands on the
+        # NEW branch, so it ALLOWS (was denied on the stale pre-command main HEAD). Discriminates: without the
+        # switched_to tracking the commit reads plr's HEAD=main and denies.
+        pexpect("(pl-f13a) switch -c feature && commit on main HEAD ALLOWS (lands on the new branch)",
+                "git switch -c feature && git commit -m x", "allow", cwd=plr)
+        pexpect("(pl-f13b) switch <existing feature> && commit ALLOWS (lands on the switched branch)",
+                "git switch other && git commit -m x", "allow", cwd=plr)
+        # Direction 1 (false-ALLOW fix): a switch TO a protected branch before a commit must DENY, even from a
+        # feature HEAD - the pre-command probe (HEAD=other) would have wrongly allowed it.
+        pexpect("(pl-f13c) switch main && commit from a feature HEAD DENIES (switched to the protected line)",
+                "git switch main && git commit -m x", "deny", cwd=plf)
+        # An '||' does NOT propagate the switch (the commit runs on switch FAILURE, HEAD unchanged), so a
+        # commit after '|| ' is classified against the pre-command HEAD (main) and DENIES.
+        pexpect("(pl-f13d) switch -c feature || commit on main HEAD DENIES ('||' commit runs on switch fail)",
+                "git switch -c feature || git commit -m x", "deny", cwd=plr)
+        # Direction 2 (false-ALLOW fix): a 'git -C <repo-on-main> commit' probes the -C TARGET's HEAD and
+        # DENIES when that target is on the protected line (was a blanket allow-note for any -C redirect).
+        pexpect("(pl-f13e) 'git -C <repo-on-main> commit' from a feature cwd DENIES (probes the -C target "
+                "HEAD, finding 13)", "git -C {} commit -m x".format(plr), "deny", cwd=plf)
+        # ... and still ALLOWS when the -C target is on a feature branch (the honoured explicit-target form).
+        pexpect("(pl-f13f) 'git -C <repo-on-feature> commit' ALLOWS (the -C target HEAD is non-protected)",
+                "git -C {} commit -m x".format(plf), "allow", cwd=plr)
+
         # Probe failure is fail-to-ASK for both surfaces (mocked like _tree_is_clean above).
         _orig_head = aiqt_hooks._head_branch
         aiqt_hooks._head_branch = lambda repo: None
@@ -2084,11 +2222,15 @@ def main():
         brexpect("(H8b) branch --set-upstream-to=<upstream> <name> is non-creation allows",
                  "git branch --set-upstream-to=origin/main x", "allow")
 
-        # H9: creation-ish forms whose start point cannot be extracted cleanly ASK (fail safe), never
-        # silently allow: --track/-t on checkout/switch, and --orphan/--track on worktree add.
-        brexpect("(H9a) checkout --track asks", "git checkout --track origin/main", "deny")
-        brexpect("(H9b) checkout -t asks", "git checkout -t origin/main", "deny")
-        brexpect("(H9c) switch --track asks", "git switch --track origin/main", "deny")
+        # H9: ROUND-2 FINDING 12: '--track'/'-t' only ENABLES upstream tracking and names a real rooted
+        # upstream (origin/main), so it no longer routes the whole form to a fail-safe deny; the checkout/
+        # switch --track forms ALLOW (the positional operand remains the start point / a DWIM tracking
+        # creation). '--orphan' and worktree '--track' still ASK->deny (their start is genuinely unverifiable).
+        brexpect("(H9a) checkout --track origin/main allows (finding 12: rooted upstream)",
+                 "git checkout --track origin/main", "allow")
+        brexpect("(H9b) checkout -t origin/main allows (finding 12)", "git checkout -t origin/main", "allow")
+        brexpect("(H9c) switch --track origin/main allows (finding 12)",
+                 "git switch --track origin/main", "allow")
         brexpect("(H9d) worktree add --orphan asks", "git worktree add --orphan ../wt-orphan", "deny")
         brexpect("(H9e) worktree add --track asks",
                  "git worktree add --track -b x ../wt-track origin/main", "deny")
@@ -2114,9 +2256,32 @@ def main():
         brexpect("(H12) checkout -b from a stale-but-rooted start allows",
                  "git checkout -b x origin/HEAD~1", "allow")
 
-        # H3: origin/HEAD cannot be derived, so the creation asks rather than silently allowing.
+        # ROUND-2 FINDING 12 (keep-working): the -c creation carrying '--track <ref>' is checked against its
+        # positional start; a rooted upstream ALLOWS, but --track never rescues a genuine ORPHAN operand.
+        brexpect("(f12-track-rooted) switch -c topic --track origin/main allows (rooted upstream operand)",
+                 "git switch -c topic --track origin/main", "allow")
+        brexpect("(f12-track-orphan) switch -c topic --track <orphan> still DENIES (--track does not rescue "
+                 "an orphan start)", "git switch -c topic --track orphan-start", "deny")
+        # -C-AWARENESS: with the session cwd a NON-git dir, a '-C <repo>' creation resolves the TARGET and
+        # checks ancestry THERE. A rooted HEAD ALLOWS (was a fail-safe deny before finding 12 - the flip
+        # discriminates the fix), while an orphan start under the same -C target is still caught and DENIES.
+        _f12_plain = tmp / "f12-plain-cwd"
+        _f12_plain.mkdir(parents=True, exist_ok=True)
+        if _decision(brg, "git -C {} checkout -b x".format(brr), cwd=str(_f12_plain)) != "allow":
+            failures.append("(f12-C-rooted) a -C <repo> creation from a rooted HEAD must ALLOW by probing "
+                            "the -C target, even from a non-git cwd (finding 12 -C-awareness)")
+        if _decision(brg, "git -C {} checkout -b x orphan-start".format(brr),
+                     cwd=str(_f12_plain)) != "deny":
+            failures.append("(f12-C-orphan) a -C <repo> creation from an ORPHAN start must still DENY "
+                            "(the -C target's ancestry is checked, not blindly allowed)")
+
+        # H3: ROUND-2 FINDING 12: origin/HEAD cannot be derived, so the guard falls back to a local
+        # main/master; a MISSING protected line is not evidence a plain local branch is orphaned, so a
+        # resolvable-start creation ALLOWS (was an over-block deny). A genuine orphan is still caught by the
+        # ancestry probe when a protected line DOES resolve (see the orphaned-start denies above).
         _git(br_repo, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
-        brexpect("(H3) missing origin/HEAD asks", "git checkout -b x", "deny")
+        brexpect("(H3) missing origin/HEAD allows a plain local branch (finding 12)",
+                 "git checkout -b x", "allow")
 
         # H4: non-creation git commands are untouched even while origin/HEAD is absent.
         for br_cmd in ("git status", "git log --oneline", "git branch"):
@@ -2398,8 +2563,10 @@ def main():
                 _redir("git diff > ./proc/self/fd/1"), [(">", 1, "./proc/self/fd/1", "opaque", "opaque")])
         texpect("(tok-18e) a nested 'dev' component ('foo/dev/x') is a plain file, still file-real",
                 _redir("git diff > foo/dev/x"), [(">", 1, "foo/dev/x", "file-real", "file-real")])
-        # Unsupported constructs are cannot-evaluate (ValueError), never partial argv.
-        for _bad, _why in [("git diff <<'EOF'\nx\nEOF", "heredoc"),
+        # Unsupported constructs are cannot-evaluate (ValueError), never partial argv. ROUND-2 FINDING 17: an
+        # UNQUOTED heredoc still raises (its body interpolates and stays in scope); a QUOTED heredoc does NOT
+        # (its body is literal data, excluded from analysis - asserted separately below).
+        for _bad, _why in [("git diff <<EOF\nx\nEOF", "unquoted heredoc"),
                            ("git diff <(echo x)", "process substitution"),
                            ("cat <<<word", "here-string"),
                            ('git diff "unbalanced', "unbalanced quote")]:
@@ -2408,6 +2575,39 @@ def main():
                 failures.append("(tok-cannot) {} must raise ValueError, did not".format(_why))
             except ValueError:
                 pass
+        # ROUND-2 FINDING 17: a QUOTED heredoc (<<'EOF'/<<"EOF"/<<\\EOF) lexes cleanly with its body EXCLUDED,
+        # so the lexical guards never fire on shell syntax quoted inside heredoc prose. The lexer sees only
+        # the command word ('cat'), not the body's 'git diff | tail' / '|| true' / bare '&'.
+        _f17_quoted = "cat <<'EOF'\ngit diff | tail\npytest || true\nrm -rf /  &\nEOF"
+        try:
+            _f17_segs = aiqt_hooks._lex_command(_f17_quoted)
+            _f17_argvs = [s.argv for s in _f17_segs if s.argv]
+            if _f17_argvs != [["cat"]]:
+                failures.append("(f17-lex) a quoted heredoc must lex to just its command word, body "
+                                "excluded; got {!r}".format(_f17_argvs))
+        except ValueError:
+            failures.append("(f17-lex-raise) a QUOTED heredoc must NOT raise (its body is literal data; "
+                            "finding 17)")
+        # No lexical Bash guard fires on the quoted-heredoc prose (each returns allow / allow-note, never a
+        # deny caused by the body). git_discard's UNCONDITIONAL raw scan is heredoc-body-stripped too.
+        for _f17g in (aiqt_hooks.diff_source_pretool, aiqt_hooks.gate_weakening,
+                      aiqt_hooks.bash_absolute_paths, aiqt_hooks.git_explicit_binding,
+                      aiqt_hooks.commit_msg_subst, aiqt_hooks.git_discard):
+            _f17c, _f17o, _ = _f17g({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": _f17_quoted}, "cwd": "/tmp"})
+            _f17d = (_f17o.get("hookSpecificOutput", {}).get("permissionDecision")
+                     if isinstance(_f17o, dict) else None)
+            if _f17d == "deny":
+                failures.append("(f17-guard-{}) a lexical guard must not fire on quoted-heredoc prose "
+                                "(finding 17); got deny".format(getattr(_f17g, "__name__", _f17g)))
+        # DISCRIMINATION: the SAME lossy verb OUTSIDE a quoted heredoc is still caught (body-strip preserves
+        # everything outside the body), so the allow above is the body exclusion, not a blanket pass.
+        _f17r, _f17ro, _ = aiqt_hooks.git_discard(
+            {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+             "tool_input": {"command": "git reset --hard <<'EOF'\nnote\nEOF"}, "cwd": brr})
+        if not (isinstance(_f17ro, dict)):
+            failures.append("(f17-outside) a real 'git reset --hard' OUTSIDE a quoted heredoc must still be "
+                            "in scope (not a boundary allow); finding 17 preserves it")
 
         # === L11: additional diff-source vectors (the AIRTIGHT-NARROW contract) =======================
         dexpect("(l11-d1) bare git diff denies", "git diff", "deny")
@@ -2447,6 +2647,20 @@ def main():
                 "git show :/text", "deny")
         dexpect("(l11-blob13) git show -O opt:val HEAD DENIES (bare-ref operand -> full diff; was ALLOW pre-fix)",
                 "git show -O opt:val HEAD", "deny")
+        # ROUND-2 FINDING 16: a value-taking option's SEPARATED value (e.g. '-L 1,3:file') contains a ':' but
+        # is NOT a blob operand; skipping it leaves no blob operand, so the line-range DIFF is DENIED (was
+        # ALLOWED - the value was misread as a blob selector). The attached '-L1,3:file' form denies too.
+        dexpect("(f16-showL) git show -L 1,3:file DENIES (line-range diff; the -L value is not a blob "
+                "operand; was ALLOW pre-fix)", "git show -L 1,3:file", "deny")
+        dexpect("(f16-showL-attached) git show -L1,3:file DENIES (attached -L value; line-range diff)",
+                "git show -L1,3:file", "deny")
+        # DISCRIMINATION: a value-taking option before a GENUINE blob operand still ALLOWS (the value is
+        # skipped, the blob read stands), so the deny above is the missing blob operand, not the ':' in -L.
+        dexpect("(f16-showU-blob) git show -U 3 HEAD:file ALLOWS (the -U value is skipped; blob read stands)",
+                "git show -U 3 HEAD:file", "allow")
+        # classifier witness: '-L 1,3:file' is a diff producer (no blob operand once the -L value is skipped).
+        if not aiqt_hooks._is_diff_producer(["git", "show", "-L", "1,3:file"]):
+            failures.append("(f16-cls) _is_diff_producer must be True for 'git show -L 1,3:file' (finding 16)")
         # Discrimination at the classifier: the blob form is NOT a diff producer, the bare form IS, and a
         # blob-selector operand followed by a bare ref/commit or a ':/' search IS a producer.
         if aiqt_hooks._is_diff_producer(["git", "show", "HEAD:x.py"]):
@@ -2611,9 +2825,12 @@ def main():
                 ([["git", "diff"]], []))
         texpect("(tok-16e) a continuation-joined MID-word '#' stays literal (di\\<nl>ff#x -> diff#x)",
                 _argv("git di\\\nff#x"), [["git", "diff#x"]])
-        # BLOCKER 3: ANSI-C / $'...' quoting that resolves to a git command word is UNPROVEN -> never ALLOW.
-        dexpect("(qa-b3a) $'g'it diff (bash runs git diff) never ALLOWs (opaque command word -> ASK)",
-                "$'g'it diff HEAD^ HEAD", "allow")
+        # ROUND-2 FINDING 15: ANSI-C $'...' quoting is LITERAL and deterministic, so $'g'it resolves to the
+        # command word 'git' (bash runs 'git diff HEAD^ HEAD' to the console) and is now provably a console
+        # diff dump -> DENY (the lexer no longer marks $'...' opaque; a genuine $VAR command word stays
+        # opaque and allows, see qa-b3b). Was an allow-note on the over-conservative opaque command word.
+        dexpect("(qa-b3a) $'g'it diff resolves to a real 'git diff' console dump -> DENIES (finding 15)",
+                "$'g'it diff HEAD^ HEAD", "deny")
         dexpect("(qa-b3b) a $VAR command word beside a producer surface never ALLOWs",
                 "$GIT diff HEAD", "allow")
         # BLOCKER 4: a --output/-o diversion means the shell redirect/pipe is a decoy; proofs C/D disabled.
@@ -2956,17 +3173,22 @@ def main():
                 "git merge --no-verify-signatures topic", "allow")
         gexpect("(gw-n4) positive --verify allows", "git commit --verify -m 'x'", "allow")
 
-        # The ASK heuristics: a checker-shaped segment swallowed or truncated.
-        gexpect("(gw-o) pytest || true asks", "pytest || true", "deny")
-        gexpect("(gw-p) pytest || : asks", "pytest -q || :", "deny")
-        gexpect("(gw-q) make test || true asks (runner + operand)", "make test || true", "deny")
-        gexpect("(gw-r) checker-named script || true asks (name parts)",
-                "tools/run_all_checks.sh || true", "deny")
-        gexpect("(gw-s) pytest | head asks (truncating sink)", "pytest | head", "deny")
-        gexpect("(gw-t) pytest | tail -20 asks", "pytest -q | tail -20", "deny")
-        gexpect("(gw-u) python -m pytest || true asks (runner -m module)",
-                "python -m pytest || true", "deny")
-        gexpect("(gw-v) npm test || true asks", "npm test || true", "deny")
+        # ROUND-2 FINDING 14: the checker-shape swallow/truncate HEURISTIC is too broad (a benign optional
+        # probe is common and is not a gate bypass), so it ALLOWS-WITH-NOTE, not deny. Only the CONFIRMED
+        # --no-verify bypass above still DENIES. These previously denied; each now allows with a note.
+        gexpect("(gw-o) pytest || true allows-with-note (heuristic relaxed, finding 14)", "pytest || true",
+                "allow")
+        gexpect("(gw-p) pytest || : allows-with-note (finding 14)", "pytest -q || :", "allow")
+        gexpect("(gw-q) make test || true allows-with-note (runner + operand; finding 14)",
+                "make test || true", "allow")
+        gexpect("(gw-r) checker-named script || true allows-with-note (name parts; finding 14)",
+                "tools/run_all_checks.sh || true", "allow")
+        gexpect("(gw-s) pytest | head allows-with-note (truncating sink; finding 14)", "pytest | head",
+                "allow")
+        gexpect("(gw-t) pytest | tail -20 allows-with-note (finding 14)", "pytest -q | tail -20", "allow")
+        gexpect("(gw-u) python -m pytest || true allows-with-note (runner -m module; finding 14)",
+                "python -m pytest || true", "allow")
+        gexpect("(gw-v) npm test || true allows-with-note (finding 14)", "npm test || true", "allow")
 
         # The heuristic stays scoped: non-checkers and non-truncating pipes are untouched.
         gexpect("(gw-w) checker with no swallow allows", "pytest && echo done", "allow")
@@ -2976,7 +3198,8 @@ def main():
         gexpect("(gw-z) echo is not checker-shaped", "echo test || true", "allow")
 
         # Precedence and disjointness (mirrors pl-l1/pl-m1).
-        gexpect("(gw-aa) a later hook-bypass deny wins over an earlier swallow ask",
+        gexpect("(gw-aa) a hook-bypass deny (--no-verify) still wins over an earlier swallow note (the "
+                "confirmed bypass DENY is preserved by finding 14)",
                 "pytest || true; git commit -n -m 'x'", "deny")
         gexpect("(gw-ab) a git_discard verb is out of gate_weakening scope (disjoint controls)",
                 "git reset --hard", "allow")
@@ -2986,7 +3209,8 @@ def main():
                 'git commit --no-verify -m "unbalanced', "deny")
         gexpect("(gw-ad) unparseable commit -n asks (the raw scan cannot bind the cluster)",
                 'git commit -n -m "unbalanced', "deny")
-        gexpect("(gw-ae) unparseable checker + swallow asks", 'pytest || true "unbalanced', "deny")
+        gexpect("(gw-ae) unparseable checker + swallow allows-with-note (finding 14; fallback relaxed)",
+                'pytest || true "unbalanced', "allow")
         gexpect("(gw-af) unparseable non-gate command allows", 'ls -la "unbalanced', "allow")
 
         # gatdis (EN-5 PR-B): additional brief coverage - the full verb roster in long form, the
@@ -3008,8 +3232,10 @@ def main():
         gexpect("(gw-an) revert with a stray -n is out of the verb roster, allows",
                 "git revert -n 0000", "allow")
         gexpect("(gw-ao) a plain pytest with no swallow allows", "pytest", "allow")
-        gexpect("(gw-ap) ruff check . || true asks", "ruff check . || true", "deny")
-        gexpect("(gw-aq) npm test | tail asks (truncating sink)", "npm test | tail", "deny")
+        gexpect("(gw-ap) ruff check . || true allows-with-note (finding 14)", "ruff check . || true",
+                "allow")
+        gexpect("(gw-aq) npm test | tail allows-with-note (truncating sink; finding 14)", "npm test | tail",
+                "allow")
         # DISCLOSED safe-direction over-deny (residue): a separated option VALUE that itself spells
         # --no-verify is scanned in the option region and DENIES; git would read it as the --message
         # value (no bypass), so this is a deliberate deny-direction over-match, never a silent allow.
@@ -3019,19 +3245,22 @@ def main():
         # gatdis round-2 (F-123): the newline-continuation ASK-miss (F3) and the --resolvemsg
         # value-option over-block (F4) are fixed; the adjacency/regression locks hold; the disclosed
         # redirect-pollution slips (F1/F2, routed to the common enforcement-hook redesign) are pinned.
-        gexpect("(gw-as) newline before the swallow now asks (F3)", "pytest ||\n true", "deny")
-        gexpect("(gw-at) newline before the truncating sink now asks (F3)", "pytest |\n head", "deny")
+        gexpect("(gw-as) newline before the swallow allows-with-note (F3 adjacency held; finding 14)",
+                "pytest ||\n true", "allow")
+        gexpect("(gw-at) newline before the truncating sink allows-with-note (F3 held; finding 14)",
+                "pytest |\n head", "allow")
         gexpect("(gw-au) am --resolvemsg -n consumes -n as the message value, allows (F4)",
                 "git am --resolvemsg -n patch.mbox", "allow")
-        gexpect("(gw-av) pytest || true still asks (adjacency lock)", "pytest || true", "deny")
+        gexpect("(gw-av) pytest || true allows-with-note (adjacency lock held; finding 14)",
+                "pytest || true", "allow")
         gexpect("(gw-aw) pytest ; true allows (';' is not a swallow)", "pytest ; true", "allow")
         gexpect("(gw-ax) am -n still denies (bare short -n is the bypass)", "git am -n", "deny")
         # L11 shared raw-aware tokenizer: a redirect anywhere in the command is removed from argv, so the
         # former F1/F2 redirect-pollution slips are CLOSED. The bypass/checker is no longer hidden.
         gexpect("(gw-ay) redirect before the git subcommand no longer slips, denies (L11 tokenizer)",
                 "git >/dev/null commit --no-verify -m x", "deny")
-        gexpect("(gw-az) redirect before the checker word no longer slips, asks (L11 tokenizer)",
-                ">/dev/null pytest || true", "deny")
+        gexpect("(gw-az) redirect before the checker word no longer slips; allows-with-note (L11 tokenizer "
+                "still de-pollutes argv; finding 14)", ">/dev/null pytest || true", "allow")
 
         # gatdis round-3 (F-123 disclosed residuals): the shared L11 tokenizer (_lex_command) treats a '#'
         # as an ordinary word character (it does no comment-stripping), so an embedded unquoted '#' is lexed
@@ -3039,8 +3268,8 @@ def main():
         # stays CLOSED; the two contrived safe-direction over-blocks still DENY.
         gexpect("(gw-ba) embedded-# no longer hides the trailing --no-verify, denies (round-32 lexer fix)",
                 "git commit -m ticket#123 --no-verify", "deny")
-        gexpect("(gw-bb) embedded-# no longer hides the '|| true' swallow, asks (round-32 lexer fix)",
-                "pytest foo#bar || true", "deny")
+        gexpect("(gw-bb) embedded-# no longer hides the '|| true' swallow; allows-with-note (lexer still "
+                "lexes it; finding 14)", "pytest foo#bar || true", "allow")
         gexpect("(gw-bc) a trailing --verify does not cancel --no-verify here, still denies "
                 "(disclosed --verify-cancel over-block)", "git commit --no-verify --verify -m x", "deny")
         gexpect("(gw-bd) a clustered -hn reads 'n' as the bypass, still denies "
@@ -3052,10 +3281,10 @@ def main():
                 "git >/dev/null commit --no-verify -m x", "deny")
         gexpect("(gw-l11b) trailing redirect does not hide --no-verify, denies",
                 "git commit --no-verify -m x >/dev/null", "deny")
-        gexpect("(gw-l11c) leading redirect before the checker no longer hides the swallow, asks",
-                ">/dev/null pytest || true", "deny")
-        gexpect("(gw-l11d) interspersed redirect does not hide the truncating sink, asks",
-                "pytest 2>/dev/null | head", "deny")
+        gexpect("(gw-l11c) leading redirect before the checker no longer hides the swallow; allows-with-note "
+                "(finding 14)", ">/dev/null pytest || true", "allow")
+        gexpect("(gw-l11d) interspersed redirect does not hide the truncating sink; allows-with-note "
+                "(finding 14)", "pytest 2>/dev/null | head", "allow")
         # A QUOTED redirect-shaped option value stays argv and does not mask the bypass verb.
         gexpect("(gw-l11e) a quoted '>' -m value does not hide the trailing --no-verify, denies",
                 "git commit -m '>' --no-verify", "deny")
@@ -3104,8 +3333,16 @@ def main():
         cmexpect("(cm-j) unquoted backtick asks", "git commit -m `git clean -fdx`", "deny")
         cmexpect("(cm-k) arithmetic is a disclosed safe-direction over-ask",
                  'git commit -m "n=$((1+2))"', "deny")
-        cmexpect("(cm-l) ANSI-C quoting is a disclosed safe-direction over-ask",
-                 "git commit -m $'a $(x) b'", "deny")
+        # ROUND-2 FINDING 15: ANSI-C $'...' quoting does NOT command-substitute, so a literal $( or backtick
+        # inside it is a LITERAL message and now ALLOWS (was a disclosed safe-direction over-deny).
+        cmexpect("(cm-l) ANSI-C $'...' literal $( is a literal message and ALLOWS (finding 15)",
+                 "git commit -m $'a $(x) b'", "allow")
+        cmexpect("(cm-l2) ANSI-C $'...' literal backtick is a literal message and ALLOWS (finding 15)",
+                 "git commit -m $'Document `code` examples'", "allow")
+        # DISCRIMINATION: the SAME markers in DOUBLE quotes DO substitute and still DENY, so the allow above
+        # is attributable to ANSI-C quoting being literal, not to dropping backtick/$( detection.
+        cmexpect("(cm-l3) the same $( in DOUBLE quotes still DENIES (substitutes; discriminates cm-l)",
+                 'git commit -m "a $(x) b"', "deny")
         cmexpect("(cm-m) marker in an abbreviated long-option argument asks",
                  'git commit --mess "x `y`"', "deny")
         cmexpect("(cm-n) git global value option is skipped before commit",
@@ -3643,17 +3880,25 @@ def main():
         # ALLOW: an absent registry is inert (repo2 has no .aiqt/gensrc.json).
         gexpect("(gs-h) an absent registry is the inert ALLOW", "allow",
                 tool="Write", file_path=os.path.join(gr2, "GEN.md"), cwd=gr2)
-        # ASK: malformed JSON, unknown version, malformed entry (kind=dir) all fail SAFE to ask.
+        # ROUND-2 FINDING 8: a PRESENT-but-unreadable/malformed registry is a cannot-evaluate for a
+        # PROTECTIVE guard, so it fails CLOSED (DENY), never allow-note - a corrupted/garbled .aiqt/gensrc.json
+        # must not silently DISABLE the generated-artefact restriction. malformed JSON, unknown version, and a
+        # malformed entry (kind=dir) all DENY. (Contrast the genuinely-ABSENT registry gs-h and the non-git /
+        # payload cannot-evaluate branches below, which stay allow: no generated-file protection is expected.)
         gs_reg3.write_text("{ not json", encoding="utf-8")
-        gexpect("(gs-i1) malformed-JSON registry ASKS", "allow",
+        gexpect("(gs-i1) malformed-JSON registry DENIES fail-closed (finding 8)", "deny",
                 tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
         gs_reg3.write_text(json.dumps({"version": 2, "generated": []}), encoding="utf-8")
-        gexpect("(gs-i2) unknown-version registry ASKS", "allow",
+        gexpect("(gs-i2) unknown-version registry DENIES fail-closed (finding 8)", "deny",
                 tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "dir", "target": "x", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
-        gexpect("(gs-i3) malformed-entry (unknown kind) registry ASKS", "allow",
+        gexpect("(gs-i3) malformed-entry (unknown kind) registry DENIES fail-closed (finding 8)", "deny",
                 tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
+        # DISCRIMINATION (fails WITHOUT the finding-8 fix): the ONLY difference between gs-i1 (present-but-bad
+        # -> deny) and gs-h (absent -> allow) is registry READABILITY, so the deny is attributable to the
+        # fail-closed treatment of a present-but-unreadable registry, not to a path match (gr3 has no match
+        # for GEN.md when the registry is unreadable). Under the old allow-note it was "allow".
         # ASK: an unresolved repo root (a plain non-git cwd).
         gexpect("(gs-j) a non-git cwd (unresolved root) ASKS", "allow",
                 tool="Write", file_path=os.path.join(gng, "GEN.md"), cwd=gng)
@@ -3678,8 +3923,8 @@ def main():
         # DETERMINISTIC: the registry PATH is a DIRECTORY, so the lstat/S_ISREG probe rejects it as
         # non-regular BEFORE the open (a directory's st_mode is not S_ISREG -> bad) on every runner, root
         # included. No os.access/chmod skip (F-166).
-        gexpect("(gs-q) a non-regular (directory-at-path) registry ASKS (not a regular file, never absent)",
-                "allow",
+        gexpect("(gs-q) a non-regular (directory-at-path) registry DENIES fail-closed (not a regular file, "
+                "never absent; finding 8)", "deny",
                 tool="Write", file_path=os.path.join(grdir, "GEN.md"), cwd=grdir)
         # ASK: a MultiEdit relative file_path is joined onto cwd, then matched.
         gexpect("(gs-r) a MultiEdit relative file_path is cwd-joined then matched (ASKS)", "deny",
@@ -3705,32 +3950,32 @@ def main():
         # ASK: version:true is a JSON bool, not int 1 (type(True) is bool). Was ALLOW (True == 1). (F-159)
         gs_reg3.write_text(json.dumps({"version": True, "generated": [
             {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
-        gexpect("(gs-u) a JSON-bool version:true ASKS (type is bool, not int)", "allow",
-                tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
-        # ASK: version:"1" string is not int 1. (both old and new reject; asserts the type contract holds)
+        gexpect("(gs-u) a JSON-bool version:true DENIES fail-closed (type is bool, not int; finding 8)",
+                "deny", tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
+        # DENY: version:"1" string is not int 1 (a present-but-bad registry -> fail-closed, finding 8).
         gs_reg3.write_text(json.dumps({"version": "1", "generated": [
             {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
-        gexpect("(gs-v) a string version:\"1\" ASKS (not int)", "allow",
+        gexpect("(gs-v) a string version:\"1\" DENIES fail-closed (not int; finding 8)", "deny",
                 tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
         # ASK: a control character (NUL) in a FILE entry target is malformed -> bad. Was ALLOW (target
         # passed the old validation, no match on an unregistered query). (F-160)
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "file", "target": "GEN\x00.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
-        gexpect("(gs-w) a NUL in a file-entry target ASKS (control-char rejected)", "allow",
-                tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
+        gexpect("(gs-w) a NUL in a file-entry target DENIES fail-closed (control-char rejected; finding 8)",
+                "deny", tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
         # ASK: a NON-NUL control char (0x1f) in a file target. Unlike NUL, realpath does NOT raise on it,
         # so ONLY the control-char rejection (not the realpath-fault wrap) catches it - guards F-160's
         # independent value. Was ALLOW (target passed old validation; no match on an unregistered query).
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "file", "target": "GEN\x1f.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
-        gexpect("(gs-w2) a non-NUL control char in a file-entry target ASKS (realpath would not reject)",
-                "allow", tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
+        gexpect("(gs-w2) a non-NUL control char in a file-entry target DENIES fail-closed (finding 8)",
+                "deny", tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
         # ASK: a NUL in a BLOCK entry target is rejected BEFORE the block-skip. Was a zero-entry ALLOW
         # (the block was dropped, leaving no entries). (F-160)
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "block", "target": "X\x00", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
-        gexpect("(gs-x) a NUL in a block-entry target ASKS (rejected before the block-skip)", "allow",
-                tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
+        gexpect("(gs-x) a NUL in a block-entry target DENIES fail-closed (rejected before the block-skip; "
+                "finding 8)", "deny", tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
         # ASK: a NUL in the PAYLOAD file_path is rejected before realpath. Was an uncaught crash
         # (os.path.realpath raises ValueError on an embedded NUL). (F-160 + F-157)
         gexpect("(gs-y) a NUL in the payload file_path ASKS (was a crash-to-deny)", "allow",
@@ -3749,12 +3994,12 @@ def main():
         # follow the link, so S_ISREG is False on the link itself -> bad; this rejects a STATIONARY symlink
         # (best-effort against the accidental case, not a TOCTOU-closure claim). Was an inert ALLOW
         # (open -> FileNotFoundError -> absent). (F-164)
-        gexpect("(gs-aa) a dangling-symlink registry ASKS (a symlink is never a regular file)", "allow",
-                tool="Write", file_path=os.path.join(grlink, "GEN.md"), cwd=grlink)
+        gexpect("(gs-aa) a dangling-symlink registry DENIES fail-closed (a symlink is never a regular file; "
+                "finding 8)", "deny", tool="Write", file_path=os.path.join(grlink, "GEN.md"), cwd=grlink)
         # ASK: a multibyte OVERSIZE registry (>1M BYTES but <1M chars) exceeds the BYTE bound. Was ALLOW
         # (a char-count read stayed under the cap and parsed to an empty registry). (F-165)
-        gexpect("(gs-ab) a multibyte-oversize registry ASKS (the bound is on BYTES)", "allow",
-                tool="Write", file_path=os.path.join(grbig, "GEN.md"), cwd=grbig)
+        gexpect("(gs-ab) a multibyte-oversize registry DENIES fail-closed (the bound is on BYTES; finding 8)",
+                "deny", tool="Write", file_path=os.path.join(grbig, "GEN.md"), cwd=grbig)
 
         # gs-ac / gs-ad: the guarded-realpath-fault branch (the target/entry realpath raises) and the
         # _gensrc_within containment-fault "err" branch are DEFENSE-IN-DEPTH and NOT input-reachable on
@@ -3802,8 +4047,8 @@ def main():
         # removing the decode try/except turns the invalid bytes into an uncaught crash the dispatcher
         # hard-DENIES, not a clean ASK. (F-169 deterministic decode-path proof)
         gs_reg3.write_bytes(b"\xff\xfe\x00\x01not utf-8\xc3\x28")
-        gexpect("(gs-af) a non-UTF-8 registry ASKS (invalid bytes -> decode fault -> bad)", "allow",
-                tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
+        gexpect("(gs-af) a non-UTF-8 registry DENIES fail-closed (invalid bytes -> decode fault -> bad; "
+                "finding 8)", "deny", tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
         # ASK: a FIFO registry is BAD (lstat/S_ISREG sees S_ISFIFO before the open), and the probe does NOT
         # block: os.lstat does not open the FIFO, so no writer is needed and there is no hang. Falsifiable:
         # dropping the lstat/S_ISREG probe would make open(path, "rb") block on the FIFO until the hook
@@ -3811,7 +4056,8 @@ def main():
         _fifo_path = os.path.join(grfifo, ".aiqt", "gensrc.json")
         os.mkfifo(_fifo_path)
         try:
-            gexpect("(gs-ag) a FIFO registry ASKS (lstat/S_ISREG sees S_ISFIFO, no open, no hang)", "allow",
+            gexpect("(gs-ag) a FIFO registry DENIES fail-closed (lstat/S_ISREG sees S_ISFIFO, no open, no "
+                    "hang; finding 8)", "deny",
                     tool="Write", file_path=os.path.join(grfifo, "GEN.md"), cwd=grfifo)
         finally:
             os.remove(_fifo_path)
@@ -3829,7 +4075,8 @@ def main():
             return _real_lstat(p, *a, **k)
         try:
             os.lstat = _racing_lstat
-            gexpect("(gs-ah) a delete-race (regular at lstat, gone at open) ASKS, not absent-ALLOW", "allow",
+            gexpect("(gs-ah) a delete-race (regular at lstat, gone at open) DENIES fail-closed, not "
+                    "absent-ALLOW (finding 8)", "deny",
                     tool="Write", file_path=os.path.join(grrace, "GEN.md"), cwd=grrace)
         finally:
             os.lstat = _real_lstat
@@ -3947,17 +4194,32 @@ def main():
         bcmd("(ap-c13) cd option then absolute allows (option skipped)", "cd -P {}".format(rp), "allow")
         bcmd("(ap-c14) cd option then relative asks (option skipped, dest judged)", "cd -P rel", "allow")
         bcmd("(ap-c15) pushd '-n' then relative asks", "pushd -n rel", "allow")
-        bcmd("(ap-c16) relative redirect target asks", "echo hi > out.txt", "allow")
+        # ROUND-2 FINDING 10: a TRUNCATING redirect ('>', '>|', '&>', '>&' to a file) to a RELATIVE or OPAQUE
+        # target DENIES-and-educates (it zeroes an unverified ambient target; the `: > file.txt` class). The
+        # NON-destructive forms (append '>>', read '<'/'<>') and an absolute truncating target stay allow.
+        bcmd("(ap-c16) relative truncating redirect target DENIES (finding 10)", "echo hi > out.txt", "deny")
         bcmd("(ap-c17) absolute redirect target allows", "echo hi > {}/out.txt".format(rp), "allow")
-        bcmd("(ap-c18) relative append redirect asks", "echo hi >> log", "allow")
-        bcmd("(ap-c19) relative input redirect asks", "sort < data.txt", "allow")
+        bcmd("(ap-c18) relative append redirect allows (append does not truncate; convention nudge)",
+             "echo hi >> log", "allow")
+        bcmd("(ap-c19) relative input redirect allows (read is not destructive; convention nudge)",
+             "sort < data.txt", "allow")
         bcmd("(ap-c20) absolute input redirect allows", "sort < {}/data.txt".format(rp), "allow")
         bcmd("(ap-c21) fd duplication '2>&1' allows (descriptor, no path)", "cat x 2>&1", "allow")
         bcmd("(ap-c22) absolute /dev redirect allows", "cat x 2>/dev/null", "allow")
-        bcmd("(ap-c23) opaque redirect target '$F' asks", "echo hi > $F", "allow")
+        bcmd("(ap-c23) opaque truncating redirect target '$F' DENIES (finding 10: unverified target)",
+             "echo hi > $F", "deny")
         bcmd("(ap-c24) non-cd relative operand NOT judged (allows)", "cat rel.txt", "allow")
-        bcmd("(ap-c25) compound with a relative redirect asks", "cd {} && echo x > out.txt".format(rp),
-             "allow")
+        bcmd("(ap-c25) compound with a relative TRUNCATING redirect DENIES (finding 10)",
+             "cd {} && echo x > out.txt".format(rp), "deny")
+        # the bare-truncation `: > file.txt` class (a no-op producer zeroing a relative target) DENIES.
+        bcmd("(ap-c25b) ': > relative' bare truncation DENIES (finding 10, the named example)",
+             ": > file.txt", "deny")
+        # discrimination witness: the SAME target as an APPEND ('>>') stays allow, so the deny is the
+        # TRUNCATION, not merely the relative path (fails if the truncating-op gate is removed).
+        bcmd("(ap-c25c) the same relative target as an append '>>' allows (truncation is the discriminator)",
+             ": >> file.txt", "allow")
+        bcmd("(ap-c25d) a relative '>|' clobber redirect DENIES (truncating op; finding 10)",
+             "echo x >| out.txt", "deny")
         bcmd("(ap-c26) compound all-absolute allows", "cd {} && cat {}/f".format(rp, rp), "allow")
         bcmd("(ap-c27) unparseable command with no earlier relative position allows (disclosed residual)",
              'git checkout -- "unbalanced', "allow")
@@ -3967,8 +4229,8 @@ def main():
         # command discarded every parsed segment and ALLOWED). Fails-when-reverted: these were "allow".
         bcmd("(ap-c34) relative cd before a heredoc asks (prefix inspected, GS-7 FIX 1)",
              "cd .aiqt; cat <<EOF > /dev/null\nx\nEOF\npwd", "allow")
-        bcmd("(ap-c35) relative redirect before a here-string asks (prefix inspected, GS-7 FIX 1)",
-             "echo hi > out.txt; cat <<<x", "allow")
+        bcmd("(ap-c35) relative TRUNCATING redirect before a here-string DENIES (prefix inspected, GS-7 FIX "
+             "1 + finding 10)", "echo hi > out.txt; cat <<<x", "deny")
         bcmd("(ap-c36) relative cd before a process substitution asks (prefix inspected, GS-7 FIX 1)",
              "cd rel; cat <(printf x)", "allow")
         # boundary: an unparseable construct with NO earlier resolvable position stays a disclosed ALLOW
@@ -4033,10 +4295,10 @@ def main():
         # the SAME in-progress segment ('cat > out.txt <<EOF...', 'cat > out.txt <(...)') is now inspected
         # (the in-progress segment is recovered on the partial-lex exception path) and ASKS; pre-round-2 the
         # whole in-progress segment was discarded, a false ALLOW. Fails-when-reverted (both were ALLOW).
-        bcmd("(ap-c58) redirect target before a heredoc asks (in-progress seg recovered, GS-7 round-2 MAJOR 2)",
-             "cat > out.txt <<EOF\nx\nEOF", "allow")
-        bcmd("(ap-c59) redirect target before a proc-subst asks (in-progress seg recovered, GS-7 round-2 MAJOR 2)",
-             "cat > out.txt <(printf x)", "allow")
+        bcmd("(ap-c58) truncating redirect target before a heredoc DENIES (in-progress seg recovered, GS-7 "
+             "round-2 MAJOR 2 + finding 10)", "cat > out.txt <<EOF\nx\nEOF", "deny")
+        bcmd("(ap-c59) truncating redirect target before a proc-subst DENIES (in-progress seg recovered, "
+             "GS-7 round-2 MAJOR 2 + finding 10)", "cat > out.txt <(printf x)", "deny")
         # boundary preserved: a construct with NO earlier resolvable position in the in-progress segment
         # stays a disclosed ALLOW; a cd/redirect AFTER the construct stays uninspected (disclosed residual).
         bcmd("(ap-c60) heredoc with only a command word before it allows (disclosed residual, GS-7 round-2)",
@@ -4128,12 +4390,12 @@ def main():
              "printf x > ~", "allow")
         # regression guards for MAJOR 4: a QUOTED or complex-prefix tilde redirect target is NOT expanded and
         # still ASKS (matching cd), and a plain relative redirect target is unaffected.
-        bcmd("(ap-c81) 'printf x > \"~\"/x' asks (quoted tilde is literal-relative, GS-7 round-4 MAJOR 4 guard)",
-             'printf x > "~"/x', "allow")
-        bcmd("(ap-c81b) 'printf x > ~\"/x\"' asks (quote inside the tilde-prefix, round-4 MAJOR 4 guard)",
-             'printf x > ~"/x"', "allow")
-        bcmd("(ap-c81c) 'printf x > out.txt' asks (plain relative redirect target unaffected, round-4 guard)",
-             "printf x > out.txt", "allow")
+        bcmd("(ap-c81) 'printf x > \"~\"/x' DENIES (quoted tilde is literal-relative truncating target; "
+             "round-4 MAJOR 4 guard + finding 10)", 'printf x > "~"/x', "deny")
+        bcmd("(ap-c81b) 'printf x > ~\"/x\"' DENIES (quote inside the tilde-prefix -> literal-relative "
+             "truncating target; round-4 MAJOR 4 + finding 10)", 'printf x > ~"/x"', "deny")
+        bcmd("(ap-c81c) 'printf x > out.txt' DENIES (plain relative TRUNCATING target; finding 10)",
+             "printf x > out.txt", "deny")
         bcmd("(ap-c81d) 'printf x > /tmp/x' allows (absolute redirect target unaffected, round-4 guard)",
              "printf x > /tmp/x", "allow")
         # MAJOR 3 (DISCLOSED conservative over-fire, PINNED): an assignment NAME quoted or escaped
@@ -4194,16 +4456,29 @@ def main():
                  "cd /abs/repo && git -C /abs/repo commit -m x", "allow")
         ebexpect("(eb-e3) inline --git-dir target credits the binding",
                  "cd /abs/repo && git --git-dir=/abs/repo/.git commit -m x", "allow")
-        ebexpect("(eb-e4) breadth add feeding push asks", "git add -A && git push", "allow")
-        ebexpect("(eb-e5) relocated breadth stage and publish asks",
-                 "cd /abs/repo && git add --all && git commit -m x && git push", "allow")
+        # ROUND-2 FINDING 11: a whole-tree BREADTH stage feeding a PUBLISH in the same command DENIES-and-
+        # educates (it sweeps unrelated content into a pushed commit); a preceding cd does not mask it.
+        ebexpect("(eb-e4) breadth add feeding push DENIES (finding 11)", "git add -A && git push", "deny")
+        ebexpect("(eb-e5) relocated breadth stage and publish DENIES (finding 11; cd does not mask it)",
+                 "cd /abs/repo && git add --all && git commit -m x && git push", "deny")
         ebexpect("(eb-e6) pushd feeding untargeted mutation asks",
                  "pushd /abs/repo && git rm -r src && popd", "allow")
         ebexpect("(eb-e7) dynamic cd still exposes the ambient binding",
                  'cd "$D" && git commit -m x', "allow")
         ebexpect("(eb-e8) lone bare mutation is a deliberate non-fire", "git commit -m x", "allow")
-        ebexpect("(eb-e9) lone breadth commit is a deliberate non-fire", "git commit -am x", "allow")
-        ebexpect("(eb-e10) dot pathspec feeding push asks", "git add . && git push", "allow")
+        ebexpect("(eb-e9) lone breadth commit (NO publish) is a deliberate non-fire (allow)",
+                 "git commit -am x", "allow")
+        ebexpect("(eb-e10) dot pathspec feeding push DENIES (finding 11)", "git add . && git push", "deny")
+        # NOT over-blocked (finding 11 guard): a plain commit and a scoped add + push stay allow; a breadth
+        # stage with NO publish stays allow (only breadth PAIRED with a publish denies).
+        ebexpect("(eb-e10b) plain 'git commit -m' with no breadth allows", "git commit -m x && git push",
+                 "allow")
+        ebexpect("(eb-e10c) scoped 'git add <path>' feeding push allows (enumerated, not breadth)",
+                 "git add src/a.py && git push", "allow")
+        ebexpect("(eb-e10d) breadth add with NO publish allows (relocate/convention, not breadth+publish)",
+                 "git add -A && git commit -m x", "allow")
+        ebexpect("(eb-e10e) a push BEFORE the breadth stage does not fire (publishes pre-breadth state)",
+                 "git push && git add -A", "allow")
         ebexpect("(eb-e11) cd feeding read-only git allows", "cd /abs && git status", "allow")
         ebexpect("(eb-e12) cd feeding non-git allows", "cd /abs && ls -la", "allow")
         ebexpect("(eb-e13) bare discard remains the git_discard control's boundary",
@@ -4623,6 +4898,48 @@ def main():
             failures.append("(ws-frozen-reg-const) _WRTSCP_ALWAYS_FROZEN must freeze "
                             ".aiqt/orchestration.local.json")
 
+        # --- ROUND-2 FINDING 1: the COMMITTED registry .aiqt/orchestration.json is ALSO always-frozen. ---
+        # companion_stores / the yield-roster are read from EITHER registry file (_orch_registry falls back
+        # from the LOCAL file to the committed .aiqt/orchestration.json), so freezing ONLY the LOCAL file left
+        # a covered Write of companion_stores into .aiqt/orchestration.json to take effect IN-SESSION before
+        # CI could see it - a self-widening bypass. Now every _ORCH_REGISTRY_FILES entry is frozen.
+        _ws_regjson = rp_j(".aiqt", "orchestration.json")
+        ws_disarm(ws_rp)
+        ws_floor(ws_rp, WS_FLOOR)              # committed floor present, does NOT list either registry
+        wsexpect("(ws-frozen-regjson-unarmed) un-armed: a covered Write of the COMMITTED registry "
+                 ".aiqt/orchestration.json denies (finding 1: both registry files are frozen)",
+                 "deny", "Write", _ws_regjson, ws_rp)
+        wsexpect("(ws-frozen-regjson-edit) an Edit of .aiqt/orchestration.json denies too (always-frozen)",
+                 "deny", "Edit", _ws_regjson, ws_rp)
+        ws_nofloor(ws_rp)
+        wsexpect("(ws-frozen-regjson-nofloor) un-armed with NO committed floor: the .aiqt/orchestration.json "
+                 "freeze still denies (independent of the committed floor)", "deny", "Write", _ws_regjson,
+                 ws_rp)
+        # DISCRIMINATION (fails WITHOUT the finding-1 fix): freezing ONLY the LOCAL file (the pre-fix set)
+        # ALLOWS the .json write (un-armed, in-repo, not on the committed floor), proving the deny is caused
+        # by adding .aiqt/orchestration.json to the freeze. Restore the constant afterwards.
+        ws_floor(ws_rp, WS_FLOOR)
+        _ws_orig_always2 = aiqt_hooks._WRTSCP_ALWAYS_FROZEN
+        aiqt_hooks._WRTSCP_ALWAYS_FROZEN = (("file", ".aiqt/orchestration.local.json"),)
+        try:
+            _ws_json_without = wsdecide("Write", _ws_regjson, str(ws_rp))
+        finally:
+            aiqt_hooks._WRTSCP_ALWAYS_FROZEN = _ws_orig_always2
+        if _ws_json_without != "allow":
+            failures.append("(ws-frozen-regjson-discriminates) with ONLY .aiqt/orchestration.local.json "
+                            "frozen (the pre-fix set) the covered Write of .aiqt/orchestration.json must "
+                            "ALLOW, so the deny is attributable to freezing the committed registry too; got {}"
+                            .format(_ws_json_without))
+        if ("file", ".aiqt/orchestration.json") not in tuple(aiqt_hooks._WRTSCP_ALWAYS_FROZEN):
+            failures.append("(ws-frozen-regjson-const) _WRTSCP_ALWAYS_FROZEN must freeze "
+                            ".aiqt/orchestration.json")
+        # CLASS WIDTH: every registry file that can source companion_stores/the yield-roster is frozen, so the
+        # freeze set can never drift behind _ORCH_REGISTRY_FILES.
+        for _rel in aiqt_hooks._ORCH_REGISTRY_FILES:
+            if ("file", _rel) not in tuple(aiqt_hooks._WRTSCP_ALWAYS_FROZEN):
+                failures.append("(ws-frozen-reg-classwidth) every _ORCH_REGISTRY_FILES entry must be "
+                                "always-frozen against covered writes; {!r} is not".format(_rel))
+
         # --- Row 19: an allow entry wholly on the floor makes the declaration malformed -> deny ---
         ws_arm(ws_rp, ["site/downloads/"])   # == the floor tree; wholly frozen
         wsexpect("(ws-r19) allow entry wholly on the floor denies (declaration malformed, row 19)", "deny",
@@ -4971,6 +5288,54 @@ def main():
                 os.path.realpath(os.path.join(str(cs_other), "z")), _cs_stores) is not None:
             failures.append("(ws-cs-match2) a target in an undeclared repo must never match")
 
+        # --- ROUND-2 FINDING 2: the FROZEN denials (always-frozen registry set AND the committed floor) are
+        # --- evaluated BEFORE the companion-store admission, so a frozen target that RESOLVES (via symlink,
+        # --- or a floor entry that resolves) OUTSIDE the session repo INTO a declared store still DENIES; the
+        # --- companion allow can never win a HEAD ALLOW over the freeze. Each assertion below FLIPS to
+        # --- "allow" if the ordering is reverted (companion-before-freeze), so it discriminates the fix.
+        # --- Symlinks are required; if the platform cannot create them the sub-block is skipped (recorded).
+        _cs_can_symlink = True
+        try:
+            _cs_probe_link = cs_sess / ".aiqt" / "_symlink_probe"
+            os.symlink(str(cs_store), str(_cs_probe_link))
+            _cs_probe_link.unlink()
+        except OSError:
+            _cs_can_symlink = False
+        if _cs_can_symlink:
+            # (a) A frozen-FLOOR entry that symlinks INTO the declared store. A covered Write to it resolves
+            # OUT into the store, yet the floor freeze DENIES it (not a companion allow).
+            cs_set([store_root])
+            (cs_store / "planted-derived.txt").write_text("x", encoding="utf-8")
+            (cs_sess / ".aiqt" / "frozen.json").write_text(
+                json.dumps({"version": 1, "frozen": [".aiqt/planted-derived"]}), encoding="utf-8")
+            _cs_floor_link = cs_sess / ".aiqt" / "planted-derived"
+            if _cs_floor_link.is_symlink() or _cs_floor_link.exists():
+                _cs_floor_link.unlink()
+            os.symlink(str(cs_store / "planted-derived.txt"), str(_cs_floor_link))
+            wsexpect("(ws-cs-floor-symlink) a covered Write to a FROZEN-FLOOR path that symlinks INTO a "
+                     "declared companion store DENIES (floor precedes companion allow; finding 2)",
+                     "deny", "Write", str(_cs_floor_link), cs_sess)
+            _cs_floor_link.unlink()
+            (cs_sess / ".aiqt" / "frozen.json").unlink()
+            # (b) The LOCAL registry itself symlinked INTO the store, where the symlink target IS a valid
+            # version-1 registry declaring the store (so companion_stores IS populated and the companion allow
+            # WOULD fire without the reorder). The always-frozen registry deny must still win.
+            _cs_planted_reg = cs_store / "planted-registry.json"
+            _cs_planted_reg.write_text(json.dumps({"version": 1, "companion_stores": [store_root]}),
+                                       encoding="utf-8")
+            if cs_reg.is_symlink() or cs_reg.exists():
+                cs_reg.unlink()
+            os.symlink(str(_cs_planted_reg), str(cs_reg))
+            # Sanity: companion_stores IS populated through the symlinked registry, so without the reorder the
+            # out-resolving target would companion-ALLOW; the freeze is what denies it.
+            if not aiqt_hooks._wrtscp_companion_stores(aiqt_hooks._recovery_toplevel(str(cs_sess))):
+                failures.append("(ws-cs-reg-symlink-setup) the symlinked local registry must still populate "
+                                "companion_stores, else the finding-2 registry case does not discriminate")
+            wsexpect("(ws-cs-reg-symlink) a covered Write to the LOCAL registry that symlinks INTO a declared "
+                     "companion store DENIES (registry freeze precedes companion allow; finding 2)",
+                     "deny", "Write", str(cs_reg), cs_sess)
+            cs_reg.unlink()
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -5039,7 +5404,7 @@ def main():
             if _got == "ask":
                 failures.append("(noask-gensrc-{}-{!r}) gensrc_guard returned 'ask' (hooks must never ask)"
                                 .format(_tool, _fp))
-    # orch PreToolUse guards must not ask either.
+    # orch PreToolUse guards must not ask either (inert-probe legs, kept for shape coverage).
     for _og, _od in ((aiqt_hooks.orch_truncation_guard,
                       {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                        "tool_input": {"command": "sleep 1 &"}, "cwd": "/nonexistent-noask-probe"}),
@@ -5050,6 +5415,102 @@ def main():
         if _decision_any(_og, _od) == "ask":
             failures.append("(noask-orch-{}) an orchestration PreToolUse guard returned 'ask'"
                             .format(getattr(_og, "__name__", _og)))
+
+    # ROUND-2 FINDING 18: exercise the orchestration PreToolUse guards on REAL triggering inputs (a real git
+    # repo + a version-1 orchestration registry), not only the inert /nonexistent probe (root None -> early
+    # allow). This ADDS orch_yield_tool (previously unexercised by this invariant, so a restored ask path
+    # there passed both suites) and drives orch_truncation on a REAL detach. Each must NOT return 'ask', and
+    # the decision must GENUINELY RUN (a real deny), so a restored ask path - however its constructor is
+    # named - is caught by behaviour, not by the evadable _ask-attribute check above.
+    _f18_tmp = None
+    try:
+        _f18_tmp = Path(tempfile.mkdtemp(prefix="aiqt-noask-orch-"))
+        _f18_repo = _f18_tmp / "repo"
+        _f18_repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(_f18_repo)],
+                       check=True, capture_output=True, timeout=30)
+        _f18_stub = _f18_repo / "enum-stub.py"
+        _f18_stub.write_text("import sys\nsys.stdout.write(open(sys.argv[1]).read())\n"
+                             "sys.exit(int(open(sys.argv[2]).read().strip()))\n", encoding="utf-8")
+        _f18_payload = _f18_repo / "enum.json"
+        _f18_now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        _f18_payload.write_text(json.dumps({
+            "version": 1, "generated_at_utc": _f18_now,
+            "source": {"locator": "noask-fixture", "revision": "r1", "observed_at_utc": _f18_now},
+            "items": [{"id": "IT-1", "title": "actionable", "state": "open", "granted": True}]}),
+            encoding="utf-8")
+        (_f18_repo / "enum-exit.txt").write_text("0", encoding="utf-8")
+        (_f18_repo / "lease.txt").write_text("holder: noask\n", encoding="utf-8")
+        (_f18_repo / "mode.md").write_text("Operating-mode: overnight-unattended\n", encoding="utf-8")
+        for _f18_rec in ("findings.md", "pending.md", "handoff.md"):
+            (_f18_repo / _f18_rec).write_text("", encoding="utf-8")
+        _f18_reg = {
+            "version": 1,
+            "enumerator": {"argv": [sys.executable, "-I", "-B", str(_f18_stub),
+                                    str(_f18_payload), str(_f18_repo / "enum-exit.txt")], "timeout": 30},
+            "lease": {"path": str(_f18_repo / "lease.txt"), "max_age_hours": 24},
+            "mode": {"path": str(_f18_repo / "mode.md")},
+            "record": {"findings": str(_f18_repo / "findings.md"),
+                       "pending_decisions": str(_f18_repo / "pending.md"),
+                       "handoff": str(_f18_repo / "handoff.md")},
+            "state_dir": str(_f18_repo / "state"),
+            "yield_tools": ["ScheduleWakeup"],
+            "dispatch_tools": [],
+            "staleness": {"external_hours": 24, "task_hours": 24},
+        }
+        (_f18_repo / ".aiqt").mkdir()
+        _f18_regfile = _f18_repo / ".aiqt" / "orchestration.local.json"
+        _f18_regfile.write_text(json.dumps(_f18_reg), encoding="utf-8")
+
+        def _f18_yield(tool_input):
+            return _decision_any(aiqt_hooks.orch_yield_tool, {
+                "hook_event_name": "PreToolUse", "tool_name": "ScheduleWakeup",
+                "tool_input": tool_input, "cwd": str(_f18_repo), "session_id": "noask-s1"})
+
+        # (a) armed decide_yield over an actionable backlog: a stop MUST DENY (not ask), a REAL decision.
+        _f18_stop = _f18_yield({"stop": True})
+        if _f18_stop == "ask":
+            failures.append("(noask-yield-stop) orch_yield_tool returned 'ask' on an armed stop (finding 18)")
+        elif _f18_stop != "deny":
+            failures.append("(noask-yield-exercised) orch_yield_tool must genuinely DENY a stop past an "
+                            "actionable backlog (proving the decision ran, not an inert allow); got {}"
+                            .format(_f18_stop))
+        # (b) malformed registry -> fail-closed deny (the finding's named real input), never ask.
+        _f18_regfile.write_text("{ not json", encoding="utf-8")
+        _f18_bad = _f18_yield({"stop": True})
+        if _f18_bad == "ask":
+            failures.append("(noask-yield-badreg) orch_yield_tool returned 'ask' on a malformed registry")
+        elif _f18_bad != "deny":
+            failures.append("(noask-yield-badreg-deny) orch_yield_tool must DENY fail-closed on a malformed "
+                            "registry; got {}".format(_f18_bad))
+        _f18_regfile.write_text(json.dumps(_f18_reg), encoding="utf-8")
+
+        # (c) orch_truncation on a REAL repo + registry: a foreground bare-& detach and a background
+        # truncating sink each DENY (not ask), proving the decision ran (the /nonexistent probe is inert).
+        def _f18_trunc(cmd, rib):
+            return _decision_any(aiqt_hooks.orch_truncation_guard, {
+                "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": {"command": cmd, "run_in_background": rib}, "cwd": str(_f18_repo)})
+        _f18_detach = _f18_trunc("sleep 1 &", False)
+        if _f18_detach == "ask":
+            failures.append("(noask-trunc-detach) orch_truncation_guard returned 'ask' on a real detach")
+        elif _f18_detach != "deny":
+            failures.append("(noask-trunc-exercised) orch_truncation_guard must DENY a real foreground "
+                            "bare-& detach on a real repo (proving the decision ran, not an inert allow); "
+                            "got {}".format(_f18_detach))
+        _f18_sink = _f18_trunc("python producer.py | tail -5", True)
+        if _f18_sink == "ask":
+            failures.append("(noask-trunc-sink) orch_truncation_guard returned 'ask' on a truncating sink")
+        elif _f18_sink != "deny":
+            failures.append("(noask-trunc-sink-deny) orch_truncation_guard must DENY a background producer "
+                            "piped into a truncating sink on a real repo (finding 9/18); got {}"
+                            .format(_f18_sink))
+    except (OSError, subprocess.SubprocessError) as _f18_exc:
+        failures.append("(noask-orch-fixture) could not build the finding-18 armed orch fixture: {}"
+                        .format(_f18_exc))
+    finally:
+        if _f18_tmp is not None:
+            shutil.rmtree(str(_f18_tmp), ignore_errors=True)
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -5063,8 +5524,11 @@ def main():
           "cnsdif (diff_source_pretool) DENIES-and-educates a confirmed console diff dump and ALLOWS "
           "with a note any producer-capable-but-unproven or unparseable form (a convention, not a "
           "hazard). abspth (bash_absolute_paths) ALLOWS with a note a relative or opaque cd/redirect and "
-          "an unreadable command (a convention nudge, never a deny). expbnd (git_explicit_binding) ALLOWS "
-          "with a note an ambient git target or whole-tree breadth+publish (a binding convention). prsunc "
+          "an unreadable command (a convention nudge), and DENIES-and-educates a TRUNCATING redirect "
+          "('>'/'>|'/'&>'/'>&') to a relative or opaque target (it could zero the wrong file; finding 10). "
+          "expbnd (git_explicit_binding) ALLOWS with a note an ambient git target or a relocated whole-tree "
+          "breadth op, and DENIES-and-educates a whole-tree breadth stage paired with a publish in one "
+          "command (finding 11). prsunc "
           "(git_discard) recovers-then-allows: a recoverable discard is snapshotted then ALLOWED with a "
           "recovery-pointer note, a confirmed whole-tree clobber on a dirty tree DENIES (with a snapshot "
           "when one could be made), and it DENIES-and-educates only when a warranted recovery snapshot "
@@ -5078,31 +5542,38 @@ def main():
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
           "--mirror/--all/wildcard/prune sweep) and an unparseable apparent force-push/delete, DENIES a "
           "commit PROVABLY on the protected branch, and ALLOWS with a note a commit it merely cannot "
-          "prove lands off it (a normal git -C commit, a detached HEAD; server-side protection is the "
-          "real gate). brnrot (branch_root) DENIES a branch created from an orphaned start and "
-          "DENIES-and-educates a form it cannot prove rooted (an ambiguous/--track/--orphan form, a "
-          "dir-change or view-override, an unresolved ancestry), each naming the reachable correct "
-          "action; a rooted creation and non-creation commands ALLOW. gatdis (gate_weakening) DENIES a "
-          "--no-verify bypass and DENIES-and-educates a checker whose failure is swallowed (|| true) or "
-          "truncated (| head/tail); the parse-error fallback denies the raw spellings. sectvl "
+          "prove lands off it (a normal detached-HEAD commit; server-side protection is the real gate), "
+          "and it now classifies a commit against the branch it will ACTUALLY land on - a same-command "
+          "switch's target or a -C target's HEAD (finding 13). brnrot (branch_root) DENIES a branch "
+          "created from an orphaned start and DENIES-and-educates a form it cannot prove rooted (an "
+          "--orphan form, an unresolved ancestry), is -C-AWARE (resolves and probes the -C/--work-tree "
+          "target), treats a missing origin/HEAD and a --track of a real ref as rooted, and ALLOWS-WITH-NOTE "
+          "an unresolvable redirect target (finding 12); a rooted creation and non-creation commands ALLOW. "
+          "gatdis (gate_weakening) DENIES a --no-verify bypass and ALLOWS-WITH-NOTE a checker-shaped segment "
+          "whose failure is swallowed (|| true) or truncated (| head/tail) - the heuristic is too broad to "
+          "deny (finding 14). sectvl "
           "(commit_msg_subst) DENIES-and-educates a backtick or $( command substitution in a git commit "
-          "argument (re-issue single-quoted, escaped, or via -F <file>); the fallback and unreadable "
-          "command deny fail-safe. gensrc (gensrc_guard) DENIES-and-educates a hand-edit of a registered "
-          "generated artefact (edit the source and regenerate) and ALLOWS with a note every "
-          "cannot-evaluate branch (a non-git session, an outside-repo target, an unreadable/malformed "
-          "registry, a malformed payload), the CI drift gate remaining the backstop; an absent registry "
-          "is the inert allow and only a missing tool_name denies. secsec (secrets_shift_left) still "
+          "argument (re-issue single-quoted, in ANSI-C $'...' quoting, escaped, or via -F <file>); a "
+          "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS "
+          "(finding 15); the fallback and unreadable command deny fail-safe. gensrc (gensrc_guard) "
+          "DENIES-and-educates a hand-edit of a registered generated artefact (edit the source and "
+          "regenerate) AND a PRESENT-but-unreadable/malformed registry (fail-closed, finding 8), and ALLOWS "
+          "with a note the remaining cannot-evaluate branches (a non-git session, an outside-repo target, a "
+          "malformed payload), the CI drift gate remaining the backstop; a genuinely-absent registry is the "
+          "inert allow and only a missing tool_name denies. secsec (secrets_shift_left) still "
           "DENIES a shaped secret in a Write/Edit/Bash write-form (unchanged by the no-ask work) and "
           "fails closed on a missing tool_name or target field. abspth's typed-path predicate still "
           "DENIES a required-absolute relative/drive-relative/tilde/UNC-less path and ALLOWS an absolute "
           "one across Write/Edit/MultiEdit/NotebookEdit/Grep/Glob. wrtscp (write_scope_guard) is "
           "unchanged except the ADDED registry freeze: armed, an in-scope write ALLOWS and an "
           "out-of-scope one DENIES; the frozen floor and the sibling/nested-repo denials hold in both "
-          "regimes; a declared companion-store write is allowed and audited; and the orchestration LOCAL "
-          "registry (.aiqt/orchestration.local.json) is ALWAYS-FROZEN against covered writes in both "
-          "regimes and independent of the committed floor, so a companion_stores widening cannot be "
-          "self-declared through a guarded tool (the discrimination test proves the same write ALLOWS "
-          "with the freeze removed); the general Bash-write path stays the disclosed wrtscp residual. A "
+          "regimes; a declared companion-store write is allowed and audited; EVERY orchestration registry "
+          "file (both .aiqt/orchestration.local.json AND the committed .aiqt/orchestration.json) is "
+          "ALWAYS-FROZEN against covered writes in both regimes and independent of the committed floor, and "
+          "the frozen/floor denials are evaluated BEFORE the companion-store allow so a symlink into a "
+          "declared store cannot bypass the freeze (findings 1 and 2), so a companion_stores widening cannot "
+          "be self-declared through a guarded tool; the general Bash-write path stays the disclosed wrtscp "
+          "residual. A "
           "mis-wired PreToolUse event hard-blocks (exit 2). Historical note: several guards were "
           "originally ASK-based; this suite now asserts the no-ask outcomes above and the global "
           "invariant guarantees none reverts to an ask.")

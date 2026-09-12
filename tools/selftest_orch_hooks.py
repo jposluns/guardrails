@@ -609,24 +609,30 @@ def main(report_path=None):
             t.payload("PreToolUse", "Bash",
                       {"command": cmd, "run_in_background": rib}))
         # AIRTIGHT-NARROW truncation guard (round 32): ALLOW (silent) only a plain metacharacter-free
-        # background command; ANY shell metacharacter -> ALLOW-WITH-NOTE (the reducer labels it "warn":
+        # background command; ANY OTHER shell metacharacter -> ALLOW-WITH-NOTE (the reducer labels it "warn":
         # denying a background dispatch that redirects or pipes its own output would block legitimate
         # fan-out, so the guard proceeds and notes the durable-capture guidance instead of prompting;
-        # historically this ASKED); foreground out of scope; only the no-command case DENIES.
+        # historically this ASKED); foreground out of scope; the no-command case DENIES.
+        # ROUND-2 FINDING 9 EXCEPTION: a background dispatch that pipes a PRODUCER into a TRUNCATING SINK
+        # (head/tail) discards the producer's full output AND its exit status (the completion signal binds to
+        # the truncated view, a failing producer reads clean), so it DENIES-and-educates - a proven false-clean
+        # hazard, not a merely-unprovable capture. cat/tee pass output through, so they stay "warn".
         check("trunc/plain-bg-allows", _verdict(bg("python3 build.py")), "allow")
         check("trunc/plain-args-allows", _verdict(bg("pytest -q tests/unit")), "allow")
         check("trunc/plain-flag-eq-allows", _verdict(bg("python3 build.py --out=dist/log")), "allow")
         check("trunc/plain-envprefix-allows", _verdict(bg("PYTHONPATH=src python3 build.py")), "allow")
-        check("trunc/pipe-allows-note", _verdict(bg("python3 build.py | tail -5")), "warn")
-        check("trunc/head-allows-note", _verdict(bg("python3 build.py | head -20")), "warn")
+        check("trunc/pipe-tail-denies", _verdict(bg("python3 build.py | tail -5")), "deny")
+        check("trunc/head-denies", _verdict(bg("python3 build.py | head -20")), "deny")
         check("trunc/tee-allows-note", _verdict(bg("python3 build.py | tee full.out")), "warn")
         check("trunc/redirect-allows-note", _verdict(bg("python3 build.py > out.txt")), "warn")
-        check("trunc/quoted-redirect-allows-note", _verdict(bg("grep '>' index.html | head -5")), "warn")
+        # a producer piped into head is a truncating sink even with a quoted-redirect earlier stage -> DENY.
+        check("trunc/quoted-redirect-head-denies", _verdict(bg("grep '>' index.html | head -5")), "deny")
         check("trunc/quoted-pipe-allows-note", _verdict(bg("grep '|' file")), "warn")
-        check("trunc/amp-allows-note", _verdict(bg("python3 build.py | tail &")), "warn")
+        check("trunc/amp-tail-denies", _verdict(bg("python3 build.py | tail &")), "deny")
         check("trunc/semicolon-allows-note", _verdict(bg("python3 a.py ; python3 b.py")), "warn")
-        check("trunc/subshell-allows-note", _verdict(bg("( python3 build.py | tail )")), "warn")
-        check("trunc/brace-allows-note", _verdict(bg("{ python3 build.py | tail; }")), "warn")
+        # the truncating sink is caught through subshell/brace wrappers too (class width).
+        check("trunc/subshell-tail-denies", _verdict(bg("( python3 build.py | tail )")), "deny")
+        check("trunc/brace-tail-denies", _verdict(bg("{ python3 build.py | tail; }")), "deny")
         check("trunc/dollar-var-allows-note", _verdict(bg("python3 build.py > $OUT")), "warn")
         check("trunc/cmdsub-allows-note", _verdict(bg("python3 build.py > $(date).log")), "warn")
         check("trunc/backtick-allows-note", _verdict(bg("python3 build.py > `date`.log")), "warn")
@@ -1543,7 +1549,9 @@ def main(report_path=None):
           "wake hygiene, and the measured quiet figure beats a claimed one; the unattended-ask "
           "blocker reproduces the host hook's regression vectors with an idempotent redacted pending "
           "row; the truncation guard allows (silently) a plain metacharacter-free background command and "
-          "ALLOWS-WITH-NOTE (reducer 'warn') any shell syntax or reserved word, DENIES-and-educates a "
+          "ALLOWS-WITH-NOTE (reducer 'warn') any other shell syntax or reserved word, DENIES-and-educates a "
+          "background dispatch that pipes a producer into a truncating sink (head/tail, which discards the "
+          "producer's full output and exit status) and a "
           "foreground bare-& detach (historically an ASK for both) while dropping a word-start `#` comment "
           "and failing an unbalanced/ANSI-C quote toward treating it as a detach (now a deny) rather than a "
           "silent allow; the ledger records launches and completions; the resume "
