@@ -105,9 +105,11 @@ _HOUSE_STYLE_DASHES = frozenset((chr(0x2013), chr(0x2014)))
 _NAMED_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t",
                   "\n": "\\n", "\f": "\\f", "\r": "\\r"}
 
-# The admitted scalar/date-time built-ins. Admission is by EXACT type (`type(v) in _SCALAR_TYPES`, never
-# isinstance), so a hostile subclass of an admitted built-in is rejected as out-of-subset before any of its
-# methods runs; this is what closes the hostile-subclass exception-leak class.
+# The admitted scalar/date-time built-ins. Admission is by EXACT type tested by IDENTITY (via
+# _is_scalar_type: `type(v) is T`, never isinstance and never `==`), so a hostile subclass of an admitted
+# built-in is rejected as out-of-subset before any of its methods runs, and a hostile metaclass's __eq__ is
+# never invoked while classifying (an `in _SCALAR_TYPES` membership test would compare with `==` and run
+# it); this is what closes the hostile-subclass exception-leak class.
 _SCALAR_TYPES = (str, bool, int, float,
                  datetime.datetime, datetime.date, datetime.time)
 
@@ -263,6 +265,15 @@ def _render_scalar(value):
     raise EmitError("value is outside the subset: {}".format(type(value).__name__))
 
 
+def _is_scalar_type(value):
+    """True iff `value`'s EXACT type is an admitted scalar/date-time built-in, tested by IDENTITY (never
+    `==`). Membership via `type(value) in _SCALAR_TYPES` would compare with `==`, running a hostile
+    metaclass's __eq__ during classification (which can raise a control-flow signal or fail to terminate);
+    an identity test never invokes it, matching the exact-type-by-identity admission the module relies on."""
+    t = type(value)
+    return any(t is scalar_type for scalar_type in _SCALAR_TYPES)
+
+
 def _classify_list(items):
     """Classify a list as 'empty', 'scalar' (an inline array of scalars/dates), or 'aot' (an array of
     tables). A mixed or nested array is outside the subset and fails closed."""
@@ -270,7 +281,7 @@ def _classify_list(items):
         return "empty"
     if all(type(e) is dict for e in items):  # exact type: a dict subclass is not admitted as a table
         return "aot"
-    if all(type(e) in _SCALAR_TYPES for e in items):  # exact type: a scalar subclass is rejected below
+    if all(_is_scalar_type(e) for e in items):  # exact type by identity: a scalar subclass is rejected below
         return "scalar"
     raise EmitError("an array must be all tables or all scalars; a mixed or nested array is outside "
                     "the subset")
@@ -353,7 +364,7 @@ def _emit_table(table, path, lines):
                     nested.append((key, value, "aot"))
                 else:
                     leaves.append((key, value))  # empty or scalar array: an inline leaf
-            elif type(value) in _SCALAR_TYPES:
+            elif _is_scalar_type(value):
                 leaves.append((key, value))
             else:
                 raise EmitError("value for key {!r} is outside the subset: {}".format(
@@ -472,6 +483,19 @@ def _model_equal(a, b):
     return True
 
 
+def _is_exception_spec(spec):
+    """True only when `spec` is usable as an `except` operand: an exception CLASS (a subclass of
+    BaseException), or a tuple of such classes (the empty tuple, which matches nothing, is valid). A
+    non-exception value (an int, a string, a tuple carrying a non-exception) is rejected so the caller can
+    substitute a match-nothing tuple rather than let `except <non-exception>` raise an uncontrolled
+    TypeError at handling time (F8, guard-input-soundness)."""
+    if isinstance(spec, type) and issubclass(spec, BaseException):
+        return True
+    if isinstance(spec, tuple):
+        return all(isinstance(e, type) and issubclass(e, BaseException) for e in spec)
+    return False
+
+
 def emit_checked(document):
     """The staging contract: emit `document`, reparse the result, and confirm it is model-equivalent to
     the input before returning the text. Nothing that does not reparse or does not round-trip is ever
@@ -479,16 +503,79 @@ def emit_checked(document):
     The two failure modes are defensive: a correct emitter never reaches them, so either is a fail-closed
     EmitError, never a silent degraded write."""
     text = emit(document)
+    # Resolve the decode-error type BEFORE the try: `except tomllib.TOMLDecodeError` evaluates the
+    # attribute at handling time, so a swapped tomllib lacking it would make the except clause itself
+    # raise an uncontrolled AttributeError. Bind it defensively; a tomllib without the attribute yields
+    # an empty tuple that matches nothing, so a reparse failure then falls to the value-free backstop
+    # below rather than escaping.
+    try:
+        _decode_error = tomllib.TOMLDecodeError
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except BaseException:  # noqa: BLE001 - a tomllib without TOMLDecodeError: match nothing, fail closed below
+        _decode_error = ()
+    # F8: the bound attribute is TRUSTED as an exception class only AFTER validating it. A tomllib-like
+    # object whose TOMLDecodeError is a non-exception (the int 7, or a tuple carrying one) would make
+    # `except _decode_error` raise an uncontrolled TypeError ("catching classes that do not inherit from
+    # BaseException") when a reparse failure reaches the handler. Accept only an exception class or a tuple
+    # of exception classes; anything else matches nothing (an empty tuple), so a reparse failure then falls
+    # to the value-free BaseException backstop below rather than escaping (guard-input-soundness; fail closed).
+    if not _is_exception_spec(_decode_error):
+        _decode_error = ()
+    # NARROW the decode-error spec to genuine Exception subclasses. _is_exception_spec accepts ANY
+    # BaseException subclass (it must, to keep `except <spec>` from raising), but a substituted tomllib
+    # whose TOMLDecodeError is a CANCELLATION class (KeyboardInterrupt/SystemExit/GeneratorExit, or any
+    # other BaseException-that-is-not-Exception) would otherwise let `except _decode_error` convert genuine
+    # control flow raised by loads() into an EmitError. Only Exception-subclass specs route to the
+    # "did not reparse" conversion; a cancellation spec is narrowed to match-nothing (an empty tuple), and
+    # the cancellation clause below is ORDERED FIRST as defence in depth (guard-input-soundness, fail closed).
+    _cancel_classes = (KeyboardInterrupt, SystemExit, GeneratorExit)
+    _decode_classes = _decode_error if isinstance(_decode_error, tuple) else (_decode_error,)
+    if not all(isinstance(e, type) and issubclass(e, Exception) for e in _decode_classes):
+        _decode_error = ()
     try:
         reparsed = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        raise EmitError("emitted document did not reparse as TOML ({}); fail-closed".format(exc))
-    if not _model_equal(document, reparsed):
-        raise EmitError("emitted document did not round-trip to a model equal to its input; fail-closed")
+        if not _model_equal(document, reparsed):
+            raise EmitError("emitted document did not round-trip to a model equal to its input; fail-closed")
+    except _cancel_classes:  # genuine control flow re-raised FIRST, never converted (even by a hostile spec)
+        raise
+    except EmitError:
+        raise
+    except _decode_error:  # value-free so a hostile decode-error __str__ is never formatted into a diagnostic
+        raise EmitError("emitted document did not reparse as TOML; fail-closed")
+    except BaseException:  # noqa: BLE001 - fail-closed backstop mirroring emit(): a NON-TOMLDecodeError
+        # reparse or comparison failure (a RecursionError from a >1000-part dotted key on 3.12/3.13, or a
+        # MemoryError building the second tree or the comparison stack) becomes a value-free EmitError, so
+        # emit_checked honours the same no-uncontrolled-exception contract as emit() and U7's `except
+        # EmitError` fail-closed path is never bypassed by a leaked exception.
+        raise EmitError("emitted document could not be reparsed or compared for the round-trip proof; "
+                        "fail-closed")
     return text
 
 
 # --- self-test --------------------------------------------------------------------------------------
+
+def _load_byte_canon_authority():
+    """Load check_byte_canon from its pinned sibling FILE by explicit path, never via a bare `import`
+    (which trusts sys.path) or the ambient sys.modules cache (which a poisoned entry could substitute
+    with an always-clean scanner that would falsely certify the emitted bytes). module_from_spec +
+    exec_module loads the real file without consulting or registering in sys.modules, so the authority
+    is bound by file identity. sys.path is snapshotted and restored around the load (the authority
+    inserts its own directory for its transitive imports). Any failure propagates so the caller fails
+    closed; byte-canon cleanliness cannot be asserted without the genuine authority."""
+    import importlib.util
+    path = Path(__file__).resolve().parent / "check_byte_canon.py"
+    spec = importlib.util.spec_from_file_location("_opf_emit_byte_canon_authority", path)
+    if spec is None or spec.loader is None:
+        raise ImportError("no import spec for the byte-canon authority at {}".format(path))
+    module = importlib.util.module_from_spec(spec)
+    _saved_sys_path = list(sys.path)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = _saved_sys_path
+    return module
+
 
 def _rejects(document):
     """True iff emit() rejects `document` with EmitError (the fail-closed subset boundary). Any other
@@ -500,25 +587,173 @@ def _rejects(document):
         return True
 
 
+def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
+    """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS and return that
+    str, or a sentinel: 'TIMEOUT' (wall-clock bound tripped), 'OOM' (address-space bound tripped),
+    'CHILD-DIED', 'ERROR:<Type>' (the thunk raised), or 'SETUP-ERROR:<Type>' (the child could NOT install
+    its bounds, or fork is unavailable or failed: a cannot-evaluate, never a normal result). Several
+    adversarial vectors drive an engine over a declared 10**9 high-water/span or a deeply-shared DAG; run
+    IN-PROCESS a regression that reverted the bounded counting or an identity short-circuit would HANG or
+    OOM the whole self-test before it could report. This watchdog turns such a regression into a
+    deterministic sentinel the assertion catches, without weakening the assertion (a correct engine returns
+    its real verdict token well inside the bounds). A SETUP-ERROR sentinel is never equal to any expected
+    verdict token, so a check whose bounds could not be installed FAILS closed rather than reading a
+    possibly-unbounded run as a clean pass (no-concealed-failure).
+
+    Test-harness only: the three OPF self-tests (_opf_check, _opf_release, _opf_emit) share THIS one
+    implementation so the fork/timer/pipe hardening lives in a single place and cannot diverge again; the
+    production validators fork nothing.
+
+    Hardening: (fork-less) a host without os.fork returns SETUP-ERROR WITHOUT running the thunk, never the
+    thunk's own result run unbounded. (child) the child resets SIGALRM to SIG_DFL AND UNBLOCKS it in its
+    signal mask, so neither an inherited SIG_IGN disposition nor an inherited BLOCKED mask can defeat the
+    watchdog and leave the parent blocked in os.read() with no deadline; it then installs BOTH bounds or,
+    on any failure, writes a SETUP-ERROR token and exits WITHOUT running the thunk unbounded. (parent) the
+    read fd is closed and the child is reaped in an ENCLOSING finally, so a parent-side exception during the
+    pipe read cannot skip waitpid and orphan the child; both pipe fds are closed on a fork failure."""
+    import os
+    import signal
+    if not hasattr(os, "fork"):
+        # A bound could NOT be installed on a fork-less host: a cannot-evaluate. Return the SETUP-ERROR
+        # sentinel WITHOUT invoking the thunk (never run it unbounded); the caller fails closed because the
+        # sentinel is never equal to an expected verdict token.
+        return "SETUP-ERROR:NoFork"
+    import resource
+    # Reject an UNBOUNDED or INVALID control BEFORE forking/running the thunk (codex round-6): a
+    # timeout_s <= 0 installs setitimer(0, 0) which DISARMS the timer (no wall-clock bound at all), and a
+    # mem_bytes of RLIM_INFINITY (or <= 0) installs no usable address-space cap, yet the child would still
+    # run the thunk unbounded and its successful no-op setrlimit/setitimer would read as "bounds installed".
+    # A control that cannot bound the child is a cannot-evaluate, so return the SETUP-ERROR sentinel here
+    # rather than let the thunk run unbounded (guard-input-soundness; no-concealed-failure; a bool is not a
+    # valid numeric control). A NaN or an infinity cannot arm a finite itimer either (setitimer raises on it
+    # in the child), so reject them PRE-FORK too for symmetry: never fork a child that could only fail setup
+    # (NaN is !=-itself; +inf is caught explicitly, -inf by the <= 0 test).
+    if (isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
+            or timeout_s != timeout_s or timeout_s == float("inf") or timeout_s <= 0):
+        return "SETUP-ERROR:BadTimeout"
+    # RLIM_INFINITY is the "no cap" sentinel; its integer representation is platform-dependent (it is -1
+    # on Linux, a large positive on others), so reject it by identity AND by the <= 0 / >= positive-sentinel
+    # bounds, rather than assuming one sign. Either way an unbounded or non-positive address-space control
+    # is a cannot-evaluate, never a silently-uncapped child.
+    _rlim_inf = resource.RLIM_INFINITY
+    if (isinstance(mem_bytes, bool) or not isinstance(mem_bytes, int)
+            or mem_bytes <= 0 or mem_bytes == _rlim_inf
+            or (_rlim_inf > 0 and mem_bytes >= _rlim_inf)):
+        return "SETUP-ERROR:BadMemBound"
+    rfd, wfd = os.pipe()
+    try:
+        pid = os.fork()
+    except OSError as exc:                               # fork failed: close BOTH pipe fds, no leak
+        os.close(rfd)
+        os.close(wfd)
+        return "SETUP-ERROR:" + type(exc).__name__
+    if pid == 0:                                         # child: bounded, writes one short token, never returns
+        os.close(rfd)
+        try:
+            # The child must not inherit an ambient SIG_IGN/custom SIGALRM disposition NOR a BLOCKED SIGALRM
+            # mask: either would keep the timer's SIGALRM from terminating the child and leave the parent
+            # blocked in os.read() with no deadline. Reset the disposition to SIG_DFL and UNBLOCK SIGALRM in
+            # the mask BEFORE arming the timer, then install BOTH bounds or, on any failure, write a
+            # SETUP-ERROR token and exit WITHOUT running the thunk unbounded.
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            if hasattr(signal, "pthread_sigmask"):
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+            import resource
+            resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+            signal.setitimer(signal.ITIMER_REAL, timeout_s)
+        except BaseException as exc:                     # noqa: BLE001 (bounds NOT installed: never run unbounded)
+            try:
+                os.write(wfd, ("SETUP-ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200])
+            except OSError:
+                pass
+            os._exit(0)
+        try:
+            payload = str(thunk()).encode("utf-8", "replace")[:200]
+        except MemoryError:
+            payload = b"OOM"
+        except BaseException as exc:                     # noqa: BLE001 (child boundary: any failure -> token)
+            payload = ("ERROR:" + type(exc).__name__).encode("utf-8", "replace")[:200]
+        try:
+            os.write(wfd, payload)
+        except OSError:
+            pass
+        os._exit(0)
+    # parent
+    data = b""
+    wstatus = None
+    try:
+        # Close the parent's WRITE end INSIDE the enclosing try, as the FIRST step, so that if this close
+        # raises (OSError EIO) the finally still closes rfd AND reaps the child, rather than leaking the read
+        # fd and orphaning the child as a close ahead of the try/finally did (codex round-8 finding 7). It
+        # must still precede the read loop: while the parent holds wfd open, os.read(rfd) would never see EOF
+        # after the child exits and would block forever.
+        os.close(wfd)
+        while True:
+            chunk = os.read(rfd, 200)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        # Close the read fd AND reap the child even when the read loop raises, so a parent-side exception
+        # during the pipe read cannot skip waitpid and orphan the child. The child always arms its own
+        # SIGALRM timer (or exits at once on a setup failure), so this waitpid is bounded and cannot block
+        # indefinitely.
+        try:
+            os.close(rfd)
+        finally:
+            _wpid, wstatus = os.waitpid(pid, 0)
+    return _bounded_child_result(data, wstatus)
+
+
+def _bounded_child_result(data, wstatus):
+    """Decide run_bounded's result from the child's pipe bytes AND its TERMINATION STATUS, inspecting the
+    status FIRST regardless of any bytes already buffered (codex round-6): a child can write its token and
+    THEN be killed by the SIGALRM timer (or any signal), so a complete or partial token in the pipe is NOT
+    proof of a clean result. A signal death is the watchdog firing and is therefore the sentinel (SIGALRM
+    -> TIMEOUT, any other signal -> CHILD-DIED), never the buffered token read as success; only a child
+    that exited NORMALLY with bytes returns those bytes (no-concealed-failure). Kept as a pure module-level
+    function so the status-precedence is exercised directly with a real signaled wait-status."""
+    import os
+    import signal
+    if os.WIFSIGNALED(wstatus):
+        if os.WTERMSIG(wstatus) == signal.SIGALRM:
+            return "TIMEOUT"
+        return "CHILD-DIED"
+    # A run_bounded child ALWAYS os._exit(0) after writing its token (a real result, ERROR:, SETUP-ERROR:,
+    # or OOM), so a NONZERO normal exit is an abnormal death and its buffered bytes are NOT proof of a clean
+    # result. Require a SUCCESSFUL exit (WIFEXITED + status 0) before the payload may be returned; anything
+    # else is CHILD-DIED. Pre-fix a child that wrote its token then exited nonzero (exit 7) still returned the
+    # buffered token (no-concealed-failure; codex round-8 finding 6). Signal death is handled above.
+    if not (os.WIFEXITED(wstatus) and os.WEXITSTATUS(wstatus) == 0):
+        return "CHILD-DIED"
+    if not data:
+        return "CHILD-DIED"
+    return data.decode("utf-8", "replace")
+
+
 def self_test():
     """Round-trip fuzz over adversarial bodies, canonical-form determinism, constrained-subset coverage
     (accepted and rejected), and byte-canon cleanliness verified against check_byte_canon itself."""
     failures = []
 
     # check_byte_canon is the authority for the byte rules; reuse it rather than re-implement (a stale
-    # duplicate is the guard-input-soundness failure this avoids). Fail closed if it cannot be imported:
-    # byte-canon cleanliness cannot be asserted without the authority.
-    _saved_sys_path = list(sys.path)  # snapshot so the import (and its transitive imports) cannot leak sys.path
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    # duplicate is the guard-input-soundness failure this avoids). It is loaded from its pinned sibling
+    # FILE by explicit identity (_load_byte_canon_authority), never a bare `import` that the ambient
+    # sys.modules cache could satisfy with a substituted always-clean scanner. Fail closed if it cannot
+    # be loaded, or if it lacks the expected interface: cleanliness cannot be asserted without it.
     try:
-        try:
-            import check_byte_canon
-        except Exception as exc:  # noqa: BLE001 - any import failure is fail-closed here
-            print("error: cannot import check_byte_canon for the byte-canon leg ({}); fail-closed".format(exc),
-                  file=sys.stderr)
-            return 2
-    finally:
-        sys.path[:] = _saved_sys_path  # restore whether the import succeeded, failed (return 2), or completed; check_byte_canon stays in sys.modules
+        check_byte_canon = _load_byte_canon_authority()
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - any load failure is fail-closed here
+        print("error: cannot load check_byte_canon for the byte-canon leg ({}); fail-closed".format(exc),
+              file=sys.stderr)
+        return 2
+    if not (isinstance(getattr(check_byte_canon, "FORBIDDEN", None), dict)
+            and callable(getattr(check_byte_canon, "scan_bytes", None))):
+        print("error: the byte-canon authority lacks the expected FORBIDDEN/scan_bytes interface; "
+              "fail-closed", file=sys.stderr)
+        return 2
 
     # The forbidden-codepoint set MUST match the authority's, so a body carrying any of them is escaped.
     authority = set(check_byte_canon.FORBIDDEN.values())
@@ -526,6 +761,35 @@ def self_test():
         failures.append("forbidden-codepoint set disagrees with check_byte_canon.FORBIDDEN "
                         "(missing {}, extra {})".format(sorted(authority - set(_FORBIDDEN_CODEPOINTS)),
                                                         sorted(set(_FORBIDDEN_CODEPOINTS) - authority)))
+
+    # sys.modules-substitution pin: the authority is loaded from its pinned sibling FILE, not the ambient
+    # sys.modules cache, so a poisoned check_byte_canon entry cannot substitute an always-clean scanner
+    # and falsely certify the emitted bytes. Poison sys.modules with such a substitute, reload via the
+    # loader, and require the reload to still flag a known-forbidden codepoint (U+200B); a bare-import
+    # mutant would return the poison and report clean. sys.modules is restored in finally.
+    class _AlwaysCleanCanon:
+        FORBIDDEN = dict(check_byte_canon.FORBIDDEN)
+
+        @staticmethod
+        def scan_bytes(data):
+            return []
+
+    _saved_canon = sys.modules.get("check_byte_canon")
+    sys.modules["check_byte_canon"] = _AlwaysCleanCanon
+    try:
+        _reloaded = _load_byte_canon_authority()
+        if not any("U+200B" in f for f in _reloaded.scan_bytes(chr(0x200B).encode("utf-8"))):
+            failures.append("authority-substitution: the byte-canon authority was substituted by a "
+                            "poisoned sys.modules entry (an always-clean scanner)")
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - loading the pinned authority must not fail here
+        failures.append("authority-substitution: loading the pinned authority raised {!r}".format(exc))
+    finally:
+        if _saved_canon is None:
+            sys.modules.pop("check_byte_canon", None)
+        else:
+            sys.modules["check_byte_canon"] = _saved_canon
 
     def _byte_canon_clean(text, label):
         findings = check_byte_canon.scan_bytes(text.encode("utf-8"))
@@ -724,13 +988,344 @@ def self_test():
     # MINOR-4 identity-guard pin: two DISTINCT lists that each hold the SAME deep shared object collapse
     # under the `x is y` short-circuit, so _model_equal returns True in O(nodes). Each level is a diamond
     # (one child shared under two keys); without the short-circuit the guardless walk expands the diamonds
-    # (2**64 pair-pushes) and does not return promptly, so removing the guard is caught here. Hermetic: no
-    # timers, no wall-clock, no host state; under the guard this runs in a handful of iterations.
+    # (2**64 pair-pushes) and does not return promptly. F11: run behind a child-process watchdog so a
+    # reverted short-circuit produces a deterministic OOM/TIMEOUT sentinel this assertion rejects rather
+    # than HANGING or OOMing the whole self-test in-process; under the guard the child returns "True"
+    # instantly.
     shared_sub = {"leaf": 1}
     for _ in range(64):
         shared_sub = {"l": shared_sub, "r": shared_sub}
-    if not _model_equal([shared_sub, shared_sub], [shared_sub, shared_sub]):
-        failures.append("identity-guard/shared-dag: a shared DAG compared unequal to itself")
+    _idg = run_bounded(lambda: str(_model_equal([shared_sub, shared_sub], [shared_sub, shared_sub])))
+    if _idg != "True":
+        failures.append("identity-guard/shared-dag: a shared DAG did not compare equal to itself under the "
+                        "identity short-circuit (got {!r}; a regressed short-circuit trips the watchdog)"
+                        .format(_idg))
+
+    # ===== ROUND-6 codex: run_bounded watchdog hardening (this is the shared implementation imported by
+    # _opf_check and _opf_release, so proving it here holds for all three self-tests) ====================
+    import os as _os6
+    import signal as _sig6
+    import resource as _res6
+    import time as _time6
+
+    def _reap_bounded(pid, timeout_s=5.0):
+        """Reap `pid`, but BOUNDED so a wedged fixture child can never hang the whole self-test runner
+        (codex round-8 finding 3(c)): poll waitpid(WNOHANG) until the child is reaped or the deadline
+        passes; on timeout SIGKILL it and reap for real, returning that terminal status. A correctly-behaving
+        fixture child (it self-signals SIGALRM under SIG_DFL with SIGALRM UNBLOCKED) dies at once, so the
+        poll returns immediately; the bound exists only so a build/ambient that ever left the child parked
+        surfaces as a reported failure (a non-SIGALRM status) instead of an unbounded parent waitpid."""
+        deadline = _time6.monotonic() + timeout_s
+        while True:
+            wpid, wstatus = _os6.waitpid(pid, _os6.WNOHANG)
+            if wpid == pid:
+                return wstatus
+            if _time6.monotonic() >= deadline:
+                try:
+                    _os6.kill(pid, _sig6.SIGKILL)
+                except OSError:
+                    pass
+                _wpid, wstatus = _os6.waitpid(pid, 0)      # blocking reap AFTER SIGKILL: bounded (the kill lands)
+                return wstatus
+            _time6.sleep(0.005)
+    # (4) an UNBOUNDED or INVALID control must yield a distinct SETUP-ERROR sentinel WITHOUT running the
+    # thunk: timeout_s <= 0 disarms the timer (setitimer(0,0)) and mem_bytes == RLIM_INFINITY / <= 0
+    # installs no address-space cap, yet pre-fix the thunk still ran and its result ("RAN") was returned as
+    # a clean pass. Reverting the control-validation makes each of these return "RAN".
+    if run_bounded(lambda: "RAN", timeout_s=0) != "SETUP-ERROR:BadTimeout":
+        failures.append("run_bounded/bad-timeout-zero: timeout_s=0 did not fail closed to SETUP-ERROR")
+    if run_bounded(lambda: "RAN", timeout_s=-1) != "SETUP-ERROR:BadTimeout":
+        failures.append("run_bounded/bad-timeout-neg: a negative timeout did not fail closed to SETUP-ERROR")
+    # A NaN or an infinity cannot arm a finite itimer, so it is rejected PRE-FORK as BadTimeout (never forked
+    # to fail setup in the child). Pre-fix these forked and returned a child SETUP-ERROR:<ValueError|Overflow>
+    # instead, so asserting the BadTimeout token reds a reverted pre-fork reject (round-15 hygiene).
+    if run_bounded(lambda: "RAN", timeout_s=float("nan")) != "SETUP-ERROR:BadTimeout":
+        failures.append("run_bounded/bad-timeout-nan: a NaN timeout did not fail closed PRE-FORK to BadTimeout")
+    if run_bounded(lambda: "RAN", timeout_s=float("inf")) != "SETUP-ERROR:BadTimeout":
+        failures.append("run_bounded/bad-timeout-inf: an infinite timeout did not fail closed PRE-FORK to BadTimeout")
+    if run_bounded(lambda: "RAN", mem_bytes=_res6.RLIM_INFINITY) != "SETUP-ERROR:BadMemBound":
+        failures.append("run_bounded/bad-mem-infinity: an RLIM_INFINITY mem cap did not fail closed")
+    if run_bounded(lambda: "RAN", mem_bytes=0) != "SETUP-ERROR:BadMemBound":
+        failures.append("run_bounded/bad-mem-zero: a non-positive mem cap did not fail closed")
+    # regression: a VALID control still runs the thunk and returns its token.
+    if run_bounded(lambda: "RAN") != "RAN":
+        failures.append("run_bounded/valid-control: a valid bounded run did not return the thunk result")
+
+    if hasattr(_os6, "fork"):
+        # (5) a child that has bytes buffered in the pipe AND is killed by SIGALRM must return TIMEOUT, not
+        # the buffered token: the termination status is inspected FIRST. Build a REAL SIGALRM-signaled
+        # wait-status (a child that raises SIGALRM on itself under SIG_DFL) and pair it with a leftover
+        # token. Pre-fix (bytes checked first) this returned the token; post-fix the signal wins -> TIMEOUT.
+        #
+        # DISCRIMINATION for finding 3: run this fixture with SIGALRM BLOCKED in the parent, the exact hostile
+        # ambient the child must survive. The child resets SIG_DFL and UNBLOCKS SIGALRM in ITS OWN process, so
+        # it still dies by SIGALRM here; reverting the child's unblock (or signal.pause -> the nonexistent
+        # os.pause) leaves the self-signal pending-and-blocked so the child parks and _reap_bounded times out
+        # to a SIGKILL, flipping the status-first-setup assertion red even under a DEFAULT ambient. The parent
+        # mask is restored in the finally, so the self-test leaves the ambient SIGALRM mask unchanged.
+        _blocked_prev = None
+        if hasattr(_sig6, "pthread_sigmask"):
+            _blocked_prev = _sig6.pthread_sigmask(_sig6.SIG_BLOCK, {_sig6.SIGALRM})
+        try:
+            _pid5 = _os6.fork()
+            if _pid5 == 0:
+                # child (its OWN process): reset SIGALRM to SIG_DFL AND UNBLOCK it in THIS child's mask before
+                # self-signalling. An INHERITED blocked SIGALRM (the ambient this fixture deliberately sets,
+                # and the hostile ambient the whole self-test may run under, finding 3) would otherwise leave
+                # the self-sent SIGALRM pending-and-blocked, so the child would never die and would PARK in
+                # signal.pause() forever, hanging the parent's reap. Unblocked under SIG_DFL the self-signal
+                # terminates the child at once, so signal.pause() (the correct call; os.pause does not exist,
+                # finding 3(a)) is unreachable and is only a belt-and-braces park. A setup failure exits
+                # cleanly rather than escaping into the parent runner.
+                try:
+                    _sig6.signal(_sig6.SIGALRM, _sig6.SIG_DFL)
+                    if hasattr(_sig6, "pthread_sigmask"):
+                        _sig6.pthread_sigmask(_sig6.SIG_UNBLOCK, {_sig6.SIGALRM})
+                    _os6.kill(_os6.getpid(), _sig6.SIGALRM)
+                    _sig6.pause()
+                except BaseException:                      # noqa: BLE001 (child boundary: never unwind into the parent)
+                    pass
+                _os6._exit(0)                              # unreachable under SIG_DFL+unblocked; a clean exit otherwise
+            _wst5 = _reap_bounded(_pid5)
+        finally:
+            if _blocked_prev is not None:
+                _sig6.pthread_sigmask(_sig6.SIG_SETMASK, _blocked_prev)  # restore the ambient mask
+        if not (_os6.WIFSIGNALED(_wst5) and _os6.WTERMSIG(_wst5) == _sig6.SIGALRM):
+            failures.append("run_bounded/status-first-setup: the fixture child was not SIGALRM-signaled "
+                            "under a blocked-SIGALRM parent (the child must unblock SIGALRM in its own "
+                            "process and use signal.pause; finding 3)")
+        elif _bounded_child_result(b"LEFTOVER-TOKEN", _wst5) != "TIMEOUT":
+            failures.append("run_bounded/status-first: a token-then-SIGALRM child returned the buffered "
+                            "token instead of TIMEOUT (termination status not inspected first)")
+        # regression: a child that exited NORMALLY with bytes returns those bytes (the fix does not swallow
+        # a legitimate result).
+        _pid5b = _os6.fork()
+        if _pid5b == 0:
+            _os6._exit(0)
+        _, _wst5b = _os6.waitpid(_pid5b, 0)
+        if _bounded_child_result(b"TOKEN", _wst5b) != "TOKEN":
+            failures.append("run_bounded/status-first-normal: a normal-exit child with bytes did not "
+                            "return its token")
+
+        # (finding 6) a child that wrote its token then exited NONZERO (exit 7) must NOT have those bytes
+        # returned as a clean result: a run_bounded child ALWAYS os._exit(0) after writing, so a nonzero
+        # normal exit is an abnormal death. Build a real exit-7 wait-status and pair it with a leftover token;
+        # post-fix _bounded_child_result requires WIFEXITED+status 0 and returns CHILD-DIED, pre-fix (only the
+        # signal case was checked) it returned the buffered token.
+        _pid7 = _os6.fork()
+        if _pid7 == 0:
+            _os6._exit(7)
+        _, _wst7 = _os6.waitpid(_pid7, 0)
+        if not (_os6.WIFEXITED(_wst7) and _os6.WEXITSTATUS(_wst7) == 7):
+            failures.append("run_bounded/nonzero-exit-setup: the fixture child did not exit 7")
+        elif _bounded_child_result(b"TOKEN", _wst7) != "CHILD-DIED":
+            failures.append("run_bounded/nonzero-exit: a token-then-exit-7 child returned the buffered "
+                            "token instead of CHILD-DIED (a successful exit was not required)")
+
+        # (9) the parent must CLOSE the pipe read fd (rfd) after reaping, or every run_bounded call leaks a
+        # descriptor. Capture the rfd os.pipe hands out, run one bounded call, and confirm the parent's rfd
+        # is CLOSED afterward (fstat -> EBADF). Removing the parent os.close(rfd) leaves it open, which this
+        # detects (and then closes so the self-test itself leaks nothing).
+        _pipe_real6 = _os6.pipe
+        _cap6 = {}
+
+        def _cap_pipe6():
+            _r, _w = _pipe_real6()
+            _cap6["rfd"] = _r
+            return _r, _w
+
+        try:
+            _os6.pipe = _cap_pipe6
+            _leak_res = run_bounded(lambda: "LEAKCHK")
+        finally:
+            _os6.pipe = _pipe_real6
+        _rfd6 = _cap6.get("rfd")
+        _leaked6 = False
+        if _rfd6 is not None:
+            try:
+                _os6.fstat(_rfd6)
+                _leaked6 = True                            # still open: the parent close was removed
+            except OSError:
+                _leaked6 = False
+            if _leaked6:
+                _pipe_real6 and _os6.close(_rfd6)          # close the leak the test just detected
+        if _leak_res != "LEAKCHK":
+            failures.append("run_bounded/leak-check-setup: the capture run did not return its token")
+        if _leaked6:
+            failures.append("run_bounded/parent-rfd-leak: the parent did not close the pipe read fd "
+                            "(a descriptor leaks per call)")
+
+        # (finding 7) the parent's wfd close was moved INSIDE the read/cleanup try/finally, so a wfd close that
+        # RAISES (OSError EIO) still runs the finally that closes rfd AND reaps the child, rather than leaking
+        # the read fd and orphaning the child as a close ahead of the try did. Fault-inject a wfd close that
+        # really releases the fd then raises (a hostile teardown close), capturing the pipe fds and the child
+        # pid. Post-fix: rfd is closed and the child is reaped (waitpid -> ECHILD). Pre-fix: run_bounded
+        # skipped both, so rfd stayed open and the child was left unreaped.
+        _pipe_real7 = _os6.pipe
+        _close_real7 = _os6.close
+        _fork_real7 = _os6.fork
+        _cap7 = {}
+
+        def _cap_pipe7():
+            _r, _w = _pipe_real7()
+            _cap7["rfd"], _cap7["wfd"] = _r, _w
+            return _r, _w
+
+        def _cap_fork7():
+            _p = _fork_real7()
+            if _p > 0:
+                _cap7["pid"] = _p
+            return _p
+
+        def _boom_close7(fd):
+            if fd == _cap7.get("wfd") and not _cap7.get("wfd_closed"):
+                _cap7["wfd_closed"] = True
+                try:
+                    _close_real7(fd)                       # really release the wfd (no leak) ...
+                except OSError:
+                    pass
+                raise OSError(5, "EIO (self-test injected wfd close)")   # ... then raise, as a hostile close would
+            return _close_real7(fd)
+
+        try:
+            _os6.pipe = _cap_pipe7
+            _os6.fork = _cap_fork7
+            _os6.close = _boom_close7
+            try:
+                run_bounded(lambda: "WFDCHK")              # the wfd close raises; the finally must still run
+            except OSError:
+                pass                                       # a propagated teardown OSError is acceptable; cleanup is what matters
+        finally:
+            _os6.pipe = _pipe_real7
+            _os6.fork = _fork_real7
+            _os6.close = _close_real7
+        _rfd7 = _cap7.get("rfd")
+        _rfd7_open = False
+        if _rfd7 is not None:
+            try:
+                _os6.fstat(_rfd7)
+                _rfd7_open = True                          # still open: the finally's rfd close was skipped
+            except OSError:
+                _rfd7_open = False
+            if _rfd7_open:
+                _os6.close(_rfd7)                          # close the leak the test just detected
+        if _rfd7_open:
+            failures.append("run_bounded/wfd-close-raise-rfd-leak: a raising parent wfd close skipped the "
+                            "rfd cleanup (read fd leaked; finding 7)")
+        _pid7c = _cap7.get("pid")
+        if _pid7c is not None:
+            _reaped7 = False
+            try:
+                _os6.waitpid(_pid7c, _os6.WNOHANG)         # ECHILD iff run_bounded already reaped it
+                # NOT raised: the child was NOT reaped by run_bounded; clean it up so the self-test leaks none
+                try:
+                    _os6.kill(_pid7c, _sig6.SIGKILL)
+                    _os6.waitpid(_pid7c, 0)
+                except OSError:
+                    pass
+            except ChildProcessError:
+                _reaped7 = True
+            except OSError:
+                _reaped7 = True
+            if not _reaped7:
+                failures.append("run_bounded/wfd-close-raise-unreaped-child: a raising parent wfd close "
+                                "skipped the child reap (zombie left; finding 7)")
+
+    # _model_equal type-strictness pins: the exact-type clause is the sole carrier of the strictness that
+    # makes the round-trip proof meaningful rather than merely plausible. A mutant dropping that clause
+    # falls back to bare ==, so 1 would equal 1.0 and True would equal 1; these direct assertions turn that
+    # mutant red. Only pairs that bare == CONFLATES discriminate the clause: int-vs-float and bool-vs-int
+    # (1 == 1.0 and True == 1 are both True under ==). A datetime-vs-date pin is NOT a discriminator and was
+    # removed (F12): Python's own == already returns False for a datetime compared to a date, so that
+    # assertion passes with OR without the exact-type clause and pins nothing.
+    if _model_equal(1, 1.0):
+        failures.append("model-equal/int-vs-float: 1 compared equal to 1.0 (exact-type strictness lost)")
+    if _model_equal(True, 1) or _model_equal(1, True):
+        failures.append("model-equal/bool-vs-int: True compared equal to a bare int")
+    if _model_equal({"n": 1}, {"n": 1.0}):
+        failures.append("model-equal/nested-int-vs-float: a nested 1 compared equal to 1.0")
+
+    # F8: the reparse boundary binds tomllib.TOMLDecodeError and uses it as an `except` operand. A
+    # tomllib-like object whose TOMLDecodeError is NOT an exception class (here the int 7) would make
+    # `except _decode_error` raise an uncontrolled TypeError ("catching classes that do not inherit from
+    # BaseException") when a reparse failure reaches the handler; _is_exception_spec now rejects it so the
+    # failure falls to the value-free EmitError backstop. Discriminates: with the guard reverted the probe
+    # escapes as TypeError, not EmitError. The tomllib module attributes carry across into emit_checked (it
+    # reads them at call time), restored in a finally.
+    _real_tde = tomllib.TOMLDecodeError
+    _real_loads = tomllib.loads
+    tomllib.TOMLDecodeError = 7                                # a non-exception "decode-error" attribute
+    tomllib.loads = lambda _s: (_ for _ in ()).throw(ValueError("f8-forced-reparse-failure"))
+    try:
+        _f8_kind = None
+        try:
+            emit_checked({"schema": 1})                       # emits fine; the patched reparse then fails
+        except EmitError:
+            _f8_kind = "EmitError"
+        except BaseException as _exc:                         # noqa: BLE001 - capture an ESCAPING TypeError
+            _f8_kind = type(_exc).__name__
+    finally:
+        tomllib.TOMLDecodeError = _real_tde
+        tomllib.loads = _real_loads
+    if _f8_kind != "EmitError":
+        failures.append("f8/nonexception-tomldecodeerror: a non-exception TOMLDecodeError must fail closed "
+                        "to EmitError, not escape as {}".format(_f8_kind))
+
+    # F(cancellation): a substituted tomllib whose loads() raises a CANCELLATION signal (KeyboardInterrupt/
+    # SystemExit/GeneratorExit) must RE-RAISE, never be converted to EmitError, even when its TOMLDecodeError
+    # is a broad BaseException subclass that `except _decode_error` would otherwise catch. Discriminates the
+    # two-part fix: with the cancellation clause moved back BELOW `except _decode_error` AND the
+    # Exception-subclass narrowing removed, the signal is swallowed into EmitError and this flips red. The
+    # patched tomllib attributes carry into emit_checked (read at call time), restored in a finally.
+    for _cancel in (KeyboardInterrupt, SystemExit, GeneratorExit):
+        _real_tde2 = tomllib.TOMLDecodeError
+        _real_loads2 = tomllib.loads
+        tomllib.TOMLDecodeError = _cancel                     # a cancellation-class "decode-error" spec
+        tomllib.loads = (lambda _c: (lambda _s: (_ for _ in ()).throw(_c())))(_cancel)
+        try:
+            _c_kind = "no-raise"
+            try:
+                emit_checked({"schema": 1})                   # emits fine; the patched reparse then cancels
+            except EmitError:
+                _c_kind = "EmitError"
+            except _cancel:                                   # the required re-raise of genuine control flow
+                _c_kind = "reraised"
+            except BaseException as _exc:                     # noqa: BLE001 - capture any other escape
+                _c_kind = type(_exc).__name__
+        finally:
+            tomllib.TOMLDecodeError = _real_tde2
+            tomllib.loads = _real_loads2
+        if _c_kind != "reraised":
+            failures.append("cancellation/reparse: a {} raised by a substituted loads must re-raise, not "
+                            "become {}".format(_cancel.__name__, _c_kind))
+
+    # Identity-membership pin: scalar admission tests _SCALAR_TYPES by IDENTITY (_is_scalar_type), never
+    # `==`, so classifying never invokes a hostile metaclass's __eq__. This spy's __eq__ records every
+    # invocation and returns NotImplemented (so membership still resolves False and the value is rejected);
+    # a `type(v) in _SCALAR_TYPES` regression would compare with `==` and populate the record, turning this
+    # red, while the value stays fail-closed either way.
+    _eq_calls = []
+
+    class _EqSpyMeta(type):
+        def __eq__(cls, other):
+            _eq_calls.append(other)
+            return NotImplemented
+
+        def __hash__(cls):
+            return id(cls)
+
+    class _EqSpy(metaclass=_EqSpyMeta):
+        pass
+
+    _eq_spy = _EqSpy()
+    for _label, _doc in (("value", {"k": _eq_spy}), ("aot-element", {"k": [_eq_spy]}),
+                         ("scalar-array", {"k": [1, _eq_spy]})):
+        _eq_calls.clear()
+        if not _rejects(_doc):
+            failures.append("identity-membership/{}: a hostile-eq value was accepted".format(_label))
+        if _eq_calls:
+            failures.append("identity-membership/{}: classifying invoked a metaclass __eq__ ({} times) via "
+                            "`==` membership instead of an identity test".format(_label, len(_eq_calls)))
 
     # --- golden byte vectors: parity locks over sorting, separators, empties, and dotted headers --------
     # The leaf-rooted golden below (built in a deliberately noncanonical insertion order; the literal was
@@ -843,6 +1438,113 @@ def self_test():
     if _MAX_EMIT_BYTES != saved_ceiling_mb:
         failures.append("budget/multibyte-restore: the production ceiling was not restored")
 
+    # --- emit_checked reparse/compare backstop: ANY non-control-flow failure fails closed to EmitError --
+    # A >1000-part dotted key makes tomllib raise RecursionError (NOT TOMLDecodeError) on 3.12/3.13, and
+    # either the reparse or the comparison can raise MemoryError on a large store-derived model; the
+    # contract (docstring) and U7's `except EmitError` fail-closed path require these to become EmitError,
+    # never escape uncontrolled. Swap the module tomllib for a stub whose loads() raises a
+    # non-TOMLDecodeError and assert the conversion; a mutant catching only TOMLDecodeError, or dropping
+    # the reparse/equivalence enforcement entirely, lets the raw exception escape or returns unproven text,
+    # so this leg turns red. Hermetic and version-independent; rebind via globals() (not a `global`
+    # statement, which cannot follow the earlier tomllib reads in this function) and restore in finally.
+    class _RaisingReparse:
+        TOMLDecodeError = tomllib.TOMLDecodeError
+
+        def loads(self, text):
+            raise RecursionError("stubbed non-TOMLDecodeError reparse failure for the backstop pin")
+
+    _saved_tomllib = globals()["tomllib"]
+    globals()["tomllib"] = _RaisingReparse()
+    try:
+        try:
+            emit_checked({"a": 1})
+            failures.append("emit-checked/reparse-backstop: a non-TOMLDecodeError reparse failure was not "
+                            "converted to a fail-closed EmitError (unproven text returned)")
+        except EmitError:
+            pass
+        except BaseException as exc:  # noqa: BLE001 - anything but EmitError here is the fail-open escape
+            failures.append("emit-checked/reparse-backstop: a non-TOMLDecodeError reparse failure escaped "
+                            "as {!r} instead of a fail-closed EmitError".format(exc))
+    finally:
+        globals()["tomllib"] = _saved_tomllib
+
+    # emit_checked backstop coverage (round-2): the decode-error handler must not itself escape on a
+    # malformed injected tomllib, and the model-equivalence COMPARISON (not merely the reparse) must be
+    # enforced and fail closed when it raises. Each leg turns red on the specific mutant named; hermetic,
+    # rebound via globals() and restored in finally.
+    class _NoDecodeAttrReparse:  # a tomllib LACKING TOMLDecodeError: the except clause must not raise
+        def loads(self, text):
+            raise RecursionError("stubbed reparse failure; this tomllib lacks TOMLDecodeError")
+
+    globals()["tomllib"] = _NoDecodeAttrReparse()
+    try:
+        try:
+            emit_checked(dict(a=1))
+            failures.append("emit-checked/missing-decode-type: a reparse failure under a tomllib lacking "
+                            "TOMLDecodeError was not converted to a fail-closed EmitError")
+        except EmitError:
+            pass
+        except BaseException as exc:  # noqa: BLE001 - anything but EmitError is the fail-open escape
+            failures.append("emit-checked/missing-decode-type: escaped as {!r} instead of a fail-closed "
+                            "EmitError".format(exc))
+    finally:
+        globals()["tomllib"] = _saved_tomllib
+
+    class _HostileDecodeError(Exception):  # a decode error whose __str__ is hostile
+        def __str__(self):
+            raise RuntimeError("a hostile decode-error __str__ must never be formatted into a diagnostic")
+
+    class _HostileStrReparse:
+        TOMLDecodeError = _HostileDecodeError
+
+        def loads(self, text):
+            raise _HostileDecodeError()
+
+    globals()["tomllib"] = _HostileStrReparse()
+    try:
+        try:
+            emit_checked(dict(a=1))
+            failures.append("emit-checked/hostile-decode-str: a hostile decode-error __str__ path did not "
+                            "fail closed to EmitError")
+        except EmitError:
+            pass
+        except BaseException as exc:  # noqa: BLE001 - a leaked RuntimeError is the fail-open escape
+            failures.append("emit-checked/hostile-decode-str: escaped as {!r} instead of a fail-closed "
+                            "EmitError".format(exc))
+    finally:
+        globals()["tomllib"] = _saved_tomllib
+
+    # The model-equivalence comparison is enforced (a mutant deleting `if not _model_equal(...)` returns
+    # unproven text) and fails closed when it raises. Swap _model_equal for a False stub (require the
+    # round-trip EmitError) and for a MemoryError stub (require the generic backstop EmitError).
+    _saved_model_equal = globals()["_model_equal"]
+    try:
+        globals()["_model_equal"] = lambda _a, _b: False
+        try:
+            emit_checked(dict(a=1))
+            failures.append("emit-checked/compare-enforced: a False model-equivalence comparison did not "
+                            "fail closed (unproven text returned)")
+        except EmitError as exc:
+            if "round-trip" not in str(exc):
+                failures.append("emit-checked/compare-enforced: rejected but not by the round-trip "
+                                "comparison ({})".format(exc))
+
+        def _raise_memoryerror(_a, _b):
+            raise MemoryError("stubbed comparison failure for the backstop pin")
+
+        globals()["_model_equal"] = _raise_memoryerror
+        try:
+            emit_checked(dict(a=1))
+            failures.append("emit-checked/compare-backstop: a MemoryError in the comparison was not "
+                            "converted to a fail-closed EmitError")
+        except EmitError:
+            pass
+        except BaseException as exc:  # noqa: BLE001 - anything but EmitError is the fail-open escape
+            failures.append("emit-checked/compare-backstop: a comparison MemoryError escaped as {!r} "
+                            "instead of a fail-closed EmitError".format(exc))
+    finally:
+        globals()["_model_equal"] = _saved_model_equal
+
     # --- constrained-subset coverage: every rejected shape (fail-closed) ------------------------------
     class _Other:
         pass
@@ -950,6 +1652,34 @@ def self_test():
     rejects["hostile-list-subclass"] = {"k": _HostileList([1, 2])}
     rejects["hostile-dict-subclass"] = {"k": _HostileDict({"a": 1})}
 
+    # A BENIGN, well-behaved subclass of an admitted container/scalar built-in is ALSO out of the subset:
+    # admission is by exact type, so ANY subclass is rejected, not only a hostile one (the documented
+    # boundary). No overridden method is needed to expose a regression; these pin the exact-type gates that
+    # the hostile-subclass vectors above cannot, because those pass via the outermost backstop regardless of
+    # where the raise happens. Weakening an exact-type gate to isinstance (at the aot list-element, the
+    # table value, the scalar-array element, or the top-level document position) silently ACCEPTS one of
+    # these and emits out-of-subset bytes while every hostile vector still passes, so these turn an
+    # isinstance regression red.
+    class _BenignDict(dict):
+        pass
+
+    class _BenignList(list):
+        pass
+
+    class _BenignInt(int):
+        pass
+
+    class _BenignStr(str):
+        pass
+
+    rejects["benign-dict-subclass-value"] = {"k": _BenignDict({"a": 1})}
+    rejects["benign-dict-subclass-aot-element"] = {"k": [_BenignDict({"a": 1})]}
+    rejects["benign-list-subclass-value"] = {"k": _BenignList([1, 2])}
+    rejects["benign-int-subclass-value"] = {"k": _BenignInt(5)}
+    rejects["benign-str-subclass-value"] = {"k": _BenignStr("x")}
+    rejects["benign-int-subclass-scalar-array-element"] = {"k": [_BenignInt(5)]}
+    rejects["benign-dict-subclass-document"] = _BenignDict({"a": 1})
+
     # A hostile METACLASS whose __getattribute__ raises on the __name__ lookup: a bare type(value).__name__
     # while a rejection diagnostic is built would otherwise leak an uncontrolled RuntimeError out of emit()
     # (and emit_checked) even though the exact-type gate has already decided to reject the value. The guarded
@@ -1016,12 +1746,24 @@ def self_test():
         pass
 
     rejects["hostile-metaclass-nonstr-name-value"] = {"k": _HostileNameInt(1)}
-    for name, document in rejects.items():
-        try:
-            if not _rejects(document):
-                failures.append("reject/{}: was accepted but is outside the subset".format(name))
-        except Exception as exc:  # noqa: BLE001 - a non-EmitError is a fail-open escape, a defect
-            failures.append("reject/{}: raised {!r} instead of a fail-closed EmitError".format(name, exc))
+    # PIN the int-str-conversion limit to the default (4300) around the reject sweep (test-hermeticity): the
+    # "oversized-int" fixture (10 ** 4301, a 4302-digit int) is rejected fail-closed ONLY because str() of it
+    # trips CPython's base-10 digit limit, so a hostile ambient of 0 (unlimited) or 5001 would render it as a
+    # valid TOML integer and it would be accepted (breaking reject/oversized-int). At the pinned 4300 str()
+    # trips, so the emitter's guard is exercised and reverting it lets the raw ValueError escape (caught by
+    # the loop's except). Pinning to 4300 is the CPython default, so it is a no-op for every other fixture in
+    # the sweep (none of which constructs an over-limit int). Restored in finally.
+    _rej_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        for name, document in rejects.items():
+            try:
+                if not _rejects(document):
+                    failures.append("reject/{}: was accepted but is outside the subset".format(name))
+            except Exception as exc:  # noqa: BLE001 - a non-EmitError is a fail-open escape, a defect
+                failures.append("reject/{}: raised {!r} instead of a fail-closed EmitError".format(name, exc))
+    finally:
+        sys.set_int_max_str_digits(_rej_prev_idlimit)
 
     # HONORED CONTROL-FLOW residual: a hostile metaclass whose __getattribute__ raises a GENUINE control-flow
     # signal (KeyboardInterrupt) on the __name__ lookup. Unlike every hostile-input vector above (each a
@@ -1055,8 +1797,8 @@ def self_test():
                             "KeyboardInterrupt".format(fn_name, returned))
 
     # The table-cycle rejects must be caught by the active-chain cycle check specifically, not by the
-    # output ceiling as a backstop: assert each raises an EmitError that NAMES a cyclic reference. With the
-    # cycle check at line 294 removed, these instead grow the dotted header until _MAX_EMIT_BYTES raises a
+    # output ceiling as a backstop: assert each raises an EmitError that NAMES a cyclic reference. With that
+    # cycle check removed, these instead grow the dotted header until _MAX_EMIT_BYTES raises a
     # different (ceiling) message, so this leg turns red, distinguishing cycle detection from budget
     # exhaustion. self-referential-list is excluded on purpose: it is rejected by _classify_list as a
     # nested array, so its message legitimately does not name a cycle. Each leg terminates: the cycle check
@@ -1071,6 +1813,66 @@ def self_test():
             if "cyclic" not in str(exc):
                 failures.append("cycle-message/{}: rejected but the message does not name a cyclic "
                                 "reference ({})".format(name, exc))
+
+    # The oversized-int guard is pinned by its SPECIFIC message, not merely by EmitError-rejection: with
+    # the guard removed, the escaping ValueError is caught by the outermost emit() backstop and reported
+    # with the generic value-free message, so a bare-EmitError assertion cannot tell the guard from the
+    # backstop. Asserting the guard's own wording turns a guard-removal mutant red, matching the
+    # cycle-message pin pattern above.
+    # PIN the int-str-conversion limit to the default (4300) here for the same reason as the reject sweep:
+    # 10 ** 4301 (4302 digits) trips str()'s base-10 limit only at or below the default, so a hostile ambient
+    # of 0 (unlimited) or 5001 would render it cleanly and the guard would never fire. Restored in finally.
+    _ovm_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        try:
+            emit({"k": 10 ** 4301})
+            failures.append("oversized-int-message: an oversized int was not rejected")
+        except EmitError as exc:
+            if "too large to render" not in str(exc):
+                failures.append("oversized-int-message: rejected, but not by the specific oversized-int guard "
+                                "({})".format(exc))
+    finally:
+        sys.set_int_max_str_digits(_ovm_prev_idlimit)
+
+    # CLI mode selection validates the WHOLE argument vector, not mere membership: exactly one recognized
+    # flag runs the self-test, and anything else (an unknown or extra token, a duplicated flag, a bare
+    # positional, or an empty vector) is misuse. A membership regression (`"--self-test" in args`) would
+    # let a malformed control vector read as a valid self-test run, so these turn that regression red.
+    for good_argv in (["--self-test"], ["--selftest"]):
+        if _selected_mode(good_argv) != "self-test":
+            failures.append("cli/valid: {!r} was not recognized as a self-test invocation".format(good_argv))
+    for bad_argv in ([], ["--self-test", "--unknown"], ["--self-test", "--self-test"],
+                     ["--selftest", "extra"], ["positional"], ["--self-test", "--selftest"]):
+        if _selected_mode(bad_argv) != "misuse":
+            failures.append("cli/misuse: {!r} was not classified as misuse (membership, not whole-vector, "
+                            "validation)".format(bad_argv))
+
+    # CLI mode selection validates the vector is an exact list of exact strings BEFORE any equality
+    # comparison, so a hostile str subclass injected into argv cannot raise from mode selection or spoof
+    # a self-test invocation. A membership/`in` regression would run the subclass __eq__: one that raises
+    # would leak, one that always returns True would spoof a self-test run.
+    class _RaisingEqStr(str):
+        def __eq__(self, other):
+            raise RuntimeError("a hostile argv __eq__ must never be reached by mode selection")
+
+        def __hash__(self):
+            return id(self)
+
+    class _AlwaysEqStr(str):
+        def __eq__(self, other):
+            return True
+
+        def __hash__(self):
+            return id(self)
+
+    try:
+        if _selected_mode([_RaisingEqStr("--malformed")]) != "misuse":
+            failures.append("cli/hostile-eq: a raising-__eq__ argv token was not classified as misuse")
+    except Exception as exc:  # noqa: BLE001 - a leaked comparison is the fail-open escape
+        failures.append("cli/hostile-eq: mode selection leaked {!r} instead of classifying misuse".format(exc))
+    if _selected_mode([_AlwaysEqStr("--malformed")]) != "misuse":
+        failures.append("cli/spoof-eq: an always-equal argv token spoofed a self-test invocation")
 
     # emit_checked returns exactly what emit returns for a good document (no divergent second path).
     if emit_checked(coverage) != emit(coverage):
@@ -1089,9 +1891,22 @@ def self_test():
     return 0
 
 
+def _selected_mode(args):
+    """Map a CLI argument vector to a mode. The WHOLE vector is validated, not mere membership: exactly one
+    recognized self-test flag selects 'self-test', and any other vector (an unknown or extra argument, a
+    duplicated flag, a bare positional, or an empty vector) is 'misuse', so a malformed control vector is
+    never silently read as a valid self-test invocation. The vector must be an exact list of exact `str`
+    tokens; a non-list, or a token that is not exactly `str` (a hostile str subclass whose `__eq__` could
+    raise or always match), is 'misuse' before any equality comparison runs."""
+    if type(args) is not list or not all(type(a) is str for a in args):
+        return "misuse"
+    if args in (["--self-test"], ["--selftest"]):
+        return "self-test"
+    return "misuse"
+
+
 def main():
-    args = sys.argv[1:]
-    if "--self-test" in args or "--selftest" in args:
+    if _selected_mode(sys.argv[1:]) == "self-test":
         return self_test()
     print("usage: _opf_emit.py --self-test (a library module; no live mode)", file=sys.stderr)
     return 2

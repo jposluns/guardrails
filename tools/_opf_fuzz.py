@@ -27,6 +27,7 @@ Run standalone (`python3 -I -B tools/_opf_fuzz.py`) or as the `opf-fuzz` leg of 
 Returns 0 clean, 1 on a failed assertion, 2 on a harness/fail-closed error. Judged on returned
 status/finding VALUES and on raised exception TYPES, never by grepping output (the isolate-verifiers rule).
 """
+import ast
 import sys
 import tomllib
 from pathlib import Path
@@ -50,10 +51,20 @@ TS = "2026-08-12T09:14:02Z"
 # A closed-by-construction proof is only real if every production site it claims to cover is actually
 # EXERCISED by a case; an un-reached site would let a future regression there escape unproven (round 6
 # found 8 of the 20 _sorted_key_names sites were never reached because the nested sweep replaced the PARENT
-# tables, so the deeper child-table sorts never ran). We derive the authoritative site set by SCANNING the
-# three module SOURCES (the guard-input-soundness authoritative-index approach, never a hand-maintained
-# list that can silently drift), and record which source lines actually EXECUTE via a line tracer, then
-# assert the scanned sites are a subset of the executed lines. A future un-exercised site FAILS the proof.
+# tables, so the deeper child-table sorts never ran). We derive the site set by SCANNING the three module
+# SOURCES for the render-helper call tokens (so the site LINE NUMBERS are never a hand-maintained list),
+# record which source lines actually EXECUTE via a line tracer, then assert the scanned sites are a subset
+# of the executed lines. A future un-exercised site FAILS the proof.
+#
+# The token VOCABULARY that defines WHICH sites count (_KEY_NAME_RENDER_TOKENS) is itself reconciled
+# against the authoritative source rather than trusted as a fixed hand list (guard-input-soundness): the
+# coverage section below asserts every `*_key_names` render helper DEFINED in the three modules is
+# registered in the vocabulary, so a renamed or newly-added helper cannot silently drop out of BOTH the
+# coverage numerator and denominator (it FAILS the proof, a cannot-evaluate, rather than staying green).
+# DISCLOSED RESIDUAL (disclose-guard-residuals): this reconciles the NAMED `*_key_names` helper vocabulary;
+# a key set rendered INLINE without such a helper is outside this scan's semantic scope and is not claimed
+# covered. The scan is a coverage proof over the enumerated helper vocabulary, not a semantic guarantee
+# that every conceivable key-rendering construct is exercised.
 #
 # ROUND-8 REVISION (the gemini meta-finding, evidence-grounded-completion). The int/str-guard class is no
 # longer proven by an author-declared `# opf-fuzz:int-guard` MARKER: a marker scan is non-authoritative,
@@ -63,9 +74,11 @@ TS = "2026-08-12T09:14:02Z"
 # (see ADVERSARIAL above), injected at every field and nested position the general and nested sweeps visit,
 # so every str(int) / canonicalization-recursion path is exercised by an adversarial VALUE rather than by a
 # developer remembering a marker. The behavioural assertion (no uncontrolled exception, only the documented
-# ReleaseError / StoreError / ValueError / EmitError) is the coverage. The _sorted_key_names scan below is
-# retained unchanged: it is a real function-CALL scan (an authoritative index of a distinct site class),
-# not a marker, so it stays.
+# ReleaseError / StoreError / ValueError / EmitError) is the coverage. The key-name-render scan below is
+# retained: it is a real function-CALL scan (an authoritative index of a distinct site class), not a
+# marker, so it stays. It counts BOTH key-name-render helpers, _sorted_key_names( and the _opf_schema
+# _safe_key_names( variant, because they are one coverage class: scanning only the former went blind to the
+# four _opf_schema sites when they moved across to _safe_key_names(.
 _TARGET_FILES = frozenset({"_opf_store.py", "_opf_schema.py", "_opf_release.py"})
 _MODULE_PATHS = {Path(m.__file__).name: Path(m.__file__)
                  for m in (_opf_store, _opf_schema, _opf_release)}
@@ -82,10 +95,97 @@ def _scan_sites(predicate):
     return sites
 
 
+# The key-name-rendering helper CALL tokens: both render a surplus-key SET into a finding message and are
+# ONE coverage class. _sorted_key_names( is the _opf_store / _opf_release unknown-key join; _safe_key_names(
+# is the _opf_schema variant that renders each key through _safe_display so a control-char or oversized
+# non-decimal int key cannot forge a finding line or crash the sort. Scanning only the former went blind to
+# the latter when the four _opf_schema sites moved across, so BOTH tokens are scanned.
+_KEY_NAME_RENDER_TOKENS = ("_sorted_key_names(", "_safe_key_names(")
+
+
+def _ast_call_sites_in(source, filename, names):
+    """The call sites of the helper `names` in `source`, enumerated over the PARSED AST: every ast.Call
+    whose callee resolves to one of `names` (a bare Name `_safe_key_names(...)` or an attribute
+    `mod._safe_key_names(...)`) contributes a (filename, lineno). Returns {name: set of (filename, lineno)}.
+    Because it walks the call grammar rather than matching a literal `<name>(` substring, a call written with
+    whitespace or other formatting between the name and its '(' -- e.g. `_safe_key_names (extra)` -- is
+    still counted; a substring proxy structurally cannot see it and would UNDER-count the coverage
+    denominator, letting an un-exercised site escape (codex round-6; guard-input-soundness). A source that
+    cannot be parsed raises SyntaxError (fail-closed loud), never a silent empty scan."""
+    hits = {n: set() for n in names}
+    tree = ast.parse(source, filename=filename)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name):
+                callee = fn.id
+            elif isinstance(fn, ast.Attribute):
+                callee = fn.attr
+            else:
+                callee = None
+            if callee in hits:
+                hits[callee].add((filename, node.lineno))
+    return hits
+
+
 def _skn_call_sites():
-    # A _sorted_key_names CALL site: the token followed by '(', excluding its own `def` line (and the
-    # bare-name import lines, which carry no '(').
-    return _scan_sites(lambda ln: "_sorted_key_names(" in ln and not ln.lstrip().startswith("def "))
+    # The key-name-render CALL sites per registered token, enumerated via the AST (see _ast_call_sites_in)
+    # so a whitespace/formatting call variant is counted rather than escaping a literal-token substring scan.
+    # Keyed by token so each class's own non-emptiness can be asserted (a class that scans to zero is a
+    # drifted or broken authoritative index). The callee name is the token minus its trailing '('.
+    name_to_tok = {tok[:-1]: tok for tok in _KEY_NAME_RENDER_TOKENS}
+    sites = {tok: set() for tok in _KEY_NAME_RENDER_TOKENS}
+    for fname, path in _MODULE_PATHS.items():
+        hits = _ast_call_sites_in(path.read_text(encoding="utf-8"), fname, set(name_to_tok))
+        for name, s in hits.items():
+            sites[name_to_tok[name]] |= s
+    return sites
+
+
+# A render helper follows the `*_key_names` naming convention (_sorted_key_names / _safe_key_names). The
+# vocabulary above is RECONCILED against every such definition in the three module sources so a renamed or
+# newly-added helper cannot silently escape the coverage vocabulary (an authoritative-index reconciliation,
+# not a trusted hand list). `_instant_key` / `_check_keyset` do not match and are correctly excluded.
+def _ast_key_name_defs_in(source, filename):
+    """The call token `<name>(` of every `*_key_names` render-helper DEFINITION in `source`, enumerated over
+    the PARSED AST: every ast.FunctionDef/ast.AsyncFunctionDef whose name ends with `_key_names`. Walking the
+    def grammar rather than a per-line `^\\s*def ...(` regex sees a def whose name and '(' are split across a
+    backslash line continuation (`def _x_key_names \\<newline>(...)`), which a per-line scan misses -- letting
+    such a helper escape BOTH the coverage numerator and denominator (F-R17-B5; the sibling of the AST
+    call-site discovery, guard-input-soundness). A source that cannot be parsed raises SyntaxError
+    (fail-closed loud), never a silent empty scan."""
+    tree = ast.parse(source, filename=filename)
+    return {node.name + "("
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.endswith("_key_names")}
+
+
+def _key_name_render_defs(sources=None):
+    """The call token `<name>(` of every `*_key_names` render helper DEFINED in the three target module
+    sources, discovered over the parsed AST (see _ast_key_name_defs_in). Reconciling this discovered set
+    against _KEY_NAME_RENDER_TOKENS surfaces a renamed or added helper that is absent from the vocabulary (a
+    cannot-evaluate / fail-closed drift), rather than letting it drop silently out of both the coverage
+    numerator and denominator. It cannot discover a key set rendered INLINE without such a helper (the
+    disclosed residual noted above). `sources` (a {filename: text} map) overrides the on-disk read so the
+    self-test can inject a fixture def (F-R17-B5)."""
+    if sources is None:
+        sources = {fname: path.read_text(encoding="utf-8") for fname, path in _MODULE_PATHS.items()}
+    defs = set()
+    for fname, source in sources.items():
+        defs |= _ast_key_name_defs_in(source, fname)
+    return defs
+
+
+def _render_vocab_drift(defs, vocab):
+    """Reconcile the DISCOVERED `*_key_names` render-helper definitions against the REGISTERED vocabulary,
+    returning `(unregistered, stale)`: `unregistered` are helpers defined in source but absent from the
+    vocabulary (they would escape both the coverage numerator and denominator, fail-closed), and `stale`
+    are registered tokens no longer defined. Either non-empty is drift. This is the ACTUAL reconciliation
+    the coverage guard fires on (`defs != vocab` expressed as its two directions); run()'s guard AND its
+    discrimination vector both route through THIS function, so disabling the reconciliation breaks both
+    rather than only a separate throwaway expression."""
+    return defs - vocab, vocab - defs
 
 
 def _make_tracer(executed):
@@ -456,7 +556,7 @@ def run():
     # keys crash vector) into an otherwise-present child table or row, so every remaining site fires.
     # Contract as before: (a) no uncontrolled crash and (b) a well-formed status. _sorted_key_names
     # str-coerces every key, so a mixed-key surplus set must sort cleanly. The coverage assertion at the end
-    # confirms ALL 20 sites are now reached; a future un-exercised site fails the proof.
+    # confirms every key-name-render site is now reached; a future un-exercised site fails the proof.
     HETERO_EXTRA = {97: "x", "zzz-extra-key": 1}      # a non-string + string surplus key set (mixed sort)
     child_cases = [
         # manifest top-level extras (_opf_store._validate_top_level): a heterogeneous top-level surplus key.
@@ -663,22 +763,33 @@ def run():
 
     # CLASS 2: an OVERSIZED numeric string (CPython refuses int() beyond 4300 digits) is reachable as an id
     # numeric suffix or a SemVer field: a clean finding / None, never an uncontrolled ValueError crash.
-    big = "9" * 4301
-    _returns_no_raise("valid_id_shape-oversized-None",
-                      lambda: _opf_schema._valid_id_shape("BI-" + big), lambda v: v is None)
-    _returns_no_raise("parse_semver-oversized-core-None",
-                      lambda: _opf_release.parse_semver(big + ".0.0"), lambda v: v is None)
-    _returns_no_raise("parse_semver-oversized-prerelease-None",
-                      lambda: _opf_release.parse_semver("1.0.0-" + big), lambda v: v is None)
-    _returns_no_raise("validate_record-oversized-id-INVALID",
-                      lambda: _opf_schema.validate_record(_full_record(id="BI-" + big),
-                                                          expected_type="backlog_item"),
-                      lambda r: hasattr(r, "status") and r.status == INVALID)
-    _returns_no_raise("validate_version-oversized-version-INVALID",
-                      lambda: _opf_release.validate_version(
-                          {"schema": 1, "release": [{"version": big + ".0.0", "date": TS,
-                           "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64}]}),
-                      lambda r: hasattr(r, "status") and r.status == INVALID)
+    # PIN the int-str-conversion limit to the default (4300) around these CLASS 2 probes (test-hermeticity):
+    # each function fails closed (None / INVALID) only because int() of the 4301-digit numeric suffix trips
+    # CPython's base-10 digit limit. A hostile ambient of 0 (unlimited) or 5001 would parse the 4301-digit
+    # value cleanly, so the functions would return an unexpected non-None / non-INVALID value (breaking these
+    # probes). At the pinned 4300 the 4301-digit int() trips, so the fail-closed path is exercised and
+    # reverting it would surface here. Restored in finally.
+    _c2_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        big = "9" * 4301
+        _returns_no_raise("valid_id_shape-oversized-None",
+                          lambda: _opf_schema._valid_id_shape("BI-" + big), lambda v: v is None)
+        _returns_no_raise("parse_semver-oversized-core-None",
+                          lambda: _opf_release.parse_semver(big + ".0.0"), lambda v: v is None)
+        _returns_no_raise("parse_semver-oversized-prerelease-None",
+                          lambda: _opf_release.parse_semver("1.0.0-" + big), lambda v: v is None)
+        _returns_no_raise("validate_record-oversized-id-INVALID",
+                          lambda: _opf_schema.validate_record(_full_record(id="BI-" + big),
+                                                              expected_type="backlog_item"),
+                          lambda r: hasattr(r, "status") and r.status == INVALID)
+        _returns_no_raise("validate_version-oversized-version-INVALID",
+                          lambda: _opf_release.validate_version(
+                              {"schema": 1, "release": [{"version": big + ".0.0", "date": TS,
+                               "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64}]}),
+                          lambda r: hasattr(r, "status") and r.status == INVALID)
+    finally:
+        sys.set_int_max_str_digits(_c2_prev_idlimit)
 
     # CLASS 3: a specs roster whose VALUE is not a TypeSpec (a hand-built Python control) must be a clean
     # CANNOT-EVALUATE, never an AttributeError on spec.namespace (typed record) or espec.reduced (reduced).
@@ -709,17 +820,29 @@ def run():
             return False
         return False        # a silent return is a fail-open: a digest computed over an uncovered value
 
-    probe("fix1-canonical-oversized-int-ReleaseError",
-          _raises_release_error(lambda: _opf_release._canonical(_OVERSIZED_INT)))
-    probe("fix1-coverage_digest-oversized-int-field-ReleaseError",
-          _raises_release_error(lambda: _opf_release.coverage_digest(
-              [_worklog_entry(1, note=_OVERSIZED_INT)])))
-    probe("fix1-coverage_digest-oversized-int-in-ext-ReleaseError",
-          _raises_release_error(lambda: _opf_release.coverage_digest(
-              [_worklog_entry(1, **{"x-aiqt": {"score": _OVERSIZED_INT}})])))
-    probe("fix1-compute_span_digest-oversized-int-in-ext-ReleaseError",
-          _raises_release_error(lambda: _opf_release.compute_span_digest(
-              {1: _worklog_entry(1, **{"x-aiqt": {"score": _OVERSIZED_INT}})}, (1, 1))))
+    # PIN the int-str-conversion limit to the default (4300) around the fix1 probes (test-hermeticity):
+    # _OVERSIZED_INT (10 ** 4301) drives the module's ReleaseError only because str() of it trips CPython's
+    # base-10 digit limit at the digest path. A hostile ambient of 0 (unlimited) or 5001 would render it
+    # cleanly, so no ReleaseError would be raised (breaking these probes). At the pinned 4300 str() trips, so
+    # the controlled-ReleaseError path is exercised and reverting the FIX-1 guard would surface here (the raw
+    # ValueError is a non-ReleaseError). The fix2 deep-nested probes below are limit-independent, so the limit
+    # is restored before them. Restored in finally.
+    _fix1_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        probe("fix1-canonical-oversized-int-ReleaseError",
+              _raises_release_error(lambda: _opf_release._canonical(_OVERSIZED_INT)))
+        probe("fix1-coverage_digest-oversized-int-field-ReleaseError",
+              _raises_release_error(lambda: _opf_release.coverage_digest(
+                  [_worklog_entry(1, note=_OVERSIZED_INT)])))
+        probe("fix1-coverage_digest-oversized-int-in-ext-ReleaseError",
+              _raises_release_error(lambda: _opf_release.coverage_digest(
+                  [_worklog_entry(1, **{"x-aiqt": {"score": _OVERSIZED_INT}})])))
+        probe("fix1-compute_span_digest-oversized-int-in-ext-ReleaseError",
+              _raises_release_error(lambda: _opf_release.compute_span_digest(
+                  {1: _worklog_entry(1, **{"x-aiqt": {"score": _OVERSIZED_INT}})}, (1, 1))))
+    finally:
+        sys.set_int_max_str_digits(_fix1_prev_idlimit)
     probe("fix2-canonical-deep-nested-ReleaseError",
           _raises_release_error(lambda: _opf_release._canonical(_deep_nest(_DEEP_DEPTH))))
     probe("fix2-coverage_digest-deep-nested-field-ReleaseError",
@@ -870,19 +993,75 @@ def run():
 
     # --- coverage-instrumentation assertions (round 7): every production site was actually reached -------
     sys.settrace(None)      # stop tracing before the verdict; self_test's finally is the backstop
-    skn_sites = _skn_call_sites()
-    # The scan must not vacuously pass by finding nothing: the corpus carries 20 _sorted_key_names call
-    # sites today, so a count below that means the authoritative-index scan itself has drifted or broken
-    # (guard-input-soundness applied to the coverage input). The int/str-guard class is no longer proven by
-    # a marker scan (see the round-8 revision note above); it is proven by the by-value probes just above.
+    skn_by_token = _skn_call_sites()
+    skn_sites = set().union(*skn_by_token.values())
+    # The scan must not vacuously pass by finding nothing. The fail-closed floor is DERIVED from the
+    # authoritative index (both key-name-render helper tokens) rather than a single magic total that
+    # silently drifts: EACH helper class must scan to at least one call site. A class that scans to zero
+    # means the authoritative-index scan has drifted or broken -- exactly the failure mode when the four
+    # _opf_schema sites moved from _sorted_key_names( to _safe_key_names( and a _sorted_key_names-only scan
+    # went blind to them (guard-input-soundness applied to the coverage input). The int/str-guard class is
+    # no longer proven by a marker scan (see the round-8 revision note above); it is proven by the by-value
+    # probes just above. The expected count is never hardcoded: the required-exercised set is the scan's own
+    # union, so adding or removing a site cannot silently drift past a stale literal.
+    for tok, sites in sorted(skn_by_token.items()):
+        assertions += 1
+        if not sites:
+            fail("coverage scan found no {} call site(s): the authoritative-index scan under-counts or "
+                 "has drifted".format(tok))
+    # ROUND-6 codex DISCRIMINATION: the call-site enumeration must count a call written with WHITESPACE
+    # between the helper name and its '(' -- the exact variant a literal `<name>(` substring scan misses.
+    # Feed a synthetic source through the SAME enumerator run() uses (_ast_call_sites_in) and require the
+    # spaced call to be counted; reverting the enumeration to substring matching drops it and fails here.
     assertions += 1
-    if len(skn_sites) < 20:
-        fail("coverage scan found only {} _sorted_key_names call site(s) (expected >= 20): the "
-             "authoritative-index scan under-counts".format(len(skn_sites)))
+    _syn_src = ("x = _safe_key_names (extra)\n"          # spaced call: no literal '_safe_key_names(' token
+                "y = _sorted_key_names(k)\n")
+    _syn_hits = _ast_call_sites_in(_syn_src, "synthetic", {"_safe_key_names", "_sorted_key_names"})
+    if (("synthetic", 1) not in _syn_hits["_safe_key_names"]
+            or ("synthetic", 2) not in _syn_hits["_sorted_key_names"]
+            or "_safe_key_names(" in _syn_src.splitlines()[0]):   # the substring proxy genuinely cannot see it
+        fail("coverage enumeration is non-discriminating: a render-helper call written with whitespace "
+             "before '(' was not counted (a literal-token scan would miss it; the AST enumeration must not)")
+    # Reconcile the vocabulary against the authoritative source: every `*_key_names` render helper DEFINED
+    # in the three modules must be registered in _KEY_NAME_RENDER_TOKENS. A renamed or newly-added helper
+    # absent from the vocabulary is drift (fail-closed), rather than silently dropping out of both the
+    # coverage numerator and denominator (guard-input-soundness). DISCLOSED RESIDUAL: a key set rendered
+    # inline without such a helper is outside this scan's scope (disclose-guard-residuals).
+    _vocab = set(_KEY_NAME_RENDER_TOKENS)
+    _defs = _key_name_render_defs()
+    assertions += 1
+    _unreg, _stale = _render_vocab_drift(_defs, _vocab)
+    if _unreg or _stale:
+        fail("coverage vocabulary drift: `*_key_names` render helpers defined in source {} do not match the "
+             "registered vocabulary {}; an unregistered or renamed helper would escape both the coverage "
+             "numerator and denominator (fail-closed)".format(sorted(_defs), sorted(_vocab)))
+    # DISCRIMINATION: feed an UNREGISTERED `*_key_names` render definition through the ACTUAL reconciliation
+    # the guard above uses (_render_vocab_drift), and confirm it reports the rogue as unregistered drift.
+    # The rogue token is first recognized by the real def-scan predicate (a weakened _KEY_NAME_RENDER_DEF_RE
+    # stops matching it), then, added to the discovered defs, must appear in the reconciliation's
+    # `unregistered` set. Because this routes through the SAME function run()'s guard fires on, disabling the
+    # `_defs != _vocab` reconciliation (returning no drift) makes THIS assertion FAIL, not merely a separate
+    # throwaway expression as the prior form did.
+    assertions += 1
+    _rogue_defs = _key_name_render_defs({"<rogue>": "def _rogue_key_names(keys):\n    return sorted(keys)\n"})
+    _rogue_tok = next(iter(_rogue_defs)) if _rogue_defs else None
+    _rogue_unreg = set() if _rogue_tok is None else _render_vocab_drift(_defs | {_rogue_tok}, _vocab)[0]
+    if _rogue_tok != "_rogue_key_names(" or _rogue_tok not in _rogue_unreg:
+        fail("coverage reconciliation is non-discriminating: an unregistered `*_key_names` render helper fed "
+             "through the reconciliation was not reported as drift (the AST def-scan or the "
+             "_render_vocab_drift reconciliation has been weakened)")
+    # F-R17-B5: a backslash-continued `def _x_key_names \<newline>(...)` is discovered by the AST scan; a
+    # per-line regex scan (the reverted form) misses it, so such a helper would escape the coverage
+    # vocabulary reconciliation while the suite still reported full coverage.
+    assertions += 1
+    _cont_src = "def _demo_key_names \\\n        (keys):\n    return sorted(keys)\n"
+    if _key_name_render_defs({"<continued-def>": _cont_src}) != {"_demo_key_names("}:
+        fail("coverage def-discovery is non-discriminating: a backslash-continued `def _x_key_names "
+             "\\<nl>(...)` was not discovered (a per-line regex scan misses it; the AST discovery must not)")
     skn_missed = sorted(skn_sites - executed)
     assertions += 1
     if skn_missed:
-        fail("coverage: {} of {} _sorted_key_names call site(s) never exercised by any case: {}".format(
+        fail("coverage: {} of {} key-name-render call site(s) never exercised by any case: {}".format(
             len(skn_missed), len(skn_sites), skn_missed))
     skn_reached = len(skn_sites) - len(skn_missed)
 
@@ -898,8 +1077,9 @@ def run():
     print("OPF-FUZZ SELF-TEST: PASS ({} adversarial cases over {} public functions; {} assertions: no "
           "uncontrolled crash, well-formed outcome, no fail-open, the by-value oversized-int / deep-nested "
           "shapes fail closed at the digest path, and an oversized parsed int (hex/octal/binary) renders to "
-          "a structured finding at every finding-message site rather than crashing; coverage: {}/{} "
-          "_sorted_key_names call sites reached)".format(
+          "a structured finding at every finding-message site rather than crashing; coverage over the "
+          "reconciled `*_key_names` render-helper vocabulary: {}/{} registered call sites reached, inline "
+          "renders disclosed out of scope)".format(
               cases, len(targets), assertions, skn_reached, len(skn_sites)))
     return 0
 

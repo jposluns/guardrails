@@ -82,7 +82,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _opf_store import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES,
     _valid_extension_namespace,
-    _str_token_set, _is_str_token_control, _is_item_collection, _sorted_key_names, _safe_display,
+    _str_token_set, _is_str_token_control, _is_item_collection, _safe_display,
 )
 
 # The one schema version this unit understands (mirrors version.toml / worklog.toml / counters.toml
@@ -99,6 +99,44 @@ RECORD_NAMESPACES = (
     | frozenset(ns for ns, _module in MODULE_TYPES.values())
     | frozenset(IMPORTER_TYPES.values())
 )
+
+
+# The section-8.1 taxonomy as one name -> normative-namespace map (baseline + module-tier + importer). A
+# caller-supplied `specs` roster is reconciled against this before either validator trusts it, so a MISBOUND
+# roster cannot validate a record or transition under the wrong type's grammar (F-R17-A3).
+_TAXONOMY_NAMESPACES = dict(BASELINE_TYPES)
+_TAXONOMY_NAMESPACES.update({_name: _ns for _name, (_ns, _module) in MODULE_TYPES.items()})
+_TAXONOMY_NAMESPACES.update(IMPORTER_TYPES)
+
+
+def _specs_roster_error(specs):
+    """Reconcile a caller-supplied `specs` roster against the section-8.1 taxonomy BEFORE either validator
+    uses it. Each mapping KEY must be a string that equals its spec's own declared `name`, that name must be
+    a real section-8.1 record type, and the spec's `namespace` must be exactly the one the taxonomy binds to
+    it. A roster that misbinds a key to a spec of a different type ({"finding": <backlog_item spec>}) would
+    otherwise let a type=finding / BI-1 record and a finding open->active transition validate under
+    backlog_item's grammar: the roster is the guard's input, and a control that cannot answer for the type it
+    is keyed under is a cannot-evaluate, not a silent pass (guard-input-soundness; F-R17-A3). Returns None
+    when every entry reconciles, else a finding message naming the first contradiction. The default
+    BASELINE_SPECS and the importer roster (legacy_fragment/LF) reconcile cleanly; only a hand-constructed
+    misbound roster is newly rejected."""
+    if not isinstance(specs, dict):
+        return "the type-spec roster is not a mapping (fail-closed)"
+    for key, spec in specs.items():
+        if type(key) is not str:
+            return "the type-spec roster contains a non-string key (fail-closed)"
+        if not isinstance(spec, TypeSpec):
+            return "the type-spec roster contains a non-TypeSpec value (fail-closed)"
+        expected_namespace = _TAXONOMY_NAMESPACES.get(key)
+        if expected_namespace is None:
+            return ("the type-spec roster names a type absent from the section-8.1 taxonomy: {!r} "
+                    "(fail-closed)".format(key))
+        if getattr(spec, "name", None) != key:
+            return "the type-spec roster key {!r} contradicts its TypeSpec name (fail-closed)".format(key)
+        if getattr(spec, "namespace", None) != expected_namespace:
+            return ("the type-spec roster namespace for {!r} contradicts the section-8.1 taxonomy "
+                    "(fail-closed)".format(key))
+    return None
 
 
 # --- envelope vocabularies (spec 8.3, 8.6) -----------------------------------------------------------
@@ -133,11 +171,11 @@ ENVELOPE_KEYS = frozenset({"id", "type", "status", "title", "created_at", "updat
 WORKLOG_KEYS = frozenset({"id", "date", "actor", "kind", "summary", "detail", "links", "refs"})
 
 # `<NS>-<n>`: two uppercase letters, a hyphen, a positive integer with no leading zero (spec 8.2).
-_ID_RE = re.compile(r"^([A-Z]{2})-([1-9][0-9]*)$")
+_ID_RE = re.compile(r"^([A-Z]{2})-([1-9][0-9]*)\Z")
 # RFC 3339 UTC with optional fractional seconds. UTC is expressible as `Z` OR the `+00:00` offset (both
 # denote a zero offset); both are accepted, any other numeric offset (e.g. +05:30) is not UTC and is
 # rejected (see the timestamp ambiguity note above).
-_TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(?:Z|\+00:00)$")
+_TS_RE = re.compile(r"^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]+)?(?:Z|\+00:00)\Z")
 
 # counters.toml layout (defined here; see the ambiguity note).
 COUNTERS_TOP_KEYS = frozenset({"schema", "counters"})
@@ -260,9 +298,29 @@ def _instant_key(value):
     m = _TS_RE.match(value) if isinstance(value, str) else None
     if not m:
         return None
-    frac = float(m.group(7)) if m.group(7) else 0.0
+    frac = m.group(7)[1:].rstrip("0") if m.group(7) else ""
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)),
             int(m.group(4)), int(m.group(5)), int(m.group(6)), frac)
+
+
+def _is_single_line(value):
+    """Non-blank single-line string under EVERY Unicode line boundary (splitlines catches \u2028/\u2029
+    and \x85 a plain \n/\r scan misses; Fable-10). Non-blank, not merely non-empty: a whitespace-only
+    title or worklog summary is rejected, harmonizing with the fix5b rejection-reason `.strip()` stance
+    (Fable-M4)."""
+    return isinstance(value, str) and bool(value.strip()) and value.splitlines() == [value]
+
+
+def _genuine_high_water(value):
+    """A non-negative int usable as a high-water: not a bool, and expressible as an id number under the
+    runtime int-to-str limit, so an oversized counter is rejected not certified clean (Fable-8; spec 8.2)."""
+    if type(value) is not int or value < 0:
+        return False
+    try:
+        str(value)
+    except ValueError:
+        return False
+    return True
 
 
 def parse_status(status, spec):
@@ -311,6 +369,16 @@ def _valid_id_shape(value):
         return None
 
 
+def _safe_key_names(keys):
+    """Order surplus keys for a finding message, each rendered through _safe_display, so a control
+    character embedded in an (untrusted) key name cannot forge an extra finding line and an oversized
+    non-decimal int key cannot crash the render. It is the newline-safe, oversized-safe render for this
+    validator's unknown-key joins (the module's own _safe_display convention); _safe_display yields a
+    total-orderable, byte-stable string for every key so the sort itself cannot raise
+    (guard-input-soundness; Fable-M2, gemini finding 3)."""
+    return sorted(_safe_display(k) for k in keys)
+
+
 def _validate_actor(record, findings):
     """Validate the `actor` table (spec 8.3). Returns the actor kind string, or None when it is absent or
     malformed (so the caller can apply the importer created_at exception on a KNOWN kind only)."""
@@ -323,7 +391,7 @@ def _validate_actor(record, findings):
         return None
     extra = set(actor) - ACTOR_KEYS
     if extra:
-        findings.append("actor unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
+        findings.append("actor unknown key(s): {}".format(", ".join(_safe_key_names(extra))))
     kind = actor.get("kind")
     if not isinstance(kind, str):
         # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the tuple
@@ -333,7 +401,9 @@ def _validate_actor(record, findings):
     elif kind not in ACTOR_KINDS:
         findings.append("actor.kind {!r} is not one of {}".format(kind, list(ACTOR_KINDS)))
         kind = None
-    if "id" in actor and (not isinstance(actor.get("id"), str) or not actor.get("id")):
+    if "id" in actor and (not isinstance(actor.get("id"), str) or not actor.get("id").strip()):
+        # A whitespace-only id is semantically blank, rejected like a blank title/summary/reason
+        # (the Fable-M4 blank-string stance, harmonized across required payloads; Fable-F4).
         findings.append("actor.id must be a non-empty string when present")
     return kind
 
@@ -354,7 +424,7 @@ def _validate_links(record, findings):
             continue
         extra = set(link) - LINK_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_safe_key_names(extra))))
         if not isinstance(link.get("rel"), str):
             # A non-string rel (e.g. a TOML-valid list/dict) is unhashable and would raise on the set
             # membership below: guard by type first and fail closed with a clean finding (spec 8.6).
@@ -389,7 +459,7 @@ def _validate_refs(record, findings):
             continue
         extra = set(ref) - REF_KEYS
         if extra:
-            findings.append("{} unknown key(s): {}".format(where, ", ".join(_sorted_key_names(extra))))
+            findings.append("{} unknown key(s): {}".format(where, ", ".join(_safe_key_names(extra))))
         if not isinstance(ref.get("kind"), str):
             # A non-string kind (e.g. a TOML-valid list/dict) is unhashable and would raise on the set
             # membership below: guard by type first and fail closed with a clean finding (spec 8.6).
@@ -397,7 +467,8 @@ def _validate_refs(record, findings):
         elif ref.get("kind") not in REF_KINDS:
             findings.append("{}.kind {!r} is not one of {} (spec 8.6)".format(
                 where, ref.get("kind"), list(REF_KINDS)))
-        if not isinstance(ref.get("locator"), str) or not ref.get("locator"):
+        if not isinstance(ref.get("locator"), str) or not ref.get("locator").strip():
+            # A whitespace-only locator is semantically blank (the Fable-M4 stance; Fable-F4).
             findings.append("{}.locator must be a non-empty string".format(where))
         # note is a required member of every ref on every record, not only a reference record (spec 8.6
         # {kind, locator, note}; m2).
@@ -423,7 +494,9 @@ def _check_keyset(record, allowed, registered_vendors, findings):
             elif not isinstance(record.get(key), dict):
                 findings.append("extension {!r} must be a table (spec 8.7)".format(key))
         else:
-            findings.append("unknown key {!r} (schemas are closed; spec 8.3)".format(key))
+            # `key` is an untrusted top-level key: an oversized non-decimal int key would crash a raw
+            # {!r} render, so it goes through _safe_display like every other key render (Fable-F2).
+            findings.append("unknown key {} (schemas are closed; spec 8.3)".format(_safe_display(key)))
 
 
 def _validate_type_specific(record, spec, findings):
@@ -438,7 +511,8 @@ def _validate_type_specific(record, spec, findings):
             if state == "open":
                 findings.append("finding.severity is graded at or after the fix decision, never while "
                                 "open (spec 8.5)")
-            if not isinstance(record.get("severity"), str) or not record.get("severity"):
+            if not isinstance(record.get("severity"), str) or not record.get("severity").strip():
+                # A whitespace-only severity is semantically blank (the Fable-M4 stance; Fable-F4).
                 findings.append("finding.severity must be a non-empty string when present")
 
     elif spec.name == "pending_decision":
@@ -451,12 +525,14 @@ def _validate_type_specific(record, spec, findings):
                 findings.append("a decided pending_decision must carry all of {}, missing {} "
                                 "(all-or-none bundle, spec 8.5)".format(list(bundle), missing))
             if "decision" in record and (not isinstance(record.get("decision"), str)
-                                         or not record.get("decision")):
+                                         or not record.get("decision").strip()):
+                # A whitespace-only decision is semantically blank (the Fable-M4 stance; Fable-F4).
                 findings.append("pending_decision.decision must be a non-empty string")
             if "decided_at" in record and not _valid_timestamp(record.get("decided_at")):
                 findings.append("pending_decision.decided_at must be an RFC 3339 UTC timestamp")
             if "decided_by" in record and (not isinstance(record.get("decided_by"), str)
-                                           or not record.get("decided_by")):
+                                           or not record.get("decided_by").strip()):
+                # A whitespace-only decided_by is semantically blank (the Fable-M4 stance; Fable-F4).
                 findings.append("pending_decision.decided_by must be a non-empty string")
         elif state in ("open", "withdrawn") and present:
             findings.append("an {} pending_decision must carry none of {}, has {} (all-or-none bundle, "
@@ -533,7 +609,8 @@ def _validate_type_specific(record, spec, findings):
         for k in ("classification", "action"):
             if k not in record:
                 findings.append("an autonomous_decision must carry a non-empty {} (spec 8.5)".format(k))
-            elif not isinstance(record.get(k), str) or not record.get(k):
+            elif not isinstance(record.get(k), str) or not record.get(k).strip():
+                # A whitespace-only classification/action is semantically blank (Fable-M4 stance; Fable-F4).
                 findings.append("autonomous_decision.{} must be a non-empty string".format(k))
 
     elif spec.name == "reference":
@@ -569,10 +646,10 @@ def _validate_worklog(record, spec, registered_vendors, findings, registered_kin
         # REJECTED with a finding, never silently accepted as "no additional kinds" (M-round3). A genuinely
         # empty list/tuple is well-formed and adds no kinds without a finding.
         if isinstance(registered_kinds, (list, tuple)) and all(
-                isinstance(k, str) for k in registered_kinds):
+                isinstance(k, str) and k for k in registered_kinds):
             allowed_kinds |= set(registered_kinds)
         else:
-            findings.append("registered worklog kinds must be a list of strings")
+            findings.append("registered worklog kinds must be a list of non-empty strings")
     if "kind" not in record:
         findings.append("missing required field: kind")
     elif not isinstance(record.get("kind"), str):
@@ -585,7 +662,7 @@ def _validate_worklog(record, spec, registered_vendors, findings, registered_kin
     summ = record.get("summary")
     if "summary" not in record or not isinstance(summ, str) or not summ:
         findings.append("a worklog entry must carry a non-empty one-line summary (spec 6.2)")
-    elif "\n" in summ or "\r" in summ:
+    elif not _is_single_line(summ):
         # A worklog summary is one line (spec 6.2), like the envelope title (m1).
         findings.append("a worklog entry summary must be a single line (spec 6.2)")
     if "detail" in record and not isinstance(record.get("detail"), str):
@@ -610,17 +687,16 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     an identified record violates its schema; VALID otherwise."""
     if specs is None:
         specs = BASELINE_SPECS
-    elif not isinstance(specs, dict):
-        # `specs` is a control (the type roster); a non-mapping would crash on specs.get() below. Fail
-        # closed rather than allocate against an unreadable roster (guard-input-soundness; spec 8.3).
-        return RecordValidation(CANNOT_EVALUATE, ["specs roster is not a mapping (fail-closed)"])
-    elif not all(isinstance(s, TypeSpec) for s in specs.values()):
-        # Each roster VALUE is a TypeSpec; a non-TypeSpec value (e.g. a hand-constructed {name: 7}) would
-        # crash on `espec.reduced` / `spec.namespace` / `spec.reduced` below. Fail closed with a clean
-        # cannot-evaluate rather than an AttributeError (guard-input-soundness; spec 8.1/8.4). parse_status
-        # already guards its own spec, so validate_transition is unaffected; this closes validate_record's
-        # direct attribute access.
-        return RecordValidation(CANNOT_EVALUATE, ["specs roster has a non-TypeSpec value (fail-closed)"])
+    else:
+        # `specs` is a control (the type roster). The value-is-a-TypeSpec check alone confirmed each value
+        # is a spec but not that it is the spec for the type it is keyed under; F-R17-A3 reconciles the
+        # roster key/spec-name/spec-namespace against the section-8.1 taxonomy so a misbound roster
+        # ({"finding": <backlog_item spec>}) is a cannot-evaluate, never a silent pass under the wrong type's
+        # grammar (guard-input-soundness; spec 8.1/8.3/8.4). A non-mapping, a non-string key, or a
+        # non-TypeSpec value is subsumed here and fails closed. BASELINE_SPECS reconciles cleanly.
+        roster_error = _specs_roster_error(specs)
+        if roster_error is not None:
+            return RecordValidation(CANNOT_EVALUATE, [roster_error])
     if not isinstance(record, dict):
         return RecordValidation(CANNOT_EVALUATE, ["record is not a table"])
     if expected_type is not None and not isinstance(expected_type, str):
@@ -632,9 +708,15 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     # exact-token frozenset at the boundary so _check_keyset's `key not in registered_vendors` is always
     # an exact-token membership over a set, never a SUBSTRING match against a bare string (a fail-open
     # that admitted an unregistered x- extension) and never a crash on a non-collection (spec 8.7; M-round3).
-    registered_vendors = _str_token_set(registered_vendors)
-
     findings = []
+    if not _is_str_token_control(registered_vendors):
+        # A malformed control (a bare string, an int, a non-string element) is SURFACED with a finding,
+        # not silently normalized to the empty set and swallowed: a manifest whose [vendors].registered is
+        # malformed must not read as "no vendors registered" without the operator learning the control was
+        # unreadable, mirroring the malformed-known_namespaces surfacing in validate_counters (guard-input-
+        # soundness; Fable-M5). The normalization below still fails closed and admits no extension.
+        findings.append("registered_vendors must be a collection of x-<vendor> strings (fail-closed)")
+    registered_vendors = _str_token_set(registered_vendors)
     tval = record.get("type")
     espec = specs.get(expected_type) if expected_type is not None else None
     if isinstance(tval, str) and tval:
@@ -658,8 +740,12 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
 
     spec = specs.get(rtype)
     if spec is None:
-        return RecordValidation(INVALID, ["{!r} is not a supported record type (baseline: {})".format(
-            rtype, sorted(specs, key=repr))], rtype=rtype)
+        # The roster's keys are rendered through _safe_display (the unknown-key idiom): a hand-constructed
+        # specs roster carrying an oversized non-decimal int key would crash a raw repr sort/render, so
+        # each key is coerced to a safe string before ordering (Fable-F2; matches _safe_key_names' stance).
+        findings.append("{!r} is not a supported record type (baseline: {})".format(
+            rtype, ", ".join(sorted(_safe_display(s) for s in specs))))
+        return RecordValidation(INVALID, findings, rtype=rtype)
 
     rid = record.get("id")
     shape = _valid_id_shape(rid)
@@ -689,7 +775,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     title = record.get("title")
     if "title" not in record:
         findings.append("missing required field: title")
-    elif not isinstance(title, str) or not title or "\n" in title or "\r" in title:
+    elif not _is_single_line(title):
         findings.append("title must be a non-empty single line")
 
     actor_kind = _validate_actor(record, findings)
@@ -757,10 +843,14 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
     """
     if specs is None:
         specs = BASELINE_SPECS
-    elif not isinstance(specs, dict):
-        # `specs` is a control (the type roster); a non-mapping would crash on specs.get() below. Fail
-        # closed rather than evaluate a transition against an unreadable roster (guard-input-soundness).
-        return TransitionCheck(CANNOT_EVALUATE, ["specs roster is not a mapping (fail-closed)"])
+    else:
+        # F-R17-A3: reconcile a caller-supplied roster against the section-8.1 taxonomy before it is used, so
+        # a misbound roster ({"finding": <backlog_item spec>}) cannot make a finding open->active transition
+        # validate under backlog_item's transition table (guard-input-soundness). A non-mapping, a non-string
+        # key, or a non-TypeSpec value is subsumed here and fails closed.
+        roster_error = _specs_roster_error(specs)
+        if roster_error is not None:
+            return TransitionCheck(CANNOT_EVALUATE, [roster_error])
     if not isinstance(type_name, str):
         # A non-string type_name (e.g. a TOML-valid list/dict) is unhashable and would raise on the
         # specs.get() dict lookup below: guard by type first and fail closed with a clean finding, never
@@ -825,9 +915,9 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
                 "a rejection target cannot be verified without the pre-proposal state; supply it from the "
                 "record's history (spec 8.4)"])
         elif to_state != pre_proposal_state:
-            findings.append("a rejection must return to the record's actual pre-proposal state {!r}, not "
+            findings.append("a rejection must return to the record's actual pre-proposal state {}, not "
                             "{!r} (a rejection may not restore a state the record was never in, spec "
-                            "8.4/8.5)".format(pre_proposal_state, to_state))
+                            "8.4/8.5)".format(_safe_display(pre_proposal_state), to_state))
         elif not (isinstance(reason, str) and reason.strip()):
             # Spec 8.4: a rejection returns the record to a working state "with a recorded reason". An
             # otherwise-legal rejection carrying no recorded reason is INVALID (fail-closed).
@@ -848,7 +938,8 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
                                     "{!r} (spec 8.4)".format(actor_kind, to_status))
             elif to_qual is not None:
                 findings.append("a terminal transition by a {} actor lands unqualified, not {!r} "
-                                "(only assistant/automation propose, spec 8.4)".format(actor_kind, to_status))
+                                "(only assistant/automation propose, spec 8.4)".format(
+                                    _safe_display(actor_kind), to_status))
         elif to_qual is not None:
             findings.append("a non-terminal transition does not carry '/proposed', got {!r}".format(to_status))
 
@@ -877,14 +968,18 @@ def validate_counters(data, known_namespaces=None):
     extra = set(data) - COUNTERS_TOP_KEYS
     if extra:
         findings.append("counters.toml unknown top-level key(s): {}".format(
-            ", ".join(_sorted_key_names(extra))))
-    if "schema" in data:
-        if type(data.get("schema")) is not int:
-            findings.append("counters.toml schema must be an integer")
-        elif data.get("schema") != SUPPORTED_SCHEMA:
-            findings.append("counters.toml schema {} is not the supported schema version {} (fail-closed; "
-                            "do not parse under v{} assumptions)".format(
-                                _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+            ", ".join(_safe_key_names(extra))))
+    # F-R17-D1: counters.toml is a schema-bearing machine document and MUST carry the exact integer marker,
+    # mirroring the index rule (absent -> finding, wrong -> fail-closed). A missing marker is no longer a
+    # silent clean pass.
+    if "schema" not in data:
+        findings.append("counters.toml is missing the required schema marker (spec 8.2)")
+    elif type(data.get("schema")) is not int:
+        findings.append("counters.toml schema must be an integer")
+    elif data.get("schema") != SUPPORTED_SCHEMA:
+        findings.append("counters.toml schema {} is not the supported schema version {} (fail-closed; "
+                        "do not parse under v{} assumptions)".format(
+                            _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
     counters = data.get("counters")
     if counters is None:
         # An absent [counters] table is a finding when namespaces are known to require a high-water each
@@ -898,7 +993,10 @@ def validate_counters(data, known_namespaces=None):
         return high_water, findings
     for ns, val in counters.items():
         if not (isinstance(ns, str) and len(ns) == 2 and ns.isupper() and ns.isalpha()):
-            findings.append("[counters] key {!r} is not a two-letter uppercase namespace".format(ns))
+            # `ns` is an untrusted inner key: an oversized non-decimal int key would crash a raw {!r}
+            # render, so it goes through _safe_display like every other key render (Fable-F2).
+            findings.append("[counters] key {} is not a two-letter uppercase namespace".format(
+                _safe_display(ns)))
             continue
         # A namespace must be bound to a real record type in the section 8.1 taxonomy, checked against that
         # authoritative set EVEN WHEN known_namespaces is omitted, so an unknown 2-letter namespace like ZZ
@@ -910,7 +1008,7 @@ def validate_counters(data, known_namespaces=None):
         if known_namespaces is not None and ns not in known_namespaces:
             findings.append("[counters] namespace {!r} is not a known namespace".format(ns))
         # A bool is an int subclass; a high-water is a genuine non-negative int, never True/False.
-        if type(val) is not int or val < 0:
+        if not _genuine_high_water(val):
             findings.append("[counters].{} must be a non-negative integer high-water mark".format(ns))
             continue
         high_water[ns] = val
@@ -948,9 +1046,11 @@ def _validated_counter_map(high, where):
         raise ValueError("{}: counters map is not a table (spec 8.2)".format(where))
     for ns, val in high.items():
         if ns not in RECORD_NAMESPACES:
-            raise ValueError("{}: namespace {!r} is bound to no record type in the section 8.1 taxonomy "
-                             "(spec 8.1/8.2)".format(where, ns))
-        if type(val) is not int or val < 0:
+            # `ns` is an untrusted map key: an oversized non-decimal int key would crash a raw {!r} render
+            # and lose this module's named refusal, so it renders through _safe_display (Fable-F3).
+            raise ValueError("{}: namespace {} is bound to no record type in the section 8.1 taxonomy "
+                             "(spec 8.1/8.2)".format(where, _safe_display(ns)))
+        if not _genuine_high_water(val):
             raise ValueError("{}: high-water for {!r} must be a genuine non-negative int, got {} "
                              "(a bool is not a high-water; spec 8.2)".format(where, ns, _safe_display(val)))
 
@@ -971,15 +1071,16 @@ def next_id(high, ns, known_complete=False):
         # Guard by type first: a non-string ns (e.g. a list) is unhashable and would crash on the
         # RECORD_NAMESPACES frozenset membership; it is also bound to no record type. Fail closed either
         # way, never a TypeError (guard-input-soundness; spec 8.1/8.2).
-        raise ValueError("cannot allocate an id for namespace {!r}: it is bound to no record type in the "
-                         "section 8.1 taxonomy (spec 8.1/8.2)".format(ns))
+        raise ValueError("cannot allocate an id for namespace {}: it is bound to no record type in the "
+                         "section 8.1 taxonomy (spec 8.1/8.2)".format(_safe_display(ns)))
     if not isinstance(known_complete, bool):
         # known_complete is a genuine-bool PROOF flag, not a truthiness test: a non-bool (e.g. the truthy
         # string "false", or 1) must NOT be read as True and allow allocation from a counters map that is
         # not actually known complete, which could reuse an existing id. Fail closed (spec 8.2,
         # guard-input-soundness).
         raise ValueError("cannot allocate an id: known_complete must be a genuine bool proof flag, got "
-                         "{!r}; a non-bool must not be read as True (spec 8.2)".format(known_complete))
+                         "{}; a non-bool must not be read as True (spec 8.2)".format(
+                             _safe_display(known_complete)))
     _validated_counter_map(high, "next_id")
     if ns not in high and not known_complete:
         raise ValueError("cannot allocate an id for namespace {!r}: it has no recorded high-water and the "
@@ -987,6 +1088,13 @@ def next_id(high, ns, known_complete=False):
                          "known_namespaces=...) and pass known_complete=True, so an absent counter cannot "
                          "read as high-water 0 and reuse an existing id (spec 8.2)".format(ns))
     n = high_water(high, ns) + 1
+    if not _genuine_high_water(n):
+        # The high-water passed _genuine_high_water (within the 4300-digit int-to-str limit), but the id it
+        # allocates is high-water + 1, which at exactly the limit overflows one digit past it; refuse with
+        # the module's OWN named message rather than let str(n) in the format below raise the raw CPython
+        # int-to-str ValueError (range-bounds closed at its root; guard-input-soundness; Fable-M3).
+        raise ValueError("cannot allocate an id for namespace {!r}: the next id number is not expressible "
+                         "under the runtime int-to-str limit ({}; spec 8.2)".format(ns, _safe_display(n)))
     return "{}-{}".format(ns, n), n
 
 
@@ -1004,11 +1112,11 @@ def check_monotonic(old_high, new_high):
             continue
         for ns, val in m.items():
             if ns not in RECORD_NAMESPACES:
-                findings.append("{} counters namespace {!r} is bound to no record type in the section 8.1 "
-                                "taxonomy (spec 8.1/8.2)".format(label, ns))
-            if type(val) is not int or val < 0:
-                findings.append("{} counters high-water for {!r} must be a genuine non-negative int, got "
-                                "{} (a bool is not a high-water; spec 8.2)".format(label, ns, _safe_display(val)))
+                findings.append("{} counters namespace {} is bound to no record type in the section 8.1 "
+                                "taxonomy (spec 8.1/8.2)".format(label, _safe_display(ns)))
+            if not _genuine_high_water(val):
+                findings.append("{} counters high-water for {} must be a genuine non-negative int, got "
+                                "{} (a bool is not a high-water; spec 8.2)".format(label, _safe_display(ns), _safe_display(val)))
     if findings:
         return findings                  # a corrupt map is not compared for monotonicity (fail-closed)
     for ns, old in old_high.items():
@@ -1037,7 +1145,7 @@ def check_ids_within_counters(ids, high):
     for rid in ids:
         shape = _valid_id_shape(rid)
         if shape is None:
-            findings.append("id {!r} is not a well-formed <NS>-<n> id".format(rid))
+            findings.append("id {} is not a well-formed <NS>-<n> id".format(_safe_display(rid)))
             continue
         ns, n = shape
         if ns not in high:
@@ -1048,7 +1156,7 @@ def check_ids_within_counters(ids, high):
         # genuine non-negative high-water, so do NOT certify the id against it (the comparison would
         # silently accept True/1.5, or reject against a negative). type(hv) is not int rejects bool, whose
         # type is bool not int (spec 8.2).
-        if type(hv) is not int or hv < 0:
+        if not _genuine_high_water(hv):
             findings.append("namespace {!r} high-water {} is not a non-negative integer (spec 8.2)".format(
                 ns, _safe_display(hv)))
             continue
@@ -1074,7 +1182,7 @@ def check_unique_ids(ids):
         # (guard-input-soundness; spec 8.2). Uniqueness cannot be judged for a malformed id, so it is
         # surfaced and not added to `seen`.
         if _valid_id_shape(rid) is None:
-            findings.append("malformed id {!r}: an id must be a well-formed '<NS>-<n>' string (spec 8.2)".format(rid))
+            findings.append("malformed id {}: an id must be a well-formed '<NS>-<n>' string (spec 8.2)".format(_safe_display(rid)))
             continue
         if rid in seen:
             findings.append("duplicate id {!r}: IDs are never reused (spec 8.2)".format(rid))
@@ -1296,9 +1404,9 @@ def self_test():
     # 10: counters. Schema, monotonic allocation, no reset, ids-within-high-water, uniqueness.
     hw, cfindings = validate_counters({"schema": 1, "counters": {"BI": 42, "FN": 7, "WL": 131}})
     check("counters-schema-ok", not cfindings and hw == {"BI": 42, "FN": 7, "WL": 131})
-    _, bad_cf = validate_counters({"counters": {"BI": -1}})
+    _, bad_cf = validate_counters({"schema": 1, "counters": {"BI": -1}})
     check("counters-negative-invalid", bad_cf)
-    _, bool_cf = validate_counters({"counters": {"BI": True}})   # bool is not a high-water int
+    _, bool_cf = validate_counters({"schema": 1, "counters": {"BI": True}})   # bool is not a high-water int
     check("counters-bool-invalid", bool_cf)
     nid, newhw = next_id({"BI": 42}, "BI")
     check("counters-allocate-increments", nid == "BI-43" and newhw == 43)
@@ -1416,11 +1524,11 @@ def self_test():
     b_failopen = validate_record(dict(wl, kind="p"), expected_type="worklog", registered_kinds="perf")
     check("r3b-string-kinds-no-failopen", b_failopen.status == INVALID)
     check("r3b-string-kinds-named",
-          any("registered worklog kinds must be a list of strings" in f for f in b_failopen.findings))
+          any("registered worklog kinds must be a list of non-empty strings" in f for f in b_failopen.findings))
     b_listoflist = validate_record(dict(wl, kind="fixed"), expected_type="worklog",
                                    registered_kinds=[["perf"]])
     check("r3b-listoflist-kinds-finding-no-crash",
-          any("registered worklog kinds must be a list of strings" in f for f in b_listoflist.findings))
+          any("registered worklog kinds must be a list of non-empty strings" in f for f in b_listoflist.findings))
     check("r3b-legit-list-kinds-still-ok",
           validate_record(dict(wl, kind="perf"), expected_type="worklog",
                           registered_kinds=["perf"]).status == VALID)
@@ -1429,11 +1537,11 @@ def self_test():
     # namespace with no high-water is a MISSING finding; a complete table is clean.
     _, m3a = validate_counters({"schema": 1}, known_namespaces={"BI"})
     check("counters-absent-table-with-known-ns-invalid", bool(m3a))
-    _, m3b = validate_counters({"counters": {"BI": 5}}, known_namespaces={"BI", "FN"})
+    _, m3b = validate_counters({"schema": 1, "counters": {"BI": 5}}, known_namespaces={"BI", "FN"})
     check("counters-missing-known-ns-invalid", any("missing a high-water" in f for f in m3b))
-    _, m3c = validate_counters({"counters": {"BI": 5, "FN": 2}}, known_namespaces={"BI", "FN"})
+    _, m3c = validate_counters({"schema": 1, "counters": {"BI": 5, "FN": 2}}, known_namespaces={"BI", "FN"})
     check("counters-complete-known-ns-ok", not m3c)
-    _, m3d = validate_counters({}, known_namespaces=None)   # no known ns: an empty file is not a finding
+    _, m3d = validate_counters({"schema": 1}, known_namespaces=None)   # no known ns: an empty file is not a finding
     check("counters-empty-no-known-ns-ok", not m3d)
 
     # 21 (M8): a schema field other than the supported version fails closed, not parsed under v1.
@@ -1492,9 +1600,9 @@ def self_test():
 
     # M5: counters validate namespaces against the taxonomy even without known_namespaces; next_id refuses
     # a non-taxonomy namespace.
-    _, m5a = validate_counters({"counters": {"ZZ": 1}})
+    _, m5a = validate_counters({"schema": 1, "counters": {"ZZ": 1}})
     check("m5-counters-nontaxonomy-ns-invalid", any("section 8.1 taxonomy" in f for f in m5a))
-    _, m5b = validate_counters({"counters": {"BI": 1}})
+    _, m5b = validate_counters({"schema": 1, "counters": {"BI": 1}})
     check("m5-counters-taxonomy-ns-ok", not m5b)
     try:
         next_id({}, "ZZ")
@@ -1583,6 +1691,240 @@ def self_test():
           validate_transition("block", "active/proposed", "active", "maintainer").status == VALID)
     check("g1-ratified-block-release-ok",
           validate_transition("block", "active", "released", "maintainer").status == VALID)
+
+    # ----- reconcile-draft fixes (U2 retro: Fable + codex). The fixN1/fixA3/fixA4-subepsilon/fix10/fix8/
+    # fixB1 vectors discriminate a fix landed in THIS commit (they fail or crash pre-fix); the remaining
+    # fix2/fix3/fix4/fix5*/fix6/fixC6/fixD1 vectors are retained regression guards, not fail-to-pass. -----
+    # ROUND-6 codex: PIN the int-str-conversion limit to the default (4300) around the oversized-int
+    # fixtures so their verdicts come from the CODE under test, not the ambient sys.set_int_max_str_digits
+    # (a hostile caller could set 0/5001/640, breaking fix8-*/r2fix3-*); restored in finally so this
+    # self-test leaves the process limit UNCHANGED (test-hermeticity). At the pinned 4300, _nines (4300
+    # digits) passes counter-map validation but the allocated next id (4301 digits) trips the
+    # _genuine_high_water(n) guard, so removing that guard reaches the raw str(n) 'Exceeds the limit'
+    # and r2fix3-next-id-boundary-refused catches it regardless of the ambient limit.
+    _prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        _big = 10 ** 5000
+        nl_env = envelope("backlog_item", 1, "open", id="BI-1" + chr(10), created_at=TS + chr(10), updated_at=TS + chr(10))
+        check("fixN1-newline-record-invalid", validate_record(nl_env).status == INVALID)
+        check("fixN1-newline-id-shape-none", _valid_id_shape("BI-1" + chr(10)) is None)
+        check("fixN1-newline-ts-false", not _valid_timestamp(TS + chr(10)))
+        check("fixN1-newline-unique-distinct", bool(check_unique_ids(["BI-1", "BI-1" + chr(10)])))
+        check("fixA3-nonascii-digit-ts-false", not _valid_timestamp("202" + chr(0x666) + "-01-02T03:04:05Z"))
+        # fixA4 replaced a FLOAT fractional-seconds key with a decimal-string one. The distinct-key (.11/.12)
+        # and trailing-zero-equal (.5/.50) vectors were removed as false pins: a float key ALSO distinguishes
+        # .11/.12 and equates .5/.50, so they passed with or without the fix and discriminated nothing. Only the
+        # sub-epsilon vector below discriminates: two fractions differing beyond double precision collapse to one
+        # float (updated_at == created_at, a clean chronology) but stay distinct as strings (updated_at precedes
+        # created_at, INVALID), so it fails pre-fix and passes post-fix.
+        check("fixA4-subepsilon-regression-invalid",
+              validate_record(envelope("backlog_item", 1, "open",
+                                       created_at="2026-08-12T09:14:02.12345678901234567892Z",
+                                       updated_at="2026-08-12T09:14:02.12345678901234567891Z")).status == INVALID)
+        check("fix10-u2028-title-invalid",
+              validate_record(envelope("finding", 1, "open", title="a" + chr(0x2028) + "b")).status == INVALID)
+        check("fix10-u2028-summary-invalid",
+              validate_record(dict(wl, summary="a" + chr(0x2028) + "b"), expected_type="worklog").status == INVALID)
+        _hw8, f8 = validate_counters(dict(schema=1, counters=dict(BI=_big)))
+        check("fix8-oversized-counter-flagged", bool(f8) and "BI" not in _hw8)
+        try:
+            next_id(dict(BI=_big), "BI", known_complete=True)
+            check("fix8-next-id-oversized-refused", False)
+        except ValueError as _e8:
+            # self-test-discrimination: assert the module's OWN named counter-validation diagnostic, not merely
+            # "some ValueError". Pre-fix, next_id let str(n) trip CPython's raw "Exceeds the limit ... integer
+            # string conversion" ValueError, which a bare `except ValueError` would ALSO satisfy; requiring the
+            # named reason means the uncontrolled CPython crash no longer passes as a clean refusal.
+            check("fix8-next-id-oversized-refused",
+                  "must be a genuine non-negative int" in str(_e8))
+        check("fix2-unique-oversized-clean", bool(check_unique_ids([_big])))
+        check("fix2-within-oversized-clean", bool(check_ids_within_counters([_big], dict())))
+        check("fix2-monotonic-oversized-key-clean", bool(check_monotonic(dict(), {_big: 1})))
+        check("fix2-transition-oversized-preproposal-clean",
+              validate_transition("backlog_item", "dropped/proposed", "open", "maintainer",
+                                  pre_proposal_state=_big, reason="x").status == INVALID)
+        check("fixB1-empty-registered-kind-invalid",
+              validate_record(dict(wl, kind=""), expected_type="worklog", registered_kinds=[""]).status == INVALID)
+        _rvbad = envelope("finding", 8, "open")
+        _rvbad["x-aiqt"] = dict(a=1)
+        check("fix3-malformed-registered-vendors-invalid",
+              validate_record(_rvbad, registered_vendors="x-aiqt,x-evil").status == INVALID)
+        check("fix5c-counters-bool-schema-flagged",
+              any("schema must be an integer" in f
+                  for f in validate_counters(dict(schema=True, counters=dict(BI=1)))[1]))
+        try:
+            next_id(dict(BI=5), "FN", known_complete="no")
+            check("fix4-known-complete-nonbool-refused", False)
+        except ValueError:
+            check("fix4-known-complete-nonbool-refused", True)
+        try:
+            next_id(dict(BI=-1), "BI", known_complete=True)
+            check("fix6-negative-map-next-id-refused", False)
+        except ValueError:
+            check("fix6-negative-map-next-id-refused", True)
+        check("fix5b-reject-whitespace-reason-invalid",
+              validate_transition("finding", "fixed/proposed", "open", "maintainer",
+                                  pre_proposal_state="open", reason="   ").status == INVALID)
+        check("fixC6-ad-missing-action-only-invalid",
+              validate_record(envelope("autonomous_decision", 1, "recorded",
+                                       actor=dict(kind="assistant"), classification="ACT")).status == INVALID)
+        check("fixC6-ad-missing-classification-only-invalid",
+              validate_record(envelope("autonomous_decision", 1, "recorded",
+                                       actor=dict(kind="assistant"), action="merged")).status == INVALID)
+        _d1 = validate_transition("backlog_item", "done/proposed", "dropped", "maintainer",
+                                  pre_proposal_state="dropped", reason="isolate terminal-target")
+        check("fixD1-reject-to-terminal-isolated-invalid", _d1.status == INVALID)
+        check("fixD1-reject-to-terminal-isolated-named",
+              any("rejection to a working state" in f for f in _d1.findings))
+        # ----- round-2 reconcile additions (Fable ff-QA MINOR 1-5 + gemini finding 3 at this module's
+        # shared-helper call sites). Each fix has a discriminating vector that fails or crashes pre-fix;
+        # r2fix4-normal-title-still-ok and r2fix5-wellformed-vendors-no-finding are over-reach guards. -------
+        # test-hermeticity: build the 4300-digit boundary fixture by ARITHMETIC (10**4300 - 1), not int("9"*4300).
+        # int() of a 4300-digit string trips CPython's int-to-str conversion limit if a caller lowered
+        # sys.set_int_max_str_digits below 4300, crashing this suite before its summary; pow/subtraction is never
+        # subject to that limit, so the fixture is constructible regardless of the ambient limit (value identical).
+        _nines = 10 ** 4300 - 1
+        _a_nl = dict(kind="maintainer"); _a_nl["x" + chr(10) + "y"] = 1
+        _r2f1 = validate_record(envelope("finding", 50, "open", actor=_a_nl))
+        check("r2fix1-unknownkey-newline-escaped",
+              _r2f1.status == INVALID and all(chr(10) not in f for f in _r2f1.findings))
+        _a_big = dict(kind="maintainer"); _a_big[_big] = 1
+        check("r2fix1-oversized-int-key-no-crash",
+              validate_record(envelope("finding", 51, "open", actor=_a_big)).status == INVALID)
+        _d_big = dict(); _d_big[_big] = 1
+        check("r2fix1-counters-oversized-int-key-no-crash", bool(validate_counters(_d_big)[1]))
+        _tc_nl = validate_transition("finding", "open", "fixed/proposed", "m" + chr(10) + "FORGED")
+        check("r2fix2-txn-actorkind-newline-escaped",
+              _tc_nl.status == INVALID and all(chr(10) not in f for f in _tc_nl.findings))
+        try:
+            next_id(dict(BI=_nines), "BI", known_complete=True)
+            check("r2fix3-next-id-boundary-refused", False)
+        except ValueError as _e:
+            check("r2fix3-next-id-boundary-refused",
+                  "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+        check("r2fix4-blank-title-invalid",
+              validate_record(envelope("finding", 52, "open", title="   ")).status == INVALID)
+        check("r2fix4-blank-summary-invalid",
+              validate_record(dict(wl, summary="   "), expected_type="worklog").status == INVALID)
+        check("r2fix4-normal-title-still-ok",
+              validate_record(envelope("finding", 53, "open", title="A real title")).status == VALID)
+        _r2f5 = validate_record(envelope("finding", 54, "open"), registered_vendors="x-aiqt")
+        check("r2fix5-malformed-vendors-surfaced",
+              _r2f5.status == INVALID and any("registered_vendors must be a collection" in f
+                                              for f in _r2f5.findings))
+        _r2f5b = envelope("finding", 55, "open")
+        _r2f5b["x-aiqt"] = dict(v="ok")
+        check("r2fix5-wellformed-vendors-no-finding",
+              not any("registered_vendors must be a collection" in f
+                      for f in validate_record(_r2f5b, registered_vendors=REG).findings))
+
+        # ----- round-3 residual sweep (Fable ff-QA F2 crash-class siblings, F3 message-integrity siblings,
+        # F4 blank-string siblings). Each vector discriminates a fix landed HERE: the F2/F3 vectors CRASH the
+        # validator with the raw CPython int-to-str ValueError pre-fix (aborting self_test), and the F4 vectors
+        # validate VALID pre-fix; each is INVALID/refused post-fix, with the *-still-ok guards catching over-reach.
+        # F2 (crash-class): an oversized non-decimal int key renders through _safe_display, never a raw {!r},
+        # at the three unknown-key/roster render sites the r2fix1 sweep left open. Each returns a structured
+        # INVALID/finding rather than aborting self_test with an uncontrolled ValueError.
+        _f2a = envelope("finding", 60, "open"); _f2a[_big] = 1
+        check("f2a-toplevel-oversized-int-key-no-crash", validate_record(_f2a).status == INVALID)
+        check("f2b-counters-inner-oversized-int-key-no-crash",
+              bool(validate_counters({"counters": {_big: 1}})[1]))
+        # An oversized non-decimal int roster key is now a non-string key: F-R17-A3 reconciles the roster
+        # first, so this is a fail-closed CANNOT-EVALUATE (updating the old INVALID expectation), still with
+        # no raw CPython int-to-str crash.
+        check("f2c-unsupported-type-oversized-specs-key-no-crash",
+              validate_record({"type": "artifact", "id": "AR-1"},
+                              specs={_big: BASELINE_SPECS["finding"]}).status == CANNOT_EVALUATE)
+        # F3 (message-integrity): a refusal handed an oversized non-decimal int control keeps this module's OWN
+        # named ValueError, never the raw CPython "Exceeds the limit"/"integer string conversion" text. Pre-fix
+        # the {!r} render raises that CPython ValueError while building the message; assert the module's message.
+        try:
+            next_id({}, _big, known_complete=True)
+            check("f3-next-id-oversized-ns-named", False)
+        except ValueError as _e:
+            check("f3-next-id-oversized-ns-named",
+                  "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+        try:
+            next_id({}, "BI", known_complete=_big)
+            check("f3-known-complete-oversized-named", False)
+        except ValueError as _e:
+            check("f3-known-complete-oversized-named",
+                  "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+        try:
+            next_id({_big: 1}, "BI", known_complete=True)
+            check("f3-counter-map-oversized-ns-named", False)
+        except ValueError as _e:
+            check("f3-counter-map-oversized-ns-named",
+                  "Exceeds the limit" not in str(_e) and "integer string conversion" not in str(_e))
+    finally:
+        sys.set_int_max_str_digits(_prev_idlimit)
+    # F4 (blank-string): a whitespace-only required payload is semantically blank and INVALID, harmonizing
+    # the Fable-M4 stance across actor.id, ref.locator, finding.severity, pending_decision.decision/
+    # decided_by, and autonomous_decision.classification/action. A real value still validates VALID.
+    check("f4-actor-id-whitespace-invalid",
+          validate_record(envelope("backlog_item", 61, "open",
+                                   actor={"kind": "maintainer", "id": "   "})).status == INVALID)
+    check("f4-actor-id-real-still-ok",
+          validate_record(envelope("backlog_item", 62, "open",
+                                   actor={"kind": "maintainer", "id": "orchestrator"})).status == VALID)
+    check("f4-ref-locator-whitespace-invalid",
+          validate_record(envelope("backlog_item", 63, "open",
+                                   refs=[{"kind": "path", "locator": "   ", "note": "n"}])).status == INVALID)
+    check("f4-severity-whitespace-invalid",
+          validate_record(envelope("finding", 64, "fixed/proposed", actor={"kind": "assistant"},
+                                   severity="   ")).status == INVALID)
+    check("f4-decision-whitespace-invalid",
+          validate_record(envelope("pending_decision", 65, "decided", decision="   ",
+                                   decided_at=TS, decided_by="maintainer")).status == INVALID)
+    check("f4-decided-by-whitespace-invalid",
+          validate_record(envelope("pending_decision", 66, "decided", decision="chose X",
+                                   decided_at=TS, decided_by="   ")).status == INVALID)
+    check("f4-ad-classification-whitespace-invalid",
+          validate_record(envelope("autonomous_decision", 67, "recorded", actor={"kind": "assistant"},
+                                   classification="   ", action="merged")).status == INVALID)
+    check("f4-ad-action-whitespace-invalid",
+          validate_record(envelope("autonomous_decision", 68, "recorded", actor={"kind": "assistant"},
+                                   classification="ACT", action="   ")).status == INVALID)
+
+    # ----- F-R17-A3: a MISBOUND caller-supplied roster is a cannot-evaluate, never a silent pass under the
+    # wrong type's grammar. The reconciliation runs in BOTH validate_record and validate_transition and
+    # admits the baseline and importer/module taxonomy extensions unchanged.
+    def _a3_spec(name, namespace):
+        s = object.__new__(TypeSpec)
+        s.name = name
+        s.namespace = namespace
+        return s
+
+    _a3_misbound = {"finding": BASELINE_SPECS["backlog_item"]}
+    check("a3-misbound-roster-record-cannot-eval",
+          validate_record({"type": "finding", "id": "FN-1", "status": "open"},
+                          specs=_a3_misbound).status == CANNOT_EVALUATE)
+    # F-R18-A3TEST: use open->active, NOT open->fixed. Under the misbound backlog_item grammar `open->active`
+    # is a LEGAL transition, so the OLD impl (roster check reverted) returns VALID here; the roster
+    # reconciliation is the ONLY layer that turns it into CANNOT-EVALUATE, so reverting that guard reds this.
+    # `open->fixed` did NOT discriminate: `fixed` is not a backlog_item state, so the OLD impl already
+    # CANNOT-EVALUATEs the unparseable target regardless of the roster check.
+    check("a3-misbound-roster-transition-cannot-eval",
+          validate_transition("finding", "open", "active", "maintainer",
+                              specs=_a3_misbound).status == CANNOT_EVALUATE)
+    check("a3-contradicting-namespace-cannot-eval",
+          validate_record({"type": "finding", "id": "FN-1", "status": "open"},
+                          specs={"finding": _a3_spec("finding", "BI")}).status == CANNOT_EVALUATE)
+    check("a3-absent-taxonomy-type-cannot-eval",
+          _specs_roster_error({"not_a_type": _a3_spec("not_a_type", "ZZ")}) is not None)
+    check("a3-baseline-roster-reconciles", _specs_roster_error(BASELINE_SPECS) is None)
+    _a3_extended = dict(BASELINE_SPECS)
+    _a3_extended["legacy_fragment"] = _a3_spec("legacy_fragment", IMPORTER_TYPES["legacy_fragment"])
+    _a3_extended["artifact"] = _a3_spec("artifact", MODULE_TYPES["artifact"][0])
+    check("a3-taxonomy-extension-reconciles", _specs_roster_error(_a3_extended) is None)
+    check("a3-baseline-record-still-ok",
+          validate_record(envelope("backlog_item", 90, "open")).status == VALID)
+
+    # ----- F-R17-D1: counters.toml requires the exact integer schema marker; an absent marker is a finding,
+    # not a silent clean pass; a present marker still validates clean.
+    check("d1-counters-absent-schema-finding", bool(validate_counters({"counters": {}})[1]))
+    check("d1-counters-present-schema-ok", not validate_counters({"schema": 1, "counters": {}})[1])
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))

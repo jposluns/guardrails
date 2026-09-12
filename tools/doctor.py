@@ -219,7 +219,7 @@ def assert_open_journal(root_fd, root):
                               "a symlinked journal entry {!r} is refused, not followed".format(entry))
             if not stat.S_ISDIR(est.st_mode):
                 continue                                  # a regular file (e.g. the lock) is not a transaction dir
-            if not _journal.is_terminal(journal_root / entry):
+            if not _journal.is_terminal(jfd, journal_root / entry):   # F1: read contained beneath the trusted jfd
                 open_txns.append(entry)
     except _journal.JournalError as exc:
         return Result("open-journal", MALFORMED, "corrupt journal ({})".format(exc))

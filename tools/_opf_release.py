@@ -65,7 +65,9 @@ following where sections 6 and 7 leave a gap:
     (ReleaseError), never a silent digest over a lossy serialization. An EMPTY span digests the header alone, a
     well-defined constant (spec 6.1 permits an empty span for a release with no worklog entries; spec 14.3
     pre-migration releases). The finalizer may re-fix the scheme in one place if adopters need another.
-  - version.toml / worklog.toml FILE SHAPE is defined here as an optional top-level `schema` int plus the
+  - version.toml / worklog.toml FILE SHAPE is defined here as a REQUIRED top-level `schema` int (the exact
+    supported integer marker; an absent or wrong marker is fail-closed per file kind, including archived
+    worklogs, D1) plus the
     `[[release]]` / `[[summary]]` (version.toml) or `[[entry]]` (worklog.toml) arrays of tables, matching
     Appendix B/C; unknown top-level keys and unknown row keys are fail-closed findings (closed keyset,
     spec 8.3 discipline applied to the ledgers). SemVer is validated to SemVer 2.0.0 precedence including
@@ -104,7 +106,7 @@ from _opf_schema import (  # noqa: E402
 )
 # U8 supplies the deterministic float SPELLING rule; reuse it so the coverage digest and the emitter agree
 # byte-for-byte on floats (M2), rather than re-deriving the signed-zero / non-finite handling here.
-from _opf_emit import _canonical_float, EmitError  # noqa: E402
+from _opf_emit import _canonical_float, EmitError, run_bounded  # noqa: E402
 
 
 WL_NAMESPACE = "WL"                       # the worklog type's namespace (spec 8.1)
@@ -119,7 +121,9 @@ SUMMARY_STATUSES = ("working", "published", "superseded")
 UNRELEASED = "unreleased"                 # the reserved covers token for the working tail (spec 6.1)
 
 # A coverage / freeze digest is `sha256:` + 64 lowercase hex (the form of every spec example, Appendix B).
-_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# Anchored with \Z (the true end of string), not $, which also matches just before a trailing newline and
+# would admit a newline-terminated digest read from a store file (fail-open on the format gate).
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 
 # The canonicalization scheme header (see the coverage-digest ambiguity note). Versioned so a future
 # scheme is distinguishable from this one by construction.
@@ -137,7 +141,8 @@ _SEMVER_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
     r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?"
-    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$")
+    # \Z, not $: $ also matches before a trailing newline, admitting a newline-terminated version string.
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\Z")
 
 
 class ReleaseError(Exception):
@@ -235,12 +240,19 @@ def _wl_id_set(values, where, findings):
             where, type(values).__name__))
         return set()
     out = set()
+    # Accumulate the per-element findings locally and append them SORTED, so a `set` input (some callers
+    # pass the union of active and archive ids) cannot leak its nondeterministic iteration order into the
+    # finding stream and break the house sorted-output constraint. _safe_display renders an oversized
+    # element without tripping repr()'s base-10 integer-string-conversion limit.
+    local = []
     for v in values:
         n = v if isinstance(v, int) and not isinstance(v, bool) else _wl_num(v)
         if n is None or n < 1:
-            findings.append("{}: entry {!r} is not a well-formed WL-<n> id (spec 8.2)".format(where, v))
+            local.append("{}: entry {} is not a well-formed WL-<n> id (spec 8.2)".format(
+                where, _safe_display(v)))
             continue
         out.add(n)
+    findings.extend(sorted(local))
     return out
 
 
@@ -320,8 +332,12 @@ def _canonical(value, _depth=0):
         # and turns the uncanonicalizable table into a controlled refusal (guard-input-soundness; M2).
         for k in value:
             if not isinstance(k, str):
-                raise ReleaseError("cannot canonicalize a table with a non-string key {!r} (type {}); a "
-                                   "worklog entry table has string keys only".format(k, type(k).__name__))
+                # F-R17-B4: render the offending key through _safe_display, never {!r}: an oversized
+                # non-decimal int key (a hand-constructed / hex-literal table) would trip CPython's int->str
+                # limit and raise a raw ValueError while BUILDING this ReleaseError message.
+                raise ReleaseError("cannot canonicalize a table with a non-string key {} (type {}); a "
+                                   "worklog entry table has string keys only".format(
+                                       _safe_display(k), type(k).__name__))
         return "{" + ",".join(
             json.dumps(k, ensure_ascii=False) + ":" + _canonical(v, _depth + 1)
             for k, v in sorted(value.items())) + "}"
@@ -353,7 +369,14 @@ def coverage_digest(entries):
     keyed.sort(key=lambda t: t[0])
     parts = [COVERAGE_SCHEME]
     parts.extend(_canonical(entry) for _, entry in keyed)
-    payload = "\n".join(parts).encode("utf-8")
+    # F-R17-B3: canonical content that is not UTF-8-encodable (a lone surrogate such as "\ud800" in a
+    # worklog field) fails closed with a ReleaseError, so an exported caller (release_cut /
+    # check_frozen_coverage / run_gates) returns its structured failure instead of a raw UnicodeEncodeError.
+    try:
+        payload = "\n".join(parts).encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ReleaseError("canonical worklog content is not encodable as UTF-8 (a lone surrogate or other "
+                           "unencodable code point; fail-closed): {}".format(exc))
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
@@ -400,14 +423,33 @@ def compute_span_digest(entries_by_id, span):
         # `span` is a (start, end) pair of WL-numbers or None (guarded above). A non-pair would crash on
         # the unpacking or on range(); fail closed (ReleaseError) rather than a TypeError (spec 6.1).
         raise ReleaseError("cannot digest a span: span must be a (start, end) pair of WL-numbers or "
-                           "None, got {!r}".format(span))
+                           "None, got {}".format(_safe_display(span)))
     start, end = span
+    # F-R17-B1: a covered span is a positive, non-reversed WL interval. A reversed span ((2, 1)) would make
+    # range() empty and silently return the empty-coverage digest, and a non-positive start would digest a
+    # phantom index-zero entry; both are fail-closed here (None stays the explicit empty-span, handled above).
+    if start < 1 or end < start:
+        raise ReleaseError("cannot digest a span: a (start, end) span must satisfy 1 <= start <= end, got "
+                           "({}, {})".format(_safe_str(start), _safe_str(end)))
     covered = []
     for n in range(start, end + 1):
         entry = entries_by_id.get(n)
         if entry is None:
             raise ReleaseError("worklog entry WL-{} covered by a span is absent (merge the archive; "
-                               "spec 12)".format(n))
+                               "spec 12)".format(_safe_str(n)))
+        # F-R17-B2: reconcile the map KEY against the entry's own parsed WL identity. A map that binds key n
+        # to an entry whose id is WL-m (m != n) is a corrupt/misbound basis, and digesting it would certify a
+        # frozen span against the wrong entry's bytes (a stored digest matching WL-m would read VALID in
+        # check_frozen_coverage). The key is the guard's input; a key that cannot answer for the entry under
+        # it is a cannot-evaluate, not a silent pass (guard-input-soundness; spec 6.1/8.2). A non-table entry
+        # fails closed here rather than crashing on .get() (coverage_digest re-checks it too).
+        if not isinstance(entry, dict):
+            raise ReleaseError("worklog entry map contains a non-table entry for WL-{} (fail-closed)".format(
+                _safe_str(n)))
+        actual = _wl_num(entry.get("id"))
+        if actual != n:
+            raise ReleaseError("worklog entry map binds key WL-{} to an entry whose id is {} (a misbound "
+                               "coverage basis; spec 6.1/8.2)".format(_safe_str(n), _safe_display(entry.get("id"))))
         covered.append(entry)
     return coverage_digest(covered)
 
@@ -455,8 +497,14 @@ def _releases_or_finding(version_data, findings):
     if not isinstance(version_data, dict):
         findings.append("cannot evaluate: version ledger is not a table")
         return None
+    # F-R17-D1: a schema-bearing ledger MUST declare its schema. An absent marker is a cannot-evaluate,
+    # mirroring the index rule, so the standalone guards never read a marker-less ledger as clean.
     schema = version_data.get("schema")
-    if schema is not None and (type(schema) is not int or schema != SUPPORTED_SCHEMA):
+    if schema is None:
+        findings.append("cannot evaluate: version.toml is missing the required `schema` key (fail-closed; a "
+                        "schema-bearing ledger declares its schema; D1)")
+        return None
+    if type(schema) is not int or schema != SUPPORTED_SCHEMA:
         findings.append("cannot evaluate: version.toml schema {} is not the supported schema version {} "
                         "(fail-closed; do not parse under v{} assumptions; M3)".format(
                             _safe_display(schema), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
@@ -515,13 +563,17 @@ def validate_version(data):
     if extra:
         findings.append("version.toml unknown top-level key(s): {}".format(
             ", ".join(_sorted_key_names(extra))))
-    if "schema" in data:
-        if type(data.get("schema")) is not int:
-            findings.append("version.toml schema must be an integer")
-        elif data.get("schema") != SUPPORTED_SCHEMA:
-            findings.append("version.toml schema {} is not the supported schema version {} (fail-closed; "
-                            "do not parse under v{} assumptions)".format(
-                                _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+    # F-R17-D1: version.toml is a schema-bearing machine document and MUST carry the exact integer marker
+    # (absent -> INVALID, wrong -> fail-closed), mirroring the index rule.
+    if "schema" not in data:
+        findings.append("version.toml is missing the required `schema` key (a schema-bearing store file "
+                        "declares its schema, mirroring the index rule; D1)")
+    elif type(data.get("schema")) is not int:
+        findings.append("version.toml schema must be an integer")
+    elif data.get("schema") != SUPPORTED_SCHEMA:
+        findings.append("version.toml schema {} is not the supported schema version {} (fail-closed; "
+                        "do not parse under v{} assumptions)".format(
+                            _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
 
     releases = data.get("release", [])
     if not isinstance(releases, list):
@@ -659,8 +711,8 @@ def _validate_summaries(summaries, ledger_versions, findings):
         if "status" not in row:
             findings.append("{}: missing required field: status".format(where))
         elif status not in SUMMARY_STATUSES:
-            findings.append("{}: status {!r} is not one of {} (spec 6.1)".format(
-                where, status, list(SUMMARY_STATUSES)))
+            findings.append("{}: status {} is not one of {} (spec 6.1)".format(
+                where, _safe_display(status), list(SUMMARY_STATUSES)))
 
         # digest is required once published or superseded; and never carried by a working row.
         has_digest = "digest" in row
@@ -687,6 +739,14 @@ def _validate_summaries(summaries, ledger_versions, findings):
                     # REPLACED this row, which is a different row (M10).
                     findings.append("{}: superseded_by must not name the row itself; a summary cannot "
                                     "supersede itself (spec 6.1/6.4)".format(where))
+                elif sb == UNRELEASED:
+                    # The working tail is never a rollup: it is status working (enforced below) and can
+                    # never have superseded a released summary, so superseded_by must not name it. Without
+                    # this an 'unreleased' token routes _covers_range to None, the covering check
+                    # (roll_range is not None) is skipped, and the row fails OPEN to VALID whenever an
+                    # 'unreleased' summary row is present (spec 6.1/6.4; fail-closed to INVALID).
+                    findings.append("{}: superseded_by must name a rollup summary, not the working "
+                                    "'unreleased' tail (spec 6.1/6.4)".format(where))
                 elif sb not in covers_index:
                     # superseded_by must name an EXISTING rollup summary row (spec 6.1: "the covers token
                     # of the rollup summary that replaced this one"), not merely a ledger-valid token (M10).
@@ -695,21 +755,32 @@ def _validate_summaries(summaries, ledger_versions, findings):
                 else:
                     # The rollup must COVER this summary's range (spec 6.4: a range summary supersedes only
                     # the summaries within its range).
+                    # `covers` may be an UNHASHABLE malformed value (a list/table already flagged above);
+                    # gate the dict membership on isinstance(str) so `covers in covers_index` cannot raise
+                    # TypeError on an unhashable key (fail-closed to the recorded covers finding, no crash).
                     this_range = _covers_range(covers_index[covers], ledger_versions) \
-                        if covers in covers_index else None
+                        if isinstance(covers, str) and covers in covers_index else None
                     roll_range = _covers_range(sb_parsed, ledger_versions)
-                    if this_range is not None and roll_range is not None and not (
-                            roll_range[0] <= this_range[0] and this_range[1] <= roll_range[1]):
-                        findings.append("{}: superseded_by {!r} does not cover this summary's range; a "
-                                        "rollup supersedes only the summaries within its range "
-                                        "(spec 6.4)".format(where, sb))
+                    if this_range is not None and roll_range is not None:
+                        if tuple(roll_range) == tuple(this_range):
+                            # A rollup whose covered range EQUALS this row's own range rolls up nothing and
+                            # supersedes the same versions; distinct tokens for one range (e.g. "1.0.0" and
+                            # "1.0.0..1.0.0") otherwise slip the token-level self-reference guard above and
+                            # admit a supersession CYCLE with no surviving rollup (spec 6.4; fail-closed).
+                            findings.append("{}: superseded_by {!r} covers exactly this summary's own "
+                                            "range; a rollup must roll up more than the row it supersedes "
+                                            "(spec 6.4)".format(where, sb))
+                        elif not (roll_range[0] <= this_range[0] and this_range[1] <= roll_range[1]):
+                            findings.append("{}: superseded_by {!r} does not cover this summary's range; a "
+                                            "rollup supersedes only the summaries within its range "
+                                            "(spec 6.4)".format(where, sb))
         elif has_sb:
             findings.append("{}: superseded_by is present only on a superseded summary (spec 6.1)".format(where))
 
         # The unreleased working tail is a working row; it is never published or superseded (spec 6.1).
         if kind == "unreleased" and status is not None and status != "working":
-            findings.append("{}: the 'unreleased' summary is always working, not {!r} (spec 6.1)".format(
-                where, status))
+            findings.append("{}: the 'unreleased' summary is always working, not {} (spec 6.1)".format(
+                where, _safe_display(status)))
 
 
 # --- worklog.toml validation (spec 6.2) --------------------------------------------------------------
@@ -730,13 +801,17 @@ def validate_worklog(data, registered_vendors=frozenset(), registered_kinds=None
     if extra:
         findings.append("worklog.toml unknown top-level key(s): {}".format(
             ", ".join(_sorted_key_names(extra))))
-    if "schema" in data:
-        if type(data.get("schema")) is not int:
-            findings.append("worklog.toml schema must be an integer")
-        elif data.get("schema") != SUPPORTED_SCHEMA:
-            findings.append("worklog.toml schema {} is not the supported schema version {} (fail-closed; "
-                            "do not parse under v{} assumptions)".format(
-                                _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
+    # F-R17-D1: worklog.toml (active AND archive) is a schema-bearing machine document and MUST carry the
+    # exact integer marker (absent -> INVALID, wrong -> fail-closed), mirroring the index rule.
+    if "schema" not in data:
+        findings.append("worklog.toml is missing the required `schema` key (a schema-bearing store file "
+                        "declares its schema, mirroring the index rule; D1)")
+    elif type(data.get("schema")) is not int:
+        findings.append("worklog.toml schema must be an integer")
+    elif data.get("schema") != SUPPORTED_SCHEMA:
+        findings.append("worklog.toml schema {} is not the supported schema version {} (fail-closed; "
+                        "do not parse under v{} assumptions)".format(
+                            _safe_display(data.get("schema")), SUPPORTED_SCHEMA, SUPPORTED_SCHEMA))
 
     entries = data.get("entry", [])
     if not isinstance(entries, list):
@@ -899,9 +974,14 @@ def release_cut(version_data, worklog_data, new_version, date,
         span_value = []
         span_parsed = None
     else:
-        # The tail MUST be the contiguous run end+1 .. max, or a span cannot tile (spec 6.1).
-        expected = list(range(end + 1, tail[-1] + 1))
-        if tail != expected:
+        # The tail MUST be the contiguous run end+1 .. max, or a span cannot tile (spec 6.1). Checked by
+        # COUNT over the present ids (tail is a sorted set of distinct WL-numbers all > end), never by
+        # materializing list(range(end + 1, tail[-1] + 1)): that list is sized by the DECLARED max id, not
+        # the entry count, so a single large-id entry (a plausible WL-1000000000 typo) forces an O(max_id)
+        # allocation and an uncaught MemoryError. The contiguous run end+1..max holds exactly (max - end)
+        # ids from end+1, so len(tail) == tail[-1] - end and tail[0] == end + 1 iff it tiles (RANGE-BOUNDS;
+        # SECA-resource-bounds; fail-closed to INVALID on a gap).
+        if tail[0] != end + 1 or tail[-1] - end != len(tail):
             return CutResult(INVALID, ["cannot cut: the unreleased tail WL-{}..WL-{} is not contiguous "
                                        "(a gap would break span tiling, spec 6.1)".format(end + 1, tail[-1])])
         span_value = ["WL-{}".format(tail[0]), "WL-{}".format(tail[-1])]
@@ -920,9 +1000,10 @@ def release_cut(version_data, worklog_data, new_version, date,
     }
     # Build a NEW version.toml value: append the release row, carry schema and summaries unchanged. The
     # summary/changelog rollup is a separate curated step (U5); the cut touches the release ledger only.
-    new_version_data = {}
-    if "schema" in version_data:
-        new_version_data["schema"] = version_data["schema"]
+    # F-R17-D1: validate_version (called above) now REQUIRES the schema marker, so the cut only reaches here
+    # from a ledger that carries it; carry it forward unconditionally so the cut output is itself
+    # schema-bearing.
+    new_version_data = {"schema": version_data["schema"]}
     new_version_data["release"] = list(vv.releases) + [new_row]
     if "summary" in version_data:
         new_version_data["summary"] = list(version_data["summary"])
@@ -952,7 +1033,14 @@ def tail_ids(releases, worklog_ids):
     tail = []
     for n in worklog_ids:
         if not (isinstance(n, int) and not isinstance(n, bool)):
-            raise ReleaseError("cannot compute the tail: worklog id {!r} is not a WL-number".format(n))
+            raise ReleaseError("cannot compute the tail: worklog id {} is not a WL-number".format(
+                _safe_display(n)))
+        if n < 1:
+            # A WL-number is a POSITIVE integer (spec 8.2); a non-positive id (WL-0, a negative) is
+            # malformed, not a tail member to be silently dropped by the `n > end` filter, which would let
+            # it falsely satisfy an empty-tail assertion. Fail closed (guard-input-soundness).
+            raise ReleaseError("cannot compute the tail: worklog id {} is not a positive WL-<n> id "
+                               "(spec 8.2)".format(_safe_display(n)))
         if n > end:
             tail.append(n)
     return sorted(tail)
@@ -1009,17 +1097,22 @@ def check_no_append_into_released(version_data, candidate_ids):
     except ReleaseError as exc:
         findings.append("cannot evaluate: {}".format(exc))
         return findings
+    # Accumulate per-id findings locally and append them SORTED, so a `set` candidate collection cannot
+    # leak its nondeterministic iteration order into the finding stream (house sorted-output constraint).
+    local = []
     for cid in candidate_ids:
         n = cid if isinstance(cid, int) and not isinstance(cid, bool) else _wl_num(cid)
         if n is None:
-            findings.append("candidate worklog id {!r} is not a well-formed WL-<n> id".format(cid))
+            local.append("candidate worklog id {} is not a well-formed WL-<n> id".format(_safe_display(cid)))
         elif n < 1:
             # A WL-number is a positive integer (spec 8.2); a non-positive raw int is malformed, not a
             # released-span member (m3 sibling sweep).
-            findings.append("candidate worklog id {!r} is not a positive WL-<n> id (spec 8.2)".format(cid))
+            local.append("candidate worklog id {} is not a positive WL-<n> id (spec 8.2)".format(
+                _safe_display(cid)))
         elif n <= end:
-            findings.append("worklog id WL-{} falls in an already-released span (<= released end WL-{}); a "
-                            "post-release correction is a NEW entry in the unreleased tail (spec 6.2)".format(n, end))
+            local.append("worklog id WL-{} falls in an already-released span (<= released end WL-{}); a "
+                         "post-release correction is a NEW entry in the unreleased tail (spec 6.2)".format(n, end))
+    findings.extend(sorted(local))
     return findings
 
 
@@ -1032,15 +1125,86 @@ def check_no_deletion(old_ids, new_ids):
     old = _wl_id_set(old_ids, "check_no_deletion old id-collection", findings)
     for n in sorted(old):
         if n not in now:
-            findings.append("worklog id WL-{} vanished: no worklog entry is ever deleted (spec 6.2/13)".format(n))
+            findings.append("worklog id WL-{} vanished: no worklog entry is ever deleted (spec 6.2/13)".format(
+                _safe_str(n)))
     return findings
+
+
+def _count_expected_absent(expected_ids, present, where, findings):
+    """The number of `expected_ids` (the authoritative id space, a range 1..high-water) absent from
+    `present` (a set of WL-numbers), computed WITHOUT materializing a collection sized by the declared
+    high-water. A range spanning a spoofed large id (a store entry WL-1000000000) would make
+    `_wl_id_set`'s `out.add(n)` loop an O(high-water) allocation and MemoryError, and a per-missing-id
+    finding would be O(high-water) too; instead the count/identity discipline the release-cut tail check
+    uses answers the interval question in O(present) (RANGE-BOUNDS; SECA-resource-bounds;
+    guard-input-soundness). Since `present` holds distinct WL-numbers, the count of present ids that fall
+    in `expected_ids` equals |present intersect expected|, so len(expected) minus that count is the number
+    of expected ids covered by NEITHER location. The authoritative id space MUST be a `range` 1..high-water
+    (the documented contract): a range is sized and membership-tested WITHOUT materializing its members,
+    and its members ARE the WL-numbers, so `present` (already-normalized WL-numbers) tests against it
+    directly. A NON-range collection is a fail-closed finding, never membership-tested raw: its elements
+    are neither deduplicated nor normalized here, so a duplicate would inflate len() and an un-normalized
+    element (a bare "WL-1") would never match a normalized present id, each reporting a FALSE loss
+    (over-fire). A range too large to size (>= 2**63 members, e.g. a spoofed 19-digit high-water id
+    WL-9223372036854775808, whose len() raises OverflowError) is likewise a fail-closed finding. A control
+    that cannot answer is a fail-closed finding, never a silent zero."""
+    if not isinstance(expected_ids, range):
+        # The id space is a RANGE by contract. A non-range collection (a list/set/tuple/generator) cannot
+        # be both bounded (never materialized, RANGE-BOUNDS) AND element-normalized here, so its raw
+        # elements would size and membership-test WRONG and report a FALSE loss; fail closed to a
+        # cannot-evaluate finding rather than over-fire (guard-input-soundness; the fail direction stays
+        # closed, never a false pass).
+        findings.append("{}: must be a range id space (a range 1..high-water), not {}".format(
+            where, type(expected_ids).__name__))
+        return 0
+    if expected_ids.start != 1 or expected_ids.step != 1 or expected_ids.stop < 1:
+        # The authoritative id space is the CANONICAL range 1..high-water: range(1, high_water+1), i.e.
+        # start 1, step 1, stop >= 1. A range that does not start at 1, does not step by 1, or stops below
+        # 1 cannot answer "which of ids 1..high-water is covered": e.g. range(2, 3) silently drops WL-1
+        # from the space, so a genuine loss of WL-1 reads as a clean partition. isinstance(range) alone is
+        # not enough (guard-input-soundness): validate the endpoint form and fail closed to a
+        # cannot-evaluate finding, never a false clean pass. (Attribute reads are O(1) and never overflow;
+        # only len() below can, which the OverflowError branch handles.)
+        # Render the endpoints through _safe_str (O(1) bit-length fallback): a spoofed non-canonical range
+        # can carry an oversized endpoint (range(-(10**5000), 1) or range(1, 2, 10**5000)) whose str() trips
+        # CPython's base-10 int-conversion limit, so interpolating it raw ({}) would raise a ValueError out
+        # of the very branch meant to REJECT it (codex round-6; guard-input-soundness: a control that cannot
+        # be evaluated becomes a structured finding, never a crash).
+        findings.append("{}: id space must be the canonical range 1..high-water (start 1, step 1); got "
+                        "range(start={}, stop={}, step={}); cannot evaluate the partition "
+                        "(guard-input-soundness)".format(where, _safe_str(expected_ids.start),
+                                                          _safe_str(expected_ids.stop),
+                                                          _safe_str(expected_ids.step)))
+        return 0
+    try:
+        expected_n = len(expected_ids)
+    except (TypeError, OverflowError):
+        # OverflowError: a range with >= 2**63 members cannot convert its length to a C ssize_t (a spoofed
+        # 19-digit high-water id, WL-9223372036854775808). TypeError is defence-in-depth (the range guard
+        # above already excludes an unsized space). Either routes to the same fail-closed finding rather
+        # than an uncontrolled crash (SECA-resource-bounds; guard-input-soundness).
+        findings.append("{}: id space is too large to size (a range with >= 2**63 members; a spoofed "
+                        "high-water id); cannot evaluate the partition (spec 12/13)".format(where))
+        return 0
+    covered = 0
+    for n in present:
+        try:
+            in_expected = n in expected_ids
+        except TypeError:
+            findings.append("{}: is not a membership-testable id space ({})".format(
+                where, type(expected_ids).__name__))
+            return 0
+        if in_expected:
+            covered += 1
+    return expected_n - covered
 
 
 def check_ids_partition(active_ids, archive_ids, expected_ids=None):
     """Rotation is archival MOVEMENT, never duplication or loss (spec 12): every worklog id exists in
     EXACTLY ONE of the active worklog or the archive. Returns a finding per id present in both, and, when
-    an authoritative `expected_ids` set is given (e.g. 1..high-water), a finding per expected id present in
-    NEITHER location, so a dropped/lost id is reported rather than reading as clean (M9). Without
+    an authoritative `expected_ids` set is given (e.g. 1..high-water), a finding naming the COUNT of
+    expected ids present in NEITHER location, bounded by the present set so a range 1..high-water spanning
+    a spoofed large id cannot force an O(high-water) allocation (M9; RANGE-BOUNDS). Without
     `expected_ids` the guard cannot see a loss (its inputs are the two locations, not the id space it
     should cover), so the authoritative set is threaded in per guard-input-soundness."""
     findings = []
@@ -1048,14 +1212,18 @@ def check_ids_partition(active_ids, archive_ids, expected_ids=None):
     archive = _wl_id_set(archive_ids, "check_ids_partition archive id-collection", findings)
     for n in sorted(active & archive):
         findings.append("worklog id WL-{} is in BOTH the active worklog and the archive; rotation is a "
-                        "move, an id lives in exactly one location (spec 12)".format(n))
+                        "move, an id lives in exactly one location (spec 12)".format(_safe_str(n)))
     if expected_ids is not None:
-        expected = _wl_id_set(expected_ids, "check_ids_partition expected id-collection", findings)
+        # Detect a LOST id (present in NEITHER location) WITHOUT materializing a set sized by the declared
+        # high-water: an `expected_ids` range spanning a spoofed large id would OOM _wl_id_set here, and a
+        # per-missing-id finding would itself be O(high-water). Answer the interval question by the
+        # count/identity discipline over the (bounded) present set instead (RANGE-BOUNDS).
         present = active | archive
-        for n in sorted(expected):
-            if n not in present:
-                findings.append("worklog id WL-{} is in NEITHER the active worklog nor the archive; "
-                                "rotation is a move, never a loss (spec 12/13)".format(n))
+        absent = _count_expected_absent(
+            expected_ids, present, "check_ids_partition expected id-collection", findings)
+        if absent > 0:
+            findings.append("{} expected worklog id(s) are in NEITHER the active worklog nor the archive; "
+                            "rotation is a move, never a loss (spec 12/13)".format(absent))
     return findings
 
 
@@ -1078,17 +1246,22 @@ def check_rotation_only_released(rotated_ids, version_data):
     except ReleaseError as exc:
         findings.append("cannot evaluate: {}".format(exc))
         return findings
+    # Accumulate per-id findings locally and append them SORTED, so a `set` rotated collection cannot leak
+    # its nondeterministic iteration order into the finding stream (house sorted-output constraint).
+    local = []
     for rid in rotated_ids:
         n = rid if isinstance(rid, int) and not isinstance(rid, bool) else _wl_num(rid)
         if n is None:
-            findings.append("rotated worklog id {!r} is not a well-formed WL-<n> id".format(rid))
+            local.append("rotated worklog id {} is not a well-formed WL-<n> id".format(_safe_display(rid)))
         elif n < 1:
             # A WL-number is a positive integer (spec 8.2); a non-positive raw int (e.g. WL-0) is outside
             # the id grammar and must not slip the > released-end test (m3).
-            findings.append("rotated worklog id {!r} is not a positive WL-<n> id (spec 8.2)".format(rid))
+            local.append("rotated worklog id {} is not a positive WL-<n> id (spec 8.2)".format(
+                _safe_display(rid)))
         elif n > end:
-            findings.append("worklog id WL-{} is in the unreleased tail (> released end WL-{}) and must "
-                            "never rotate (spec 12)".format(n, end))
+            local.append("worklog id WL-{} is in the unreleased tail (> released end WL-{}) and must "
+                         "never rotate (spec 12)".format(_safe_str(n), end))
+    findings.extend(sorted(local))
     return findings
 
 
@@ -1112,6 +1285,11 @@ def self_test():
              "actor": {"kind": "maintainer"}, "kind": kind, "summary": summary}
         e.update(extra)
         return e
+
+    # run_bounded: the shared bounded-child watchdog imported from _opf_emit (the RANGE-BOUNDS mutant-kill
+    # vectors below run behind it; a reverted bounded-counting fix would otherwise materialize an O(10**9)
+    # collection and HANG or OOM the whole self-test). One shared implementation across the three OPF
+    # self-tests so the fork/timer/pipe hardening cannot diverge again.
 
     # --- 1: a VALID version.toml + worklog.toml (the everyday shape, Appendix B/C) --------------------
     worklog = {"schema": 1, "entry": [entry(1), entry(2), entry(3), entry(4)]}
@@ -1138,13 +1316,16 @@ def self_test():
     check("valid-version-releases", len(vv.releases) == 1)
 
     # --- 2: a NON-MONOTONIC version is rejected -------------------------------------------------------
-    v_nonmono = {"release": [
+    # F-R18-D1MASK: every markerless negative fixture below carries "schema": 1 so its INVALID verdict rests
+    # on the INTENDED guard (order/uniqueness/tiling/summary/supersession), not on the missing-schema finding
+    # D1 adds -- otherwise reverting the intended guard would still read INVALID via the absent marker.
+    v_nonmono = {"schema": 1, "release": [
         {"version": "2.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
         {"version": "1.0.0", "date": "2026-06-02T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
     ]}
     check("non-monotonic-invalid", validate_version(v_nonmono).status == INVALID)
     # a duplicate version is also a monotonicity/uniqueness failure
-    v_dup = {"release": [
+    v_dup = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
         {"version": "1.0.0", "date": "2026-06-02T00:00:00Z", "worklog_span": [], "coverage_digest": "sha256:" + "0" * 64},
     ]}
@@ -1157,7 +1338,7 @@ def self_test():
     check("semver-bad-rejected", parse_semver("1.0") is None and parse_semver("01.0.0") is None)
 
     # --- 3 & 5: a REWRITE / MUTATION of a released (frozen) span is detected --------------------------
-    frozen_ver = {"release": [
+    frozen_ver = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
          "worklog_span": ["WL-1", "WL-2"], "coverage_digest": dig12},
     ]}
@@ -1192,27 +1373,27 @@ def self_test():
     check("cut-inconsistent-ledger-invalid", release_cut(v_nonmono, worklog, "3.0.0", "2026-06-15T00:00:00Z").status == INVALID)
 
     # --- empty-span release: a cut with no new worklog entries yields an empty span -------------------
-    worklog_all = {"entry": [entry(1), entry(2), entry(3), entry(4)]}
+    worklog_all = {"schema": 1, "entry": [entry(1), entry(2), entry(3), entry(4)]}
     empty_cut = release_cut(cut.version_data, worklog_all, "1.2.0", "2026-07-01T00:00:00Z")
     check("empty-cut-valid", empty_cut.status == VALID)
     check("empty-cut-empty-span", empty_cut.frozen_span == [])
     check("empty-cut-digest", empty_cut.coverage_digest == coverage_digest([]))
-    empty_ver = {"release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+    empty_ver = {"schema": 1, "release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
                              "worklog_span": [], "coverage_digest": coverage_digest([])}]}
     check("empty-span-release-valid", validate_version(empty_ver).status == VALID)
 
     # --- tiling gap / overlap ------------------------------------------------------------------------
-    gap = {"release": [
+    gap = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-1", "WL-2"], "coverage_digest": dig12},
         {"version": "1.1.0", "date": "2026-06-02T00:00:00Z", "worklog_span": ["WL-4", "WL-5"], "coverage_digest": "sha256:" + "0" * 64},
     ]}
     check("tiling-gap-invalid", validate_version(gap).status == INVALID)
-    overlap = {"release": [
+    overlap = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-1", "WL-3"], "coverage_digest": "sha256:" + "0" * 64},
         {"version": "1.1.0", "date": "2026-06-02T00:00:00Z", "worklog_span": ["WL-3", "WL-5"], "coverage_digest": "sha256:" + "0" * 64},
     ]}
     check("tiling-overlap-invalid", validate_version(overlap).status == INVALID)
-    not_start_one = {"release": [
+    not_start_one = {"schema": 1, "release": [
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": ["WL-2", "WL-3"], "coverage_digest": "sha256:" + "0" * 64},
     ]}
     check("tiling-not-start-one-invalid", validate_version(not_start_one).status == INVALID)
@@ -1271,11 +1452,11 @@ def self_test():
     # --- worklog / version fail-closed on non-tables --------------------------------------------------
     check("worklog-not-table-cannot-eval", validate_worklog([]).status == CANNOT_EVALUATE)
     check("version-not-table-cannot-eval", validate_version([]).status == CANNOT_EVALUATE)
-    check("worklog-bad-entry-invalid", validate_worklog({"entry": [{"id": "WL-1"}]}).status == INVALID)
+    check("worklog-bad-entry-invalid", validate_worklog({"schema": 1, "entry": [{"id": "WL-1"}]}).status == INVALID)
     check("summary-covers-unknown-invalid", validate_version(
-        {"release": [], "summary": [{"covers": "9.9.9", "status": "working"}]}).status == INVALID)
+        {"schema": 1, "release": [], "summary": [{"covers": "9.9.9", "status": "working"}]}).status == INVALID)
     check("summary-published-needs-digest-invalid", validate_version(
-        {"release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [],
+        {"schema": 1, "release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [],
                       "coverage_digest": coverage_digest([])}],
          "summary": [{"covers": "1.0.0", "status": "published"}]}).status == INVALID)
 
@@ -1394,7 +1575,7 @@ def self_test():
     check("version-good-schema-ok", validate_version({"schema": 1, "release": []}).status == VALID)
 
     # --- M4: a manifest-registered worklog kind validates through validate_worklog --------------------
-    wl_custom = {"entry": [entry(1, kind="perf")]}
+    wl_custom = {"schema": 1, "entry": [entry(1, kind="perf")]}
     check("release-worklog-manifest-kind-ok",
           validate_worklog(wl_custom, registered_kinds=["perf"]).status == VALID)
     check("release-worklog-manifest-kind-unregistered-invalid",
@@ -1441,6 +1622,69 @@ def self_test():
     check("m9-partition-loss-across-active-archive-ok",
           not check_ids_partition([2], [1], expected_ids=range(1, 3)))
     check("m9-partition-no-expected-backward-compat", not check_ids_partition([1], []))
+    # F6: a NON-CANONICAL authoritative range (not starting at 1, not stepping by 1, or stopping below 1)
+    # is a cannot-evaluate finding, never a false clean pass. range(2, 3) drops WL-1 from the id space, so
+    # pre-fix a genuine loss of WL-1 read as a clean partition ([] returned); post-fix the malformed space
+    # itself is a finding. Discriminates: reverting the endpoint-form guard makes these return [] (clean).
+    check("f6-noncanonical-range-start-cannot-eval",
+          bool(check_ids_partition([2], [], expected_ids=range(2, 3))))
+    check("f6-noncanonical-range-step-cannot-eval",
+          bool(check_ids_partition([1, 3], [], expected_ids=range(1, 4, 2))))
+    check("f6-noncanonical-range-empty-stop-cannot-eval",
+          bool(check_ids_partition([], [], expected_ids=range(1, 0))))
+    # control: the canonical range(1, high_water+1) still evaluates without the malformed-space finding.
+    check("f6-canonical-range-ok", not check_ids_partition([1, 2], [], expected_ids=range(1, 3)))
+    # ROUND-6 codex: a NON-CANONICAL range whose ENDPOINT is an oversized int (str() trips CPython's
+    # base-10 digit limit) must render through _safe_str into the rejection finding, not crash the branch
+    # that is meant to reject it. Pre-fix (raw {} interpolation) these raised a ValueError out of
+    # check_ids_partition; post-fix each returns a structured cannot-evaluate finding naming the space.
+    # PIN the int-str limit to the default (4300) around these fixtures so the discrimination is caused by
+    # the CODE, not the ambient sys.set_int_max_str_digits: the pre-fix crash (and the "oversized-int"
+    # marker) only manifest when str() of a 5001-digit endpoint trips the limit, so a hostile ambient of 0
+    # or 5001 would neither reproduce the bug nor produce the marker. Restored in finally (test-hermeticity).
+    _r6_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        _r6_start = check_ids_partition([], [], expected_ids=range(-(10**5000), 1))
+        _r6_step = check_ids_partition([], [], expected_ids=range(1, 2, 10**5000))
+        check("r6-noncanonical-oversized-start-finding",
+              bool(_r6_start) and any("canonical range" in f and "oversized-int" in f for f in _r6_start))
+        check("r6-noncanonical-oversized-step-finding",
+              bool(_r6_step) and any("canonical range" in f and "oversized-int" in f for f in _r6_step))
+    finally:
+        sys.set_int_max_str_digits(_r6_prev_idlimit)
+
+    # ROUND-8 codex (finding 5): compute_span_digest and tail_ids were the class-width MISS of the round-7
+    # oversized-int rendering fix (which hardened check_ids_partition). They raw-interpolated a
+    # possibly-oversized int control into an exception message; with the int-str limit pinned to 4300, str()
+    # of a 5001-digit endpoint (site 420) and repr() of a malformed span holding one (site 413), and repr()
+    # of a non-int container holding one in tail_ids (site 989), trip CPython's base-10 limit. Pre-fix each
+    # raised a RAW ValueError out of the guard (before the intended ReleaseError); post-fix each renders
+    # through _safe_str / _safe_display and returns the controlled ReleaseError with the bounded marker.
+    # Reverting any of the three .format wrappers flips its check red. Limit restored in finally.
+    _r8_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        def _outcome(thunk):
+            try:
+                thunk()
+                return "no-error"
+            except ReleaseError as exc:
+                return "release:" + str(exc)
+            except ValueError:
+                return "raw-valueerror"
+
+        _r8a = _outcome(lambda: compute_span_digest({}, (10 ** 5000, 10 ** 5000)))   # site 420: str(n)
+        check("r8-span-digest-oversized-start-releaseerror",
+              _r8a.startswith("release:") and "oversized-int" in _r8a)
+        _r8b = _outcome(lambda: compute_span_digest({}, (1, 2, 10 ** 5000)))         # site 413: repr(span)
+        check("r8-span-digest-malformed-oversized-releaseerror",
+              _r8b.startswith("release:") and "oversized-value" in _r8b)
+        _r8c = _outcome(lambda: tail_ids([], [[10 ** 5000]]))                        # site 989: repr(n)
+        check("r8-tail-ids-oversized-nonint-releaseerror",
+              _r8c.startswith("release:") and "oversized-value" in _r8c)
+    finally:
+        sys.set_int_max_str_digits(_r8_prev_idlimit)
 
     # M10: a superseded summary's superseded_by must name an EXISTING rollup that COVERS it, never itself.
     D = "sha256:" + "a" * 64
@@ -1449,20 +1693,20 @@ def self_test():
         {"version": "1.0.0", "date": "2026-06-01T00:00:00Z", "worklog_span": [], "coverage_digest": EMPTY},
         {"version": "1.1.0", "date": "2026-06-02T00:00:00Z", "worklog_span": [], "coverage_digest": EMPTY},
     ]
-    sup_base = {"release": sup_releases, "summary": [
+    sup_base = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": "unreleased", "status": "working"},
         {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"},
         {"covers": "1.1.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"},
         {"covers": "1.0.0..1.1.0", "status": "published", "digest": D},
     ]}
     check("m10-valid-supersession-ok", validate_version(sup_base).status == VALID)
-    sup_self = {"release": sup_releases, "summary": [
+    sup_self = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0"}]}
     check("m10-self-reference-invalid", validate_version(sup_self).status == INVALID)
-    sup_missing = {"release": sup_releases, "summary": [
+    sup_missing = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"}]}
     check("m10-nonexistent-rollup-invalid", validate_version(sup_missing).status == INVALID)
-    sup_notcover = {"release": sup_releases, "summary": [
+    sup_notcover = {"schema": 1, "release": sup_releases, "summary": [
         {"covers": "1.1.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0"},
         {"covers": "1.0.0", "status": "published", "digest": D}]}
     check("m10-rollup-not-covering-invalid", validate_version(sup_notcover).status == INVALID)
@@ -1472,6 +1716,236 @@ def self_test():
     check("m3-rotation-nonpositive-invalid", bool(check_rotation_only_released([0], frozen_ver)))
     check("m3-rotation-negative-invalid", bool(check_rotation_only_released([-1], frozen_ver)))
     check("m3-append-nonpositive-invalid", bool(check_no_append_into_released(frozen_ver, [0])))
+
+    # --- retro fixes: discriminating vectors for the three confirmed defects ---------------------
+    # BLOCKER (RANGE-BOUNDS): a single large-id tail entry is judged by COUNT, not by materializing a
+    # range sized by the declared max id. Empty ledger + WL-1000000000: the tail is not contiguous from
+    # WL-1, so the cut returns a controlled INVALID in O(1). Before the fix release_cut built
+    # list(range(1, 1000000001)) and raised an uncaught MemoryError, never reaching this INVALID.
+    wl_bigid = {"schema": 1, "entry": [entry(1000000000)]}
+    # F11: behind a child-process watchdog. A reverted RANGE-BOUNDS fix would build list(range(1, 10**9+1))
+    # here and OOM the whole suite in-process; the watchdog turns that into an OOM/TIMEOUT sentinel this
+    # assertion rejects, while the shipped bounded engine returns INVALID in O(1).
+    check("blocker-large-id-tail-bounded-invalid",
+          run_bounded(lambda: "INVALID" if release_cut(
+              {"release": []}, wl_bigid, "1.0.0", "2026-06-15T00:00:00Z").status == INVALID
+              else "NOT-INVALID") == "INVALID")
+    # MINOR (SELF-TEST DISCRIMINATION): a reversed span in a NON-FIRST position (start > end) tiles its
+    # start against the cursor but drives coverage backward; the _parse_span a > b guard is the sole
+    # layer against it. Pin the guard: without it this ledger fails OPEN to VALID.
+    reversed_span_ver = {"schema": 1, "release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+         "worklog_span": ["WL-1", "WL-2"], "coverage_digest": dig12},
+        {"version": "1.1.0", "date": "2026-06-02T00:00:00Z",
+         "worklog_span": ["WL-3", "WL-1"], "coverage_digest": "sha256:" + "0" * 64}]}
+    check("reversed-span-non-first-invalid", validate_version(reversed_span_ver).status == INVALID)
+    # MAJOR (FAIL-OPEN): superseded_by must not name the working 'unreleased' tail. With an
+    # 'unreleased' summary row present the token sits in covers_index and _covers_range returns None,
+    # so the covering check is skipped and the row failed OPEN to VALID before the fix; now INVALID.
+    sup_by_unreleased = {"schema": 1, "release": sup_releases, "summary": [
+        {"covers": "unreleased", "status": "working"},
+        {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "unreleased"}]}
+    check("m10-superseded-by-unreleased-invalid", validate_version(sup_by_unreleased).status == INVALID)
+
+    # ----- round-2 fix-forward QA: reconciled NEW/residual findings ---------------------------------
+    # BLOCKER (RANGE-BOUNDS): the expected-id LOSS check is bounded by the PRESENT set, never by the
+    # declared high-water. A range 1..10^9 (a spoofed WL-1000000000 store entry) reports loss in O(1);
+    # before the fix _wl_id_set(expected_ids) materialized it into a set and raised an uncaught MemoryError.
+    # F11: behind the child-process watchdog. A reverted RANGE-BOUNDS fix would materialize the 10**9-wide
+    # expected set here and OOM the whole suite in-process; the watchdog makes the regression a deterministic
+    # sentinel this assertion rejects, while the shipped bounded engine reports loss in O(present).
+    check("blocker-partition-huge-expected-bounded",
+          run_bounded(lambda: "LOSS" if check_ids_partition(
+              [1], [], expected_ids=range(1, 1000000001)) else "NO-LOSS") == "LOSS")
+    # self-test-discrimination: range(1, 3) is {1, 2} with only WL-1 present, so WL-2 is absent in NEITHER
+    # location and a loss MUST be reported (a truthy findings list). The prior range(1, 2) is {1} with {1}
+    # present -> zero absent, so it asserted NO loss despite the name and exercised no loss detection at all;
+    # this vector exercises small-range loss detection directly and fails if the expected-id loss check regresses.
+    check("partition-huge-expected-still-detects-loss",
+          check_ids_partition([1], [], expected_ids=range(1, 3)))
+
+    # MAJOR (FAIL-OPEN, format gate): a trailing newline no longer passes the digest / SemVer regex
+    # (`$` matched before a final newline; `\Z` anchors the whole string).
+    check("digest-trailing-newline-rejected", not _valid_digest("sha256:" + "0" * 64 + "\n"))
+    check("semver-trailing-newline-rejected", parse_semver("1.0.0\n") is None)
+    check("semver-valid-still-parses", parse_semver("1.0.0") is not None)
+
+    # MAJOR (fail-CRASH -> fail-closed): an oversized non-decimal int status renders through _safe_display,
+    # so validate_version returns INVALID instead of an uncontrolled ValueError from repr().
+    big_int_status = int("f" * 4000, 16)   # a >4300-decimal-digit int; repr() trips CPython's limit
+    check("summary-oversized-int-status-invalid", validate_version(
+        {"schema": 1, "release": [], "summary": [{"covers": "unreleased", "status": big_int_status}]}).status == INVALID)
+
+    # MAJOR (fail-CRASH -> fail-closed): an UNHASHABLE covers value no longer crashes the covering check
+    # (`covers in covers_index`); the malformed covers is a finding and the row is INVALID.
+    covers_unhashable = {"schema": 1, "release": sup_releases, "summary": [
+        {"covers": [], "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.1.0"},
+        {"covers": "1.0.0..1.1.0", "status": "published", "digest": D}]}
+    check("covers-unhashable-invalid", validate_version(covers_unhashable).status == INVALID)
+
+    # MAJOR (FAIL-OPEN): a supersession whose rollup range EQUALS the superseded row's own range (distinct
+    # tokens "1.0.0" and "1.0.0..1.0.0" for the same range) is a cycle with no surviving rollup; the
+    # token-level self-reference guard missed it, the range-equality guard catches it (INVALID).
+    sup_cycle = {"schema": 1, "release": sup_releases, "summary": [
+        {"covers": "1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0..1.0.0"},
+        {"covers": "1.0.0..1.0.0", "status": "superseded", "digest": D, "superseded_by": "1.0.0"}]}
+    check("m10-equal-range-supersession-cycle-invalid", validate_version(sup_cycle).status == INVALID)
+
+    # MINOR (fail-closed): tail_ids raises on a non-positive id rather than silently dropping it through
+    # the `n > end` filter (which would let a malformed id falsely satisfy an empty-tail assertion).
+    try:
+        tail_ids([], [0])
+        check("tail-ids-nonpositive-fails-closed", False)
+    except ReleaseError:
+        check("tail-ids-nonpositive-fails-closed", True)
+
+    # MINOR (determinism / house sorted-output): the id-collection guards emit findings in SORTED order
+    # regardless of input iteration order (a set input would otherwise be nondeterministic).
+    check("wl-id-set-findings-sorted",
+          check_no_deletion(["mB", "mA"], []) == sorted(check_no_deletion(["mB", "mA"], [])))
+    appf_order = check_no_append_into_released(frozen_ver, [2, 1])
+    check("append-findings-sorted", appf_order == sorted(appf_order))
+    rotf_order = check_rotation_only_released([4, 3], frozen_ver)
+    check("rotation-findings-sorted", rotf_order == sorted(rotf_order))
+
+    # MINOR (self-test discrimination, Fable): pin the load-bearing contiguity clause tail[-1]-end !=
+    # len(tail). An interior-gap tail (WL-1, WL-3 over an empty ledger) must cut INVALID with the
+    # not-contiguous finding; removing the clause degrades it to CANNOT-EVALUATE with a different message.
+    wl_gap_tail = {"schema": 1, "entry": [entry(1), entry(3)]}
+    gap_cut = release_cut({"schema": 1, "release": []}, wl_gap_tail, "1.0.0", "2026-06-15T00:00:00Z")
+    check("cut-interior-gap-tail-invalid", gap_cut.status == INVALID)
+    check("cut-interior-gap-tail-named", any("not contiguous" in f for f in gap_cut.findings))
+
+    # --- retro hardening (opf-hardening branch): three whole-file adversarial-QA findings ------------
+    # NF-1 (fail-closed soundness): _count_expected_absent's len(expected_ids) raises OverflowError, not
+    # TypeError, for a range with >= 2**63 members (a spoofed 19-digit high-water id). Before the fix
+    # check_ids_partition crashed uncontrolled here; now it fails closed to a cannot-evaluate finding and
+    # reports NO false loss.
+    nf1 = check_ids_partition([1], [], expected_ids=range(1, 2**63 + 2))
+    check("nf1-oversized-range-len-failclosed", bool(nf1) and not any("NEITHER" in f for f in nf1))
+    # NF-2 (oversized-int class closure): three WELL-FORMED-branch findings format an ACCEPTED WL-number
+    # via "WL-{}".format(n); an oversized non-decimal int (a TOML hex literal passing _wl_id_set's n >= 1)
+    # made str(n) raise ValueError uncaught. Rendered through _safe_str they fail closed instead. `big`
+    # trips CPython's base-10 integer-string-conversion limit (> 4300 digits).
+    # PIN the int-str-conversion limit to the default (4300) around these fixtures (test-hermeticity): the
+    # "oversized-int" marker is produced by _safe_str ONLY when str(big) trips CPython's base-10 digit
+    # limit, so a hostile ambient of 0 (unlimited) or 5001 would render `big` cleanly and never produce the
+    # marker (breaking these checks). At the pinned 4300, str(big) (a ~4816-digit int) trips, so _safe_str
+    # is exercised and reverting it would let the raw ValueError crash the branch. Restored in finally.
+    _nf2_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        big = int("f" * 4000, 16)
+        check("nf2-partition-both-location-oversized-safe",
+              any("oversized-int" in f for f in check_ids_partition([big], [big])))
+        check("nf2-no-deletion-vanished-oversized-safe",
+              any("oversized-int" in f for f in check_no_deletion([big], [])))
+        check("nf2-rotation-tail-oversized-safe",
+              any("oversized-int" in f for f in check_rotation_only_released([big], frozen_ver)))
+    finally:
+        sys.set_int_max_str_digits(_nf2_prev_idlimit)
+    # NF-4 (over-fire regression): _count_expected_absent must not membership-test RAW expected-id
+    # elements. A non-range expected_ids (a duplicate list, or an un-normalized "WL-1") reported a FALSE
+    # loss before the fix; now it fails closed to a cannot-evaluate finding and reports NO loss.
+    # Excluding "NEITHER" alone is NON-discriminating: an EMPTY findings list satisfies it, so retaining the
+    # non-range branch's `return 0` WITHOUT its `findings.append(...)` would still pass. Require a NONEMPTY
+    # result carrying the specifically-identified cannot-evaluate finding ("must be a range id space"), so
+    # dropping the finding (a silent zero, guard-input-soundness) flips this red while a genuine FALSE loss
+    # ("NEITHER") stays excluded.
+    nf4_dup = check_ids_partition([1, 2], [], expected_ids=[1, 1, 2])
+    check("nf4-duplicate-expected-no-false-loss",
+          any("must be a range id space" in f for f in nf4_dup)
+          and not any("NEITHER" in f for f in nf4_dup))
+    nf4_norm = check_ids_partition([1], [], expected_ids=["WL-1"])
+    check("nf4-unnormalized-expected-no-false-loss",
+          any("must be a range id space" in f for f in nf4_norm)
+          and not any("NEITHER" in f for f in nf4_norm))
+
+    # ----- F-R17 round-18 discrimination tests ------------------------------------------------------
+    # B1: a reversed / non-positive span is fail-closed, not a silent empty-coverage digest.
+    for _b1_bad in ((2, 1), (0, 0)):
+        try:
+            compute_span_digest(by_id, _b1_bad)
+            check("b1-invalid-span-raises", False)
+        except ReleaseError as _b1e:
+            check("b1-invalid-span-raises", "1 <= start <= end" in str(_b1e))
+    check("b1-valid-span-still-ok",
+          compute_span_digest(by_id, (1, 2)) == compute_span_digest(by_id, (1, 2)))
+    check("b1-none-empty-span-ok", compute_span_digest(by_id, None) == coverage_digest([]))
+
+    # B2: a map that binds key WL-1 to an entry whose id is WL-2 is a misbound basis (fail-closed), not
+    # silently digested; check_frozen_coverage surfaces it as a finding rather than certifying clean.
+    try:
+        compute_span_digest({1: entry(2)}, (1, 1))
+        check("b2-misbound-map-raises", False)
+    except ReleaseError:
+        check("b2-misbound-map-raises", True)
+    _b2_ver = {"schema": 1, "release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+         "worklog_span": ["WL-1", "WL-1"], "coverage_digest": coverage_digest([entry(2)])}]}
+    check("b2-frozen-coverage-misbound-map-finding",
+          bool(check_frozen_coverage(_b2_ver, {1: entry(2)})))
+
+    # B3: canonical content that is not UTF-8-encodable (a lone surrogate) fails closed with a ReleaseError,
+    # never a raw UnicodeEncodeError out of the exported digest API; the release gate surfaces it structured.
+    try:
+        coverage_digest([entry(1, summary="\ud800")])
+        check("b3-surrogate-raises-releaseerror", False)
+    except ReleaseError:
+        check("b3-surrogate-raises-releaseerror", True)
+    except UnicodeEncodeError:
+        check("b3-surrogate-raises-releaseerror", False)
+    _b3_ver = {"schema": 1, "release": [
+        {"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+         "worklog_span": ["WL-1", "WL-1"], "coverage_digest": "sha256:" + "0" * 64}]}
+    check("b3-frozen-coverage-surrogate-finding",
+          bool(check_frozen_coverage(_b3_ver, {1: entry(1, summary="\ud800")})))
+
+    # B4: an oversized non-string nested key renders through _safe_display (a ReleaseError), never a raw
+    # ValueError from {!r} tripping the int->str limit. F-R18-B4TEST: pin the int->str limit to 4300
+    # LOCALLY (save/set/restore) so the fixture discriminates under ANY ambient limit; without the pin a
+    # process run with an unlimited limit lets the reverted _canonical render the key and never raise, so
+    # the test would not red on its revert.
+    _b4_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        try:
+            _canonical({"x-acme": {10 ** 4301: "x"}})
+            check("b4-oversized-key-raises-releaseerror", False)
+        except ReleaseError:
+            check("b4-oversized-key-raises-releaseerror", True)
+        except ValueError:
+            check("b4-oversized-key-raises-releaseerror", False)
+    finally:
+        sys.set_int_max_str_digits(_b4_prev_idlimit)
+
+    # F-R18-B2REND: the B2 misbound-key mismatch message renders the span index `n` through _safe_str, never
+    # a raw .format(n): an OVERSIZED int key (a spoofed WL-<huge>) would trip CPython's int->str limit and
+    # raise a raw ValueError before the ReleaseError. Pin the limit to 4300 locally so the fixture
+    # discriminates under any ambient limit; a reverted `.format(n)` reds via the except ValueError branch.
+    _b2r_prev_idlimit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        _b2r_big = 10 ** 4301                       # str(_b2r_big) trips the 4300-digit limit
+        _b2r_map = {_b2r_big: entry(1)}             # key WL-<huge> bound to an entry whose id is WL-1 (misbound)
+        try:
+            compute_span_digest(_b2r_map, (_b2r_big, _b2r_big))
+            check("b2rend-oversized-misbound-key-releaseerror", False)
+        except ReleaseError:
+            check("b2rend-oversized-misbound-key-releaseerror", True)
+        except ValueError:
+            check("b2rend-oversized-misbound-key-releaseerror", False)   # raw ValueError = the reverted .format(n)
+    finally:
+        sys.set_int_max_str_digits(_b2r_prev_idlimit)
+
+    # D1: version.toml / worklog.toml require the exact integer schema marker; an absent marker is INVALID
+    # per file kind, a present marker validates VALID, and the standalone guard path fails closed too.
+    check("d1-version-absent-schema-invalid", validate_version({"release": []}).status == INVALID)
+    check("d1-worklog-absent-schema-invalid", validate_worklog({"entry": []}).status == INVALID)
+    check("d1-version-present-schema-ok", validate_version({"schema": 1, "release": []}).status == VALID)
+    check("d1-worklog-present-schema-ok", validate_worklog({"schema": 1, "entry": []}).status == VALID)
+    check("d1-standalone-guard-absent-schema-finding",
+          bool(check_frozen_coverage({"release": []}, {})))
 
     if failures:
         print("OPF-RELEASE SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))

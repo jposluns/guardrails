@@ -88,6 +88,7 @@ import datetime
 import hashlib
 import os
 import re
+import stat
 import sys
 from collections import Counter
 from pathlib import Path
@@ -213,7 +214,7 @@ def _changelog_entries(text):
                             "multiple lines); an entry heading must be a single line (spec 6.3)")
         suffix = rest[len(token):].strip()
         if suffix and not _valid_heading_date_suffix(suffix):
-            findings.append("CHANGELOG.md heading '## {}' carries text after the covers token that is not "
+            findings.append("CHANGELOG.md heading {!r} carries text after the covers token that is not "
                             "parenthesized date(s) (spec 6.3)".format(rest))
         entries.append((token, norm[start:end]))
     return entries, findings
@@ -416,6 +417,16 @@ def run_gates(version_data, worklog_data, changelog_text, registered_vendors=fro
         return ChangelogResult(CANNOT_EVALUATE,
                                ["cannot evaluate the changelog gates: heading scan failed ({}): {}".format(
                                    exc.reason, exc)])
+    except UnicodeEncodeError as exc:
+        # The heading scanner sizes its input with text.encode("utf-8") BEFORE parsing; a str carrying a
+        # lone surrogate (e.g. a caller that decoded with errors="surrogateescape") makes that encode raise
+        # UnicodeEncodeError, which is not a HeadingScanError. The live evaluate() path decodes strict utf-8
+        # and cannot produce a surrogate, but run_gates is an exported composition surface, so an
+        # un-encodable changelog is a distinct fail-closed cannot-evaluate here, never an escaping crash
+        # (guard-input-soundness; check-fails-closed-on-unreadable).
+        return ChangelogResult(CANNOT_EVALUATE,
+                               ["cannot evaluate the changelog gates: changelog text is not encodable as "
+                                "UTF-8 ({})".format(exc)])
     findings = list(findings)
     entry_map = {}
     heading_tokens = []
@@ -491,6 +502,41 @@ def _load_inputs(resolution, product_root):
         return None, None, None, frozenset(), "cannot open product root {} ({})".format(product_root, exc)
     try:
         try:
+            # A non-regular CHANGELOG.md (a FIFO, device, socket, or directory) is refused BEFORE any open,
+            # and an OVERSIZE one is refused BEFORE it is read into memory. Both gates read the lstat result:
+            # opening a FIFO O_RDONLY with no writer blocks the process forever, and reading a
+            # multi-hundred-MiB file allocates it three times over (the raw bytes, the decoded str, and the
+            # scanner's pre-parse re-encode) before the scanner's own MAX_CHANGELOG_BYTES check can reject it,
+            # turning a bounded fail-closed verdict into a MemoryError / OOM kill. So the regular-file gate
+            # and the size ceiling are BOTH checked on the lstat result rather than after _read_contained
+            # opens the target, exactly as _opf_store._read_toml_contained's pre-open st.st_size fast-reject
+            # guards the ledger reads (check-fails-closed-on-unreadable, SECA resource-bounds; an unbounded
+            # block or an OOM is worse than a crash for a CI gate). The ceiling is the scanner's own named
+            # policy value (_commonmark_headings.MAX_CHANGELOG_BYTES), so this pre-open check is the cheap
+            # fast-path of the SAME bound the scanner re-checks on the decoded bytes as depth, never a second
+            # divergent limit.
+            #
+            # Depth behind this fast-path: _journal._read_contained re-opens O_NONBLOCK and re-confirms
+            # S_ISREG on the fd, so a non-regular file swapped in AFTER this lstat neither hangs nor slips
+            # through; and the scanner re-applies MAX_CHANGELOG_BYTES to the decoded bytes. Racing-grow
+            # window (SECA resource-bounds): the intermediate _read_contained read is itself capped at
+            # _journal._MAX_PRODUCT_READ_BYTES (its hard incremental read-cap), so a writer racing to GROW
+            # the changelog past st.st_size between this lstat and that open is refused fail-closed AT that
+            # ceiling before the read completes, not merely by the post-decode scanner. That ceiling is well
+            # above MAX_CHANGELOG_BYTES, so no legitimate changelog is refused by it; this module reuses the
+            # contained reader rather than duplicating its cap.
+            st = _journal._lstat_contained(product_fd, CHANGELOG_REL)
+            if st is None:
+                return None, None, None, frozenset(), ("{} is absent from the product root (a required "
+                                                        "input; fail-closed, spec 5.8/6.3)".format(CHANGELOG_REL))
+            if not stat.S_ISREG(st.st_mode):
+                return None, None, None, frozenset(), ("{} is present but is not a regular file (an exotic "
+                                                        "entry; fail-closed, never opened)".format(CHANGELOG_REL))
+            if st.st_size > _commonmark_headings.MAX_CHANGELOG_BYTES:
+                return None, None, None, frozenset(), (
+                    "{} is {} bytes, over the {}-byte changelog ceiling; refused before the read "
+                    "(fail-closed, SECA resource-bounds)".format(
+                        CHANGELOG_REL, st.st_size, _commonmark_headings.MAX_CHANGELOG_BYTES))
             raw, _ = _journal._read_contained(product_fd, CHANGELOG_REL)
         except (_journal.JournalError, OSError) as exc:
             return None, None, None, frozenset(), "cannot read {} ({})".format(CHANGELOG_REL, exc)
@@ -509,7 +555,14 @@ def evaluate(product_root):
     `--root .` lands here); CANNOT-EVALUATE (fail closed) when the store cannot resolve or a required input
     is unreadable, unparseable, or structurally inconsistent; FINDING on a coverage or freeze violation;
     PASS otherwise."""
-    product_root = Path(os.path.abspath(product_root))
+    try:
+        product_root = Path(os.path.abspath(product_root))
+    except OSError as exc:
+        # os.path.abspath resolves a relative root against the process cwd; a removed or unresolvable cwd
+        # makes it raise (e.g. FileNotFoundError). An unresolvable --root is a fail-closed cannot-evaluate,
+        # never an escaping crash (the module's fail-closed contract; check-fails-closed-on-unreadable).
+        return ChangelogResult(CANNOT_EVALUATE,
+                               ["cannot resolve --root path {!r} ({})".format(product_root, exc)])
     if not product_root.exists():
         return ChangelogResult(CANNOT_EVALUATE, ["--root path does not exist: {}".format(product_root)])
     if not product_root.is_dir():
@@ -531,7 +584,11 @@ def run(root):
     """Run the changelog gates under `root` and return the aggregate exit code (0 pass / NA, 1 finding,
     2 cannot-evaluate). Prints a concise status line and one line per finding."""
     result = evaluate(root)
-    print("OPF changelog gates: {}".format(Path(os.path.abspath(root))))
+    try:
+        shown = Path(os.path.abspath(root))
+    except OSError:
+        shown = root                      # an unresolvable cwd already yielded CANNOT-EVALUATE in evaluate
+    print("OPF changelog gates: {}".format(shown))
     print("  status: {}".format(result.status))
     for f in result.findings:
         print("  - {}".format(f))
@@ -553,7 +610,11 @@ def self_test():
     --root), a missing-[types] manifest failing closed,
     registered / unregistered x-vendor cases, unreadable / unparseable / inconsistent input failing closed,
     and end-to-end store resolution (NOT-APPLICABLE, cannot-evaluate, PASS, and FINDING) including a
-    registered-vendor pass and an injected-OSError fail-closed path."""
+    registered-vendor pass and an injected-OSError fail-closed path. Fail-closed store-input hardening: a
+    FIFO CHANGELOG.md refused as non-regular (never blocking), an oversized CHANGELOG.md refused before the
+    read (the pre-open st.st_size ceiling), a non-UTF-8 CHANGELOG.md, an un-encodable
+    (lone-surrogate) changelog, an unresolvable --root, run()'s exit-code mapping, and the two unreleased
+    heading vectors (a heading with no summary row, and a misplaced not-first entry)."""
     import tempfile
     import shutil
 
@@ -836,6 +897,60 @@ def self_test():
     check("f3-root-empty-value-usage-error", _parse_cli(["--root", ""])[2] is not None)
     check("f3-root-blank-value-usage-error", _parse_cli(["--root", "   "])[2] is not None)
 
+    # F3 (Fable/self-test-blind): a '## unreleased' heading with NO covers="unreleased" summary row is a
+    # FINDING (spec 7.1). This branch is the sole layer; deleting it yields a silent fail-open.
+    cl_f3 = ("# Changelog\n\n## unreleased\n\n- wip\n\n"
+             "## 1.1.0 (2026-06-15)\n\n- second\n\n## 1.0.0 (2026-06-01)\n\n- first\n")
+    v_f3 = dict(schema=1, release=vbase["release"],
+                summary=[dict(covers="1.0.0", status="published", digest=freeze_of(cl_f3, "1.0.0")),
+                         dict(covers="1.1.0", status="published", digest=freeze_of(cl_f3, "1.1.0"))])
+    r_f3 = run_gates(v_f3, worklog, cl_f3)
+    check("f3-unreleased-heading-no-row-finding",
+          r_f3.status == FINDING and any("has an '## unreleased' heading but" in f for f in r_f3.findings))
+
+    # F4 (Fable/self-test-blind): a misplaced '## unreleased' entry (not first) is a FINDING (spec 6.3),
+    # even when the released headings alone are correctly descending. The sole ordering vector (cl_order)
+    # puts unreleased first, so it never exercises this branch.
+    cl_f4 = ("# Changelog\n\n## 1.1.0 (2026-06-15)\n\n- second\n\n## unreleased\n\n- wip\n\n"
+             "## 1.0.0 (2026-06-01)\n\n- first\n")
+    r_f4 = run_gates(base_version(cl_f4), worklog, cl_f4)
+    check("f4-unreleased-not-first-finding",
+          r_f4.status == FINDING and any("is not first" in f for f in r_f4.findings))
+
+    # F6 (Fable): a changelog str carrying a lone surrogate is not encodable as UTF-8; run_gates returns a
+    # distinct CANNOT-EVALUATE rather than letting the scanner's pre-parse encode() escape.
+    check("f6-surrogate-changelog-cannot-eval",
+          run_gates(vbase, worklog, cl + chr(0xD800)).status == CANNOT_EVALUATE)
+
+    # F-R17-B3: a lone surrogate in a WORKLOG entry field is not encodable as UTF-8 when the coverage digest
+    # is recomputed; the exported release gate surfaces it as a structured coverage FINDING rather than
+    # letting the raw UnicodeEncodeError escape.
+    surrogate_worklog = {"schema": worklog["schema"],
+                         "entry": [dict(item) for item in worklog["entry"]]}
+    surrogate_worklog["entry"][0]["summary"] = chr(0xD800)
+    try:
+        surrogate_gate = run_gates(vbase, surrogate_worklog, cl, registered_vendors=frozenset())
+    except UnicodeEncodeError:
+        surrogate_gate = None
+    check("b3-surrogate-worklog-coverage-finding",
+          surrogate_gate is not None
+          and surrogate_gate.status == FINDING
+          and any("coverage" in f.lower() for f in surrogate_gate.findings))
+
+    # codex slice-2: an unresolvable --root (os.path.abspath raising, as when the process cwd was removed)
+    # is a fail-closed CANNOT-EVALUATE, not an escaping crash. Inject the raise (matching the M1 style).
+    saved_abspath = os.path.abspath
+    def _raise_abspath(*_a, **_k):
+        raise FileNotFoundError(2, "simulated unresolvable cwd")
+    os.path.abspath = _raise_abspath
+    try:
+        abs_ok = evaluate(".").status == CANNOT_EVALUATE
+    except OSError:
+        abs_ok = False                    # pre-fix: the OSError escaped evaluate uncaught
+    finally:
+        os.path.abspath = saved_abspath
+    check("abspath-unresolvable-root-cannot-eval", abs_ok)
+
     # --- end-to-end store resolution over synthetic on-disk stores -----------------------------------
     manifest = ("[devprocess]\n"
                 'standard = "devprocess"\n'
@@ -910,6 +1025,96 @@ def self_test():
         cl_disk_edit = cl_disk.replace("- first release\n", "- first release EDITED\n")
         check("disk-freeze-finding",
               evaluate(build_store(version_text, worklog_text, cl_disk_edit)).status == FINDING)
+
+        # F2 (Fable): run() maps the store-level status to the process exit code through EXIT; the suite
+        # otherwise judges evaluate()/run_gates statuses and never the process-boundary verdict, so a
+        # mutation like EXIT[FINDING]->0 passes unseen. Exercise run() end to end on a PASS and a FINDING
+        # store, and pin the EXIT map itself.
+        check("f2-run-pass-exit-0", run(str(build_store(version_text, worklog_text, cl_disk))) == 0)
+        check("f2-run-finding-exit-1", run(str(build_store(version_text, worklog_text, cl_disk_edit))) == 1)
+        check("f2-exit-map-values",
+              EXIT[PASS] == 0 and EXIT[NOT_APPLICABLE] == 0 and EXIT[FINDING] == 1
+              and EXIT[CANNOT_EVALUATE] == 2)
+
+        # F5 (Fable/codex): the non-UTF-8 CHANGELOG.md handler (a distinct CANNOT-EVALUATE) had no
+        # discriminating vector because build_store writes utf-8 text; write raw invalid bytes directly.
+        # Deleting the UnicodeDecodeError handler in _load_inputs makes this escape as a crash.
+        nonutf8_root = build_store(version_text, worklog_text, cl_disk)
+        (nonutf8_root / CHANGELOG_REL).write_bytes(bytes([0x23, 0x0a, 0xff, 0xfe, 0x0a]))
+        check("disk-non-utf8-changelog-cannot-eval", evaluate(nonutf8_root).status == CANNOT_EVALUATE)
+
+        # F1 (Fable/codex, BLOCKER): a FIFO at CHANGELOG.md must fail closed as a non-regular input, never
+        # block. _load_inputs lstat-checks S_ISREG BEFORE opening (mirroring _read_toml_contained), so a
+        # reader-only FIFO can never hang. A SIGALRM watchdog bounds a pre-fix regression (which blocks in
+        # os.open) so the suite fails fast; post-fix the guard returns a "not a regular file" cannot-evaluate
+        # well within it, and the alarm never fires.
+        import signal as _signal
+        import time as _time
+        fifo_root = build_store(version_text, worklog_text, None)
+        os.mkfifo(str(fifo_root / CHANGELOG_REL))
+        def _fifo_watchdog(_signum, _frame):
+            raise TimeoutError("evaluate() blocked on the FIFO changelog (pre-fix hang)")
+        # G (self-test-discrimination): the LOCAL pre-open S_ISREG guard in _load_inputs, not the hardened
+        # downstream _journal._read_contained (which ALSO refuses a non-regular file with an identical "not a
+        # regular file" diagnostic), must refuse the FIFO. Record whether the downstream reader is reached:
+        # only CHANGELOG.md flows through _read_contained (version/worklog/manifest use _read_toml_contained),
+        # and with the local guard present it is NEVER called, so removing that guard flips this check red.
+        _rc_calls = []
+        _orig_rc = _journal._read_contained
+        def _recording_rc(root_fd, relpath, **_kw):
+            if relpath == CHANGELOG_REL:                  # only the CHANGELOG.md read is the guarded path here
+                _rc_calls.append(relpath)                 # (version/worklog/manifest also route through _read_contained)
+            return _orig_rc(root_fd, relpath, **_kw)
+        _journal._read_contained = _recording_rc
+        # C (test-hermeticity): snapshot the caller's SIGALRM disposition and mask, and its ITIMER_REAL +
+        # pending state through the SHARED _opf_store.snapshot_caller_alarm helper; unblock SIGALRM for the
+        # probe; and restore all of them so this watchdog leaves the ambient alarm state unchanged (never
+        # cancelling a caller's timer, unblocking its SIGALRM, nor destroying its pending alarm).
+        _old_alarm = _signal.getsignal(_signal.SIGALRM)          # capture WITHOUT installing yet (F2)
+        _have_mask = hasattr(_signal, "pthread_sigmask")
+        _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
+        _alarm_snap = _opf_store.snapshot_caller_alarm()         # ITIMER value/interval + pending (shared helper)
+        # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
+        # finally restores the caller's mask, disposition, and timer even if a signal fires during setup. An
+        # ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would otherwise
+        # be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the try/finally, would
+        # raise out of the watchdog uncaught AND leave the caller's mask corrupted (SIGALRM unblocked). Any
+        # inherited pending SIGALRM is first DISCARDED under SIG_IGN (POSIX: setting SIG_IGN discards a
+        # pending signal whether or not it is blocked) so it cannot fire the probe handler spuriously; the
+        # shared restore_caller_alarm RE-POSTS it on exit (round-15 F2) so the caller's pending alarm is
+        # preserved, not destroyed.
+        try:
+            _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)     # discard any inherited pending SIGALRM
+            _signal.signal(_signal.SIGALRM, _fifo_watchdog)      # now install the watchdog handler
+            if _have_mask:
+                _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
+            _signal.setitimer(_signal.ITIMER_REAL, 5)
+            r_fifo = evaluate(fifo_root)
+        finally:
+            _signal.setitimer(_signal.ITIMER_REAL, 0)
+            _signal.signal(_signal.SIGALRM, _old_alarm)
+            if _have_mask:
+                _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
+            _opf_store.restore_caller_alarm(*_alarm_snap)        # shared elapsed-aware timer + pending restore
+            _journal._read_contained = _orig_rc
+        check("f1-fifo-changelog-not-regular-fail-closed",
+              r_fifo.status == CANNOT_EVALUATE and any("not a regular file" in f for f in r_fifo.findings)
+              and not _rc_calls)
+
+        # F-A (RANGE-BOUNDS, hostile store-file on disk): an OVERSIZE CHANGELOG.md is refused by
+        # _load_inputs on the pre-open st.st_size ceiling BEFORE the whole file is read into memory,
+        # mirroring _opf_store's store-read-cap discipline. Pre-fix _load_inputs read it unbounded and only
+        # the scanner rejected it, after three input-sized allocations ("heading scan failed (oversized)");
+        # post-fix the finding names the pre-read ceiling refusal. Both verdicts are CANNOT-EVALUATE, so the
+        # discriminator is the "before the read" message that only the new pre-open guard emits (the scanner
+        # path never says "before the read"). Sized just over the ceiling (ceiling + slack), the same shape
+        # _opf_store's oversize vectors use, so the write is cheap and no OOM is needed to exercise it.
+        oversize_cl = (cl_disk + "\n<!-- "
+                       + ("x" * (_commonmark_headings.MAX_CHANGELOG_BYTES + 64)) + " -->\n")
+        r_oversize = evaluate(build_store(version_text, worklog_text, oversize_cl))
+        check("disk-oversize-changelog-refused-before-read",
+              r_oversize.status == CANNOT_EVALUATE
+              and any("before the read" in f for f in r_oversize.findings))
 
         # F5: a manifest that omits the required [types] section must fail the FULL manifest validator and
         # come back CANNOT-EVALUATE. Pre-fix only [vendors] was checked, so this clean-passed.

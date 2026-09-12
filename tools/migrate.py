@@ -27,6 +27,7 @@ Staged-unit contract (the off-path tree a verified, green step-2/3 build produce
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -195,7 +196,7 @@ def _open_root_or_none(root):
                       "(O_NOFOLLOW, 3.6b); fail-closed".format(root, exc))
 
 
-def _validated_completed_cutover(txn_dir):
+def _validated_completed_cutover(jr_fd, txn_dir):
     """Fix #3 (C2 in all consumers): classify a transaction through the SINGLE validated terminal state
     machine and return its INTENT object ONLY when it is a genuinely COMPLETE cutover eligible for
     coverage-gating (and, in Step 7, reverse-replay): the frame sequence is exactly [INTENT, COMPLETE]
@@ -204,9 +205,9 @@ def _validated_completed_cutover(txn_dir):
     transaction, or None when it is not a completed cutover (a rolled-back, still-open, un-adopt, or other
     non-cutover terminal journal). JournalError (fail-closed) on a corrupt or invalid-sequence journal.
     Used by check_crosswalk's whole-component coverage gate; it exposes no un-adopt CLI (that is Step 7)."""
-    if _journal.classify_state(txn_dir) != "complete":       # runs the C2 validator; raises on an invalid sequence
+    if _journal.classify_state(jr_fd, txn_dir) != "complete":  # runs the C2 validator; raises on an invalid sequence
         return None
-    frames, _torn, _ = _journal.read_frames(txn_dir)
+    frames, _torn, _ = _journal.read_frames(jr_fd, txn_dir)
     if [t for t, _ in frames] != [_journal.F_INTENT, _journal.F_COMPLETE]:
         return None
     intent = _journal._first(frames, _journal.F_INTENT)
@@ -216,7 +217,7 @@ def _validated_completed_cutover(txn_dir):
     return intent
 
 
-def _claim_recover_lock(journal_root, root_fd):
+def _claim_recover_lock(journal_root, jr_fd, root_fd):
     """Atomically claim the journal lock for recovery (fix #3, hardened for C1 and E4). Returns 'acquired'
     when this process now owns the lock (the lock was absent, or a confirmed-dead stale lock was reconciled
     and broken), or 'possibly-live' when a lock whose owner may still be alive holds it (never seized, the
@@ -233,7 +234,7 @@ def _claim_recover_lock(journal_root, root_fd):
         return "possibly-live"
     # Confirmed dead: reconcile-then-break under the kernel arbitration lock (E4, spec 1262): the stale
     # lease is the recovery claim, retained until every journal validates terminal, and only then broken.
-    return _journal.reconcile_and_claim_stale(journal_root, root_fd, session_id="recover")
+    return _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id="recover")
 
 
 def do_plan(root):
@@ -260,6 +261,7 @@ def do_cutover(root, staged, unit):
     if err:
         print("error: {}".format(err), file=sys.stderr)
         return 2
+    jr_fd = None
     try:
         try:
             _assert_off_path(root, staged)
@@ -283,7 +285,11 @@ def do_cutover(root, staged, unit):
             # or apply, so a crash cannot keep an applied tree mutation while losing the journal subtree
             # (which recovery would then miss, falsely reporting nothing to recover).
             _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
-        except _journal.JournalError as exc:
+            # F1: reach the journal root ONCE by a contained no-follow walk from the trusted root fd, and
+            # thread that stable handle to run_transaction so every framed record is written beneath it,
+            # never through a re-resolved txn-dir absolute path an ancestor symlink could redirect.
+            jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+        except (_journal.JournalError, OSError) as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
         txn_id = "{}.{}.{}".format(_slug(unit), os.getpid(), time.time_ns())
@@ -297,18 +303,20 @@ def do_cutover(root, staged, unit):
                   "component-successors": member["successors"]}
         txn_dir = journal_root / txn_id
         try:
-            _journal.run_transaction(root_fd, journal_root, txn_id, header, ops,
+            _journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
                                      _staged_reader(staged), session_id="cutover")
         except _journal.JournalError as exc:
-            return _settle_failed_transaction(journal_root, txn_dir, exc, "cutover")
+            return _settle_failed_transaction(journal_root, jr_fd, txn_dir, exc, "cutover")
         _journal.release_lock(journal_root)
     finally:
+        if jr_fd is not None:
+            os.close(jr_fd)
         os.close(root_fd)
     print("cutover complete: unit {} txn {}".format(unit, txn_id))
     return 0
 
 
-def _settle_failed_transaction(journal_root, txn_dir, exc, what):
+def _settle_failed_transaction(journal_root, jr_fd, txn_dir, exc, what):
     """A JournalError escaped run_transaction. Classify the VALIDATED journal state via the C2 state
     machine (classify_state), never a bare is_terminal that reads True on a NO-INTENT journal and so
     falsely reports a pre-INTENT failure as 'rolled back' (C4). Three cases:
@@ -319,7 +327,7 @@ def _settle_failed_transaction(journal_root, txn_dir, exc, what):
       (c) otherwise ('open': the rollback itself failed, or an unreadable/invalid journal): RETAIN the
           lock, leave the transaction open for a later `recover`, claim no rollback, exit 2."""
     try:
-        state = _journal.classify_state(txn_dir)
+        state = _journal.classify_state(jr_fd, txn_dir)
     except _journal.JournalError:
         state = "open"                                    # unreadable/invalid journal: fail-closed, retain lock
     if state == "nothing-opened":
@@ -347,16 +355,33 @@ def do_recover(root):
     if err:
         print("error: {}".format(err), file=sys.stderr)
         return 2
+    jr_fd = None
     try:
         journal_root = root / JOURNAL_REL
-        if not journal_root.is_dir():
+        # F-R17-C1: classify the journal path no-follow. Only a CONFIRMED-absent journal is exit-0
+        # "nothing to recover"; a regular file or a symlink (dangling or not) at the journal path is
+        # MALFORMED and fails closed (exit 2), never silently followed or read as absent.
+        journal_state = _classify_journal(root_fd)
+        if journal_state == "absent":
             print("recover: no journal at {} (nothing to recover)".format(JOURNAL_REL))
             return 0
+        if journal_state == "malformed":
+            print("error: journal path {} is present but is not a directory (a regular file or a symlink is "
+                  "refused, not followed); fail-closed".format(JOURNAL_REL), file=sys.stderr)
+            return 2
+        # F1: reach the journal root ONCE by a contained no-follow walk from the trusted root fd, and
+        # thread that stable handle to the lock reconcile and every recover() so each txn journal is read
+        # and its terminal frames written beneath it, never through a re-resolved txn-dir absolute path.
+        try:
+            jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+        except (_journal.JournalError, OSError) as exc:
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return 2
         # Atomically CLAIM the lock before touching any transaction (fix #3): acquire an absent lock, or
         # (E4) reconcile-then-break a confirmed-dead stale lock under the arbitration lock; a possibly-live
         # owner is NEVER seized. Only the lock THIS recover owns is released, after every txn is terminal.
         try:
-            claim = _claim_recover_lock(journal_root, root_fd)
+            claim = _claim_recover_lock(journal_root, jr_fd, root_fd)
         except _journal.JournalError as exc:
             print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
@@ -366,9 +391,14 @@ def do_recover(root):
                   .format((owner or {}).get("pid")), file=sys.stderr)
             return 1
         outcomes = {}
-        for txn_dir in _txn_dirs(journal_root):
+        try:
+            recover_txns = _txn_dirs(jr_fd, journal_root)   # F-R17-C1 / F-R18-JTOCTOU: fd-relative, symlink raises
+        except _journal.JournalError as exc:
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
+            return 2                                        # lock RETAINED: the journal is not terminal
+        for txn_dir in recover_txns:
             try:
-                outcomes[txn_dir.name] = _journal.recover(txn_dir, root_fd)
+                outcomes[txn_dir.name] = _journal.recover(jr_fd, txn_dir, root_fd)
             except _journal.JournalError as exc:
                 print("error: cannot recover {} ({}); fail-closed".format(txn_dir.name, exc),
                       file=sys.stderr)
@@ -381,26 +411,56 @@ def do_recover(root):
             print("recover: no transactions to recover")
         return 0
     finally:
+        if jr_fd is not None:
+            os.close(jr_fd)
         os.close(root_fd)
 
 
 def do_status(root):
     journal_root = root / JOURNAL_REL
-    if not journal_root.is_dir():
+    # E3 / F-R17-C1: open and VALIDATE --root FIRST (O_NOFOLLOW), then classify the journal path no-follow.
+    # A regular file or a symlink (dangling or not) at the journal path is MALFORMED and fails closed (exit
+    # 2), never silently read as "not adopted"; only a CONFIRMED-absent journal is exit-0 "not adopted".
+    root_fd, err = _open_root_or_none(root)
+    if err:
+        print("error: {}".format(err), file=sys.stderr)
+        return 2
+    try:
+        journal_state = _classify_journal(root_fd)
+    finally:
+        os.close(root_fd)
+    if journal_state == "absent":
         print("status: not adopted (no journal)")
         return 0
+    if journal_state == "malformed":
+        print("error: journal path {} is present but is not a directory (a regular file or a symlink is "
+              "refused, not followed); fail-closed".format(JOURNAL_REL), file=sys.stderr)
+        return 2
+    try:                                                  # F1: read each txn journal contained beneath a
+        jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)   # trusted journal-root handle
+    except (_journal.JournalError, OSError) as exc:
+        print("error: cannot open journal root ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
     open_txns = []
-    for txn_dir in _txn_dirs(journal_root):
+    try:
         try:
-            terminal = _journal.is_terminal(txn_dir)
+            status_txns = _txn_dirs(jr_fd, journal_root)  # F-R17-C1 / F-R18-JTOCTOU: fd-relative, symlink raises
         except _journal.JournalError as exc:
-            print("error: corrupt journal {} ({}); fail-closed".format(txn_dir.name, exc),
-                  file=sys.stderr)
+            print("error: {}; fail-closed".format(exc), file=sys.stderr)
             return 2
-        state = "terminal" if terminal else "OPEN"
-        print("status: txn {} -> {}".format(txn_dir.name, state))
-        if not terminal:
-            open_txns.append(txn_dir.name)
+        for txn_dir in status_txns:
+            try:
+                terminal = _journal.is_terminal(jr_fd, txn_dir)
+            except _journal.JournalError as exc:
+                print("error: corrupt journal {} ({}); fail-closed".format(txn_dir.name, exc),
+                      file=sys.stderr)
+                return 2
+            state = "terminal" if terminal else "OPEN"
+            print("status: txn {} -> {}".format(txn_dir.name, state))
+            if not terminal:
+                open_txns.append(txn_dir.name)
+    finally:
+        os.close(jr_fd)
     lock = _journal.read_lock_owner(journal_root)
     if lock is not None:
         print("status: journal lock held by pid {}".format(lock.get("pid")))
@@ -410,12 +470,32 @@ def do_status(root):
     return 0
 
 
-def _txn_dirs(journal_root):
-    out = []
-    for entry in sorted(Path(journal_root).iterdir()):
-        if entry.is_dir():
-            out.append(entry)
-    return out
+def _classify_journal(root_fd):
+    """Classify the cutover journal path beneath the trusted root fd by CONTAINED no-follow inspection,
+    aligning migrate's recover/status with the store reader. Returns 'absent' (CONFIRMED no journal: the
+    only 'nothing to recover' exit-0 case), 'present' (a real directory), or 'malformed' (present but not a
+    directory: a regular file, or a symlink -- dangling or not -- refused, not followed; or a symlinked
+    intermediate component). A read error is 'malformed' (fail-closed), never silently 'absent'; the old
+    Path.is_dir() conflated all of these into False (F-R17-C1)."""
+    try:
+        st = _journal._lstat_contained(root_fd, JOURNAL_REL)
+    except (_journal.JournalError, OSError):
+        return "malformed"
+    if st is None:
+        return "absent"
+    if stat.S_ISDIR(st.st_mode):
+        return "present"
+    return "malformed"
+
+
+def _txn_dirs(jr_fd, journal_root):
+    """The journal's transaction subdirectories, sorted, classified no-follow so a symlinked entry is
+    REFUSED (JournalError -> the caller exits 2), never followed or silently skipped, aligning with the
+    _journal sibling (F-R17-C1). Raises JournalError on an unreadable listing (fail-closed). F-R18-JTOCTOU:
+    enumeration is bound to the TRUSTED already-open journal-root descriptor `jr_fd` (fd-relative), never a
+    re-resolved journal path, so a swapped journal ancestor between open and enumerate cannot redirect the
+    listing onto a decoy and report false-clean."""
+    return _journal._journal_txn_dirs(jr_fd, journal_root)
 
 
 def _slug(value):
@@ -616,14 +696,36 @@ def _run(argv, kill=None):
 
 def _all_terminal(root):
     journal_root = Path(root) / JOURNAL_REL
-    if not journal_root.is_dir():
+    # F-R17-C1: classify the journal path no-follow. Absent -> nothing open (True); a malformed path (a
+    # regular file or a symlink) fails closed (False), never silently "all terminal".
+    root_fd, err = _open_root_or_none(root)
+    if err or root_fd is None:
+        return False
+    try:
+        journal_state = _classify_journal(root_fd)
+    finally:
+        os.close(root_fd)
+    if journal_state == "absent":
         return True
-    for txn_dir in _txn_dirs(journal_root):
+    if journal_state == "malformed":
+        return False
+    try:
+        jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+    except (_journal.JournalError, OSError):
+        return False
+    try:
         try:
-            if not _journal.is_terminal(txn_dir):
-                return False
+            terminals = _txn_dirs(jr_fd, journal_root)      # F-R17-C1 / F-R18-JTOCTOU: fd-relative, symlink raises
         except _journal.JournalError:
             return False
+        for txn_dir in terminals:
+            try:
+                if not _journal.is_terminal(jr_fd, txn_dir):
+                    return False
+            except _journal.JournalError:
+                return False
+    finally:
+        os.close(jr_fd)
     return not (journal_root / "lock").exists()
 
 
@@ -761,7 +863,11 @@ def self_test():
             if txn is None:
                 failures.append("{} inverse: no completed cutover txn to invert".format(case))
                 continue
-            frames, _torn, _good = _journal.read_frames(uroot / JOURNAL_REL / txn)
+            _ujr = _journal.open_journal_root_from_path(uroot, JOURNAL_REL)
+            try:
+                frames, _torn, _good = _journal.read_frames(_ujr, uroot / JOURNAL_REL / txn)
+            finally:
+                os.close(_ujr)
             src_ops = (_journal._first(frames, _journal.F_INTENT) or {}).get("ops", [])
             inverse = _journal.build_inverse_ops(src_ops)
             expected = [(_INVERSE_KIND[o["op"]], o["path"]) for o in reversed(src_ops)]
@@ -846,13 +952,314 @@ def self_test():
             for kind, prestate in (("mkdir", {"kind": "absent"}),
                                    ("rmdir", {"kind": "dir", "mode": 0o755})):
                 try:
-                    _journal._restore_preimage(nd / "txn", ndfd,
+                    # mkdir/rmdir undo never reads a payload preimage, so the jr_fd arg is unused here; pass
+                    # the same dir fd to satisfy the (jr_fd, txn_dir, root_fd, op) signature.
+                    _journal._restore_preimage(ndfd, nd / "txn", ndfd,
                                                {"op": kind, "path": "collide", "prestate": prestate})
                     failures.append("{}-undo on a non-directory must raise JournalError".format(kind))
                 except _journal.JournalError:
                     pass
         finally:
             os.close(ndfd)
+        checked += 1
+
+        # (K) PREIMAGE-SLOT EXCLUSIVE CREATE: capture_preimages creates each payload slot with O_EXCL (no
+        #     O_TRUNC), so a pre-planted HARD LINK to a victim regular file at preimages/<seq> is REFUSED
+        #     (JournalError), never truncated and overwritten through the shared inode. Reverted (O_TRUNC),
+        #     the open succeeds on the planted link and rewrites the victim's bytes, so the victim-intact
+        #     assertion below flips red. (A hard link, not a FIFO, so the buggy O_WRONLY open cannot block.)
+        kroot = _build_case_root(tmp / "exclcap" / "root", "flat-files")   # has regular file dataA
+        kjr = tmp / "exclcap" / "journal"; (kjr / "t1" / "preimages").mkdir(parents=True)
+        kvictim = tmp / "exclcap" / "victim"; kvictim.write_bytes(b"VICTIM-INTACT")
+        os.link(str(kvictim), str(kjr / "t1" / "preimages" / "0"))         # slot 0: a hard link to the victim
+        kjr_fd = os.open(str(kjr), os.O_RDONLY | os.O_DIRECTORY)
+        kroot_fd = os.open(str(kroot), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _journal.capture_preimages(kjr_fd, kjr / "t1", kroot_fd, [{"op": "write", "path": "dataA"}])
+            failures.append("capture_preimages must refuse a pre-planted payload slot (O_EXCL), not overwrite it")
+        except _journal.JournalError:
+            pass
+        finally:
+            os.close(kjr_fd)
+            os.close(kroot_fd)
+        if kvictim.read_bytes() != b"VICTIM-INTACT":
+            failures.append("capture_preimages truncated/overwrote a hard-linked victim at the payload slot")
+        checked += 1
+
+        # (L) PREIMAGE READ CONTAINED + BOUNDED: _restore_preimage reads the retained preimage through a
+        #     contained dir-fd walk beneath the journal-root fd, BOUNDED by the recorded prestate size, so an
+        #     oversized preimage is refused AT the read cap before it is read whole and only then digested.
+        #     Reverted to an unbounded absolute-path read_bytes(), the whole file is read and the failure is
+        #     a DIGEST mismatch instead, so the "read cap" message below no longer appears.
+        lroot = tmp / "boundpre" / "root"; lroot.mkdir(parents=True)
+        (lroot / "dataA").write_bytes(b"live\n")
+        ljr = tmp / "boundpre" / "journal"; (ljr / "t1" / "preimages").mkdir(parents=True)
+        (ljr / "t1" / "preimages" / "0").write_bytes(b"X" * 4096)          # far larger than the recorded size
+        _small = b"orig\n"
+        _lop = {"op": "write", "path": "dataA",
+                "prestate": {"kind": "file", "mode": 0o644, "size": len(_small), "payload": "0",
+                             "sha256": hashlib.sha256(_small).hexdigest()}}
+        ljr_fd = os.open(str(ljr), os.O_RDONLY | os.O_DIRECTORY)
+        lroot_fd = os.open(str(lroot), os.O_RDONLY | os.O_DIRECTORY)
+        _lmsg = ""
+        try:
+            _journal._restore_preimage(ljr_fd, ljr / "t1", lroot_fd, _lop)
+            failures.append("_restore_preimage must refuse an oversized preimage at the recorded-size cap")
+        except _journal.JournalError as exc:
+            _lmsg = str(exc)
+        finally:
+            os.close(ljr_fd)
+            os.close(lroot_fd)
+        if "read cap" not in _lmsg:
+            failures.append("_restore_preimage did not bound the preimage read by the recorded size "
+                            "(failure was {!r}, expected a read-cap refusal)".format(_lmsg))
+        checked += 1
+
+        # (M) RESTORE-PATH POST-OPEN IDENTITY: the regular-file restore decides S_ISREG from the PRE-open
+        #     lstat, then opens the name O_NOFOLLOW and ftruncate+rewrites it. O_NOFOLLOW refuses a symlink
+        #     but NOT a hardlink or a regular-file swap raced in between the lstat and the open (both regular,
+        #     so a post-open S_ISREG alone would not catch it). The fix re-fstats the OPENED fd and refuses
+        #     (JournalError) unless it is the SAME object (S_ISREG + st_ino/st_dev) the lstat saw, mirroring
+        #     the apply path's _verify_fd_prestate. Simulate the swap by making _lstat_at return a DECOY
+        #     regular file's stat (a different inode) while the real name on disk is the victim: post-fix the
+        #     identity mismatch is refused and the victim's bytes are intact; reverted (no post-open check)
+        #     the victim is truncated and overwritten through the swapped-in inode, flipping both asserts red.
+        mroot = tmp / "restoreswap" / "root"; mroot.mkdir(parents=True)
+        mvictim = mroot / "dataA"; mvictim.write_bytes(b"VICTIM-INTACT")
+        mdecoy = tmp / "restoreswap" / "decoy"; mdecoy.write_bytes(b"decoy")   # a DIFFERENT inode, regular
+        mjr = tmp / "restoreswap" / "journal"; (mjr / "t1" / "preimages").mkdir(parents=True)
+        _mpre = b"restored\n"
+        (mjr / "t1" / "preimages" / "0").write_bytes(_mpre)
+        _mop = {"op": "write", "path": "dataA",
+                "prestate": {"kind": "file", "mode": 0o644, "size": len(_mpre), "payload": "0",
+                             "sha256": hashlib.sha256(_mpre).hexdigest()}}
+        _decoy_st = os.lstat(str(mdecoy))          # regular, but a DIFFERENT st_ino/st_dev than the victim
+        _orig_lstat_at = _journal._lstat_at
+        _journal._lstat_at = lambda pfd, name: _decoy_st
+        mjr_fd = os.open(str(mjr), os.O_RDONLY | os.O_DIRECTORY)
+        mroot_fd = os.open(str(mroot), os.O_RDONLY | os.O_DIRECTORY)
+        _m_refused = False
+        try:
+            _journal._restore_preimage(mjr_fd, mjr / "t1", mroot_fd, _mop)
+        except _journal.JournalError:
+            _m_refused = True
+        finally:
+            _journal._lstat_at = _orig_lstat_at
+            os.close(mjr_fd)
+            os.close(mroot_fd)
+        if not _m_refused:
+            failures.append("_restore_preimage must refuse a regular-file/hardlink swap detected on the "
+                            "opened fd (post-open identity check missing)")
+        if mvictim.read_bytes() != b"VICTIM-INTACT":
+            failures.append("_restore_preimage truncated/overwrote a swapped-in victim regular file")
+        checked += 1
+
+        # (N) FRAMES.LOG HARDLINK DEFENCE (codex round-6): a frames.log that is a HARD LINK to an out-of-tree
+        #     victim regular file passes O_NOFOLLOW + S_ISREG (a hardlink IS a regular file), so pre-fix
+        #     publish would APPEND its frame onto the victim's inode and recover's _truncate_log would
+        #     FTRUNCATE it. The per-open st_nlink==1 identity check refuses a link count above 1 on the
+        #     publish (append), read, AND truncate (recover) paths; reverted, publish rewrites and
+        #     _truncate_log zeroes the victim, flipping the victim-intact assert red.
+        nroot = tmp / "frameslink" / "root"; nroot.mkdir(parents=True)
+        njr = tmp / "frameslink" / "journal"; (njr / "t1").mkdir(parents=True)
+        nvictim = tmp / "frameslink" / "victim"; nvictim.write_bytes(b"VICTIM-INTACT")
+        os.link(str(nvictim), str(njr / "t1" / "frames.log"))   # frames.log: a hard link to the victim
+        njr_fd = os.open(str(njr), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _pub_refused = False
+            try:
+                _journal.publish(njr_fd, njr / "t1", _journal.F_INTENT,
+                                 {"txn": "t1", "header": {}, "ops": []})
+            except _journal.JournalError:
+                _pub_refused = True
+            if not _pub_refused:
+                failures.append("publish must refuse a hard-linked frames.log (st_nlink!=1), not append to "
+                                "the out-of-tree victim")
+            _tr_refused = False
+            try:
+                _journal._truncate_log(njr_fd, njr / "t1", 0)
+            except _journal.JournalError:
+                _tr_refused = True
+            if not _tr_refused:
+                failures.append("_truncate_log (recover) must refuse a hard-linked frames.log (st_nlink!=1), "
+                                "not truncate the out-of-tree victim")
+            _rd_msg = ""
+            try:
+                _journal.read_frames(njr_fd, njr / "t1")
+                failures.append("read_frames must refuse a hard-linked frames.log (st_nlink!=1)")
+            except _journal.JournalError as exc:
+                _rd_msg = str(exc)
+            if "hard link" not in _rd_msg:
+                failures.append("read_frames refused a hard-linked frames.log for the wrong reason "
+                                "(expected an st_nlink identity refusal, got {!r})".format(_rd_msg))
+        finally:
+            os.close(njr_fd)
+        if nvictim.read_bytes() != b"VICTIM-INTACT":
+            failures.append("a hard-linked frames.log was appended-to/truncated through the shared inode "
+                            "(victim not intact)")
+        checked += 1
+
+        # (O) FRAMES.LOG EXCLUSIVE FIRST-CREATE (codex round-6): a full cutover creates frames.log with
+        #     O_CREAT|O_EXCL in the fresh txn dir, so a pre-planted entry at that name is refused. Here that
+        #     path is exercised indirectly by the crash-injection cutovers below (every cutover creates its
+        #     frames.log exclusively); a direct pre-plant is not reachable because each cutover mints a fresh
+        #     txn id whose dir is created by us. The st_nlink==1 check in (N) is the reopen-time identity
+        #     guarantee that complements it. (P2) below now covers the exclusive-create DIRECTLY (finding 4).
+
+        # (P) PRODUCT-FILE HARDLINK DEFENCE (codex round-8, finding 1): a product file (a root/data file the
+        #     engine mutates) that is a HARD LINK to an out-of-tree victim passes O_NOFOLLOW + S_ISREG (a
+        #     hardlink IS a regular file), so pre-fix capture_preimages accepted the nlink-2 target, apply_ops
+        #     (ftruncate+write) mutated the victim through the shared inode, and _restore_preimage
+        #     (ftruncate+rewrite) did the same. The st_nlink==1 product-file check on the OPENED fd (apply:
+        #     _verify_fd_prestate; restore: the post-open identity check) and the capture-time early reject
+        #     refuse a link count above 1; reverted, the victim's bytes are clobbered, flipping the
+        #     victim-intact asserts red. This is the PRODUCT-FILE sibling of the frames.log defence in (N).
+        _pw_bytes = b"VICTIM-INTACT"
+        _pw_sha = hashlib.sha256(_pw_bytes).hexdigest()
+        # (P-apply) apply_ops must REFUSE a hard-linked write target and leave the victim intact.
+        aproot = tmp / "prodlink-apply" / "root"; aproot.mkdir(parents=True)
+        avictim = tmp / "prodlink-apply" / "victim"; avictim.write_bytes(_pw_bytes)
+        os.chmod(str(avictim), 0o644)
+        os.link(str(avictim), str(aproot / "dataA"))          # dataA: a hard link to the out-of-tree victim
+        _apply_op = {"op": "write", "path": "dataA",
+                     "prestate": {"kind": "file", "mode": 0o644, "size": len(_pw_bytes), "payload": "0",
+                                  "sha256": _pw_sha},
+                     "poststate": {"content-sha256": hashlib.sha256(b"NEWDATA").hexdigest()}}
+        aproot_fd = os.open(str(aproot), os.O_RDONLY | os.O_DIRECTORY)
+        _apply_refused = False
+        try:
+            _journal.apply_ops(aproot_fd, [_apply_op], lambda _o: b"NEWDATA")
+        except _journal.JournalError:
+            _apply_refused = True
+        finally:
+            os.close(aproot_fd)
+        if not _apply_refused:
+            failures.append("apply_ops must refuse a hard-linked product file (st_nlink!=1), not write "
+                            "through the shared inode to an out-of-tree victim")
+        if avictim.read_bytes() != _pw_bytes:
+            failures.append("apply_ops truncated/overwrote a hard-linked out-of-tree victim (product file)")
+        checked += 1
+        # (P-capture) capture_preimages must REFUSE a hard-linked write target (defence in depth).
+        cproot = tmp / "prodlink-cap" / "root"; cproot.mkdir(parents=True)
+        cvictim = tmp / "prodlink-cap" / "victim"; cvictim.write_bytes(_pw_bytes)
+        os.chmod(str(cvictim), 0o644)
+        os.link(str(cvictim), str(cproot / "dataA"))
+        cjr = tmp / "prodlink-cap" / "journal"; (cjr / "t1").mkdir(parents=True)
+        cproot_fd = os.open(str(cproot), os.O_RDONLY | os.O_DIRECTORY)
+        cjr_fd = os.open(str(cjr), os.O_RDONLY | os.O_DIRECTORY)
+        _cap_refused = False
+        try:
+            _journal.capture_preimages(cjr_fd, cjr / "t1", cproot_fd, [{"op": "write", "path": "dataA"}])
+        except _journal.JournalError:
+            _cap_refused = True
+        finally:
+            os.close(cproot_fd)
+            os.close(cjr_fd)
+        if not _cap_refused:
+            failures.append("capture_preimages must refuse a hard-linked `write` target (st_nlink!=1) "
+                            "before the transaction opens")
+        if cvictim.read_bytes() != _pw_bytes:
+            failures.append("capture_preimages disturbed a hard-linked out-of-tree victim")
+        checked += 1
+        # (P-restore) _restore_preimage must REFUSE a hard-linked target and leave the victim intact.
+        rproot = tmp / "prodlink-restore" / "root"; rproot.mkdir(parents=True)
+        rvictim = tmp / "prodlink-restore" / "victim"; rvictim.write_bytes(_pw_bytes)
+        os.chmod(str(rvictim), 0o644)
+        os.link(str(rvictim), str(rproot / "dataA"))
+        rjr = tmp / "prodlink-restore" / "journal"; (rjr / "t1" / "preimages").mkdir(parents=True)
+        _rpre = b"RESTORED-BYTES\n"
+        (rjr / "t1" / "preimages" / "0").write_bytes(_rpre)
+        _restore_op = {"op": "write", "path": "dataA",
+                       "prestate": {"kind": "file", "mode": 0o644, "size": len(_rpre), "payload": "0",
+                                    "sha256": hashlib.sha256(_rpre).hexdigest()}}
+        rjr_fd = os.open(str(rjr), os.O_RDONLY | os.O_DIRECTORY)
+        rproot_fd = os.open(str(rproot), os.O_RDONLY | os.O_DIRECTORY)
+        _restore_refused = False
+        try:
+            _journal._restore_preimage(rjr_fd, rjr / "t1", rproot_fd, _restore_op)
+        except _journal.JournalError:
+            _restore_refused = True
+        finally:
+            os.close(rjr_fd)
+            os.close(rproot_fd)
+        if not _restore_refused:
+            failures.append("_restore_preimage must refuse a hard-linked product file (st_nlink!=1), not "
+                            "rewrite through the shared inode to an out-of-tree victim")
+        if rvictim.read_bytes() != _pw_bytes:
+            failures.append("_restore_preimage truncated/overwrote a hard-linked out-of-tree victim")
+        checked += 1
+
+        # (P2) FRAMES.LOG EXCLUSIVE FIRST-CREATE, DIRECT (codex round-8, finding 4): the (O) note said a
+        #     pre-plant was "not reachable" because each cutover mints a fresh txn dir, so removing O_EXCL from
+        #     _create_frames_excl left this self-test at exit 0 (the discrimination GAP). Cover it DIRECTLY:
+        #     pre-plant a frames.log in a txn dir, then call _create_frames_excl in-process (so THIS self-test
+        #     process, which imports _journal, catches the mutant). O_CREAT|O_EXCL must REFUSE the pre-existing
+        #     entry (JournalError); reverted (O_EXCL dropped), the open succeeds, no JournalError is raised,
+        #     and this flips red.
+        xroot = tmp / "exclcreate" / "journal"; (xroot / "t1").mkdir(parents=True)
+        (xroot / "t1" / "frames.log").write_bytes(b"PRE-PLANTED")     # a pre-existing entry at that name
+        xjr_fd = os.open(str(xroot), os.O_RDONLY | os.O_DIRECTORY)
+        _excl_refused = False
+        try:
+            _journal._create_frames_excl(xjr_fd, xroot / "t1")
+        except _journal.JournalError:
+            _excl_refused = True
+        finally:
+            os.close(xjr_fd)
+        if not _excl_refused:
+            failures.append("_create_frames_excl must refuse a pre-existing frames.log (O_CREAT|O_EXCL); a "
+                            "dropped O_EXCL silently accepts a pre-planted log (finding 4)")
+        checked += 1
+
+        # (P3) CONTAINED-WALK CLEANUP-CLOSE GUARD (codex round-8, finding 8-2): the contained-walk cleanup
+        #     loops (_open_parent / _open_dir_contained / ensure_journal_dirs) close several opened dir fds in
+        #     a `finally`. A raw os.close there, when one close raised (EINTR/EIO), abandoned the REMAINING
+        #     sibling fds (a leak) and let a raw OSError escape the finally. The guarded close
+        #     (_journal._close_fd_quietly) confirms-and-continues so the walk COMPLETES and no sibling leaks.
+        #     Inject a first-close-raises-without-releasing into a DEEP _open_parent walk (>=2 intermediate
+        #     dirs => >=2 opened fds): post-fix _open_parent returns and the process fd count is unchanged;
+        #     pre-fix the first raise aborts the loop, the second fd leaks, and the raw OSError escapes.
+        wroot = tmp / "walkclose" / "root"; (wroot / "a" / "b").mkdir(parents=True)
+        (wroot / "a" / "b" / "dataA").write_bytes(b"x")
+        wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
+        _w_real_close = os.close
+        _w_state = {"n": 0}
+
+        def _w_boom_close(fd):
+            _w_state["n"] += 1
+            if _w_state["n"] == 1:
+                raise OSError(5, "EIO (self-test injected, fd left open)")   # raise WITHOUT releasing
+            return _w_real_close(fd)
+
+        def _fdcount():
+            try:
+                return len(os.listdir("/proc/self/fd"))
+            except OSError:
+                return None
+
+        _w_before = _fdcount()
+        _w_outcome = None
+        _w_pfd = None
+        try:
+            os.close = _w_boom_close
+            try:
+                _w_pfd, _w_name = _journal._open_parent(wroot_fd, "a/b/dataA")
+                _w_outcome = "returned"
+            except OSError:
+                _w_outcome = "raised"
+        finally:
+            os.close = _w_real_close
+        if _w_pfd is not None:
+            _w_real_close(_w_pfd)                            # real close so the test itself leaks nothing
+        os.close(wroot_fd)
+        _w_after = _fdcount()
+        _w_leak_ok = True
+        if _w_before is not None and _w_after is not None:
+            _w_leak_ok = (_w_after <= _w_before)            # a leaked sibling fd makes after > before
+        if not (_w_outcome == "returned" and _w_leak_ok):
+            failures.append("_open_parent contained-walk cleanup must GUARD each close so a raising close "
+                            "neither aborts the walk nor leaks a sibling fd (outcome={}, before={}, after={}; "
+                            "finding 8-2)".format(_w_outcome, _w_before, _w_after))
         checked += 1
 
         # (F2) FIX #3 OWNERSHIP-CHECKED RELEASE: a lock NOT owned by this process is never unlinked.
@@ -906,12 +1313,16 @@ def self_test():
             _journal._restore_preimage = orig_restore
         jr = Path(rbroot) / JOURNAL_REL
         nonterminal = False
-        for td in _txn_dirs(jr):
-            try:
-                if not _journal.is_terminal(td):
+        _jr_fd = _journal.open_journal_root_from_path(rbroot, JOURNAL_REL)
+        try:
+            for td in _txn_dirs(_jr_fd, jr):
+                try:
+                    if not _journal.is_terminal(_jr_fd, td):
+                        nonterminal = True
+                except _journal.JournalError:
                     nonterminal = True
-            except _journal.JournalError:
-                nonterminal = True
+        finally:
+            os.close(_jr_fd)
         if rc != 2:
             failures.append("fix4: do_cutover on a failed rollback must exit 2")
         if not (jr / "lock").exists():
@@ -928,8 +1339,12 @@ def self_test():
         mroot = _build_case_root(tmp / "mismatch" / "root", "flat-files")
         mtxn = mroot / JOURNAL_REL / "sometxn"
         mtxn.mkdir(parents=True)
-        _journal.publish(mtxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
-        _journal.publish(mtxn, _journal.F_COMPLETE, {"txn": "B"})
+        _mjr = _journal.open_journal_root_from_path(mroot, JOURNAL_REL)
+        try:
+            _journal.publish(_mjr, mtxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
+            _journal.publish(_mjr, mtxn, _journal.F_COMPLETE, {"txn": "B"})
+        finally:
+            os.close(_mjr)
         if _run(["recover", "--root", str(mroot)]) != 2:
             failures.append("fix2: a mismatched-txn terminal frame must fail closed (exit 2)")
         checked += 1
@@ -948,25 +1363,33 @@ def self_test():
                   (_journal.F_RIP, {"txn": "A"})])):
             stxn = tmp / "c2" / label.replace(" ", "_")
             stxn.mkdir(parents=True)
-            for ftype, obj in frames_spec:
-                _journal.publish(stxn, ftype, obj)
+            _sjr = os.open(str(stxn.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
-                _journal.classify_state(stxn)
-                failures.append("C2: {} must be rejected by the state machine".format(label))
-            except _journal.JournalError:
-                pass
+                for ftype, obj in frames_spec:
+                    _journal.publish(_sjr, stxn, ftype, obj)
+                try:
+                    _journal.classify_state(_sjr, stxn)
+                    failures.append("C2: {} must be rejected by the state machine".format(label))
+                except _journal.JournalError:
+                    pass
+            finally:
+                os.close(_sjr)
             checked += 1
         # is_terminal invokes the SAME validator (C2): an INTENT then RC (no preceding RIP) is not an
         # accepted sequence, so is_terminal fails closed there too, classifying identically to recover.
         itxn = tmp / "c2-isterm"
         itxn.mkdir(parents=True)
-        _journal.publish(itxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
-        _journal.publish(itxn, _journal.F_RC, {"txn": "A"})
+        _ijr = os.open(str(itxn.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            _journal.is_terminal(itxn)
-            failures.append("C2: is_terminal must reject an invalid frame sequence (same validator)")
-        except _journal.JournalError:
-            pass
+            _journal.publish(_ijr, itxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
+            _journal.publish(_ijr, itxn, _journal.F_RC, {"txn": "A"})
+            try:
+                _journal.is_terminal(_ijr, itxn)
+                failures.append("C2: is_terminal must reject an invalid frame sequence (same validator)")
+            except _journal.JournalError:
+                pass
+        finally:
+            os.close(_ijr)
         checked += 1
 
         # (M) C3: COMPLETE means the poststate was installed. A staged payload whose bytes do NOT match the
@@ -976,23 +1399,25 @@ def self_test():
         c3jr = c3root / JOURNAL_REL
         c3jr.mkdir(parents=True, exist_ok=True)
         c3fd = os.open(str(c3root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        c3jrfd = _journal.open_journal_root_fd(c3fd, JOURNAL_REL)
         try:
             planned = {"op": "write", "path": "dataA",
                        "poststate": {"kind": "file",
                                      "content-sha256": hashlib.sha256(b"PLANNED-A\n").hexdigest()}}
             pre3 = _snapshot(c3root)
             try:
-                _journal.run_transaction(c3fd, c3jr, "c3txn", {"unit": "x", "kind": "cutover"},
+                _journal.run_transaction(c3fd, c3jrfd, c3jr, "c3txn", {"unit": "x", "kind": "cutover"},
                                          [planned], lambda op: b"MUTATED-A\n", session_id="c3")
                 failures.append("C3: a staged/INTENT digest mismatch must raise (no false COMPLETE)")
             except _journal.JournalError:
                 pass
-            ftypes = [t for t, _ in _journal.read_frames(c3jr / "c3txn")[0]]
+            ftypes = [t for t, _ in _journal.read_frames(c3jrfd, c3jr / "c3txn")[0]]
             if _journal.F_COMPLETE in ftypes:
                 failures.append("C3: a digest mismatch must NEVER publish COMPLETE")
             if _snapshot(c3root) != pre3:
                 failures.append("C3: a digest mismatch must roll back to the prestate exactly")
         finally:
+            os.close(c3jrfd)
             os.close(c3fd)
         checked += 1
 
@@ -1028,9 +1453,10 @@ def self_test():
         c1jr = tmp / "c1" / JOURNAL_REL
         c1jr.mkdir(parents=True)
         c1fd = os.open(str(tmp / "c1"), os.O_RDONLY | os.O_DIRECTORY)
+        c1jrfd = _journal.open_journal_root_fd(c1fd, JOURNAL_REL)
         try:
             _journal.acquire_lock(c1jr, session_id="live-holder")
-            res1 = _journal.reconcile_and_claim_stale(c1jr, c1fd, session_id="recover")
+            res1 = _journal.reconcile_and_claim_stale(c1jr, c1jrfd, c1fd, session_id="recover")
             if res1 != "possibly-live":
                 failures.append("C1: reconcile_and_claim_stale must report possibly-live for a live lock")
             if not (c1jr / "lock").exists():
@@ -1040,7 +1466,68 @@ def self_test():
                 failures.append("C1: the live current lock owner must be left unchanged")
             _journal.release_lock(c1jr)
         finally:
+            os.close(c1jrfd)
             os.close(c1fd)
+        checked += 1
+
+        # (O2) F3 (round-10): reconcile_and_claim_stale refuses a MULTIPLY-LINKED arbitration inode. A
+        #      hardlinked <journal>/lock.break (st_nlink > 1) is a second name for the same inode, so a
+        #      foreign flock holder on the other name could block the LOCK_EX indefinitely and wedge
+        #      stale-lock recovery. The nlink==1 guard (class-consistent with the frames.log/product-file
+        #      write-path nlink checks) fires right after the open, before flock/owner-read, so it refuses
+        #      with a JournalError. Reverting the guard lets the break proceed (no live lock -> "acquired"),
+        #      flipping this red.
+        f3root = tmp / "f3-hardlink-lockbreak"
+        f3jr = f3root / JOURNAL_REL
+        f3jr.mkdir(parents=True)
+        (f3jr / "lock.break").write_bytes(b"")               # a regular arbitration file...
+        os.link(str(f3jr / "lock.break"), str(f3root / "evil-hardlink"))  # ...with a SECOND hard link
+        f3fd = os.open(str(f3root), os.O_RDONLY | os.O_DIRECTORY)
+        f3jrfd = _journal.open_journal_root_fd(f3fd, JOURNAL_REL)
+        try:
+            try:
+                _journal.reconcile_and_claim_stale(f3jr, f3jrfd, f3fd, session_id="recover")
+                failures.append("F3: reconcile_and_claim_stale must refuse a hardlinked (nlink>1) lock.break")
+            except _journal.JournalError as exc:
+                if "hard link" not in str(exc):
+                    failures.append("F3: the hardlinked-lock.break refusal must name the hard-link count "
+                                    "(got {!r})".format(str(exc)))
+            if (f3jr / "lock").exists():
+                failures.append("F3: a refused hardlinked-lock.break break must NOT acquire a fresh lock")
+        finally:
+            os.close(f3jrfd)
+            os.close(f3fd)
+        checked += 1
+
+        # (O3) F4 (round-12): read_lock_owner refuses a MULTIPLY-LINKED `lock` inode, class-consistent with
+        #      the frames.log/product-file/lock.break nlink==1 identity guards. A `lock` hardlinked to an
+        #      out-of-tree victim (st_nlink > 1) passes O_NOFOLLOW + S_ISREG (a hardlink is a regular file,
+        #      not the symlink O_NOFOLLOW catches), so pre-fix it was read through the victim's inode. The
+        #      nlink==1 guard fires right after the fstat, before the size/JSON read, refusing with a
+        #      JournalError that names the link count; reverting it lets the hardlinked lock be read. A
+        #      singly-linked lock (nlink==1) is still read normally, so the guard does not over-reject.
+        f4root = tmp / "f4-hardlink-lock"
+        f4jr = f4root / JOURNAL_REL
+        f4jr.mkdir(parents=True)
+        _f4_owner = {"uid": os.getuid(), "pid": os.getpid(), "session": "s",
+                     "pid-start": _journal._pid_start(os.getpid()),
+                     "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        (f4jr / "lock").write_text(json.dumps(_f4_owner, sort_keys=True), encoding="utf-8")
+        os.link(str(f4jr / "lock"), str(f4root / "evil-lock-hardlink"))   # a SECOND hard link -> nlink==2
+        try:
+            _journal.read_lock_owner(f4jr)
+            failures.append("F4: read_lock_owner must refuse a hardlinked (nlink>1) lock")
+        except _journal.JournalError as exc:
+            if "hard link" not in str(exc):
+                failures.append("F4: the hardlinked-lock refusal must name the hard-link count "
+                                "(got {!r})".format(str(exc)))
+        # regression: a singly-linked lock (the normal case) is still read, so the guard does not over-reject.
+        f4ok = tmp / "f4-single-lock"
+        f4okjr = f4ok / JOURNAL_REL
+        f4okjr.mkdir(parents=True)
+        (f4okjr / "lock").write_text(json.dumps(_f4_owner, sort_keys=True), encoding="utf-8")
+        if _journal.read_lock_owner(f4okjr) is None:
+            failures.append("F4: read_lock_owner must still read a singly-linked lock (no over-reject)")
         checked += 1
 
         # (P) C7: an unknown --unit (not a connected component of the crosswalk) is REJECTED before locking
@@ -1145,12 +1632,14 @@ def self_test():
         ajr.mkdir(parents=True)
         os.symlink(str(tmp / "arb-symlink" / "elsewhere"), str(ajr / "lock.break"))
         awfd = os.open(str(tmp / "arb-symlink"), os.O_RDONLY | os.O_DIRECTORY)
+        awjrfd = _journal.open_journal_root_fd(awfd, JOURNAL_REL)
         try:
-            _journal.reconcile_and_claim_stale(ajr, awfd, session_id="recover")
+            _journal.reconcile_and_claim_stale(ajr, awjrfd, awfd, session_id="recover")
             failures.append("hardening: a symlinked lock.break must be refused (O_NOFOLLOW, fail-closed)")
         except _journal.JournalError:
             pass
         finally:
+            os.close(awjrfd)
             os.close(awfd)
         checked += 1
 
@@ -1333,7 +1822,8 @@ def self_test():
                 ("remove",
                  lambda d: ((d / "t").write_bytes(b"DRIFTED\n"), os.chmod(d / "t", 0o644)),
                  lambda d: ((d / "t").write_bytes(b"REAL\n"), os.chmod(d / "t", 0o644)),
-                 {"kind": "file", "mode": 0o644, "sha256": hashlib.sha256(b"REAL\n").hexdigest()}),
+                 {"kind": "file", "mode": 0o644, "size": len(b"REAL\n"),
+                  "sha256": hashlib.sha256(b"REAL\n").hexdigest()}),
                 ("rmdir",
                  lambda d: ((d / "t").mkdir(), os.chmod(d / "t", 0o700)),
                  lambda d: ((d / "t").mkdir(), os.chmod(d / "t", 0o755)),
@@ -1399,8 +1889,12 @@ def self_test():
         e4jr.mkdir(parents=True, exist_ok=True)
         badtxn = e4jr / "badtxn"
         badtxn.mkdir()
-        _journal.publish(badtxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
-        _journal.publish(badtxn, _journal.F_RC, {"txn": "A"})    # INTENT then RC (no RIP): recover() rejects
+        _e4jrfd = _journal.open_journal_root_from_path(e4root, JOURNAL_REL)
+        try:
+            _journal.publish(_e4jrfd, badtxn, _journal.F_INTENT, {"txn": "A", "header": {}, "ops": []})
+            _journal.publish(_e4jrfd, badtxn, _journal.F_RC, {"txn": "A"})  # INTENT then RC (no RIP): recover() rejects
+        finally:
+            os.close(_e4jrfd)
         dead = subprocess.Popen([sys.executable, "-c", "pass"])   # a pid that is confirmed dead once reaped
         dead.wait()
         (e4jr / "lock").write_bytes(json.dumps(
@@ -1436,10 +1930,11 @@ def self_test():
                 pass
             return _orig(fd)
 
-        def _snapshot_publish(txn_dir, ftype, obj, _orig=j1_orig_publish, _s=j1_at_intent, _rec=j1_recorded):
+        def _snapshot_publish(jr_fd, txn_dir, ftype, obj, _orig=j1_orig_publish, _s=j1_at_intent,
+                              _rec=j1_recorded):
             if ftype == _journal.F_INTENT and _s["inos"] is None:
                 _s["inos"] = set(_rec)                        # freeze the fsync'd set at the FIRST INTENT
-            return _orig(txn_dir, ftype, obj)
+            return _orig(jr_fd, txn_dir, ftype, obj)
 
         os.fsync = _tracking_fsync
         _journal.publish = _snapshot_publish
@@ -1462,6 +1957,253 @@ def self_test():
                             "journal subtree is crash-durable (a crash before it is durable must not make "
                             "recovery falsely report no journal to recover)")
         checked += 1
+
+        # (F-R17-A2) journal budget: a transaction whose serialized INTENT+rollback frames would exceed the
+        # recovery reader's cap is REFUSED before any product mutation and before the txn dir is created. A
+        # 17 MiB header is the padding vector; a reverted budget check would APPLY (mutating the tree), which
+        # this detects, and would leave a journal recovery could not re-read.
+        a2root = _build_case_root(tmp / "a2-root", "flat-files")    # dataA = old-A\n
+        a2jr = a2root / JOURNAL_REL
+        a2jr.mkdir(parents=True, exist_ok=True)
+        a2fd = os.open(str(a2root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        a2jrfd = _journal.open_journal_root_fd(a2fd, JOURNAL_REL)
+        try:
+            pre_a2 = _snapshot(a2root)
+            big_header = {"unit": "x", "kind": "cutover", "pad": "P" * (17 << 20)}   # >16 MiB serialized
+            a2plan = {"op": "write", "path": "dataA",
+                      "poststate": {"kind": "file",
+                                    "content-sha256": hashlib.sha256(b"PLANNED-A\n").hexdigest()}}
+            try:
+                _journal.run_transaction(a2fd, a2jrfd, a2jr, "a2txn", big_header, [a2plan],
+                                         lambda op: b"PLANNED-A\n", "a2")
+                failures.append("A2: an over-cap transaction journal must be refused, not applied")
+            except _journal.JournalError:
+                pass
+            if _snapshot(a2root) != pre_a2:
+                failures.append("A2: an over-cap transaction must NOT mutate the product tree")
+            if (a2jr / "a2txn").exists():
+                failures.append("A2: an over-cap transaction must be refused BEFORE creating the txn dir")
+            if not (17 << 20) > _journal._MAX_JOURNAL_READ_BYTES:
+                failures.append("A2: fixture header is not actually over the reader cap (test is inert)")
+        finally:
+            os.close(a2jrfd)
+            os.close(a2fd)
+        checked += 1
+
+        # (F-R18-A2BUD) FINALIZED-envelope budget re-check: capture_preimages grows each op with prestate
+        # metadata AFTER the pre-mutation budget, so a BOUNDARY transaction whose PRE-capture ops fit the
+        # reader cap but whose POST-capture INTENT+ROLLBACK does not must be refused BEFORE any product
+        # mutation. Construct exactly that boundary: pad the header so the pre-capture budget EQUALS the cap
+        # (passes the pre-check), while the post-capture INTENT+RIP+RC exceeds it. A reverted re-check would
+        # publish INTENT, APPLY (mutating dataA), then fail to publish the terminal frame over the append cap;
+        # the tree changing detects that. WITH the re-check the tree is untouched and the journal is terminal.
+        abroot = _build_case_root(tmp / "a2bud-root", "flat-files")   # dataA = old-A\n
+        abjr = abroot / JOURNAL_REL
+        abjr.mkdir(parents=True, exist_ok=True)
+        _ab_cap = _journal._MAX_JOURNAL_READ_BYTES
+
+        def _ab_bf(ftype, obj):
+            return _journal._frame(ftype, json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                                                     ensure_ascii=True).encode())
+
+        _ab_txn = "a2budtxn"
+        _ab_data = (abroot / "dataA").read_bytes()
+        _ab_mode = stat.S_IMODE(os.stat(str(abroot / "dataA")).st_mode)
+        _ab_prestate = {"kind": "file", "mode": _ab_mode, "size": len(_ab_data),
+                        "payload": "0", "sha256": hashlib.sha256(_ab_data).hexdigest()}
+        _ab_op_wo = {"op": "write", "path": "dataA",
+                     "poststate": {"kind": "file",
+                                   "content-sha256": hashlib.sha256(b"PLANNED-A\n").hexdigest()}}
+        _ab_op_w = dict(_ab_op_wo)
+        _ab_op_w["prestate"] = _ab_prestate           # exactly what capture_preimages adds (seq 0 -> payload "0")
+        _ab_rip = len(_ab_bf(_journal.F_RIP, {"txn": _ab_txn}))
+        _ab_rc = len(_ab_bf(_journal.F_RC, {"txn": _ab_txn}))
+        _ab_complete = len(_ab_bf(_journal.F_COMPLETE, {"txn": _ab_txn}))
+        _ab_delta = (len(_ab_bf(_journal.F_INTENT, {"txn": _ab_txn, "header": {}, "ops": [_ab_op_w]}))
+                     - len(_ab_bf(_journal.F_INTENT, {"txn": _ab_txn, "header": {}, "ops": [_ab_op_wo]})))
+        # Solve the header pad so the PRE-capture budget (INTENT_pre + RIP + RC) lands at the cap. The solve
+        # must ITERATE because _frame embeds str(len(payload)) whose decimal width grows with the pad, so a
+        # single linear estimate is off by the width change; converge until INTENT_pre == cap - RIP - RC.
+        _ab_want_pre = _ab_cap - _ab_rip - _ab_rc
+        _ab_pad = _ab_want_pre - len(_ab_bf(_journal.F_INTENT,
+                                            {"txn": _ab_txn, "header": {"unit": "x", "kind": "cutover", "pad": ""},
+                                             "ops": [_ab_op_wo]}))
+        for _ab_iter in range(8):
+            _ab_cur = len(_ab_bf(_journal.F_INTENT,
+                                 {"txn": _ab_txn,
+                                  "header": {"unit": "x", "kind": "cutover", "pad": "P" * max(0, _ab_pad)},
+                                  "ops": [_ab_op_wo]}))
+            if _ab_cur == _ab_want_pre:
+                break
+            _ab_pad += _ab_want_pre - _ab_cur
+        # never let the pre-capture budget exceed the cap (that would refuse before capture, not at the re-check).
+        while (len(_ab_bf(_journal.F_INTENT,
+                          {"txn": _ab_txn,
+                           "header": {"unit": "x", "kind": "cutover", "pad": "P" * max(0, _ab_pad)},
+                           "ops": [_ab_op_wo]})) + _ab_rip + _ab_rc) > _ab_cap and _ab_pad > 0:
+            _ab_pad -= 1
+        # discrimination window: INTENT_post < cap (INTENT publishes -> apply) AND INTENT_post + COMPLETE > cap
+        # (terminal publish fails) hold iff delta < RIP+RC and delta + COMPLETE > RIP+RC.
+        if _ab_pad < 0:
+            failures.append("A2BUD: fixture cannot reach the cap boundary (pad negative; test inert)")
+        if not (_ab_delta < _ab_rip + _ab_rc and _ab_delta + _ab_complete > _ab_rip + _ab_rc):
+            failures.append("A2BUD: prestate delta does not straddle the terminal-frame boundary (test inert)")
+        _ab_header = {"unit": "x", "kind": "cutover", "pad": "P" * max(0, _ab_pad)}
+        abfd = os.open(str(abroot), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        abjrfd = _journal.open_journal_root_fd(abfd, JOURNAL_REL)
+        try:
+            pre_ab = _snapshot(abroot)
+            try:
+                _journal.run_transaction(abfd, abjrfd, abjr, _ab_txn, _ab_header, [dict(_ab_op_wo)],
+                                         lambda op: b"PLANNED-A\n", "a2bud")
+                failures.append("A2BUD: an over-cap FINALIZED envelope must be refused, not applied")
+            except _journal.JournalError:
+                pass
+            if _snapshot(abroot) != pre_ab:
+                failures.append("A2BUD: a boundary transaction must NOT mutate the product tree (the "
+                                "post-capture re-check must refuse BEFORE apply)")
+            if not (abjr / _ab_txn).exists():
+                failures.append("A2BUD: expected the txn dir to exist (the refusal must be at the "
+                                "post-capture re-check, after the pre-capture check passed)")
+            elif not _journal.is_terminal(abjrfd, abjr / _ab_txn):
+                failures.append("A2BUD: a refused boundary transaction must leave a terminal (recoverable) "
+                                "journal, not an open one")
+        finally:
+            os.close(abjrfd)
+            os.close(abfd)
+        checked += 1
+
+        # (F-R18-APPCAP) the publish() cumulative append-cap admits an EXACT-FIT terminal frame and REFUSES a
+        # ONE-OVER one, so no recovery publish (COMPLETE / RIP / RC) can ever write a journal it cannot
+        # re-read. Pre-fill frames.log to (cap - frame_len [+0 exact / +1 over]) and publish each terminal
+        # frame type. A reverted append-cap would ADMIT the one-over append (an unrecoverable over-cap log).
+        for _ap_ftype in (_journal.F_COMPLETE, _journal.F_RIP, _journal.F_RC):
+            for _ap_label, _ap_extra, _ap_expect_ok in (("exact-fit", 0, True), ("one-over", 1, False)):
+                _ap_root = _build_case_root(tmp / ("appcap-" + _ap_ftype + "-" + _ap_label) / "root",
+                                            "flat-files")
+                _ap_jr = _ap_root / JOURNAL_REL
+                (_ap_jr / "aptxn").mkdir(parents=True, exist_ok=True)
+                _ap_frame = _journal._frame(_ap_ftype, json.dumps({"txn": "aptxn"}, sort_keys=True,
+                                                                  separators=(",", ":")).encode())
+                _ap_fill = _journal._MAX_JOURNAL_READ_BYTES - len(_ap_frame) + _ap_extra
+                (_ap_jr / "aptxn" / "frames.log").write_bytes(b"x" * _ap_fill)
+                _ap_fd = os.open(str(_ap_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                _ap_jrfd = _journal.open_journal_root_fd(_ap_fd, JOURNAL_REL)
+                try:
+                    try:
+                        _journal.publish(_ap_jrfd, _ap_jr / "aptxn", _ap_ftype, {"txn": "aptxn"})
+                        _ap_got_ok = True
+                    except _journal.JournalError:
+                        _ap_got_ok = False
+                finally:
+                    os.close(_ap_jrfd)
+                    os.close(_ap_fd)
+                if _ap_got_ok != _ap_expect_ok:
+                    failures.append("APPCAP {} {}: publish append-cap expected {}".format(
+                        _ap_ftype, _ap_label, "success" if _ap_expect_ok else "refusal"))
+                checked += 1
+
+        # (F-R18-JTOCTOU) fd-relative enumeration: _journal_txn_dirs enumerates on the TRUSTED already-open
+        # journal descriptor, so a journal path SWAPPED to an empty decoy AFTER the open cannot hide an open
+        # txn. Open jr_fd on a journal holding one txn, then replace the journal dir at its path with an empty
+        # decoy; fd-relative enumeration still sees the real txn. A path-based revert (iterdir on the path)
+        # would follow to the decoy and report zero -> false-clean.
+        _jt_root = tmp / "jtoctou" / "root"
+        (_jt_root / JOURNAL_REL / "txn1").mkdir(parents=True)
+        _jt_rfd = os.open(str(_jt_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _jt_jrfd = _journal.open_journal_root_fd(_jt_rfd, JOURNAL_REL)
+        try:
+            _jt_jpath = _jt_root / JOURNAL_REL
+            os.rename(str(_jt_jpath), str(_jt_root / "journal-real"))   # move the real journal aside
+            _jt_jpath.mkdir()                                           # empty decoy at the journal path
+            _jt_dirs = _journal._journal_txn_dirs(_jt_jrfd, _jt_jpath)
+            if not (len(_jt_dirs) == 1 and _jt_dirs[0].name == "txn1"):
+                failures.append("JTOCTOU: fd-relative enumeration must see the open txn on the trusted "
+                                "descriptor, not a swapped-in empty decoy (got {})".format(
+                                    [d.name for d in _jt_dirs]))
+        finally:
+            os.close(_jt_jrfd)
+            os.close(_jt_rfd)
+        checked += 1
+
+        # (F-R18-OSESC) an enumeration OSError (e.g. EIO) escapes as a CONTEXTUAL JournalError, not a raw
+        # OSError, so the CLI maps it to exit 2 and _all_terminal to False. Inject a scandir failure.
+        _ose_root = tmp / "osesc" / "root"
+        (_ose_root / JOURNAL_REL).mkdir(parents=True)
+        _ose_rfd = os.open(str(_ose_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _ose_jrfd = _journal.open_journal_root_fd(_ose_rfd, JOURNAL_REL)
+        _ose_real_scandir = os.scandir
+
+        def _ose_boom(*_a, **_k):
+            raise OSError(5, "injected-eio")                            # EIO
+        os.scandir = _ose_boom
+        try:
+            try:
+                _journal._journal_txn_dirs(_ose_jrfd, _ose_root / JOURNAL_REL)
+                failures.append("OSESC: an enumeration OSError must be wrapped in JournalError")
+            except _journal.JournalError:
+                pass
+            except OSError:
+                failures.append("OSESC: a raw OSError escaped enumeration (must be a contextual JournalError)")
+        finally:
+            os.scandir = _ose_real_scandir
+            os.close(_ose_jrfd)
+            os.close(_ose_rfd)
+        checked += 1
+
+        # (F-R17-C1) journal-state classification: recover/status distinguish a CONFIRMED-absent journal
+        # (exit 0) from a MALFORMED one (a regular file OR a symlink at the journal path, exit 2), and REFUSE
+        # a symlinked txn entry (exit 2). The old Path.is_dir() conflated absent/regular/symlink into False.
+        c1_absent = tmp / "c1-absent"
+        c1_absent.mkdir()
+        if _run(["recover", "--root", str(c1_absent)]) != 0:
+            failures.append("C1: recover on a confirmed-absent journal must exit 0")
+        if _run(["status", "--root", str(c1_absent)]) != 0:
+            failures.append("C1: status on a confirmed-absent journal must exit 0")
+        checked += 1
+        for _kind in ("regular", "dangling"):
+            c1_root = tmp / ("c1-" + _kind)
+            (c1_root / JOURNAL_REL).parent.mkdir(parents=True)
+            _jpath = c1_root / JOURNAL_REL
+            if _kind == "regular":
+                _jpath.write_bytes(b"not a directory")
+            else:
+                os.symlink("missing-journal-target", str(_jpath))
+            if _run(["status", "--root", str(c1_root)]) != 2:
+                failures.append("C1: status must exit 2 on a {} journal path".format(_kind))
+            if _run(["recover", "--root", str(c1_root)]) != 2:
+                failures.append("C1: recover must exit 2 on a {} journal path".format(_kind))
+            checked += 1
+        c1_txn = tmp / "c1-symlink-txn"
+        (c1_txn / JOURNAL_REL).mkdir(parents=True)
+        os.symlink("missing-txn-target", str(c1_txn / JOURNAL_REL / "txn-link"))
+        if _run(["status", "--root", str(c1_txn)]) != 2:
+            failures.append("C1: status must refuse a symlinked txn entry (exit 2)")
+        if _run(["recover", "--root", str(c1_txn)]) != 2:
+            failures.append("C1: recover must refuse a symlinked txn entry (exit 2)")
+        checked += 1
+
+        # (F-R18-C1HELP) the _all_terminal and _latest_txn helpers each fail closed on a MALFORMED journal
+        # INDEPENDENTLY of the CLI: a regular file where the journal dir belongs, and a symlinked txn ENTRY
+        # under a real journal dir. _all_terminal must return False (never "all terminal" -> True) and
+        # _latest_txn must RAISE its documented JournalError (never silently return None). Reverting either
+        # helper's malformed handling to the parent reds the matching assertion.
+        for _c1h_kind in ("regular", "symlink-txn"):
+            _c1h_root = tmp / ("c1help-" + _c1h_kind)
+            if _c1h_kind == "regular":
+                (_c1h_root / JOURNAL_REL).parent.mkdir(parents=True)
+                (_c1h_root / JOURNAL_REL).write_bytes(b"not a directory")
+            else:
+                (_c1h_root / JOURNAL_REL).mkdir(parents=True)
+                os.symlink("missing-txn-target", str(_c1h_root / JOURNAL_REL / "txn-link"))
+            if _all_terminal(_c1h_root) is not False:
+                failures.append("C1HELP: _all_terminal must return False on a {} journal".format(_c1h_kind))
+            try:
+                _latest_txn(_c1h_root)
+                failures.append("C1HELP: _latest_txn must RAISE on a {} journal".format(_c1h_kind))
+            except _journal.JournalError:
+                pass
+            checked += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1487,16 +2229,31 @@ def self_test():
 def _latest_txn(root):
     journal_root = Path(root) / JOURNAL_REL
     best = None
-    if not journal_root.is_dir():
+    # F-R17-C1: classify the journal path no-follow. Absent -> None; a malformed path (a regular file or a
+    # symlink) fails closed rather than being followed or read as absent.
+    root_fd, err = _open_root_or_none(root)
+    if err or root_fd is None:
+        raise _journal.JournalError("cannot safely open product root for _latest_txn")
+    try:
+        journal_state = _classify_journal(root_fd)
+    finally:
+        os.close(root_fd)
+    if journal_state == "absent":
         return None
-    for txn_dir in _txn_dirs(journal_root):
-        if "unadopt" in txn_dir.name:
-            continue
-        try:
-            if _journal.F_COMPLETE in [t for t, _ in _journal.read_frames(txn_dir)[0]]:
-                best = txn_dir.name
-        except _journal.JournalError:
-            continue
+    if journal_state == "malformed":
+        raise _journal.JournalError("journal path is present but is not a directory (fail-closed)")
+    jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+    try:
+        for txn_dir in _txn_dirs(jr_fd, journal_root):
+            if "unadopt" in txn_dir.name:
+                continue
+            try:
+                if _journal.F_COMPLETE in [t for t, _ in _journal.read_frames(jr_fd, txn_dir)[0]]:
+                    best = txn_dir.name
+            except _journal.JournalError:
+                continue
+    finally:
+        os.close(jr_fd)
     return best
 
 

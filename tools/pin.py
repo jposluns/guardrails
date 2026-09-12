@@ -492,9 +492,12 @@ def _capture_pin_preimages(root, root_fd, transition_id, ops):
         except FileExistsError:
             raise PinError("preimage transition dir {!r} already exists; refusing to reuse".format(name))
         os.fsync(pfd)
+        # F1: pfd is the CONTAINED pin-preimages dir fd (reached by a no-follow walk from root_fd); pass it
+        # so capture_preimages opens the transition dir and writes/fsyncs its payloads beneath it, never via
+        # a re-resolved absolute path an ancestor symlink could redirect off-tree.
+        _journal.capture_preimages(pfd, root / PREIMAGES_REL / transition_id, root_fd, ops)
     finally:
         os.close(pfd)
-    _journal.capture_preimages(root / PREIMAGES_REL / transition_id, root_fd, ops)
 
 
 def _contained_swap(root_fd, ops, staged_reader):
@@ -579,7 +582,7 @@ def _blocking_open_journal(root, root_fd):
             est = os.stat(entry, dir_fd=jfd, follow_symlinks=False)
             if stat.S_ISLNK(est.st_mode):
                 return True                               # a symlinked journal entry is never followed (block)
-            if stat.S_ISDIR(est.st_mode) and not _journal.is_terminal(journal_root / entry):
+            if stat.S_ISDIR(est.st_mode) and not _journal.is_terminal(jfd, journal_root / entry):  # F1: contained
                 return True
         return False
     except (OSError, _journal.JournalError):
@@ -1327,10 +1330,13 @@ def self_test():
         jb2 = tmp / "JB2" / "txn"; jb2.mkdir(parents=True)
         os.symlink(str(tmp / "JB2" / "nowhere"), str(jb2 / "frames.log"))
         b2_caught = False
+        _jb2jr = os.open(str(jb2.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            _journal.is_terminal(str(jb2))
+            _journal.is_terminal(_jb2jr, str(jb2))
         except _journal.JournalError:
             b2_caught = True
+        finally:
+            os.close(_jb2jr)
         check("B2: a symlinked frames.log fails closed (no-follow), not read as empty/terminal", b2_caught)
 
         # ---- B1: un-adopt REFUSES while migration state (.aiqt/migration) is present ----
@@ -1414,8 +1420,12 @@ def self_test():
             _journal.ensure_journal_dirs(fd, JOURNAL_REL)
         txn_open = k / JOURNAL_REL / "txn-open"
         txn_open.mkdir()
-        _journal.publish(txn_open, _journal.F_INTENT,
-                         {"txn": "txn-open", "header": {}, "ops": []})   # valid INTENT, no COMPLETE = OPEN
+        _kjr = _journal.open_journal_root_from_path(k, JOURNAL_REL)
+        try:
+            _journal.publish(_kjr, txn_open, _journal.F_INTENT,
+                             {"txn": "txn-open", "header": {}, "ops": []})   # valid INTENT, no COMPLETE = OPEN
+        finally:
+            os.close(_kjr)
         with _RootFd(k) as fd:
             check("T12: a present migration journal is NOT read as clean absence (B7)",
                   not doctor._adoption_absent(fd))
@@ -1609,8 +1619,12 @@ def self_test():
         with _RootFd(t29) as fd:
             _journal.ensure_journal_dirs(fd, JOURNAL_REL)
         (t29 / JOURNAL_REL / "txn-open").mkdir()
-        _journal.publish(t29 / JOURNAL_REL / "txn-open", _journal.F_INTENT,
-                         {"txn": "txn-open", "header": {}, "ops": []})
+        _t29jr = _journal.open_journal_root_from_path(t29, JOURNAL_REL)
+        try:
+            _journal.publish(_t29jr, t29 / JOURNAL_REL / "txn-open", _journal.F_INTENT,
+                             {"txn": "txn-open", "header": {}, "ops": []})
+        finally:
+            os.close(_t29jr)
         rc, out = _run_cli(["un-adopt", "--root", str(t29), "--authorizer", "ops", "--reason", "x"])
         check("T29: un-adopt BLOCKS on an open migration journal exit 2", rc == 2 and "journal" in out.lower())
 

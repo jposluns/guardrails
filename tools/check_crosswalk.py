@@ -556,46 +556,57 @@ def check_unit_coverage(root, cw):
     component_succs = {key: sorted({m.get("successor-clause-id") for m in rows})
                        for key, rows in comps.items()}
     have_completed = False
-    for entry in sorted(journal_root.iterdir()):
-        if not entry.is_dir():
-            continue
-        # fix #3: route through the SINGLE validated classification. Only a genuinely COMPLETE cutover
-        # ([INTENT, COMPLETE] AND header kind == "cutover") is coverage-gated; a mismatched-txn or
-        # invalid-sequence journal fails closed (GateError), and a rolled-back, open, un-adopt, or other
-        # non-cutover terminal is not mis-selected as a completed cutover.
-        try:
-            intent = _validated_completed_cutover(entry)
-        except _journal.JournalError as exc:
-            raise GateError("corrupt journal transaction {} ({})".format(entry.name, exc))
-        if intent is None:
-            continue
-        have_completed = True
-        header = intent.get("header", {})
-        unit = header.get("unit")
-        if not unit:
-            findings.append("terminal transaction {} names no unit (9.1)".format(entry.name))
-            continue
-        if unit not in component_preds:
-            findings.append("terminal transaction {} names unit {!r} which is not a connected component "
-                            "of the crosswalk (9.1)".format(entry.name, unit))
-            continue
-        # C7 (fix #4): the recorded predecessor AND successor sets must each be a list of strings that
-        # equals the component's canonical mapped set. A split-component cutover that omits a successor is
-        # caught here, not only a missing predecessor.
-        recorded_p = header.get("component-predecessors")
-        recorded_s = header.get("component-successors")
-        if not _is_str_list(recorded_p) or not _is_str_list(recorded_s):
-            findings.append("terminal transaction {} records a non-list component-predecessors/successors "
-                            "header (9.1)".format(entry.name))
-            continue
-        if sorted(recorded_p) != component_preds[unit]:
-            findings.append("terminal transaction {} did not cover the whole component {!r}: its recorded "
-                            "predecessor set {} does not equal the component's mapped predecessor set {} "
-                            "(9.1)".format(entry.name, unit, sorted(recorded_p), component_preds[unit]))
-        if sorted(recorded_s) != component_succs[unit]:
-            findings.append("terminal transaction {} did not cover the whole component {!r}: its recorded "
-                            "successor set {} does not equal the component's mapped successor set {} "
-                            "(9.1)".format(entry.name, unit, sorted(recorded_s), component_succs[unit]))
+    # F1: read each txn journal contained beneath a trusted journal-root handle reached by a no-follow
+    # walk from the repo root, so an ancestor symlink on the txn path cannot redirect the read off-tree.
+    try:
+        jr_fd = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+    except (_journal.JournalError, OSError) as exc:
+        raise GateError("cannot open journal root ({})".format(exc))
+    try:
+        for entry in sorted(journal_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            # fix #3: route through the SINGLE validated classification. Only a genuinely COMPLETE cutover
+            # ([INTENT, COMPLETE] AND header kind == "cutover") is coverage-gated; a mismatched-txn or
+            # invalid-sequence journal fails closed (GateError), and a rolled-back, open, un-adopt, or
+            # other non-cutover terminal is not mis-selected as a completed cutover.
+            try:
+                intent = _validated_completed_cutover(jr_fd, entry)
+            except _journal.JournalError as exc:
+                raise GateError("corrupt journal transaction {} ({})".format(entry.name, exc))
+            if intent is None:
+                continue
+            have_completed = True
+            header = intent.get("header", {})
+            unit = header.get("unit")
+            if not unit:
+                findings.append("terminal transaction {} names no unit (9.1)".format(entry.name))
+                continue
+            if unit not in component_preds:
+                findings.append("terminal transaction {} names unit {!r} which is not a connected "
+                                "component of the crosswalk (9.1)".format(entry.name, unit))
+                continue
+            # C7 (fix #4): the recorded predecessor AND successor sets must each be a list of strings that
+            # equals the component's canonical mapped set. A split-component cutover that omits a successor
+            # is caught here, not only a missing predecessor.
+            recorded_p = header.get("component-predecessors")
+            recorded_s = header.get("component-successors")
+            if not _is_str_list(recorded_p) or not _is_str_list(recorded_s):
+                findings.append("terminal transaction {} records a non-list "
+                                "component-predecessors/successors header (9.1)".format(entry.name))
+                continue
+            if sorted(recorded_p) != component_preds[unit]:
+                findings.append("terminal transaction {} did not cover the whole component {!r}: its "
+                                "recorded predecessor set {} does not equal the component's mapped "
+                                "predecessor set {} (9.1)".format(entry.name, unit, sorted(recorded_p),
+                                                                   component_preds[unit]))
+            if sorted(recorded_s) != component_succs[unit]:
+                findings.append("terminal transaction {} did not cover the whole component {!r}: its "
+                                "recorded successor set {} does not equal the component's mapped "
+                                "successor set {} (9.1)".format(entry.name, unit, sorted(recorded_s),
+                                                                component_succs[unit]))
+    finally:
+        os.close(jr_fd)
     if have_completed and not cw.get("mapping"):
         findings.append("a completed cutover exists but the crosswalk has no mapping rows (9.1)")
     return findings
@@ -1050,8 +1061,12 @@ def self_test():
         def _write_journal_txn(root, name, header):
             td = root / JOURNAL_REL / name
             td.mkdir(parents=True, exist_ok=True)
-            _journal.publish(td, _journal.F_INTENT, {"txn": name, "header": header, "ops": []})
-            _journal.publish(td, _journal.F_COMPLETE, {"txn": name})
+            _jr = _journal.open_journal_root_from_path(root, JOURNAL_REL)
+            try:
+                _journal.publish(_jr, td, _journal.F_INTENT, {"txn": name, "header": header, "ops": []})
+                _journal.publish(_jr, td, _journal.F_COMPLETE, {"txn": name})
+            finally:
+                os.close(_jr)
 
         c7ok = _build_install(tmp / "c7-ok", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
         groups7 = components(_load_toml(c7ok / CROSSWALK_REL))
@@ -1099,9 +1114,14 @@ def self_test():
         c7mm = _build_install(tmp / "c7-mismatch", base_text, [_LEGACY_ONE, _LEGACY_TWO], inv)
         mmtd = c7mm / JOURNAL_REL / "txn.mismatch"
         mmtd.mkdir(parents=True, exist_ok=True)
-        _journal.publish(mmtd, _journal.F_INTENT, {"txn": "A", "header": {"unit": ukey, "kind": "cutover",
-                         "component-predecessors": wpreds, "component-successors": wsuccs}, "ops": []})
-        _journal.publish(mmtd, _journal.F_COMPLETE, {"txn": "B"})
+        _mmjr = _journal.open_journal_root_from_path(c7mm, JOURNAL_REL)
+        try:
+            _journal.publish(_mmjr, mmtd, _journal.F_INTENT,
+                             {"txn": "A", "header": {"unit": ukey, "kind": "cutover",
+                              "component-predecessors": wpreds, "component-successors": wsuccs}, "ops": []})
+            _journal.publish(_mmjr, mmtd, _journal.F_COMPLETE, {"txn": "B"})
+        finally:
+            os.close(_mmjr)
         if run_quiet(c7mm) != 2:
             failures.append("fix #3: a mismatched-txn terminal must fail the coverage leg closed (exit 2)")
         n += 1

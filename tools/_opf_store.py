@@ -88,6 +88,8 @@ WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root
 DEFAULT_MACHINE_SUBDIR = "toml"        # standard machine-store subdir name, tried first (spec 4.4)
 MANIFEST_NAME = "manifest.toml"        # discovery marker filename (spec 4.5)
 STANDARD_TOKEN = "devprocess"          # exact discovery token in [devprocess].standard (spec 4.5)
+MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (manifest/pointer); a larger
+                                       # store input is refused rather than read unboundedly (SECA)
 
 # Resolution outcomes.
 RESOLVED = "RESOLVED"                  # a machine store was resolved and located
@@ -169,6 +171,50 @@ TOP_LEVEL_TABLES = frozenset({"devprocess", "store", "modules", "profiles", "typ
                               "views", "deliverables", "archive", "unmanaged", "vendors"})
 
 _NAMESPACE_OK = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_EXTENSION_VENDOR_OK = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")   # ASCII x-<vendor> slug alphabet
+
+
+def snapshot_caller_alarm():
+    """Snapshot the caller's SIGALRM timing state for a hermetic FIFO-probe watchdog, the SINGLE source of
+    truth the opf-side watchdogs share (round-15 F1, so no per-site save/restore can diverge again and
+    re-induce the watchdog-timer class). Captures the caller's ITIMER_REAL value and repeating interval, a
+    monotonic baseline for the elapsed-aware restore, and whether a SIGALRM was already PENDING on entry.
+    Returns an opaque tuple to hand to restore_caller_alarm() in the watchdog's finally. Call it BEFORE the
+    probe installs its own handler / unblocks / arms its timer (so the pending reading is the caller's, not
+    the probe's)."""
+    import signal as _signal
+    import time as _time
+    _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
+    _was_pending = (hasattr(_signal, "sigpending")
+                    and _signal.SIGALRM in _signal.sigpending())
+    return (_prev_value, _prev_interval, _time.monotonic(), _was_pending)
+
+
+def restore_caller_alarm(prev_value, prev_interval, t0, was_pending):
+    """Restore the caller's SIGALRM timing state a FIFO-probe watchdog borrowed, the SINGLE elapsed-aware
+    save/restore every opf-side watchdog shares (round-15 F1, so no per-site verbatim restore can diverge
+    and re-induce the watchdog-timer class the round-13 fix closed once). Two moves:
+      (1) ITIMER_REAL is re-armed ELAPSED-AWARE: the caller's remaining value MINUS the wall time the
+          watchdog held it (interval preserved), so running the watchdog neither PAUSES nor EXTENDS a
+          caller deadline. A deadline that would have expired during the probe clamps to a tiny positive so
+          it still FIRES rather than being silently dropped, never re-armed to its full original value.
+      (2) a SIGALRM the caller had PENDING on entry is RE-POSTED (round-15 F2): the probe's SIG_IGN discards
+          any inherited pending alarm so it cannot fire the watchdog spuriously, which would otherwise
+          DESTROY a blocked+pending ambient SIGALRM the caller still owns; re-posting it here leaves the
+          caller's pending state unchanged, matching the ambient-preserving contract the watchdog docstrings
+          promise. Re-posting happens after the mask is restored (caller blocked => it re-pends; caller
+          unblocked => it delivers at once, as it would have).
+    Call it AFTER restoring the caller's SIGALRM disposition and signal mask, in the watchdog's finally.
+    The pending arguments come from snapshot_caller_alarm(); a test may pass an explicit (value, interval,
+    t0, was_pending) to exercise the elapsed-aware restore directly."""
+    import signal as _signal
+    import time as _time
+    import os as _os
+    if prev_value > 0.0:
+        _rem = prev_value - (_time.monotonic() - t0)
+        _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, prev_interval)
+    if was_pending:
+        _os.kill(_os.getpid(), _signal.SIGALRM)
 
 
 class StoreError(Exception):
@@ -232,8 +278,17 @@ def _open_dir_nofollow(abspath):
     symlink-resolution rule). `Path.resolve()` is deliberately NOT used to resolve a pointer target: it
     canonicalizes symlinks BEFORE the open, so a symlinked target would resolve away and open
     successfully. Raises OSError, which the caller maps to CANNOT-EVALUATE."""
+    if "\x00" in str(abspath):
+        # os.open raises ValueError (not the OSError this helper documents) for an embedded NUL; refuse it
+        # here as OSError so a NUL-bearing pointer target fails closed to CANNOT-EVALUATE at the caller
+        # rather than escaping unmapped (guard-input-soundness; defence in depth behind the caller's
+        # existence pre-check that already shields the current resolve path).
+        raise OSError("store root {!r} carries an embedded NUL byte".format(str(abspath)))
     parts = Path(abspath).parts
-    if not parts or parts[0] != os.sep:
+    # POSIX preserves a leading '//' as a distinct root anchor (pathlib yields '//' for exactly two leading
+    # slashes; '///...' collapses to '/'), so accept both root spellings rather than falsely rejecting a
+    # '//'-anchored path with a message claiming it is not absolute (over-fire; class 2).
+    if not parts or parts[0] not in (os.sep, os.sep + os.sep):
         raise OSError("store root {!r} is not an absolute POSIX path".format(str(abspath)))
     fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)   # the filesystem root itself is never a symlink
     for comp in parts[1:]:
@@ -259,7 +314,15 @@ def _read_toml_contained(root_fd, relpath):
     """Read and parse a contained TOML file beneath root_fd, no-follow. Returns the parsed dict, or None
     when the file (or a parent) is absent. StoreError (a cannot-evaluate) on an unreadable file, a
     refused symlink, or a TOML/parse error: an unreadable input is a failure, never an empty pass."""
-    st = _journal._lstat_contained(root_fd, relpath)
+    try:
+        st = _journal._lstat_contained(root_fd, relpath)
+    except (_journal.JournalError, OSError) as exc:
+        # _lstat_contained walks the contained parents no-follow and can raise JournalError (a backslash,
+        # control-character, or refused/unreadable intermediate component) or OSError; neither is a
+        # StoreError, so an unwrapped raise escapes resolve_store/discover/load_manifest uncaught. Map it to
+        # a fail-closed StoreError (routed to CANNOT-EVALUATE), never an uncaught crash on an adopter-
+        # controlled store tree (check-fails-closed-on-unreadable).
+        raise StoreError("cannot stat {} ({})".format(relpath, exc))
     if st is None:
         return None
     # A non-regular entry (a FIFO, device, socket, or directory) is refused BEFORE any open: opening a
@@ -269,13 +332,44 @@ def _read_toml_contained(root_fd, relpath):
     if not stat.S_ISREG(st.st_mode):
         raise StoreError("{} is present but is not a regular file (an exotic entry; fail-closed, never "
                          "opened)".format(relpath))
+    # A store input is not read unboundedly: refuse a file larger than the read cap on the size the lstat
+    # already returned, so a multi-gigabyte stray file in an adopter-controlled tree meets a controlled
+    # refusal rather than exhausting memory during resolution (SECA resource-bounds). This lstat size is a
+    # pre-open FAST REJECT bound to the size BEFORE the open; a file swapped or grown between this lstat and
+    # the open is caught by the post-read length check below (disclose-guard-residuals).
+    if st.st_size > MAX_STORE_READ_BYTES:
+        raise StoreError("{} is {} bytes, over the {}-byte store-read cap (fail-closed)".format(
+            relpath, st.st_size, MAX_STORE_READ_BYTES))
     try:
-        data, _ = _journal._read_contained(root_fd, relpath)
-    except _journal.JournalError as exc:
+        # F-R17-A1: a STORE control file (a manifest or a `.opf.toml`/`.opf.local.toml` pointer) is refused
+        # when it is multiply-linked. The decision is made on the OPENED fd's stat inside _read_contained,
+        # not the pre-open _lstat_contained probe above, so a hardlink to an out-of-tree victim cannot let a
+        # resolved store posture silently track the victim inode. This reader serves ONLY manifest and pointer
+        # paths, so the single-link requirement covers both without touching generic product reads.
+        data, _ = _journal._read_contained(root_fd, relpath, require_single_link=True)
+    except (_journal.JournalError, OSError) as exc:
+        # _read_contained maps its open/read errors to JournalError, but its post-open os.fstat can still
+        # raise a BARE OSError (a device/EIO-level failure) that would otherwise escape resolve_store
+        # uncaught; catch OSError alongside JournalError here (as the _lstat_contained choke point above
+        # already does) so any unreadable manifest/pointer is a fail-closed StoreError, never a crash
+        # (check-fails-closed-on-unreadable).
         raise StoreError("cannot read {} ({})".format(relpath, exc))
+    # Re-check the bytes ACTUALLY read against the cap: the pre-open lstat size is bound to the file as it
+    # was BEFORE the open, so a store file swapped in or grown between that lstat and the open (a TOCTOU race
+    # on an adopter-controlled tree) is refused here rather than parsed over the cap. Residual: the bytes are
+    # read before this refusal, so a concurrently-growing file is bounded at classification, not mid-read
+    # (SECA resource-bounds; disclose-guard-residuals).
+    if len(data) > MAX_STORE_READ_BYTES:
+        raise StoreError("{} read {} bytes, over the {}-byte store-read cap (a raced swap or growth past "
+                         "the pre-open size; fail-closed)".format(relpath, len(data), MAX_STORE_READ_BYTES))
     try:
         return tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError) as exc:
+        # tomllib.TOMLDecodeError is a ValueError subclass, but an oversized BASE-10 integer literal (a
+        # token past CPython's ~4300-digit limit) makes tomllib raise a BARE ValueError from int(), not a
+        # TOMLDecodeError, so a hostile store file would otherwise escape resolve_store uncaught; catch the
+        # ValueError base so a present-but-unparseable input is a fail-closed StoreError, never a crash
+        # (check-fails-closed-on-unreadable; unreadable includes present-but-unparseable).
         raise StoreError("cannot parse {} ({})".format(relpath, exc))
     except RecursionError as exc:
         # A deeply-nested TOML value overflows the parser's recursion: a present-but-unparseable input is a
@@ -307,8 +401,14 @@ def _immediate_subdirs(store_root_fd, working_rel):
             # O_NOFOLLOW refuses a symlinked .working with ELOOP: refused, not followed, fail-closed.
             raise StoreError("cannot open {} no-follow ({})".format(working_rel, exc))
         try:
+            try:
+                names = sorted(os.listdir(wfd))
+            except OSError as exc:
+                # A listing I/O error (EIO, or a state change after the open) is fail-closed, never read as
+                # an empty (no-store) directory (check-fails-closed-on-unreadable).
+                raise StoreError("cannot list {} ({})".format(working_rel, exc))
             subdirs = []
-            for entry in sorted(os.listdir(wfd)):
+            for entry in names:
                 try:
                     est = os.stat(entry, dir_fd=wfd, follow_symlinks=False)
                 except OSError as exc:
@@ -452,7 +552,17 @@ def resolve_store(product_root):
     # A relative dir: target joined to a relative product root would otherwise be rejected downstream by
     # _open_dir_nofollow as not absolute, so a valid relative --root refused a valid companion store
     # (MAJOR 2).
-    product_root = Path(os.path.abspath(product_root))
+    try:
+        product_root = Path(os.path.abspath(product_root))
+    except OSError as exc:
+        # os.path.abspath anchors a RELATIVE product root to os.getcwd(); when the process cwd has been
+        # deleted or become unreadable, os.getcwd() raises OSError, which would otherwise ESCAPE this
+        # resolver uncaught (it contracts to never raise for an expected outcome, only return a Resolution).
+        # The abspath CHOICE is deliberate (it anchors a relative --root without following symlinks, MAJOR 2);
+        # this only closes its ambient-cwd crash residual by mapping an unreadable cwd to a fail-closed
+        # CANNOT-EVALUATE, exactly as every other unreadable input here is (check-fails-closed-on-unreadable).
+        return Resolution(CANNOT_EVALUATE,
+                          "cannot resolve product root to an absolute path (cwd unreadable?): {}".format(exc))
     if not _containment.probe():
         # A store read touches adopter-controlled paths; without the race-free primitive a read cannot be
         # done safely, so resolution fails closed rather than resolving over an unguarded name (spec 17).
@@ -593,11 +703,14 @@ def _valid_namespace(value):
 
 
 def _valid_extension_namespace(value):
-    """An `x-<vendor>` token: 'x-' plus a lowercase-alphanumeric vendor slug (spec 8.7)."""
+    """An `x-<vendor>` token: 'x-' plus a lowercase-ASCII-alphanumeric vendor slug (spec 8.7). The vendor
+    alphabet is the explicit ASCII set, NOT str.islower()/str.isdigit(), which also admit non-ASCII letters
+    and digits, so a Unicode slug that should be INVALID cannot pass a check meant for the ASCII token
+    alphabet (guard-input-soundness)."""
     if not isinstance(value, str) or not value.startswith("x-"):
         return False
     vendor = value[2:]
-    return bool(vendor) and all(ch.islower() or ch.isdigit() or ch == "-" for ch in vendor) \
+    return bool(vendor) and all(ch in _EXTENSION_VENDOR_OK for ch in vendor) \
         and vendor[0] != "-" and vendor[-1] != "-"
 
 
@@ -639,15 +752,16 @@ def _str_token_set(value):
 
 def _sorted_key_names(keys):
     """Order an iterable of keys for a FINDING MESSAGE as a sorted list of strings. Every element is
-    str-coerced BEFORE the sort, so a heterogeneous or non-str key set (e.g. a hand-constructed table
-    with mixed int/str keys) can neither crash sorted() on an int-vs-str type mismatch nor break the
+    coerced through _safe_str BEFORE the sort, so a heterogeneous or non-str key set (e.g. a hand-
+    constructed table with mixed int/str keys, or an oversized-int key whose str() would trip CPython's
+    integer-string-conversion limit) can neither crash sorted() on an int-vs-str type mismatch nor break the
     later ", ".join, which is always over strings. This is the shared total-sort for the unknown-key
     finding-message idiom (formerly a bare sorted over the surplus-key set) across the three OPF pass-A
     validators (schema, store, release). It
     is for ERROR-MESSAGE ORDERING ONLY; it is deliberately NOT used on the byte-stable coverage digest,
     where a non-str key fails closed with a ReleaseError instead (str-coercing a digest key would change
     the digest, so the digest path rejects rather than coerces)."""
-    return sorted(str(k) for k in keys)
+    return sorted(_safe_str(k) for k in keys)
 
 
 def _safe_display(value):
@@ -672,16 +786,40 @@ def _safe_display(value):
         return "<oversized-value>"
 
 
+def _escape_line_unsafe(s):
+    """Escape every NON-PRINTABLE character in `s` (a C0/C1 control such as newline, CR or tab, a
+    zero-width or bidirectional format char, a line/paragraph separator, a surrogate or unassigned code
+    point) to a backslash escape, leaving every printable character (letters, digits, punctuation, and the
+    ordinary space) byte-for-byte. `str.isprintable()` is the authority for what may sit on a single
+    diagnostic line. This keeps an untrusted value from forging an extra finding line ('x\\nFORGED') or
+    hiding/steering text with format characters (codex round-6; guard-input-soundness / no-concealed-failure
+    applied to a diagnostic renderer)."""
+    out = []
+    for ch in s:
+        if ch.isprintable():
+            out.append(ch)
+        else:
+            o = ord(ch)
+            out.append("\\x{:02x}".format(o) if o <= 0xff
+                       else "\\u{:04x}".format(o) if o <= 0xffff
+                       else "\\U{:08x}".format(o))
+    return "".join(out)
+
+
 def _safe_str(value):
     """The str()-style companion of _safe_display, for a finding-message position that renders a value with
     {} (no surrounding repr quotes) rather than {!r}: a version string interpolated into a `release #N
-    (<version>)` label, for instance. Returns str(value) for every value whose str is well-formed, byte for
-    byte, so a normal string or int renders exactly as it did before; only a value whose str trips the
-    base-10 integer-string-conversion limit (an oversized non-decimal int parsed from TOML, or a container
-    holding one) returns the same bounded marker _safe_display uses (fail-closed). It is for MESSAGE
-    rendering only, never the byte-stable coverage digest."""
+    (<version>)` label, for instance. Returns str(value) with any NON-PRINTABLE character escaped to a
+    backslash form (_escape_line_unsafe), so a value carrying a control character cannot inject a second
+    diagnostic line; a value whose str is entirely printable (a normal string or int) renders exactly as it
+    did before, byte for byte. Only a value whose str trips the base-10 integer-string-conversion limit (an
+    oversized non-decimal int parsed from TOML, or a container holding one) returns the same bounded marker
+    _safe_display uses (fail-closed). Unlike _safe_display, which renders through repr() and so already
+    escapes controls, this str()-based renderer must escape them itself (the store/release sibling the
+    schema newline-hardening left exposed; codex round-6). It is for MESSAGE rendering only, never the
+    byte-stable coverage digest."""
     try:
-        return str(value)
+        return _escape_line_unsafe(str(value))
     except ValueError:
         if isinstance(value, int) and not isinstance(value, bool):
             return "<oversized-int: {} bits>".format(value.bit_length())
@@ -697,6 +835,34 @@ def _is_item_collection(value):
     return (isinstance(value, collections.abc.Iterable)
             and not isinstance(value, (str, bytes, bytearray))
             and not isinstance(value, collections.abc.Mapping))
+
+
+_MAX_SUPPORTED_MAJORS = 4096   # a profile supports a handful of majors; a larger control is malformed
+
+
+def _materialize_majors(value):
+    """Materialize a supported-profiles majors control to a concrete list of NON-NEGATIVE ints, FAIL-
+    CLOSED. A well-formed control (a finite item collection whose every element is a non-negative int)
+    yields that list; anything malformed yields None, so the caller fails closed to CANNOT-EVALUATE rather
+    than crashing, hanging, or exhausting memory: a non-collection, a bare string/mapping/scalar, an
+    element that is not an int, a boolean (an int subclass, excluded), a NEGATIVE major (no SemVer major is
+    negative), an iterator that raises mid-iteration, or a control longer than _MAX_SUPPORTED_MAJORS (a
+    range(10**12) or an unbounded generator is cut off at the cap, never fully materialized). This is the
+    single boundary that normalizes the enforcement control's majors (guard-input-soundness, SECA resource-
+    bounds); a one-shot iterator is consumed here exactly once and the returned list is reused."""
+    if not _is_item_collection(value):
+        return None
+    out = []
+    try:
+        for m in value:
+            if not isinstance(m, int) or isinstance(m, bool) or m < 0:
+                return None
+            out.append(m)
+            if len(out) > _MAX_SUPPORTED_MAJORS:
+                return None
+    except Exception:
+        return None
+    return out
 
 
 def validate_manifest(data, supported_profiles=None):
@@ -737,13 +903,12 @@ def validate_manifest(data, supported_profiles=None):
     # validation and enforcement consumes each value exactly once, so enforcement still fires.
     materialized_profiles = {}
     for _pname, _majors in supported_profiles.items():
-        _mats = list(_majors) if _is_item_collection(_majors) else None
-        if not isinstance(_pname, str) or _mats is None or not all(
-                isinstance(m, int) and not isinstance(m, bool) for m in _mats):
+        _mats = _materialize_majors(_majors)
+        if not isinstance(_pname, str) or _mats is None:
             return ManifestValidation(CANNOT_EVALUATE,
-                                      ["supported_profiles entry {!r} is malformed: each profile name "
-                                       "(a string) maps to a list of integer major versions (fail-closed; "
-                                       "spec 9.1)".format(_pname)])
+                                      ["supported_profiles entry {} is malformed: each profile name (a "
+                                       "string) maps to a bounded list of non-negative integer major "
+                                       "versions (fail-closed; spec 9.1)".format(_safe_display(_pname))])
         materialized_profiles[_pname] = _mats
     supported_profiles = materialized_profiles
     if not isinstance(data, dict):
@@ -787,7 +952,8 @@ def validate_manifest(data, supported_profiles=None):
             # FAIL-CLOSED finding (INVALID), never routed to unevaluated, which would skip all its gates
             # and let the manifest validate VALID (BLOCKER 1, spec 9.1).
             findings.append("[profiles.{}] is a supported profile but its major cannot be determined "
-                            "(version absent, non-string, or not a bare SemVer); fail-closed".format(name))
+                            "(version absent, non-string, or not a bare SemVer); fail-closed".format(
+                                _safe_display(name)))
             continue
         if prof_major not in supported_majors:
             # A genuinely UNSUPPORTED profile major is ignored for enforcement (spec 9.1), recorded
@@ -920,13 +1086,13 @@ def _normative_namespace(name, modules_enabled, where, findings):
     if name in MODULE_TYPES:
         normative_ns, module = MODULE_TYPES[name]
         if module not in modules_enabled:
-            findings.append("{} declares module type {!r} but its module {!r} is not enabled in "
-                            "[modules] (spec 8.1)".format(where, name, module))
+            findings.append("{} declares module type {} but its module {!r} is not enabled in "
+                            "[modules] (spec 8.1)".format(where, _safe_display(name), module))
             return None
         return normative_ns
     if name in RESERVED_EXCLUDED_TYPES:
-        findings.append("{} type {!r} is reserved and excluded from the adopter standard "
-                        "(spec 8.1)".format(where, name))
+        findings.append("{} type {} is reserved and excluded from the adopter standard "
+                        "(spec 8.1)".format(where, _safe_display(name)))
         return None
     findings.append("{} is not a known record type (spec 8.1)".format(where))
     return None
@@ -953,7 +1119,7 @@ def _is_contained_relpath(p):
                 return False
         else:
             depth += 1
-    return True
+    return depth > 0        # a path that resolves AT the root (e.g. "." or "a/..") is not contained-below
 
 
 def _validate_types(types, modules_enabled, findings):
@@ -973,7 +1139,7 @@ def _validate_types(types, modules_enabled, findings):
         return
     seen_ns = {}
     for name, tbl in types.items():
-        where = "[types.{}]".format(name)
+        where = "[types.{}]".format(_safe_display(name))
         if not isinstance(tbl, dict):
             findings.append("{} is not a table".format(where))
             continue
@@ -990,11 +1156,11 @@ def _validate_types(types, modules_enabled, findings):
         # finding, as is an unknown or reserved-excluded name).
         normative_ns = _normative_namespace(name, modules_enabled, where, findings)
         if normative_ns is not None and ns != normative_ns:
-            findings.append("{}.namespace {!r} is not the normative namespace {!r} bound to type {!r} "
-                            "(spec 8.1)".format(where, ns, normative_ns, name))
+            findings.append("{}.namespace {!r} is not the normative namespace {!r} bound to type {} "
+                            "(spec 8.1)".format(where, ns, normative_ns, _safe_display(name)))
         if ns in seen_ns:
             findings.append("namespace {!r} is bound to more than one type ({} and {}); the binding is "
-                            "one-to-one (spec 8.2)".format(ns, seen_ns[ns], name))
+                            "one-to-one (spec 8.2)".format(ns, _safe_str(seen_ns[ns]), _safe_str(name)))
         else:
             seen_ns[ns] = name
 
@@ -1006,7 +1172,7 @@ def _validate_providers(providers, findings):
         findings.append("[providers] is not a table")
         return
     for name, tbl in providers.items():
-        where = "[providers.{}]".format(name)
+        where = "[providers.{}]".format(_safe_display(name))
         if not isinstance(tbl, dict):
             findings.append("{} is not a table".format(where))
             continue
@@ -1028,7 +1194,7 @@ def _validate_views(views, findings):
         findings.append("[views] is not a table")
         return
     for name, tbl in views.items():
-        where = "[views.{!r}]".format(name)
+        where = "[views.{}]".format(_safe_display(name))
         if not isinstance(tbl, dict):
             findings.append("{} is not a table".format(where))
             continue
@@ -1056,7 +1222,7 @@ def _validate_deliverables(deliverables, findings):
         findings.append("[deliverables] is not a table")
         return
     for name, tbl in deliverables.items():
-        where = "[deliverables.{!r}]".format(name)
+        where = "[deliverables.{}]".format(_safe_display(name))
         if not isinstance(tbl, dict):
             findings.append("{} is not a table".format(where))
             continue
@@ -1123,7 +1289,7 @@ def _validate_supported_profile(name, prof, spec_tuple, base_posture, modules_en
     closed on a base-incompatible instance, a posture_floor that WEAKENS the base, a required module
     that is not enabled, and an extension_namespace that is absent, malformed, or not registered in
     [vendors]."""
-    where = "[profiles.{}]".format(name)
+    where = "[profiles.{}]".format(_safe_display(name))
     if not isinstance(prof, dict):
         findings.append("{} is not a table".format(where))
         return
@@ -1232,6 +1398,18 @@ def self_test():
         checked += 1
         if not cond:
             failures.append(name)
+
+    def _guard(thunk, default="RAISED"):
+        """Run thunk() and return its result, or the sentinel `default` if it raised. MINOR-3: a self-test
+        vector whose fix, when reverted, throws an UNCAUGHT exception wraps its probe here, so a reverted fix
+        yields a NAMED counted check FAILURE (the sentinel fails the assertion) rather than aborting the whole
+        suite with a traceback. Detection is not weakened: the assertion still passes only on the fixed result
+        (self-test-discrimination; the fail-closed reporting check-fails-closed-on-unreadable asks of the
+        suite itself)."""
+        try:
+            return thunk()
+        except Exception:
+            return default
 
     # A minimal valid base + a valid aiqt profile, as a manifest text builder.
     def manifest_text(standard=STANDARD_TOKEN, spec_version="1.0.0", posture="required",
@@ -1604,14 +1782,484 @@ def self_test():
         (rel_prod / POINTER_REL).write_text('[store]\ntarget = "dir:rel-companion"\n', encoding="utf-8")
         abs_res = resolve_store(rel_prod)
         check("relative-root-abs-baseline", abs_res.status == RESOLVED)
-        prev_cwd = os.getcwd()
+        # test-hermeticity: resolve the SAME cwd-relative product root WITHOUT os.chdir, which would mutate
+        # the ambient process cwd (a test leaves the host as it found it, and shared process state is exactly
+        # the kind of surrounding a test's verdict must not depend on or perturb). A CHILD process carries its
+        # cwd via subprocess cwd=base instead, resolves the relative name there, and prints its status and
+        # resolved store root for the parent to compare. This exercises os.path.abspath's cwd anchoring (the
+        # MAJOR 2 relative-root path) exactly as before, but with no mutation of this process's cwd.
+        import subprocess
+        import json
+        # test-hermeticity: launch the child ISOLATED (-I ignores PYTHON* env like PYTHONHOME/PYTHONPATH and
+        # user site; -B suppresses __pycache__ writes into the tools dir), so a hostile ambient PYTHONHOME the
+        # parent inherits cannot break the child interpreter, and supply the sibling-import path EXPLICITLY
+        # inside the child (since -I ignores PYTHONPATH), so the child's verdict comes from store resolution,
+        # not the ambient interpreter env.
+        _child_src = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import _opf_store as S\n"
+            "r = S.resolve_store(sys.argv[2])\n"
+            "sys.stdout.write(json.dumps([r.status, None if r.store_root is None else str(r.store_root)]))\n")
+        _child = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", _child_src,
+             str(Path(__file__).resolve().parent), rel_prod.name],
+            cwd=str(base), capture_output=True, text=True)
+        _rel_status, _rel_store = (json.loads(_child.stdout)
+                                   if _child.returncode == 0 and _child.stdout else (None, None))
+        check("relative-root-resolves", _rel_status == RESOLVED)
+        check("relative-root-matches-abs",
+              _rel_store is not None and _rel_store == str(abs_res.store_root))
+
+        # ITEM C (ambient-cwd crash): a RELATIVE product root reaches os.path.abspath, whose os.getcwd()
+        # raises when the process cwd is deleted or unreadable. resolve_store must MAP that to
+        # CANNOT-EVALUATE (its no-raise contract), never let the OSError escape uncaught. Simulate the
+        # unreadable cwd by making os.getcwd raise; the pre-abspath exists()/is_dir() gates use os.stat(".")
+        # (which does NOT consult getcwd) so they still pass and the abspath path is reached. _guard'd so a
+        # reverted fix (the OSError escaping) is a NAMED counted failure, not a traceback that aborts the
+        # suite; still passes only on CANNOT-EVALUATE (no weakened detection). getcwd restored in finally.
+        _real_getcwd = os.getcwd
+        os.getcwd = lambda: (_ for _ in ()).throw(FileNotFoundError(2, "No such file or directory"))
         try:
-            os.chdir(str(base))
-            rel_res = resolve_store(Path(rel_prod.name))       # a cwd-relative product root
+            check("itemC-abspath-cwd-unreadable-cannot-eval",
+                  _guard(lambda: resolve_store(".").status) == CANNOT_EVALUATE)
         finally:
-            os.chdir(prev_cwd)
-        check("relative-root-resolves", rel_res.status == RESOLVED)
-        check("relative-root-matches-abs", rel_res.store_root == abs_res.store_root)
+            os.getcwd = _real_getcwd
+        # ---- reconcile-draft fix vectors (fail pre-fix, pass post-fix) --------------------------------
+        # M1: an oddly-named .working subdir (_check_rel refuses a backslash) -> CANNOT-EVALUATE, never an
+        # uncaught JournalError out of resolve_store.
+        _m1subs = dict()
+        _m1subs[DEFAULT_MACHINE_SUBDIR] = manifest_text()
+        _m1subs["bad" + chr(92) + "name"] = manifest_text()
+        m1_root = build_store(machine_subdirs=_m1subs)
+        check("m1-oddly-named-subdir-cannot-eval", resolve_store(m1_root).status == CANNOT_EVALUATE)
+
+        # S1.3: a listing I/O error inside .working fails closed, never read as an empty (no-store) dir.
+        s13_root = build_store(manifest=manifest_text())
+        _real_listdir = os.listdir
+        os.listdir = (lambda x: (_ for _ in ()).throw(OSError(5, "EIO"))
+                      if isinstance(x, int) else _real_listdir(x))
+        try:
+            check("s13-listdir-io-error-cannot-eval", resolve_store(s13_root).status == CANNOT_EVALUATE)
+        finally:
+            os.listdir = _real_listdir
+
+        # S2.2: a non-ASCII x-<vendor> slug is not a valid extension namespace (islower()/isdigit() admit
+        # non-ASCII; the ASCII alphabet does not).
+        check("s22-ascii-vendor-ok", _valid_extension_namespace("x-acme1"))
+        check("s22-unicode-vendor-rejected", not _valid_extension_namespace("x-" + chr(0xe9)))
+        check("s22-unicode-digit-vendor-rejected", not _valid_extension_namespace("x-" + chr(0xb2)))
+
+        # S2.3: a NEGATIVE supported major is malformed -> CANNOT-EVALUATE, never silently routing a covered
+        # (weakening) profile to unevaluated and validating VALID.
+        m_weak2 = _t.loads(manifest_text(with_aiqt=True, aiqt_floor="warn"))
+        _neg = dict(); _neg["aiqt"] = [-1]
+        check("s23-negative-major-cannot-eval",
+              validate_manifest(m_weak2, supported_profiles=_neg).status == CANNOT_EVALUATE)
+
+        # S2.4/S2.5: an unbounded/exploding majors control (huge range, throwing iterator) is cut off or
+        # caught at the materialization boundary -> CANNOT-EVALUATE, never an eager alloc/hang/escape.
+        _hr = dict(); _hr["aiqt"] = range(10 ** 12)
+        check("s24-huge-range-cannot-eval",
+              validate_manifest(m_weak2, supported_profiles=_hr).status == CANNOT_EVALUATE)
+        def _one_then_raise():
+            yield 1
+            raise OSError("boom")
+        _thr = dict(); _thr["aiqt"] = _one_then_raise()
+        check("s25-throwing-iterator-cannot-eval",
+              validate_manifest(m_weak2, supported_profiles=_thr).status == CANNOT_EVALUATE)
+
+        # m3: an oversized-int table key renders through _safe_display rather than crashing the validator
+        # (including inside the fail-closed supported_profiles branch).
+        _big = 10 ** 5000
+        _spk = dict(); _spk[_big] = [1]
+        check("m3-oversized-sp-key-cannot-eval",
+              validate_manifest(_t.loads(manifest_text()), supported_profiles=_spk).status == CANNOT_EVALUATE)
+        _md = _t.loads(manifest_text()); _tk = dict(); _tk[_big] = dict(namespace="BI"); _md["types"] = _tk
+        check("m3-oversized-types-key-invalid", validate_manifest(_md).status == INVALID)
+
+        # m4: a target/path resolving AT the root (".", "a/..") is not contained-below; a genuine contained
+        # path is still accepted.
+        check("m4-at-root-dot-rejected", not _is_contained_relpath("."))
+        check("m4-at-root-dotdot-rejected", not _is_contained_relpath("a/.."))
+        check("m4-contained-still-ok",
+              _is_contained_relpath("a/../b") and _is_contained_relpath("docs/x.md"))
+
+        # m5: a '//'-anchored absolute path is accepted as a root spelling, not falsely rejected. The probe
+        # runs INSIDE the check via _guard: with the fix reverted _open_dir_nofollow("//") raises, which now
+        # yields a NAMED counted failure rather than aborting the suite with an uncaught traceback (MINOR-3).
+        def _double_slash_root_opens():
+            _fd = _open_dir_nofollow("//")
+            os.close(_fd)
+            return "opened"
+        check("m5-double-slash-root-accepted", _guard(_double_slash_root_opens) == "opened")
+
+        # S1.4 (defence in depth): a NUL-bearing pointer target fails closed as OSError, honouring
+        # _open_dir_nofollow's documented OSError contract rather than raising an unmapped ValueError.
+        _kind = None
+        try:
+            _open_dir_nofollow("/tmp/a" + chr(0) + "b")
+        except OSError:
+            _kind = "OSError"
+        except ValueError:
+            _kind = "ValueError"
+        check("s14-nul-target-oserror", _kind == "OSError")
+
+        # m8: a store file larger than the read cap is refused rather than read unboundedly.
+        big_manifest = manifest_text() + chr(10) + "#" + ("x" * (MAX_STORE_READ_BYTES + 16))
+        m8_root = build_store(manifest=big_manifest)
+        check("m8-oversized-manifest-cannot-eval", resolve_store(m8_root).status == CANNOT_EVALUATE)
+
+        # ---- round-2 reconcile-draft fix vectors (fail pre-fix, pass post-fix) ------------------------
+        # The FIFO-hang alarm marker MUST NOT derive from OSError: a reader's own `except OSError`
+        # (read_frames, read_lock_owner, _read_contained) would launder an OSError-derived marker such as
+        # TimeoutError into a JournalError, so a genuine writer-less-FIFO hang would read as a refusal and the
+        # check would pass while blocking. A distinct non-OSError marker propagates out of the reader instead,
+        # so a hang is a check FAILURE, never a silent slow pass (self-test-discrimination).
+        import signal as _signal
+
+        class _HangMarker(Exception):
+            pass
+
+        import time as _time
+
+        def _refused_no_hang(thunk):
+            """True when thunk() fails closed with a JournalError inside a 2s alarm; False when it HANGS (the
+            marker fires) so a writer-less-FIFO blocking-open regression is a check failure, not a hung suite.
+            Test-hermeticity: snapshot the caller's SIGALRM disposition and signal mask, and snapshot its
+            ITIMER_REAL + pending state through the SHARED snapshot_caller_alarm helper; RESTORE all of them
+            in the finally (disposition and mask directly, the timer + any pending SIGALRM through the shared
+            restore_caller_alarm helper: the timer elapsed-aware with its interval, a caller deadline already
+            passed re-armed to fire at once never silently dropped, and a caller SIGALRM that was pending
+            re-posted). SIGALRM is UNBLOCKED for the probe so the watchdog fires even if the caller had it
+            blocked, then the exact caller mask is restored, so this probe never cancels a caller's running
+            timer, unblocks its SIGALRM, nor destroys its pending alarm."""
+            _prev = _signal.getsignal(_signal.SIGALRM)           # capture WITHOUT installing yet (F2)
+            _have_mask = hasattr(_signal, "pthread_sigmask")
+            _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
+            _alarm_snap = snapshot_caller_alarm()                # ITIMER value/interval + pending (shared helper)
+            # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
+            # finally restores the caller's mask, disposition, and timer even if a signal fires during setup.
+            # An ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would
+            # otherwise be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the
+            # try/finally, would raise _HangMarker out of the probe uncaught AND leave the caller's mask
+            # corrupted (SIGALRM unblocked). Any inherited pending SIGALRM is first DISCARDED under SIG_IGN
+            # (POSIX: setting SIG_IGN discards a pending signal whether or not it is blocked) so it cannot
+            # fire the marker handler spuriously and read as a false hang; the shared restore_caller_alarm
+            # RE-POSTS it on exit (round-15 F2) so the caller's pending alarm is preserved, not destroyed.
+            try:
+                _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)  # discard any inherited pending SIGALRM
+                _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(_HangMarker()))
+                if _have_mask:
+                    _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
+                _signal.setitimer(_signal.ITIMER_REAL, 2.0)
+                try:
+                    thunk()
+                    return False
+                except _journal.JournalError:
+                    return True
+                except _HangMarker:
+                    return False
+            finally:
+                _signal.setitimer(_signal.ITIMER_REAL, 0)
+                _signal.signal(_signal.SIGALRM, _prev)
+                if _have_mask:
+                    _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
+                restore_caller_alarm(*_alarm_snap)        # shared elapsed-aware timer + pending restore
+
+        # M2: _read_contained does not hang on a writer-less FIFO (the raced regular-file->FIFO swap); it
+        # returns a fail-closed JournalError at once. The non-OSError marker makes a blocking regression a
+        # check failure (the earlier TimeoutError marker, an OSError subclass, was laundered to JournalError
+        # by _read_contained's own `except OSError` and so passed even while blocking).
+        _fd_dir = base / "m2-fifo"; _fd_dir.mkdir()
+        os.mkfifo(str(_fd_dir / "f"))
+        _rfd = os.open(str(_fd_dir), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            check("m2-fifo-no-hang-refused",
+                  _refused_no_hang(lambda: _journal._read_contained(_rfd, "f")))
+        finally:
+            os.close(_rfd)
+
+        # NEW-2: the FIFO-hang class survived at three sibling _journal readers (read_frames, read_lock_owner,
+        # _read_at); each now opens O_NONBLOCK so a writer-less FIFO is refused at the fstat gate at once,
+        # never a hang. A hostile on-disk tree can pre-plant these paths.
+        _rf_dir = base / "n2-read-frames"; _rf_dir.mkdir()
+        os.mkfifo(str(_rf_dir / "frames.log"))
+        _rf_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            check("new2-read-frames-fifo-no-hang",
+                  _refused_no_hang(lambda: _journal.read_frames(_rf_jr, _rf_dir)))
+        finally:
+            os.close(_rf_jr)
+        _rl_dir = base / "n2-read-lock-owner"; _rl_dir.mkdir()
+        os.mkfifo(str(_rl_dir / "lock"))
+        check("new2-read-lock-owner-fifo-no-hang", _refused_no_hang(lambda: _journal.read_lock_owner(_rl_dir)))
+        _ra_dir = base / "n2-read-at"; _ra_dir.mkdir()
+        os.mkfifo(str(_ra_dir / "f"))
+        _rafd = os.open(str(_ra_dir), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            check("new2-read-at-fifo-no-hang", _refused_no_hang(lambda: _journal._read_at(_rafd, "f", "f")))
+        finally:
+            os.close(_rafd)
+
+        # NEW-1: a hostile store file with an oversized BASE-10 integer literal makes tomllib raise a bare
+        # ValueError (not TOMLDecodeError); it maps to a fail-closed StoreError -> CANNOT-EVALUATE, never an
+        # uncaught crash out of resolve_store.
+        n1_root = build_store(manifest="[devprocess]\nbig = " + "9" * 5000 + "\n")
+        # MINOR-3: run the probe INSIDE _guard so a reverted fix (resolve_store no longer mapping the bare
+        # ValueError from tomllib's int() to CANNOT-EVALUATE) yields a NAMED counted failure, not an uncaught
+        # traceback that aborts the suite. Still passes only on CANNOT-EVALUATE (no weakened detection).
+        check("new1-oversized-int-literal-cannot-eval",
+              _guard(lambda: resolve_store(n1_root).status) == CANNOT_EVALUATE)
+
+        # NEW-3: an OSError from _read_contained (e.g. a post-open fstat EIO) maps to a fail-closed StoreError
+        # -> CANNOT-EVALUATE, never an uncaught OSError out of resolve_store.
+        n3_root = build_store(manifest=manifest_text())
+        _real_rc = _journal._read_contained
+        def _rc_oserror(_rfd_arg, _rel_arg, **_kw):
+            raise OSError(5, "injected EIO on read")
+        _journal._read_contained = _rc_oserror
+        try:
+            # MINOR-3: _guard the probe so a reverted fix (resolve_store catching only JournalError, letting
+            # the injected OSError escape) is a NAMED counted failure, not an uncaught traceback aborting the
+            # suite. Still passes only on CANNOT-EVALUATE (no weakened detection).
+            check("new3-read-oserror-cannot-eval",
+                  _guard(lambda: resolve_store(n3_root).status) == CANNOT_EVALUATE)
+        finally:
+            _journal._read_contained = _real_rc
+
+        # NEW-4: an oversized-int key rendered into a finding message no longer crashes the validator: the
+        # unknown-key idiom (_sorted_key_names) and the duplicate-namespace message both render through
+        # _safe_str. TOML keys are always strings, so these reach the validator only from a hand-built control
+        # dict (an injected-boundary hardening).
+        _n4a = _t.loads(manifest_text()); _n4a[10 ** 5000] = dict(x=1)
+        check("new4-oversized-toplevel-key-invalid", validate_manifest(_n4a).status == INVALID)
+        _n4b = _t.loads(manifest_text())
+        _n4tk = dict(); _n4tk[10 ** 5000] = dict(namespace="BI"); _n4tk["backlog_item"] = dict(namespace="BI")
+        _n4b["types"] = _n4tk
+        check("new4-oversized-dup-ns-key-invalid", validate_manifest(_n4b).status == INVALID)
+
+        # ROUND-6 codex: _safe_str (and _sorted_key_names, which renders each key through it) must ESCAPE
+        # control characters so an untrusted key/value cannot forge a second diagnostic line ('x\nFORGED');
+        # a printable value stays byte-for-byte. Pre-fix _safe_str returned str(value) verbatim and leaked
+        # the literal newline. (_safe_display already escapes via repr(); this is its str()-based sibling.)
+        _r6s = _safe_str("x" + chr(10) + "FORGED")
+        check("r6-safe-str-escapes-newline", chr(10) not in _r6s and "\\x0a" in _r6s)
+        check("r6-safe-str-printable-unchanged", _safe_str("1.2.3") == "1.2.3" and _safe_str(41) == "41")
+        _r6z = _safe_str("a" + chr(0x200b) + "b")
+        check("r6-safe-str-escapes-zero-width", chr(0x200b) not in _r6z and "\\u200b" in _r6z)
+        # _sorted_key_names renders each key through _safe_str (return sorted(_safe_str(k) for k in keys)),
+        # so the escaping above holds for the unknown-key idiom by construction; asserting _safe_str is the
+        # class-root check (a direct _sorted_key_names call here is deliberately avoided so the opf-fuzz
+        # call-site coverage scan does not count a self-test-only site the fuzz tracer never exercises).
+        check("r6-safe-str-controls-composed",
+              all(chr(10) not in _safe_str(k) for k in ("a" + chr(10) + "b", "plain")))
+
+        # NEW-5: the store-read cap is enforced on the bytes ACTUALLY read, not only the pre-open lstat, so a
+        # file reporting a small size at lstat but reading over the cap (a raced swap) is refused. The lstat is
+        # pinned small while the real file is over-cap.
+        n5_root = build_store(manifest=manifest_text() + "\n#" + "x" * (MAX_STORE_READ_BYTES + 16))
+        _real_lstat = _journal._lstat_contained
+        def _small_lstat(_rfd_arg, _rel_arg):
+            _stv = _real_lstat(_rfd_arg, _rel_arg)
+            if _stv is not None and stat.S_ISREG(_stv.st_mode):
+                _f = list(_stv); _f[stat.ST_SIZE] = 1
+                return os.stat_result(_f)
+            return _stv
+        _journal._lstat_contained = _small_lstat
+        try:
+            check("new5-toctou-oversized-read-cannot-eval", resolve_store(n5_root).status == CANNOT_EVALUATE)
+        finally:
+            _journal._lstat_contained = _real_lstat
+
+        # ---- MINOR-1: journal-reader memory bound (fail pre-fix, pass post-fix) ------------------------
+        # The journal CONTROL readers (read_frames, read_lock_owner) cap how much they read, so a pre-planted
+        # oversize journal file is refused fail-closed rather than slurped whole into memory. Discriminated
+        # with the cap monkeypatched SMALL so the vector stays fast and deterministic: a WELL-FORMED control
+        # file LARGER than the (patched) cap must be refused (JournalError) at the size gate, whereas with the
+        # cap logic reverted each reader would read and parse it normally (no refusal). Restored in a finally.
+        _m1_frames = base / "minor1-frames"; _m1_frames.mkdir()
+        (_m1_frames / "frames.log").write_bytes(_journal._frame(_journal.F_INTENT, b'{"txn":"t","ops":[]}'))
+        _m1_lock = base / "minor1-lock"; _m1_lock.mkdir()
+        (_m1_lock / "lock").write_bytes(b'{"uid": 0, "pid": 1, "pid-start": "", "session": "s", "utc": "u"}')
+        _real_jcap = _journal._MAX_JOURNAL_READ_BYTES
+        _journal._MAX_JOURNAL_READ_BYTES = 8        # below either well-formed control file; above 0
+        _m1_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            check("minor1-read-frames-oversize-refused",
+                  _guard(lambda: (_journal.read_frames(_m1_jr, _m1_frames), "read")[1]) == "RAISED")
+            check("minor1-read-lock-owner-oversize-refused",
+                  _guard(lambda: (_journal.read_lock_owner(_m1_lock), "read")[1]) == "RAISED")
+        finally:
+            _journal._MAX_JOURNAL_READ_BYTES = _real_jcap
+            os.close(_m1_jr)
+
+        # ---- ITEM A: product-file read ceiling (fail pre-fix, pass post-fix) ---------------------------
+        # _read_contained / _read_at carry a HARD INCREMENTAL ceiling so a product file GROWN or swapped past
+        # a caller's pre-open st.st_size (the store/changelog racing-grow residual) is refused fail-closed AT
+        # the ceiling rather than slurped whole into memory, while a normal-size file reads unchanged.
+        # Discriminated with the ceiling monkeypatched SMALL: a file LARGER than the (patched) ceiling must be
+        # refused (JournalError) by BOTH readers, whereas with the cap reverted (cap=None) each would read it
+        # whole (no refusal); an UNDER-ceiling file still reads through. Restored in a finally.
+        _pa_dir = base / "itemA-product"; _pa_dir.mkdir()
+        (_pa_dir / "big").write_bytes(b"x" * 4096)
+        (_pa_dir / "small").write_bytes(b"ok")
+        _pa_fd = os.open(str(_pa_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _pa_pfd = os.open(str(_pa_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _real_pcap = _journal._MAX_PRODUCT_READ_BYTES
+        _journal._MAX_PRODUCT_READ_BYTES = 8        # below the 4096-byte file; above the 2-byte file
+        try:
+            check("itemA-read-contained-oversize-refused",
+                  _guard(lambda: (_journal._read_contained(_pa_fd, "big"), "read")[1]) == "RAISED")
+            check("itemA-read-at-oversize-refused",
+                  _guard(lambda: (_journal._read_at(_pa_pfd, "big", "big"), "read")[1]) == "RAISED")
+            check("itemA-read-contained-under-ceiling-ok",
+                  _guard(lambda: _journal._read_contained(_pa_fd, "small")[0]) == b"ok")
+        finally:
+            _journal._MAX_PRODUCT_READ_BYTES = _real_pcap
+            os.close(_pa_fd)
+            os.close(_pa_pfd)
+
+        # ---- MINOR-2: symlink-race containment (fail pre-fix, pass post-fix) ---------------------------
+        # publish and _truncate_log open frames.log CONTAINED (O_NOFOLLOW + dir-fd relative), so a symlinked
+        # frames.log cannot redirect the append/ftruncate onto a victim file. Pre-fix each followed a
+        # re-resolved absolute path and would mutate the victim (publish appends, _truncate_log truncates it
+        # to 0); post-fix each fails closed (JournalError) and leaves the victim byte-for-byte intact. Both a
+        # refusal check and a victim-intact check discriminate.
+        _victim = base / "minor2-victim"
+        _victim.write_bytes(b"VICTIM-INTACT")
+        _m2_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            _m2_pub = base / "minor2-publish"; _m2_pub.mkdir()
+            os.symlink(str(_victim), str(_m2_pub / "frames.log"))
+            check("minor2-publish-symlink-refused",
+                  _guard(lambda: _journal.publish(_m2_jr, _m2_pub, _journal.F_INTENT,
+                                                  {"txn": "t", "ops": []})) == "RAISED")
+            check("minor2-publish-victim-intact", _victim.read_bytes() == b"VICTIM-INTACT")
+            _m2_tr = base / "minor2-truncate"; _m2_tr.mkdir()
+            os.symlink(str(_victim), str(_m2_tr / "frames.log"))
+            check("minor2-truncate-symlink-refused",
+                  _guard(lambda: _journal._truncate_log(_m2_jr, _m2_tr, 0)) == "RAISED")
+            check("minor2-truncate-victim-intact", _victim.read_bytes() == b"VICTIM-INTACT")
+        finally:
+            os.close(_m2_jr)
+
+        # ---- F1: an ANCESTOR symlink on the txn dir's path fails closed (fail pre-fix, pass post-fix) ----
+        # publish/read_frames/_truncate_log now reach the txn dir by a dir-fd-relative O_NOFOLLOW open
+        # BENEATH a journal-root fd that is itself reached by a CONTAINED per-component no-follow walk from
+        # the repo root (open_journal_root_fd). So a symlinked ANCESTOR component of the journal path is
+        # refused fail-closed. Pre-fix each opened the txn dir by its ABSOLUTE path with O_NOFOLLOW guarding
+        # only the FINAL txn component, so a symlinked journal-root ancestor was FOLLOWED and the frame op
+        # escaped off-tree. Discriminated by planting a symlinked journal-root component: the contained walk
+        # refuses it (ELOOP -> JournalError), where the reverted absolute-path open would have followed it.
+        _f1root = base / "f1-ancestor"; _f1root.mkdir()
+        (_f1root / "realj" / "txn").mkdir(parents=True)
+        (_f1root / "realj" / "txn" / "frames.log").write_bytes(
+            _journal._frame(_journal.F_INTENT, b'{"txn":"t","ops":[]}'))
+        os.symlink("realj", str(_f1root / "jdir"))          # jdir -> realj: a symlinked journal-root ancestor
+        _f1_rootfd = os.open(str(_f1root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            # positive control: through the REAL journal root, the txn journal reads normally.
+            _f1_realjr = _journal.open_journal_root_fd(_f1_rootfd, "realj")
+            try:
+                _f1_frames, _f1_torn, _f1_len = _journal.read_frames(_f1_realjr, _f1root / "realj" / "txn")
+                check("f1-ancestor-real-path-reads", [t for t, _ in _f1_frames] == [_journal.F_INTENT])
+            finally:
+                os.close(_f1_realjr)
+            # the symlinked ancestor 'jdir' is refused by the contained walk (this FAILS if the walk is
+            # reverted to a symlink-following absolute-path open of the journal root).
+            check("f1-ancestor-symlink-refused",
+                  _guard(lambda: _journal.open_journal_root_fd(_f1_rootfd, "jdir")) == "RAISED")
+
+            # capture_preimages leg: it reaches the txn dir and writes/fsyncs its preimages CONTAINED
+            # beneath the trusted parent_fd, using only Path(txn_dir).name, so an ANCESTOR symlink on the
+            # txn_dir path is IGNORED and the store lands under the real txn (parent_fd tree). Pre-fix it
+            # built `pre = txn_dir/"preimages"` and `_fsync_path_dir(txn_dir)` by ABSOLUTE path, following an
+            # ancestor symlink onto a DECOY off-tree. Discriminated by pointing txn_dir's absolute route
+            # through a symlink to a decoy: post-fix the preimage lands under the real txn and the decoy
+            # stays empty; a body reverted to the absolute-path store would write into the decoy instead.
+            (_f1root / "data.txt").write_bytes(b"F1-CAPTURE-PAYLOAD")
+            (_f1root / "realj" / "capt").mkdir()            # the REAL txn dir, beneath the real journal root
+            (_f1root / "decoy" / "capt").mkdir(parents=True)  # a decoy the ancestor symlink resolves onto
+            os.symlink("decoy", str(_f1root / "caplink"))   # caplink -> decoy: an ANCESTOR symlink on the txn path
+            _f1_capjr = os.open(str(_f1root / "realj"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                _journal.capture_preimages(
+                    _f1_capjr, _f1root / "caplink" / "capt", _f1_rootfd, [{"op": "remove", "path": "data.txt"}])
+            finally:
+                os.close(_f1_capjr)
+            check("f1-capture-preimage-contained-under-real-txn",
+                  (_f1root / "realj" / "capt" / "preimages" / "0").is_file())
+            check("f1-capture-preimage-not-under-ancestor-symlink-decoy",
+                  not (_f1root / "decoy" / "capt" / "preimages").exists())
+        finally:
+            os.close(_f1_rootfd)
+
+        # ---- F-R17-A1: a store CONTROL file hardlinked to an out-of-tree victim is refused ----------------
+        # A manifest or pointer hardlinked to an external file passes O_NOFOLLOW and S_ISREG, so without the
+        # opened-fd nlink==1 guard its resolved posture would track the victim inode. The manifest case masks
+        # _lstat_contained to report a single link, proving the decision uses the OPENED fd, not the pre-open
+        # lstat probe. A GENERIC product read keeps an intentional hardlink (the guard is opt-in, off by
+        # default), so nlink==2 product reads are not over-restricted.
+        a1_root = build_store(manifest=manifest_text())
+        check("a1-precondition-resolved", resolve_store(a1_root).status == RESOLVED)
+        a1_manifest = a1_root / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME
+        a1_victim = base / "a1-manifest-victim.toml"
+        a1_victim.write_text(manifest_text(), encoding="utf-8")
+        a1_manifest.unlink()
+        os.link(str(a1_victim), str(a1_manifest))              # manifest now nlink == 2
+        _a1_real_lstat = _journal._lstat_contained
+
+        def _a1_masked_lstat(root_fd, relpath):
+            st = _a1_real_lstat(root_fd, relpath)
+            if st is None or not relpath.endswith(MANIFEST_NAME):
+                return st
+            fields = list(st)
+            fields[stat.ST_NLINK] = 1                          # hide the extra link from the pre-open probe
+            return os.stat_result(fields)
+
+        _journal._lstat_contained = _a1_masked_lstat
+        try:
+            a1_manifest_result = load_manifest(resolve_store(a1_root))
+        finally:
+            _journal._lstat_contained = _a1_real_lstat
+        check("a1-hardlinked-manifest-cannot-eval",
+              a1_manifest_result.status == CANNOT_EVALUATE)
+
+        # a hardlinked COMMITTED pointer is refused during resolution
+        a1_pstore = base / "a1-pointer-store"
+        (a1_pstore / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR).mkdir(parents=True)
+        (a1_pstore / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME).write_text(
+            manifest_text(), encoding="utf-8")
+        a1_pr = build_store(make_working=False)
+        a1_pvictim = base / "a1-pointer-victim.toml"
+        a1_pvictim.write_text('[store]\ntarget = "dir:{}"\n'.format(a1_pstore), encoding="utf-8")
+        os.link(str(a1_pvictim), str(a1_pr / POINTER_REL))     # committed pointer now nlink == 2
+        check("a1-hardlinked-committed-pointer-cannot-eval",
+              resolve_store(a1_pr).status == CANNOT_EVALUATE)
+
+        # a hardlinked LOCAL pointer is refused during resolution
+        a1_lpr = build_store(make_working=False)
+        a1_lpvictim = base / "a1-local-pointer-victim.toml"
+        a1_lpvictim.write_text('[store]\ntarget = "dir:{}"\n'.format(a1_pstore), encoding="utf-8")
+        os.link(str(a1_lpvictim), str(a1_lpr / LOCAL_POINTER_REL))   # local pointer now nlink == 2
+        check("a1-hardlinked-local-pointer-cannot-eval",
+              resolve_store(a1_lpr).status == CANNOT_EVALUATE)
+
+        # a GENERIC product hardlink read is NOT over-restricted (the guard is opt-in, off by default)
+        a1_generic = base / "a1-generic-root"
+        a1_generic.mkdir()
+        a1_gvictim = base / "a1-generic-victim"
+        a1_gvictim.write_bytes(b"intentional product hardlink")
+        os.link(str(a1_gvictim), str(a1_generic / "product-data"))
+        a1_gfd = os.open(str(a1_generic), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            a1_gdata, a1_gst = _journal._read_contained(a1_gfd, "product-data")
+        finally:
+            os.close(a1_gfd)
+        check("a1-generic-product-hardlink-allowed",
+              a1_gdata == b"intentional product hardlink" and a1_gst.st_nlink == 2)
+
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

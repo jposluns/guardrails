@@ -97,11 +97,17 @@ REGEN_COMMAND = "opf render"
 # CLI runs check-only meanwhile. This is not a fabricated gate; it is a refusal pending the real one.
 _WRITE_GATE_COMPOSED = False
 
+# The mode installed on a NEWLY-created view/deliverable file. An EXISTING target's own mode is preserved
+# across the atomic replace instead (a restrictive mode is never widened); this default applies only when
+# the target did not previously exist.
+_VIEW_FILE_MODE = 0o644
+
 WORKING_DIRNAME = _opf_store.WORKING_DIRNAME     # ".working": public targets sit OUTSIDE it, at product root
 
 # The baseline record types (spec 8.1), with worklog and version resolved to their ledger files rather
 # than a `<type>.index.toml` (spec 4.2). A view source name maps to exactly one store file through this.
 BASELINE_TYPES = tuple(_opf_schema.BASELINE_SPECS)   # the nine baseline type names
+_LEDGER_SOURCES = frozenset(("worklog", "version"))  # read their own files, no <type>.index.toml to mirror
 
 
 class ViewsError(Exception):
@@ -132,13 +138,29 @@ def _read_raw_and_parsed(store_root_fd, relpath):
     """Read a declared source file's raw bytes AND its parsed table through a no-follow fd. Returns
     (raw_bytes, parsed_dict), or None when the file is ABSENT. ViewsError (a cannot-evaluate) on an
     unreadable file, a refused symlink, or a parse error: a present-but-unreadable declared source is a
-    failure, never an empty pass (the check-fails-closed-on-unreadable rule)."""
-    st = _journal._lstat_contained(store_root_fd, relpath)
+    failure, never an empty pass (the check-fails-closed-on-unreadable rule).
+    Disclosed residual (disclose-guard-residuals): _journal._read_contained opens the file no-follow with
+    O_NONBLOCK and re-confirms S_ISREG on the OPENED fd, so a live writer that swaps the regular file for a
+    FIFO between the lstat here and that open does NOT block: the non-blocking open returns at once and the
+    fstat gate refuses the non-regular object (fail-closed). The narrower residual is a swap to a DIFFERENT
+    regular file in that window, whose bytes would then be read and validated as TOML and schema-checked;
+    this is a concurrent-writer race beyond static on-disk store content, named here rather than left implied."""
+    try:
+        st = _journal._lstat_contained(store_root_fd, relpath)
+    except (_journal.JournalError, OSError) as exc:
+        # OSError (not only JournalError): _open_parent's terminal os.dup(root_fd) is UNWRAPPED, so a bad
+        # store_root_fd (EBADF) or fd exhaustion (EMFILE) raises a raw OSError that _lstat_contained does not
+        # convert. Map it here (with the JournalError symlink/read-error case) to a ViewsError cannot-evaluate,
+        # so an unreadable declared source never escapes as an uncaught OSError (check-fails-closed-on-unreadable).
+        raise ViewsError("cannot stat {} ({})".format(relpath, exc))
     if st is None:
         return None
+    if not stat.S_ISREG(st.st_mode):
+        raise ViewsError("{} is present but is not a regular file (a FIFO, device, socket, or directory; "
+                         "fail-closed, never opened)".format(relpath))
     try:
         raw, _ = _journal._read_contained(store_root_fd, relpath)
-    except _journal.JournalError as exc:
+    except (_journal.JournalError, OSError) as exc:        # OSError caught for parity with the lstat path above
         raise ViewsError("cannot read {} ({})".format(relpath, exc))
     try:
         return raw, tomllib.loads(raw.decode("utf-8"))
@@ -165,9 +187,11 @@ def _load_records(store_root_fd, relpath, type_name, registered_vendors, registe
     extra = set(data) - {"schema", "record"}
     if extra:
         raise ViewsError("{} has unknown top-level key(s): {}".format(relpath, ", ".join(sorted(extra))))
-    if "schema" in data and data.get("schema") != SCHEMA_VERSION:
-        raise ViewsError("{} schema {!r} is not the supported schema {} (fail-closed)".format(
-            relpath, data.get("schema"), SCHEMA_VERSION))
+    schema = data.get("schema")
+    if "schema" not in data or type(schema) is not int or schema != SCHEMA_VERSION:
+        raise ViewsError("{} schema {!r} is not an integer equal to the supported schema {} (a present "
+                         "index must carry an exact integer schema marker; fail-closed)".format(
+                             relpath, schema, SCHEMA_VERSION))
     records = data.get("record", [])
     if not isinstance(records, list):
         raise ViewsError("{}: [[record]] is not an array of tables".format(relpath))
@@ -184,7 +208,12 @@ def _load_records(store_root_fd, relpath, type_name, registered_vendors, registe
 
 
 def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds):
-    """Load and validate worklog.toml (spec 6.2); return (raw_bytes, [entry, ...]) in file order."""
+    """Load and validate worklog.toml (spec 6.2); return (raw_bytes, [entry, ...]) in file order.
+    Disclosed divergence (disclose-guard-residuals): unlike the index schema marker, which
+    _load_records pins MANDATORY and exact, the ledger schema marker follows U3 optional-marker
+    contract: _opf_release.validate_worklog type-pins a PRESENT marker (a non-integer or unsupported
+    version is refused) but PERMITS an absent one. A schema-less ledger authored for another schema
+    version is not caught here; grading an unsupported-schema-version ledger is U3/U6 remit (F2)."""
     got = _read_raw_and_parsed(store_root_fd, relpath)
     if got is None:
         raise ViewsError("declared source {} is missing (the worklog ledger must exist)".format(relpath))
@@ -197,7 +226,11 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds):
 
 
 def _load_version(store_root_fd, relpath):
-    """Load and validate version.toml (spec 6.1); return (raw_bytes, releases, summaries) in file order."""
+    """Load and validate version.toml (spec 6.1); return (raw_bytes, releases, summaries) in file order.
+    Disclosed divergence (disclose-guard-residuals): the version ledger schema marker follows U3
+    optional-marker contract, as _load_worklog documents: validate_version type-pins a PRESENT marker
+    but permits an absent one, diverging from the index MANDATORY pin. An unsupported-schema-version
+    ledger that omits the marker is routed to U3/U6, not caught here."""
     got = _read_raw_and_parsed(store_root_fd, relpath)
     if got is None:
         raise ViewsError("declared source {} is missing (the version ledger must exist)".format(relpath))
@@ -386,9 +419,12 @@ def join_actionability(items, blocks):
     blocked_by = {}
     for b in blocks:
         if _state(b) == "active" and not _is_proposed(b):
+            bid = b.get("id")
+            if not isinstance(bid, str):
+                continue
             for sid in b.get("scopes", []) or []:
                 if isinstance(sid, str):
-                    blocked_by.setdefault(sid, []).append(b.get("id"))
+                    blocked_by.setdefault(sid, []).append(bid)
     for sid in blocked_by:
         blocked_by[sid] = _sorted_ids(blocked_by[sid])   # dedup + numeric id order (BL-2 before BL-10, MAJOR-1)
     return blocked_by, set(blocked_by)
@@ -677,7 +713,7 @@ def render_todo(src):
     _blocked_by, hidden = join_actionability(items, blocks)
     actionable = t_filter(items, "is_actionable", hidden=hidden)
     ordered = t_sort(actionable, keys=("status",))
-    lines = ["- {} ({}) {}".format(_md_text(r["id"]), _md_text(_state(r)), _md_text(r.get("title", "")))
+    lines = ["- {} ({}) {}".format(_md_text(r.get("id")), _md_text(_state(r)), _md_text(r.get("title", "")))
              for r in ordered]
     return _lines("TODO", lines)
 
@@ -690,10 +726,10 @@ def render_backlog(src):
     lines = []
     for r in t_sort(items):
         note = "actionable" if is_actionable(r, hidden) else (
-            "blocked by {}".format(", ".join(_md_text(b) for b in blocked_by[r["id"]])) if r.get("id") in hidden
+            "blocked by {}".format(", ".join(_md_text(b) for b in blocked_by[r.get("id")])) if r.get("id") in hidden
             else "not actionable ({})".format(_md_text(_state(r))))
         lines.append("- {} ({}) {} -- {}".format(
-            _md_text(r["id"]), _md_text(r.get("status", "")), _md_text(r.get("title", "")), note))
+            _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", "")), note))
     return _lines("BACKLOG", lines)
 
 
@@ -708,7 +744,7 @@ def render_pipeline(src):
     blocked_by, hidden = join_actionability(items, blocks)
 
     def _marker(r):
-        return " [blocked by {}]".format(", ".join(_md_text(b) for b in blocked_by[r["id"]])) \
+        return " [blocked by {}]".format(", ".join(_md_text(b) for b in blocked_by[r.get("id")])) \
             if r.get("id") in hidden else ""
 
     out = []
@@ -716,14 +752,14 @@ def render_pipeline(src):
                                 order=("open", "active", "done", "dropped")):
         out.append("## {}".format(_md_text(state)))
         for r in group:
-            out.append("- {} {}{}".format(_md_text(r["id"]), _md_text(r.get("title", "")), _marker(r)))
+            out.append("- {} {}{}".format(_md_text(r.get("id")), _md_text(r.get("title", "")), _marker(r)))
         out.append("")
     proposed = t_sort(t_filter(items, "is_proposed"))
     if proposed:
         out.append("## awaiting ratification")
         for r in proposed:
             out.append("- {} ({}) {}{}".format(
-                _md_text(r["id"]), _md_text(r.get("status", "")), _md_text(r.get("title", "")), _marker(r)))
+                _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", "")), _marker(r)))
         out.append("")
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
     return "# {}\n\n{}\n".format("PIPELINE", body)
@@ -736,7 +772,7 @@ def render_done(src):
     for r in t_sort(src["done"]):
         recs = _sorted_ids(_links_of(r, "receipt_of"))
         suffix = " (receipt_of {})".format(", ".join(_md_text(x) for x in recs)) if recs else ""
-        lines.append("- {} {}{}".format(_md_text(r["id"]), _md_text(r.get("title", "")), suffix))
+        lines.append("- {} {}{}".format(_md_text(r.get("id")), _md_text(r.get("title", "")), suffix))
     return _lines("DONE", lines)
 
 
@@ -747,7 +783,7 @@ def render_findings(src):
         out.append("## {}".format(_md_text(status)))
         for r in group:
             sev = " (severity: {})".format(_md_text(r["severity"])) if "severity" in r else ""
-            out.append("- {}{} {}".format(_md_text(r["id"]), sev, _md_text(r.get("title", ""))))
+            out.append("- {}{} {}".format(_md_text(r.get("id")), sev, _md_text(r.get("title", ""))))
         out.append("")
     body = "\n".join(out).rstrip("\n") if out else _EMPTY
     return "# {}\n\n{}\n".format("FINDINGS", body)
@@ -774,26 +810,26 @@ def render_decisions(src):
     gone = t_sort(t_filter(decided, "id_in", ids=superseded))
     withdrawn = t_sort(t_filter(settled, "state_in", states=("withdrawn",)))
     out = ["## Pending decisions"]
-    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in open_pd] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in open_pd] or [_EMPTY])
     out += ["", "## Effective resolutions"]
     if effective:
         for r in effective:
-            sup = supersedes_map.get(r["id"]) or []
+            sup = supersedes_map.get(r.get("id")) or []
             tail = " (supersedes {})".format(", ".join(_md_text(s) for s in sup)) if sup else ""
-            out.append("- {} {}{}".format(_md_text(r["id"]), _md_text(r.get("title", "")), tail))
+            out.append("- {} {}{}".format(_md_text(r.get("id")), _md_text(r.get("title", "")), tail))
     else:
         out.append(_EMPTY)
     out += ["", "## Superseded resolutions"]
-    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in gone] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in gone] or [_EMPTY])
     if withdrawn:
         out += ["", "## Withdrawn decisions"]
-        out += ["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in withdrawn]
+        out += ["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in withdrawn]
     if proposed:
         out += ["", "## Awaiting ratification"]
         out += ["- {} ({}) {}".format(
-            _md_text(r["id"]), _md_text(r.get("status", "")), _md_text(r.get("title", ""))) for r in proposed]
+            _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", ""))) for r in proposed]
     out += ["", "## Autonomous decisions"]
-    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in t_sort(auto)] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in t_sort(auto)] or [_EMPTY])
     return "# {}\n\n{}\n".format("DECISIONS", "\n".join(out))
 
 
@@ -803,7 +839,7 @@ def render_blocks(src):
     for r in t_sort(src["block"]):
         scopes = ", ".join(_md_text(s) for s in (r.get("scopes", []) or []))
         lines.append("- {} ({}) scopes [{}] -- {}".format(
-            _md_text(r["id"]), _md_text(r.get("status", "")), scopes, _md_text(r.get("title", ""))))
+            _md_text(r.get("id")), _md_text(r.get("status", "")), scopes, _md_text(r.get("title", ""))))
     return _lines("BLOCKS", lines)
 
 
@@ -816,15 +852,15 @@ def render_handoff(src):
     handoffs = src["handoff"]
     out = ["## Current"]
     cur = t_sort(t_filter(handoffs, "state_in", states=("current",)))
-    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in cur] or [_EMPTY])
     out += ["", "## Superseded"]
     old = t_sort(t_filter(t_filter(handoffs, "state_in", states=("superseded",)), "not_proposed"))
-    out += (["- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))) for r in old] or [_EMPTY])
+    out += (["- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))) for r in old] or [_EMPTY])
     proposed = t_sort(t_filter(handoffs, "is_proposed"))
     if proposed:
         out += ["", "## Awaiting ratification"]
         out += ["- {} ({}) {}".format(
-            _md_text(r["id"]), _md_text(r.get("status", "")), _md_text(r.get("title", ""))) for r in proposed]
+            _md_text(r.get("id")), _md_text(r.get("status", "")), _md_text(r.get("title", ""))) for r in proposed]
     return "# {}\n\n{}\n".format("HANDOFF", "\n".join(out))
 
 
@@ -832,7 +868,7 @@ def render_references(src):
     """REFERENCES: the captured references in ID order, each with its captured refs."""
     lines = []
     for r in t_sort(src["reference"]):
-        lines.append("- {} {}".format(_md_text(r["id"]), _md_text(r.get("title", ""))))
+        lines.append("- {} {}".format(_md_text(r.get("id")), _md_text(r.get("title", ""))))
         for ref in r.get("refs", []) or []:
             if isinstance(ref, dict):
                 lines.append("  - {}: {}".format(
@@ -946,6 +982,8 @@ def _mirror_type(view_name):
     if not m:
         return None
     type_name = m.group(1).lower()
+    if type_name in _LEDGER_SOURCES:
+        return None
     return type_name if type_name in _opf_schema.BASELINE_SPECS else None
 
 
@@ -984,8 +1022,9 @@ def _write_contained(root_fd, relpath, text, check):
     no-follow counterpart of the `_journal` contained READS the module already uses: a symlinked
     destination, a symlinked path component, or a non-regular destination is REFUSED (ViewsError, a
     cannot-evaluate), never followed, so a manifest or a planted link cannot redirect a write off-tree.
-    Fail-closed: any read/write error, or a parent directory that cannot be opened, is a ViewsError, never
-    a silent skip. Byte-stable: an unchanged target is not rewritten.
+    Fail-closed: any read/write error, or a parent directory that cannot be opened (including a symlinked or
+    non-directory intermediate path component, which _open_parent signals as a JournalError rather than an
+    OSError), is a ViewsError, never a silent skip. Byte-stable: an unchanged target is not rewritten.
 
     This is the single choke point EVERY view and deliverable write passes through, so the F1 write-gate
     refusal is enforced HERE at the write boundary, not only at the render() entry: while the U6 store-
@@ -999,7 +1038,11 @@ def _write_contained(root_fd, relpath, text, check):
     new_bytes = text.encode("utf-8")
     try:
         pfd, name = _journal._open_parent(root_fd, relpath)
-    except OSError as exc:                                 # includes FileNotFoundError (a missing parent dir)
+    except (OSError, _journal.JournalError) as exc:
+        # OSError includes FileNotFoundError (a missing parent dir); JournalError is how _open_parent signals a
+        # symlinked or non-directory intermediate path component (it is NOT an OSError subclass, so the plain
+        # `except OSError` here let it escape uncaught -- render()'s handler does not catch it either, so it
+        # died as exit 1, colliding with EXIT_DRIFT). Both are fail-closed, mapped to a cannot-evaluate here.
         raise ViewsError("cannot open parent of {} for write ({})".format(relpath, exc))
     try:
         st = _journal._lstat_at(pfd, name)
@@ -1011,15 +1054,47 @@ def _write_contained(root_fd, relpath, text, check):
             return current != new_bytes
         if current == new_bytes:
             return False                                  # already current: byte-stable, no rewrite
-        if st is None:
-            fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
-        else:
-            fd = os.open(name, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, dir_fd=pfd)
+        # Reopen-TOCTOU hardening: never open the destination NAME for truncation. O_NOFOLLOW refuses a
+        # symlink but NOT a hardlink or a regular-file swap raced in after the lstat/read above, so an
+        # O_TRUNC of `name` could truncate a victim the attacker hardlinked in over the destination. Instead
+        # write the new bytes to a fresh O_EXCL temp beneath the SAME parent fd and atomically rename it over
+        # `name`: the rename re-points only the directory entry, so a raced hardlink/regular swap of `name`
+        # loses the entry rather than having its inode truncated (the victim's own bytes stay intact).
+        # Descriptor-relative throughout (dir_fd=pfd), never a re-resolved path.
+        # A UNIQUE, exclusively-created temp NAME, never a fixed ".{name}.opf-tmp" a concurrent call could be
+        # using and never an unconditional unlink of that fixed name (which could delete another live call's
+        # temp). O_EXCL proves THIS call created the inode; a collision on the random name is a genuine
+        # anomaly that fails closed (the OSError maps to a ViewsError below), never a clobber of an existing
+        # file. Created 0o600 so the in-flight temp is not world-readable before the real mode is applied.
+        tmpname = ".{}.opf-tmp.{}.{}".format(name, os.getpid(), os.urandom(8).hex())
+        fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=pfd)
+        # Wrap the WHOLE temp-file lifetime so ANY failure before the atomic rename succeeds (fchmod,
+        # _write_all, fsync, or the rename itself) unlinks the temp descriptor-relative, never leaving an
+        # orphan behind. The cleanup is best-effort and never masks the ORIGINAL error: the exception in
+        # flight propagates through this finally unchanged (mapped to a ViewsError by the outer handler).
+        _renamed = False
         try:
-            _journal._write_all(fd, new_bytes)
+            try:
+                # PRESERVE the destination's EXISTING mode across the atomic replace: installing the temp's
+                # create mode would silently WIDEN a restrictive view (e.g. a 0600 target -> 0644). fchmod the
+                # temp fd to the destination's current mode, or to the intended default for a new file, BEFORE
+                # the rename. fchmod is not umask-masked, so the installed mode is deterministic regardless of
+                # the process umask (test-hermeticity).
+                os.fchmod(fd, stat.S_IMODE(st.st_mode) if st is not None else _VIEW_FILE_MODE)
+                _journal._write_all(fd, new_bytes)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)   # atomic entry replace, no truncation
+            _renamed = True
+            os.fsync(pfd)                                 # the rename (a directory entry change) is durable
+            return False
         finally:
-            os.close(fd)
-        return False
+            if not _renamed:
+                try:
+                    os.unlink(tmpname, dir_fd=pfd)         # never leave a temp behind on ANY pre-rename failure
+                except OSError:
+                    pass
     except _journal.JournalError as exc:                  # a swapped-in non-regular file at read time
         raise ViewsError("cannot write {} ({})".format(relpath, exc))
     except OSError as exc:                                 # ELOOP (a component/target raced to a symlink), etc.
@@ -1145,10 +1220,11 @@ def render(argv):
     try:
         try:
             return _render_resolved(store_root_fd, product_root_fd, machine_rel, check)
-        except (ViewsError, RecursionError, ValueError) as exc:
-            # ViewsError is U4's cannot-evaluate; RecursionError and (defensively) ValueError are widened
-            # here as defence in depth, so a parse recursion escaping any inner path becomes a controlled
-            # exit 2 rather than an uncontrolled traceback.
+        except (ViewsError, RecursionError, ValueError, OSError) as exc:
+            # ViewsError is U4's cannot-evaluate; RecursionError, (defensively) ValueError, and OSError are
+            # widened here as defence in depth, so a parse recursion or a raw OSError (e.g. an unwrapped
+            # os.dup EBADF/EMFILE) escaping any inner path becomes a controlled exit 2 rather than an
+            # uncontrolled traceback.
             print("opf render: cannot evaluate: {}".format(exc), file=sys.stderr)
             return EXIT_CANNOT_EVALUATE
     finally:
@@ -1563,7 +1639,13 @@ def self_test():
             if t != "worklog":
                 write_toml(root, "{}.index.toml".format(t), "schema = 1\n")
         write_toml(root, "worklog.toml", "schema = 1\n")
-        write_toml(root, "version.toml", "schema = 1\n")
+        write_toml(root, "version.toml", "\n".join([
+            "schema = 1", "", "[[release]]",
+            'version = "0.1.0"',
+            'date = "2026-01-01T00:00:00Z"',
+            'worklog_span = []',
+            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+        ]) + "\n")
 
     try:
         # One Markdown-injection payload reused across the free-text-sink vectors below, and its EXACT
@@ -1594,6 +1676,257 @@ def self_test():
         check("group-field-closed", raises_views_error(lambda: t_group([{"id": "BI-1"}], "bogus")))
         check("project-column-closed", raises_views_error(lambda: t_project({"id": "BI-1"}, ("bogus",))))
         check("filter-predicate-closed", raises_views_error(lambda: t_filter([], "bogus")))
+
+        import signal as _signal
+        import time as _time
+        _fifo_dir = base / "fifo-src"; _fifo_dir.mkdir()
+        os.mkfifo(str(_fifo_dir / "blk.index.toml"))
+        _ffd = os.open(str(_fifo_dir), os.O_RDONLY | os.O_DIRECTORY)
+        class _Watchdog(Exception):
+            pass
+        def _boom(_s, _f):
+            raise _Watchdog()
+        # G (self-test-discrimination): the LOCAL pre-open S_ISREG guard in _read_raw_and_parsed, not the
+        # hardened downstream _journal._read_contained (which ALSO refuses a non-regular file with an
+        # identical "not a regular file" diagnostic), must be what refuses the FIFO. Record whether the
+        # downstream reader is reached: with the local guard present it is NEVER called, so removing that
+        # guard (letting the FIFO fall through to _read_contained) flips this check red.
+        _rc_calls = []
+        _orig_rc = _journal._read_contained
+        def _recording_rc(root_fd, relpath):
+            _rc_calls.append(relpath)
+            return _orig_rc(root_fd, relpath)
+        _journal._read_contained = _recording_rc
+        # C (test-hermeticity): snapshot the caller's SIGALRM disposition and mask, and its ITIMER_REAL +
+        # pending state through the SHARED _opf_store.snapshot_caller_alarm helper; unblock SIGALRM for the
+        # probe; and restore all of them so this watchdog leaves the ambient alarm state unchanged (never
+        # cancelling a caller's timer, unblocking its SIGALRM, nor destroying its pending alarm).
+        _prev = _signal.getsignal(_signal.SIGALRM)               # capture WITHOUT installing yet (F2)
+        _have_mask = hasattr(_signal, "pthread_sigmask")
+        _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
+        _alarm_snap = _opf_store.snapshot_caller_alarm()         # ITIMER value/interval + pending (shared helper)
+        _fifo_ok = False
+        # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
+        # finally restores the caller's mask, disposition, and timer even if a signal fires during setup. An
+        # ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would otherwise
+        # be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the try/finally, would
+        # raise _Watchdog out of the probe uncaught AND leave the caller's mask corrupted (SIGALRM
+        # unblocked). Any inherited pending SIGALRM is first DISCARDED under SIG_IGN (POSIX: setting SIG_IGN
+        # discards a pending signal whether or not it is blocked) so it cannot fire _boom spuriously; the
+        # shared restore_caller_alarm RE-POSTS it on exit (round-15 F2) so the caller's pending alarm is
+        # preserved, not destroyed.
+        try:
+            _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)     # discard any inherited pending SIGALRM
+            _signal.signal(_signal.SIGALRM, _boom)               # now install the watchdog handler
+            if _have_mask:
+                _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
+            _signal.setitimer(_signal.ITIMER_REAL, 5)
+            try:
+                _read_raw_and_parsed(_ffd, "blk.index.toml")
+            except ViewsError:
+                _fifo_ok = True
+            except _Watchdog:
+                _fifo_ok = False
+        finally:
+            _signal.setitimer(_signal.ITIMER_REAL, 0)
+            _signal.signal(_signal.SIGALRM, _prev)
+            if _have_mask:
+                _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
+            _opf_store.restore_caller_alarm(*_alarm_snap)        # shared elapsed-aware timer + pending restore
+            _journal._read_contained = _orig_rc
+            os.close(_ffd)
+        check("fifo-source-fails-closed-not-hang", _fifo_ok and not _rc_calls)
+        _slp = base / "symparent"; _slp.mkdir(); (_slp / "real").mkdir()
+        (_slp / "real" / "x.index.toml").write_text("schema = 1\n", encoding="utf-8")
+        (_slp / "toml").symlink_to("real")
+        _spfd = os.open(str(_slp), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _read_raw_and_parsed(_spfd, "toml/x.index.toml")
+            _sp_ok = False
+        except ViewsError:
+            _sp_ok = True
+        except _journal.JournalError:
+            _sp_ok = False
+        finally:
+            os.close(_spfd)
+        check("symlinked-parent-component-maps-to-viewserror", _sp_ok)
+        # F5 (read-path fail-closed on an unreadable source): a bad store_root_fd (or fd exhaustion at
+        # os.dup) makes _open_parent's terminal os.dup raise a RAW OSError that _lstat_contained does not
+        # wrap; _read_raw_and_parsed must map it to a ViewsError (a cannot-evaluate), never let the OSError
+        # escape the render boundary as an uncaught exit-1 traceback. A single-component relpath drives the
+        # os.dup(root_fd) path with fd -1. Pre-fix (only `except JournalError`) this raised OSError; post-fix
+        # it is a ViewsError, so the check discriminates the OSError-widening at the reader boundary.
+        _f5_kind = None
+        try:
+            _read_raw_and_parsed(-1, "x.index.toml")
+        except ViewsError:
+            _f5_kind = "ViewsError"
+        except OSError:
+            _f5_kind = "OSError"
+        check("read-bad-fd-maps-to-viewserror", _f5_kind == "ViewsError")
+        # QA-1 (write-path sibling of the read-path check above): _write_contained's _open_parent call maps a
+        # symlinked or non-directory intermediate component to a ViewsError, not an uncaught JournalError.
+        # _open_parent signals that case as JournalError (NOT an OSError subclass), so the pre-fix
+        # `except OSError` let it escape _write_contained; render()'s handler catches only
+        # ViewsError/RecursionError/ValueError, so it died as exit 1, colliding with EXIT_DRIFT. check=True so
+        # the write gate is not consulted; the failure is at the parent walk, before any write.
+        _wslp = base / "wsymparent"; _wslp.mkdir(); (_wslp / "real").mkdir()
+        (_wslp / "toml").symlink_to("real")
+        _wspfd = os.open(str(_wslp), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _write_contained(_wspfd, "toml/TODO.md", "x\n", True)
+            _wsp_ok = False
+        except ViewsError:
+            _wsp_ok = True
+        except _journal.JournalError:
+            _wsp_ok = False
+        finally:
+            os.close(_wspfd)
+        check("write-symlinked-parent-component-maps-to-viewserror", _wsp_ok)
+        # F4 (reopen-TOCTOU, class B): _write_contained never truncates the destination NAME in place; it
+        # writes a fresh O_EXCL temp and atomically renames it over the entry. So a destination raced to a
+        # HARDLINK of a victim (O_NOFOLLOW refuses a symlink, NOT a hardlink) cannot have the victim's inode
+        # truncated: the rename re-points only the directory entry, leaving the victim's bytes intact while
+        # the store file receives the new content. Pre-fix (O_WRONLY|O_TRUNC of `name`) the shared inode was
+        # truncated and rewritten through the hardlink, corrupting the victim; this vector FAILS pre-fix
+        # (victim reads the new bytes) and passes post-fix (victim intact, destination updated).
+        _f4dir = base / "f4-hardlink-swap"; _f4dir.mkdir()
+        _f4victim = _f4dir / "victim"; _f4victim.write_text("VICTIM-INTACT", encoding="utf-8")
+        os.link(str(_f4victim), str(_f4dir / "TODO.md"))   # destination is a hardlink to the victim inode
+        _f4fd = os.open(str(_f4dir), os.O_RDONLY | os.O_DIRECTORY)
+        _f4saved_gate = _WRITE_GATE_COMPOSED
+        try:
+            _WRITE_GATE_COMPOSED = True                    # exercise a real write through the sink
+            _write_contained(_f4fd, "TODO.md", "NEW-VIEW-CONTENT\n", False)
+        finally:
+            _WRITE_GATE_COMPOSED = _f4saved_gate
+            os.close(_f4fd)
+        check("write-hardlink-swap-victim-intact", _f4victim.read_text(encoding="utf-8") == "VICTIM-INTACT")
+        check("write-hardlink-swap-dest-updated",
+              (_f4dir / "TODO.md").read_text(encoding="utf-8") == "NEW-VIEW-CONTENT\n")
+        # F(unique-temp): the write temp uses a UNIQUE, exclusively-created name, never a FIXED
+        # ".{name}.opf-tmp" it would unconditionally unlink on collision -- which, under concurrency, is
+        # ANOTHER live call's temp. Plant a file at the OLD fixed temp name and confirm a write leaves it
+        # intact (the new unique name never addresses it). Pre-fix the write would collide on that fixed
+        # name and unlink the planted file; post-fix it is untouched.
+        _utdir = base / "unique-temp"; _utdir.mkdir()
+        (_utdir / "TODO.md").write_text("OLD\n", encoding="utf-8")
+        _utplanted = _utdir / ".TODO.md.opf-tmp"
+        _utplanted.write_text("ANOTHER-CALLERS-TEMP", encoding="utf-8")
+        _utfd = os.open(str(_utdir), os.O_RDONLY | os.O_DIRECTORY)
+        _utsaved_gate = _WRITE_GATE_COMPOSED
+        try:
+            _WRITE_GATE_COMPOSED = True
+            _write_contained(_utfd, "TODO.md", "NEW\n", False)
+        finally:
+            _WRITE_GATE_COMPOSED = _utsaved_gate
+            os.close(_utfd)
+        check("write-unique-temp-does-not-clobber-fixed-name",
+              _utplanted.exists() and _utplanted.read_text(encoding="utf-8") == "ANOTHER-CALLERS-TEMP")
+        check("write-unique-temp-dest-updated",
+              (_utdir / "TODO.md").read_text(encoding="utf-8") == "NEW\n")
+        # F(temp-cleanup): a failure DURING the temp-file lifetime (fchmod / write / fsync), BEFORE the atomic
+        # rename, must leave NO temp behind and must re-raise the ORIGINAL error unmasked. Inject an ENOSPC
+        # mid-write; post-fix the descriptor-relative unlink removes the orphan while the ViewsError-mapped
+        # ENOSPC still surfaces. Pre-fix (cleanup only on a failed rename) the temp file leaks, so the
+        # no-temp-leak assertion flips red.
+        _tcdir = base / "temp-cleanup"; _tcdir.mkdir()
+        (_tcdir / "TODO.md").write_text("OLD\n", encoding="utf-8")
+        _tcfd = os.open(str(_tcdir), os.O_RDONLY | os.O_DIRECTORY)
+        _tc_orig_write_all = _journal._write_all
+        _journal._write_all = lambda fd, data: (_ for _ in ()).throw(OSError(28, "No space left on device"))
+        _tcsaved_gate = _WRITE_GATE_COMPOSED
+        _tc_err = None
+        try:
+            _WRITE_GATE_COMPOSED = True
+            _write_contained(_tcfd, "TODO.md", "NEW\n", False)
+        except ViewsError as _e:
+            _tc_err = str(_e)
+        finally:
+            _journal._write_all = _tc_orig_write_all
+            _WRITE_GATE_COMPOSED = _tcsaved_gate
+            os.close(_tcfd)
+        check("write-midfailure-surfaces-original-error",
+              _tc_err is not None and "No space left" in _tc_err)
+        check("write-midfailure-no-temp-leak",
+              not any(".opf-tmp." in _n for _n in os.listdir(str(_tcdir))))
+        # F(mode-preserve): the atomic replace PRESERVES the destination's existing mode; a restrictive 0600
+        # view is not widened to the temp's create mode. The prestate mode is set explicitly (fchmod, not
+        # umask), so the assertion is hermetic. Pre-fix the temp's 0644 create mode became the view's mode on
+        # rename; post-fix the temp is fchmod'd to the destination's 0600 first.
+        _mpdir = base / "mode-preserve"; _mpdir.mkdir()
+        _mpview = _mpdir / "TODO.md"; _mpview.write_text("OLD\n", encoding="utf-8")
+        os.chmod(str(_mpview), 0o600)
+        _mpfd = os.open(str(_mpdir), os.O_RDONLY | os.O_DIRECTORY)
+        _mpsaved_gate = _WRITE_GATE_COMPOSED
+        try:
+            _WRITE_GATE_COMPOSED = True
+            _write_contained(_mpfd, "TODO.md", "NEW\n", False)
+        finally:
+            _WRITE_GATE_COMPOSED = _mpsaved_gate
+            os.close(_mpfd)
+        check("write-preserves-existing-restrictive-mode",
+              stat.S_IMODE(os.stat(str(_mpview)).st_mode) == 0o600
+              and _mpview.read_text(encoding="utf-8") == "NEW\n")
+        # The positive mapping DISCRIMINATES the regex/baseline lookup: backlog_item IS a baseline type, so a
+        # broken regex or baseline lookup flips it from "backlog_item" to None.
+        check("mirror-type-resolves-record-type", _mirror_type("BACKLOG_ITEM-INDEX.md") == "backlog_item")
+        # ROUND-6 codex: the _LEDGER_SOURCES exclusion (line ~985) IS load-bearing and needs its own
+        # discriminating pin. "worklog" IS a key in _opf_schema.BASELINE_SPECS (a prior F12 note wrongly said
+        # neither ledger name was), so WITHOUT the exclusion _mirror_type("WORKLOG-INDEX.md") would fall
+        # through to the baseline lookup and return "worklog" (a ledger reads its own worklog.toml, it has no
+        # <type>.index.toml to mirror). The exclusion returns None; removing it flips this pin from None to
+        # "worklog". ("version" is NOT a baseline key, so a VERSION-INDEX.md pin would not discriminate.)
+        check("mirror-type-worklog-ledger-rejected", _mirror_type("WORKLOG-INDEX.md") is None)
+        check("mirror-type-worklog-is-baseline-key", "worklog" in _opf_schema.BASELINE_SPECS)
+        _f5_bb, _f5_hid = join_actionability([dict(id="BI-1", status="open")],
+                                             [dict(status="active", scopes=["BI-1"])])
+        check("idless-block-hides-nothing", _f5_bb == {} and _f5_hid == set())
+        _f5_body = render_backlog(dict(backlog_item=[dict(id="BI-1", status="open", title="t")],
+                                       block=[dict(status="active", scopes=["BI-1"])]))
+        check("idless-block-no-dangling-annotation",
+              "blocked by \n" not in _f5_body and _f5_body.rstrip().endswith("actionable"))
+        # QA-2 (sibling of the closed id-less-block finding): every composed record renderer indexes the
+        # record id; an id-less record from a trusted caller must render gracefully (via .get("id"), the
+        # posture render_worklog/render_mirror/_id_key already take), never raise an unmapped KeyError --
+        # which render() maps nowhere, so it would escape as exit 1, colliding with EXIT_DRIFT. The round-1
+        # fix hardened id-less BLOCKS in join_actionability; this closes the sibling record sinks across the
+        # renderers. Each case FAILS pre-fix with KeyError('id') and passes post-fix.
+        _idless_cases = [
+            (render_todo, {"backlog_item": [{"status": "open", "title": "t"}], "block": []}),
+            (render_backlog, {"backlog_item": [{"status": "open", "title": "t"}], "block": []}),
+            (render_pipeline, {"backlog_item": [{"status": "open", "title": "t"}], "block": []}),
+            (render_done, {"done": [{"status": "recorded", "title": "t"}]}),
+            (render_findings, {"finding": [{"status": "open", "title": "t"}]}),
+            (render_decisions, {"pending_decision": [{"status": "open", "title": "t"}],
+                                "autonomous_decision": [{"status": "recorded", "title": "t"}]}),
+            (render_blocks, {"block": [{"status": "active", "title": "t"}]}),
+            (render_handoff, {"handoff": [{"status": "current", "title": "t"}]}),
+            (render_references, {"reference": [{"status": "recorded", "title": "t"}]}),
+        ]
+
+        def _renders_without_keyerror(fn, arg):
+            try:
+                fn(arg)
+                return True
+            except KeyError:
+                return False
+
+        check("idless-record-renderers-no-keyerror",
+              all(_renders_without_keyerror(fn, src) for fn, src in _idless_cases))
+        _d01 = _opf_release.coverage_digest([dict(id="WL-1", date="2026-01-01T00:00:00Z",
+            actor=dict(kind="maintainer"), kind="added", summary="first change")])
+        _d02 = _opf_release.coverage_digest([dict(id="WL-1", date="2026-01-02T00:00:00Z",
+            actor=dict(kind="maintainer"), kind="added", summary="first change")])
+        check("coverage-digest-date-sensitive", _d01 != _d02)
+        # F13: the stale word-presence pin ("O_NONBLOCK"/"lstat-to-open" in the docstring) is removed; it
+        # asserted the presence of text, not behaviour, and pinned a docstring claim that _read_contained
+        # "does not pass O_NONBLOCK" which is FALSE (it does). The LIVE behaviour the disclosure describes,
+        # a writer-less FIFO source fails closed without hanging, is asserted by "fifo-source-fails-closed-
+        # not-hang" above (an actual FIFO under a watchdog), which discriminates the real O_NONBLOCK guard.
+        check("read-ledger-schema-divergence-disclosed",
+              "optional-marker" in _load_worklog.__doc__ and "optional-marker" in _load_version.__doc__)
+        check("entry-writes-fixed-date", 'date = "2026-01-01T00:00:00Z"' in _entry("WL-2", "fixed", "x"))
 
         # F4 (cited sink, B2 class): a spec-VALID free-text severity renders as LITERAL text, forging no
         # link, emphasis, code, table cell, strikethrough, heading, or HTML comment. The record is a valid
@@ -2172,7 +2505,7 @@ def self_test():
                 'coverage_digest = "{}"'.format(_opf_release.coverage_digest([
                     {"id": "WL-1", "date": "2026-01-01T00:00:00Z", "actor": {"kind": "maintainer"},
                      "kind": "added", "summary": "first change"},
-                    {"id": "WL-2", "date": "2026-01-02T00:00:00Z", "actor": {"kind": "maintainer"},
+                    {"id": "WL-2", "date": "2026-01-01T00:00:00Z", "actor": {"kind": "maintainer"},
                      "kind": "fixed", "summary": "second change"}])),
                 "",
                 "[[summary]]",
@@ -2183,6 +2516,11 @@ def self_test():
             # Write mode renders cleanly, then --check is clean (a byte-stable re-render).
             check("populated-write-ok", render(["--root", str(root)]) == EXIT_OK)
             check("populated-check-clean", render(["--root", str(root), "--check"]) == EXIT_OK)
+            _wl_on_disk = tomllib.loads((root / WORKING_DIRNAME / "toml" / "worklog.toml").read_text(encoding="utf-8"))
+            _ver_on_disk = tomllib.loads((root / WORKING_DIRNAME / "toml" / "version.toml").read_text(encoding="utf-8"))
+            check("coverage-digest-reconciles-worklog",
+                  _opf_release.coverage_digest(_wl_on_disk.get("entry", []))
+                  == _ver_on_disk["release"][0]["coverage_digest"])
 
             def read_view(name):
                 return (root / WORKING_DIRNAME / name).read_text(encoding="utf-8")
@@ -2314,7 +2652,8 @@ def self_test():
             # (Runs under the scaffolded gate ON, so it reaches rendering and fails at F3, not the F1 write gate.)
             vroot = new_root()
             write_toml(vroot, "manifest.toml", manifest)
-            empty_indexes(vroot)                       # version.toml is "schema = 1\n": declared, but no release
+            empty_indexes(vroot)
+            write_toml(vroot, "version.toml", "schema = 1\n")   # OVERRIDE: declared but no-release ledger
             check("empty-version-cannot-eval", render(["--root", str(vroot)]) == EXIT_CANNOT_EVALUATE)
             check("empty-version-not-zero-byte", not (vroot / "VERSION").exists())
 
@@ -2334,6 +2673,27 @@ def self_test():
                 _rec("FN-1", "finding", "not-a-state", "bad status"),   # illegal status: INVALID record
             ]) + "\n")
             check("malformed-record-cannot-eval", render(["--root", str(broot)]) == EXIT_CANNOT_EVALUATE)
+
+            s2root = new_root(); write_toml(s2root, "manifest.toml", manifest); empty_indexes(s2root)
+            write_toml(s2root, "backlog_item.index.toml", "schema = 2\n")
+            check("index-schema-pin-cannot-eval", render(["--root", str(s2root)]) == EXIT_CANNOT_EVALUATE)
+            stroot = new_root(); write_toml(stroot, "manifest.toml", manifest); empty_indexes(stroot)
+            write_toml(stroot, "backlog_item.index.toml", "schema = true\n")
+            check("index-schema-bool-cannot-eval", render(["--root", str(stroot)]) == EXIT_CANNOT_EVALUATE)
+            saroot = new_root(); write_toml(saroot, "manifest.toml", manifest); empty_indexes(saroot)
+            write_toml(saroot, "backlog_item.index.toml", "record = []\n")
+            check("index-schema-absent-cannot-eval", render(["--root", str(saroot)]) == EXIT_CANNOT_EVALUATE)
+            ukroot = new_root(); write_toml(ukroot, "manifest.toml", manifest); empty_indexes(ukroot)
+            write_toml(ukroot, "backlog_item.index.toml", "schema = 1\nbogus_table = 1\n")
+            check("index-unknown-key-cannot-eval", render(["--root", str(ukroot)]) == EXIT_CANNOT_EVALUATE)
+            naroot = new_root(); write_toml(naroot, "manifest.toml", manifest); empty_indexes(naroot)
+            write_toml(naroot, "backlog_item.index.toml", "schema = 1\nrecord = 3\n")
+            check("index-record-not-array-cannot-eval", render(["--root", str(naroot)]) == EXIT_CANNOT_EVALUATE)
+            duroot = new_root()
+            write_toml(duroot, "manifest.toml",
+                       manifest.replace('sources = ["done"]', 'sources = ["done", "done"]'))
+            empty_indexes(duroot)
+            check("duplicate-source-cannot-eval", render(["--root", str(duroot)]) == EXIT_CANNOT_EVALUATE)
 
             # --- F-01: a manifest target that does not match the view's spec destination fails closed --------
             troot = new_root()

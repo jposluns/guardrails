@@ -47,6 +47,7 @@ over synthetic whole stores; the observation seam under test is exercised direct
 """
 import bisect
 import hashlib
+import ipaddress
 import os
 import stat
 import sys
@@ -64,6 +65,8 @@ from _opf_store import (  # noqa: E402
     _read_toml_contained, _open_store_root_fd, _open_root_fd, validate_manifest, classify_target,
     _sorted_key_names, _safe_display, _is_contained_relpath,
     BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES, KNOWN_MODULES,
+    snapshot_caller_alarm,  # round-17 F-R16-1: capture caller ITIMER+pending before a fixture borrows SIGALRM
+    restore_caller_alarm,   # round-15 F2 + round-17 F-R16-1: shared elapsed-aware caller-alarm save/restore
 )
 # U2 supplies the record validator, the counter guards, the transition validator, and the type specs.
 from _opf_schema import (  # noqa: E402
@@ -216,12 +219,14 @@ class StoreValidation:
 
 
 def exit_code(result):
-    """Reduce a StoreValidation to a 0/1/2 exit code for the future doctor verb."""
-    if result.status == CANNOT_EVALUATE:
-        return 2
+    """Reduce a StoreValidation to a 0/1/2 exit code for the future doctor verb. Only the exact VALID
+    status yields 0; any unrecognized/malformed status fails CLOSED to 2, never a two-valued fall-through
+    reading a bad status as success (ROUND-2 codex-2 s1; guard-input-soundness)."""
+    if result.status == VALID:
+        return 0
     if result.status == INVALID:
         return 1
-    return 0
+    return 2
 
 
 class _Report:
@@ -405,6 +410,36 @@ def _read_bytes(fd, relpath, rep):
     return raw, "ok"
 
 
+def _close_fd_quietly(fd):
+    """Close a descriptor on a cleanup / teardown path, swallowing an OSError so a close that raises
+    (EINTR / EIO / EBADF) during teardown cannot crash the validator. The store verdict is already computed
+    (or an exception is already in flight) by the time these closes run, so a cleanup-close irregularity is
+    never itself the store's verdict (fail-closed teardown; S1-F1 / S4-F3).
+
+    A raising close is swallowed but never lets a genuine descriptor leak pass CONCEALED (codex round-6;
+    no-concealed-failure): a close that raises does not by itself prove the fd is retained, since on Linux
+    close() releases the descriptor even on EINTR/EIO and EBADF means it was already gone. So on a raise we
+    CONFIRM the descriptor is actually gone (fstat); only when it is genuinely STILL open do we close it
+    once more (fstat has just proven the fd valid, so this is not a blind double-close) and, if even that
+    cannot release it, surface the leak to stderr rather than the old silent pass that could not tell
+    closed-then-errored from still-open."""
+    try:
+        os.close(fd)
+        return
+    except OSError as exc:
+        first = exc
+    try:
+        os.fstat(fd)
+    except OSError:
+        return                                            # confirmed gone: the raise was benign teardown noise
+    try:
+        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
+        return
+    except OSError as exc2:
+        print("warning: cleanup close of fd {} failed to release it ({} / {}); fail-surfaced"
+              .format(fd, first, exc2), file=sys.stderr)
+
+
 def _list_contained(root_fd, reldir):
     """The immediate real subdirectory and regular-file names of `reldir` beneath root_fd, listed
     no-follow. Returns (subdirs, files) sorted, or (None, None) when `reldir` is absent. Raises StoreError
@@ -428,7 +463,14 @@ def _list_contained(root_fd, reldir):
             raise StoreError("cannot open {} no-follow ({})".format(reldir, exc))
         try:
             subdirs, files = [], []
-            for entry in sorted(os.listdir(dfd)):
+            try:
+                entries = sorted(os.listdir(dfd))
+            except OSError as exc:
+                # An I/O error listing the opened directory (EIO, ENOMEM, EBADF from an exotic fd) is a
+                # fail-closed StoreError naming the directory, never a raw OSError escaping the barrier
+                # (S1-F1); it routes through _list_dir to a named CANNOT-EVALUATE like the os.stat case.
+                raise StoreError("cannot list {} no-follow ({})".format(reldir, exc))
+            for entry in entries:
                 try:
                     est = os.stat(entry, dir_fd=dfd, follow_symlinks=False)
                 except OSError as exc:
@@ -442,9 +484,9 @@ def _list_contained(root_fd, reldir):
                                      "entry; fail-closed)".format(reldir, entry))
             return subdirs, files
         finally:
-            os.close(dfd)
+            _close_fd_quietly(dfd)
     finally:
-        os.close(pfd)
+        _close_fd_quietly(pfd)
 
 
 def _list_dir(root_fd, reldir, rep):
@@ -476,6 +518,123 @@ def _under_any(p, prefixes):
     return False
 
 
+def _canonical_contained(p):
+    """The canonical store-relative form of a CONTAINED path (one _is_contained_relpath admits): empty and
+    '.' components dropped and lexical '..' resolved, so a non-canonical but contained [unmanaged]
+    declaration (a trailing slash, a './' or '//' form, or a lexical '..') matches the canonical paths the
+    walk produces rather than covering nothing and over-firing its legacy content as unregistered (F4). The
+    caller confirms containment first, so no component can pop above the root; the reduction cannot escape."""
+    out = []
+    for comp in p.split("/"):
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            if out:
+                out.pop()
+        else:
+            out.append(comp)
+    return "/".join(out)
+
+
+def _bracketed_host_ok(tok):
+    """True only when `tok` is a well-formed bracketed host `[addr]` (RFC 3986 host): the token is
+    bracketed and its interior parses as an IPv6 literal. Brackets in a URI/scp host delimit an IPv6
+    address SPECIFICALLY (RFC 3986 IP-literal); an IPv4 dotted-quad is never bracketed, so `[127.0.0.1]`
+    is a malformed authority, not a resolvable host, and must canonicalize to nothing rather than a
+    spurious ('[127.0.0.1]', path) pair that could falsely satisfy C-SYNC-AGREE (codex round-12 F1:
+    `ipaddress.ip_address()` accepting an IPv4 inside brackets was the structural bug; require IPv6 for
+    the bracket form). A malformed interior (`[nonsense]`, `[2001/db8::1]`) is likewise unresolvable
+    (codex round-6; guard-input-soundness: a membership question about a host is answered by parsing the
+    address as its bracket form promises, not by matching the bracket tokens)."""
+    if not (tok.startswith("[") and tok.endswith("]")):
+        return False
+    inner = tok[1:-1]
+    if not inner:
+        return False
+    try:
+        ipaddress.IPv6Address(inner)     # the bracket form is an IPv6 literal ONLY; an IPv4 in brackets is rejected
+    except ValueError:                   # AddressValueError subclasses ValueError (IPv4/junk interior -> unresolvable)
+        return False
+    return True
+
+
+def _dns_or_ipv4_ok(name):
+    """True only when an UNBRACKETED host `name` (port and brackets already handled by the caller) is a
+    STRUCTURALLY valid bare IPv4 literal or DNS name. The character allowlist (_HOST_AUTHORITY_ALLOWED)
+    bounds the code points; this bounds the STRUCTURE, so a host that is character-clean but structurally
+    malformed (an empty DNS label from `..`, a label over 63 characters, an over-long name) is
+    UNRESOLVABLE -> the caller returns None -> CANNOT-EVALUATE, never a spurious host that could falsely
+    satisfy C-SYNC-AGREE even when the manifest target and observed remote strings match (codex round-12
+    F1). This COMPLETES the host class the allowlist began: chars (character set) + structure (this) =
+    the whole host surface, so a newly-hostile structural class is refused by a positive grammar rather
+    than a fresh negative clause. A bare IPv4 dotted-quad is a valid host as-is; any other form is
+    validated as a DNS name per RFC 1035: total length <= 253, no leading or trailing dot, and every
+    label non-empty and <= 63 characters (so `a..b` yields an empty label and is rejected). The caller
+    has already stripped any `:port` and excluded the bracketed IPv6 form, so `name` here carries neither
+    a port nor brackets.
+
+    The DNS-name structure enforces the RFC 1035/1123 LDH ("letters-digits-hyphen") shape the allowlist's
+    character set cannot by itself: every label is non-empty and <= 63 characters, AND no label begins or
+    ends with a HYPHEN (`-lead`, `trail-`, a hyphen-edge interior label). The FINAL (top-level) label is
+    never ALL-NUMERIC: such a name is neither a valid bare IPv4 literal (handled above) nor a resolvable
+    hostname, which is also how an IPv4-LOOKALIKE is refused here. An out-of-range octet (`256.0.113.5`) or a
+    leading-zero octet (`203.0.113.05`) makes IPv4Address raise, so the string falls through to the DNS path
+    as a dotted run of numeric labels; its all-numeric final label is rejected, so it is accepted neither as
+    a bare IPv4 nor as a DNS name, never a spurious host that could falsely satisfy C-SYNC-AGREE (round-15
+    F3, completing the host structural class the round-12 fix began)."""
+    try:
+        ipaddress.IPv4Address(name)      # a bare IPv4 dotted-quad is a valid host as-is
+        return True
+    except ValueError:
+        pass
+    if not name or len(name) > 253:      # RFC 1035 total-name ceiling; an empty name is not a host
+        return False
+    if name.startswith(".") or name.endswith("."):   # no leading/trailing dot (an empty first/last label)
+        return False
+    labels = name.split(".")
+    for label in labels:
+        if not label or len(label) > 63:  # every DNS label is non-empty (rejects `..`) and <= 63 characters
+            return False
+        if label.startswith("-") or label.endswith("-"):   # LDH: no label begins or ends with a hyphen
+            return False
+    # The final (top-level) label is never all-numeric: a bare all-numeric name is neither a valid IPv4
+    # literal (handled above) nor a resolvable hostname, and this is how an IPv4-lookalike with an
+    # out-of-range or leading-zero octet (which IPv4Address rejects) is refused rather than admitted as a
+    # DNS name. isascii() pairs with isdigit() so only ASCII 0-9 count (the allowlist already bounds the
+    # character set; this mirrors the port-parse idiom and never treats a Unicode digit as numeric).
+    if labels[-1].isascii() and labels[-1].isdigit():
+        return False
+    return True
+
+
+# The ONLY characters a git remote host authority (host[:port], userinfo already stripped) may carry:
+# DNS/IPv4 hostname characters [A-Za-z0-9.-], the ':' that separates a port (and appears inside an IPv6
+# literal), and the '[' ']' that bracket an IPv6 literal (its hex digits and '.' are already in the DNS
+# set). This is an ALLOWLIST: any other code point is rejected by default.
+_HOST_AUTHORITY_ALLOWED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-:[]")
+
+
+def _host_authority_ok(authority):
+    """The `host[:port]` authority (userinfo already stripped) carries ONLY characters from the host
+    ALLOWLIST (_HOST_AUTHORITY_ALLOWED): DNS/IPv4 hostname characters, the port/IPv6 ':', and the IPv6
+    brackets. ANY other character -- whitespace, an ASCII control or DEL, a Unicode FORMAT/zero-width/bidi
+    character (category Cf, e.g. U+200B ZERO WIDTH SPACE or U+202E RIGHT-TO-LEFT OVERRIDE), or any other
+    non-ASCII code point -- is never valid in a host or a port, so a remote carrying one is a forged or
+    mis-parsed authority and must be UNRESOLVABLE (the caller returns None -> CANNOT-EVALUATE) rather than a
+    spurious host that could falsely satisfy C-SYNC-AGREE even when the manifest target and observed remote
+    strings match. This ALLOWLIST replaces the earlier whitespace/control BLOCKLIST, which admitted every
+    character it did not enumerate and so had to be widened at each new hostile class (port/bracket ->
+    whitespace/control -> Cf/zero-width/bidi: the host-validation whack-a-mole, round-10 F1). An allowlist
+    structurally ends it: a newly-hostile character class is outside the allowlist by default rather than
+    needing a fresh blocklist clause (guard-input-soundness: the WHOLE host token is validated by a positive
+    grammar, not a growing set of negatives). The bracket-BALANCE, IPv6-literal parse (_bracketed_host_ok),
+    and port-RANGE checks stay in _canonical_remote: this bounds only the character set; the structure is
+    still validated there. An empty authority carries no character (all() is vacuously True) and is handled
+    by the caller's own emptiness guard (host falsiness), unchanged."""
+    return all(ch in _HOST_AUTHORITY_ALLOWED for ch in authority)
+
+
 def _canonical_remote(url):
     """Canonicalize a git remote URL to a (host, path) pair for host+path equivalence (spec 5.5/5.6),
     covering https/http/ssh/git scheme URLs and scp-style git@host:path, with or without a trailing
@@ -497,25 +656,88 @@ def _canonical_remote(url):
         authority, path = rest.split("/", 1)
         if "@" in authority:
             authority = authority.rsplit("@", 1)[1]
+        # Reject a whitespace/control character anywhere in the host:port authority: it is never a valid
+        # host and marks a forged/mis-parsed remote, unresolvable rather than a spurious host (codex round-8).
+        if not _host_authority_ok(authority):
+            return None
         host = authority     # KEEP the port: host:port is part of the endpoint identity (codex-4),
         # EXCEPT a port that spells the scheme's DEFAULT names the same endpoint as the port-less form
         # (spec 5.6 host+path equivalence): https://h:443/p, ssh://h:22/p and github:org/repo are one
         # endpoint. A NON-default port (2222 vs 2223) stays distinct (F3); match only a trailing numeric
         # default so a bracketed IPv6 host is never mis-split.
+        # An UNBRACKETED multi-colon authority is an IPv6 literal that MUST be bracketed
+        # (ssh://[2001:db8::22]/p); unbracketed it is unresolvable rather than mis-read with a trailing
+        # '::22' consumed as a default port (F5b).
         _default_port = {"https": "443", "http": "80", "ssh": "22", "git": "9418"}.get(scheme.lower())
-        hname, _sep, hport = host.rpartition(":")
-        if _sep and hname and hport == _default_port:
-            host = hname
+        if host.startswith("["):
+            # A bracketed IPv6 literal: a missing ']', an EMPTY '[]' authority, or junk before the ':' is
+            # unresolvable (ROUND-2 codex-2 / Fable F3), never a mis-canonicalized ('[::1', path) or ('[]',
+            # path) pair that could falsely agree. '[' is at index 0, so rb == 1 means empty brackets.
+            rb = host.find("]")
+            if rb <= 1 or host[rb + 1:rb + 2] not in ("", ":"):
+                return None
+            hostpart, portsep, hport = host[:rb + 1], host[rb + 1:rb + 2], host[rb + 2:]
+            # The bracketed interior must be a well-formed IP literal; '[nonsense]' is unresolvable
+            # rather than a spurious host that could falsely agree (codex round-6).
+            if not _bracketed_host_ok(hostpart):
+                return None
+        else:
+            # A STRAY bracket in an UNBRACKETED authority (`ssh://host]/p`) is not a valid host: the only
+            # legitimate brackets delimit an IPv6 literal and are handled by the startswith('[') branch above,
+            # so any '[' or ']' here is an unbalanced/stray bracket, unresolvable rather than a spurious
+            # 'host]' endpoint that could falsely agree (codex round-8; whole-host-token validation).
+            if "[" in host or "]" in host:
+                return None
+            # An UNBRACKETED multi-colon authority is an IPv6 literal that MUST be bracketed; unbracketed it
+            # is unresolvable rather than mis-read with a trailing '::22' consumed as a port (F5b).
+            if host.count(":") > 1:
+                return None
+            hostpart, portsep, hport = host.rpartition(":")
+            # STRUCTURAL host validation (codex round-12 F1): the bare host must be a well-formed bare IPv4
+            # literal or DNS name; a character-clean but structurally malformed host (`a..b`, a label over 63
+            # chars, an over-long name) is unresolvable rather than a spurious pair that could falsely satisfy
+            # C-SYNC-AGREE. When no ':' is present rpartition leaves the whole host in `hport`, so the bare
+            # host is `hostpart` only when a port separator was found; the port itself is range-checked below.
+            if not _dns_or_ipv4_ok(hostpart if portsep else hport):
+                return None
+        # A port is a run of ASCII digits: a default port (incl. a leading-zero spelling, ':022' == ':22')
+        # names the port-less endpoint and is dropped; a non-default numeric port is re-emitted without
+        # leading zeros so its spelling cannot cause a false disagreement (ROUND-2 codex-4). A colon whose
+        # tail is not ASCII digits (a bracket fragment, or hostile Unicode digits int() would reject with a
+        # ValueError) is not a port: unresolvable rather than a crash escaping the barrier (ROUND-2 codex-2).
+        if portsep:
+            if not (hostpart and hport.isascii() and hport.isdigit()):
+                return None
+            try:
+                port_i = int(hport)
+            except ValueError:
+                # An all-ASCII-digit run long enough to trip CPython's int-conversion digit limit (>4300
+                # digits) is not a real port: unresolvable rather than a ValueError escaping the barrier
+                # (ROUND-2 codex-2, the LENGTH sibling of the Unicode-digit case the isdigit guard closes).
+                return None
+            # A TCP port is 1..65535; an out-of-range run of digits ('0', '65536', '99999999') is not a
+            # real port, so it is unresolvable rather than a spurious 'host:65536' endpoint that could
+            # falsely agree (codex round-6; a range membership answered by a bounds test, not the tokens).
+            if not (1 <= port_i <= 65535):
+                return None
+            if _default_port is not None and port_i == int(_default_port):
+                host = hostpart
+            else:
+                host = "{}:{}".format(hostpart, port_i)
     else:
         # scp-style [user@]host:path: the colon before any slash separates host from path. A bracketed
         # IPv6 host ([addr]) carries colons INSIDE the brackets that are part of the address, not the
         # separator, so the separator is the colon immediately after the closing bracket; a malformed
         # bracket or a missing host:path colon is unresolvable (returns None, disclosed; gemini round-7).
-        at = s.rfind("@")
-        hoststart = at + 1 if at != -1 else 0
-        if s[hoststart:hoststart + 1] == "[":
-            rb = s.find("]", hoststart)
-            if rb == -1 or s[rb + 1:rb + 2] != ":":
+        # The userinfo boundary is found from the FRONT: the host '[' sits at the start or immediately
+        # after the userinfo '@'. The PATH may itself contain '@' (git@[addr]:path@x), so rfind would land
+        # in the path and skip the bracket branch, mis-splitting on a colon inside the address (F5a).
+        lb = s.find("[")
+        if lb != -1 and (lb == 0 or s[lb - 1] == "@"):
+            rb = s.find("]", lb)
+            # A missing ']', an EMPTY '[]' authority (rb == lb + 1), or a bracket not immediately followed
+            # by the host:path colon is unresolvable rather than a mis-split ('[]', path) pair (Fable F3).
+            if rb == -1 or rb == lb + 1 or s[rb + 1:rb + 2] != ":":
                 return None
             colon = rb + 1
         else:
@@ -527,6 +749,27 @@ def _canonical_remote(url):
         if "@" in authority:
             authority = authority.rsplit("@", 1)[1]
         host = authority
+        # Reject a whitespace/control character anywhere in the host authority: never a valid host, and the
+        # scp-style sibling of the scheme-URL check above (codex round-8; whole-host-token validation).
+        if not _host_authority_ok(host):
+            return None
+        # A scp-style bracketed host carries no port, so the whole authority is the '[addr]' token;
+        # its interior must be a well-formed IP literal. 'git@[nonsense]:p' is unresolvable rather than
+        # a spurious host (codex round-6; class sibling of the scheme-URL bracket check above).
+        if host.startswith("["):
+            if not _bracketed_host_ok(host):
+                return None
+        else:
+            # A STRAY bracket in an UNBRACKETED scp host ('git@host]:p') is unbalanced and not a valid host:
+            # unresolvable rather than a spurious 'host]' endpoint (codex round-8, scp sibling of the
+            # scheme-URL stray-bracket check).
+            if "[" in host or "]" in host:
+                return None
+            # STRUCTURAL host validation (codex round-12 F1, scp sibling of the scheme-URL check): an scp host
+            # carries no port (the ':' is the host:path separator), so the whole authority is the bare host;
+            # it must be a well-formed bare IPv4 literal or DNS name, else unresolvable -> CANNOT-EVALUATE.
+            if not _dns_or_ipv4_ok(host):
+                return None
     if not host:
         return None
     p = path.strip("/")
@@ -557,6 +800,25 @@ def _target_remote_canon(target):
             return set(), [target.value]
         return {c}, []
     return None, []
+
+
+def _canon_sets_agree(a_canon, b_canon, kind):
+    """True when two canonical (host, path) remote sets share an endpoint (spec 5.6). For a github/gitlab
+    target the org/repo PATH compares case-INSENSITIVELY (those hosts resolve org/repo without regard to
+    case; the host is already lowercased by _canonical_remote / _target_remote_canon), so a case-only
+    difference is not a disagreement (F5); any other host stays case-sensitive, a disclosed residual since
+    an arbitrary git host may be case-sensitive. BOTH legs of C-SYNC-AGREE (the committed-pointer leg and
+    the actual-remote leg) share this one fold so they cannot diverge (round-16 F-3)."""
+    if not a_canon.isdisjoint(b_canon):
+        return True
+    # github.com / gitlab.com resolve the org/repo PATH case-insensitively: this is a property of the HOST,
+    # not of how the target was spelled, so a git: URL naming github.com folds exactly as the github:
+    # shorthand does (ROUND-2 codex-3 s2; the host is already lowercased by the canonicalizers). Any other
+    # host stays case-sensitive, a disclosed residual since an arbitrary git host may be case-sensitive.
+    _ci = ("github.com", "gitlab.com")
+    a_fold = {(h, pth.lower()) if h in _ci else (h, pth) for h, pth in a_canon}
+    b_fold = {(h, pth.lower()) if h in _ci else (h, pth) for h, pth in b_canon}
+    return not a_fold.isdisjoint(b_fold)
 
 
 # --- index parsing (shape defined here) --------------------------------------------------------------
@@ -982,8 +1244,11 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             if fn_ in (ARCHIVE_MANIFEST_NAME, WORKLOG_NAME):
                 continue
             if not fn_.endswith(INDEX_SUFFIX):
-                rep.finding("C-ARCHIVE-ENUM: unexpected file {!r} in archive bucket {} (spec 12)".format(
-                    fn_, bucket))
+                # A non-index file in a bucket (only archive.toml, worklog.toml, and <type>.index.toml
+                # belong) is an unregistered path; route it through the SAME substantiated-partial triage
+                # as its siblings (_archive_unmanaged for root files and bucket subdirs), so the store-wide
+                # partial relaxation (spec 14.2) is honoured here too rather than hard-failing (F2).
+                _archive_unmanaged(rep, partial_active, _rel(bucket, fn_))
                 continue
             tname = fn_[:-len(INDEX_SUFFIX)]
             if tname not in enabled_types:
@@ -1391,7 +1656,10 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
     if isinstance(um, dict) and isinstance(um.get("paths"), list):
         for p in um["paths"]:
             if isinstance(p, str) and _is_contained_relpath(p):
-                unmanaged.append(p)
+                # Normalize to the canonical contained form so a non-canonical declaration covers the
+                # legacy content it names rather than nothing (F4); this also makes the collision check
+                # below see a declaration of a managed path in any spelling.
+                unmanaged.append(_canonical_contained(p))
             else:
                 # guard-input-soundness (round-14 C4): a malformed [unmanaged] entry (non-string, or a
                 # non-contained / escaping path) is a named CANNOT-EVALUATE, not a silent drop; a malformed
@@ -1454,6 +1722,11 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
     # per-record worklog/; round-13 the inline analog). A ledger type's INDEX file (<type>.index.toml) is
     # likewise a never-legal slot and is reserved so it cannot be declared unmanaged to shield a rogue file.
     type_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types))
+    # The per-record body dirs to RECURSE are the non-ledger type dirs only: a ledger type (worklog) keeps
+    # its entries in <type>.toml, so a <ledgertype>/ dir must NEVER exist and is graded as a stray even when
+    # empty, never recursed as a managed namespace where an empty one would escape grading (ROUND-2 Fable
+    # F-1a). type_body_dirs (all enabled types) still drives the reservation below.
+    perrecord_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types) if t not in _LEDGER_TYPES)
     ledger_index_files = tuple(_rel(mrel, t + INDEX_SUFFIX) for t in sorted(enabled_types)
                                if t in _LEDGER_TYPES)
     graded_containers = (archive_root, imports_root) + type_body_dirs
@@ -1480,7 +1753,7 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
         # directory, or a tree of only empty dirs, escaped grading entirely).
         if full == mrel or _under_any(full, (imports_root,)):
             return True
-        if layout == "per-record" and full in type_body_dirs:
+        if layout == "per-record" and full in perrecord_body_dirs:
             return True
         return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
 
@@ -1494,6 +1767,14 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
             return
         subdirs, files = _list_dir(root_fd, reldir, rep)
         if subdirs is None and files is None:
+            return
+        if not subdirs and not files and reldir != imports_root and _under_any(reldir, (imports_root,)):
+            # An EMPTY directory strictly under the imports interior has no file to flag, so it would
+            # escape grading entirely (round-14 graded files only; F1). Grade the directory itself as an
+            # unregistered path, exactly as any other unregistered path is: a finding at steady state and
+            # a triage entry under a substantiated partial (the sorted loop below routes it). The imports
+            # ROOT itself, holding no runs, is a legitimate empty namespace and stays clean.
+            unmanaged_files.append(reldir)
             return
         for f in files:
             full = reldir + "/" + f
@@ -1752,9 +2033,11 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
         rep.cant("internal: store validation raised an unexpected {} and fails closed to CANNOT-EVALUATE "
                  "({})".format(type(exc).__name__, exc))
     finally:
-        os.close(root_fd)
+        # The store verdict is already computed by the barrier above; a descriptor close that raises
+        # (EINTR / EIO / an invalid fd) during teardown must not crash the validator (S4-F3, outside B6).
+        _close_fd_quietly(root_fd)
         if product_root_fd is not None:
-            os.close(product_root_fd)
+            _close_fd_quietly(product_root_fd)
     return rep.result(evaluated_profiles, unevaluated_profiles)
 
 
@@ -2036,10 +2319,26 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                          "host+path agreement (a disclosed residual; spec 5.5)".format(raw))
             # Leg 2: a committed pointer that names a REMOTE disagreeing with the sync_target (B3).
             if pointer_target is not None and not pointer_target.local:
-                pcanon, _pun = _target_remote_canon(pointer_target)
-                if tcanon and pcanon and pcanon.isdisjoint(tcanon):
+                pcanon, pun = _target_remote_canon(pointer_target)
+                for raw in pun:
+                    # Symmetric with the sync_target unresolved-forms cant (F7): a committed pointer naming a
+                    # REMOTE the equivalence cannot canonicalize is a disclosed CANNOT-EVALUATE, never a
+                    # silent leg-2 pass (ROUND-2 Fable F-4 / codex-3 s5).
+                    rep.cant("C-SYNC-AGREE: the committed pointer remote form {!r} cannot be canonicalized "
+                             "for host+path agreement against the sync_target (a disclosed residual; spec "
+                             "5.6)".format(raw))
+                if tcanon and pcanon and not _canon_sets_agree(pcanon, tcanon, tgt.kind):
                     rep.finding("C-SYNC-AGREE: the committed pointer remote {!r} does not agree with the "
                                 "manifest sync_target {!r} (spec 5.6)".format(pointer_target.value, sync_target))
+                elif pcanon and tcanon is None:
+                    # A dedicated LOCAL sync_target (dir:/path -> tcanon is None) names NO remote, so a
+                    # committed pointer that names a canonicalizable REMOTE contradicts it. Symmetric with
+                    # the actual-remote leg's local-target-with-a-remote finding (leg 3) and the
+                    # relocated-local committed-pointer-remote finding, so leg 2 does not silently pass a
+                    # remote pointer against a local sync_target (Fable F2).
+                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a local target but the "
+                                "committed pointer names a remote {} target {!r} (spec 5.6)".format(
+                                    sync_target, pointer_target.kind, pointer_target.value))
             # Leg 3: the store repository's actual remote agrees with the RESOLVED sync_target. Equivalent
             # URL forms (https / ssh scp-style git@host:path, with or without a trailing .git) compare by
             # canonical host+path, so a valid shorthand is not rejected by a naive strip-compare (F8).
@@ -2067,14 +2366,9 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                              "to compare against the actual remote (a disclosed residual; spec 5.5)".format(
                                  sync_target))
                 else:
-                    matched = acanon in tcanon
-                    if not matched and tgt.kind in ("github", "gitlab"):
-                        # GitHub / GitLab resolve the org/repo path case-insensitively, so a case-only
-                        # difference is not a disagreement (F5). The host is already lowercased; the
-                        # disclosed residual is that a bare git: remote path stays case-sensitive, since an
-                        # arbitrary git host may be case-sensitive.
-                        matched = (acanon[0], acanon[1].lower()) in {(h, p.lower()) for h, p in tcanon}
-                    if not matched:
+                    # The committed-pointer leg (above) and this actual-remote leg share ONE fold
+                    # (_canon_sets_agree) so they cannot diverge on github/gitlab case (round-16 F-3).
+                    if not _canon_sets_agree({acanon}, tcanon, tgt.kind):
                         rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
                                     "repository's actual remote {!r} (spec 5.6)".format(sync_target, actual))
     elif in_repo:
@@ -2465,6 +2759,13 @@ def self_test():
             return None
         observations = clean_prior() if obs == "clean" else obs
         return validate_store(res, observations=observations)
+
+    # run_bounded: the shared bounded-child watchdog, imported from _opf_emit so the fork/timer/pipe
+    # hardening lives in ONE place across the three OPF self-tests and cannot diverge again (its prior
+    # per-file copies drifted: the fork-less, SIGALRM-unblock, and parent-reap fixes had to be re-carried
+    # by hand). Callers here still pre-check hasattr(os, "fork") and fail their setup closed where it is
+    # absent; the shared helper additionally returns a SETUP-ERROR sentinel on a fork-less host.
+    run_bounded = _opf_emit.run_bounded
 
     try:
         # --- clean inline store ----------------------------------------------------------------------
@@ -3050,26 +3351,138 @@ def self_test():
         check("history-resurrection-invalid", r.status == INVALID)
         check("history-resurrection-named", any("C-HISTORY-RESURRECTION" in x for x in r.findings))
 
-        # --- range-bounding: a huge declared high-water and span must NOT expand (F15) ----------------
-        f = clean_machine()
-        f["counters.toml"] = counters(WL=10 ** 9)
-        big_obs = copy.deepcopy(clean_prior())
-        big_obs["prior"]["counters_high"]["WL"] = 10 ** 9
-        r = run(f, obs=big_obs)   # terminates promptly; the overhang finding carries a COUNT, not a list
-        check("f15-huge-high-water-bounded-invalid", r.status == INVALID)
-        f = clean_machine()
-        one_cl2 = make_changelog(["1.0.0"])
-        one_digs2 = freeze_digests(one_cl2, ["1.0.0"])
-        f["version.toml"] = {"schema": 1, "release": [rel_row("1.0.0", 1, 2, dig12)],
-                             "summary": [{"covers": "1.0.0", "status": "published",
-                                          "digest": one_digs2["1.0.0"]},
-                                         {"covers": "unreleased", "status": "working"}]}
-        f["worklog.toml"] = {"schema": 1, "entry": [wl(3), wl(4)]}
-        f["archive/2026/archive.toml"] = {"schema": 1, "moved": [],
-                                          "worklog_moved": [{"span": ["WL-1", "WL-1000000000"],
-                                                             "destination": "archive/2026/worklog.toml"}]}
-        r = run(f, product={"VERSION": "1.0.0\n", "CHANGELOG.md": one_cl2})   # span WL-1..WL-1e9 over 2 present
-        check("f15-huge-span-bounded-invalid", r.status == INVALID)
+        # --- range-bounding: a huge declared high-water and span must NOT expand (F15). The engine must
+        # terminate promptly (the overhang finding carries a COUNT, not a list), so the two vectors run
+        # behind a bounded child (S7-F1): a range-expansion REGRESSION would otherwise hang or OOM the
+        # suite in-process; here it trips a deterministic TIMEOUT/OOM sentinel the INVALID assertion
+        # catches. Requires os.fork; a fork-less host fails the setup check closed. ----------------------
+        if not hasattr(os, "fork"):
+            check("f15-bounded-runner-available", False)   # fail-closed: the range vectors need a bounded child
+        else:
+            f = clean_machine()
+            f["counters.toml"] = counters(WL=10 ** 9)
+            big_obs = copy.deepcopy(clean_prior())
+            big_obs["prior"]["counters_high"]["WL"] = 10 ** 9
+            _hw_root = build(f)
+            _hw_status = run_bounded(
+                lambda: validate_store(resolve_store(_hw_root), observations=big_obs).status)
+            check("f15-huge-high-water-bounded-invalid", _hw_status == INVALID)
+            f = clean_machine()
+            one_cl2 = make_changelog(["1.0.0"])
+            one_digs2 = freeze_digests(one_cl2, ["1.0.0"])
+            f["version.toml"] = {"schema": 1, "release": [rel_row("1.0.0", 1, 2, dig12)],
+                                 "summary": [{"covers": "1.0.0", "status": "published",
+                                              "digest": one_digs2["1.0.0"]},
+                                             {"covers": "unreleased", "status": "working"}]}
+            f["worklog.toml"] = {"schema": 1, "entry": [wl(3), wl(4)]}
+            f["archive/2026/archive.toml"] = {"schema": 1, "moved": [],
+                                              "worklog_moved": [{"span": ["WL-1", "WL-1000000000"],
+                                                                 "destination": "archive/2026/worklog.toml"}]}
+            _sp_root = build(f, product={"VERSION": "1.0.0\n", "CHANGELOG.md": one_cl2})   # span WL-1..WL-1e9
+            _sp_status = run_bounded(
+                lambda: validate_store(resolve_store(_sp_root), observations=clean_prior()).status)
+            check("f15-huge-span-bounded-invalid", _sp_status == INVALID)
+
+            # --- F7 bounded-runner hardening (fail pre-fix, pass post-fix) ----------------------------
+            import signal as _sig7
+            import time as _t7
+            # (a) a SETUP failure (a bound could NOT be installed) must yield a DISTINCT SETUP-ERROR
+            # sentinel, NEVER the thunk's normal result run unbounded. Force setitimer to raise in the
+            # child (the patched module carries across the fork); a reverted `except: pass` would swallow
+            # it and return "F7-NORMAL".
+            _real_setitimer = _sig7.setitimer
+            _sig7.setitimer = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("f7-injected-setup-failure"))
+            try:
+                _setup = run_bounded(lambda: "F7-NORMAL")
+            finally:
+                _sig7.setitimer = _real_setitimer
+            check("f7-setup-failure-yields-setup-error-not-normal", _setup.startswith("SETUP-ERROR"))
+            # (c) the child must not inherit an ambient SIG_IGN SIGALRM disposition that would defeat the
+            # watchdog: with SIGALRM ignored in the parent, a thunk that sleeps past the timeout must still
+            # TIMEOUT (the child resets SIG_DFL). Reverted (no reset), the ignored timer lets the sleep run
+            # to completion and the thunk's own result returns instead of TIMEOUT.
+            # Test-hermeticity (round-15 F2 + round-17 F-R16-1): installing SIG_IGN over this ~1s window both
+            # DISCARDS a caller SIGALRM pending on entry (POSIX) AND silently drops a caller ITIMER_REAL
+            # deadline that EXPIRES inside the window (the timer's generated SIGALRM is ignored, never
+            # re-armed). So this fixture snapshots the caller's FULL alarm state (ITIMER value+interval and
+            # pending) BEFORE installing SIG_IGN and hands it to the shared restore_caller_alarm helper in the
+            # finally: the timer is re-armed elapsed-aware (an in-window-expired deadline clamps to a tiny
+            # positive so it still FIRES rather than being destroyed), and a discarded pending is re-posted,
+            # leaving the caller's alarm state unchanged. A prior 0.0 stand-in restored only the pending and
+            # let an in-window caller deadline vanish (F-R16-1).
+            # F-R18-COV1TEST: the SINGLE snapshot -> SIG_IGN -> run_bounded -> restore path that BOTH the f7
+            # ignored-sigalrm check and the COV1 caller-deadline-preservation probe exercise, so a revert of
+            # the caller-timer snapshot/restore here (e.g. zeroing _snap7) reds the COV1 probe below rather
+            # than passing on the probe's own separate copy. The caller's FULL alarm is snapshotted BEFORE
+            # SIG_IGN and restored elapsed-aware after (F-R16-1 / F2).
+            def _f7_ignore_window(_thunk, _timeout_s):
+                _snap7 = snapshot_caller_alarm()   # caller ITIMER + pending, captured BEFORE SIG_IGN
+                _prev7 = _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
+                try:
+                    return run_bounded(_thunk, timeout_s=_timeout_s)
+                finally:
+                    _sig7.signal(_sig7.SIGALRM, _prev7)
+                    restore_caller_alarm(*_snap7)   # elapsed-aware ITIMER restore + re-post pending
+            _to = _f7_ignore_window(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], 1)
+            check("f7-inherited-ignored-sigalrm-still-times-out", _to == "TIMEOUT")
+            # (d) the child must also UNBLOCK SIGALRM, not merely reset its DISPOSITION: a caller with
+            # SIGALRM BLOCKED in its signal mask passes that blocked mask across the fork, so the timer's
+            # SIGALRM stays pending (never delivered) and never terminates the child, leaving the parent
+            # blocked in os.read() with no deadline. With SIGALRM blocked in the parent, a thunk that sleeps
+            # past the timeout must still TIMEOUT (the child unblocks it before arming the timer). Reverted
+            # (no unblock), the pending timer never fires and the sleep runs to completion, so the thunk's
+            # own result returns instead of TIMEOUT.
+            if hasattr(_sig7, "pthread_sigmask"):
+                # test-hermeticity: SNAPSHOT the caller's mask and RESTORE it exactly (SIG_SETMASK), never a
+                # blind SIG_UNBLOCK -- a caller that had SIGALRM blocked must stay blocked afterward, so this
+                # probe leaves the ambient signal mask as it found it. SIG_BLOCK returns the prior mask.
+                _prev_mask7 = _sig7.pthread_sigmask(_sig7.SIG_BLOCK, {_sig7.SIGALRM})
+                try:
+                    _tb = run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], timeout_s=1)
+                finally:
+                    _sig7.pthread_sigmask(_sig7.SIG_SETMASK, _prev_mask7)
+                check("f7-inherited-blocked-sigalrm-still-times-out", _tb == "TIMEOUT")
+
+            # F-R17-COV1 / F-R18-COV1TEST: the f7 checks above assert only the CHILD's TIMEOUT outcome, so the
+            # module self-test passed even with the caller-timer snapshot reverted to zeros -- the
+            # timer-restore class (F-R16-1 / F-R17-C2) went undiscriminated in-suite. Close that gap: arm a
+            # REAL caller ITIMER_REAL that EXPIRES inside the ~1s SIG_IGN window, and run the caller deadline
+            # through the SHARED _f7_ignore_window callable (the ACTUAL f7 restoration path), so zeroing the
+            # snapshot/restore reds this probe. Assert the caller's deadline is PRESERVED and fires PROMPTLY
+            # after the elapsed-aware restore (which clamps an in-window-expired deadline to a tiny positive),
+            # within a TIGHT bound that distinguishes a prompt clamp (fires within a few ms) from a fresh 0.3s
+            # deadline: a zeros revert never re-arms (never fires) and a verbatim revert re-arms the full 0.3s
+            # (fires ~0.3s after the restore, outside the bound) -- both red. The prior 0.5s window admitted a
+            # verbatim-restored 0.3s timer, so it did not discriminate a verbatim revert.
+            # SKIP when SIGALRM is currently BLOCKED (the hostile-ambient wrapper re-runs this self-test with
+            # SIGALRM blocked-and-pending): the probe needs the deadline DELIVERED, and unblocking would
+            # consume the caller's pending SIGALRM the wrapper asserts must survive. In the normal run SIGALRM
+            # is deliverable, so the discrimination still holds where it matters.
+            _cov_blocked = (hasattr(_sig7, "pthread_sigmask")
+                            and _sig7.SIGALRM in _sig7.pthread_sigmask(_sig7.SIG_BLOCK, set()))
+            if hasattr(_sig7, "setitimer") and hasattr(_sig7, "ITIMER_REAL") and not _cov_blocked:
+                _cov_fired = []
+                _cov_outer = snapshot_caller_alarm()
+                _cov_prev = _sig7.signal(_sig7.SIGALRM,
+                                         lambda _s, _f: _cov_fired.append(_t7.monotonic()))
+                try:
+                    _sig7.setitimer(_sig7.ITIMER_REAL, 0)          # quiet baseline
+                    _sig7.setitimer(_sig7.ITIMER_REAL, 0.3, 0.0)   # a caller deadline that EXPIRES in-window
+                    # Exercise the ACTUAL f7 restoration via the shared callable (it snapshots BEFORE its
+                    # SIG_IGN and restores elapsed-aware, then re-installs the counting handler captured as the
+                    # pre-SIG_IGN disposition), so the clamped deadline fires under the counting handler.
+                    _f7_ignore_window(lambda: (_t7.sleep(1), "COV-SLEPT")[1], 1)   # ~1s > 0.3s
+                    # TIGHT bound (0.12s): a prompt clamp fires within a few ms of the restore; a verbatim
+                    # revert's fresh 0.3s deadline fires ~0.3s later (outside 0.12s) and a zeros revert never
+                    # fires -- both red.
+                    _cov_stop = _t7.monotonic() + 0.12
+                    while not _cov_fired and _t7.monotonic() < _cov_stop:
+                        _t7.sleep(0.002)
+                    check("cov1-caller-itimer-preserved-across-f7-fixture", bool(_cov_fired))
+                finally:
+                    _sig7.setitimer(_sig7.ITIMER_REAL, 0)
+                    _sig7.signal(_sig7.SIGALRM, _cov_prev)
+                    restore_caller_alarm(*_cov_outer)
 
         # --- io fail-closed ---------------------------------------------------------------------------
         f = clean_machine()
@@ -3324,15 +3737,143 @@ def self_test():
         check("b5-dotdot-moved-dest-no-crash",
               b5r is not None and b5r.status in (INVALID, CANNOT_EVALUATE))
 
-        # --- B4: a FIFO planted as a declared read target fails closed, never an unbounded block ------
-        if hasattr(os, "mkfifo"):
+        # --- B4: a FIFO planted as a declared read target fails closed to CANNOT-EVALUATE, never an
+        # unbounded BLOCK on the reader. The validate_store call runs behind a bounded child (S7-F2): a
+        # regression that opened the FIFO for a blocking read would HANG the suite in-process; here it trips
+        # a TIMEOUT sentinel the assertion rejects. The setup needs os.mkfifo AND os.fork, so a host missing
+        # either fails the setup check closed rather than silently skipping the no-hang guarantee. ---------
+        if not (hasattr(os, "mkfifo") and hasattr(os, "fork")):
+            check("b4-fifo-setup-available", False)   # fail-closed: cannot assert the no-hang property here
+        else:
             fifo_root = build(clean_machine(), clean_product())
             (fifo_root / "CHANGELOG.md").unlink()
             os.mkfifo(str(fifo_root / "CHANGELOG.md"))
-            fr = validate_store(resolve_store(fifo_root), observations=clean_prior())
-            check("b4-fifo-target-cannot-eval-not-hang",
-                  fr is not None and fr.status == CANNOT_EVALUATE
-                  and any("regular file" in m for m in fr.cannot_evaluate))
+
+            def _fifo_probe():
+                fr = validate_store(resolve_store(fifo_root), observations=clean_prior())
+                if (fr is not None and fr.status == CANNOT_EVALUATE
+                        and any("regular file" in m for m in fr.cannot_evaluate)):
+                    return "CANT-REGFILE"
+                return "status={}".format(None if fr is None else fr.status)
+
+            check("b4-fifo-target-cannot-eval-not-hang", run_bounded(_fifo_probe) == "CANT-REGFILE")
+
+        # --- S1-F1: an OSError from os.listdir inside _list_contained maps to a fail-closed StoreError
+        # (routed by _list_dir to a named CANNOT-EVALUATE), never a raw OSError escaping the walk; pre-fix
+        # only the os.stat leg was wrapped. Exercised by forcing os.listdir to raise over a real dir fd. ---
+        _s1_dir = base / "s1-listdir"
+        (_s1_dir / "sub").mkdir(parents=True)
+        _s1_fd = os.open(str(_s1_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _s1_orig_listdir = os.listdir
+
+        def _s1_boom_listdir(*_a, **_k):
+            raise OSError(5, "EIO (self-test injected)")
+
+        try:
+            os.listdir = _s1_boom_listdir
+            try:
+                _list_contained(_s1_fd, "sub")
+                _s1_outcome = "no-raise"
+            except StoreError:
+                _s1_outcome = "storeerror"
+            except OSError:
+                _s1_outcome = "oserror"
+        finally:
+            os.listdir = _s1_orig_listdir
+            _close_fd_quietly(_s1_fd)
+        check("s1-listdir-oserror-is-storeerror", _s1_outcome == "storeerror")
+
+        # --- S1-F1 (close leg): the _list_contained `finally` closes are guarded, so a teardown close that
+        # raises does not escape as a raw OSError; pre-fix the raw os.close there propagated (reaching a
+        # CANNOT-EVALUATE only via the far B6 barrier, spuriously downgrading a VALID store). Patch os.close
+        # to really-close-then-raise over a real dir walk and confirm _list_contained still returns its
+        # listing without raising. ------------------------------------------------------------------------
+        _s1c_dir = base / "s1-close"
+        (_s1c_dir / "sub" / "child").mkdir(parents=True)
+        (_s1c_dir / "sub" / "afile").write_text("x\n", encoding="utf-8")
+        _s1c_fd = os.open(str(_s1c_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _s1c_real_close = os.close
+
+        def _s1c_boom_close(fd):
+            try:
+                _s1c_real_close(fd)
+            except OSError:
+                pass
+            raise OSError(9, "EBADF (self-test injected)")
+
+        try:
+            os.close = _s1c_boom_close
+            try:
+                _s1c_sub, _s1c_files = _list_contained(_s1c_fd, "sub")
+                _s1c_outcome = "returned"
+            except BaseException:                          # noqa: BLE001 (any escape means the guard failed)
+                _s1c_sub = _s1c_files = None
+                _s1c_outcome = "raised"
+        finally:
+            os.close = _s1c_real_close
+            _s1c_real_close(_s1c_fd)
+        check("s1-listcontained-finally-close-guarded",
+              _s1c_outcome == "returned" and _s1c_sub == ["child"] and _s1c_files == ["afile"])
+
+        # --- ROUND-6 codex: _close_fd_quietly must not CONCEAL a genuine descriptor leak. A close that
+        # raises WITHOUT releasing the fd (a "still open" close error) must be detected and the fd actually
+        # closed, not silently passed. Patch os.close so its FIRST call raises WITHOUT closing (fd stays
+        # open) and later calls really close; after _close_fd_quietly the fd must be GONE (fstat -> EBADF).
+        # Pre-fix (`except OSError: pass`) the single raising close left the fd open and fstat succeeded. --
+        _q_dir = base / "q-close"
+        _q_dir.mkdir()
+        _q_fd = os.open(str(_q_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _q_real_close = os.close
+        _q_state = {"n": 0}
+
+        def _q_boom_close(fd):
+            _q_state["n"] += 1
+            if _q_state["n"] == 1:
+                raise OSError(5, "EIO (self-test injected, fd left open)")  # raise WITHOUT closing
+            return _q_real_close(fd)
+
+        try:
+            os.close = _q_boom_close
+            _close_fd_quietly(_q_fd)
+        finally:
+            os.close = _q_real_close
+        try:
+            os.fstat(_q_fd)
+            _q_still_open = True
+        except OSError:
+            _q_still_open = False
+        if _q_still_open:                                  # would leak under the old silent pass; close it now
+            _q_real_close(_q_fd)
+        check("r6-close-fd-quietly-no-silent-leak", _q_still_open is False)
+
+        # --- S4-F3: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
+        # the B6 barrier, so a close that raises during teardown (EINTR / EIO / an invalid fd) must be
+        # swallowed rather than crash the validator after the verdict is already computed. Exercised by
+        # patching os.close to really close then raise for the whole call: post-fix the guarded finally
+        # swallows it and validate_store still returns a verdict; pre-fix the raw os.close propagated. Every
+        # production close routes through _close_fd_quietly, so the ONLY unguarded raw close pre-fix is the
+        # finally under test. -----------------------------------------------------------------------------
+        _s4_root = build(clean_machine(), clean_product())
+        _s4_res_in = resolve_store(_s4_root)               # resolve BEFORE patching os.close
+        _s4_real_close = os.close
+
+        def _s4_boom_close(fd):
+            try:
+                _s4_real_close(fd)                         # really release the fd (no leak) ...
+            except OSError:
+                pass
+            raise OSError(9, "EBADF (self-test injected)")  # ... then raise, as a hostile teardown close would
+
+        try:
+            os.close = _s4_boom_close
+            try:
+                _s4r = validate_store(_s4_res_in, observations=clean_prior())
+                _s4_outcome = "returned" if _s4r is not None else "none"
+            except OSError:
+                _s4_outcome = "raised"
+        finally:
+            os.close = _s4_real_close
+        check("s4-validate-store-finally-close-guarded", _s4_outcome == "returned")
 
         # --- B6: a pathologically deep directory chain UNDER A RECURSED namespace (the imports interior)
         # fails closed to CANNOT-EVALUATE, never a RecursionError. A deep chain OUTSIDE a managed namespace
@@ -3463,6 +4004,339 @@ def self_test():
         check("unknown-observation-key-cannot-eval", r is not None and r.status == CANNOT_EVALUATE)
         check("unknown-observation-key-named",
               r is not None and any("unrecognized" in m for m in r.cannot_evaluate))
+
+        # ===== round-16 Fable-retrofix discriminating vectors (F-1..F-6) ==============================
+        RUNID16 = "imp-20260601T000000Z-0123456789abcdef"
+        # F-1: an EMPTY unregistered directory under the imports interior is graded like any other stray
+        # (round-14 graded FILES only, so an empty rogue dir laundered to VALID). Steady state -> INVALID.
+        _f1a = build(clean_machine())
+        os.makedirs(str(_f1a / ".working" / "toml" / "imports" / "rogue-empty"), exist_ok=False)
+        _f1ar = validate_store(resolve_store(_f1a), observations=clean_prior())
+        check("imports-empty-rogue-dir-none-invalid", _f1ar.status == INVALID)
+        check("imports-empty-rogue-dir-named",
+              any("C-CONTAINMENT" in f and "imports/rogue-empty" in f and "unregistered" in f
+                  for f in _f1ar.findings))
+        # a tree of ONLY-empty dirs under imports is still graded (its deepest empty leaf) -> INVALID.
+        _f1b = build(clean_machine())
+        os.makedirs(str(_f1b / ".working" / "toml" / "imports" / "a" / "b" / "c"), exist_ok=False)
+        _f1br = validate_store(resolve_store(_f1b), observations=clean_prior())
+        check("imports-empty-tree-none-invalid", _f1br.status == INVALID)
+        # under a SUBSTANTIATED partial (an active run carries plan.toml) an empty dir under imports
+        # triages (VALID), never a finding, exactly as files under imports already do.
+        _f1c = clean_machine()
+        _f1c["manifest.toml"] = base_manifest()
+        _f1c["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _f1c["imports/{}/plan.toml".format(RUNID16)] = "schema = 1"
+        _f1croot = build(_f1c)
+        os.makedirs(str(_f1croot / ".working" / "toml" / "imports" / "empty-under-partial"),
+                    exist_ok=False)
+        _f1cr = validate_store(resolve_store(_f1croot), observations=clean_prior())
+        check("imports-empty-dir-partial-triaged",
+              _f1cr.status == VALID and any("empty-under-partial" in t for t in _f1cr.triage))
+        # the empty imports ROOT itself (no runs) is a legitimate empty namespace and stays clean.
+        _f1d = build(clean_machine())
+        os.makedirs(str(_f1d / ".working" / "toml" / "imports"), exist_ok=False)
+        _f1dr = validate_store(resolve_store(_f1d), observations=clean_prior())
+        check("imports-empty-root-valid", _f1dr.status == VALID)
+
+        # F-2: a stray (non-index) file in an archive bucket routes through the SAME substantiated-partial
+        # triage as its siblings: a finding at steady state, a triage entry under a substantiated partial.
+        _f2 = clean_machine()
+        _f2["archive/2026/strayfile.txt"] = "x\n"
+        _f2r = run(_f2)
+        check("archive-bucket-stray-file-steady-invalid",
+              _f2r is not None and _f2r.status == INVALID
+              and any("C-ARCHIVE-ENUM" in f and "strayfile.txt" in f for f in _f2r.findings))
+        _f2p = clean_machine()
+        _f2p["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _f2p["imports/{}/plan.toml".format(RUNID16)] = "schema = 1"
+        _f2p["archive/2026/strayfile.txt"] = "x\n"
+        _f2pr = run(_f2p)
+        check("archive-bucket-stray-file-partial-triaged",
+              _f2pr is not None and _f2pr.status == VALID
+              and any("strayfile.txt" in t for t in _f2pr.triage))
+
+        # F-3: the committed-pointer leg (leg 2) applies the SAME github/gitlab case fold as the
+        # actual-remote leg. A dedicated sync_target differing only in case from the committed pointer
+        # AGREES -> VALID (the actual remote also agrees).
+        _f3 = clean_machine()
+        _f3["manifest.toml"] = base_manifest()
+        _f3["manifest.toml"]["store"] = {"sync_target": "github:Org/Repo"}
+        _f3res = resolve_store(build(_f3))
+        _f3res.target = classify_target("github:org/repo")
+        _f3r = validate_store(_f3res, observations={"tracked": "tracked",
+                                                    "actual_remote": "git@github.com:org/repo.git",
+                                                    "prior": clean_prior()["prior"]})
+        check("sync-pointer-leg-case-insensitive-valid", _f3r is not None and _f3r.status == VALID)
+
+        # F-4: a non-canonical but CONTAINED [unmanaged] declaration (trailing slash, '//', or lexical
+        # '..') is normalized so it covers the legacy content it names rather than over-firing it as
+        # unregistered (a false INVALID). Without the fix each of these is INVALID.
+        for _ncp in (".working/legacy-dir/", ".working//legacy-dir", ".working/x/../legacy-dir"):
+            _f4 = clean_machine()
+            _f4["manifest.toml"] = base_manifest()
+            _f4["manifest.toml"]["unmanaged"] = {"paths": [_ncp]}
+            check("unmanaged-noncanonical-not-false-invalid:" + _ncp,
+                  run(_f4, working={"legacy-dir/old-note.md": "x\n"}).status == VALID)
+
+        # F-6a: C-CONTIGUITY "does not start at WL-1" is the SOLE layer catching a worklog whose first
+        # present id is not WL-1 (the below-max side; the overhang side is C-NO-DELETION). A zero-release
+        # store holding only WL-2, WL-3 (high-water 3, contiguous among themselves) is INVALID solely via
+        # this branch; deleting it flips the store VALID.
+        _f6a = copy.deepcopy(pr_machine)
+        _f6a["worklog.toml"] = {"schema": 1, "entry": [wl(2), wl(3)]}
+        _f6a["counters.toml"] = counters(FN=2, BI=0, DN=0, WL=3, HO=0)
+        _f6a_obs = {"tracked": "tracked",
+                    "prior": {"releases": [],
+                              "counters_high": counters(FN=2, BI=0, DN=0, WL=3, HO=0)["counters"],
+                              "records": {"FN-1": ("finding", "open"), "FN-2": ("finding", "open")}}}
+        _f6ar = run(_f6a, product=pr_product, obs=_f6a_obs)
+        check("c-contiguity-start-not-wl1-invalid", _f6ar is not None and _f6ar.status == INVALID)
+        check("c-contiguity-start-not-wl1-named",
+              _f6ar is not None and any("C-CONTIGUITY" in f and "does not start at WL-1" in f
+                                        for f in _f6ar.findings))
+        # F-6b: the "archived worklog WL-n not enumerated in a worklog_moved span" branch is the SOLE
+        # layer catching an archived worklog id no span accounts for. A bucket holding WL-1, WL-2 whose
+        # span enumerates only WL-1 is INVALID solely via it.
+        _f6b = clean_machine()
+        _f6b["archive/2026/archive.toml"] = {"schema": 1, "moved": [],
+            "worklog_moved": [{"span": ["WL-1", "WL-1"], "destination": "archive/2026/worklog.toml"}]}
+        _f6br = run(_f6b)
+        check("archive-wl-unenumerated-invalid", _f6br is not None and _f6br.status == INVALID)
+        check("archive-wl-unenumerated-named",
+              _f6br is not None and any("C-ARCHIVE-ENUM" in f and "WL-2" in f and "not enumerated" in f
+                                        for f in _f6br.findings))
+        # F-6c: the committed-pointer leg (leg 2) is the SOLE layer catching a committed pointer whose
+        # remote genuinely disagrees with a dedicated sync_target while the actual remote (leg 3) AGREES
+        # -> INVALID; deleting leg 2 flips it VALID. Pairs with the F-3 fold fix.
+        _f6c = clean_machine()
+        _f6c["manifest.toml"] = base_manifest()
+        _f6c["manifest.toml"]["store"] = {"sync_target": "github:Org/Repo"}
+        _f6cres = resolve_store(build(_f6c))
+        _f6cres.target = classify_target("github:other/repo")
+        _f6cr = validate_store(_f6cres, observations={"tracked": "tracked",
+                                                      "actual_remote": "git@github.com:org/repo.git",
+                                                      "prior": clean_prior()["prior"]})
+        check("sync-pointer-leg-disagree-invalid", _f6cr is not None and _f6cr.status == INVALID)
+        check("sync-pointer-leg-disagree-named",
+              _f6cr is not None and any("committed pointer remote" in f and "does not agree" in f
+                                        for f in _f6cr.findings))
+
+        # Fable F2: a dedicated LOCAL sync_target (dir:/path -> tcanon is None) whose committed pointer names
+        # a canonicalizable REMOTE is a C-SYNC-AGREE finding (leg 2), symmetric with the actual-remote leg's
+        # local-target-with-a-remote finding. Pre-fix leg 2 short-circuited on `tcanon and pcanon` (tcanon
+        # None) and passed the remote pointer silently. Hand-set the remote Target, since resolve_store
+        # rejects a remote committed pointer before validate_store sees it.
+        _lt = clean_machine()
+        _lt["manifest.toml"] = base_manifest()
+        _lt["manifest.toml"]["store"] = {"sync_target": "dir:/some/where"}
+        _ltres = resolve_store(build(_lt))
+        _ltres.target = classify_target("github:org/repo")
+        _ltr = validate_store(_ltres, observations={"tracked": "tracked", "actual_remote": "",
+                                                    "prior": clean_prior()["prior"]})
+        check("sync-local-target-remote-pointer-invalid", _ltr is not None and _ltr.status == INVALID)
+        check("sync-local-target-remote-pointer-named",
+              _ltr is not None and any("is a local target but the" in f
+                                       and "committed pointer names a remote" in f for f in _ltr.findings))
+
+        # F-5: _canonical_remote exotic edges.
+        # (a) an scp bracketed-IPv6 host whose PATH itself contains '@' must not mis-split on a colon
+        # inside the brackets; it canonicalizes to the same (host, path) as the ssh:// equivalent.
+        check("canonical-ipv6-scp-at-in-path-matches-ssh",
+              _canonical_remote("git@[2001:db8::1]:path@x") is not None
+              and _canonical_remote("git@[2001:db8::1]:path@x")
+              == _canonical_remote("ssh://[2001:db8::1]/path@x"))
+        # (b) an UNBRACKETED multi-colon (IPv6-looking) scheme authority is unresolvable (None), never
+        # mis-read with a trailing '::22' consumed as a default port.
+        check("canonical-unbracketed-ipv6-none", _canonical_remote("ssh://2001:db8::22/p") is None)
+        # (c) a default port written with leading zeros names the default endpoint (== the port-less form).
+        check("canonical-leading-zero-default-port-folds",
+              _canonical_remote("ssh://h:022/p") is not None
+              and _canonical_remote("ssh://h:022/p") == _canonical_remote("ssh://h/p"))
+
+        # ===== ROUND-2 retrofix discriminating vectors ==============================================
+        # The exit_code retrofix hardened the FALLTHROUGH: only the exact VALID status yields 0 and any
+        # unrecognized/malformed status fails CLOSED to 2 (never a two-valued fall-through that read a bad
+        # status as success). The VALID->0 and INVALID->1 explicit branches were satisfied by the
+        # pre-retrofix reducer too, so those pins discriminate nothing about this fix and were removed
+        # (F12). The UNKNOWN-status vector is the sole discriminator: it exercises the hardened fallthrough,
+        # failing (returning 0) under the pre-retrofix reducer and returning 2 only with the fix in place.
+        check("r2-exit-code-unknown-fails-closed", exit_code(StoreValidation("UNKNOWN-STATUS")) == 2)
+        check("r2-canonical-scheme-bad-bracket-none", _canonical_remote("ssh://[::1/p") is None)
+        check("r2-canonical-scheme-bad-bracket2-none",
+              _canonical_remote("ssh://[2001/db8::1]:org/repo") is None)
+        check("r2-canonical-nondefault-leading-zero-folds",
+              _canonical_remote("ssh://h:02222/p") is not None
+              and _canonical_remote("ssh://h:02222/p") == _canonical_remote("ssh://h:2222/p"))
+        check("r2-canonical-nondefault-port-significant",
+              _canonical_remote("ssh://h:23/p") != _canonical_remote("ssh://h/p"))
+        check("r2-canonical-ipv6-scp-at-path-preserved",
+              _canonical_remote("git@[2001:db8::1]:path@x") == ("[2001:db8::1]", "path@x"))
+        check("r2-canonical-unicode-port-none", _canonical_remote("ssh://h:\u00b2/p") is None)
+        # Fable F1: an ASCII-digit port long enough to trip CPython's int() digit limit (>4300) is
+        # unresolvable, never a ValueError escaping the canonicalizer (the LENGTH sibling of the Unicode
+        # case above). Pre-fix this call raised ValueError out of _canonical_remote.
+        check("r2-canonical-long-port-none",
+              _canonical_remote("ssh://h:" + "1" * 5000 + "/p") is None)
+        # Fable F3: an EMPTY bracketed authority '[]' is unresolvable in every form (scheme with/without a
+        # port, and scp), never a mis-canonicalized ('[]', path) pair. Pre-fix these returned ('[]', 'p').
+        check("f3-canonical-empty-bracket-scheme-port-none", _canonical_remote("ssh://[]:22/p") is None)
+        check("f3-canonical-empty-bracket-scheme-noport-none", _canonical_remote("ssh://[]/p") is None)
+        check("f3-canonical-empty-bracket-scp-none", _canonical_remote("git@[]:p") is None)
+        # regression: a real bracketed IPv6 authority still canonicalizes (the empty-bracket guard is tight)
+        check("f3-canonical-nonempty-bracket-preserved",
+              _canonical_remote("ssh://[2001:db8::1]/p") == ("[2001:db8::1]", "p"))
+        # ROUND-6 codex: an out-of-range port and a malformed bracketed host are cannot-evaluate (None),
+        # never a spurious endpoint that yields a clean C-SYNC-AGREE. Pre-fix these returned a (host, path)
+        # pair (('host:65536','org/repo'), ('[nonsense]','org/repo'), etc). Removing either guard fails these.
+        check("r6-canonical-port-over-range-none", _canonical_remote("ssh://host:65536/org/repo") is None)
+        check("r6-canonical-port-zero-none", _canonical_remote("ssh://host:0/org/repo") is None)
+        check("r6-canonical-port-huge-none", _canonical_remote("ssh://host:99999999/p") is None)
+        check("r6-canonical-bad-bracket-scheme-none", _canonical_remote("ssh://[nonsense]/org/repo") is None)
+        check("r6-canonical-bad-bracket-scp-none", _canonical_remote("git@[nonsense]:org/repo") is None)
+        # regression: an in-range non-default port and a valid IPv6 bracket still canonicalize.
+        check("r6-canonical-port-max-preserved",
+              _canonical_remote("ssh://host:65535/p") == ("host:65535", "p"))
+        check("r6-canonical-good-bracket-preserved",
+              _canonical_remote("ssh://[2001:db8::22]/org/repo") == ("[2001:db8::22]", "org/repo"))
+        # ROUND-8 codex (finding 2): the WHOLE host token is validated. A host carrying WHITESPACE, a
+        # CONTROL character, or a STRAY/unbalanced bracket is not a real host, so it is CANNOT-EVALUATE
+        # (None), never a spurious ('h ost', ...) / ('host\nforged', ...) / ('host]', ...) pair that could
+        # falsely satisfy C-SYNC-AGREE when the manifest target and observed remote strings match. Each
+        # reverted host-token guard flips one of these red.
+        check("r8-canonical-host-space-none", _canonical_remote("ssh://h ost/p") is None)
+        check("r8-canonical-host-tab-none", _canonical_remote("ssh://ho\tst/p") is None)
+        check("r8-canonical-host-newline-none", _canonical_remote("ssh://host\nFORGED/p") is None)
+        check("r8-canonical-host-control-none", _canonical_remote("ssh://ho\x01st/p") is None)
+        check("r8-canonical-host-stray-bracket-scheme-none", _canonical_remote("ssh://host]/p") is None)
+        check("r8-canonical-host-stray-open-bracket-scheme-none", _canonical_remote("ssh://ho[st/p") is None)
+        check("r8-canonical-host-stray-bracket-scp-none", _canonical_remote("git@host]:p") is None)
+        check("r8-canonical-host-space-scp-none", _canonical_remote("git@ho st:p") is None)
+        # regression: an ordinary host, a userinfo form, and a valid IPv6 bracket are UNAFFECTED by the token
+        # validation (no false positive on a legitimate host).
+        check("r8-canonical-plain-host-preserved", _canonical_remote("ssh://good.host/p") == ("good.host", "p"))
+        check("r8-canonical-userinfo-host-preserved",
+              _canonical_remote("ssh://git@good.host/p") == ("good.host", "p"))
+        check("r8-canonical-bracket-host-still-ok",
+              _canonical_remote("git@[2001:db8::1]:path@x") == ("[2001:db8::1]", "path@x"))
+        # ROUND-10 F1 (MODERATE): the host-token validation is now an ALLOWLIST, so a Unicode FORMAT
+        # character (category Cf: zero-width, bidi) in the host is CANNOT-EVALUATE (None), never a clean
+        # (host, path) pair that could falsely satisfy C-SYNC-AGREE. The earlier blocklist (whitespace /
+        # control / DEL only) admitted these and canonicalized `ssh://ho<ZWSP>st/p` to ('ho<ZWSP>st', 'p');
+        # each check reverts red if the allowlist is weakened back to a blocklist. Covers a zero-width space
+        # (U+200B) and a right-to-left override (U+202E) in both the scheme-URL and scp host positions.
+        check("f1-canonical-host-zwsp-scheme-none", _canonical_remote("ssh://ho\u200bst/p") is None)
+        check("f1-canonical-host-bidi-scheme-none", _canonical_remote("ssh://ho\u202est/p") is None)
+        check("f1-canonical-host-zwsp-scp-none", _canonical_remote("git@ho\u200bst:p") is None)
+        check("f1-canonical-host-bidi-scp-none", _canonical_remote("git@ho\u202est:p") is None)
+        # regression: the round-8/9 whitespace/control/stray-bracket forms STILL reject under the allowlist,
+        # and a legitimate bracketed IPv6 literal carrying a non-default PORT is still preserved (the
+        # allowlist admits the brackets, ':' and digits; the structure checks in _canonical_remote pass it).
+        check("f1-canonical-host-space-still-none", _canonical_remote("ssh://h ost/p") is None)
+        check("f1-canonical-host-newline-still-none", _canonical_remote("ssh://host\nFORGED/p") is None)
+        check("f1-canonical-ipv6-port-preserved",
+              _canonical_remote("ssh://[2001:db8::22]:2222/p") == ("[2001:db8::22]:2222", "p"))
+        # ROUND-12 F1 (MODERATE): host STRUCTURAL validation completes the host class (chars + structure).
+        # After the character allowlist, the host STRUCTURE is validated: an empty DNS label (`a..b`), a
+        # label over 63 characters, and an IPv4 address inside brackets (`[127.0.0.1]`) are each a malformed
+        # remote and must be CANNOT-EVALUATE (None), never a spurious (host, path) pair that could falsely
+        # satisfy C-SYNC-AGREE even when the manifest target and observed remote strings match. Pre-fix each
+        # returned a pair (('a..b','p'), (64-char label, 'p'), ('[127.0.0.1]','p')); reverting the structural
+        # checks (_dns_or_ipv4_ok, or _bracketed_host_ok's IPv6-only parse) reds them. Covered in both the
+        # scheme-URL and scp host positions.
+        check("f1r12-canonical-empty-dns-label-scheme-none", _canonical_remote("ssh://a..b/p") is None)
+        check("f1r12-canonical-empty-dns-label-scp-none", _canonical_remote("git@a..b:p") is None)
+        check("f1r12-canonical-oversize-label-scheme-none",
+              _canonical_remote("ssh://" + "a" * 64 + ".example/p") is None)
+        check("f1r12-canonical-oversize-label-scp-none",
+              _canonical_remote("git@" + "a" * 64 + ".example:p") is None)
+        check("f1r12-canonical-ipv4-in-brackets-scheme-none", _canonical_remote("ssh://[127.0.0.1]/p") is None)
+        check("f1r12-canonical-ipv4-in-brackets-scp-none", _canonical_remote("git@[127.0.0.1]:p") is None)
+        check("f1r12-canonical-leading-dot-none", _canonical_remote("ssh://.lead/p") is None)
+        check("f1r12-canonical-trailing-dot-none", _canonical_remote("ssh://trail./p") is None)
+        # regression (legit controls the structural checks must NOT red): a valid DNS host, a bracketed IPv6
+        # literal carrying a non-default port, a bare IPv4 dotted-quad (scheme and scp), and a maximal 63-char
+        # label all still canonicalize to a real (host, path) pair.
+        check("f1r12-canonical-dns-host-preserved", _canonical_remote("ssh://good.host/p") == ("good.host", "p"))
+        check("f1r12-canonical-ipv6-port-preserved",
+              _canonical_remote("ssh://[2001:db8::1]:2222/p") == ("[2001:db8::1]:2222", "p"))
+        check("f1r12-canonical-bare-ipv4-scheme-preserved",
+              _canonical_remote("ssh://203.0.113.5/p") == ("203.0.113.5", "p"))
+        check("f1r12-canonical-bare-ipv4-scp-preserved",
+              _canonical_remote("git@203.0.113.5:p") == ("203.0.113.5", "p"))
+        check("f1r12-canonical-max-label-preserved",
+              _canonical_remote("ssh://" + "a" * 63 + ".example/p") == ("a" * 63 + ".example", "p"))
+        # ROUND-15 F3 (MINOR): the host structural class is COMPLETED. 15 RFC-invalid forms still
+        # canonicalized clean after round-12: a DNS label with a HYPHEN EDGE (LDH: a label may not begin or
+        # end with '-'), an ALL-NUMERIC final label (neither a valid IPv4 literal nor a resolvable hostname),
+        # and an IPv4-LOOKALIKE with an out-of-range (>255) or leading-zero octet (IPv4Address rejects it, so
+        # it fell through as a dotted numeric DNS name). Each must now be CANNOT-EVALUATE (None), never a
+        # spurious (host, path) pair that could falsely satisfy C-SYNC-AGREE even when the manifest target and
+        # observed remote strings match. Pre-fix each returned a clean pair; reverting the LDH/all-numeric
+        # checks in _dns_or_ipv4_ok reds them. Covered in both the scheme-URL and scp host positions. IP
+        # fixtures use RFC-5737 doc-range or plainly-invalid octets (never a private RFC-1918 address).
+        for _bad in ("ssh://-lead.example/p", "git@-lead.example:p",        # hyphen-edge: leading '-'
+                     "ssh://trail-.example/p", "git@trail-.example:p",      # hyphen-edge: trailing '-'
+                     "ssh://mid.-inner.example/p", "ssh://a-.b.example/p",  # hyphen-edge: interior label
+                     "ssh://host.123/p", "git@host.123:p",                  # all-numeric final label
+                     "ssh://example.0/p",                                   # all-numeric final label (single digit)
+                     "ssh://256.0.113.5/p", "git@256.0.113.5:p",            # IPv4-lookalike: octet > 255
+                     "ssh://999.999.999.999/p", "git@999.999.999.999:p",    # IPv4-lookalike: all octets > 255
+                     "ssh://203.0.113.05/p", "git@203.0.113.05:p"):         # IPv4-lookalike: leading-zero octet
+            check("f3r15-canonical-rfc-invalid-host-none:" + _bad, _canonical_remote(_bad) is None)
+        # regression (legit controls the structural checks must NOT red): a hyphen INTERIOR to a label, an
+        # all-numeric NON-final label (valid under a real final label), and a bare IPv4 all still canonicalize.
+        check("f3r15-canonical-hyphen-interior-preserved",
+              _canonical_remote("ssh://a-b.example/p") == ("a-b.example", "p"))
+        check("f3r15-canonical-numeric-nonfinal-label-preserved",
+              _canonical_remote("ssh://123.example/p") == ("123.example", "p"))
+        check("f3r15-canonical-bare-ipv4-still-preserved",
+              _canonical_remote("ssh://203.0.113.5/p") == ("203.0.113.5", "p"))
+        _r2wd = build(pr_machine, product=pr_product)
+        os.makedirs(str(_r2wd / ".working" / "toml" / "worklog"), exist_ok=False)
+        _r2wdr = validate_store(resolve_store(_r2wd), observations=pr_obs)
+        check("r2-empty-perrecord-ledger-dir-invalid", _r2wdr.status == INVALID)
+        check("r2-empty-perrecord-ledger-dir-named",
+              any("C-CONTAINMENT" in f and "worklog" in f and "unregistered" in f for f in _r2wdr.findings))
+        check("r2-perrecord-clean-still-valid",
+              run(pr_machine, product=pr_product, obs=pr_obs).status == VALID)
+        _r2lg = clean_machine()
+        _r2lg["manifest.toml"] = base_manifest()
+        _r2lg["manifest.toml"]["store"] = {"sync_target": "github:org/repo"}
+        _r2lgres = resolve_store(build(_r2lg))
+        _r2lgres.target = classify_target("git:not-a-canonicalizable-url")
+        _r2lgr = validate_store(_r2lgres, observations={"tracked": "tracked",
+                                                        "actual_remote": "git@github.com:org/repo.git",
+                                                        "prior": clean_prior()["prior"]})
+        check("r2-pointer-uncanon-remote-cannot-eval", _r2lgr is not None and _r2lgr.status == CANNOT_EVALUATE)
+        check("r2-pointer-uncanon-remote-named",
+              _r2lgr is not None and any("committed pointer remote form" in m and "cannot be canonicalized" in m
+                                         for m in _r2lgr.cannot_evaluate))
+        _r2lz = clean_machine()
+        _r2lz["lease.toml"] = dict(schema=1, holder="run-abc", operation="", acquired_at=TS)
+        _r2lzr = run(_r2lz)
+        check("r2-lease-empty-operation-invalid", _r2lzr.status == INVALID)
+        check("r2-lease-empty-operation-named",
+              any("C-LEASE" in f and "operation" in f for f in _r2lzr.findings))
+        _r2rn = clean_machine()
+        _r2rn["done.index.toml"] = idx([])
+        _r2rn["counters.toml"] = counters(DN=0)
+        _r2rn_prior = copy.deepcopy(clean_prior())
+        del _r2rn_prior["prior"]["records"]["DN-1"]
+        del _r2rn_prior["prior"]["digests"]["DN-1"]
+        _r2rn_prior["prior"]["counters_high"]["DN"] = 0
+        _r2rnr = run(_r2rn, obs=_r2rn_prior)
+        check("r2-ratified-bi-no-done-isolated-invalid", _r2rnr is not None and _r2rnr.status == INVALID)
+        check("r2-ratified-bi-no-done-isolated-named",
+              _r2rnr is not None and any("C-RECEIPTS" in f and "no done receipt" in f
+                                         for f in _r2rnr.findings))
+        _r2gs = clean_machine()
+        _r2gs["manifest.toml"] = base_manifest()
+        _r2gs["manifest.toml"]["store"] = {"sync_target": "git:https://github.com/Org/Repo"}
+        check("r2-git-scheme-github-case-valid",
+              run(_r2gs, obs={"tracked": "tracked", "actual_remote": "https://github.com/org/repo",
+                          "prior": clean_prior()["prior"]}).status == VALID)
+
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
