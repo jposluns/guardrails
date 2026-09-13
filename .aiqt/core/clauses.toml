@@ -3551,7 +3551,7 @@ source-path = ".aiqt/core/rules/security-seci-symlink-resolution.md"
 start-line = 14
 end-line = 15
 canonical-text = "Code the assistant writes that opens, reads, or writes a filesystem path with elevated privilege resolves\nthat path safely against a symbolic-link race rather than trusting the name it was given."
-source-digest = "93ffb833cd7b48f217e84853cbce4a49ec748b8696e25fed9d38933b3b2c1ccc"
+source-digest = "871a35aa28d00a45b0379b3261838135fc264ae887e9a4049b751e93da70dc7a"
 
 [[clause]]
 clause-id = "secspr.2"
@@ -3560,7 +3560,7 @@ source-path = ".aiqt/core/rules/security-seci-symlink-resolution.md"
 start-line = 15
 end-line = 19
 canonical-text = "It resolves each\npath component beneath a pre-opened directory handle, using the platform's containment primitive where one\nexists, refusing to follow a symbolic link or to escape above the anchoring directory, so an attacker who\nswaps a component for a link between the check and the use cannot redirect the operation onto a target\noutside the intended tree."
-source-digest = "93ffb833cd7b48f217e84853cbce4a49ec748b8696e25fed9d38933b3b2c1ccc"
+source-digest = "871a35aa28d00a45b0379b3261838135fc264ae887e9a4049b751e93da70dc7a"
 
 [[clause]]
 clause-id = "secspr.3"
@@ -3569,7 +3569,7 @@ source-path = ".aiqt/core/rules/security-seci-symlink-resolution.md"
 start-line = 15
 end-line = 19
 canonical-text = "It resolves each\npath component beneath a pre-opened directory handle, using the platform's containment primitive where one\nexists, refusing to follow a symbolic link or to escape above the anchoring directory, so an attacker who\nswaps a component for a link between the check and the use cannot redirect the operation onto a target\noutside the intended tree."
-source-digest = "93ffb833cd7b48f217e84853cbce4a49ec748b8696e25fed9d38933b3b2c1ccc"
+source-digest = "871a35aa28d00a45b0379b3261838135fc264ae887e9a4049b751e93da70dc7a"
 
 [[clause]]
 clause-id = "secspr.4"
@@ -3578,7 +3578,7 @@ source-path = ".aiqt/core/rules/security-seci-symlink-resolution.md"
 start-line = 15
 end-line = 19
 canonical-text = "It resolves each\npath component beneath a pre-opened directory handle, using the platform's containment primitive where one\nexists, refusing to follow a symbolic link or to escape above the anchoring directory, so an attacker who\nswaps a component for a link between the check and the use cannot redirect the operation onto a target\noutside the intended tree."
-source-digest = "93ffb833cd7b48f217e84853cbce4a49ec748b8696e25fed9d38933b3b2c1ccc"
+source-digest = "871a35aa28d00a45b0379b3261838135fc264ae887e9a4049b751e93da70dc7a"
 
 [[clause]]
 clause-id = "secspr.5"
@@ -3587,7 +3587,7 @@ source-path = ".aiqt/core/rules/security-seci-symlink-resolution.md"
 start-line = 15
 end-line = 19
 canonical-text = "It resolves each\npath component beneath a pre-opened directory handle, using the platform's containment primitive where one\nexists, refusing to follow a symbolic link or to escape above the anchoring directory, so an attacker who\nswaps a component for a link between the check and the use cannot redirect the operation onto a target\noutside the intended tree."
-source-digest = "93ffb833cd7b48f217e84853cbce4a49ec748b8696e25fed9d38933b3b2c1ccc"
+source-digest = "871a35aa28d00a45b0379b3261838135fc264ae887e9a4049b751e93da70dc7a"
 
 [[clause]]
 clause-id = "secspr.6"
@@ -3596,7 +3596,7 @@ source-path = ".aiqt/core/rules/security-seci-symlink-resolution.md"
 start-line = 19
 end-line = 20
 canonical-text = "After the object is opened it confirms the opened object's type and identity,\nbecause a name-based check performed before the open describes a path that may no longer point where it did."
-source-digest = "93ffb833cd7b48f217e84853cbce4a49ec748b8696e25fed9d38933b3b2c1ccc"
+source-digest = "871a35aa28d00a45b0379b3261838135fc264ae887e9a4049b751e93da70dc7a"
 
 [[clause]]
 clause-id = "secspr.7"
@@ -3605,7 +3605,7 @@ source-path = ".aiqt/core/rules/security-seci-symlink-resolution.md"
 start-line = 19
 end-line = 20
 canonical-text = "After the object is opened it confirms the opened object's type and identity,\nbecause a name-based check performed before the open describes a path that may no longer point where it did."
-source-digest = "93ffb833cd7b48f217e84853cbce4a49ec748b8696e25fed9d38933b3b2c1ccc"
+source-digest = "871a35aa28d00a45b0379b3261838135fc264ae887e9a4049b751e93da70dc7a"
 
 [[clause]]
 clause-id = "secspr.8"
@@ -3614,7 +3614,16 @@ source-path = ".aiqt/core/rules/security-seci-symlink-resolution.md"
 start-line = 21
 end-line = 22
 canonical-text = "Where the platform offers no race-free containment primitive, the operation fails closed rather than\nfalling back to an unguarded name-based resolution."
-source-digest = "93ffb833cd7b48f217e84853cbce4a49ec748b8696e25fed9d38933b3b2c1ccc"
+source-digest = "871a35aa28d00a45b0379b3261838135fc264ae887e9a4049b751e93da70dc7a"
+
+[[clause]]
+clause-id = "secspr.9"
+corpus-id = "secspr"
+source-path = ".aiqt/core/rules/security-seci-symlink-resolution.md"
+start-line = 24
+end-line = 26
+canonical-text = "When such code classifies a control or state path, a lock, marker, journal, or state directory, to decide\nwhat to do, the classification is a no-follow inspection bound to a trusted directory descriptor, never a\nre-resolved string-path existence or type check that follows links."
+source-digest = "871a35aa28d00a45b0379b3261838135fc264ae887e9a4049b751e93da70dc7a"
 
 [[clause]]
 clause-id = "secthm.1"
@@ -5164,3 +5173,75 @@ start-line = 20
 end-line = 22
 canonical-text = "Where a change genuinely cannot wait, it is made on a\nseparate revision and the in-flight review is left undisturbed, to be re-dispatched against the new\nstate once that change has settled."
 source-digest = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
+
+[[clause]]
+clause-id = "tmrrst.1"
+corpus-id = "tmrrst"
+source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
+start-line = 13
+end-line = 14
+canonical-text = "Code that borrows a caller's process-global deadline facility for a bounded window, a signal handler, an\ninterval timer, or a pending single-shot alarm, restores the caller's state elapsed-aware, never verbatim."
+source-digest = "cd5feec674c0e576a2e1060037827ee3e41713e24bd5128e0adf24d540f840d0"
+
+[[clause]]
+clause-id = "tmrrst.2"
+corpus-id = "tmrrst"
+source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
+start-line = 15
+end-line = 16
+canonical-text = "on restore the saved remaining interval is reduced\nby the time the window consumed"
+source-digest = "cd5feec674c0e576a2e1060037827ee3e41713e24bd5128e0adf24d540f840d0"
+
+[[clause]]
+clause-id = "tmrrst.3"
+corpus-id = "tmrrst"
+source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
+start-line = 16
+end-line = 18
+canonical-text = "a caller deadline that would have expired during the window is clamped to\nfire immediately at the platform's minimal positive delay, never dropped and never re-armed at its full\noriginal value"
+source-digest = "cd5feec674c0e576a2e1060037827ee3e41713e24bd5128e0adf24d540f840d0"
+
+[[clause]]
+clause-id = "tmrrst.4"
+corpus-id = "tmrrst"
+source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
+start-line = 18
+end-line = 18
+canonical-text = "a pending notification or single-shot alarm is preserved, not consumed or discarded"
+source-digest = "cd5feec674c0e576a2e1060037827ee3e41713e24bd5128e0adf24d540f840d0"
+
+[[clause]]
+clause-id = "tmrrst.5"
+corpus-id = "tmrrst"
+source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
+start-line = 19
+end-line = 19
+canonical-text = "periodic timer's repeat interval, and its phase to the extent the platform can express it, are preserved"
+source-digest = "cd5feec674c0e576a2e1060037827ee3e41713e24bd5128e0adf24d540f840d0"
+
+[[clause]]
+clause-id = "tmrrst.6"
+corpus-id = "tmrrst"
+source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
+start-line = 20
+end-line = 22
+canonical-text = "The save and the elapsed-aware\nrestore live once, in a single shared, nesting-safe helper, so no call site can hand-roll a variant that\nreintroduces the verbatim restore"
+source-digest = "cd5feec674c0e576a2e1060037827ee3e41713e24bd5128e0adf24d540f840d0"
+
+[[clause]]
+clause-id = "tmrrst.7"
+corpus-id = "tmrrst"
+source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
+start-line = 23
+end-line = 24
+canonical-text = "Where the platform cannot preserve the caller's state reliably, the code uses a timeout mechanism that\nis not process-global, or refuses the borrow, rather than corrupting the caller's deadline"
+source-digest = "cd5feec674c0e576a2e1060037827ee3e41713e24bd5128e0adf24d540f840d0"
+
+[[clause]]
+clause-id = "tmrrst.8"
+corpus-id = "tmrrst"
+source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
+start-line = 20
+end-line = 20
+canonical-text = "the original handler is reinstalled through exception-safe cleanup."
+source-digest = "cd5feec674c0e576a2e1060037827ee3e41713e24bd5128e0adf24d540f840d0"

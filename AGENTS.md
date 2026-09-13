@@ -582,6 +582,24 @@ violation. A layer that over-fires is not cheap: one that raises false alarms tr
 erodes trust in the controls around it, so a noisy layer is not the low-cost overlap this prefers, and adding
 one is not warranted by this rule.
 
+## A borrowed process timer is restored elapsed-aware
+
+Code that borrows a caller's process-global deadline facility for a bounded window, a signal handler, an
+interval timer, or a pending single-shot alarm, restores the caller's state elapsed-aware, never verbatim.
+A monotonic timestamp is recorded when the borrow opens; on restore the saved remaining interval is reduced
+by the time the window consumed; a caller deadline that would have expired during the window is clamped to
+fire immediately at the platform's minimal positive delay, never dropped and never re-armed at its full
+original value; a pending notification or single-shot alarm is preserved, not consumed or discarded; a
+periodic timer's repeat interval, and its phase to the extent the platform can express it, are preserved;
+and the original handler is reinstalled through exception-safe cleanup. The save and the elapsed-aware
+restore live once, in a single shared, nesting-safe helper, so no call site can hand-roll a variant that
+reintroduces the verbatim restore, and the helper itself remains subject to the same inspection as any call
+site. Where the platform cannot preserve the caller's state reliably, the code uses a timeout mechanism that
+is not process-global, or refuses the borrow, rather than corrupting the caller's deadline, most dangerously
+a watchdog's. This is the companion of the kill-timeout rule: that one keeps a wrapper's bound from cutting a
+correctly-waiting callee short, while this one keeps a borrower's restore from silently moving or losing the
+deadline the caller had already set.
+
 ## A verification finding is fixed, not argued away
 
 A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
@@ -1276,6 +1294,16 @@ outside the intended tree. After the object is opened it confirms the opened obj
 because a name-based check performed before the open describes a path that may no longer point where it did.
 Where the platform offers no race-free containment primitive, the operation fails closed rather than
 falling back to an unguarded name-based resolution.
+
+When such code classifies a control or state path, a lock, marker, journal, or state directory, to decide
+what to do, the classification is a no-follow inspection bound to a trusted directory descriptor, never a
+re-resolved string-path existence or type check that follows links. The result is three-way: genuine
+absence, which may legitimately mean nothing to do; presence with exactly the expected type, confirmed on
+the opened object rather than on the name; and everything else, a regular file where a directory was
+expected, a symbolic link, a dangling link, any other wrong-type entry, a malformed name, or an entry the
+code cannot evaluate, which is refused as an error and never collapsed into absence or treated as clean.
+Enumeration and use after classification stay bound to the same descriptor rather than re-resolving the
+string path, so nothing can be swapped between the check and the use.
 
 ## Threat-model new trust boundaries before implementation
 

@@ -1,0 +1,1512 @@
+#!/usr/bin/env python3
+"""Enforce no-follow, three-way classification of control and state paths (a deterministic code-shape gate).
+
+Code that decides what to do about a control or state path (a lock, marker, journal, or state directory) by
+a FOLLOWING existence or type check on the string name, then proceeds as if a negative or wrong-type result
+simply meant nothing to do, both follows a symbolic link an attacker can swap in and collapses a wrong-type
+or unreadable entry into benign absence. The corpus rule secspr (security-seci-symlink-resolution, its
+control-path-classification clause) requires the classification to be a no-follow inspection bound to a
+trusted directory descriptor, with a three-way result: genuine absence, presence of exactly the expected
+type confirmed on the opened object, and everything else refused as an error rather than collapsed into
+absence; and its sibling fail-closed and no-silent-empty rules (secfcl, chkfcl) require a wrong-type or
+unreadable entry to surface, never read as clean. This gate is an ADVISORY (WARN-only) v1: it scans the
+repo's own Python and EMITS WARN advisories for the certain collapse shapes and for the resist-static
+shapes alike, flagging both for human review against secspr and chkfcl/secfcl, and it NEVER blocks CI. A
+sound BLOCKING classification (DENY-precision) is a DISCLOSED FOLLOW-ON, deferred because a sound
+static-dataflow conviction over arbitrary Python binding and control-flow is not yet achieved; v1 is
+WARN-only and does not block CI.
+
+DETECTOR (AST plus local dataflow; a regex never convicts). Import aliases for os, os.path, and pathlib are
+resolved within each module. The classifier-signature and suppressor sets are module-level DATA TABLES so
+another language is an additive parser plus rows, a documented follow-on, not a rewrite.
+  FOLLOWING-CLASSIFY   os.path.exists / isdir / isfile (P); os.stat(P) with no follow_symlinks=False;
+                       a method .exists() / .is_dir() / .is_file() / .stat() (no follow_symlinks=False) on
+                       a receiver. os.path.lexists, os.lstat, a .lstat() / .is_symlink() call, and any call
+                       carrying follow_symlinks=False or dir_fd= are NO-FOLLOW and never a following-classify.
+  CONTROL-PATH RELEVANCE a soft signal: a name hint (lock, state, journal, marker, pid) in the classified
+                       path expression, or the classified path flowing into a state-changing action in the
+                       decision's branch. Heuristic (name-hint-only) relevance caps a finding at WARN.
+  BENIGN-NEGATIVE      the absent / negative branch proceeds clean (pass, continue, a return of a
+                       clear absence sentinel, None, an empty string, or an empty collection, or a
+                       fall-through into a state-changing action) rather than raising or refusing. A return
+                       of a failure status (a numeric code the caller raises on, or a boolean a consumer
+                       treats as refusal) is a REFUSAL, not benign absence, so it does not license a
+                       certain-shape advisory.
+  FILESYSTEM RECEIVER  a receiver is a PROVEN filesystem path only when it traces to a pathlib constructor,
+                       a path-returning method or attribute on one, a `/` join involving one, or a Path-typed
+                       parameter or variable, AND the name that reaches it is not locally shadowed and not
+                       rebound to an unproven value. The certain-shape advisory is emitted only against a
+                       proven filesystem receiver; an unresolved receiver type (a bare attribute or a
+                       same-named non-path object), a name whose Path provenance is lost by a rebind (a
+                       for/with/except/comprehension target, an aug-assign, or a walrus carrying a non-path
+                       value, propagated through dependent aliases to a fixpoint), or an
+                       os/os.path/shutil/pathlib name shadowed by a parameter or local, is heuristic and
+                       caps at the resist-static advisory for the cases the scan models. This is not a
+                       categorical guarantee: unmodelled dataflow (an `import ... as <name>` rebind of a
+                       proven-path name leaving stale provenance) CAN still yield a false-positive
+                       certain-shape advisory (harmless under WARN-only; precision is a disclosed follow-on).
+  STATE-CHANGE         os.mkdir / makedirs / remove / unlink / rmdir / rename / replace / symlink / link, a
+                       builtin open in a write/append/create mode, shutil.move / copy* / rmtree, or a Path
+                       .mkdir / .unlink / .rename / .replace / .touch / .write_text / .write_bytes / .rmdir /
+                       .open(write) ON A PROVEN PATH RECEIVER (the mode is read from a positional arg or a
+                       `mode=` keyword).
+  SUPPRESSOR (function-wide) any lstat / lexists / is_symlink call, any follow_symlinks=False or dir_fd=
+                       keyword, or an O_NOFOLLOW reference: evidence the code resolves no-follow.
+
+  CERTAIN-SHAPE advisory (exit 0)  a following-classify controlling an `if` whose ABSENT / wrong-type branch
+                  performs a PROVEN-filesystem state-changing action on the SYNTACTICALLY IDENTICAL path,
+                  with no suppressor anywhere in the enclosing function (the check-then-act collapse); or a
+                  `try` guarding a CERTAIN-filesystem following-classify or a builtin open of a
+                  control-relevant path whose exceptions REACH that `except` (no intervening nested-try
+                  handler catches or transforms them first) and which catches an EXPLICIT conflated tuple
+                  (FileNotFoundError mixed with PermissionError / NotADirectoryError / IsADirectoryError /
+                  OSError) and whose handler collapses to a benign absence sentinel (pass, continue, or a
+                  return of None / empty string / empty collection), mapping a non-absence error onto the
+                  absence path. A handler that returns a failure status or otherwise refuses is not this
+                  collapse and is not flagged. v1 EMITS this as a WARN advisory for human review, never a
+                  block. It is recognized CONSERVATIVELY, only when the receiver resolves to a filesystem
+                  Path with clean provenance under the provenance model this scan tracks (a pathlib
+                  constructor, a path-returning method/attribute, a `/` join, or a Path-typed annotation);
+                  the model is not exhaustive, so a receiver whose Path-ness the scan cannot model may be
+                  missed, and dataflow the scan does not follow (e.g. an `import ... as <name>` rebind of a
+                  proven-path name) can leave stale provenance and produce a false-positive advisory, with
+                  advisory precision a disclosed follow-on. Receiver-provenance is applied UNIFORMLY on EVERY certain-shape
+                  path (the if-branch mutation AND the conflated-except): a method-form classify or mutation
+                  on an unproven receiver, or a path reached through an alias chain where any link is or
+                  becomes non-Path, is NOT a certain filesystem receiver and drops to the resist-static
+                  advisory. The scan models a bounded set of cases; unmodelled or ambiguous dataflow (an
+                  `import ... as <name>` alias rebinding a proven-path name, a cross-branch or rebound
+                  provenance flow, and other constructs it does not track) CAN leave stale provenance and
+                  yield a false-positive certain-shape advisory, and can equally miss a genuine collapse;
+                  both are harmless under WARN-only, and precision is a disclosed follow-on.
+  RESIST-STATIC advisory (exit 0)  a control-relevant following-classify with a benign-negative branch that
+                  is not a certain shape: name-hint-only relevance, an indirect wrapper, ambiguous branch
+                  semantics, or a bare `except OSError` (too broad to convict as a deliberate conflation, yet
+                  a candidate).
+  CANNOT-EVALUATE (exit 2)  any declared scanned input missing, unreadable, non-regular, non-UTF-8, or
+                  unparseable (a SyntaxError on a declared file is a named refusal, never a skip), per the
+                  check-fails-closed-on-unreadable rule; and a non-isolated run (the bootstrap self-guard).
+
+BOOTSTRAP SELF-GUARD. The gate's first executable statements import only sys and refuse to run (exit 2)
+unless the interpreter is isolated, so a sibling planted beside this gate cannot shadow a stdlib import and
+neuter the gate before it can check anything.
+
+SCANNED SURFACES (the declared set, resolved from the repo root): every regular *.py directly under tools/
+(the vendored tools/_vendor/ subtree is excluded), and every regular *.py directly under
+.aiqt/core/hooks/scripts/. Both directories are REQUIRED: an unreadable or absent one is a cannot-evaluate.
+
+DISCLOSED RESIDUAL (v1 advisory coverage limit, no silence guaranteed): outside the modelled certain
+same-path shape this advisory is best-effort and per-scope, same-module only and certifies no shape as
+silent, so an unrecognized shape MAY still surface a resist-static advisory or MAY go unflagged. The
+conservative bail-out is itself the residual,
+since the certain shape is recognized only on the modelled case and a genuine collapse behind provenance
+or dataflow complexity usually produces no certain-shape advisory (a false negative); conversely, unmodelled
+or ambiguous dataflow can leave stale provenance and yield a false-positive certain-shape advisory, so
+neither direction is a categorical guarantee (both harmless under WARN-only). Cases the scan conservatively
+keeps below the certain shape (a false negative when a real collapse hides behind them): a
+receiver whose Path-ness this scan cannot confirm (a method-form .exists()/.stat() or .mkdir()/.write_text()
+on an unproven receiver, on the conflated-except path as much as the if-branch mutation, is credited only
+heuristically, so a genuine collapse on a path whose type the scan cannot prove drops to the resist-static
+advisory or nothing); a provenance that becomes ambiguous through an alias chain where any link is or becomes
+non-Path, or through a cross-branch or rebound binding (the disqualification PROPAGATES through dependent
+aliases, so such a name is not treated as a certain filesystem receiver for the rebinds the scan models, an
+unmodelled `import ... as <name>` rebind excepted); a classify and a mutation on the same path
+expressed two different ways (identity is syntactic, so a variable alias is a syntactic non-match and is not
+raised to the certain shape, a false negative); a compound `if` test (a BoolOp joining a classify with another condition,
+e.g. `if not exists(p) and ready:`) whose classify is not the whole test is not raised to the certain shape and MAY go unflagged; the guard-return
+/ early-return fall-through form (an `if classify(p): return` followed by a mutation), which is outside the
+enclosing-branch shape; a mutation whose classified path is NOT the state-changing call's FIRST positional
+argument (the destination of an os.rename/os.replace/os.symlink/os.link, e.g. `if not
+os.path.isfile("state"): os.rename("incoming", "state")`, whose mutated operand is argument one, is not
+matched: the state-change target is read from argument zero, so the destination-mutates-the-classified-path
+shape is a disclosed false-negative); a re-resolution of a descriptor-classified path through the string
+name (a resist-static-tier shape NOT actively raised to the certain shape in v1, a documented follow-on);
+cross-function and cross-module flows, dynamic dispatch and getattr indirection, non-Python surfaces, and
+the semantic question of whether a bare `except OSError` truly conflates absence with a non-absence error
+(kept at the resist-static advisory). Path provenance is intra-scope and syntactic (a pathlib construction,
+a path-returning method or attribute, a `/` join, or a Path-typed annotation); a path object arriving from a
+helper return or a container the scan does not model is not proven, so it is the resist-static advisory
+rather than the certain shape. A sound BLOCKING classification (DENY-precision) that would convict these is
+a DISCLOSED FOLLOW-ON. Missing such a defect is the accepted residual; the secspr and chkfcl/secfcl rules
+carry the full obligation. The classifier table is Python-first; further languages are additive rows plus a
+parser (a named follow-on), not covered here.
+
+  check_path_classification.py             scan the declared surfaces
+  check_path_classification.py --self-test build synthetic trees and assert the gate's invariants
+
+Run this gate isolated: python3 -I -B tools/check_path_classification.py
+"""
+import sys
+
+
+def _interpreter_isolated(flags):
+    """True iff a sys.flags-like object reports isolated mode: -I, or the full -P -E -s equivalent."""
+    return bool(flags.isolated) or bool(
+        getattr(flags, "safe_path", 0) and flags.ignore_environment and flags.no_user_site)
+
+
+if not _interpreter_isolated(sys.flags):
+    sys.stderr.write("check_path_classification: refusing to run non-isolated; launch it as "
+                     "`python3 -I -B tools/check_path_classification.py` (a sibling file could otherwise "
+                     "shadow a stdlib import and neuter this gate)\n")
+    raise SystemExit(2)
+
+import ast  # noqa: E402  imported only after the isolation guard above
+import os  # noqa: E402
+import stat  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+TOOLS_REL = "tools"
+HOOKS_SCRIPTS_REL = ".aiqt/core/hooks/scripts"
+
+# --- classifier / suppressor / state-change DATA TABLES (Python-first; other languages are additive) ----
+OSPATH_FOLLOW = frozenset({"exists", "isdir", "isfile"})       # os.path.<name>(P), following
+OS_STAT_FOLLOW = frozenset({"stat"})                           # os.stat(P) without follow_symlinks=False
+METHOD_FOLLOW = frozenset({"exists", "is_dir", "is_file", "stat"})  # p.<name>() following
+NOFOLLOW_METHODS = frozenset({"lstat", "is_symlink"})          # never a following-classify
+OSPATH_NOFOLLOW = frozenset({"lexists"})                       # os.path.lexists: no-follow
+OS_NOFOLLOW = frozenset({"lstat"})                             # os.lstat: no-follow
+NAME_HINTS = ("lock", "state", "journal", "marker", "pid")
+CONFLATED_NONABSENCE = frozenset({"PermissionError", "NotADirectoryError", "IsADirectoryError", "OSError"})
+OS_STATE_CHANGE = frozenset({"mkdir", "makedirs", "remove", "unlink", "rmdir", "rename", "replace",
+                             "symlink", "link"})
+SHUTIL_STATE_CHANGE = frozenset({"move", "copy", "copy2", "copyfile", "copytree", "rmtree"})
+METHOD_STATE_CHANGE = frozenset({"mkdir", "unlink", "rename", "replace", "touch", "write_text",
+                                 "write_bytes", "rmdir"})
+WRITE_MODES = ("w", "a", "x", "+")
+# pathlib provenance: a receiver is a PROVEN filesystem path only when it traces to a pathlib constructor,
+# a path-returning method/attribute on one, a `/` join involving one, or a Path-typed annotation. This is
+# what separates a certain-shape advisory (proven fs receiver, exit 0) from a heuristic resist-static
+# advisory (unresolved receiver type).
+PATH_CTORS = frozenset({"Path", "PurePath", "PosixPath", "WindowsPath", "PurePosixPath", "PureWindowsPath"})
+PATH_RETURNING_METHODS = frozenset({"joinpath", "resolve", "absolute", "expanduser", "with_name",
+                                    "with_suffix", "with_stem", "relative_to", "readlink"})
+PATH_RETURNING_ATTRS = frozenset({"parent"})
+
+
+class _Resolver:
+    """Resolve, within one module, the os / os.path / shutil module aliases and the pathlib names honoured
+    by the tables above. Unresolved aliases are simply not recognized (a disclosed residual)."""
+
+    def __init__(self, tree):
+        self.os_aliases = {"os"}
+        self.ospath_aliases = {"os.path"}   # tracked as a marker; real detection is Attribute(Attribute)
+        self.shutil_aliases = {"shutil"}
+        self.bare_ospath = {}   # name -> attr for `from os.path import exists`
+        self.bare_os = {}       # name -> attr for `from os import stat, mkdir`
+        self.pathlib_aliases = set()   # `import pathlib [as pl]`
+        self.path_ctor_names = {}      # name -> ctor for `from pathlib import Path [as P]`
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name == "os":
+                        self.os_aliases.add(a.asname or "os")
+                    elif a.name == "shutil":
+                        self.shutil_aliases.add(a.asname or "shutil")
+                    elif a.name == "pathlib":
+                        self.pathlib_aliases.add(a.asname or "pathlib")
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                if node.module == "os.path":
+                    for a in node.names:
+                        self.bare_ospath[a.asname or a.name] = a.name
+                elif node.module == "os":
+                    for a in node.names:
+                        self.bare_os[a.asname or a.name] = a.name
+                elif node.module == "pathlib":
+                    for a in node.names:
+                        if a.name in PATH_CTORS:
+                            self.path_ctor_names[a.asname or a.name] = a.name
+
+    def scoped(self, shadowed):
+        """CATCH-ALL 1 (general shadowing): a per-scope view of this resolver with every os / os.path /
+        shutil / pathlib name SHADOWED by a local binding removed, so `def ensure(os): os.makedirs(...)`
+        (a parameter shadowing the module) is not read as the real os module, and `def refresh(Path):
+        Path("x")` (a parameter shadowing the constructor) is not read as the pathlib constructor. An
+        imported alias or a builtin name is credited as the real API only where no parameter or local
+        binding in the scope reuses its name; where one does, the receiver is not provably the API and the
+        scope's classifies and mutations fall to the resist-static advisory rather than convicting on an
+        ambiguous name. The
+        `os.path` marker is left intact: os.path.<name> resolution keys off the (now shadow-stripped)
+        os_aliases plus the literal `path` attribute, so dropping `os` already disables it."""
+        if not shadowed:
+            return self
+        r = _Resolver.__new__(_Resolver)
+        r.os_aliases = self.os_aliases - shadowed
+        r.ospath_aliases = self.ospath_aliases
+        r.shutil_aliases = self.shutil_aliases - shadowed
+        r.bare_ospath = {k: v for k, v in self.bare_ospath.items() if k not in shadowed}
+        r.bare_os = {k: v for k, v in self.bare_os.items() if k not in shadowed}
+        r.pathlib_aliases = self.pathlib_aliases - shadowed
+        r.path_ctor_names = {k: v for k, v in self.path_ctor_names.items() if k not in shadowed}
+        return r
+
+
+def _has_kw(call, name):
+    return any(kw.arg == name for kw in call.keywords)
+
+
+def _kw_is_false(call, name):
+    for kw in call.keywords:
+        if kw.arg == name and isinstance(kw.value, ast.Constant) and kw.value.value is False:
+            return True
+    return False
+
+
+def _is_path_ctor_call(call, resolver):
+    """True iff `call` is a pathlib constructor: a bare `Path(...)` bound from pathlib, or `pathlib.Path(...)`
+    (any alias). A local class shadowing the name is never credited, only the imported constructor."""
+    f = call.func
+    if isinstance(f, ast.Name):
+        return f.id in resolver.path_ctor_names
+    if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+        return f.value.id in resolver.pathlib_aliases and f.attr in PATH_CTORS
+    return False
+
+
+def _is_proven_path(node, path_names, resolver):
+    """True iff `node` is a PROVEN filesystem path object: a pathlib constructor call, a path-returning
+    method or attribute on a proven path, a `/` join involving one, or a name/param proven Path-typed. An
+    unresolved receiver type is NOT proven (it is heuristic, resist-static-tier at most, never a
+    certain-shape advisory)."""
+    if isinstance(node, ast.Name):
+        return node.id in path_names
+    if isinstance(node, ast.Call):
+        if _is_path_ctor_call(node, resolver):
+            return True
+        f = node.func
+        if isinstance(f, ast.Attribute) and f.attr in PATH_RETURNING_METHODS:
+            return _is_proven_path(f.value, path_names, resolver)
+        return False
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return (_is_proven_path(node.left, path_names, resolver)
+                or _is_proven_path(node.right, path_names, resolver))
+    if isinstance(node, ast.Attribute):
+        return node.attr in PATH_RETURNING_ATTRS and _is_proven_path(node.value, path_names, resolver)
+    if isinstance(node, ast.Subscript):
+        v = node.value   # p.parents[0]
+        return (isinstance(v, ast.Attribute) and v.attr == "parents"
+                and _is_proven_path(v.value, path_names, resolver))
+    return False
+
+
+def _is_path_annotation(ann, resolver):
+    """True iff an annotation names a pathlib type: `Path`, `pathlib.Path`, or a forward-ref string of one."""
+    if isinstance(ann, ast.Name):
+        return ann.id in resolver.path_ctor_names
+    if isinstance(ann, ast.Attribute) and isinstance(ann.value, ast.Name):
+        return ann.value.id in resolver.pathlib_aliases and ann.attr in PATH_CTORS
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        tail = ann.value.rsplit(".", 1)[-1]
+        return tail in PATH_CTORS
+    return False
+
+
+def _assign_target_names(target):
+    """The Name ids bound by an assignment target (a Name, or a Tuple/List of Names, possibly starred)."""
+    out = []
+    if isinstance(target, ast.Name):
+        out.append(target.id)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for elt in target.elts:
+            if isinstance(elt, ast.Starred):
+                elt = elt.value
+            if isinstance(elt, ast.Name):
+                out.append(elt.id)
+    return out
+
+
+def _iter_arg_annotations(func):
+    """Yield (arg-name, annotation) for every annotated parameter of a function scope (none for a module)."""
+    args = getattr(func, "args", None)
+    if args is None:
+        return
+    groups = list(getattr(args, "posonlyargs", [])) + list(args.args) + list(args.kwonlyargs)
+    for a in (args.vararg, args.kwarg):
+        if a is not None:
+            groups.append(a)
+    for a in groups:
+        if a.annotation is not None:
+            yield a.arg, a.annotation
+
+
+def _proven_path_names(func, resolver):
+    """The set of local names in `func`'s scope proven to hold a pathlib path: seeded from Path-typed
+    parameter and variable annotations, grown to a fixpoint over assignments whose value is a proven path,
+    then SHRUNK to a fixpoint that DISQUALIFIES any name augmented-assigned or with any binding to a non-path
+    value, PROPAGATING the disqualification through dependent aliases (a name proven only via `q = p` is
+    dropped once `p` is dropped), so a name reused across a path and a non-path type, or an alias chain with
+    any non-Path link the scan models, is dropped rather than treated as a certain filesystem receiver (an
+    unmodelled `import ... as <name>` rebind the scan does not follow can still leave stale provenance)."""
+    body = func.body if hasattr(func, "body") else []
+    seeded = set()
+    for arg_name, ann in _iter_arg_annotations(func):
+        if _is_path_annotation(ann, resolver):
+            seeded.add(arg_name)
+    for n in _walk_no_nested(body):
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.annotation is not None:
+            if _is_path_annotation(n.annotation, resolver):
+                seeded.add(n.target.id)
+    names = set(seeded)
+
+    def _binding(n):
+        """(target-names, value) for a value-producing assignment or walrus, else (None, None). A walrus
+        (`(p := expr)`) is value-based exactly like an assignment: it KEEPS provenance when its value is a
+        proven path and invalidates it otherwise (codex #4: `(p := cache)` drops p to unproven)."""
+        if isinstance(n, ast.Assign):
+            tn = []
+            for t in n.targets:
+                tn.extend(_assign_target_names(t))
+            return tn, n.value
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.value is not None:
+            return [n.target.id], n.value
+        if isinstance(n, ast.NamedExpr):
+            return _assign_target_names(n.target), n.value
+        return None, None
+
+    # Collect every value bound to each name across the scope, plus the names invalidated by a rebind whose
+    # value the scan does not model as a path, so provenance can be recomputed to a fixpoint rather than
+    # read once. CATCH-ALL 2 (all-binding invalidation): a name rebound by one of the binding constructs
+    # this scan tracks that does not carry a proven-path value loses filesystem provenance and propagates
+    # that loss through dependent aliases; a rebind this scan does NOT model, such as an `import ... as
+    # <name>` alias binding a proven-path name, is not invalidated and may leave stale provenance (a
+    # possible false-positive advisory, advisory precision a disclosed follow-on).
+    # `augmented` (an aug-assign is a derivation) and `rebound` (a for/with/except/comprehension
+    # target or a nested def/class, each binding a value this scan cannot prove is a path) both force
+    # disqualification in the shrink below; a walrus is handled value-based through `bindings`, not here.
+    bindings = {}
+    augmented = set()
+    rebound = set()
+    for n in _walk_no_nested(body):
+        if isinstance(n, ast.AugAssign):
+            augmented.update(_assign_target_names(n.target))
+            continue
+        if isinstance(n, (ast.For, ast.AsyncFor)):
+            rebound.update(_assign_target_names(n.target))     # a loop target: element type unproven
+        elif isinstance(n, (ast.With, ast.AsyncWith)):
+            for item in n.items:
+                if item.optional_vars is not None:
+                    rebound.update(_assign_target_names(item.optional_vars))  # the __enter__ result
+        elif isinstance(n, ast.ExceptHandler):
+            if n.name:
+                rebound.add(n.name)                            # the caught exception object
+        elif isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            for gen in n.generators:
+                rebound.update(_assign_target_names(gen.target))
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            rebound.add(n.name)                                # a nested def/class rebinds the name
+        tn, val = _binding(n)
+        if val is not None:
+            for nm in tn:
+                bindings.setdefault(nm, []).append(val)
+
+    # Grow a candidate proven set to a fixpoint: a name becomes a candidate when a value bound to it is a
+    # proven path under the candidate set, so an alias chain (`q = p` after `p = Path(...)`) reaches proven.
+    changed = True
+    while changed:
+        changed = False
+        for nm, vals in bindings.items():
+            if nm in names:
+                continue
+            if any(_is_proven_path(v, names, resolver) for v in vals):
+                names.add(nm)
+                changed = True
+
+    # Shrink to a fixpoint so an INVALIDATED link propagates through every dependent alias. A name is
+    # dropped when it is augmented, or ANY value bound to it is not a proven path under the current
+    # (already shrinking) set, or it is not annotation-seeded and has no binding at all. Recomputing until
+    # stable means `q = p; q = p` is dropped once `p` is dropped for a later non-path rebind (codex #3): an
+    # alias chain with a non-Path link this scan models, or a cross-branch rebind to an unproven value, is
+    # not a certain filesystem receiver, so it FALLS to the resist-static advisory rather than convicting on
+    # unproven provenance (an unmodelled `import ... as <name>` rebind can still leave stale provenance).
+    changed = True
+    while changed:
+        changed = False
+        for nm in list(names):
+            vals = bindings.get(nm, [])
+            if nm in augmented or nm in rebound:
+                names.discard(nm)
+                changed = True
+                continue
+            if nm in seeded:
+                if any(not _is_proven_path(v, names, resolver) for v in vals):
+                    names.discard(nm)
+                    changed = True
+            elif not vals or any(not _is_proven_path(v, names, resolver) for v in vals):
+                names.discard(nm)
+                changed = True
+    return names
+
+
+def _open_write_mode(call, mode_index):
+    """True iff an open call opens in a write/append/create mode: a `mode=` string keyword, or a positional
+    mode string at `mode_index` (1 for the builtin open(path, mode), 0 for Path.open(mode))."""
+    for kw in call.keywords:
+        if kw.arg == "mode" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            return any(m in kw.value.value for m in WRITE_MODES)
+    if len(call.args) > mode_index:
+        a = call.args[mode_index]
+        if isinstance(a, ast.Constant) and isinstance(a.value, str):
+            return any(m in a.value for m in WRITE_MODES)
+    return False
+
+
+def _classify(call, resolver):
+    """If `call` is a FOLLOWING-CLASSIFY, return its classified path expr; else None. No-follow forms
+    (lexists, lstat, is_symlink, follow_symlinks=False, dir_fd=) are excluded."""
+    if _kw_is_false(call, "follow_symlinks") or _has_kw(call, "dir_fd"):
+        return None
+    f = call.func
+    # os.path.<name>(P)  -> Attribute(Attribute(Name os, 'path'), name)
+    if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute):
+        inner = f.value
+        if (isinstance(inner.value, ast.Name) and inner.value.id in resolver.os_aliases
+                and inner.attr == "path"):
+            if f.attr in OSPATH_FOLLOW:
+                return call.args[0] if call.args else None
+            if f.attr in OSPATH_NOFOLLOW:
+                return None
+    # os.<name>(P)  -> Attribute(Name os, name)
+    if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in resolver.os_aliases:
+        if f.attr in OS_STAT_FOLLOW:
+            return call.args[0] if call.args else None
+        if f.attr in OS_NOFOLLOW:
+            return None
+    # from-import bare names
+    if isinstance(f, ast.Name):
+        if f.id in resolver.bare_ospath:
+            attr = resolver.bare_ospath[f.id]
+            if attr in OSPATH_FOLLOW:
+                return call.args[0] if call.args else None
+            return None
+        if f.id in resolver.bare_os:
+            attr = resolver.bare_os[f.id]
+            if attr in OS_STAT_FOLLOW:
+                return call.args[0] if call.args else None
+            return None
+    # method form: <recv>.<name>()  (heuristic Path receiver)
+    if isinstance(f, ast.Attribute):
+        if f.attr in NOFOLLOW_METHODS:
+            return None
+        if f.attr in METHOD_FOLLOW:
+            return f.value      # the receiver is the classified path expression
+    return None
+
+
+def _classify_is_certain_fs(call, resolver, path_names):
+    """True iff a following-classify `call` is a CERTAIN filesystem operation: an os.path.<exists/isdir/
+    isfile>, os.stat, or from-os bare stat / from-os.path bare classify (module-resolved, inherently
+    filesystem), or a method-form classify (.exists()/.is_dir()/.is_file()/.stat()) whose receiver is a
+    PROVEN pathlib path. A method-form classify on an unproven receiver is NOT certain: the receiver may be
+    a non-filesystem object with a same-named method (codex #4), so it never anchors a certain-shape
+    advisory. Called
+    only where _classify already matched, so it needs only to grade the receiver's provenance."""
+    f = call.func
+    if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute):
+        inner = f.value
+        if (isinstance(inner.value, ast.Name) and inner.value.id in resolver.os_aliases
+                and inner.attr == "path" and f.attr in OSPATH_FOLLOW):
+            return True
+    if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in resolver.os_aliases:
+        if f.attr in OS_STAT_FOLLOW:
+            return True
+    if isinstance(f, ast.Name):
+        if f.id in resolver.bare_ospath and resolver.bare_ospath[f.id] in OSPATH_FOLLOW:
+            return True
+        if f.id in resolver.bare_os and resolver.bare_os[f.id] in OS_STAT_FOLLOW:
+            return True
+    if isinstance(f, ast.Attribute) and f.attr in METHOD_FOLLOW and f.attr not in NOFOLLOW_METHODS:
+        return _is_proven_path(f.value, path_names, resolver)
+    return False
+
+
+def _unparse(node):
+    try:
+        return ast.unparse(node)
+    except Exception:  # noqa: BLE001  an unparseable node is simply not matched (disclosed residual)
+        return None
+
+
+def _has_name_hint(node):
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            low = sub.value.lower()
+            if any(h in low for h in NAME_HINTS):
+                return True
+        if isinstance(sub, ast.Name) and any(h in sub.id.lower() for h in NAME_HINTS):
+            return True
+        if isinstance(sub, ast.Attribute) and any(h in sub.attr.lower() for h in NAME_HINTS):
+            return True
+    return False
+
+
+def _walk_no_nested(nodes):
+    """Walk statements/expressions without descending into nested function or lambda bodies. A nested
+    def/lambda is yielded (visible as a statement) but never entered, so a statement inside a nested
+    function is attributed to that function's own scope, not the enclosing one."""
+    stack = list(nodes)
+    while stack:
+        n = stack.pop()
+        yield n
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        for c in ast.iter_child_nodes(n):
+            stack.append(c)
+
+
+def _scope_bound_names(scope):
+    """The set of names bound LOCALLY in one scope by a parameter or an in-scope binding (assignment,
+    annotation, aug-assign, walrus, for/with/except/comprehension target, or a nested def/class), NOT
+    descending into a nested def and NOT counting a plain `import` (an import IS the module, so it never
+    shadows itself, and counting a module-level import here would wrongly disable module-scope detection).
+    Used by CATCH-ALL 1 to detect a local name that shadows an os/os.path/shutil/pathlib API name."""
+    names = set()
+    args = getattr(scope, "args", None)
+    if args is not None:
+        for a in list(getattr(args, "posonlyargs", [])) + list(args.args) + list(args.kwonlyargs):
+            names.add(a.arg)
+        for a in (args.vararg, args.kwarg):
+            if a is not None:
+                names.add(a.arg)
+    body = scope.body if hasattr(scope, "body") else []
+    for n in _walk_no_nested(body):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                names.update(_assign_target_names(t))
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            names.add(n.target.id)
+        elif isinstance(n, ast.AugAssign):
+            names.update(_assign_target_names(n.target))
+        elif isinstance(n, ast.NamedExpr):
+            names.update(_assign_target_names(n.target))
+        elif isinstance(n, (ast.For, ast.AsyncFor)):
+            names.update(_assign_target_names(n.target))
+        elif isinstance(n, (ast.With, ast.AsyncWith)):
+            for item in n.items:
+                if item.optional_vars is not None:
+                    names.update(_assign_target_names(item.optional_vars))
+        elif isinstance(n, ast.ExceptHandler):
+            if n.name:
+                names.add(n.name)
+        elif isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            for gen in n.generators:
+                names.update(_assign_target_names(gen.target))
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(n.name)
+    return names
+
+
+def _state_change_targets(nodes, resolver, path_names):
+    """The set of unparsed target-path expressions of PROVEN filesystem state-changing calls within `nodes`
+    (no nested defs). A module call (os.<state>, shutil.<state>, from-os bare) is inherently a filesystem
+    mutation; a method-form mutation (p.mkdir(), p.open('w'), ...) counts only when its receiver is a proven
+    pathlib path, so a str.replace() or a same-named non-path object is never read as a filesystem change.
+    The module-call branch is matched first and narrowly, so a Path-method call on a bare-Name receiver is
+    no longer swallowed before it can reach the method classification (codex #4 / claude B-3)."""
+    targets = set()
+    for n in _walk_no_nested(nodes):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        tgt = None
+        if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                and f.value.id in resolver.os_aliases and f.attr in OS_STATE_CHANGE):
+            tgt = n.args[0] if n.args else None
+        elif (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                and f.value.id in resolver.shutil_aliases and f.attr in SHUTIL_STATE_CHANGE):
+            tgt = n.args[-1] if n.args else None  # dst is the mutated target for move/copy
+        elif isinstance(f, ast.Name) and f.id in resolver.bare_os and resolver.bare_os[f.id] in OS_STATE_CHANGE:
+            tgt = n.args[0] if n.args else None
+        elif (isinstance(f, ast.Attribute) and f.attr == "open"
+                and _is_proven_path(f.value, path_names, resolver) and _open_write_mode(n, 0)):
+            tgt = f.value  # Path(...).open('w') on a proven path
+        elif (isinstance(f, ast.Attribute) and f.attr in METHOD_STATE_CHANGE
+                and _is_proven_path(f.value, path_names, resolver)):
+            tgt = f.value  # p.mkdir()/p.unlink()/p.replace()/... on a proven path
+        elif isinstance(f, ast.Name) and f.id == "open" and _open_write_mode(n, 1):
+            tgt = n.args[0] if n.args else None  # builtin open(path, 'w')
+        if tgt is not None:
+            u = _unparse(tgt)
+            if u is not None:
+                targets.add(u)
+    return targets
+
+
+def _walk_stop_at_try(nodes):
+    """Walk `nodes` without descending into a nested function/lambda OR a nested `try` statement. CATCH-ALL
+    3 (control-flow): an operation inside a nested try may have its exceptions caught or transformed by
+    that try's own handlers before they could reach an OUTER handler, so it is not credited to the outer
+    try (codex #5: an inner `except PermissionError: raise RuntimeError` means the outer conflated handler
+    never receives that PermissionError). An op directly in the try body, or nested only in an `if`/`with`/
+    `for` that does not catch, still reaches this try's handlers and is walked."""
+    stack = list(nodes)
+    while stack:
+        n = stack.pop()
+        yield n
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.Try)):
+            continue
+        for c in ast.iter_child_nodes(n):
+            stack.append(c)
+
+
+def _branch_refuses(nodes):
+    """True iff the branch clearly REFUSES (raises) rather than proceeding clean. A raise anywhere at the
+    branch's own statement level (not inside a nested def) is a refusal/suppressor."""
+    for n in nodes:
+        for sub in _walk_no_nested([n]):
+            if isinstance(sub, ast.Raise):
+                return True
+    return False
+
+
+def _function_has_suppressor(func, resolver):
+    """True iff the enclosing function carries any no-follow evidence: an lstat/lexists/is_symlink call, a
+    follow_symlinks=False or dir_fd= keyword, or an O_NOFOLLOW reference."""
+    for n in _walk_no_nested(func.body if hasattr(func, "body") else []):
+        if isinstance(n, ast.Call):
+            if _kw_is_false(n, "follow_symlinks") or _has_kw(n, "dir_fd"):
+                return True
+            f = n.func
+            if isinstance(f, ast.Attribute) and f.attr in (NOFOLLOW_METHODS | OS_NOFOLLOW | OSPATH_NOFOLLOW):
+                return True
+            if isinstance(f, ast.Name) and (f.id in resolver.bare_os and resolver.bare_os[f.id] in OS_NOFOLLOW):
+                return True
+        if isinstance(n, ast.Name) and n.id == "O_NOFOLLOW":
+            return True
+        if isinstance(n, ast.Attribute) and n.attr == "O_NOFOLLOW":
+            return True
+    return False
+
+
+def _iter_if_tests(nodes):
+    """Yield (if_node) for every If in `nodes` at any depth, not descending nested defs."""
+    for n in _walk_no_nested(nodes):
+        if isinstance(n, ast.If):
+            yield n
+
+
+def _test_classify(test, resolver):
+    """If an `if` test is a following-classify (optionally negated), return (path_expr, absent_is_body).
+    absent_is_body is True when the BODY runs on absent/negative (i.e. `if not classify(P)`), False when the
+    ELSE runs on absent (i.e. `if classify(P)`)."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) and isinstance(test.operand, ast.Call):
+        p = _classify(test.operand, resolver)
+        if p is not None:
+            return p, True
+    if isinstance(test, ast.Call):
+        p = _classify(test, resolver)
+        if p is not None:
+            return p, False
+    return None
+
+
+def _analyze_function(func, resolver, rel, deny, warn, path_names):
+    """Analyze one function (or module pseudo-scope) for the if-based classify shapes."""
+    suppressed = _function_has_suppressor(func, resolver)
+    body = func.body if hasattr(func, "body") else []
+    for node in _iter_if_tests(body):
+        tc = _test_classify(node.test, resolver)
+        if tc is None:
+            continue
+        path_expr, absent_is_body = tc
+        absent_branch = node.body if absent_is_body else node.orelse
+        path_u = _unparse(path_expr)
+        state_targets = _state_change_targets(absent_branch, resolver, path_names)
+        same_path_mutation = path_u is not None and path_u in state_targets
+        relevant = _has_name_hint(path_expr) or bool(state_targets)
+        if not relevant:
+            continue
+        if _branch_refuses(absent_branch):
+            continue  # a refusing negative branch is the correct fail-closed posture, not a finding
+        where = (rel, node.lineno)
+        if same_path_mutation and not suppressed:
+            deny.append(where + ("a following classify of {!r} whose absent/wrong-type branch mutates the "
+                                 "same path with no no-follow evidence; classify no-follow, three-way"
+                                 .format(path_u),))
+        else:
+            warn.append(where + ("a following classify of a control-relevant path with a benign-negative "
+                                 "branch (name-hint or state-change relevance); confirm no-follow, "
+                                 "descriptor-bound, three-way classification (secspr)",))
+
+
+def _analyze_try(func, resolver, rel, deny, warn, path_names):
+    """Analyze try/except conflation within a function/module scope. A conflated-except certain-shape
+    advisory is emitted only when the guarded operation is a CERTAIN filesystem classify/open
+    (receiver-provenance is applied uniformly on this certain-shape path, exactly as the mutation detector
+    applies it): an os/os.path module classify, a builtin
+    open, or a method-form classify on a PROVEN pathlib receiver. A method-form classify on an unproven
+    receiver is not a filesystem certainty (codex #4) and anchors no finding."""
+    body = func.body if hasattr(func, "body") else []
+    for node in _walk_no_nested(body):
+        if not isinstance(node, ast.Try):
+            continue
+        # A control-relevant, CERTAIN-filesystem classify or open inside the try body, whose exceptions
+        # reach THIS try's handlers with no intervening nested-try handler (catch-all 3)?
+        guards_relevant = False
+        for sub in _walk_stop_at_try(node.body):
+            if isinstance(sub, ast.Call):
+                p = _classify(sub, resolver)
+                if (p is not None and _has_name_hint(p)
+                        and _classify_is_certain_fs(sub, resolver, path_names)):
+                    guards_relevant = True
+                    break
+                f = sub.func
+                if isinstance(f, ast.Name) and f.id == "open" and sub.args and _has_name_hint(sub.args[0]):
+                    guards_relevant = True
+                    break
+        if not guards_relevant:
+            continue
+        for handler in node.handlers:
+            names = _handler_exc_names(handler.type)
+            benign = _handler_is_benign(handler.body)
+            if not benign:
+                continue
+            conflated_tuple = ("FileNotFoundError" in names) and bool(names & CONFLATED_NONABSENCE)
+            bare_broad = names == {"OSError"}
+            if conflated_tuple:
+                deny.append((rel, handler.lineno, "a try guarding a control-relevant classify/open whose "
+                             "except conflates FileNotFoundError with a non-absence error under a benign "
+                             "default; refuse the non-absence error, do not collapse it into absence"))
+            elif bare_broad:
+                warn.append((rel, handler.lineno, "a bare `except OSError` with a benign default guards a "
+                             "control-relevant classify/open; a permission or wrong-type error may be "
+                             "collapsed into absence (confirm it fails closed, chkfcl/secfcl)"))
+
+
+def _handler_exc_names(exc_type):
+    """The set of exception class NAMES an except clause catches (a bare Name, or a Tuple of Names)."""
+    out = set()
+    if isinstance(exc_type, ast.Name):
+        out.add(exc_type.id)
+    elif isinstance(exc_type, ast.Tuple):
+        for elt in exc_type.elts:
+            if isinstance(elt, ast.Name):
+                out.add(elt.id)
+    return out
+
+
+def _is_benign_absence_value(value):
+    """True iff a returned value is a clear 'nothing here' sentinel that collapses to genuine absence:
+    a bare return, None, an empty string, or an empty list/dict/tuple/set literal or empty-constructor call.
+    A numeric or other constant (e.g. `return 2`), or a boolean, is NOT benign absence: it may be an explicit
+    failure status or a value the consumer treats as refusal, so it does not license a certain-shape
+    advisory."""
+    if value is None:
+        return True
+    if isinstance(value, ast.Constant):
+        return value.value is None or (isinstance(value.value, str) and value.value == "")
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        return len(value.elts) == 0
+    if isinstance(value, ast.Dict):
+        return len(value.keys) == 0
+    if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id in ("set", "list", "dict", "tuple") and not value.args and not value.keywords):
+        return True
+    return False
+
+
+def _handler_is_benign(handler_body):
+    """True iff a handler body collapses to genuine absence: only pass, continue, or a return of an
+    clear absence sentinel (per _is_benign_absence_value), with no raise, no explicit failure status,
+    and no other statement. An except that returns a failure code or refuses is NOT benign."""
+    if not handler_body:
+        return False
+    for n in handler_body:
+        if isinstance(n, ast.Pass):
+            continue
+        if isinstance(n, ast.Continue):
+            continue
+        if isinstance(n, ast.Return):
+            if _is_benign_absence_value(n.value):
+                continue
+            return False
+        return False
+    return True
+
+
+def _scopes(tree):
+    yield tree
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield node
+
+
+def _diagnose(rel, tree):
+    resolver = _Resolver(tree)
+    deny, warn = [], []
+    for scope in _scopes(tree):
+        scope_resolver = resolver.scoped(_scope_bound_names(scope))   # CATCH-ALL 1: per-scope shadowing
+        path_names = _proven_path_names(scope, scope_resolver)
+        _analyze_function(scope, scope_resolver, rel, deny, warn, path_names)
+        _analyze_try(scope, scope_resolver, rel, deny, warn, path_names)
+    return deny, warn
+
+
+# --- scan-set enumeration (shared shape with check_timer_restore) -------------------------------------
+def _iter_declared_dir(root, rel, errors):
+    d = root / rel
+    try:
+        names = sorted(os.listdir(d))
+    except OSError as exc:
+        errors.append((rel, 0, "cannot list required directory: {}".format(exc)))
+        return
+    for name in names:
+        if not name.endswith(".py"):
+            continue
+        r = rel + "/" + name
+        p = d / name
+        try:
+            mode = p.lstat().st_mode
+        except OSError as exc:
+            errors.append((r, 0, "cannot stat declared input: {}".format(exc)))
+            continue
+        if not stat.S_ISREG(mode):
+            errors.append((r, 0, "declared input is not a regular file"))
+            continue
+        yield r, p
+
+
+def _scan_set(root, errors):
+    out = []
+    for r, p in _iter_declared_dir(root, TOOLS_REL, errors):
+        out.append((r, p))
+    for r, p in _iter_declared_dir(root, HOOKS_SCRIPTS_REL, errors):
+        out.append((r, p))
+    return sorted(out)
+
+
+def scan(root, files):
+    """Scan an explicit (rel, abspath) file list. Returns (errors, deny, warn) sorted. A read, decode, or
+    parse failure on a declared input is a cannot-evaluate (fail-closed)."""
+    errors, deny, warn = [], [], []
+    for rel, abspath in files:
+        phase = "read"
+        try:
+            try:
+                raw = abspath.read_bytes()
+            except OSError as exc:
+                errors.append((rel, 0, "cannot read declared input: {}".format(exc)))
+                continue
+            except (RecursionError, MemoryError) as exc:
+                # A huge declared input under memory pressure can raise MemoryError in the read/decode
+                # phase, before the parse-stage capacity catch below is reached. Fail closed as a located
+                # cannot-evaluate (exit 2), the same fail-closed path as an unreadable/unparseable input,
+                # never an uncaught error escaping as exit 1. Not portably self-testable (it needs an
+                # address-space ulimit), so it is covered by this catch rather than a flaky self-test leg.
+                errors.append((rel, 0, "declared input exceeds the analyzer's capacity (cannot evaluate): "
+                               "{}".format(type(exc).__name__)))
+                continue
+            phase = "decode"
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                errors.append((rel, 0, "declared input is not valid UTF-8: {}".format(exc)))
+                continue
+            except (RecursionError, MemoryError) as exc:
+                errors.append((rel, 0, "declared input exceeds the analyzer's capacity (cannot evaluate): "
+                               "{}".format(type(exc).__name__)))
+                continue
+            phase = "parse"
+            try:
+                tree = ast.parse(text, filename=rel)
+            except SyntaxError as exc:
+                errors.append((rel, exc.lineno or 0, "declared input does not parse (SyntaxError): {}".format(exc.msg)))
+                continue
+            except ValueError as exc:
+                # A null-byte or otherwise malformed source makes ast.parse raise ValueError (not
+                # SyntaxError) on CPython < 3.12; 3.12+ raises SyntaxError, caught above. Close it
+                # fail-closed either way as a located cannot-evaluate (exit 2), never an uncaught error
+                # escaping as exit 1 (SC1 third state). RecursionError/MemoryError below are a disjoint
+                # capacity case, unaffected.
+                errors.append((rel, 0, "declared input does not parse (malformed source): {}".format(exc)))
+                continue
+            except (RecursionError, MemoryError) as exc:
+                errors.append((rel, 0, "declared input exceeds the analyzer's capacity (cannot evaluate): "
+                               "{}".format(type(exc).__name__)))
+                continue
+            phase = "diagnose"
+            try:
+                d, w = _diagnose(rel, tree)
+            except (RecursionError, MemoryError) as exc:
+                # A syntactically valid but analysis-hostile input (e.g. a very deep AST) can drive the
+                # recursive dataflow/provenance pass past the interpreter's recursion or memory limit. Fail
+                # closed as a located cannot-evaluate (exit 2), the same fail-closed path as an unreadable/
+                # unparseable input. RecursionError and MemoryError get this specific capacity message; any
+                # OTHER uncaught error is caught by the per-file broad backstop below as a located
+                # cannot-evaluate (surfaced, never masked), never an uncaught error escaping as exit 1.
+                errors.append((rel, 0, "declared input exceeds the analyzer's capacity (cannot evaluate): "
+                               "{}".format(type(exc).__name__)))
+                continue
+            deny.extend(d)
+            warn.extend(w)
+        except Exception as exc:  # noqa: BLE001  FINAL broad backstop; catch Exception, not BaseException
+            # CLASS-WIDTH FAIL-CLOSED (SC1): any otherwise-uncaught error anywhere in this file's
+            # read/decode/parse/diagnose pipeline is recorded as a LOCATED cannot-evaluate naming the file,
+            # the phase, and the exception type+message, so a genuine bug is VISIBLE (never silently masked)
+            # and drives exit 2, never an uncaught error escaping as exit 1. This broad catch replaces the
+            # piecemeal type-specific catches as the backstop; the narrower catches above stay for their
+            # specific located messages. KeyboardInterrupt and SystemExit are BaseException, left uncaught.
+            errors.append((rel, 0, "cannot evaluate declared input during {} ({}: {})".format(
+                phase, type(exc).__name__, exc)))
+            continue
+    errors.sort()
+    deny.sort()
+    warn.sort()
+    return errors, deny, warn
+
+
+def _safe_write(stream, text):
+    """Write text to a text stream ENCODING-SAFE. An advisory/diagnostic line carries file names and paths,
+    so under a non-UTF-8 stdout locale a plain write could raise UnicodeEncodeError. On that error, re-encode
+    through the stream's own encoding with unencodable characters backslash-escaped, so the line is written
+    in the stream's encoding (a Latin-1 stream keeps its Latin-1 characters; it is not forced to ASCII) and
+    the fallback does not itself raise UnicodeEncodeError. A write failure other than an encoding error (e.g.
+    a closed or full stream) is an environment/tool failure, not a scanned-input verdict; it is left to
+    propagate rather than being turned into an advisory or a scanned-input result."""
+    try:
+        stream.write(text)
+        return
+    except UnicodeEncodeError:
+        enc = getattr(stream, "encoding", None) or "utf-8"
+        data = text.encode(enc, "backslashreplace")
+        buf = getattr(stream, "buffer", None)
+        if buf is None:
+            stream.write(data.decode(enc, "backslashreplace"))
+        else:
+            buf.write(data)
+            buf.flush()
+
+
+def _emit(line):
+    """Print one advisory/diagnostic line to stdout, encoding-safe (see _safe_write)."""
+    _safe_write(sys.stdout, line + "\n")
+
+
+def run(root):
+    """Scan the declared set and report. WARN-only v1: the certain collapse shapes and the resist-static
+    shapes are both emitted as WARN advisories for human review, and the gate NEVER blocks. A scanned input
+    yields exit 0 (ran, with or without advisories) or exit 2 (cannot-evaluate on an unreadable, unparseable,
+    or over-capacity input); it never exits 1 on a scanned input. The per-file pipeline fails closed to a
+    located cannot-evaluate (see scan()) and advisory rendering is encoding-safe (see _emit). An output-stream
+    failure (e.g. a full or broken stdout) is an environment/tool failure that may surface as a nonzero tool
+    exit; it is not a scanned-input verdict."""
+    try:
+        errors = []
+        files = _scan_set(root, errors)
+        scan_errors, deny, warn = scan(root, files)
+        errors = sorted(errors + scan_errors)
+        for rel, lineno, msg in errors:
+            where = "{}:{}".format(rel, lineno) if lineno else rel
+            _emit("cannot-evaluate: {}: {}".format(where, msg))
+        # WARN-only v1: the certain-shape findings (deny) and the resist-static findings (warn) are both
+        # advisories on the same stream; neither sets a blocking exit. DENY-precision is a disclosed
+        # follow-on.
+        for rel, lineno, msg in warn:
+            _emit("WARN: {}:{}: {}".format(rel, lineno, msg))
+        for rel, lineno, msg in deny:
+            _emit("WARN: {}:{}: {}".format(rel, lineno, msg))
+        if errors:
+            _emit("RESULT: cannot-evaluate ({} issue(s)); fail-closed".format(len(errors)))
+            return 2
+        _emit("PASS (advisory): {} certain-shape and {} resist-static advisory WARN(s) in the scanned "
+              "surfaces; WARN-only v1 never blocks".format(len(deny), len(warn)))
+        return 0
+    except Exception as exc:  # noqa: BLE001  final backstop: never let an uncaught error exit 1
+        # An unrecoverable output or scan failure fails closed to a cannot-evaluate exit 2, never escapes as
+        # exit 1. The stderr note is itself best-effort and encoding-safe.
+        try:
+            _safe_write(sys.stderr, "cannot-evaluate: advisory run failed ({}: {}); fail-closed\n".format(
+                type(exc).__name__, exc))
+        except Exception:  # noqa: BLE001  stderr itself unwritable; still fail closed, never exit 1
+            pass
+        return 2
+
+
+def _repo_root():
+    p = Path(__file__).resolve()
+    for anc in [p, *p.parents]:
+        if (anc / ".git").exists():
+            return anc
+    return Path.cwd()
+
+
+def main():
+    if "--self-test" in sys.argv[1:]:
+        return self_test_main()
+    return run(_repo_root())
+
+
+# --- self-test ----------------------------------------------------------------------------------------
+# Synthetic trees under a private tempdir the test creates and removes (test-hermeticity); generic
+# placeholders only (state.d, trusted_root). WARN-only v1: every scan that ran exits 0; a "certain" case
+# emits the certain-shape advisory (the former DENY, still detected, now advisory), a "warn" case emits the
+# resist-static advisory, and a "clean" case emits no advisory:
+#   1. `if os.path.isdir("state.d"): ... else: <mkdir "state.d">` (absent branch mutates the same path,
+#      no no-follow evidence) is a certain-shape advisory (exit 0),
+#   2. the descriptor-bound three-way classify (os.open(root, O_NOFOLLOW|O_DIRECTORY) + os.lstat(name,
+#      dir_fd=fd)) is clean (exit 0),
+#   3. a name-hint-only classify with a benign-negative branch is a resist-static advisory (exit 0),
+#   4. the conflated-except shape (except (FileNotFoundError, PermissionError): return None guarding a
+#      control-relevant open) is a certain-shape advisory (exit 0),
+#   5. an unreadable, a syntactically invalid, and a valid-but-analysis-hostile deep-AST declared input
+#      each exit 2 (fail-closed), never an uncaught error escaping as exit 1,
+#   6. a refusing negative branch (raise) over a control path is clean (exit 0, no advisory),
+#   7. a method-classify + mutation on an unproven (non-filesystem) receiver is not raised to the certain
+#      shape (exit 0),
+#   8. a str.replace() in the negative branch is not a filesystem mutation, so no certain shape (exit 0),
+#   9. a Path-method mutation on a bare-Name proven-Path receiver on the same path is a certain-shape
+#      advisory (exit 0),
+#  10. a conflated except returning an explicit failure status is a refusal, not benign (exit 0),
+#  11. a builtin open in write mode via a `mode=` keyword is a state change, so it is a certain-shape
+#      advisory (exit 0),
+#  12. an alias chain with a non-Path link propagates disqualification, so no certain shape (exit 0),
+#  13. a conflated except on a method-form classify with an unproven receiver is not raised to the certain
+#      shape (exit 0),
+#  14. an `os` parameter shadowing the module (os.path.isdir / os.makedirs) is NOT the fs API (exit 0),
+#  15. a `Path` parameter shadowing the constructor is NOT a proven fs receiver (exit 0),
+#  16. a for-loop target rebinding a proven Path to an unproven element loses provenance (exit 0),
+#  17. a walrus rebinding a proven Path to an unproven value loses provenance (exit 0),
+#  18. an inner try transforming PermissionError before the outer conflated handler gives no certain-shape
+#      advisory (exit 0),
+#  19. an `if classify(p): return` early-return fall-through with the mutation after it (outside the
+#      classify's own branch) on a name-hint path is a resist-static advisory WARN (exit 0), never silent.
+
+_DENY_STATE_SRC = '''\
+import os
+def ensure():
+    if os.path.isdir("state.d"):
+        use_it()
+    else:
+        os.makedirs("state.d")
+        use_it()
+'''
+
+_PASS_DESC_SRC = '''\
+import os
+def classify(name):
+    fd = os.open("trusted_root", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        st = os.lstat(name, dir_fd=fd)
+        if os.path.stat.S_ISDIR(st.st_mode):
+            return "dir"
+        raise RuntimeError("wrong type")
+    finally:
+        os.close(fd)
+'''
+
+_WARN_HINT_SRC = '''\
+import os
+def check(root):
+    if not os.path.exists(root + "/lockfile"):
+        proceed()
+'''
+
+_DENY_CONFLATED_SRC = '''\
+def read_marker(path):
+    try:
+        with open(path + "/marker", "r") as fh:
+            return fh.read()
+    except (FileNotFoundError, PermissionError):
+        return None
+'''
+
+_REFUSE_SRC = '''\
+import os
+def ensure(lock_path):
+    if not os.path.exists(lock_path):
+        raise RuntimeError("lock missing")
+    proceed()
+'''
+
+# A method-form classify + mutation on an unproven (non-filesystem) receiver must NOT be convicted
+# (codex #3): the receiver's Path-ness cannot be proven, so it is not a certain-shape advisory.
+_NONFS_RECEIVER_SRC = '''\
+def refresh(self):
+    if not self.cache.exists():
+        self.cache.write_text("data")
+'''
+
+# A str.replace() in the negative branch of an os.path.exists check is a string format, not a filesystem
+# mutation (codex #3): it must not emit a certain-shape advisory (exit 0; a name-hint WARN is acceptable).
+_STR_REPLACE_SRC = '''\
+import os
+def label(self):
+    if not os.path.exists(self.state_path):
+        return self.state_path.replace("_", " ")
+    return read(self.state_path)
+'''
+
+# A Path-method mutation on a bare-Name proven-Path receiver whose absent branch mutates the same path
+# (codex #4 / claude B-3): the branch-ordering fix must let it reach method classification and be flagged
+# (exit 0; a certain-shape advisory).
+_PROVEN_PATH_DENY_SRC = '''\
+from pathlib import Path
+def ensure(d):
+    out = Path(d) / "cache"
+    if not out.exists():
+        out.mkdir()
+'''
+
+# A conflated except whose handler returns an explicit FAILURE status is a refusal, not a benign-absence
+# collapse (codex #5): it must NOT emit a certain-shape advisory (exit 0, clean).
+_CONFLATED_REFUSE_SRC = '''\
+import os
+def check_marker(marker):
+    try:
+        os.stat(marker)
+    except (FileNotFoundError, PermissionError):
+        return 2
+    return 0
+'''
+
+# A builtin open in write mode given via a `mode=` keyword must be recognized as a state change (claude
+# m-1), so this same-path check-then-create is a certain-shape advisory (exit 0).
+_OPEN_KW_DENY_SRC = '''\
+import os
+def make_lock():
+    if not os.path.isfile("state.lock"):
+        open("state.lock", mode="w")
+'''
+
+# An alias chain where a link becomes non-Path (codex #3): `p` is rebound to a caller-supplied `cache`, so
+# the dependent alias `q = p` is no longer a proven filesystem receiver. The disqualification must propagate
+# through the alias, so the classify+mutation on `q` is NOT convicted (exit 0).
+_ALIAS_CHAIN_CLEAN_SRC = '''\
+from pathlib import Path
+def refresh(cache):
+    p = Path("state")
+    p = cache
+    q = p
+    if not q.exists():
+        q.write_text("data")
+'''
+
+# A conflated except guarding a method-form classify on an UNPROVEN receiver (codex #4): `state_cache` may be
+# a non-filesystem object with an `.exists()` method, so receiver provenance (applied uniformly on the
+# conflated-except DENY path) withholds the DENY (exit 0).
+_CONFLATED_NONFS_SRC = '''\
+def probe(state_cache):
+    try:
+        return state_cache.exists()
+    except (FileNotFoundError, PermissionError):
+        return None
+'''
+
+# CATCH-ALL 1 (codex #3): `os` is a PARAMETER shadowing the module, so os.path.isdir / os.makedirs are
+# calls on a caller-supplied object, not the filesystem API; the scope bails out of DENY (exit 0).
+_SHADOWED_OS_CLEAN_SRC = '''\
+def ensure(os):
+    if not os.path.isdir("state.d"):
+        os.makedirs("state.d")
+'''
+
+# CATCH-ALL 1 (codex #3): `Path` is a PARAMETER shadowing the constructor, so Path("state") is not a proven
+# filesystem receiver and the classify+mutation on it is not convicted (exit 0).
+_SHADOWED_PATH_CLEAN_SRC = '''\
+from pathlib import Path
+def refresh(Path):
+    p = Path("state")
+    if not p.exists():
+        p.write_text("data")
+'''
+
+# CATCH-ALL 2 (codex #4): a for-loop target REBINDS `p` from a proven Path to an unproven loop element, so
+# `p` loses filesystem provenance and the classify+mutation on it is not convicted (exit 0).
+_LOOP_REBIND_CLEAN_SRC = '''\
+from pathlib import Path
+def refresh(cache):
+    p = Path("state")
+    for p in [cache]:
+        if not p.exists():
+            p.write_text("data")
+'''
+
+# CATCH-ALL 2 (codex #4): a walrus REBINDS `p` from a proven Path to an unproven value before the
+# conditional, so provenance is lost and no DENY fires (exit 0).
+_WALRUS_REBIND_CLEAN_SRC = '''\
+from pathlib import Path
+def refresh(cache):
+    p = Path("state")
+    if not (p := cache).exists():
+        p.write_text("data")
+'''
+
+# CATCH-ALL 3 (codex #5): an INNER try transforms PermissionError into RuntimeError before it could reach
+# the outer conflated handler, so the outer `except (FileNotFoundError, PermissionError)` does not actually
+# conflate a non-absence error from os.stat; no DENY fires (exit 0).
+_NESTED_TRY_CLEAN_SRC = '''\
+import os
+def inspect(root):
+    try:
+        try:
+            return os.stat(root + "/state")
+        except PermissionError as exc:
+            raise RuntimeError("refused") from exc
+    except (FileNotFoundError, PermissionError):
+        return None
+'''
+
+
+# R9 (round-9 QA, early-return fall-through with a name-hint): an `if classify(p): return` guard with the
+# mutation after it (outside the classify's own branch) on a name-hint path is not the modelled certain
+# same-path shape, yet a following-classify with a benign-negative branch is visible; it must emit a
+# resist-static WARN advisory (exit 0), never be silent.
+_EARLY_RETURN_WARN_SRC = '''\
+import os
+def ensure():
+    if os.path.exists("state"):
+        return
+    os.mkdir("state")
+'''
+
+
+# A certain-shape (state-change collapse) whose classified PATH STRING carries a non-ASCII character, so its
+# advisory message embeds a non-ASCII path and exercises the encoding-safe emitter under an ASCII stdout.
+# Written with a \u escape so this test source stays ASCII-only; the fixture file on disk carries the real
+# character (utf-8). "state" is the name-hint that makes it relevant.
+_NONASCII_ADVISORY_SRC = '''\
+import os
+def ensure():
+    if os.path.isdir("state_\u00e9.d"):
+        use_it()
+    else:
+        os.makedirs("state_\u00e9.d")
+'''
+
+
+def self_test_main():
+    import io
+    import shutil
+    import subprocess
+    import tempfile
+    from contextlib import redirect_stdout
+
+    def run_quiet_files(root, files):
+        # WARN-only v1: a scan that ran exits 0; only a cannot-evaluate exits 2. `deny` is the certain-shape
+        # advisory list (still detected, now advisory), `warn` the resist-static advisory list.
+        with redirect_stdout(io.StringIO()):
+            scan_errors, deny, warn = scan(root, files)
+            if scan_errors:
+                return 2, deny, warn
+            return 0, deny, warn
+
+    def write(base, rel, text):
+        p = base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if text is not None:
+            p.write_text(text, encoding="utf-8")
+        return rel, p
+
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-path-classification-selftest-"))
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    failures = []
+    skipped = []
+    try:
+        base = tmp / "tree"
+        # kind: "certain" (former DENY, still detected, now a certain-shape advisory), "warn" (a
+        # resist-static advisory expected), "clean" (no advisory at all), "clean-or-warn" (no certain-shape
+        # advisory; a resist-static advisory is acceptable). Every scan that ran exits 0 under WARN-only v1.
+        cases = [
+            ("deny-state", _DENY_STATE_SRC, "certain"),
+            ("pass-desc", _PASS_DESC_SRC, "clean"),
+            ("warn-hint", _WARN_HINT_SRC, "warn"),
+            ("deny-conflated", _DENY_CONFLATED_SRC, "certain"),
+            ("refuse", _REFUSE_SRC, "clean"),
+            ("nonfs-receiver", _NONFS_RECEIVER_SRC, "clean"),
+            ("str-replace", _STR_REPLACE_SRC, "clean-or-warn"),
+            ("proven-path-deny", _PROVEN_PATH_DENY_SRC, "certain"),
+            ("conflated-refuse", _CONFLATED_REFUSE_SRC, "clean"),
+            ("open-kw-deny", _OPEN_KW_DENY_SRC, "certain"),
+            ("alias-chain-clean", _ALIAS_CHAIN_CLEAN_SRC, "clean"),
+            ("conflated-nonfs-clean", _CONFLATED_NONFS_SRC, "clean"),
+            ("shadowed-os-clean", _SHADOWED_OS_CLEAN_SRC, "clean"),
+            ("shadowed-path-clean", _SHADOWED_PATH_CLEAN_SRC, "clean"),
+            ("loop-rebind-clean", _LOOP_REBIND_CLEAN_SRC, "clean"),
+            ("walrus-rebind-clean", _WALRUS_REBIND_CLEAN_SRC, "clean"),
+            ("nested-try-clean", _NESTED_TRY_CLEAN_SRC, "clean"),
+            ("r9-early-return-namehint", _EARLY_RETURN_WARN_SRC, "warn"),
+        ]
+        for name, src, kind in cases:
+            rel, p = write(base, "tools/case_{}.py".format(name), src)
+            code, deny, warns = run_quiet_files(base, [(rel, p)])
+            if code != 0:
+                failures.append("{}: expected exit 0 (WARN-only), got {}".format(name, code))
+            if kind == "certain":
+                if not deny:
+                    failures.append("{}: expected a certain-shape advisory (former DENY), got none"
+                                    .format(name))
+            elif kind == "warn":
+                if deny:
+                    failures.append("{}: expected no certain-shape advisory, got {}".format(name, len(deny)))
+                if not warns:
+                    failures.append("{}: expected a resist-static advisory WARN, got none".format(name))
+            elif kind == "clean":
+                if deny or warns:
+                    failures.append("{}: expected a clean scan (no advisory), got deny {} warn {}"
+                                    .format(name, len(deny), len(warns)))
+            elif kind == "clean-or-warn":
+                if deny:
+                    failures.append("{}: expected no certain-shape advisory, got {}".format(name, len(deny)))
+
+        # 5a. an unparseable declared input is a located cannot-evaluate (exit 2, fail-closed), never an
+        # uncaught error escaping as exit 1. This leg asserts exit 2 AND the located "does not parse
+        # (SyntaxError)" diagnostic, not just the exit code. Call scan() directly to inspect the located
+        # diagnostic; run_quiet_files discards the messages this leg asserts on.
+        rel, p = write(base, "tools/case_bad.py", "def broken(:\n    pass\n")
+        with redirect_stdout(io.StringIO()):
+            bad_errors, _, _ = scan(base, [(rel, p)])
+        bad_code = 2 if bad_errors else 0
+        if bad_code != 2:
+            failures.append("syntaxerror: expected exit 2, got {}".format(bad_code))
+        if not any("does not parse (SyntaxError)" in msg for _, _, msg in bad_errors):
+            failures.append("syntaxerror: expected the located parse cannot-evaluate diagnostic, got {}"
+                            .format([msg for _, _, msg in bad_errors]))
+
+        # 5b. an unreadable declared input is a located cannot-evaluate (exit 2, fail-closed), never an
+        # uncaught error escaping as exit 1. This leg asserts exit 2 AND the located "cannot read declared
+        # input" diagnostic, not just the exit code. Skipped if chmod-0 stays readable (root).
+        rel, p = write(base, "tools/case_unread.py", "import os\n")
+        os.chmod(p, 0)
+        if os.access(p, os.R_OK):
+            skipped.append("unreadable (chmod-0 still readable)")
+        else:
+            with redirect_stdout(io.StringIO()):
+                unread_errors, _, _ = scan(base, [(rel, p)])
+            unread_code = 2 if unread_errors else 0
+            if unread_code != 2:
+                failures.append("unreadable: expected exit 2, got {}".format(unread_code))
+            if not any("cannot read declared input" in msg for _, _, msg in unread_errors):
+                failures.append("unreadable: expected the located read cannot-evaluate diagnostic, got {}"
+                                .format([msg for _, _, msg in unread_errors]))
+        os.chmod(p, 0o644)
+
+        # 5c. a missing declared directory is a located cannot-evaluate via _scan_set. This leg asserts the
+        # located "cannot list required directory" diagnostic, not merely a non-empty error list.
+        empty = tmp / "empty"
+        empty.mkdir()
+        errs = []
+        _scan_set(empty, errs)
+        if not any("cannot list required directory" in msg for _, _, msg in errs):
+            failures.append("missing-dirs: expected the located cannot-list cannot-evaluate diagnostic, got {}"
+                            .format([msg for _, _, msg in errs]))
+
+        # 5d. a declared input that is valid UTF-8 and PARSES but whose AST is so deep the recursive
+        # provenance/dataflow pass exceeds the interpreter's recursion limit is a cannot-evaluate (exit 2,
+        # fail-closed), never an uncaught RecursionError escaping as exit 1. This leg asserts exit 2 AND the
+        # located capacity ("exceeds the analyzer's capacity (cannot evaluate)") diagnostic, not just the
+        # exit code.
+        deep_src = "x = p" + ".parent" * 20000 + "\n"
+        rel, p = write(base, "tools/case_deep.py", deep_src)
+        # Call scan() directly to inspect the located diagnostic; the exit derived here (2 iff any
+        # scan error) mirrors run_quiet_files, which discards the error messages this leg asserts on.
+        with redirect_stdout(io.StringIO()):
+            deep_errors, _, _ = scan(base, [(rel, p)])
+        deep_code = 2 if deep_errors else 0
+        if deep_code != 2:
+            failures.append("deep-ast: expected exit 2 (cannot-evaluate), got {}".format(deep_code))
+        if not any("exceeds the analyzer's capacity (cannot evaluate)" in msg
+                   for _, _, msg in deep_errors):
+            failures.append("deep-ast: expected the located capacity cannot-evaluate diagnostic, got {}"
+                            .format([msg for _, _, msg in deep_errors]))
+
+        # 5e. a NUL-byte source is a malformed declared input: ast.parse raises SyntaxError on CPython >=
+        # 3.12 and ValueError on < 3.12, and either way it is a located cannot-evaluate (exit 2, fail-closed),
+        # never an uncaught error escaping as exit 1. Written as raw bytes so the NUL survives. This leg
+        # asserts exit 2 AND the located "does not parse" diagnostic, not just the exit code. Call scan()
+        # directly to inspect the located diagnostic; run_quiet_files discards the messages this leg asserts on.
+        rel = "tools/case_nul.py"
+        p = base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"import os\nx = 0\x00\n")
+        with redirect_stdout(io.StringIO()):
+            nul_errors, _, _ = scan(base, [(rel, p)])
+        nul_code = 2 if nul_errors else 0
+        if nul_code != 2:
+            failures.append("nul-byte: expected exit 2 (cannot-evaluate), got {}".format(nul_code))
+        if not any("does not parse" in msg for _, _, msg in nul_errors):
+            failures.append("nul-byte: expected the located parse cannot-evaluate diagnostic, got {}"
+                            .format([msg for _, _, msg in nul_errors]))
+
+        # 5f. SUBPROCESS regression legs: run the gate as a CHILD PROCESS over a fixture repo root,
+        # exercising the FULL main/run path (read/decode/parse/diagnose AND advisory RENDERING/output), and
+        # assert the child exit is 0 or 2, NEVER 1 (the class-width SC1 contract: no scanned input exits 1).
+        # The child runs isolated (-I) as the gate is meant to, imports this module by path, and calls run()
+        # on the fixture root, so _repo_root() is not consulted.
+        this_dir = str(Path(__file__).resolve().parent)
+        module_name = Path(__file__).stem
+
+        def child_exit(fixture_root, extra_env=None, ascii_stdout=False):
+            boot = "import sys\n"
+            if ascii_stdout:
+                # An isolated interpreter (-I implies -E) IGNORES PYTHONIOENCODING, and the C locale may be
+                # coerced to UTF-8, so force an ASCII stdout/stderr directly to reproduce the non-UTF-8
+                # rendering condition deterministically (the env is still set to record intent).
+                boot += ("sys.stdout.reconfigure(encoding='ascii')\n"
+                         "sys.stderr.reconfigure(encoding='ascii')\n")
+            boot += ("sys.path.insert(0, {!r})\n".format(this_dir)
+                     + "from pathlib import Path\n"
+                     + "import {} as _m\n".format(module_name)
+                     + "sys.exit(_m.run(Path({!r})))\n".format(str(fixture_root)))
+            env = dict(os.environ)
+            if extra_env:
+                env.update(extra_env)
+            proc = subprocess.run([sys.executable, "-I", "-B", "-c", boot],
+                                  capture_output=True, env=env)
+            return proc.returncode
+
+        def make_child_root(sub, case_name, text=None, raw=None):
+            froot = tmp / sub
+            (froot / "tools").mkdir(parents=True, exist_ok=True)
+            (froot / ".aiqt/core/hooks/scripts").mkdir(parents=True, exist_ok=True)
+            fp = froot / "tools" / case_name
+            if raw is not None:
+                fp.write_bytes(raw)
+            elif text is not None:
+                fp.write_text(text, encoding="utf-8")
+            return froot
+
+        # deep-AST fixture -> cannot-evaluate (exit 2), never exit 1.
+        rc = child_exit(make_child_root("child_deep", "case_deep.py", text=deep_src))
+        if rc == 1:
+            failures.append("deep-ast (subprocess): child exited 1 (uncaught error escaped)")
+        elif rc != 2:
+            failures.append("deep-ast (subprocess): expected exit 2, got {}".format(rc))
+
+        # null-byte fixture -> cannot-evaluate (exit 2), never exit 1.
+        rc = child_exit(make_child_root("child_nul", "case_nul.py", raw=b"import os\nx = 0\x00\n"))
+        if rc == 1:
+            failures.append("nul-byte (subprocess): child exited 1 (uncaught error escaped)")
+        elif rc != 2:
+            failures.append("nul-byte (subprocess): expected exit 2, got {}".format(rc))
+
+        # ASCII-locale advisory rendering: a fixture whose advisory carries a NON-ASCII classified path,
+        # rendered under an ASCII stdout. Encoding-safe rendering keeps the advisory emitted and the exit 0
+        # (never 1); only an unrecoverable output failure routes to exit 2.
+        rc = child_exit(make_child_root("child_ascii", "case_nonascii.py", text=_NONASCII_ADVISORY_SRC),
+                        extra_env={"LC_ALL": "C", "PYTHONIOENCODING": "ascii"}, ascii_stdout=True)
+        if rc == 1:
+            failures.append("ascii-locale (subprocess): child exited 1 (advisory rendering not encoding-safe)")
+        elif rc not in (0, 2):
+            failures.append("ascii-locale (subprocess): expected exit 0 or 2, got {}".format(rc))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if failures:
+        for f in failures:
+            print("SELF-TEST FAIL: {}".format(f), file=sys.stderr)
+        return 1
+    tail = " ({} skipped: {})".format(len(skipped), "; ".join(skipped)) if skipped else ""
+    print("SELF-TEST PASS (WARN-only v1, every scan that ran exits 0): the state-change collapse, "
+          "conflated-except, proven-Path bare-Name mutation, and open(mode=) shapes are all still detected "
+          "as certain-shape advisories; the descriptor-bound classify, refusing-branch, failure-status "
+          "refusal, alias-chain non-Path link, conflated-except on an unproven receiver, shadowed os/Path "
+          "params, loop/walrus rebind, and nested-try intervening handler cases are clean; name-hint is a "
+          "resist-static advisory; the non-filesystem/str.replace receivers give no certain-shape advisory; "
+          "and unreadable/unparseable/missing-dir/deep-AST cannot-evaluate all hold{}".format(tail))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
