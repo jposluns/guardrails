@@ -110,8 +110,15 @@ path (FIX 1) an enumerator error or any cannot-evaluate FAILS CLOSED-CONTINUE: t
 (ignorance refuses the wind-down), releasable by the operator-owned escape sentinel OR by the
 guard-owned loop bound (past which it becomes a deliberate, recorded forced exit), and never a clean
 close; a new idle or wake scheduling call is likewise DENIED on cannot-evaluate, bounded by a
-three-denial cap. `tools/aei_backlog_md.py` is the generic reference
-provider for a markdown-checkbox backlog.
+three-denial cap. `tools/aei_backlog_md.py` is the generic reference provider for a markdown-checkbox
+backlog. Its grammar is the dash-bullet checkbox line (`- <ID> [ |.|o|O|x|BLOCKED] <title>`, with an
+optional `:: blocker:<kind>=<ref>` clause and a trailing `:: proposed`); any other line is prose. A
+backlog that yields ZERO items is a cannot-evaluate ENUMERATOR_ERROR (exit 3, no JSON emitted), NOT an
+empty enumeration, unless it affirms emptiness with the sentinel line `<!-- aei: empty backlog -->`: a
+non-empty file the grammar does not recognize (a markdown table or any other format) and an unaffirmed
+empty file both fail closed, so an unrecognized backlog can never read as a drained actionable set.
+Emptiness is affirmed by the sentinel, never inferred from absence; the empty `items` array is a valid
+enumeration only when produced from that affirmation.
 
 ## Platforms without hooks
 

@@ -716,7 +716,7 @@
           "default": "block",
           "id": "aei-enumerator-selftest",
           "platform": "ci",
-          "residue": "The reference enumerator's own grammar and fail-closed vectors: a malformed item-shaped line, an unknown token or blocker kind, and a duplicate id are enumeration errors (exit 3), never silently dropped items, and an empty backlog is a valid empty enumeration distinct from a parse failure. It proves the reference provider's contract, not any adopter's provider; the doctor probes those live.",
+          "residue": "The reference enumerator's own grammar and fail-closed vectors: a malformed item-shaped line, an unknown token or blocker kind, and a duplicate id are enumeration errors (exit 3), never silently dropped items, and a backlog that yields ZERO items is a cannot-evaluate enumeration error (exit 3, no --aei JSON emitted), NOT an empty enumeration, unless it affirms emptiness with the sentinel line '<!-- aei: empty backlog -->' (a non-empty file the grammar does not recognize, such as a markdown table, and an unaffirmed empty file both fail closed, so an unrecognized backlog can never read as a drained actionable set), while a sentinel-affirmed empty backlog is a valid empty enumeration distinct from a parse failure. It proves the reference provider's contract, not any adopter's provider; the doctor probes those live.",
           "script": "tools/aei_backlog_md.py"
         },
         {
