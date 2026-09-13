@@ -577,6 +577,7 @@ tools/check_mistakes_register.py text eol=lf
 tools/check_msg_leaks.py text eol=lf
 tools/check_newtab.py text eol=lf
 tools/check_no_dashes.py text eol=lf
+tools/check_opf_drift.py text eol=lf
 tools/check_overclaim.py text eol=lf
 tools/check_portability.py text eol=lf
 tools/check_python_launcher_isolation.py text eol=lf

@@ -4,16 +4,21 @@
   opf.py --self-test                run every registered OPF helper self-test (the CI leg)
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)
 
-This is the SKELETON dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side
-helper self-test wired in; the store verbs (`render`, `import`, `doctor`, and the rest of the spec's
-command vocabulary) are recognized names that report NOT-YET-IMPLEMENTED and fail closed (exit 2) until
-their unit lands, so a stub can never read as a passing operation.
+This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
+self-test wired in; store verbs that have not yet landed are recognized names that report
+NOT-YET-IMPLEMENTED and fail closed (exit 2) until their unit lands, so a stub can never read as a
+passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exactly one of
+`--check | --write` (a bare `render` is a usage error, exit 2); `--check` is IMPLEMENTED (read-only drift
+check, forwarding to the U4 engine) and `--write` is recognized but fail-closed (exit 2) pending VC-4, the
+composition of the EXISTING U6 `validate_store` store-integrity gate INTENDED FOR the deferred `opf doctor`
+verb. `doctor` itself is NOT yet wired: it is a recognized KNOWN_VERB that reports NOT-YET-IMPLEMENTED and
+fails closed (exit 2), so validate_store is the engine doctor WILL compose, not one it already uses.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
-The pack is not a DevProcess adopter, so a live `opf.py <verb> --root .` here reports NOT APPLICABLE
-once the verbs land; the assurance rides the `--self-test` leg over synthetic stores (spec-honest,
-mirroring the crosswalk/doctor/migrate legs in run_all_checks.sh).
+The pack is a readable non-adopter root, so a live `opf.py render --root . --check` here reports NOT
+APPLICABLE; the assurance rides the `--self-test` leg over synthetic stores (spec-honest, mirroring the
+crosswalk/doctor/migrate legs in run_all_checks.sh).
 
 Deliberately NOT named tools/gen_*.py: the generated-source registry (gen_gensrc.py) discovers gen_*.py
 and validates fixed repo-relative targets, but OPF renders into an adopter --root with no fixed
@@ -22,23 +27,49 @@ repo-relative target, so this family gates as self-tests instead (the U1 build-p
 Launched isolated (-I -B) per the Python-launcher-isolation gate; sibling helpers are imported through
 the sys.path insert idiom the repo's tools share.
 """
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _opf_store  # noqa: E402  U1: store resolution + discovery + manifest base/profile schema
-import _opf_schema  # noqa: E402  U2: record envelope + baseline type schemas + status/transition + counters
-import _opf_release  # noqa: E402  U3: version.toml + worklog.toml + span tiling + coverage digests + release cut
-import _opf_changelog  # noqa: E402  U5: changelog range-coverage + freeze gates over version.toml + CHANGELOG.md
-import _opf_check  # noqa: E402  U6: store-level integrity validator (validate_store; the opf doctor engine)
-import _opf_emit  # noqa: E402  U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
-import _opf_views  # noqa: E402  U4: deterministic view generators + the closed transform vocabulary
-import _opf_fuzz  # noqa: E402  adversarial input-hardening proof (membership/type-guard class closure)
-import _opf_import  # noqa: E402  U7: import staging (module + self-test; the live import verb stays unwired)
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the guarded _opf_* helper bootstrap below
 
 EXIT_OK = 0
 EXIT_FINDING = 1
 EXIT_MALFORMED = 2
+
+
+def _bootstrap():
+    """Import the non-stdlib _opf_* helper modules the dispatch and self-test legs use, binding each to a
+    module global. Called FIRST in main() so a broken or PARTIAL install -- a helper that cannot be imported
+    (ImportError) or read (OSError) -- maps to a located cannot-evaluate (EXIT_MALFORMED / 2), never an
+    uncaught ImportError that Python would surface as its default exit 1 and that a direct `opf render
+    --check` would then read as a false DRIFT (the exit-1=drift conflation, reached here BEFORE the render
+    dispatcher's own fail-closed handler). Only ImportError and OSError (the broken/partial-install signals)
+    are caught; a broader error propagates rather than being masked as bootstrap. The imports moved OFF module
+    top for exactly this reason -- an eager top-level import failed before main()'s contract could apply.
+    Idempotent: a re-import of an already-loaded module is a cheap no-op, so main() may call it on every
+    invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
+    that could not be brought in."""
+    global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
+    global _opf_emit, _opf_views, _opf_fuzz, _opf_import
+    try:
+        import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
+        import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
+        import _opf_release     # U3: version.toml + worklog.toml + span tiling + coverage digests + release cut
+        import _opf_changelog   # U5: changelog range-coverage + freeze gates over version.toml + CHANGELOG.md
+        import _opf_check       # U6: store-level integrity validator (validate_store; engine for opf doctor)
+        import _opf_emit        # U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
+        import _opf_views       # U4: deterministic view generators + the closed transform vocabulary
+        import _opf_fuzz        # adversarial input-hardening proof (membership/type-guard class closure)
+        import _opf_import      # U7: import staging (module + self-test; the live import verb stays unwired)
+    except ImportError as exc:
+        print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    except OSError as exc:
+        print("opf: cannot bootstrap: a helper module could not be read ({!r}) (cannot evaluate)".format(
+            exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    return EXIT_OK
 
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
@@ -267,6 +298,10 @@ def _watchdog_wrapper_caller_deadline_self_test():
             print("opf watchdog wrapper-deadline self-test: the wrapper ran {:.4f}s, not longer than the {}s "
                   "deadline; the fixture cannot discriminate".format(_elapsed, _deadline), file=sys.stderr)
             ok = False
+        # Bounded delivery-grace for the last iteration's clamped (1e-6) re-armed SIGALRM under load: a flaky-observation stabilization, not a correctness change (SIGALRM is unblocked here, so the pending timer delivers during the wait).
+        _grace = _time.monotonic() + 2.0
+        while not _fired and _time.monotonic() < _grace:
+            _time.sleep(0.005)
         if not _fired:
             print("opf watchdog wrapper-deadline self-test: the caller's {}s deadline never FIRED across a "
                   "{:.4f}s run; the wrapper paused/extended it instead of restoring it elapsed-aware "
@@ -420,9 +455,195 @@ def _watchdog_shared_restore_deadline_self_test():
     return EXIT_OK
 
 
+def _cmd_render(rest):
+    """`opf render [--root DIR] (--check | --write)`: the store render verb.
+
+    PR-A wires the READ-ONLY `--check` half, forwarding to the U4 engine `_opf_views.render`, whose 0/1/2
+    contract is exactly the required one (0 clean, 1 drift, 2 cannot-evaluate; a NOT-ADOPTED root reports
+    NOT APPLICABLE and exits 0, the pack's own `--root .` case). The mutating `--write` half is recognized
+    but fails closed until a later unit composes the U6 store-integrity gate, so a write can never read as a
+    silent no-op. Exactly one of `--check`/`--write` is required: a bare `opf render` is a usage error (a
+    preview never defaults into a write). The parser is the house fail-closed idiom (unknown token, an empty
+    or option-looking or duplicate --root value -> exit 2), matching _opf_views.render's own parser."""
+    root = None
+    mode = None
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in ("--check", "--write"):
+            if mode is not None:
+                print("opf render: give exactly one of --check / --write", file=sys.stderr)
+                return EXIT_MALFORMED
+            mode = "check" if tok == "--check" else "write"
+            i += 1
+        elif tok == "--root":
+            if i + 1 >= len(rest):
+                print("opf render: --root requires a directory argument", file=sys.stderr)
+                return EXIT_MALFORMED
+            if root is not None:
+                print("opf render: --root given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            val = rest[i + 1]
+            if val == "" or val.startswith("-"):
+                print("opf render: --root requires a non-empty directory argument, not {!r}".format(val),
+                      file=sys.stderr)
+                return EXIT_MALFORMED
+            root = val
+            i += 2
+        else:
+            print("opf render: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            return EXIT_MALFORMED
+    if mode is None:
+        print("opf render: give exactly one of --check / --write", file=sys.stderr)
+        return EXIT_MALFORMED
+    if mode == "write":
+        # The mutating --write half composes the U6 store-integrity gate in a later unit; until then it
+        # fails closed (exit 2), never a silent no-op, exactly like a not-yet-landed verb.
+        print("opf render --write: not yet implemented in this build (fail-closed)", file=sys.stderr)
+        return EXIT_MALFORMED
+    argv = ["--check"] if root is None else ["--root", root, "--check"]
+    # Class-width backstop: the render dispatch forwards the U4 engine's defined 0/1/2 contract unchanged;
+    # any residual, unforeseen error from it routes to a located cannot-evaluate (exit 2), never an uncaught
+    # exit-1 escape. KeyboardInterrupt/SystemExit are BaseException and stay uncaught.
+    try:
+        return _opf_views.render(argv)
+    except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
+        print("opf render: cannot evaluate: unexpected error in the render check ({!r}); failing closed to "
+              "exit 2".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
+
+
+def _cli_self_test():
+    """Guard the opf.py dispatcher's verb ROUTING (PR-A: the `render` verb). Judged on the returned exit
+    code ONLY (never by grepping output, per the isolate-verifiers rule); each case drives main() with an
+    explicit argv, its stdout/stderr redirected so this leg's own output stays clean. Cases: an unknown
+    verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`, `render
+    --write`, both flags together, an unrecognized render flag, a `--root` with no value, and an empty
+    `--root` are usage errors (exit 2); and `render --check` FORWARDS to the U4 engine -- a NOT-ADOPTED root
+    returns 0 (the wiring discriminator: reverting the render wiring routes it to the fail-closed KNOWN_VERBS
+    branch and returns 2, failing this case) and a garbage store returns 2. The clean/drift 0/1
+    discrimination over a populated store rides check_opf_drift.py --self-test, which drives the same wiring
+    end to end. Returns 0 clean, 1 on a failure, 2 on a harness error.
+
+    HARNESS fail-close (FIX 2): the fixture SETUP (tempfile.mkdtemp) and the fixture I/O (directory creation
+    and writes) are the harness surface; an OSError from any of them is caught and returned as a located
+    cannot-evaluate (exit 2), never allowed to escape uncaught (which Python would surface as exit 1). A final
+    broad backstop routes any other residual error to exit 2 as well. Discriminating coverage injects an
+    OSError at mkdtemp and at directory creation and asserts each routes to exit 2 (change-carries-check)."""
+    import io
+    import shutil
+    import tempfile
+    import contextlib
+
+    try:
+        failures = []
+
+        def expect(argv, want):
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    got = main(list(argv))
+            except BaseException as exc:                # a dispatcher crash is itself a failure
+                failures.append("{!r} raised {!r}".format(argv, exc))
+                return
+            if got != want:
+                failures.append("{!r} returned {!r} (expected {})".format(argv, got, want))
+
+        # Routing cases that need no store on disk.
+        expect([], EXIT_MALFORMED)
+        expect(["frobnicate"], EXIT_MALFORMED)
+        for verb in KNOWN_VERBS:
+            if verb != "render":
+                expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
+        expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
+        expect(["render", "--write"], EXIT_MALFORMED)   # the write half is not yet wired, fail-closed
+        expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
+        expect(["render", "--bogus"], EXIT_MALFORMED)   # unknown render flag
+        expect(["render", "--root"], EXIT_MALFORMED)    # --root needs a value
+        expect(["render", "--check", "--root", ""], EXIT_MALFORMED)   # empty root refused
+
+        def _fixture_leg():
+            """Build the on-disk fixtures and drive render --check over them. Assertion outcomes are recorded
+            in `failures`; returns None on success or EXIT_MALFORMED on a HARNESS error. The tempdir creation
+            and every fixture directory/file write are the harness surface: an OSError from any of them is a
+            located cannot-evaluate (exit 2), never an uncaught escape that Python would surface as exit 1."""
+            try:
+                base = tempfile.mkdtemp(prefix="opf-cli-selftest-")
+            except OSError as exc:
+                print("opf cli self-test: harness error: could not create the fixture tempdir ({})".format(
+                    exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            try:
+                try:
+                    # A NOT-ADOPTED root (no .working/): render --check FORWARDS to the U4 engine and returns
+                    # 0 (NOT APPLICABLE) -- the wiring discriminator (an unwired render verb returns 2 here).
+                    not_adopted = os.path.join(base, "not-adopted")
+                    os.mkdir(not_adopted)
+                    # A garbage store (a discovered but unparseable manifest): render --check fails closed
+                    # (exit 2).
+                    broken = os.path.join(base, "broken")
+                    os.makedirs(os.path.join(broken, ".working", "toml"))
+                    with open(os.path.join(broken, ".working", "toml", "manifest.toml"),
+                              "w", encoding="utf-8") as fh:
+                        fh.write("this is not valid toml {{{\n")
+                except OSError as exc:
+                    print("opf cli self-test: harness error: could not build a fixture store ({})".format(
+                        exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                expect(["render", "--check", "--root", not_adopted], EXIT_OK)
+                expect(["render", "--check", "--root", broken], EXIT_MALFORMED)
+            finally:
+                shutil.rmtree(base, ignore_errors=True)
+            return None
+
+        harness_rc = _fixture_leg()
+        if harness_rc is not None:
+            return harness_rc
+
+        # Discriminating harness-path coverage (FIX 2): an injected OSError at fixture SETUP (mkdtemp) and at
+        # fixture I/O (directory creation) must each route to the located cannot-evaluate (exit 2), never
+        # escape uncaught (which Python surfaces as exit 1). Judged on the returned code only; each probe
+        # restores the patched callable in a finally so no later leg runs under the injection.
+        def _refuse(*_a, **_k):
+            raise OSError("simulated harness I/O refusal")
+
+        def _expect_harness(label, obj, attr):
+            real = getattr(obj, attr)
+            setattr(obj, attr, _refuse)
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    rc = _fixture_leg()
+            finally:
+                setattr(obj, attr, real)
+            if rc != EXIT_MALFORMED:
+                failures.append("harness {}: _fixture_leg returned {!r} (expected {})".format(
+                    label, rc, EXIT_MALFORMED))
+
+        _expect_harness("mkdtemp-oserror", tempfile, "mkdtemp")
+        _expect_harness("makedirs-oserror", os, "makedirs")
+
+        if failures:
+            for f in failures:
+                print("opf cli self-test: FAIL: {}".format(f), file=sys.stderr)
+            return EXIT_FINDING
+        print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render usage errors fail "
+              "closed; render --check forwards to the U4 engine; fixture-setup and fixture-I/O OSError fail "
+              "closed to exit 2)")
+        return EXIT_OK
+    except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
+        print("opf cli self-test: harness error: unexpected error ({!r}); failing closed to exit 2".format(
+            exc), file=sys.stderr)
+        return EXIT_MALFORMED
+
+
 # Registered helper self-tests, run by `opf.py --self-test`. Each is (label, callable) returning a
 # 0/1/2 exit code (0 clean, 1 finding, 2 cannot-evaluate). Later units append their own helper here.
-SELF_TESTS = (
+# Built by a function rather than a module-level tuple because the _opf_* helpers it references are bound by
+# _bootstrap() inside main(), not at module import; it is called after _bootstrap() has run.
+def _self_tests():
+    """Return the registered (label, callable) helper self-tests run by `opf.py --self-test`. Called after
+    _bootstrap() has bound the _opf_* helpers, so every referenced helper is present."""
+    return (
     ("opf-store", _opf_store.self_test),
     ("opf-schema", _opf_schema.self_test),
     ("opf-release", _opf_release.self_test),
@@ -437,6 +658,7 @@ SELF_TESTS = (
     ("opf-watchdog-shared-restore", _watchdog_shared_restore_self_test),
     ("opf-watchdog-shared-restore-deadline", _watchdog_shared_restore_deadline_self_test),
     ("opf-aggregator", _aggregator_self_test),
+    ("opf-cli", _cli_self_test),
 )
 
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
@@ -448,10 +670,12 @@ KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync")
 _INT_LIMIT_SELF_TESTS = frozenset({"opf-release", "opf-emit", "opf-schema", "opf-fuzz", "opf-import"})
 
 
-def run_self_tests(tests=SELF_TESTS):
+def run_self_tests(tests=None):
     """Run every registered helper self-test in order, forwarding each result. The aggregate exit code
     is the WORST outcome (2 cannot-evaluate > 1 finding > 0 clean): one degraded or failing helper fails
-    the whole leg, never masked by a later clean one.
+    the whole leg, never masked by a later clean one. With no explicit `tests`, the registered set is built
+    by _self_tests() at call time (after _bootstrap() has bound the _opf_* helpers), never a module-level
+    default that would need those helpers imported at module top.
 
     Int-limit hermeticity guard (finding 8-4): each helper in _INT_LIMIT_SELF_TESTS pins the int-string
     conversion limit to 4300 inside its fixtures and must RESTORE the ambient value afterward. That restore
@@ -461,6 +685,8 @@ def run_self_tests(tests=SELF_TESTS):
     ambient; a dropped restore in any of those helpers leaves 4300 != sentinel and fails the leg closed.
     These helpers are hermetic w.r.t. the ambient int-limit by construction (they pin their own 4300), so
     running them under the sentinel is exactly the hostile-ambient contract they already satisfy."""
+    if tests is None:
+        tests = _self_tests()
     worst = EXIT_OK
     _idlimit_orig = sys.get_int_max_str_digits()
     _idlimit_sentinel = 271828 if _idlimit_orig != 271828 else 314159   # distinct from 4300 AND from ambient
@@ -496,14 +722,24 @@ def run_self_tests(tests=SELF_TESTS):
     return worst
 
 
-def main():
-    args = sys.argv[1:]
+def main(argv=None):
+    # Guarded helper bootstrap FIRST: a broken or partial install (an unimportable/unreadable _opf_* helper)
+    # maps to a located cannot-evaluate (exit 2), never an uncaught ImportError escaping as Python's default
+    # exit 1 that a direct `opf render --check` would read as a false drift. Idempotent, so the repeated
+    # main() calls in the CLI self-test cost nothing once the helpers are loaded.
+    rc = _bootstrap()
+    if rc != EXIT_OK:
+        return rc
+    args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--self-test"]:
         return run_self_tests()
     if not args or args[0] in ("-h", "--help"):
         print(__doc__, file=sys.stderr)
         return EXIT_MALFORMED
     verb = args[0]
+    rest = args[1:]
+    if verb == "render":
+        return _cmd_render(rest)
     if verb in KNOWN_VERBS:
         # A recognized verb whose unit has not landed: fail closed (exit 2), never a silent success, so
         # a stub is never mistaken for a completed operation.
