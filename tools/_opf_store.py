@@ -610,10 +610,17 @@ def _resolve_at(store_root, source, target, pointer):
     store_root = Path(store_root)
     if not store_root.exists():
         detail = "pointer target {} does not exist".format(store_root) if pointer \
-            else "default store location {} does not exist".format(store_root)
-        # An absent pointer target is unresolvable (cannot-evaluate); an absent default is not-adopted.
-        return Resolution(CANNOT_EVALUATE if pointer else NOT_ADOPTED, detail, target=target,
-                          pointer_source=source)
+            else ("default store location {} disappeared at the resolution boundary "
+                  "(removed, renamed, or made unreadable after the product root was opened)".format(
+                      store_root))
+        # An absent pointer target is unresolvable (cannot-evaluate). At the DEFAULT location the store
+        # root IS the product root, which resolve_store already opened as a readable directory upstream, so
+        # its absence HERE is a TOCTOU disappearance (removed/renamed at the resolution boundary): a product
+        # root that could no longer be evaluated, NOT a genuinely un-adopted repo. It too is CANNOT-EVALUATE
+        # (BLOCKER 1), never a false NOT-ADOPTED that render --check would report as a clean NOT-APPLICABLE
+        # (exit 0). A readable non-adopter root that merely lacks `.working/` is still NOT-ADOPTED below
+        # (discovery inspects it and returns absent), the successfully-inspected case NOT-ADOPTED is for.
+        return Resolution(CANNOT_EVALUATE, detail, target=target, pointer_source=source)
     if not store_root.is_dir():
         return Resolution(CANNOT_EVALUATE, "store root {} is not a directory".format(store_root),
                           target=target, pointer_source=source)
@@ -1532,6 +1539,32 @@ def self_test():
         # 3: no pointer and no .working -> NOT-ADOPTED.
         root = build_store(make_working=False)
         check("no-store-not-adopted", resolve_store(root).status == NOT_ADOPTED)
+
+        # 3b (codex BLOCKER 1, TOCTOU): the product root is a readable directory when resolve_store opens
+        # its fd, then is renamed/removed at the resolution boundary before the default-location check. That
+        # disappearance is a product root that could no longer be evaluated (CANNOT-EVALUATE, exit 2), NEVER
+        # a false NOT-ADOPTED that render --check would report as a clean NOT-APPLICABLE (exit 0). Simulate
+        # the race by renaming the root away the instant its fd is opened: the open fd stays valid (the
+        # pointer reads see no pointer), but the path-based existence check in _resolve_at now fails. The
+        # second assertion confirms the patch actually fired, so a green cannot rest on the rename never
+        # happening (self-test-discrimination).
+        toctou_root = build_store(make_working=False)
+        _real_orf = _open_root_fd
+        _toctou = {"fired": False}
+
+        def _toctou_orf(root, _r=_real_orf, _t=toctou_root, _s=_toctou):
+            fd = _r(root)
+            if not _s["fired"]:
+                _s["fired"] = True
+                os.rename(str(_t), str(_t) + "-moved")   # root disappears at the resolution boundary
+            return fd
+        globals()["_open_root_fd"] = _toctou_orf
+        try:
+            check("toctou-default-root-disappeared-cannot-eval",
+                  _guard(lambda: resolve_store(toctou_root).status) == CANNOT_EVALUATE)
+            check("toctou-open-was-exercised", _toctou["fired"])
+        finally:
+            globals()["_open_root_fd"] = _real_orf
 
         # 4: zero manifests at a POINTER target -> CANNOT-EVALUATE (pointer promised a store).
         empty_store = base / "empty-store"

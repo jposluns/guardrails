@@ -4,16 +4,19 @@
   opf.py --self-test                run every registered OPF helper self-test (the CI leg)
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)
 
-This is the SKELETON dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side
-helper self-test wired in; the store verbs (`render`, `import`, `doctor`, and the rest of the spec's
-command vocabulary) are recognized names that report NOT-YET-IMPLEMENTED and fail closed (exit 2) until
-their unit lands, so a stub can never read as a passing operation.
+This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
+self-test wired in; store verbs that have not yet landed are recognized names that report
+NOT-YET-IMPLEMENTED and fail closed (exit 2) until their unit lands, so a stub can never read as a
+passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exactly one of
+`--check | --write` (a bare `render` is a usage error, exit 2); `--check` is IMPLEMENTED (read-only drift
+check, forwarding to the U4 engine) and `--write` is recognized but fail-closed (exit 2) pending VC-4, the
+composition of the EXISTING U6 `validate_store` store-integrity gate that `opf doctor` already uses.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
-The pack is not a DevProcess adopter, so a live `opf.py <verb> --root .` here reports NOT APPLICABLE
-once the verbs land; the assurance rides the `--self-test` leg over synthetic stores (spec-honest,
-mirroring the crosswalk/doctor/migrate legs in run_all_checks.sh).
+The pack is a readable non-adopter root, so a live `opf.py render --root . --check` here reports NOT
+APPLICABLE; the assurance rides the `--self-test` leg over synthetic stores (spec-honest, mirroring the
+crosswalk/doctor/migrate legs in run_all_checks.sh).
 
 Deliberately NOT named tools/gen_*.py: the generated-source registry (gen_gensrc.py) discovers gen_*.py
 and validates fixed repo-relative targets, but OPF renders into an adopter --root with no fixed

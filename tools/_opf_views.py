@@ -35,12 +35,16 @@ version string as EXACT bytes (spec 6.1), so it carries no header, exactly as th
 VERSION file does.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: `opf render --root DIR` resolves the store at a
-PRODUCT repository root (default: the cwd), never the pack's own tree via `_gen_common.repo_root()`. A
-live `opf render --root .` in THIS repo reports NOT APPLICABLE (the pack is not a DevProcess adopter), so
-the assurance rides the `--self-test` render leg over synthetic stores, mirroring the crosswalk/doctor
-legs. Fail-closed: an unresolvable store, or a declared source that is missing or unreadable, STOPS
-(exit 2), never a silent empty or partial view; an empty store (its index files present but carrying no
-records) renders VALID EMPTY views, which is distinct from cannot-evaluate.
+PRODUCT repository root (default: the cwd), never the pack's own tree via `_gen_common.repo_root()`. The
+`opf render` CLI requires exactly one of `--check | --write` (the dispatcher rejects a bare `render` with
+exit 2); `--check` (read-only drift detection) forwards to this engine, while `--write` is fail-closed and
+deferred (see below). A live `opf render --root . --check` in THIS repo reports NOT APPLICABLE (the pack is
+a readable non-adopter root: it exists and is readable but has no `.working/`), so the assurance rides the
+`--self-test` render leg over synthetic stores, mirroring the crosswalk/doctor legs. Fail-closed: an
+unresolvable store, a product root that disappears or becomes unreadable at the resolution boundary, or a
+declared source that is missing or unreadable, STOPS (exit 2), never a silent empty or partial view nor a
+false NOT-APPLICABLE pass; an empty store (its index files present but carrying no records) renders VALID
+EMPTY views, which is distinct from cannot-evaluate.
 
 Every target is bound to the view's OWN spec destination (spec 5.8/9), never to the manifest `target`: a
 manifest cannot rebind a known view or deliverable off its destination, and view outputs are written
@@ -53,11 +57,13 @@ mis-reported as a downstream malformed-record error, and never silently rendered
 module-type record schemas ship (F8; `_opf_schema.validate_record` knows only the baseline specs, so no
 module-type mirror can be rendered regardless). A mutating render MUST gate on the U6 `validate_store`
 store-integrity layer (cross-record uniqueness, coverage, and reconciliation), a tracked spec-11
-obligation (F2); that layer does not exist yet and `render` does not compose it (VC-4, deferred), so
-WRITE mode FAILS CLOSED today: an ungated write through any entry (the unwired verb, the module
-`__main__`, or a direct `render(...)` call) is REFUSED (cannot-evaluate, exit 2) and writes nothing,
-while `--check` (read-only drift detection) keeps working and the CLI defaults to check-only. This is a
-refusal pending the real gate, never a fabricated one.
+obligation (F2); `validate_store` EXISTS (U6, and `opf doctor` already uses it), but `render` does not yet
+COMPOSE its write-gate invocation (VC-4, deferred), so WRITE mode FAILS CLOSED today: an ungated write
+through any entry (the unwired verb, the module `__main__`, or a direct `render(...)` call) is REFUSED
+(cannot-evaluate, exit 2) and writes nothing. The `opf render` CLI requires exactly one of
+`--check | --write` (no default): `--check` (read-only drift detection) is IMPLEMENTED and keeps working,
+while `--write` stays fail-closed until VC-4 composes the gate. This is a refusal pending the real
+composition, never a fabricated gate.
 """
 import hashlib
 import html
@@ -91,10 +97,12 @@ SCHEMA_VERSION = _opf_schema.SUPPORTED_SCHEMA
 REGEN_COMMAND = "opf render"
 
 # spec 5.7/5.8/11: a mutating render must gate on the U6 store-integrity layer (validate_store:
-# cross-record uniqueness, coverage, reconciliation). That layer does not exist yet and render does
-# not compose it (VC-4, deferred), so WRITE mode fails closed: an ungated write is refused. VC-4 flips
-# this to True only WHEN it wires the actual gate invocation; until then every write is refused. The
-# CLI runs check-only meanwhile. This is not a fabricated gate; it is a refusal pending the real one.
+# cross-record uniqueness, coverage, reconciliation). validate_store EXISTS (U6; opf doctor uses it),
+# but render does not yet COMPOSE its write-gate invocation (VC-4, deferred), so WRITE mode fails
+# closed: an ungated write is refused. VC-4 flips this to True only WHEN it wires the actual gate
+# invocation; until then every write is refused. The opf render CLI requires exactly one of
+# --check / --write (no default), and --check keeps working meanwhile. This is not a fabricated gate;
+# it is a refusal pending the real one.
 _WRITE_GATE_COMPOSED = False
 
 # The mode installed on a NEWLY-created view/deliverable file. An EXISTING target's own mode is preserved
@@ -1192,10 +1200,10 @@ def render(argv):
         return EXIT_CANNOT_EVALUATE
 
     if not check and not _WRITE_GATE_COMPOSED:
-        # spec 5.7/5.8/11 (F1/F2): a mutating render must gate on the U6 store-integrity layer, which
-        # does not exist yet and render does not compose (VC-4, deferred). Refuse the ungated write here,
-        # BEFORE any fd is opened or any payload rendered, so nothing on disk is touched. --check reads
-        # only and is unaffected.
+        # spec 5.7/5.8/11 (F1/F2): a mutating render must gate on the U6 store-integrity layer
+        # (validate_store), which EXISTS (U6) but render does not yet COMPOSE (VC-4, deferred). Refuse the
+        # ungated write here, BEFORE any fd is opened or any payload rendered, so nothing on disk is
+        # touched. --check reads only and is unaffected.
         print("opf render: cannot evaluate: store-integrity gate (U6 validate_store) not available; "
               "render write refused", file=sys.stderr)
         return EXIT_CANNOT_EVALUATE
@@ -3229,9 +3237,10 @@ def _entry(wid, kind, summary):
 
 if __name__ == "__main__":
     _argv = sys.argv[1:]
-    # Until the U6 store-integrity gate lands, the CLI runs CHECK-only (drift detection, never a
-    # write): a write requires that gate, which does not exist yet, so default the command line to
-    # --check. A write invocation through any other entry still fails closed in render(). Appending
+    # Until render COMPOSES the U6 store-integrity write-gate (VC-4), this module entry runs CHECK-only
+    # (drift detection, never a write): a write requires that composition, so default the command line to
+    # --check. validate_store itself EXISTS (U6); it is render's write-gate composition that is deferred. A
+    # write invocation through any other entry still fails closed in render(). Appending
     # --check is a deliberate default, not a parse relaxation; the F10 parser still refuses any
     # unrecognized token alongside it.
     if "--check" not in _argv:
