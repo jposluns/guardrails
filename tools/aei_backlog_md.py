@@ -15,11 +15,14 @@ STRICT: a dash-bullet line that starts with an id-shaped token and a bracket, AN
 a checkbox marker ([ ] [x] [X] [.] [o] [O] [BLOCKED]), or ANY line bearing a ':: blocker:' prefix, is
 an enumeration ERROR (exit 3) when it fails the grammar, never a silently dropped item (so an id-less
 checkbox or a malformed blocker clause can never shrink the open-set the stop guard trusts). A backlog
-that yields ZERO items is an enumeration ERROR (exit 3), NOT an empty enumeration, UNLESS it affirms
-emptiness with the sentinel line '<!-- aei: empty backlog -->': a non-empty file the grammar does not
-recognize (a markdown table or any other format) and an unaffirmed empty file both fail closed, so an
-unrecognized backlog can never read as a drained/empty actionable set. Emptiness is AFFIRMED, never
-inferred from absence. An unreadable backlog is an error. The enumerator reads the real file; it
+that yields ZERO items is an enumeration ERROR (exit 3), NOT an empty enumeration, UNLESS it carries no
+operative content besides scaffolding (blank lines, ATX headings, whole-line comments) AND affirms
+emptiness with the sentinel line '<!-- aei: empty backlog -->' (internal whitespace tolerated, the
+hyphen spelling rejected): a file with operative content the grammar does not recognize (a markdown
+table, an alternate bullet, a fenced example, prose, or any other format) fails closed WHETHER OR NOT a
+sentinel is present, and an unaffirmed empty file fails closed, so an unrecognized backlog can never read
+as a drained/empty actionable set and a sentinel can never mask unrecognized work. Emptiness is AFFIRMED,
+never inferred from absence. An unreadable backlog is an error. The enumerator reads the real file; it
 accepts no item list from its caller.
   aei_backlog_md.py --backlog PATH --aei     emit the AEI v1 JSON on stdout
   aei_backlog_md.py --self-test              grammar and fail-closed vectors
@@ -41,13 +44,17 @@ OBSERVED_RE = re.compile(r"::\s*observed=(?P<t>\S+)")
 EVIDENCE_RE = re.compile(r"::\s*evidence=(?P<e>[^:]+?)(?:\s*::|$)")
 KINDS = ("tracked-task", "human-decision", "external", "foreign-lease", "not-before")
 
-# A zero-item enumeration is VALID only when the backlog AFFIRMS emptiness with this sentinel line;
-# otherwise (a non-empty file in an unrecognized format such as a markdown table, or an unaffirmed
-# empty file) zero items is a cannot-evaluate error (exit 3), never a silently drained backlog (rule
-# grdinp, check-fails-closed-on-unreadable). The sentinel is a markdown/HTML comment; internal
-# whitespace is tolerated.
-SENTINEL_RE = re.compile(r"^<!--\s*aei:\s*empty[ -]backlog\s*-->$")
+# A zero-item enumeration is VALID only when the file carries no operative content besides scaffolding
+# (blank lines, ATX headings, whole-line comments) AND affirms emptiness with this sentinel line. Any
+# operative content with zero recognized items (a markdown table, an alternate bullet, a fenced example,
+# prose, or any other unrecognized format) is a cannot-evaluate error (exit 3), sentinel or not: a
+# sentinel does not affirm emptiness while operative content is present, so it can never mask unrecognized
+# work as a silently drained backlog (rule grdinp, check-fails-closed-on-unreadable). The sentinel is a
+# markdown/HTML comment; internal whitespace between 'empty' and 'backlog' is tolerated (one or more
+# spaces or a tab), but the hyphen spelling 'empty-backlog' is REJECTED.
+SENTINEL_RE = re.compile(r"^<!--\s*aei:\s*empty\s+backlog\s*-->$")
 COMMENT_RE = re.compile(r"^<!--.*-->$")
+HEADING_RE = re.compile(r"^#{1,6}\s")
 
 
 def has_sentinel(text):
@@ -56,11 +63,13 @@ def has_sentinel(text):
 
 
 def has_content(text):
-    """True if any line is non-blank and not a whole-line comment (the sentinel included)."""
+    """True if any line carries operative content: non-blank and not a whole-line comment or an
+    ATX heading (scaffolding a legitimately empty backlog may still contain, alongside the sentinel)."""
     for line in text.splitlines():
         s = line.strip()
-        if s and not COMMENT_RE.match(s):
-            return True
+        if not s or COMMENT_RE.match(s) or HEADING_RE.match(s):
+            continue
+        return True
     return False
 
 
@@ -133,20 +142,24 @@ def main():
         for e in errors:
             print("enumerator error: " + e, file=sys.stderr)
         return 3
-    if not items and not has_sentinel(text):
-        # Zero items with no sentinel: a format mismatch (content the grammar does not recognize) or an
-        # unaffirmed empty file, never a drained backlog. FAIL CLOSED (exit 3, no --aei JSON emitted), so
-        # the stop guard denies the wind-down rather than reading it as a drained/empty actionable set.
+    if not items:
+        # Zero items: the operative-content check runs REGARDLESS of the sentinel, so a sentinel can never
+        # mask unrecognized work as a drained backlog. FAIL CLOSED (exit 3, no --aei JSON emitted) on either
+        # content-with-zero-items or an unaffirmed empty file, so the stop guard denies the wind-down rather
+        # than reading it as a drained/empty actionable set.
         if has_content(text):
             print("enumerator error: backlog has content but zero items were recognized; the grammar "
                   "is a dash-bullet checkbox line (e.g. '- <ID> [ ] <title>', tokens [ |.|o|O|x|BLOCKED]); "
-                  "a table or other format is unrecognized. To declare an empty backlog, add the "
-                  "sentinel line '<!-- aei: empty backlog -->'.", file=sys.stderr)
-        else:
+                  "a table, alternate bullet, fenced block, or other format is unrecognized. Express the "
+                  "items in the dash-bullet grammar, or remove the unrecognized content; a sentinel does "
+                  "not affirm emptiness while operative content is present.", file=sys.stderr)
+            return 3
+        if not has_sentinel(text):
             print("enumerator error: backlog is empty but does not affirm emptiness; add the sentinel "
-                  "line '<!-- aei: empty backlog -->' to declare an empty backlog (emptiness is "
-                  "affirmed, never inferred from absence).", file=sys.stderr)
-        return 3
+                  "line '<!-- aei: empty backlog -->' to declare an empty backlog (emptiness is affirmed, "
+                  "never inferred from absence).", file=sys.stderr)
+            return 3
+        # No items and no operative content, and the sentinel affirms emptiness: a valid empty enumeration.
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     print(json.dumps({"version": 1, "generated_at_utc": now,
                       "source": {"locator": path,
@@ -185,14 +198,29 @@ def self_test():
     malformed = ("- [ ] ship\n", "- [x] done\n", "- [.] idless seed\n", "- [O] idless ready\n",
                  "A :: blocker:EXTERNAL=ci-42\n", "A :: blocker:external_foo=ci\n")
     # FIX (main-level, exit code + JSON, exercised via subprocess): (a) a recognized dash-bullet backlog
-    # enumerates unchanged; (b) a TABLE-format file with content is a cannot-evaluate error (exit 3) with
-    # NO drained-empty JSON; (c) the declared-empty sentinel is a valid empty enumeration (exit 0, []);
-    # (d) an unaffirmed empty/whitespace-only/comment-only file fails closed (exit 3); (e) a malformed
-    # line stays the existing error (exit 3).
+    # enumerates unchanged; (b) the operative-content check runs REGARDLESS of the sentinel, so a sentinel
+    # PLUS any operative content (a table, a '*'-bullet, a fenced example, or prose) is a cannot-evaluate
+    # error (exit 3) with NO drained-empty JSON, and the sentinel can never mask unrecognized work; (c) the
+    # sentinel affirms an empty enumeration (exit 0, []) only over scaffolding (blank lines, ATX headings,
+    # whole-line comments), tolerating internal whitespace (spaces or a tab) but NOT the hyphen spelling;
+    # (d) an unaffirmed empty/whitespace-only/comment-only file, and the rejected hyphen spelling alone,
+    # fail closed (exit 3); (e) a malformed line stays the existing error (exit 3).
     table = "| ID | State |\n| --- | --- |\n| A-1 | open |\n| A-2 | open |\n"
-    sentinel_only = "<!-- aei: empty backlog -->\n"
-    sentinel_with_text = "# Backlog\nAll items complete.\n<!-- aei: empty backlog -->\n"
+    sentinel = "<!-- aei: empty backlog -->\n"
     recognized = "# backlog\n- A-1 [ ] first\n- A-2 [x] done\n"
+    # (c) exit-0 affirmations: bare sentinel, heading + sentinel, and internal-whitespace variants alone.
+    affirm_cases = (sentinel,
+                    "# Backlog\n" + sentinel,
+                    "<!-- aei: empty  backlog -->\n",
+                    "<!-- aei: empty\tbacklog -->\n")
+    # (b)+(d) exit-3 fail-closed: table/empty/whitespace/comment-only with no sentinel; sentinel PLUS a
+    # table, a '*'-bullet, a fenced example, or prose (operative content masks nothing); the hyphen spelling.
+    failclose_cases = (table, "", "   \n\n", "<!-- other note -->\n",
+                       table + sentinel,
+                       "* A-1 [ ] unfinished\n" + sentinel,
+                       "```\n" + sentinel + "```\n",
+                       "All items complete.\n" + sentinel,
+                       "<!-- aei: empty-backlog -->\n")
 
     def run_backlog(tmp, name, body):
         p = Path(tmp) / name
@@ -203,15 +231,14 @@ def self_test():
     with tempfile.TemporaryDirectory(prefix="aiqt-aei-backlog-") as tmp:
         malformed_ok = all(run_backlog(tmp, "m-{}.md".format(i), t).returncode == 3
                            for i, t in enumerate(malformed))
-        # (b)+(d): content-yields-zero (table) and unaffirmed empty/whitespace/comment-only all fail
-        # closed with exit 3 AND no drained-empty JSON on stdout.
+        # (b)+(d): every fail-closed case exits 3 AND emits no drained-empty JSON on stdout.
         failclose_ok = True
-        for j, t in enumerate((table, "", "   \n\n", "<!-- other note -->\n")):
+        for j, t in enumerate(failclose_cases):
             r = run_backlog(tmp, "fc-{}.md".format(j), t)
             failclose_ok = failclose_ok and r.returncode == 3 and r.stdout.strip() == b""
-        # (c): the sentinel affirms an empty enumeration (exit 0, empty items), with or without text.
+        # (c): the sentinel over scaffolding affirms an empty enumeration (exit 0, empty items).
         affirm_ok = True
-        for j, t in enumerate((sentinel_only, sentinel_with_text)):
+        for j, t in enumerate(affirm_cases):
             r = run_backlog(tmp, "s-{}.md".format(j), t)
             affirm_ok = (affirm_ok and r.returncode == 0
                          and json.loads(r.stdout)["items"] == [])
