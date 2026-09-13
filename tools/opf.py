@@ -473,7 +473,15 @@ def _cmd_render(rest):
         print("opf render --write: not yet implemented in this build (fail-closed)", file=sys.stderr)
         return EXIT_MALFORMED
     argv = ["--check"] if root is None else ["--root", root, "--check"]
-    return _opf_views.render(argv)
+    # Class-width backstop: the render dispatch forwards the U4 engine's defined 0/1/2 contract unchanged;
+    # any residual, unforeseen error from it routes to a located cannot-evaluate (exit 2), never an uncaught
+    # exit-1 escape. KeyboardInterrupt/SystemExit are BaseException and stay uncaught.
+    try:
+        return _opf_views.render(argv)
+    except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
+        print("opf render: cannot evaluate: unexpected error in the render check ({!r}); failing closed to "
+              "exit 2".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
 
 
 def _cli_self_test():
@@ -486,62 +494,117 @@ def _cli_self_test():
     returns 0 (the wiring discriminator: reverting the render wiring routes it to the fail-closed KNOWN_VERBS
     branch and returns 2, failing this case) and a garbage store returns 2. The clean/drift 0/1
     discrimination over a populated store rides check_opf_drift.py --self-test, which drives the same wiring
-    end to end. Returns 0 clean, 1 on a failure, 2 on a harness error."""
+    end to end. Returns 0 clean, 1 on a failure, 2 on a harness error.
+
+    HARNESS fail-close (FIX 2): the fixture SETUP (tempfile.mkdtemp) and the fixture I/O (directory creation
+    and writes) are the harness surface; an OSError from any of them is caught and returned as a located
+    cannot-evaluate (exit 2), never allowed to escape uncaught (which Python would surface as exit 1). A final
+    broad backstop routes any other residual error to exit 2 as well. Discriminating coverage injects an
+    OSError at mkdtemp and at directory creation and asserts each routes to exit 2 (change-carries-check)."""
     import io
     import shutil
     import tempfile
     import contextlib
 
-    failures = []
-
-    def expect(argv, want):
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                got = main(list(argv))
-        except BaseException as exc:                    # a dispatcher crash is itself a failure
-            failures.append("{!r} raised {!r}".format(argv, exc))
-            return
-        if got != want:
-            failures.append("{!r} returned {!r} (expected {})".format(argv, got, want))
-
-    # Routing cases that need no store on disk.
-    expect([], EXIT_MALFORMED)
-    expect(["frobnicate"], EXIT_MALFORMED)
-    for verb in KNOWN_VERBS:
-        if verb != "render":
-            expect([verb], EXIT_MALFORMED)              # a known but not-yet-wired verb fails closed
-    expect(["render"], EXIT_MALFORMED)                  # bare: exactly one of --check/--write required
-    expect(["render", "--write"], EXIT_MALFORMED)       # the write half is not yet wired, fail-closed
-    expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
-    expect(["render", "--bogus"], EXIT_MALFORMED)       # unknown render flag
-    expect(["render", "--root"], EXIT_MALFORMED)        # --root needs a value
-    expect(["render", "--check", "--root", ""], EXIT_MALFORMED)   # empty root refused
-
-    base = tempfile.mkdtemp(prefix="opf-cli-selftest-")
     try:
-        # A NOT-ADOPTED root (no .working/): render --check FORWARDS to the U4 engine and returns 0
-        # (NOT APPLICABLE). This is the wiring discriminator -- an unwired render verb returns 2 here.
-        not_adopted = os.path.join(base, "not-adopted")
-        os.mkdir(not_adopted)
-        expect(["render", "--check", "--root", not_adopted], EXIT_OK)
+        failures = []
 
-        # A garbage store (a discovered but unparseable manifest): render --check fails closed (exit 2).
-        broken = os.path.join(base, "broken")
-        os.makedirs(os.path.join(broken, ".working", "toml"))
-        with open(os.path.join(broken, ".working", "toml", "manifest.toml"), "w", encoding="utf-8") as fh:
-            fh.write("this is not valid toml {{{\n")
-        expect(["render", "--check", "--root", broken], EXIT_MALFORMED)
-    finally:
-        shutil.rmtree(base, ignore_errors=True)
+        def expect(argv, want):
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    got = main(list(argv))
+            except BaseException as exc:                # a dispatcher crash is itself a failure
+                failures.append("{!r} raised {!r}".format(argv, exc))
+                return
+            if got != want:
+                failures.append("{!r} returned {!r} (expected {})".format(argv, got, want))
 
-    if failures:
-        for f in failures:
-            print("opf cli self-test: FAIL: {}".format(f), file=sys.stderr)
-        return EXIT_FINDING
-    print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render usage errors fail "
-          "closed; render --check forwards to the U4 engine)")
-    return EXIT_OK
+        # Routing cases that need no store on disk.
+        expect([], EXIT_MALFORMED)
+        expect(["frobnicate"], EXIT_MALFORMED)
+        for verb in KNOWN_VERBS:
+            if verb != "render":
+                expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
+        expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
+        expect(["render", "--write"], EXIT_MALFORMED)   # the write half is not yet wired, fail-closed
+        expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
+        expect(["render", "--bogus"], EXIT_MALFORMED)   # unknown render flag
+        expect(["render", "--root"], EXIT_MALFORMED)    # --root needs a value
+        expect(["render", "--check", "--root", ""], EXIT_MALFORMED)   # empty root refused
+
+        def _fixture_leg():
+            """Build the on-disk fixtures and drive render --check over them. Assertion outcomes are recorded
+            in `failures`; returns None on success or EXIT_MALFORMED on a HARNESS error. The tempdir creation
+            and every fixture directory/file write are the harness surface: an OSError from any of them is a
+            located cannot-evaluate (exit 2), never an uncaught escape that Python would surface as exit 1."""
+            try:
+                base = tempfile.mkdtemp(prefix="opf-cli-selftest-")
+            except OSError as exc:
+                print("opf cli self-test: harness error: could not create the fixture tempdir ({})".format(
+                    exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            try:
+                try:
+                    # A NOT-ADOPTED root (no .working/): render --check FORWARDS to the U4 engine and returns
+                    # 0 (NOT APPLICABLE) -- the wiring discriminator (an unwired render verb returns 2 here).
+                    not_adopted = os.path.join(base, "not-adopted")
+                    os.mkdir(not_adopted)
+                    # A garbage store (a discovered but unparseable manifest): render --check fails closed
+                    # (exit 2).
+                    broken = os.path.join(base, "broken")
+                    os.makedirs(os.path.join(broken, ".working", "toml"))
+                    with open(os.path.join(broken, ".working", "toml", "manifest.toml"),
+                              "w", encoding="utf-8") as fh:
+                        fh.write("this is not valid toml {{{\n")
+                except OSError as exc:
+                    print("opf cli self-test: harness error: could not build a fixture store ({})".format(
+                        exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                expect(["render", "--check", "--root", not_adopted], EXIT_OK)
+                expect(["render", "--check", "--root", broken], EXIT_MALFORMED)
+            finally:
+                shutil.rmtree(base, ignore_errors=True)
+            return None
+
+        harness_rc = _fixture_leg()
+        if harness_rc is not None:
+            return harness_rc
+
+        # Discriminating harness-path coverage (FIX 2): an injected OSError at fixture SETUP (mkdtemp) and at
+        # fixture I/O (directory creation) must each route to the located cannot-evaluate (exit 2), never
+        # escape uncaught (which Python surfaces as exit 1). Judged on the returned code only; each probe
+        # restores the patched callable in a finally so no later leg runs under the injection.
+        def _refuse(*_a, **_k):
+            raise OSError("simulated harness I/O refusal")
+
+        def _expect_harness(label, obj, attr):
+            real = getattr(obj, attr)
+            setattr(obj, attr, _refuse)
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    rc = _fixture_leg()
+            finally:
+                setattr(obj, attr, real)
+            if rc != EXIT_MALFORMED:
+                failures.append("harness {}: _fixture_leg returned {!r} (expected {})".format(
+                    label, rc, EXIT_MALFORMED))
+
+        _expect_harness("mkdtemp-oserror", tempfile, "mkdtemp")
+        _expect_harness("makedirs-oserror", os, "makedirs")
+
+        if failures:
+            for f in failures:
+                print("opf cli self-test: FAIL: {}".format(f), file=sys.stderr)
+            return EXIT_FINDING
+        print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render usage errors fail "
+              "closed; render --check forwards to the U4 engine; fixture-setup and fixture-I/O OSError fail "
+              "closed to exit 2)")
+        return EXIT_OK
+    except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
+        print("opf cli self-test: harness error: unexpected error ({!r}); failing closed to exit 2".format(
+            exc), file=sys.stderr)
+        return EXIT_MALFORMED
 
 
 # Registered helper self-tests, run by `opf.py --self-test`. Each is (label, callable) returning a

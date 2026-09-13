@@ -5,10 +5,14 @@ A thin gate wrapper in the check_*.py family (deliberately NOT gen_*.py: an OPF 
 --root with no fixed repo-relative target, so it gates as a self-test plus a live leg, exactly the posture
 opf.py itself documents). The live leg runs `opf.py render --check --root <repo-root>` and forwards the
 child's exit code UNMASKED (gate discipline: no truncating sink, no `|| true`, no status-masking trailer).
-The repo root is DERIVED by walking up from the gate's OWN source location and REQUIRING a real repo
-marker (.git) to be found; unlike _gen_common.repo_root() it never falls back to the current directory, so
-a run from an unrelated directory with no .git fails closed (exit 2) rather than silently checking the
-WRONG root and returning a false 0 (guard-input-soundness).
+The repo root is DERIVED by CONFIRMING the repository IDENTITY of the gate's OWN source location through a
+local git probe (git -C <gate-dir> rev-parse --show-toplevel, with the ambient Git environment scrubbed and
+git resolved to an absolute path), not by the mere PRESENCE of a `.git` entry: a stray or garbage `.git`
+marker beside the gate would satisfy a bare existence test yet is not a real repository root. Unlike
+_gen_common.repo_root() it never falls back to the current directory, so a run whose root cannot be
+confirmed (git missing, a launch failure, an invalid/garbage gitfile, or a toplevel that does not contain
+the gate) fails closed (exit 2) rather than silently checking the WRONG root and returning a false 0
+(guard-input-soundness).
 
 This repository is not a DevProcess adopter, so the live leg prints render's own NOT APPLICABLE and exits 0,
 spec-honest like the crosswalk/doctor legs in run_all_checks.sh; the day this repo adopts, the same leg
@@ -210,6 +214,18 @@ def _self_test():
             norepo_anchor.mkdir(parents=True)
             with contextlib.redirect_stderr(io.StringIO()):
                 expect("no-repo-root", _run_gate(norepo_anchor), EXIT_ERROR)
+
+            # Invalid/garbage .git marker at the gate's own dir -> exit 2 (cannot-evaluate), never a false
+            # NOT-APPLICABLE 0 (FIX 1 regression). A bare existence test would accept this stray gitfile as
+            # a repository root, anchor the gate to a dir with no .working/, and pass 0 while the real root
+            # went unchecked; the git probe rejects it (git -C <dir> rev-parse --show-toplevel returns 128
+            # on an invalid gitfile format). Its diagnostic goes to stderr, suppressed so a passing leg
+            # stays quiet.
+            badmarker_anchor = base / "badmarker" / "tools"
+            badmarker_anchor.mkdir(parents=True)
+            (badmarker_anchor / ".git").write_text("not a git marker\n", encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                expect("invalid-git-marker", _run_gate(badmarker_anchor), EXIT_ERROR)
         finally:
             shutil.rmtree(base, ignore_errors=True)
         return failures
@@ -236,38 +252,84 @@ def _self_test():
     rc = _classify(_drift_suite)
     if rc == EXIT_OK:
         print("check_opf_drift self-test: PASS (opf render --check returns 0 clean / 1 drift / 2 broken / "
-              "0 NOT APPLICABLE end to end; no-repo-root -> 2; status contract 1=assertion 2=harness)")
+              "0 NOT APPLICABLE end to end; no-repo-root -> 2; invalid-git-marker -> 2; status contract "
+              "1=assertion 2=harness)")
     return rc
 
 
+def _git_toplevel(anchor):
+    """Confirm the repository IDENTITY of `anchor` (the gate's own tools dir) through a local git probe bound
+    to that location, returning the resolved repository toplevel Path, or None if it cannot be established.
+    The probe is `git -C <anchor> rev-parse --show-toplevel` with the ambient Git environment SCRUBBED (every
+    GIT_-prefixed variable removed, so an inherited GIT_DIR/GIT_WORK_TREE/etc. cannot bind the probe to a
+    DIFFERENT repository) and the git executable resolved to an ABSOLUTE path. A missing git, a launch
+    failure, a nonzero return (an invalid/garbage `.git` gitfile yields git's own exit 128), or empty/
+    malformed output all return None -- the caller maps that to a cannot-evaluate (exit 2), never a false
+    pass."""
+    import shutil
+    git = shutil.which("git")
+    if git is None:
+        return None
+    # Allowlist-scrub the ambient Git environment: an inherited GIT_DIR/GIT_WORK_TREE/GIT_* could otherwise
+    # rebind rev-parse to a repository other than the one the gate physically lives in.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        proc = subprocess.run(
+            [git, "-C", str(anchor), "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, text=True)
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    if not out:
+        return None
+    try:
+        return Path(out).resolve()
+    except OSError:
+        return None
+
+
 def _run_gate(anchor):
-    """Establish the repository root by walking up from the gate's OWN source location `anchor`, REQUIRING a
-    real repo marker (.git) to be found, then run the live render-drift check against it. Unlike
-    _gen_common.repo_root() (which falls back to Path.cwd() when no .git ancestor exists, so a run from an
-    unrelated directory would silently check the WRONG root and return a false 0), a root that cannot be
-    established here is a cannot-evaluate (exit 2), never a fall-through to the current directory."""
+    """Establish the repository root by CONFIRMING the repository IDENTITY of the gate's OWN location
+    `anchor` through a local git probe (git -C <anchor> rev-parse --show-toplevel, ambient Git env scrubbed,
+    git resolved absolute), then run the live render-drift check against it. A root established only by the
+    PRESENCE of a `.git` entry is not enough: a stray or garbage `.git` file beside the gate (an invalid
+    gitfile) satisfies a bare existence test yet is NOT a real repository root, so the gate would anchor to
+    the wrong directory, find no `.working/`, and return a FALSE NOT-APPLICABLE 0 while the real drift at the
+    true root went unchecked. So the root is CONFIRMED by the git probe; if the probe cannot establish it
+    (git missing, a launch failure, a nonzero/garbage-gitfile result, or malformed output) or the resolved
+    toplevel does not contain or parent the gate's own tools dir, that is a cannot-evaluate (exit 2), never a
+    fall-through to the current directory and never a false NOT-APPLICABLE 0."""
     anchor = Path(anchor).resolve()
-    root = None
-    for cand in [anchor, *anchor.parents]:
-        if (cand / ".git").exists():
-            root = cand
-            break
-    if root is None:
-        print("check_opf_drift: cannot evaluate: no repository root (.git) found at or above the gate's "
-              "own location {}; refusing to fall back to the current directory".format(anchor),
-              file=sys.stderr)
+    root = _git_toplevel(anchor)
+    if root is None or not (root == anchor or root in anchor.parents):
+        print("check_opf_drift: cannot evaluate: could not confirm a real repository root for the gate's "
+              "own location {} via a git probe (git -C ... rev-parse --show-toplevel); a stray or invalid "
+              ".git marker is not a repository root, and the gate refuses to fall back to the current "
+              "directory or return a false NOT-APPLICABLE".format(anchor), file=sys.stderr)
         return EXIT_ERROR
     return _run_render_check(root, capture=False)
 
 
 def main(argv=None):
-    args = list(sys.argv[1:] if argv is None else argv)
-    if args == ["--self-test"]:
-        return _self_test()
-    if args:
-        print("check_opf_drift: unexpected argument(s): {}".format(" ".join(args)), file=sys.stderr)
+    # Final class-width backstop: any residual, unforeseen error path routes to a located cannot-evaluate
+    # (exit 2), so no checked input yields a false-0 or an uncaught exit-1 escape. KeyboardInterrupt and
+    # SystemExit are BaseException (not Exception) and stay uncaught, and the defined clean(0)/drift(1)/
+    # cannot-evaluate(2) forwarding for cases that DID resolve is preserved. The located message keeps the
+    # failure debuggable rather than silently masked.
+    try:
+        args = list(sys.argv[1:] if argv is None else argv)
+        if args == ["--self-test"]:
+            return _self_test()
+        if args:
+            print("check_opf_drift: unexpected argument(s): {}".format(" ".join(args)), file=sys.stderr)
+            return EXIT_ERROR
+        return _run_gate(Path(__file__).resolve().parent)
+    except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false-0 or uncaught exit-1
+        print("check_opf_drift: cannot evaluate: unexpected error in the render-drift gate ({!r}); failing "
+              "closed to exit 2".format(exc), file=sys.stderr)
         return EXIT_ERROR
-    return _run_gate(Path(__file__).resolve().parent)
 
 
 if __name__ == "__main__":
