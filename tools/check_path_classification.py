@@ -1,91 +1,37 @@
 #!/usr/bin/env python3
-"""Enforce no-follow, three-way classification of control and state paths (a deterministic code-shape gate).
+"""Advisory scan for unsafe classification of control and state paths (a deterministic code-shape gate).
 
-Code that decides what to do about a control or state path (a lock, marker, journal, or state directory) by
-a FOLLOWING existence or type check on the string name, then proceeds as if a negative or wrong-type result
-simply meant nothing to do, both follows a symbolic link an attacker can swap in and collapses a wrong-type
-or unreadable entry into benign absence. The corpus rule secspr (security-seci-symlink-resolution, its
-control-path-classification clause) requires the classification to be a no-follow inspection bound to a
+Code that decides what to do about a control or state path (a lock, marker, journal, or state directory)
+by a FOLLOWING existence or type check on the string name, then proceeds as if a negative or wrong-type
+result simply meant nothing to do, both follows a symbolic link an attacker can swap in and collapses a
+wrong-type or unreadable entry into benign absence. The corpus rule secspr (security-seci-symlink-resolution,
+its control-path-classification clause) requires the classification to be a no-follow inspection bound to a
 trusted directory descriptor, with a three-way result: genuine absence, presence of exactly the expected
 type confirmed on the opened object, and everything else refused as an error rather than collapsed into
 absence; and its sibling fail-closed and no-silent-empty rules (secfcl, chkfcl) require a wrong-type or
-unreadable entry to surface, never read as clean. This gate is an ADVISORY (WARN-only) v1: it scans the
-repo's own Python and EMITS WARN advisories for the certain collapse shapes and for the resist-static
-shapes alike, flagging both for human review against secspr and chkfcl/secfcl, and it NEVER blocks CI.
-Sharper precision that could later support a non-advisory classification is a DISCLOSED FOLLOW-ON, deferred
-because a sound static-dataflow conviction over arbitrary Python binding and control-flow is not yet
-achieved; v1 is WARN-only and does not block CI.
+unreadable entry to surface, never read as clean.
 
-DETECTOR (AST plus local dataflow; a regex never convicts). Import aliases for os, os.path, and pathlib are
-resolved within each module. The classifier-signature and suppressor sets are module-level DATA TABLES so
-another language is an additive parser plus rows, a documented follow-on, not a rewrite.
-  FOLLOWING-CLASSIFY   os.path.exists / isdir / isfile (P); os.stat(P) with no follow_symlinks=False;
-                       a method .exists() / .is_dir() / .is_file() / .stat() (no follow_symlinks=False) on
-                       a receiver. os.path.lexists, os.lstat, a .lstat() / .is_symlink() call, and any call
-                       carrying follow_symlinks=False or dir_fd= are NO-FOLLOW and never a following-classify.
-  CONTROL-PATH RELEVANCE a soft signal: a name hint (lock, state, journal, marker, pid) in the classified
-                       path expression, or the classified path flowing into a state-changing action in the
-                       decision's branch. Heuristic (name-hint-only) relevance caps a finding at WARN.
-  BENIGN-NEGATIVE      the absent / negative branch proceeds clean (pass, continue, a return of a
-                       clear absence sentinel, None, an empty string, or an empty collection, or a
-                       fall-through into a state-changing action) rather than raising or refusing. A return
-                       of a failure status (a numeric code the caller raises on, or a boolean a consumer
-                       treats as refusal) is a REFUSAL, not benign absence, so it does not license a
-                       certain-shape advisory.
-  FILESYSTEM RECEIVER  a receiver is a PROVEN filesystem path only when it traces to a pathlib constructor,
-                       a path-returning method or attribute on one, a `/` join involving one, or a Path-typed
-                       parameter or variable, AND the name that reaches it is not locally shadowed and not
-                       rebound to an unproven value. The certain-shape advisory is emitted only against a
-                       proven filesystem receiver; an unresolved receiver type (a bare attribute or a
-                       same-named non-path object), a name whose Path provenance is lost by a rebind (a
-                       for/with/except/comprehension target, an aug-assign, or a walrus carrying a non-path
-                       value, propagated through dependent aliases to a fixpoint), or an
-                       os/os.path/shutil/pathlib name shadowed by a parameter or local, is heuristic and
-                       caps at the resist-static advisory for the cases the scan models. This is not a
-                       categorical guarantee: unmodelled dataflow (an `import ... as <name>` rebind of a
-                       proven-path name leaving stale provenance) CAN still yield a false-positive
-                       certain-shape advisory (harmless under WARN-only; precision is a disclosed follow-on).
-  STATE-CHANGE         os.mkdir / makedirs / remove / unlink / rmdir / rename / replace / symlink / link, a
-                       builtin open in a write/append/create mode, shutil.move / copy* / rmtree, or a Path
-                       .mkdir / .unlink / .rename / .replace / .touch / .write_text / .write_bytes / .rmdir /
-                       .open(write) ON A PROVEN PATH RECEIVER (the mode is read from a positional arg or a
-                       `mode=` keyword).
-  SUPPRESSOR (function-wide) any lstat / lexists / is_symlink call, any follow_symlinks=False or dir_fd=
-                       keyword, or an O_NOFOLLOW reference: evidence the code resolves no-follow.
+This gate is an ADVISORY (WARN-only) v1 best-effort heuristic, not a decision procedure and not a
+specification of its own behaviour. It scans a recognizable subset of the repo's own Python (AST plus a
+local, per-scope dataflow pass; a regex never convicts) and EMITS WARN advisories, at a certain-shape or a
+resist-static tier, for the following-classify-then-mutate and conflated-except scopes it recognizes,
+flagging them for human review against secspr and chkfcl/secfcl. It NEVER blocks CI. Recognition is
+syntactic and per-scope, and it applies internal suppression and downgrade heuristics: for example it can
+recognize an explicit-raise refusal on a negative branch, and no-follow evidence, which can suppress or
+downgrade a finding. It guarantees neither a WARN for every risky case nor silence for any particular
+shape: a shape it does not model may emit or may go unflagged, so it can both miss a genuine collapse and,
+on dataflow it does not follow (for example an `import ... as <name>` rebind, an unproven receiver
+provenance, a classify that is only part of a larger BoolOp, a cross-function or cross-module flow, dynamic
+dispatch, or getattr indirection), emit a false-positive advisory; both are harmless under WARN-only. The
+DETECTOR source below and its --self-test are the authoritative account of exactly what it flags; this
+docstring does not restate that account, and sharper precision that could later support a non-advisory
+classification is a disclosed follow-on, deferred because a sound static-dataflow conviction over arbitrary
+Python binding and control-flow is not yet achieved.
 
-  CERTAIN-SHAPE advisory (exit 0)  a following-classify controlling an `if` whose ABSENT / wrong-type branch
-                  performs a PROVEN-filesystem state-changing action on the SYNTACTICALLY IDENTICAL path,
-                  with no suppressor anywhere in the enclosing function (the check-then-act collapse); or a
-                  `try` guarding a CERTAIN-filesystem following-classify or a builtin open of a
-                  control-relevant path whose exceptions REACH that `except` (no intervening nested-try
-                  handler catches or transforms them first) and which catches an EXPLICIT conflated tuple
-                  (FileNotFoundError mixed with PermissionError / NotADirectoryError / IsADirectoryError /
-                  OSError) and whose handler collapses to a benign absence sentinel (pass, continue, or a
-                  return of None / empty string / empty collection), mapping a non-absence error onto the
-                  absence path. A handler that returns a failure status or otherwise refuses is not this
-                  collapse and is not flagged. v1 EMITS this as a WARN advisory for human review, never a
-                  block. It is recognized CONSERVATIVELY, only when the receiver resolves to a filesystem
-                  Path with clean provenance under the provenance model this scan tracks (a pathlib
-                  constructor, a path-returning method/attribute, a `/` join, or a Path-typed annotation);
-                  the model is not exhaustive, so a receiver whose Path-ness the scan cannot model may be
-                  missed, and dataflow the scan does not follow (e.g. an `import ... as <name>` rebind of a
-                  proven-path name) can leave stale provenance and produce a false-positive advisory, with
-                  advisory precision a disclosed follow-on. Receiver-provenance is applied UNIFORMLY on EVERY certain-shape
-                  path (the if-branch mutation AND the conflated-except): a method-form classify or mutation
-                  on an unproven receiver, or a path reached through an alias chain where any link is or
-                  becomes non-Path, is NOT a certain filesystem receiver and drops to the resist-static
-                  advisory. The scan models a bounded set of cases; unmodelled or ambiguous dataflow (an
-                  `import ... as <name>` alias rebinding a proven-path name, a cross-branch or rebound
-                  provenance flow, and other constructs it does not track) CAN leave stale provenance and
-                  yield a false-positive certain-shape advisory, and can equally miss a genuine collapse;
-                  both are harmless under WARN-only, and precision is a disclosed follow-on.
-  RESIST-STATIC advisory (exit 0)  a control-relevant following-classify with a benign-negative branch that
-                  is not a certain shape: name-hint-only relevance, an indirect wrapper, ambiguous branch
-                  semantics, or a bare `except OSError` (too broad to convict as a deliberate conflation, yet
-                  a candidate).
-  CANNOT-EVALUATE (exit 2)  any declared scanned input missing, unreadable, non-regular, non-UTF-8, or
-                  unparseable (a SyntaxError on a declared file is a named refusal, never a skip), per the
-                  check-fails-closed-on-unreadable rule; and a non-isolated run (the bootstrap self-guard).
+CANNOT-EVALUATE (exit 2, fail-closed per the check-fails-closed-on-unreadable rule): any declared scanned
+input missing, unreadable, non-regular, non-UTF-8, or unparseable (a SyntaxError on a declared file is a
+named refusal, never a skip); a declared input whose AST exceeds the analyzer's recursion or memory
+capacity; or a non-isolated run (the bootstrap self-guard).
 
 BOOTSTRAP SELF-GUARD. The gate's first executable statements import only sys and refuse to run (exit 2)
 unless the interpreter is isolated, so a sibling planted beside this gate cannot shadow a stdlib import and
@@ -95,41 +41,8 @@ SCANNED SURFACES (the declared set, resolved from the repo root): every regular 
 (the vendored tools/_vendor/ subtree is excluded), and every regular *.py directly under
 .aiqt/core/hooks/scripts/. Both directories are REQUIRED: an unreadable or absent one is a cannot-evaluate.
 
-DISCLOSED RESIDUAL (v1 advisory coverage limit, no silence guaranteed): outside the modelled certain
-same-path shape this advisory is best-effort and per-scope, same-module only and certifies no shape as
-silent, so an unrecognized shape MAY still surface a resist-static advisory or MAY go unflagged. The
-conservative bail-out is itself the residual,
-since the certain shape is recognized only on the modelled case and a genuine collapse behind provenance
-or dataflow complexity usually produces no certain-shape advisory (a false negative); conversely, unmodelled
-or ambiguous dataflow can leave stale provenance and yield a false-positive certain-shape advisory, so
-neither direction is a categorical guarantee (both harmless under WARN-only). Cases the scan conservatively
-keeps below the certain shape (a false negative when a real collapse hides behind them): a
-receiver whose Path-ness this scan cannot confirm (a method-form .exists()/.stat() or .mkdir()/.write_text()
-on an unproven receiver, on the conflated-except path as much as the if-branch mutation, is credited only
-heuristically, so a genuine collapse on a path whose type the scan cannot prove drops to the resist-static
-advisory or nothing); a provenance that becomes ambiguous through an alias chain where any link is or becomes
-non-Path, or through a cross-branch or rebound binding (the disqualification PROPAGATES through dependent
-aliases, so such a name is not treated as a certain filesystem receiver for the rebinds the scan models, an
-unmodelled `import ... as <name>` rebind excepted); a classify and a mutation on the same path
-expressed two different ways (identity is syntactic, so a variable alias is a syntactic non-match and is not
-raised to the certain shape, a false negative); a compound `if` test (a BoolOp joining a classify with another condition,
-e.g. `if not exists(p) and ready:`) whose classify is not the whole test is not raised to the certain shape and MAY go unflagged; the guard-return
-/ early-return fall-through form (an `if classify(p): return` followed by a mutation), which is outside the
-enclosing-branch shape; a mutation whose classified path is NOT the state-changing call's FIRST positional
-argument (the destination of an os.rename/os.replace/os.symlink/os.link, e.g. `if not
-os.path.isfile("state"): os.rename("incoming", "state")`, whose mutated operand is argument one, is not
-matched: the state-change target is read from argument zero, so the destination-mutates-the-classified-path
-shape is a disclosed false-negative); a re-resolution of a descriptor-classified path through the string
-name (a resist-static-tier shape NOT actively raised to the certain shape in v1, a documented follow-on);
-cross-function and cross-module flows, dynamic dispatch and getattr indirection, non-Python surfaces, and
-the semantic question of whether a bare `except OSError` truly conflates absence with a non-absence error
-(kept at the resist-static advisory). Path provenance is intra-scope and syntactic (a pathlib construction,
-a path-returning method or attribute, a `/` join, or a Path-typed annotation); a path object arriving from a
-helper return or a container the scan does not model is not proven, so it is the resist-static advisory
-rather than the certain shape. Sharper precision that could later support a non-advisory classification of
-these is a DISCLOSED FOLLOW-ON. Missing such a defect is the accepted residual; the secspr and chkfcl/secfcl rules
-carry the full obligation. The classifier table is Python-first; further languages are additive rows plus a
-parser (a named follow-on), not covered here.
+The classifier table is Python-first; further languages are additive rows plus a parser, a named follow-on,
+not covered here. The secspr and chkfcl/secfcl rules carry the full obligation.
 
   check_path_classification.py             scan the declared surfaces
   check_path_classification.py --self-test build synthetic trees and assert the gate's invariants
@@ -496,10 +409,13 @@ def _classify_is_certain_fs(call, resolver, path_names):
     """True iff a following-classify `call` is a CERTAIN filesystem operation: an os.path.<exists/isdir/
     isfile>, os.stat, or from-os bare stat / from-os.path bare classify (module-resolved, inherently
     filesystem), or a method-form classify (.exists()/.is_dir()/.is_file()/.stat()) whose receiver is a
-    PROVEN pathlib path. A method-form classify on an unproven receiver is NOT certain: the receiver may be
-    a non-filesystem object with a same-named method (codex #4), so it never anchors a certain-shape
-    advisory. Called
-    only where _classify already matched, so it needs only to grade the receiver's provenance."""
+    PROVEN pathlib path. A method-form classify on an unproven receiver grades NOT certain here: the
+    receiver may be a non-filesystem object with a same-named method (codex #4). This grade is consulted
+    ONLY on the conflated-except certain-shape path in _analyze_try (its sole caller); it does NOT gate the
+    if-branch same-path-mutation path in _analyze_function, which grades the mutation target rather than the
+    classified receiver, so on that path an unproven method-form receiver CAN still anchor a certain-shape
+    advisory (a disclosed tier-imprecision follow-on, harmless under WARN-only v1). Called only where
+    _classify already matched, so it needs only to grade the receiver's provenance."""
     f = call.func
     if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute):
         inner = f.value
@@ -730,11 +646,12 @@ def _analyze_function(func, resolver, rel, deny, warn, path_names):
 
 def _analyze_try(func, resolver, rel, deny, warn, path_names):
     """Analyze try/except conflation within a function/module scope. A conflated-except certain-shape
-    advisory is emitted only when the guarded operation is a CERTAIN filesystem classify/open
-    (receiver-provenance is applied uniformly on this certain-shape path, exactly as the mutation detector
-    applies it): an os/os.path module classify, a builtin
-    open, or a method-form classify on a PROVEN pathlib receiver. A method-form classify on an unproven
-    receiver is not a filesystem certainty (codex #4) and anchors no finding."""
+    advisory is emitted only when the guarded operation is a CERTAIN filesystem classify/open, graded by
+    _classify_is_certain_fs on this conflated-except path: an os/os.path module classify, a builtin
+    open, or a method-form classify on a PROVEN pathlib receiver. On THIS conflated-except path a method-form
+    classify on an unproven receiver is not a filesystem certainty (codex #4) and anchors no finding; that
+    scoping is local to this path and does not hold for the if-branch same-path-mutation path in
+    _analyze_function, which does not consult this grade."""
     body = func.body if hasattr(func, "body") else []
     for node in _walk_no_nested(body):
         if not isinstance(node, ast.Try):
@@ -941,7 +858,7 @@ def scan(root, files):
         except Exception as exc:  # noqa: BLE001  FINAL broad backstop; catch Exception, not BaseException
             # CLASS-WIDTH FAIL-CLOSED (SC1): any otherwise-uncaught error anywhere in this file's
             # read/decode/parse/diagnose pipeline is recorded as a LOCATED cannot-evaluate naming the file,
-            # the phase, and the exception type+message, so a genuine bug is VISIBLE (never silently masked)
+            # the phase, and the exception type+message, so a genuine bug is VISIBLE (never masked)
             # and drives exit 2, never an uncaught error escaping as exit 1. This broad catch replaces the
             # piecemeal type-specific catches as the backstop; the narrower catches above stay for their
             # specific located messages. KeyboardInterrupt and SystemExit are BaseException, left uncaught.
@@ -1038,39 +955,15 @@ def main():
 # --- self-test ----------------------------------------------------------------------------------------
 # Synthetic trees under a private tempdir the test creates and removes (test-hermeticity); generic
 # placeholders only (state.d, trusted_root). WARN-only v1: every scan that ran exits 0; a "certain" case
-# emits the certain-shape advisory (the former DENY, still detected, now advisory), a "warn" case emits the
+# emits the certain-shape advisory, a "warn" case emits the
 # resist-static advisory, and a "clean" case emits no advisory:
-#   1. `if os.path.isdir("state.d"): ... else: <mkdir "state.d">` (absent branch mutates the same path,
-#      no no-follow evidence) is a certain-shape advisory (exit 0),
-#   2. the descriptor-bound three-way classify (os.open(root, O_NOFOLLOW|O_DIRECTORY) + os.lstat(name,
-#      dir_fd=fd)) is clean (exit 0),
-#   3. a name-hint-only classify with a benign-negative branch is a resist-static advisory (exit 0),
-#   4. the conflated-except shape (except (FileNotFoundError, PermissionError): return None guarding a
-#      control-relevant open) is a certain-shape advisory (exit 0),
-#   5. an unreadable, a syntactically invalid, and a valid-but-analysis-hostile deep-AST declared input
-#      each exit 2 (fail-closed), never an uncaught error escaping as exit 1,
-#   6. a refusing negative branch (raise) over a control path is clean (exit 0, no advisory),
-#   7. a method-classify + mutation on an unproven (non-filesystem) receiver is not raised to the certain
-#      shape (exit 0),
-#   8. a str.replace() in the negative branch is not a filesystem mutation, so no certain shape (exit 0),
-#   9. a Path-method mutation on a bare-Name proven-Path receiver on the same path is a certain-shape
-#      advisory (exit 0),
-#  10. a conflated except returning an explicit failure status is a refusal, not benign (exit 0),
-#  11. a builtin open in write mode via a `mode=` keyword is a state change, so it is a certain-shape
-#      advisory (exit 0),
-#  12. an alias chain with a non-Path link propagates disqualification, so no certain shape (exit 0),
-#  13. a conflated except on a method-form classify with an unproven receiver is not raised to the certain
-#      shape (exit 0),
-#  14. an `os` parameter shadowing the module (os.path.isdir / os.makedirs) is NOT the fs API (exit 0),
-#  15. a `Path` parameter shadowing the constructor is NOT a proven fs receiver (exit 0),
-#  16. a for-loop target rebinding a proven Path to an unproven element loses provenance (exit 0),
-#  17. a walrus rebinding a proven Path to an unproven value loses provenance (exit 0),
-#  18. an inner try transforming PermissionError before the outer conflated handler gives no certain-shape
-#      advisory (exit 0),
-#  19. an `if classify(p): return` early-return fall-through with the mutation after it (outside the
-#      classify's own branch) on a name-hint path is a resist-static advisory WARN (exit 0), never silent.
+#   each fixture in the `cases` table below is asserted against its own recorded kind, the cannot-evaluate
+#   legs assert exit 2 with a located diagnostic naming the input, and the subprocess legs assert the child
+#   never exits 1 and that run() emits a located WARN advisory. These assertions bind to the exact fixture
+#   inputs defined below, not to any general per-shape guarantee; the detector source is the authoritative
+#   account of what it flags.
 
-_DENY_STATE_SRC = '''\
+_CERTAIN_STATE_SRC = '''\
 import os
 def ensure():
     if os.path.isdir("state.d"):
@@ -1100,7 +993,7 @@ def check(root):
         proceed()
 '''
 
-_DENY_CONFLATED_SRC = '''\
+_CERTAIN_CONFLATED_SRC = '''\
 def read_marker(path):
     try:
         with open(path + "/marker", "r") as fh:
@@ -1138,7 +1031,7 @@ def label(self):
 # A Path-method mutation on a bare-Name proven-Path receiver whose absent branch mutates the same path
 # (codex #4 / claude B-3): the branch-ordering fix must let it reach method classification and be flagged
 # (exit 0; a certain-shape advisory).
-_PROVEN_PATH_DENY_SRC = '''\
+_PROVEN_PATH_CERTAIN_SRC = '''\
 from pathlib import Path
 def ensure(d):
     out = Path(d) / "cache"
@@ -1160,7 +1053,7 @@ def check_marker(marker):
 
 # A builtin open in write mode given via a `mode=` keyword must be recognized as a state change (claude
 # m-1), so this same-path check-then-create is a certain-shape advisory (exit 0).
-_OPEN_KW_DENY_SRC = '''\
+_OPEN_KW_CERTAIN_SRC = '''\
 import os
 def make_lock():
     if not os.path.isfile("state.lock"):
@@ -1182,7 +1075,7 @@ def refresh(cache):
 
 # A conflated except guarding a method-form classify on an UNPROVEN receiver (codex #4): `state_cache` may be
 # a non-filesystem object with an `.exists()` method, so receiver provenance (applied uniformly on the
-# conflated-except DENY path) withholds the DENY (exit 0).
+# conflated-except certain-shape path) withholds the certain-shape advisory (exit 0).
 _CONFLATED_NONFS_SRC = '''\
 def probe(state_cache):
     try:
@@ -1192,7 +1085,7 @@ def probe(state_cache):
 '''
 
 # CATCH-ALL 1 (codex #3): `os` is a PARAMETER shadowing the module, so os.path.isdir / os.makedirs are
-# calls on a caller-supplied object, not the filesystem API; the scope bails out of DENY (exit 0).
+# calls on a caller-supplied object, not the filesystem API; the scope bails out of the certain-shape advisory (exit 0).
 _SHADOWED_OS_CLEAN_SRC = '''\
 def ensure(os):
     if not os.path.isdir("state.d"):
@@ -1221,7 +1114,7 @@ def refresh(cache):
 '''
 
 # CATCH-ALL 2 (codex #4): a walrus REBINDS `p` from a proven Path to an unproven value before the
-# conditional, so provenance is lost and no DENY fires (exit 0).
+# conditional, so provenance is lost and no certain-shape advisory fires (exit 0).
 _WALRUS_REBIND_CLEAN_SRC = '''\
 from pathlib import Path
 def refresh(cache):
@@ -1232,7 +1125,7 @@ def refresh(cache):
 
 # CATCH-ALL 3 (codex #5): an INNER try transforms PermissionError into RuntimeError before it could reach
 # the outer conflated handler, so the outer `except (FileNotFoundError, PermissionError)` does not actually
-# conflate a non-absence error from os.stat; no DENY fires (exit 0).
+# conflate a non-absence error from os.stat; no certain-shape advisory fires (exit 0).
 _NESTED_TRY_CLEAN_SRC = '''\
 import os
 def inspect(root):
@@ -1249,7 +1142,7 @@ def inspect(root):
 # R9 (round-9 QA, early-return fall-through with a name-hint): an `if classify(p): return` guard with the
 # mutation after it (outside the classify's own branch) on a name-hint path is not the modelled certain
 # same-path shape, yet a following-classify with a benign-negative branch is visible; it must emit a
-# resist-static WARN advisory (exit 0), never be silent.
+# resist-static WARN advisory (exit 0); the r9-early-return-namehint fixture asserts this for this input.
 _EARLY_RETURN_WARN_SRC = '''\
 import os
 def ensure():
@@ -1296,6 +1189,22 @@ def self_test_main():
             p.write_text(text, encoding="utf-8")
         return rel, p
 
+    def _located_warn(out, expected_rel):
+        # A WARN line renders as "WARN: <rel>:<lineno>: <diagnostic>" (see run()/_emit). Assert the
+        # advisory is LOCATED: the expected fixture relative path, a positive line number, and nonempty
+        # diagnostic text after the location, not merely a line that starts with "WARN:".
+        for ln in out.splitlines():
+            if not ln.startswith("WARN: "):
+                continue
+            head, sep, diag = ln[len("WARN: "):].partition(": ")
+            if not sep or not diag.strip():
+                continue
+            rel_part, _, line_part = head.rpartition(":")
+            if rel_part == expected_rel and line_part.isdigit() and int(line_part) > 0:
+                return True
+        return False
+
+
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-path-classification-selftest-"))
     except OSError as exc:
@@ -1305,20 +1214,20 @@ def self_test_main():
     skipped = []
     try:
         base = tmp / "tree"
-        # kind: "certain" (former DENY, still detected, now a certain-shape advisory), "warn" (a
+        # kind: "certain" (a certain-shape advisory expected), "warn" (a
         # resist-static advisory expected), "clean" (no advisory at all), "clean-or-warn" (no certain-shape
         # advisory; a resist-static advisory is acceptable). Every scan that ran exits 0 under WARN-only v1.
         cases = [
-            ("deny-state", _DENY_STATE_SRC, "certain"),
+            ("deny-state", _CERTAIN_STATE_SRC, "certain"),
             ("pass-desc", _PASS_DESC_SRC, "clean"),
             ("warn-hint", _WARN_HINT_SRC, "warn"),
-            ("deny-conflated", _DENY_CONFLATED_SRC, "certain"),
+            ("deny-conflated", _CERTAIN_CONFLATED_SRC, "certain"),
             ("refuse", _REFUSE_SRC, "clean"),
             ("nonfs-receiver", _NONFS_RECEIVER_SRC, "clean"),
             ("str-replace", _STR_REPLACE_SRC, "clean-or-warn"),
-            ("proven-path-deny", _PROVEN_PATH_DENY_SRC, "certain"),
+            ("proven-path-deny", _PROVEN_PATH_CERTAIN_SRC, "certain"),
             ("conflated-refuse", _CONFLATED_REFUSE_SRC, "clean"),
-            ("open-kw-deny", _OPEN_KW_DENY_SRC, "certain"),
+            ("open-kw-deny", _OPEN_KW_CERTAIN_SRC, "certain"),
             ("alias-chain-clean", _ALIAS_CHAIN_CLEAN_SRC, "clean"),
             ("conflated-nonfs-clean", _CONFLATED_NONFS_SRC, "clean"),
             ("shadowed-os-clean", _SHADOWED_OS_CLEAN_SRC, "clean"),
@@ -1335,7 +1244,7 @@ def self_test_main():
                 failures.append("{}: expected exit 0 (WARN-only), got {}".format(name, code))
             if kind == "certain":
                 if not deny:
-                    failures.append("{}: expected a certain-shape advisory (former DENY), got none"
+                    failures.append("{}: expected a certain-shape advisory, got none"
                                     .format(name))
             elif kind == "warn":
                 if deny:
@@ -1510,9 +1419,11 @@ def self_test_main():
                                                 text=_EARLY_RETURN_WARN_SRC))
         if rc != 0:
             failures.append("run-emit early-return (subprocess): expected exit 0, got {}".format(rc))
-        if not any(ln.startswith("WARN:") for ln in out.splitlines()):
-            failures.append("run-emit early-return (subprocess): expected an emitted WARN: advisory on "
-                            "stdout, got {!r}".format(out))
+        expected_rel = "tools/case_early_return.py"
+        if not _located_warn(out, expected_rel):
+            failures.append("run-emit early-return (subprocess): expected a LOCATED WARN advisory "
+                            "(WARN: {}:<line>: <diagnostic>) with a positive line number and nonempty "
+                            "diagnostic text, got {!r}".format(expected_rel, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1521,13 +1432,12 @@ def self_test_main():
             print("SELF-TEST FAIL: {}".format(f), file=sys.stderr)
         return 1
     tail = " ({} skipped: {})".format(len(skipped), "; ".join(skipped)) if skipped else ""
-    print("SELF-TEST PASS (WARN-only v1, every scan that ran exits 0): the state-change collapse, "
-          "conflated-except, proven-Path bare-Name mutation, and open(mode=) shapes are all still detected "
-          "as certain-shape advisories; the descriptor-bound classify, refusing-branch, failure-status "
-          "refusal, alias-chain non-Path link, conflated-except on an unproven receiver, shadowed os/Path "
-          "params, loop/walrus rebind, and nested-try intervening handler cases are clean; name-hint is a "
-          "resist-static advisory; the non-filesystem/str.replace receivers give no certain-shape advisory; "
-          "and unreadable/unparseable/missing-dir/deep-AST cannot-evaluate all hold{}".format(tail))
+    print("SELF-TEST PASS (WARN-only v1): every scan that ran exited 0, every cases-table fixture matched "
+          "its recorded kind, the malformed and unreadable declared inputs that ran each failed closed to a "
+          "located cannot-evaluate (exit 2), and the subprocess legs confirmed the child never exits 1 and "
+          "that run() emits a located WARN advisory; these are the fixture-bound invariants the suite "
+          "exercises, not a general guarantee of the detector's behaviour{}"
+          .format(tail))
     return 0
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce elapsed-aware restore of a borrowed process-global timer (a deterministic code-shape gate).
+"""Advisory scan for verbatim restore of a borrowed process-global timer (a deterministic code-shape gate).
 
 Code that borrows a caller's process-global deadline facility (a POSIX interval timer or single-shot
 alarm) for a bounded window and then RESTORES the caller's saved value VERBATIM re-arms the caller's
@@ -7,80 +7,30 @@ deadline to its full original interval, silently moving or losing a deadline the
 most dangerously a watchdog's. The corpus rule tmrrst (quali-elapsed-aware-timer-restore) requires the
 restore to be elapsed-aware: the saved remaining interval reduced by the time the window consumed, a
 deadline that would have expired during the window clamped to fire immediately rather than re-armed at
-full value. This gate is an ADVISORY (WARN-only) v1: it scans the repo's own Python and EMITS WARN
-advisories for the certain verbatim-restore shape and for the resist-static shapes alike, flagging both for
-human review against tmrrst, and it NEVER blocks CI. Sharper precision that could later support a non-advisory classification is a
-DISCLOSED FOLLOW-ON, deferred because a sound static-dataflow conviction over arbitrary Python binding and
-control-flow is not yet achieved; v1 is WARN-only and does not block CI.
+full value.
 
-DETECTOR (AST plus an ORDERED, per-scope dataflow pass; a regex never convicts). Import aliases are
-resolved within each module, so `import signal as sg`, `from signal import setitimer`, and `from time
-import monotonic as mono` are all recognized. Each function body (and the module top level) is one scope; a
-nested function is its own scope. The pass walks the scope's statements in source order, tracking which
-local names currently hold a verbatim saved timer value:
-  SAVE            a name bound to the return of signal.getitimer / signal.alarm / signal.setitimer (each
-                  returns the PREVIOUS interval-bearing state), through a plain assignment, an annotated
-                  assignment (`saved: int = signal.alarm(0)`), a walrus (`saved := signal.getitimer(...)`),
-                  or a tuple unpack. A tuple/list assignment is collected ELEMENT-WISE against its targets
-                  (`saved, other = signal.alarm(0), 0` records the save on `saved`), not read as a whole-RHS
-                  non-save. The saved status PROPAGATES through an identity-preserving copy of a saved name
-                  (`c = saved`, a subscript, an attribute, or an int/float/copy wrap whose cast name is not
-                  locally shadowed) and is CLEARED when the name is rebound by one of the binding constructs
-                  this scan models (a constant, an arithmetic derivation, or a value routed through an
-                  elapsed-aware helper), so
-                  an overwritten or elapsed-adjusted name no longer carries the verbatim value.
-                  signal.getsignal is a HANDLER save, not an interval save, and is not a SAVE here: a
-                  handler-only restore is not the violation.
-  OWN-ARM         a signal.alarm(...) / signal.setitimer(...) whose value argument is a NONZERO numeric
-                  constant (the borrower armed its own timer over the caller's). A zero argument is a
-                  disarm, not an arm.
-  RESTORE         a currently-saved name reaching signal.alarm / signal.setitimer as its value argument.
-                  IDENTITY-flow: the argument IS a saved name, or a tuple index / attribute / a copy or
-                  numeric cast (int/float) of it. DERIVED: a saved name reaches the argument through
-                  arithmetic (a subtraction of elapsed time is the elapsed-aware form).
-  ELAPSED-EVIDENCE a time.monotonic / perf_counter / monotonic_ns / perf_counter_ns read anywhere in the
-                  enclosing scope (the suppressor the elapsed-aware restore leaves behind).
-Only a scope carrying BOTH a SAVE and a RESTORE of a name still saved at the restore point is ever
-reported, so an ordinary arm, a disarm, a bare save, a restore of an overwritten name, or a handler-only
-restore falls outside the recognized save-plus-restore core.
+This gate is an ADVISORY (WARN-only) v1 best-effort heuristic, not a decision procedure and not a
+specification of its own behaviour. It scans a recognizable subset of the repo's own Python (AST plus an
+ordered, per-scope dataflow pass; a regex never convicts) and EMITS WARN advisories, at a certain-shape or
+a resist-static tier, for the borrowed-timer save-plus-restore scopes it recognizes, flagging them for
+human review against tmrrst. It NEVER blocks CI. Recognition is syntactic and per-scope, and it applies
+internal suppression and downgrade heuristics: for example a derived restore accompanied by elapsed
+evidence (a time.monotonic or perf_counter read in the same scope) can be suppressed as a plausibly
+elapsed-aware restore. It guarantees neither a WARN for every risky restore nor silence for any particular
+shape: a shape it does not model may emit or may go unflagged, so it can both miss a genuine verbatim
+re-arm and, on dataflow it does not follow (for example a timer API reached through an unresolved alias,
+getattr, or dynamic dispatch; a value that flows across a function or module boundary; a value stashed into
+and read back from a container or helper; an `import ... as <name>` rebind; or FFI or non-Python
+manipulation), emit a false-positive advisory; both are harmless under WARN-only. The DETECTOR source below
+and its --self-test are the authoritative account of exactly what it flags; this docstring does not restate
+that account, and sharper precision that could later support a non-advisory classification is a disclosed
+follow-on, deferred because a sound static-dataflow conviction over arbitrary Python binding and
+control-flow is not yet achieved.
 
-  CERTAIN-SHAPE advisory (exit 0)  an ordered SAVE -> own nonzero ARM -> IDENTITY-flow RESTORE (the own-arm
-                  already seen when the identity restore fires) with NO elapsed-evidence anywhere in the
-                  scope: the verbatim re-arm shape (the intersection of the certain shapes). v1 EMITS this as
-                  a WARN advisory for human review, never a block. It is recognized CONSERVATIVELY, only when
-                  the saved identity resolves through the constructs this scan models (see the rebind list
-                  below); the scan makes no categorical uniqueness claim. The own nonzero arm must sit in the ordered save -> arm
-                  -> restore window AND on the SAME execution path as the restore: the armed state is
-                  threaded linearly and ISOLATED across mutually-exclusive branches (each if/elif/else arm,
-                  loop body, match case, and except handler is entered from the pre-branch armed state and
-                  its arm does not leak out), so an arm that precedes the save, or an arm in a sibling
-                  branch, is not credited, while a try body, else, finally, and a with body are straightline
-                  continuations that carry the armed state through; a single alarm/setitimer that both arms
-                  and saves counts as arm-at-save. The receiver must be the imported signal module (a
-                  parameter or local that shadows the module name in the scope disqualifies it), and a
-                  restore cast callable (int/float/copy/deepcopy) establishes an identity flow only where
-                  that name is not locally shadowed (a shadowed `float` parameter is a caller-supplied
-                  adjuster, so its restore is derived, not verbatim). A saved name rebound between the save
-                  and the restore by one of the constructs this scan tracks (assignment, annotation, walrus,
-                  tuple/list unpack, aug-assign, for/loop target, with-as, except-as, or a comprehension
-                  target) loses its verbatim status; a rebind this scan does NOT model, such as an
-                  `import ... as <name>` alias binding the saved name, or other dataflow the scan cannot
-                  follow, may leave the stale saved name in the set and produce a false-positive
-                  certain-shape advisory. Under WARN-only that advisory is harmless (it is a flag for review,
-                  never a block); sharper precision that would need binding-completeness is a disclosed
-                  follow-on. The scan models a bounded set of cases; unmodelled or ambiguous dataflow
-                  (cross-branch saved-value flow across mutually-exclusive branches, an `import ... as
-                  <name>` alias rebinding the saved name, and other constructs it does not track) CAN yield
-                  a false-positive certain-shape advisory, and can equally miss a genuine one; both are
-                  harmless under WARN-only, and precision is a disclosed follow-on.
-  RESIST-STATIC advisory (exit 0)  any other SAVE-plus-RESTORE scope: own-arm unproven, a derived restore
-                  with no elapsed-evidence, an identity restore alongside an unrelated monotonic read whose
-                  flow into the restore is not established, or pending-signal and periodic-phase preservation
-                  this static scan cannot prove. A derived restore WITH elapsed-evidence is the correct
-                  elapsed-aware form and is NOT reported.
-  CANNOT-EVALUATE (exit 2)  any declared scanned input missing, unreadable, non-regular, non-UTF-8, or
-                  unparseable (a SyntaxError on a declared file is a named refusal, never a skip), per the
-                  check-fails-closed-on-unreadable rule; and a non-isolated run (the bootstrap self-guard).
+CANNOT-EVALUATE (exit 2, fail-closed per the check-fails-closed-on-unreadable rule): any declared scanned
+input missing, unreadable, non-regular, non-UTF-8, or unparseable (a SyntaxError on a declared file is a
+named refusal, never a skip); a declared input whose AST exceeds the analyzer's recursion or memory
+capacity; or a non-isolated run (the bootstrap self-guard).
 
 BOOTSTRAP SELF-GUARD. The gate's first executable statements import only sys and refuse to run (exit 2)
 unless the interpreter is isolated, so a sibling planted beside this gate cannot shadow a stdlib import
@@ -91,32 +41,8 @@ tools/ (the vendored tools/_vendor/ subtree is excluded), and every regular *.py
 .aiqt/core/hooks/scripts/. Both directories are REQUIRED: an unreadable or absent directory is a
 cannot-evaluate, never an empty clean scan.
 
-DISCLOSED RESIDUAL (v1 advisory coverage limit, no silence guaranteed): outside the modelled scope this
-advisory may not flag and certifies no shape as silent. It is best-effort and per-scope, same-module only,
-so dynamic dispatch or getattr indirection onto the timer API, a saved value that flows across a function or
-module boundary, a value stashed into and read back out of a container or helper the scan does not follow,
-and FFI or non-Python timer manipulation MAY still surface a resist-static advisory where a save-plus-restore
-scope is visible (for instance a saved name that remains syntactically present in the restore, even through
-an inline container), or MAY go unflagged where the save or the restore is lost to the scan. Above it all
-sits the fundamentally undecidable question of whether the borrowed timer's caller had in fact armed a
-deadline, which is why the resist-static advisory dominates and the certain-shape advisory is confined to
-the modelled case. A timer API reached
-through an unresolved alias, an arm whose value is a non-constant expression (counted as NOT a proven
-own-arm), and a saved name overwritten or routed through a helper before the restore (cleared from the saved
-set) are handled as the weaker resist-static advisory or not flagged at all, as is
-pending-signal or periodic-phase preservation (unprovable statically); this is not a categorical guarantee,
-since cross-branch saved-value flow or an unmodelled rebind CAN still yield a false-positive certain-shape
-advisory (harmless under WARN-only; precision a disclosed follow-on). The conservative bail-out ITSELF is a
-disclosed residual: because the certain shape is recognized only on the modelled case, a genuine verbatim
-re-arm hidden behind dataflow complexity may produce no advisory at all: a saved name rebound between the
-save and the restore by a loop, with-as, except-as, or comprehension target; a
-receiver whose module identity is shadowed by a parameter or local; an own-arm that does not provably sit in
-the ordered save -> arm -> restore window; an IfExp-derived restore (`saved[0] if ... else ...`) and a
-star-unpack restore (`setitimer(WHICH, *saved)`), neither of which is enumerated as an identity flow; and a
-restore assembled through a container or across a helper. Sharper precision that could later support a non-advisory classification
-of these is a DISCLOSED FOLLOW-ON. Missing such a defect is the accepted residual; the tmrrst
-rule carries the full obligation, and the elapsed-aware save/restore living once in a shared helper (which
-the rule requires) is the primary control this advisory backstops.
+The tmrrst rule carries the full obligation, and the elapsed-aware save/restore living once in a shared
+helper (which the rule requires) is the primary control this advisory backstops.
 
   check_timer_restore.py             scan the declared surfaces
   check_timer_restore.py --self-test build synthetic trees and assert the gate's invariants
@@ -668,7 +594,7 @@ def scan(root, files):
         except Exception as exc:  # noqa: BLE001  FINAL broad backstop; catch Exception, not BaseException
             # CLASS-WIDTH FAIL-CLOSED (SC1): any otherwise-uncaught error anywhere in this file's
             # read/decode/parse/diagnose pipeline is recorded as a LOCATED cannot-evaluate naming the file,
-            # the phase, and the exception type+message, so a genuine bug is VISIBLE (never silently masked)
+            # the phase, and the exception type+message, so a genuine bug is VISIBLE (never masked)
             # and drives exit 2, never an uncaught error escaping as exit 1. This broad catch replaces the
             # piecemeal type-specific catches as the backstop; the narrower catches above stay for their
             # specific located messages. KeyboardInterrupt and SystemExit are BaseException, left uncaught.
@@ -765,36 +691,16 @@ def main():
 # --- self-test ----------------------------------------------------------------------------------------
 # Proves the gate against synthetic trees written under a private tempdir the test creates and removes
 # (test-hermeticity), all fixtures using generic placeholders. WARN-only v1: every scan that ran exits 0;
-# a "certain" case emits the certain-shape advisory (the former DENY, still detected, now advisory), a
+# a "certain" case emits the certain-shape advisory, a
 # "warn" case emits the resist-static advisory, a "clean" case emits no advisory, and a "clean-or-warn"
 # case emits no certain-shape advisory (a resist-static advisory is acceptable):
-#   1. the verbatim-restore shape (save getitimer, own-arm setitimer nonzero, identity restore in
-#      finally, no monotonic) is a certain-shape advisory (exit 0),
-#   2. the elapsed-aware form (save, own-arm, derived restore with a monotonic delta and a clamp) is
-#      clean (exit 0),
-#   3. a save/restore with NO own-arm (own-arm unproven) is a resist-static advisory (exit 0),
-#   4. an unreadable declared input, a syntactically invalid declared input, and a valid-but-analysis-
-#      hostile deep-AST declared input each exit 2 (fail-closed), never an uncaught error escaping as exit 1,
-#   5. a from-import alias form of the verbatim shape is still detected (certain-shape advisory, exit 0),
-#   6. a handler-only save/restore (getsignal/signal.signal) is clean (exit 0, no advisory),
-#   7. a verbatim restore reached through a one-hop copy of the saved name is detected (exit 0),
-#   8. an annotated-assignment save is visible and detected (exit 0),
-#   9. a walrus save is visible and detected (exit 0),
-#  10. a verbatim restore through a tuple-unpack alias is detected (exit 0),
-#  11. a saved name overwritten before the re-arm is NOT a verbatim restore (clean, exit 0),
-#  12. a saved value rebound through an elapsed-aware helper is NOT verbatim (clean, exit 0),
-#  13. a single alarm(N) that both arms and saves, then restores, is detected (exit 0),
-#  14. a saved name rebound by a for-loop target before the re-arm is NOT verbatim (clean, exit 0),
-#  15. a parameter shadowing the imported signal module is NOT the timer API (clean, exit 0),
-#  16. an own-arm that precedes the save is outside the ordered window, so no certain-shape advisory (exit 0),
-#  17. a restore cast callable that is a shadowed parameter (`float`) is NOT an identity flow (exit 0),
-#  18. a verbatim restore through the REAL builtin cast (`int`) is still detected (exit 0),
-#  19. a direct save inside a tuple assignment, own-arm, verbatim restore is detected (exit 0),
-#  20. an own-arm and restore in mutually exclusive branches give no certain-shape advisory (exit 0),
-#  21. a re-arm whose saved name is read back through an inline container (`signal.alarm([saved][0])`) is
-#      not the modelled certain identity flow but a resist-static advisory WARN (exit 0), never silent.
+#   each fixture in the `cases` table below is asserted against its own recorded kind, the cannot-evaluate
+#   legs assert exit 2 with a located diagnostic naming the input, and the subprocess legs assert the child
+#   never exits 1 and that run() emits a located WARN advisory. These assertions bind to the exact fixture
+#   inputs defined below, not to any general per-shape guarantee; the detector source is the authoritative
+#   account of what it flags.
 
-_DENY_SRC = '''\
+_CERTAIN_SRC = '''\
 import signal
 def borrow():
     saved = signal.getitimer(signal.ITIMER_REAL)
@@ -827,7 +733,7 @@ def peek():
     signal.setitimer(signal.ITIMER_REAL, saved[0], saved[1])
 '''
 
-_ALIAS_DENY_SRC = '''\
+_ALIAS_CERTAIN_SRC = '''\
 from signal import getitimer, setitimer, ITIMER_REAL
 def borrow():
     saved = getitimer(ITIMER_REAL)
@@ -851,7 +757,7 @@ def borrow():
 
 # A verbatim restore reached through a one-hop copy of the saved name (M-1 / codex #1): the alias must
 # propagate the saved value so the restore is still caught.
-_COPY_DENY_SRC = '''\
+_COPY_CERTAIN_SRC = '''\
 import signal
 def borrow():
     saved = signal.getitimer(signal.ITIMER_REAL)
@@ -864,7 +770,7 @@ def borrow():
 '''
 
 # An annotated-assignment save (codex #1): the save must be visible.
-_ANN_DENY_SRC = '''\
+_ANN_CERTAIN_SRC = '''\
 import signal
 def borrow():
     saved: tuple = signal.getitimer(signal.ITIMER_REAL)
@@ -876,7 +782,7 @@ def borrow():
 '''
 
 # A walrus save (claude B-2): the save must be visible.
-_WALRUS_DENY_SRC = '''\
+_WALRUS_CERTAIN_SRC = '''\
 import signal
 def borrow():
     if (saved := signal.getitimer(signal.ITIMER_REAL)):
@@ -888,7 +794,7 @@ def borrow():
 '''
 
 # A verbatim restore through a tuple-unpack alias of the saved value (M-1): must be caught.
-_TUPLE_ALIAS_DENY_SRC = '''\
+_TUPLE_ALIAS_CERTAIN_SRC = '''\
 import signal
 def borrow():
     saved = signal.getitimer(signal.ITIMER_REAL)
@@ -926,7 +832,7 @@ def borrow():
 
 # A genuine verbatim restore where a single alarm(N) both arms and saves (codex #1 self-arm baseline): the
 # combined save-and-own-arm is a certain-shape advisory (exit 0).
-_ALARM_ARM_DENY_SRC = '''\
+_ALARM_ARM_CERTAIN_SRC = '''\
 import signal
 def borrow():
     saved = signal.alarm(5)
@@ -955,7 +861,7 @@ def f(signal):
 '''
 
 # The own nonzero arm PRECEDES the save (codex #1 ordering case): the arm does not sit in the ordered
-# save -> arm -> restore window, so it is not a certain verbatim re-arm and does not DENY (exit 0; a WARN is
+# save -> arm -> restore window, so it is not a certain verbatim re-arm and does not emit a certain-shape advisory (exit 0; a resist-static WARN is
 # acceptable).
 _ARM_BEFORE_SAVE_SRC = '''\
 import signal
@@ -967,7 +873,7 @@ def f():
 
 # CATCH-ALL 1 (codex #1): the restore callable `float` is a PARAMETER shadowing the builtin cast, so it
 # may adjust the elapsed value and does not establish a verbatim identity flow; the restore is derived,
-# not identity, so no DENY fires (exit 0; a WARN is acceptable).
+# not identity, so no certain-shape advisory fires (exit 0; a resist-static WARN is acceptable).
 _SHADOWED_CAST_CLEAN_SRC = '''\
 import signal
 def borrow(float):
@@ -982,7 +888,7 @@ def borrow(float):
 # A genuine verbatim restore through the REAL builtin `int` cast (not shadowed): the identity flow must
 # still be followed and flagged as a certain-shape advisory (exit 0), so the shadow guard does not
 # over-narrow the real cast.
-_REAL_CAST_DENY_SRC = '''\
+_REAL_CAST_CERTAIN_SRC = '''\
 import signal
 def borrow():
     saved = signal.alarm(0)
@@ -993,7 +899,7 @@ def borrow():
 # CATCH-ALL 2 (codex #2): a direct save inside a TUPLE assignment (`saved, other = signal.alarm(0), 0`),
 # then a constant own-arm, then a verbatim restore, is a certain verbatim re-arm and emits a certain-shape
 # advisory (exit 0).
-_TUPLE_SAVE_DENY_SRC = '''\
+_TUPLE_SAVE_CERTAIN_SRC = '''\
 import signal
 def borrow():
     saved, other = signal.alarm(0), 0
@@ -1003,7 +909,7 @@ def borrow():
 
 # CATCH-ALL 3 (codex additional): the own-arm and the identity restore sit in MUTUALLY EXCLUSIVE branches
 # (arm in the `if` body, restore in the `else`), so no single execution path runs save -> arm -> restore;
-# this is not the certain shape and must NOT DENY (exit 0; a WARN is acceptable).
+# this is not the certain shape and must NOT emit a certain-shape advisory (exit 0; a resist-static WARN is acceptable).
 _CROSS_BRANCH_CLEAN_SRC = '''\
 import signal
 def inspect(borrow):
@@ -1017,7 +923,7 @@ def inspect(borrow):
 
 # R9 (round-9 QA, inline-container restore): the saved name remains syntactically present through an inline
 # container (`[saved][0]`) at the re-arm, so this is not the modelled certain identity flow, yet a
-# save-plus-restore scope is visible; it must emit a resist-static WARN advisory (exit 0), never be silent.
+# save-plus-restore scope is visible; the r9-inline-container fixture asserts a resist-static WARN advisory (exit 0) for this input.
 _INLINE_CONTAINER_WARN_SRC = '''\
 import signal
 def borrow():
@@ -1066,6 +972,22 @@ def self_test_main():
             p.write_text(text, encoding="utf-8")
         return rel, p
 
+    def _located_warn(out, expected_rel):
+        # A WARN line renders as "WARN: <rel>:<lineno>: <diagnostic>" (see run()/_emit). Assert the
+        # advisory is LOCATED: the expected fixture relative path, a positive line number, and nonempty
+        # diagnostic text after the location, not merely a line that starts with "WARN:".
+        for ln in out.splitlines():
+            if not ln.startswith("WARN: "):
+                continue
+            head, sep, diag = ln[len("WARN: "):].partition(": ")
+            if not sep or not diag.strip():
+                continue
+            rel_part, _, line_part = head.rpartition(":")
+            if rel_part == expected_rel and line_part.isdigit() and int(line_part) > 0:
+                return True
+        return False
+
+
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-timer-restore-selftest-"))
     except OSError as exc:
@@ -1075,28 +997,28 @@ def self_test_main():
     skipped = []
     try:
         base = tmp / "tree"
-        # kind: "certain" (former DENY, still detected, now a certain-shape advisory), "warn" (a
+        # kind: "certain" (a certain-shape advisory expected), "warn" (a
         # resist-static advisory expected), "clean" (no advisory at all), "clean-or-warn" (no certain-shape
         # advisory; a resist-static advisory is acceptable). Every scan that ran exits 0 under WARN-only v1.
         cases = [
-            ("deny", _DENY_SRC, "certain"),
+            ("deny", _CERTAIN_SRC, "certain"),
             ("pass", _PASS_SRC, "clean"),
             ("warn", _WARN_SRC, "warn"),
-            ("alias-deny", _ALIAS_DENY_SRC, "certain"),
+            ("alias-deny", _ALIAS_CERTAIN_SRC, "certain"),
             ("handler-only", _HANDLER_ONLY_SRC, "clean"),
-            ("copy-deny", _COPY_DENY_SRC, "certain"),
-            ("ann-deny", _ANN_DENY_SRC, "certain"),
-            ("walrus-deny", _WALRUS_DENY_SRC, "certain"),
-            ("tuple-alias-deny", _TUPLE_ALIAS_DENY_SRC, "certain"),
+            ("copy-deny", _COPY_CERTAIN_SRC, "certain"),
+            ("ann-deny", _ANN_CERTAIN_SRC, "certain"),
+            ("walrus-deny", _WALRUS_CERTAIN_SRC, "certain"),
+            ("tuple-alias-deny", _TUPLE_ALIAS_CERTAIN_SRC, "certain"),
             ("overwrite-clean", _OVERWRITE_CLEAN_SRC, "clean"),
             ("helper-rebind-clean", _HELPER_REBIND_CLEAN_SRC, "clean"),
-            ("alarm-arm-deny", _ALARM_ARM_DENY_SRC, "certain"),
+            ("alarm-arm-deny", _ALARM_ARM_CERTAIN_SRC, "certain"),
             ("loop-rebind-clean", _LOOP_REBIND_CLEAN_SRC, "clean"),
             ("shadowed-receiver-clean", _SHADOWED_RECEIVER_CLEAN_SRC, "clean"),
             ("arm-before-save-clean", _ARM_BEFORE_SAVE_SRC, "clean-or-warn"),
             ("shadowed-cast-clean", _SHADOWED_CAST_CLEAN_SRC, "clean-or-warn"),
-            ("real-cast-deny", _REAL_CAST_DENY_SRC, "certain"),
-            ("tuple-save-deny", _TUPLE_SAVE_DENY_SRC, "certain"),
+            ("real-cast-deny", _REAL_CAST_CERTAIN_SRC, "certain"),
+            ("tuple-save-deny", _TUPLE_SAVE_CERTAIN_SRC, "certain"),
             ("cross-branch-clean", _CROSS_BRANCH_CLEAN_SRC, "clean-or-warn"),
             ("r9-inline-container-restore", _INLINE_CONTAINER_WARN_SRC, "warn"),
         ]
@@ -1107,7 +1029,7 @@ def self_test_main():
                 failures.append("{}: expected exit 0 (WARN-only), got {}".format(name, code))
             if kind == "certain":
                 if not deny:
-                    failures.append("{}: expected a certain-shape advisory (former DENY), got none"
+                    failures.append("{}: expected a certain-shape advisory, got none"
                                     .format(name))
             elif kind == "warn":
                 if deny:
@@ -1281,9 +1203,11 @@ def self_test_main():
                                                 text=_INLINE_CONTAINER_WARN_SRC))
         if rc != 0:
             failures.append("run-emit inline-container (subprocess): expected exit 0, got {}".format(rc))
-        if not any(ln.startswith("WARN:") for ln in out.splitlines()):
-            failures.append("run-emit inline-container (subprocess): expected an emitted WARN: advisory on "
-                            "stdout, got {!r}".format(out))
+        expected_rel = "tools/case_inline_container.py"
+        if not _located_warn(out, expected_rel):
+            failures.append("run-emit inline-container (subprocess): expected a LOCATED WARN advisory "
+                            "(WARN: {}:<line>: <diagnostic>) with a positive line number and nonempty "
+                            "diagnostic text, got {!r}".format(expected_rel, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1292,12 +1216,11 @@ def self_test_main():
             print("SELF-TEST FAIL: {}".format(f), file=sys.stderr)
         return 1
     tail = " ({} skipped: {})".format(len(skipped), "; ".join(skipped)) if skipped else ""
-    print("SELF-TEST PASS (WARN-only v1, every scan that ran exits 0): the verbatim-restore, alias, "
-          "copy/annotated/walrus/tuple-alias, alarm-self-arm, real-cast, and tuple-save shapes are all "
-          "still detected as certain-shape advisories; the elapsed-aware form, handler-only, overwrite-kill, "
-          "helper-rebind, loop-rebind, and shadowed-receiver cases are clean; own-arm-unproven is a "
-          "resist-static advisory; arm-before-save, shadowed-cast, and cross-branch give no certain-shape "
-          "advisory; and unreadable/unparseable/missing-dir/deep-AST cannot-evaluate all hold{}"
+    print("SELF-TEST PASS (WARN-only v1): every scan that ran exited 0, every cases-table fixture matched "
+          "its recorded kind, the malformed and unreadable declared inputs that ran each failed closed to a "
+          "located cannot-evaluate (exit 2), and the subprocess legs confirmed the child never exits 1 and "
+          "that run() emits a located WARN advisory; these are the fixture-bound invariants the suite "
+          "exercises, not a general guarantee of the detector's behaviour{}"
           .format(tail))
     return 0
 
