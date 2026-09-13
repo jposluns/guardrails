@@ -3,8 +3,10 @@
 
 A thin gate wrapper in the check_*.py family (deliberately NOT gen_*.py: an OPF render targets an adopter
 --root with no fixed repo-relative target, so it gates as a self-test plus a live leg, exactly the posture
-opf.py itself documents). The live leg runs `opf.py render --check --root <repo-root>` and forwards the
-child's exit code UNMASKED (gate discipline: no truncating sink, no `|| true`, no status-masking trailer).
+opf.py itself documents). The live leg runs `opf.py render --check --root <repo-root>` and CLASSIFIES the
+child's outcome by the render check's drift MARKER, not by the bare child exit code (the marker mapping is
+below); it preserves gate discipline throughout (no truncating sink, no `|| true`, no status-masking
+trailer).
 The repo root is DERIVED by CONFIRMING the repository IDENTITY of the gate's OWN source location through a
 local git probe (git -C <gate-dir> rev-parse --show-toplevel, with the ambient Git environment scrubbed and
 git resolved to an absolute path), not by the mere PRESENCE of a `.git` entry: a stray or garbage `.git`
@@ -16,11 +18,12 @@ the gate) fails closed (exit 2) rather than silently checking the WRONG root and
 
 This repository is not a DevProcess adopter, so the live leg prints render's own NOT APPLICABLE and exits 0,
 spec-honest like the crosswalk/doctor legs in run_all_checks.sh; the day this repo adopts, the same leg
-gates real view drift with no change. The exit contract is render's own and identical here: 0 clean, 1
-drift, 2 cannot-evaluate. The gate recognizes DRIFT POSITIVELY, never from the bare child exit code: it
-emits DRIFT (exit 1) ONLY when the child exited with the drift code (1) AND its stdout carries the render
-check's drift MARKER (a `drift:` sentinel line, which `opf render --check` prints per drifted target). EVERY
-other child outcome routes to cannot-evaluate (exit 2), closing the exit-1=drift conflation at the
+gates real view drift with no change. The gate's verdict uses render's own 0/1/2 vocabulary (0 clean, 1
+drift, 2 cannot-evaluate) but is assigned from the drift MARKER, not the bare child exit code. The mapping is
+three-way: a clean child (exit 0) is a PASS (0), and its stdout is NOT inspected for exit 0 because a clean
+render prints nothing; a child that exits with the drift code (1) AND carries the render check's drift MARKER
+on stdout (a `drift:` sentinel line, which `opf render --check` prints per drifted target) is DRIFT (1); and
+EVERY OTHER outcome routes to cannot-evaluate (exit 2). This closes the exit-1=drift conflation at the
 INTERPRETATION layer rather than per failure mode: a child that exits 1 WITHOUT the drift marker (a
 module-import crash before opf.py's handler, an uncaught exception, or any abnormal exit-1 path) produced no
 render drift verdict and is a cannot-evaluate, never a false drift; a child-LAUNCH failure (an OS refusal
@@ -72,7 +75,9 @@ def _run_render_check(root, capture):
     exception, or any abnormal exit-1 path) produced NO render drift verdict, so it is a cannot-evaluate, not
     drift; a child-LAUNCH failure (an OS refusal such as BlockingIOError/OSError when a fork is refused under
     RLIMIT_NPROC pressure) is caught HERE; and exit 2, an unexpected non-0/1/2 status, a signal death
-    (negative return), or empty/garbled output is a cannot-evaluate. Only a clean child (exit 0) is clean.
+    (negative return), or empty/garbled output is a cannot-evaluate. Only a clean child (exit 0) is clean,
+    and its stdout is NOT inspected for exit 0 because a clean render prints nothing; the marker is examined
+    only to CONFIRM a drift (exit 1), never to qualify the clean pass.
 
     stdout is CAPTURED so the marker can be recognized (decoded with errors='replace', so garbled bytes
     route to cannot-evaluate rather than crashing the gate). In the live leg (capture False) it is re-emitted

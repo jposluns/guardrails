@@ -31,20 +31,45 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _opf_store  # noqa: E402  U1: store resolution + discovery + manifest base/profile schema
-import _opf_schema  # noqa: E402  U2: record envelope + baseline type schemas + status/transition + counters
-import _opf_release  # noqa: E402  U3: version.toml + worklog.toml + span tiling + coverage digests + release cut
-import _opf_changelog  # noqa: E402  U5: changelog range-coverage + freeze gates over version.toml + CHANGELOG.md
-import _opf_check  # noqa: E402  U6: store-level integrity validator (validate_store; engine for the deferred opf doctor verb)
-import _opf_emit  # noqa: E402  U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
-import _opf_views  # noqa: E402  U4: deterministic view generators + the closed transform vocabulary
-import _opf_fuzz  # noqa: E402  adversarial input-hardening proof (membership/type-guard class closure)
-import _opf_import  # noqa: E402  U7: import staging (module + self-test; the live import verb stays unwired)
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the guarded _opf_* helper bootstrap below
 
 EXIT_OK = 0
 EXIT_FINDING = 1
 EXIT_MALFORMED = 2
+
+
+def _bootstrap():
+    """Import the non-stdlib _opf_* helper modules the dispatch and self-test legs use, binding each to a
+    module global. Called FIRST in main() so a broken or PARTIAL install -- a helper that cannot be imported
+    (ImportError) or read (OSError) -- maps to a located cannot-evaluate (EXIT_MALFORMED / 2), never an
+    uncaught ImportError that Python would surface as its default exit 1 and that a direct `opf render
+    --check` would then read as a false DRIFT (the exit-1=drift conflation, reached here BEFORE the render
+    dispatcher's own fail-closed handler). Only ImportError and OSError (the broken/partial-install signals)
+    are caught; a broader error propagates rather than being masked as bootstrap. The imports moved OFF module
+    top for exactly this reason -- an eager top-level import failed before main()'s contract could apply.
+    Idempotent: a re-import of an already-loaded module is a cheap no-op, so main() may call it on every
+    invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
+    that could not be brought in."""
+    global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
+    global _opf_emit, _opf_views, _opf_fuzz, _opf_import
+    try:
+        import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
+        import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
+        import _opf_release     # U3: version.toml + worklog.toml + span tiling + coverage digests + release cut
+        import _opf_changelog   # U5: changelog range-coverage + freeze gates over version.toml + CHANGELOG.md
+        import _opf_check       # U6: store-level integrity validator (validate_store; engine for opf doctor)
+        import _opf_emit        # U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
+        import _opf_views       # U4: deterministic view generators + the closed transform vocabulary
+        import _opf_fuzz        # adversarial input-hardening proof (membership/type-guard class closure)
+        import _opf_import      # U7: import staging (module + self-test; the live import verb stays unwired)
+    except ImportError as exc:
+        print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    except OSError as exc:
+        print("opf: cannot bootstrap: a helper module could not be read ({!r}) (cannot evaluate)".format(
+            exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    return EXIT_OK
 
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
@@ -609,7 +634,12 @@ def _cli_self_test():
 
 # Registered helper self-tests, run by `opf.py --self-test`. Each is (label, callable) returning a
 # 0/1/2 exit code (0 clean, 1 finding, 2 cannot-evaluate). Later units append their own helper here.
-SELF_TESTS = (
+# Built by a function rather than a module-level tuple because the _opf_* helpers it references are bound by
+# _bootstrap() inside main(), not at module import; it is called after _bootstrap() has run.
+def _self_tests():
+    """Return the registered (label, callable) helper self-tests run by `opf.py --self-test`. Called after
+    _bootstrap() has bound the _opf_* helpers, so every referenced helper is present."""
+    return (
     ("opf-store", _opf_store.self_test),
     ("opf-schema", _opf_schema.self_test),
     ("opf-release", _opf_release.self_test),
@@ -636,10 +666,12 @@ KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync")
 _INT_LIMIT_SELF_TESTS = frozenset({"opf-release", "opf-emit", "opf-schema", "opf-fuzz", "opf-import"})
 
 
-def run_self_tests(tests=SELF_TESTS):
+def run_self_tests(tests=None):
     """Run every registered helper self-test in order, forwarding each result. The aggregate exit code
     is the WORST outcome (2 cannot-evaluate > 1 finding > 0 clean): one degraded or failing helper fails
-    the whole leg, never masked by a later clean one.
+    the whole leg, never masked by a later clean one. With no explicit `tests`, the registered set is built
+    by _self_tests() at call time (after _bootstrap() has bound the _opf_* helpers), never a module-level
+    default that would need those helpers imported at module top.
 
     Int-limit hermeticity guard (finding 8-4): each helper in _INT_LIMIT_SELF_TESTS pins the int-string
     conversion limit to 4300 inside its fixtures and must RESTORE the ambient value afterward. That restore
@@ -649,6 +681,8 @@ def run_self_tests(tests=SELF_TESTS):
     ambient; a dropped restore in any of those helpers leaves 4300 != sentinel and fails the leg closed.
     These helpers are hermetic w.r.t. the ambient int-limit by construction (they pin their own 4300), so
     running them under the sentinel is exactly the hostile-ambient contract they already satisfy."""
+    if tests is None:
+        tests = _self_tests()
     worst = EXIT_OK
     _idlimit_orig = sys.get_int_max_str_digits()
     _idlimit_sentinel = 271828 if _idlimit_orig != 271828 else 314159   # distinct from 4300 AND from ambient
@@ -685,6 +719,13 @@ def run_self_tests(tests=SELF_TESTS):
 
 
 def main(argv=None):
+    # Guarded helper bootstrap FIRST: a broken or partial install (an unimportable/unreadable _opf_* helper)
+    # maps to a located cannot-evaluate (exit 2), never an uncaught ImportError escaping as Python's default
+    # exit 1 that a direct `opf render --check` would read as a false drift. Idempotent, so the repeated
+    # main() calls in the CLI self-test cost nothing once the helpers are loaded.
+    rc = _bootstrap()
+    if rc != EXIT_OK:
+        return rc
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--self-test"]:
         return run_self_tests()
