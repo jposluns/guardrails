@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "be77ac2647e1d5e02477488bd7442ef0ae530a798f8ff26fb271a083bd658bac"
+tree-sha256 = "79dca0e7f1a5203487c454d09dfd41f86bd1ab269279fdd5ba8a9ee3f915d1cb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -117,7 +117,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2536
-sha256 = "d5c0496596495ea59bcb49bb959cd3d111353e3ae650c2e4b137e11220b193d2"
+sha256 = "f67467cfa11861d510d1d2f655e0c5185cdc52d56cdd4962ff560827e670898c"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2541,8 +2541,8 @@ sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
 
 [[sources]]
 path = "tools/_gen_common.py"
-bytes = 4763
-sha256 = "817bdf856c6984fe01dc066e13b477af8328e44cf58fda04bce6b596d7bd920d"
+bytes = 5104
+sha256 = "224829d7c09fe46485455ba5e69bd5621e5411270a36dda248dde527d0b20811"
 
 [[sources]]
 path = "tools/_journal.py"
@@ -2866,8 +2866,8 @@ sha256 = "c56cc0b8082aea3d2c45f62b27a4270c3597601ecaf993bbfd52cab84efaa85a"
 
 [[sources]]
 path = "tools/check_newtab.py"
-bytes = 12144
-sha256 = "873b85c17a349a012cb72ad19147aebfc6cc370796d1b151c36393258548922f"
+bytes = 14117
+sha256 = "86599a1fa316dd23acedb44a6fafe8c5856e32c29c5a7c2891a0506a06cb5f3d"
 
 [[sources]]
 path = "tools/check_no_dashes.py"
@@ -2936,8 +2936,8 @@ sha256 = "12300a7a0cf8bff754569003f99d03a5eb69509735d5dd8433f331b3f5b31e8f"
 
 [[sources]]
 path = "tools/check_site.py"
-bytes = 17405
-sha256 = "8d9c93c2dad38228a72a725aca24621ed29913661fcc0439c246c9ce658b7227"
+bytes = 19257
+sha256 = "7bb0136bf1f895d0d5f7efdaaadfe8dc4428bfbd26ea49d9f7bb1d7a265913ca"
 
 [[sources]]
 path = "tools/check_site_versions.py"
