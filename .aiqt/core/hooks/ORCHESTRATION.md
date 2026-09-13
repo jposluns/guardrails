@@ -114,14 +114,15 @@ three-denial cap. `tools/aei_backlog_md.py` is the generic reference provider fo
 backlog. Its grammar is the dash-bullet checkbox line (`- <ID> [ |.|o|O|x|BLOCKED] <title>`, with an
 optional `:: blocker:<kind>=<ref>` clause and a trailing `:: proposed`); any other line is prose. A
 backlog that yields ZERO items is a cannot-evaluate ENUMERATOR_ERROR (exit 3, no JSON emitted), NOT an
-empty enumeration, unless it carries no operative content besides scaffolding (blank lines, headings,
-whole-line comments) AND affirms emptiness with the sentinel line `<!-- aei: empty backlog -->`: any
-operative content with zero recognized items (a markdown table, an alternate bullet, a fenced example,
-prose, or any other unrecognized format) is cannot-evaluate (exit 3) WHETHER OR NOT a sentinel is
-present, and an unaffirmed empty file fails closed, so an unrecognized backlog can never read as a
-drained actionable set and a sentinel can never mask unrecognized work. Emptiness is affirmed by the
-sentinel (which tolerates internal whitespace, not a hyphen), never inferred from absence; the empty
-`items` array is a valid enumeration only when produced from that affirmation over scaffolding alone.
+empty enumeration, unless it is a valid affirmed-empty backlog: a file whose ONLY non-blank line is the
+column-0 sentinel line `<!-- aei: empty backlog -->` (blank lines allowed). Any other non-blank line,
+including a heading or a comment carrying content (a markdown table, an alternate bullet, a fenced
+example, indented code, prose, or any other unrecognized format), is operative content and yields
+cannot-evaluate (exit 3) WHETHER OR NOT a sentinel is present, and an unaffirmed empty file fails closed,
+so an unrecognized backlog can never read as a drained actionable set and a sentinel can never mask
+unrecognized work. Emptiness is affirmed by the sentinel (which tolerates internal whitespace, not a
+hyphen, and must sit at column 0), never inferred from absence; the empty `items` array is a valid
+enumeration only when produced from that affirmation, the sentinel the sole non-blank line.
 
 ## Platforms without hooks
 
