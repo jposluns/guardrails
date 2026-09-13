@@ -124,6 +124,12 @@ jobs:
       - name: OPF tooling self-test
         run: python3 -I -B tools/opf.py --self-test
 
+      - name: OPF render-drift gate self-test
+        run: python3 -I -B tools/check_opf_drift.py --self-test
+
+      - name: OPF render-drift gate
+        run: python3 -I -B tools/check_opf_drift.py
+
       - name: Corpus-core library self-test
         run: python3 -I -B tools/selftest_aiqt_corpus.py
 

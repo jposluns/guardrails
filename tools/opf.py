@@ -22,6 +22,7 @@ repo-relative target, so this family gates as self-tests instead (the U1 build-p
 Launched isolated (-I -B) per the Python-launcher-isolation gate; sibling helpers are imported through
 the sys.path insert idiom the repo's tools share.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -420,6 +421,124 @@ def _watchdog_shared_restore_deadline_self_test():
     return EXIT_OK
 
 
+def _cmd_render(rest):
+    """`opf render [--root DIR] (--check | --write)`: the store render verb.
+
+    PR-A wires the READ-ONLY `--check` half, forwarding to the U4 engine `_opf_views.render`, whose 0/1/2
+    contract is exactly the required one (0 clean, 1 drift, 2 cannot-evaluate; a NOT-ADOPTED root reports
+    NOT APPLICABLE and exits 0, the pack's own `--root .` case). The mutating `--write` half is recognized
+    but fails closed until a later unit composes the U6 store-integrity gate, so a write can never read as a
+    silent no-op. Exactly one of `--check`/`--write` is required: a bare `opf render` is a usage error (a
+    preview never defaults into a write). The parser is the house fail-closed idiom (unknown token, an empty
+    or option-looking or duplicate --root value -> exit 2), matching _opf_views.render's own parser."""
+    root = None
+    mode = None
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in ("--check", "--write"):
+            if mode is not None:
+                print("opf render: give exactly one of --check / --write", file=sys.stderr)
+                return EXIT_MALFORMED
+            mode = "check" if tok == "--check" else "write"
+            i += 1
+        elif tok == "--root":
+            if i + 1 >= len(rest):
+                print("opf render: --root requires a directory argument", file=sys.stderr)
+                return EXIT_MALFORMED
+            if root is not None:
+                print("opf render: --root given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            val = rest[i + 1]
+            if val == "" or val.startswith("-"):
+                print("opf render: --root requires a non-empty directory argument, not {!r}".format(val),
+                      file=sys.stderr)
+                return EXIT_MALFORMED
+            root = val
+            i += 2
+        else:
+            print("opf render: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            return EXIT_MALFORMED
+    if mode is None:
+        print("opf render: give exactly one of --check / --write", file=sys.stderr)
+        return EXIT_MALFORMED
+    if mode == "write":
+        # The mutating --write half composes the U6 store-integrity gate in a later unit; until then it
+        # fails closed (exit 2), never a silent no-op, exactly like a not-yet-landed verb.
+        print("opf render --write: not yet implemented in this build (fail-closed)", file=sys.stderr)
+        return EXIT_MALFORMED
+    argv = ["--check"] if root is None else ["--root", root, "--check"]
+    return _opf_views.render(argv)
+
+
+def _cli_self_test():
+    """Guard the opf.py dispatcher's verb ROUTING (PR-A: the `render` verb). Judged on the returned exit
+    code ONLY (never by grepping output, per the isolate-verifiers rule); each case drives main() with an
+    explicit argv, its stdout/stderr redirected so this leg's own output stays clean. Cases: an unknown
+    verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`, `render
+    --write`, both flags together, an unrecognized render flag, a `--root` with no value, and an empty
+    `--root` are usage errors (exit 2); and `render --check` FORWARDS to the U4 engine -- a NOT-ADOPTED root
+    returns 0 (the wiring discriminator: reverting the render wiring routes it to the fail-closed KNOWN_VERBS
+    branch and returns 2, failing this case) and a garbage store returns 2. The clean/drift 0/1
+    discrimination over a populated store rides check_opf_drift.py --self-test, which drives the same wiring
+    end to end. Returns 0 clean, 1 on a failure, 2 on a harness error."""
+    import io
+    import shutil
+    import tempfile
+    import contextlib
+
+    failures = []
+
+    def expect(argv, want):
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                got = main(list(argv))
+        except BaseException as exc:                    # a dispatcher crash is itself a failure
+            failures.append("{!r} raised {!r}".format(argv, exc))
+            return
+        if got != want:
+            failures.append("{!r} returned {!r} (expected {})".format(argv, got, want))
+
+    # Routing cases that need no store on disk.
+    expect([], EXIT_MALFORMED)
+    expect(["frobnicate"], EXIT_MALFORMED)
+    for verb in KNOWN_VERBS:
+        if verb != "render":
+            expect([verb], EXIT_MALFORMED)              # a known but not-yet-wired verb fails closed
+    expect(["render"], EXIT_MALFORMED)                  # bare: exactly one of --check/--write required
+    expect(["render", "--write"], EXIT_MALFORMED)       # the write half is not yet wired, fail-closed
+    expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
+    expect(["render", "--bogus"], EXIT_MALFORMED)       # unknown render flag
+    expect(["render", "--root"], EXIT_MALFORMED)        # --root needs a value
+    expect(["render", "--check", "--root", ""], EXIT_MALFORMED)   # empty root refused
+
+    base = tempfile.mkdtemp(prefix="opf-cli-selftest-")
+    try:
+        # A NOT-ADOPTED root (no .working/): render --check FORWARDS to the U4 engine and returns 0
+        # (NOT APPLICABLE). This is the wiring discriminator -- an unwired render verb returns 2 here.
+        not_adopted = os.path.join(base, "not-adopted")
+        os.mkdir(not_adopted)
+        expect(["render", "--check", "--root", not_adopted], EXIT_OK)
+
+        # A garbage store (a discovered but unparseable manifest): render --check fails closed (exit 2).
+        broken = os.path.join(base, "broken")
+        os.makedirs(os.path.join(broken, ".working", "toml"))
+        with open(os.path.join(broken, ".working", "toml", "manifest.toml"), "w", encoding="utf-8") as fh:
+            fh.write("this is not valid toml {{{\n")
+        expect(["render", "--check", "--root", broken], EXIT_MALFORMED)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+    if failures:
+        for f in failures:
+            print("opf cli self-test: FAIL: {}".format(f), file=sys.stderr)
+        return EXIT_FINDING
+    print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render usage errors fail "
+          "closed; render --check forwards to the U4 engine)")
+    return EXIT_OK
+
+
 # Registered helper self-tests, run by `opf.py --self-test`. Each is (label, callable) returning a
 # 0/1/2 exit code (0 clean, 1 finding, 2 cannot-evaluate). Later units append their own helper here.
 SELF_TESTS = (
@@ -437,6 +556,7 @@ SELF_TESTS = (
     ("opf-watchdog-shared-restore", _watchdog_shared_restore_self_test),
     ("opf-watchdog-shared-restore-deadline", _watchdog_shared_restore_deadline_self_test),
     ("opf-aggregator", _aggregator_self_test),
+    ("opf-cli", _cli_self_test),
 )
 
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
@@ -496,14 +616,17 @@ def run_self_tests(tests=SELF_TESTS):
     return worst
 
 
-def main():
-    args = sys.argv[1:]
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--self-test"]:
         return run_self_tests()
     if not args or args[0] in ("-h", "--help"):
         print(__doc__, file=sys.stderr)
         return EXIT_MALFORMED
     verb = args[0]
+    rest = args[1:]
+    if verb == "render":
+        return _cmd_render(rest)
     if verb in KNOWN_VERBS:
         # A recognized verb whose unit has not landed: fail closed (exit 2), never a silent success, so
         # a stub is never mistaken for a completed operation.
