@@ -28,7 +28,8 @@
 #   rules     the corpus-id(s) this gate cites (a list; MAY be empty but must be PRESENT; every
 #             element must resolve to a real corpus-id in .aiqt/core/rules/)
 #   platform  "ci" (the Quality workflow plus its local mirror; a neutrality dimension, not an abstraction)
-#   default   "block" (a failing gate exits nonzero; no roster step carries continue-on-error)
+#   default   "block" (a finding fails CI, a failing gate exits nonzero) or "warn" (an ADVISORY gate: a
+#             finding is reported for human review but never fails CI; only a tool crash, an exit 2, fails)
 #   class     the EN-5 enforceability letter, restricted to a (deterministic gate) or c (partial) here;
 #             b is the hook axis and never appears in a gates manifest, d is never authored on a control.
 #             The a-versus-c line is TOTALITY over the examined class, not determinism of the scan (the
@@ -651,6 +652,24 @@ platform = "ci"
 default = "block"
 class = "c"
 residue = "A deterministic scan over a RECOGNIZABLE SUBSET of the repo's Python launcher configuration: the generated plugin hooks.json, tools/run_all_checks.sh, every regular *.yml/*.yaml under .github/workflows/, and the optional .claude/settings.json files. A direct python3 launcher there is FAILed unless it runs isolated (-I, or the full -P -E -s), so a tool-written sibling cannot shadow a stdlib import and neuter the control; the gate itself refuses to run non-isolated (exit 2) so a sibling cannot neuter the gate first, and it fails closed (exit 2) on a missing, unreadable, non-regular, or malformed input rather than passing it as clean. It does NOT catch: wrapper or indirect launchers (a bash -c string, a .sh re-launcher), $PYTHON or shell aliases and functions, a dynamically assembled argv, the programmatic subprocess children in the tools and the regenerate strings in .aiqt/gensrc.json (a separate follow-up), a script that mutates its own sys.path at runtime (which -I cannot prevent), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces, YAML or shell constructs beyond the supported line grammar, and the PATH provenance of python3 itself; a python3 token embedded in a quoted argument or a heredoc may be miscounted."
+
+[[gate]]
+id = "timer-restore"
+script = "tools/check_timer_restore.py"
+rules = ["tmrrst"]
+platform = "ci"
+default = "warn"
+class = "c"
+residue = "An ADVISORY (WARN-only) v1 deterministic AST-plus-local-dataflow scan over a RECOGNIZABLE SUBSET of the repo's Python (tools/*.py excluding tools/_vendor/, and .aiqt/core/hooks/scripts/*.py) that flags borrowed process-timer save-plus-restore scopes for human review against tmrrst. It EMITS a WARN advisory (exit 0) for a recognized scope and NEVER blocks CI. It fails closed (exit 2) on a missing, unreadable, non-regular, non-UTF-8, or unparseable declared input, a declared input whose AST exceeds the analyzer's recursion or memory capacity (a cannot-evaluate), or a non-isolated run. It covers a recognizable SUBSET (class c, partial) and is a best-effort heuristic, not a decision procedure and not a specification of its own behaviour: within a single function or module scope it recognizes a value saved from a process timer (signal.getitimer/alarm/setitimer) and later passed to a restoring signal.alarm/setitimer, and it applies internal suppression and downgrade heuristics, for example it can suppress a derived restore that carries elapsed evidence, and it recognizes only a syntactic subset of saves, restores, and control flow. It guarantees neither a WARN for every risky restore nor silence for any particular shape: a shape it does not model, such as a cross-function or cross-module flow, dynamic dispatch or an unresolved alias, a value stashed into and read back from a container or helper it does not follow, FFI or non-Python manipulation, or a rebind such as an `import ... as <name>`, may emit or may go unflagged. The detector source and its self-tests are the authoritative account of exactly what it flags; this residue does not restate that account, and sharper precision that could later support a non-advisory classification is a disclosed follow-on deferred because sound static-dataflow conviction over arbitrary Python is not yet achieved. The tmrrst rule carries the full obligation, and the elapsed-aware save/restore living once in a shared helper (which the rule requires) is the primary control this advisory backstops."
+
+[[gate]]
+id = "path-classification"
+script = "tools/check_path_classification.py"
+rules = ["secspr", "chkfcl"]
+platform = "ci"
+default = "warn"
+class = "c"
+residue = "An ADVISORY (WARN-only) v1 deterministic AST-plus-local-dataflow scan over a RECOGNIZABLE SUBSET of the repo's Python (tools/*.py excluding tools/_vendor/, and .aiqt/core/hooks/scripts/*.py) that flags control-path following-classify-then-mutate and conflated-except scopes for human review against secspr and chkfcl/secfcl. It EMITS a WARN advisory (exit 0) for a recognized scope and NEVER blocks CI. It fails closed (exit 2) on a missing, unreadable, non-regular, non-UTF-8, or unparseable declared input, a declared input whose AST exceeds the analyzer's recursion or memory capacity (a cannot-evaluate), or a non-isolated run. It covers a recognizable SUBSET (class c, partial) and is a best-effort heuristic, not a decision procedure and not a specification of its own behaviour: within a single function or module scope it recognizes a following existence or type check whose benign-negative branch lets a control or state path be mutated, and a try whose except conflates an absence error with a non-absence error, and it applies internal suppression and downgrade heuristics, for example it recognizes an explicit-raise refusal on the branch, and no-follow evidence, which can suppress or downgrade a finding, and it emits at a certain-shape or a resist-static tier. It guarantees neither a WARN for every risky case nor silence for any particular shape: a shape it does not model, such as a classify that is only part of a larger BoolOp, a cross-function or cross-module flow, dynamic dispatch, getattr indirection, an unproven receiver provenance, a non-Python surface, or a rebind such as an `import ... as <name>`, may emit or may go unflagged. The detector source and its self-tests are the authoritative account of exactly what it flags; this residue does not restate that account. The classifier table is Python-first; further languages are additive rows plus a parser, a named follow-on. The secspr and chkfcl/secfcl rules carry the full obligation."
 
 [[gate]]
 id = "branch-root"
