@@ -224,6 +224,7 @@
 .claude/rules/aiqt/10-QUALI-compatibility-or-migration.md text eol=lf
 .claude/rules/aiqt/10-QUALI-confirm-execution-target.md text eol=lf
 .claude/rules/aiqt/10-QUALI-defence-in-depth-default.md text eol=lf
+.claude/rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md text eol=lf
 .claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md text eol=lf
 .claude/rules/aiqt/10-QUALI-goal-fidelity-across-trajectory.md text eol=lf
 .claude/rules/aiqt/10-QUALI-high-assurance-verification.md text eol=lf
@@ -353,6 +354,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-compatibility-or-migration.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-confirm-execution-target.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-defence-in-depth-default.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-elapsed-aware-timer-restore.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-findings-are-fixed-not-argued.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-goal-fidelity-across-trajectory.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-QUALI-high-assurance-verification.mdc text eol=lf

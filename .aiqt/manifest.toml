@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "c409e8d5017a2586b68b741215ee238dcee56bc4c640d46c4cc4bf2147a9f47e"
+tree-sha256 = "5ab75e072b8eef5112ae0d6cb4ba847473811eafc68f1c03a68990487c68640c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -56,8 +56,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 100866
-sha256 = "de6106ec8a115965da07a3d6a211e06459ef2aa6edcc6321d4ed00ec7d58613d"
+bytes = 99560
+sha256 = "85da4022265c985e5be7f9e449e93e4d55e7c1e12233e6c0454de70b145d5f08"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -776,8 +776,8 @@ sha256 = "5ed8a9d47b3b445a038d48eafcd819aec5c12736513dc3f205de1ebc17423ee2"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 308497
-sha256 = "062066990d03af914c8193e6c6e1562c173c452a61aad6c8c2e6d326a88bb2a9"
+bytes = 306254
+sha256 = "9c2b650a5a2ab03c8199fe4d9da30e91b490d0899ec46d1c2d4cac0497fd69dc"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -1113,6 +1113,11 @@ sha256 = "d5c77943670abf446d40b528e75b2e4226c1ff231c1347ea959dd1d782240f8f"
 path = ".claude/rules/aiqt/10-QUALI-defence-in-depth-default.md"
 bytes = 1321
 sha256 = "869083e9ef683c85b8eb380961c656ce727214fa20b1d599c559559904c4e0d6"
+
+[[sources]]
+path = ".claude/rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md"
+bytes = 1712
+sha256 = "cd5feec674c0e576a2e1060037827ee3e41713e24bd5128e0adf24d540f840d0"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md"
@@ -1760,6 +1765,11 @@ bytes = 1167
 sha256 = "1702534c0d49b5dbb98d95b6092a6059e4cca1f2950bc4ab009c8c2311e47918"
 
 [[sources]]
+path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-elapsed-aware-timer-restore.mdc"
+bytes = 1611
+sha256 = "569c678faf65b6cc6885fce90437b70a7004684bf740e688d07dd9434c1470a5"
+
+[[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-findings-are-fixed-not-argued.mdc"
 bytes = 343
 sha256 = "47d9807da8a518932d428853002700ba5e55d521b93f6d588edd0e2b859d5fc4"
@@ -2186,8 +2196,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 37487
-sha256 = "bb12358852d46e69fd207d6841d7d26f2678620106f358e39c34ba494beb2af9"
+bytes = 37646
+sha256 = "884ca9798d1446b25fa0af35979851a0bb6f4ccf590f9689484288e87a74c909"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2891,8 +2901,8 @@ sha256 = "7f6444c17c8955e826e967ee116878f61edc75940464e3b30e62b0aefa617b75"
 
 [[sources]]
 path = "tools/check_path_classification.py"
-bytes = 82347
-sha256 = "c43369f8f144f2eb4bf9e6204a1f5edad5c5e4648775c5e66d1fa0688922caf0"
+bytes = 84021
+sha256 = "f9e78925756cc44769c04ee3a67f29e2734cbac7a9d751c40e2550c07126865c"
 
 [[sources]]
 path = "tools/check_portability.py"
@@ -2971,8 +2981,8 @@ sha256 = "565eaf3a2a53a94de3ae525faac3411a99a4bcdd96e017f2a859bc4c33b4d79d"
 
 [[sources]]
 path = "tools/check_timer_restore.py"
-bytes = 69172
-sha256 = "8d10f7ed0aaf97b306d3b5599b860b7b520587e143af07020e2d8f3c1eebaaac"
+bytes = 70885
+sha256 = "3e19a015c2a8ed852684e3b82f592f5e1a14257c952c16c157072871672bafe6"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"
@@ -3473,6 +3483,12 @@ artifact-id = "rules:.claude/rules/aiqt/10-QUALI-defence-in-depth-default.md"
 path = ".claude/rules/aiqt/10-QUALI-defence-in-depth-default.md"
 kind = "file"
 sha256 = "869083e9ef683c85b8eb380961c656ce727214fa20b1d599c559559904c4e0d6"
+
+[[artifacts]]
+artifact-id = "rules:.claude/rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md"
+path = ".claude/rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md"
+kind = "file"
+sha256 = "cd5feec674c0e576a2e1060037827ee3e41713e24bd5128e0adf24d540f840d0"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md"
@@ -4247,6 +4263,12 @@ artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-defence-in-dep
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-defence-in-depth-default.mdc"
 kind = "file"
 sha256 = "1702534c0d49b5dbb98d95b6092a6059e4cca1f2950bc4ab009c8c2311e47918"
+
+[[artifacts]]
+artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-elapsed-aware-timer-restore.mdc"
+path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-elapsed-aware-timer-restore.mdc"
+kind = "file"
+sha256 = "569c678faf65b6cc6885fce90437b70a7004684bf740e688d07dd9434c1470a5"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-findings-are-fixed-not-argued.mdc"

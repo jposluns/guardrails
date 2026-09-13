@@ -9,7 +9,7 @@ restore to be elapsed-aware: the saved remaining interval reduced by the time th
 deadline that would have expired during the window clamped to fire immediately rather than re-armed at
 full value. This gate is an ADVISORY (WARN-only) v1: it scans the repo's own Python and EMITS WARN
 advisories for the certain verbatim-restore shape and for the resist-static shapes alike, flagging both for
-human review against tmrrst, and it NEVER blocks CI. A sound BLOCKING classification (DENY-precision) is a
+human review against tmrrst, and it NEVER blocks CI. Sharper precision that could later support a non-advisory classification is a
 DISCLOSED FOLLOW-ON, deferred because a sound static-dataflow conviction over arbitrary Python binding and
 control-flow is not yet achieved; v1 is WARN-only and does not block CI.
 
@@ -42,7 +42,7 @@ local names currently hold a verbatim saved timer value:
                   enclosing scope (the suppressor the elapsed-aware restore leaves behind).
 Only a scope carrying BOTH a SAVE and a RESTORE of a name still saved at the restore point is ever
 reported, so an ordinary arm, a disarm, a bare save, a restore of an overwritten name, or a handler-only
-restore is out of scope entirely.
+restore falls outside the recognized save-plus-restore core.
 
   CERTAIN-SHAPE advisory (exit 0)  an ordered SAVE -> own nonzero ARM -> IDENTITY-flow RESTORE (the own-arm
                   already seen when the identity restore fires) with NO elapsed-evidence anywhere in the
@@ -67,7 +67,7 @@ restore is out of scope entirely.
                   `import ... as <name>` alias binding the saved name, or other dataflow the scan cannot
                   follow, may leave the stale saved name in the set and produce a false-positive
                   certain-shape advisory. Under WARN-only that advisory is harmless (it is a flag for review,
-                  never a block); DENY-precision that would need binding-completeness is a disclosed
+                  never a block); sharper precision that would need binding-completeness is a disclosed
                   follow-on. The scan models a bounded set of cases; unmodelled or ambiguous dataflow
                   (cross-branch saved-value flow across mutually-exclusive branches, an `import ... as
                   <name>` alias rebinding the saved name, and other constructs it does not track) CAN yield
@@ -113,8 +113,8 @@ save and the restore by a loop, with-as, except-as, or comprehension target; a
 receiver whose module identity is shadowed by a parameter or local; an own-arm that does not provably sit in
 the ordered save -> arm -> restore window; an IfExp-derived restore (`saved[0] if ... else ...`) and a
 star-unpack restore (`setitimer(WHICH, *saved)`), neither of which is enumerated as an identity flow; and a
-restore assembled through a container or across a helper. A sound BLOCKING classification (DENY-precision)
-that would convict these is a DISCLOSED FOLLOW-ON. Missing such a defect is the accepted residual; the tmrrst
+restore assembled through a container or across a helper. Sharper precision that could later support a non-advisory classification
+of these is a DISCLOSED FOLLOW-ON. Missing such a defect is the accepted residual; the tmrrst
 rule carries the full obligation, and the elapsed-aware save/restore living once in a shared helper (which
 the rule requires) is the primary control this advisory backstops.
 
@@ -725,7 +725,7 @@ def run(root):
             where = "{}:{}".format(rel, lineno) if lineno else rel
             _emit("cannot-evaluate: {}: {}".format(where, msg))
         # WARN-only v1: the certain-shape findings (deny) and the resist-static findings (warn) are both
-        # advisories on the same stream; neither sets a blocking exit. DENY-precision is a disclosed
+        # advisories on the same stream; neither sets a blocking exit. Sharper precision is a disclosed
         # follow-on.
         for rel, lineno, msg in warn:
             _emit("WARN: {}:{}: {}".format(rel, lineno, msg))
@@ -1261,6 +1261,29 @@ def self_test_main():
             failures.append("ascii-locale (subprocess): child exited 1 (advisory rendering not encoding-safe)")
         elif rc not in (0, 2):
             failures.append("ascii-locale (subprocess): expected exit 0 or 2, got {}".format(rc))
+
+        # 4g. RUN-PATH ADVISORY-EMISSION leg: exercise the REAL run() entry point in an isolated child over a
+        # /dev/shm fixture root (TMPDIR routes tmp there) and assert BOTH the child exits 0 AND a located
+        # "WARN:" advisory is actually EMITTED on stdout, so a regression in the reporting/exit-code path
+        # cannot pass unseen. The r9-inline-container leg above exercises scan() alone (not run() or its
+        # rendered output); this companion drives run() end to end over the same inline-container fixture.
+        def child_run_out(fixture_root):
+            boot = ("import sys\n"
+                    + "sys.path.insert(0, {!r})\n".format(this_dir)
+                    + "from pathlib import Path\n"
+                    + "import {} as _m\n".format(module_name)
+                    + "sys.exit(_m.run(Path({!r})))\n".format(str(fixture_root)))
+            proc = subprocess.run([sys.executable, "-I", "-B", "-c", boot],
+                                  capture_output=True, env=dict(os.environ))
+            return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+        rc, out = child_run_out(make_child_root("child_warn_inline", "case_inline_container.py",
+                                                text=_INLINE_CONTAINER_WARN_SRC))
+        if rc != 0:
+            failures.append("run-emit inline-container (subprocess): expected exit 0, got {}".format(rc))
+        if not any(ln.startswith("WARN:") for ln in out.splitlines()):
+            failures.append("run-emit inline-container (subprocess): expected an emitted WARN: advisory on "
+                            "stdout, got {!r}".format(out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

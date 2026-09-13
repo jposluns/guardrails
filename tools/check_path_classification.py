@@ -11,10 +11,10 @@ type confirmed on the opened object, and everything else refused as an error rat
 absence; and its sibling fail-closed and no-silent-empty rules (secfcl, chkfcl) require a wrong-type or
 unreadable entry to surface, never read as clean. This gate is an ADVISORY (WARN-only) v1: it scans the
 repo's own Python and EMITS WARN advisories for the certain collapse shapes and for the resist-static
-shapes alike, flagging both for human review against secspr and chkfcl/secfcl, and it NEVER blocks CI. A
-sound BLOCKING classification (DENY-precision) is a DISCLOSED FOLLOW-ON, deferred because a sound
-static-dataflow conviction over arbitrary Python binding and control-flow is not yet achieved; v1 is
-WARN-only and does not block CI.
+shapes alike, flagging both for human review against secspr and chkfcl/secfcl, and it NEVER blocks CI.
+Sharper precision that could later support a non-advisory classification is a DISCLOSED FOLLOW-ON, deferred
+because a sound static-dataflow conviction over arbitrary Python binding and control-flow is not yet
+achieved; v1 is WARN-only and does not block CI.
 
 DETECTOR (AST plus local dataflow; a regex never convicts). Import aliases for os, os.path, and pathlib are
 resolved within each module. The classifier-signature and suppressor sets are module-level DATA TABLES so
@@ -126,8 +126,8 @@ the semantic question of whether a bare `except OSError` truly conflates absence
 (kept at the resist-static advisory). Path provenance is intra-scope and syntactic (a pathlib construction,
 a path-returning method or attribute, a `/` join, or a Path-typed annotation); a path object arriving from a
 helper return or a container the scan does not model is not proven, so it is the resist-static advisory
-rather than the certain shape. A sound BLOCKING classification (DENY-precision) that would convict these is
-a DISCLOSED FOLLOW-ON. Missing such a defect is the accepted residual; the secspr and chkfcl/secfcl rules
+rather than the certain shape. Sharper precision that could later support a non-advisory classification of
+these is a DISCLOSED FOLLOW-ON. Missing such a defect is the accepted residual; the secspr and chkfcl/secfcl rules
 carry the full obligation. The classifier table is Python-first; further languages are additive rows plus a
 parser (a named follow-on), not covered here.
 
@@ -998,7 +998,7 @@ def run(root):
             where = "{}:{}".format(rel, lineno) if lineno else rel
             _emit("cannot-evaluate: {}: {}".format(where, msg))
         # WARN-only v1: the certain-shape findings (deny) and the resist-static findings (warn) are both
-        # advisories on the same stream; neither sets a blocking exit. DENY-precision is a disclosed
+        # advisories on the same stream; neither sets a blocking exit. Sharper precision is a disclosed
         # follow-on.
         for rel, lineno, msg in warn:
             _emit("WARN: {}:{}: {}".format(rel, lineno, msg))
@@ -1490,6 +1490,29 @@ def self_test_main():
             failures.append("ascii-locale (subprocess): child exited 1 (advisory rendering not encoding-safe)")
         elif rc not in (0, 2):
             failures.append("ascii-locale (subprocess): expected exit 0 or 2, got {}".format(rc))
+
+        # 5g. RUN-PATH ADVISORY-EMISSION leg: exercise the REAL run() entry point in an isolated child over a
+        # /dev/shm fixture root (TMPDIR routes tmp there) and assert BOTH the child exits 0 AND a located
+        # "WARN:" advisory is actually EMITTED on stdout, so a regression in the reporting/exit-code path
+        # cannot pass unseen. The r9-early-return-namehint leg above exercises scan() alone (not run() or its
+        # rendered output); this companion drives run() end to end over the same early-return fixture.
+        def child_run_out(fixture_root):
+            boot = ("import sys\n"
+                    + "sys.path.insert(0, {!r})\n".format(this_dir)
+                    + "from pathlib import Path\n"
+                    + "import {} as _m\n".format(module_name)
+                    + "sys.exit(_m.run(Path({!r})))\n".format(str(fixture_root)))
+            proc = subprocess.run([sys.executable, "-I", "-B", "-c", boot],
+                                  capture_output=True, env=dict(os.environ))
+            return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+        rc, out = child_run_out(make_child_root("child_warn_early_return", "case_early_return.py",
+                                                text=_EARLY_RETURN_WARN_SRC))
+        if rc != 0:
+            failures.append("run-emit early-return (subprocess): expected exit 0, got {}".format(rc))
+        if not any(ln.startswith("WARN:") for ln in out.splitlines()):
+            failures.append("run-emit early-return (subprocess): expected an emitted WARN: advisory on "
+                            "stdout, got {!r}".format(out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
