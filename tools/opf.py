@@ -10,7 +10,9 @@ NOT-YET-IMPLEMENTED and fail closed (exit 2) until their unit lands, so a stub c
 passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exactly one of
 `--check | --write` (a bare `render` is a usage error, exit 2); `--check` is IMPLEMENTED (read-only drift
 check, forwarding to the U4 engine) and `--write` is recognized but fail-closed (exit 2) pending VC-4, the
-composition of the EXISTING U6 `validate_store` store-integrity gate that `opf doctor` already uses.
+composition of the EXISTING U6 `validate_store` store-integrity gate INTENDED FOR the deferred `opf doctor`
+verb. `doctor` itself is NOT yet wired: it is a recognized KNOWN_VERB that reports NOT-YET-IMPLEMENTED and
+fails closed (exit 2), so validate_store is the engine doctor WILL compose, not one it already uses.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -34,7 +36,7 @@ import _opf_store  # noqa: E402  U1: store resolution + discovery + manifest bas
 import _opf_schema  # noqa: E402  U2: record envelope + baseline type schemas + status/transition + counters
 import _opf_release  # noqa: E402  U3: version.toml + worklog.toml + span tiling + coverage digests + release cut
 import _opf_changelog  # noqa: E402  U5: changelog range-coverage + freeze gates over version.toml + CHANGELOG.md
-import _opf_check  # noqa: E402  U6: store-level integrity validator (validate_store; the opf doctor engine)
+import _opf_check  # noqa: E402  U6: store-level integrity validator (validate_store; engine for the deferred opf doctor verb)
 import _opf_emit  # noqa: E402  U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
 import _opf_views  # noqa: E402  U4: deterministic view generators + the closed transform vocabulary
 import _opf_fuzz  # noqa: E402  adversarial input-hardening proof (membership/type-guard class closure)

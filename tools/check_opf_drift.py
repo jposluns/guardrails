@@ -13,11 +13,13 @@ WRONG root and returning a false 0 (guard-input-soundness).
 This repository is not a DevProcess adopter, so the live leg prints render's own NOT APPLICABLE and exits 0,
 spec-honest like the crosswalk/doctor legs in run_all_checks.sh; the day this repo adopts, the same leg
 gates real view drift with no change. The exit contract is render's own and identical here: 0 clean, 1
-drift, 2 cannot-evaluate; an unexpected child status is clamped to 2 (fail-closed). Residual
-(disclose-guard-residuals): the live leg reads a child exit 1 as drift, so a hypothetical uncaught crash in
-the render child (Python exit 1) would be reported as drift rather than a cannot-evaluate. This is disclosed
-rather than parsed out, to keep the child's exit UNMASKED and its output streamed to the console unaltered;
-render's own internal failures already fail closed to exit 2 upstream of this leg.
+drift, 2 cannot-evaluate. The gate emits DRIFT (exit 1) only for a child that actually RAN and returned
+the defined drift signal: a child-LAUNCH failure (an OS refusal such as BlockingIOError under RLIMIT_NPROC
+pressure) is caught and reported as a cannot-evaluate (exit 2) rather than escaping as the gate's own exit
+1, and an unexpected or abnormal child status (a non 0/1/2 code, or a signal death surfacing as a negative
+return code) is clamped to 2 (fail-closed). The child's defined statuses stay UNMASKED and its output is
+streamed to the console unaltered; render's own internal failures fail closed to exit 2 upstream of this
+leg.
 
 --self-test builds SYNTHETIC adopter stores in a tempdir and asserts that 0/1/2 contract END TO END through
 opf.py: 0 on a clean populated store, 1 after a view is edited, 2 on a broken store, and 0 (NOT APPLICABLE)
@@ -39,13 +41,26 @@ EXIT_ERROR = 2
 
 def _run_render_check(root, capture):
     """Run `opf.py render --check --root <root>` isolated (-I -B) and return its exit code, unmasked.
-    An unexpected (non 0/1/2) child status is clamped to EXIT_ERROR, never read as clean."""
+    The gate reports DRIFT (exit 1) only on a CONFIRMED drift signal from a child that actually RAN. Any
+    other child outcome routes to cannot-evaluate (EXIT_ERROR), never a false drift 1: a child-LAUNCH
+    failure (an OS refusal such as BlockingIOError/OSError when a fork is refused under RLIMIT_NPROC
+    pressure) is caught HERE and reported as a located cannot-evaluate, because no child ran and no drift
+    verdict exists; and an unexpected (non 0/1/2) child status is clamped to EXIT_ERROR, never read as
+    clean or as drift."""
     tools_dir = Path(__file__).resolve().parent
     kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL} if capture else {}
-    proc = subprocess.run(
-        [sys.executable, "-I", "-B", str(tools_dir / "opf.py"),
-         "render", "--check", "--root", str(root)],
-        **kwargs)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-I", "-B", str(tools_dir / "opf.py"),
+             "render", "--check", "--root", str(root)],
+            **kwargs)
+    except OSError as exc:
+        # An OS refusal AT LAUNCH (BlockingIOError et al., e.g. fork refused under RLIMIT_NPROC) escapes
+        # before any return code exists. Map it to a located cannot-evaluate (exit 2), never let it
+        # propagate and exit the gate 1, which would read as a false DRIFT verdict though no child ran.
+        print("check_opf_drift: cannot evaluate: could not launch the render child for root {} ({}); "
+              "no child ran, so no drift verdict exists".format(root, exc), file=sys.stderr)
+        return EXIT_ERROR
     rc = proc.returncode
     return rc if rc in (EXIT_OK, EXIT_DRIFT, EXIT_ERROR) else EXIT_ERROR
 
@@ -170,6 +185,22 @@ def _self_test():
             empty = base / "empty"
             empty.mkdir()
             expect("not-adopted-root", _run_render_check(empty, capture=True), EXIT_OK)
+
+            # Child-LAUNCH failure -> exit 2 (cannot-evaluate), never a false drift 1 (FIX 1 regression,
+            # subsuming the NB-4 child-crash residual). Inject an OSError at the launch call: an OS refusal
+            # to fork (RLIMIT_NPROC pressure) surfaces as BlockingIOError/OSError from subprocess.run, which
+            # must be caught and mapped to EXIT_ERROR, never propagate and exit the gate 1. Its diagnostic
+            # goes to stderr, suppressed here so a passing leg stays quiet; subprocess.run is restored in a
+            # finally so no later leg runs under the injected failure.
+            real_run = subprocess.run
+            def _refuse_launch(*_a, **_k):
+                raise BlockingIOError("simulated fork refusal (RLIMIT_NPROC)")
+            subprocess.run = _refuse_launch
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    expect("child-launch-failure", _run_render_check(clean, capture=True), EXIT_ERROR)
+            finally:
+                subprocess.run = real_run
 
             # No repository root discoverable from the gate's own anchor -> exit 2 (cannot-evaluate),
             # never a silent fall-through to cwd that would return a false 0 (FIX 1 regression). Anchor a

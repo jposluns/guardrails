@@ -57,13 +57,17 @@ mis-reported as a downstream malformed-record error, and never silently rendered
 module-type record schemas ship (F8; `_opf_schema.validate_record` knows only the baseline specs, so no
 module-type mirror can be rendered regardless). A mutating render MUST gate on the U6 `validate_store`
 store-integrity layer (cross-record uniqueness, coverage, and reconciliation), a tracked spec-11
-obligation (F2); `validate_store` EXISTS (U6, and `opf doctor` already uses it), but `render` does not yet
-COMPOSE its write-gate invocation (VC-4, deferred), so WRITE mode FAILS CLOSED today: an ungated write
-through any entry (the unwired verb, the module `__main__`, or a direct `render(...)` call) is REFUSED
-(cannot-evaluate, exit 2) and writes nothing. The `opf render` CLI requires exactly one of
-`--check | --write` (no default): `--check` (read-only drift detection) is IMPLEMENTED and keeps working,
-while `--write` stays fail-closed until VC-4 composes the gate. This is a refusal pending the real
-composition, never a fabricated gate.
+obligation (F2); `validate_store` is the EXISTING U6 engine INTENDED FOR the deferred `opf doctor` verb
+(doctor itself is not yet wired, so validate_store is the engine doctor WILL compose, not one it already
+uses), and it is the gate `render` will compose for `--write`, but `render` does not yet COMPOSE that
+write-gate invocation (VC-4, deferred), so WRITE mode FAILS CLOSED today and writes nothing. The public
+`opf render --write` CLI verb returns exit 2, failing closed at the dispatcher BEFORE the root is resolved.
+A direct-engine write (a `render(...)` call in write mode) is refused exit 2 ONLY once the root RESOLVES as
+an adopter; a non-adopter root returns NOT APPLICABLE (0) FIRST, because non-adopter resolution PRECEDES the
+write refusal. The module `__main__` defaults its command line to `--check`, so it never enters write mode.
+The `opf render` CLI requires exactly one of `--check | --write` (no default): `--check` (read-only drift
+detection) is IMPLEMENTED and keeps working, while `--write` stays fail-closed until VC-4 composes the gate.
+This is a refusal pending the real composition, never a fabricated gate.
 """
 import hashlib
 import html
@@ -97,12 +101,14 @@ SCHEMA_VERSION = _opf_schema.SUPPORTED_SCHEMA
 REGEN_COMMAND = "opf render"
 
 # spec 5.7/5.8/11: a mutating render must gate on the U6 store-integrity layer (validate_store:
-# cross-record uniqueness, coverage, reconciliation). validate_store EXISTS (U6; opf doctor uses it),
-# but render does not yet COMPOSE its write-gate invocation (VC-4, deferred), so WRITE mode fails
-# closed: an ungated write is refused. VC-4 flips this to True only WHEN it wires the actual gate
-# invocation; until then every write is refused. The opf render CLI requires exactly one of
-# --check / --write (no default), and --check keeps working meanwhile. This is not a fabricated gate;
-# it is a refusal pending the real one.
+# cross-record uniqueness, coverage, reconciliation). validate_store EXISTS (U6; the engine intended for
+# the deferred opf doctor verb, not yet wired), but render does not yet COMPOSE its write-gate invocation
+# (VC-4, deferred), so WRITE mode fails closed: an ungated write against a RESOLVED adopter store is
+# refused (a non-adopter root reports NOT APPLICABLE (0) first, since resolution precedes the refusal).
+# VC-4 flips this to True only WHEN it wires the actual gate invocation; until then every ungated write
+# against an adopter store is refused. The opf render CLI requires exactly one of --check / --write (no
+# default), and --check keeps working meanwhile. This is not a fabricated gate; it is a refusal pending
+# the real one.
 _WRITE_GATE_COMPOSED = False
 
 # The mode installed on a NEWLY-created view/deliverable file. An EXISTING target's own mode is preserved
