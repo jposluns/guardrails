@@ -110,8 +110,26 @@ path (FIX 1) an enumerator error or any cannot-evaluate FAILS CLOSED-CONTINUE: t
 (ignorance refuses the wind-down), releasable by the operator-owned escape sentinel OR by the
 guard-owned loop bound (past which it becomes a deliberate, recorded forced exit), and never a clean
 close; a new idle or wake scheduling call is likewise DENIED on cannot-evaluate, bounded by a
-three-denial cap. `tools/aei_backlog_md.py` is the generic reference
-provider for a markdown-checkbox backlog.
+three-denial cap. `tools/aei_backlog_md.py` is the generic reference provider for a markdown-checkbox
+backlog. Its grammar is the dash-bullet checkbox line (`- <ID> [ |.|o|O|x|BLOCKED] <title>`, with an
+optional `:: blocker:<kind>=<ref>` clause and a trailing `:: proposed`); any other line is prose. A
+backlog that yields ZERO items is a cannot-evaluate ENUMERATOR_ERROR (exit 3, no JSON emitted), NOT an
+empty enumeration, unless it is a valid affirmed-empty backlog: a file whose every non-blank line, split
+on physical newlines, is a column-0 sentinel line `<!-- aei: empty backlog -->` (one or more sentinel
+lines allowed; blank lines allowed). Any other non-blank line,
+including a heading or a comment carrying content (a markdown table, an alternate bullet, a fenced
+example, indented code, prose, or any other unrecognized format), is operative content and yields
+cannot-evaluate (exit 3) WHETHER OR NOT a sentinel is present, and an unaffirmed empty file fails closed,
+so an unrecognized backlog can never read as a drained actionable set and a sentinel can never mask
+unrecognized work. Emptiness is affirmed by the sentinel (which tolerates internal whitespace, not a
+hyphen, and must sit at column 0), never inferred from absence; the empty `items` array is a valid
+enumeration only when produced from that affirmation, every non-blank line a column-0 sentinel line.
+The input is decoded as UTF-8 strictly: invalid UTF-8 is a cannot-evaluate (exit 3, no JSON), never
+silently replaced and its line dropped. Any nonphysical line-boundary or separator control character
+(VT, FF, FS, GS, RS, NEL, and the LINE and PARAGRAPH SEPARATOR) makes the whole input a cannot-evaluate
+(exit 3), because such a character is a line boundary to Unicode but not a physical newline, so it could
+otherwise smuggle a second item onto one physical line or embed content inside a sentinel; the enumerator
+rejects it rather than guess. Lines are otherwise split on physical newlines only (CR, LF, CRLF).
 
 ## Platforms without hooks
 

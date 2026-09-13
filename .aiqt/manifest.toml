@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "79dca0e7f1a5203487c454d09dfd41f86bd1ab269279fdd5ba8a9ee3f915d1cb"
+tree-sha256 = "3a5a477a5a8f959d7d7152d0e4c43a99667a3f9827125a28a7abb1a133363fe2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -56,13 +56,13 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 93160
-sha256 = "006306e8448e8f3c125de2e1a7a469d15b393beabcf7ae2e2ab0a8294abe08e9"
+bytes = 93590
+sha256 = "c8d7b3a67fd995c9b2c432cef3b6e92935828c001971ab1a7d45af826ca7ee07"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
-bytes = 14226
-sha256 = "c1ff979c5ec114ad1c0675fcaa7b8ee1d93874dc9fb1eff86b76bee68de7c280"
+bytes = 16109
+sha256 = "67d79191ae326795932b4d5d71f4833168b1249ad1594803becc3cb968e9f51b"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
@@ -771,8 +771,8 @@ sha256 = "5ed8a9d47b3b445a038d48eafcd819aec5c12736513dc3f205de1ebc17423ee2"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 296396
-sha256 = "0a7b5495be90454248a21a56e6c6426ad4abd21a0e750b80ad968ae19dd66424"
+bytes = 296826
+sha256 = "147114df4754f1a06f2b5afc91d222d3363d7065d5a90266411871736ca45131"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2761,8 +2761,8 @@ sha256 = "08ea73b8873bdb0871e9e449303d5c176a0c64863ae0a7feafe96c6c75f29a54"
 
 [[sources]]
 path = "tools/aei_backlog_md.py"
-bytes = 7991
-sha256 = "71f7a366e4d703c9b33a4f7c3d2f5f165260f590b62a38bd31e2c9062b8103bd"
+bytes = 19638
+sha256 = "aeaba2aa17340217c2fb3e682e1ef4d83508262d951faaaf32d014510936ca9c"
 
 [[sources]]
 path = "tools/aiqt_corpus.py"
