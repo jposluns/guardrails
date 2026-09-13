@@ -124,9 +124,12 @@ so an unrecognized backlog can never read as a drained actionable set and a sent
 unrecognized work. Emptiness is affirmed by the sentinel (which tolerates internal whitespace, not a
 hyphen, and must sit at column 0), never inferred from absence; the empty `items` array is a valid
 enumeration only when produced from that affirmation, every non-blank line a column-0 sentinel line.
-Lines are split on physical newlines only (CR, LF, CRLF), so any Unicode line separator or control
-character embedded in a line stays inside it and makes that line operative content (exit 3), never a
-phantom column-0 sentinel.
+The input is decoded as UTF-8 strictly: invalid UTF-8 is a cannot-evaluate (exit 3, no JSON), never
+silently replaced and its line dropped. Any nonphysical line-boundary or separator control character
+(VT, FF, FS, GS, RS, NEL, and the LINE and PARAGRAPH SEPARATOR) makes the whole input a cannot-evaluate
+(exit 3), because such a character is a line boundary to Unicode but not a physical newline, so it could
+otherwise smuggle a second item onto one physical line or embed content inside a sentinel; the enumerator
+rejects it rather than guess. Lines are otherwise split on physical newlines only (CR, LF, CRLF).
 
 ## Platforms without hooks
 

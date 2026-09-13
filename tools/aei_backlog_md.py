@@ -57,6 +57,11 @@ KINDS = ("tracked-task", "human-decision", "external", "foreign-lease", "not-bef
 # 'empty-backlog' is REJECTED.
 SENTINEL_RE = re.compile(r"^<!--\s*aei:\s*empty\s+backlog\s*-->$")
 
+# These characters are line boundaries to str.splitlines and to Unicode but are NOT physical newlines, so
+# they can smuggle a second item onto one physical line or embed content inside a sentinel; reject them
+# rather than guess. Ordinary tab (U+0009), space, CR, and LF are NOT in the set and are never rejected.
+SEPARATOR_CHARS = frozenset("\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
+
 
 def _physical_lines(text):
     """Split on physical line endings only (CR, LF, CRLF), never Unicode line separators or control
@@ -127,7 +132,21 @@ def main():
     except OSError as exc:
         print("enumerator error: backlog unreadable: {}".format(exc), file=sys.stderr)
         return 3
-    text = raw.decode("utf-8", "replace")
+    # STRICT decode: invalid UTF-8 is a cannot-evaluate (exit 3), never silently replaced and its line
+    # dropped, which would lose a task. The raw bytes are still hashed for the revision below.
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        print("enumerator error: backlog is not valid UTF-8: {}: {}".format(path, exc), file=sys.stderr)
+        return 3
+    # Reject any nonphysical line-boundary / separator control character before parsing or the
+    # empty-validation, so it protects BOTH the item grammar (a separator cannot smuggle a second item
+    # onto one physical line) and the sentinel path (a separator cannot embed content inside a sentinel).
+    if SEPARATOR_CHARS.intersection(text):
+        print("enumerator error: backlog contains a nonphysical line-boundary or separator control "
+              "character (VT, FF, FS, GS, RS, NEL, LINE/PARAGRAPH SEPARATOR): {}".format(path),
+              file=sys.stderr)
+        return 3
     items, errors = parse(text)
     if errors:
         for e in errors:
@@ -240,6 +259,18 @@ def self_test():
                        "\x1d" + sentinel,
                        "\x1e" + sentinel,
                        "    \x0c" + sentinel)
+    # (f) #1 REGRESSION + #3: a nonphysical line boundary on ONE physical line must not collapse two items
+    # into one (dropping the second) and must not smuggle content into a sentinel; each fails closed
+    # (exit 3, empty stdout), never a 1-item exit 0 or a phantom empty affirmation. Covers VT, FF, FS, GS,
+    # RS, NEL, and LINE/PARAGRAPH SEPARATOR. The embedded-separator sentinel closes #3 directly.
+    separators = ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+    collapse_cases = tuple("- DONE [x] complete" + sep + "- OPEN [ ] still work\n"
+                           for sep in separators) + ("<!-- aei: empty\u2028backlog -->\n",)
+    # (g) #2a MALFORMED INPUT: invalid UTF-8 must fail closed (exit 3), never be silently replace-decoded
+    # and its line dropped, losing a task.
+    invalid_utf8 = b"- DONE [x] complete\n\xff- OPEN [ ] still work\n"
+    # (h) a NORMAL two-item backlog with a real newline between items still yields BOTH items (no over-fire).
+    two_item = "- DONE [x] a\n- OPEN [ ] b\n"
 
     def run_backlog(tmp, name, body):
         p = Path(tmp) / name
@@ -264,7 +295,23 @@ def self_test():
         # (a): a recognized dash-bullet backlog still enumerates exactly as before.
         r = run_backlog(tmp, "ok.md", recognized)
         recognized_ok = r.returncode == 0 and len(json.loads(r.stdout)["items"]) == 2
-    exit3 = malformed_ok and failclose_ok and affirm_ok and recognized_ok
+        # (f): every nonphysical-separator collapse case (and the embedded-separator sentinel) fails
+        # closed (exit 3, empty stdout), never a 1-item exit 0.
+        collapse_ok = True
+        for j, t in enumerate(collapse_cases):
+            r = run_backlog(tmp, "cs-{}.md".format(j), t)
+            collapse_ok = collapse_ok and r.returncode == 3 and r.stdout.strip() == b""
+        # (g): invalid UTF-8 fails closed (exit 3, empty stdout), never a silently dropped line.
+        p_bad = Path(tmp) / "bad-utf8.md"
+        p_bad.write_bytes(invalid_utf8)
+        r_bad = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                                "--backlog", str(p_bad), "--aei"], capture_output=True, timeout=30)
+        invalid_ok = r_bad.returncode == 3 and r_bad.stdout.strip() == b""
+        # (h): a normal two-item backlog with a real newline still enumerates BOTH items (no over-fire).
+        r_two = run_backlog(tmp, "two.md", two_item)
+        two_ok = r_two.returncode == 0 and len(json.loads(r_two.stdout)["items"]) == 2
+    exit3 = (malformed_ok and failclose_ok and affirm_ok and recognized_ok
+             and collapse_ok and invalid_ok and two_ok)
     if ok and errs2 and errs3 and empty_items == [] and not empty_errs and exit3:
         print("self-test OK")
         return 0
