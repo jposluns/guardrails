@@ -185,6 +185,38 @@ def _self_test():
         got = sorted(page_findings("p.html", html))
         if got != sorted(expected):
             failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    # AIQT_SITE_HOST: is_external_url derives the site host at call time (default, and empty-value
+    # fallback, aiqt.ai; lowercased). Behaviour is unchanged when the variable is unset or empty.
+    import os
+    env_cases = [
+        # (AIQT_SITE_HOST value or None=unset, href, expected is_external_url)
+        (None, "https://aiqt.ai/x", False),                 # (a) unset -> default aiqt.ai internal
+        (None, "https://example.test/x", True),             #     non-aiqt host external
+        ("example.test", "https://example.test/x", False),  # (b) set host internal
+        ("example.test", "https://www.example.test/x", False),  #     its www. subdomain internal
+        ("example.test", "https://aiqt.ai/x", True),        #     aiqt.ai now external
+        ("", "https://example.test/x", True),               # (c) empty -> fallback aiqt.ai (not all-internal)
+        ("", "https://aiqt.ai/x", False),                   #     aiqt.ai still internal under fallback
+        ("EXAMPLE.TEST", "https://example.test/x", False),  #     env host lowercased
+        ("localhost", "https://localhost/x", False),        # (d) no-dot host: exact match internal
+        ("localhost", "https://aiqt.ai/x", True),           #     other host external
+    ]
+    _saved = os.environ.get("AIQT_SITE_HOST")
+    try:
+        for env_val, href, want_ext in env_cases:
+            if env_val is None:
+                os.environ.pop("AIQT_SITE_HOST", None)
+            else:
+                os.environ["AIQT_SITE_HOST"] = env_val
+            got_ext = is_external_url(href)
+            if got_ext != want_ext:
+                failures.append("AIQT_SITE_HOST={!r} is_external_url({!r}): expected {} got {}".format(
+                    env_val, href, want_ext, got_ext))
+    finally:
+        if _saved is None:
+            os.environ.pop("AIQT_SITE_HOST", None)
+        else:
+            os.environ["AIQT_SITE_HOST"] = _saved
     # run() fail-closed on absent/empty site
     import tempfile
     import contextlib
@@ -211,7 +243,8 @@ def _self_test():
         for x in failures:
             print("  " + x)
         return 1
-    print("PASS: check_newtab self-test ({} page cases + run() exit-code legs)".format(len(cases)))
+    print("PASS: check_newtab self-test ({} page cases + {} AIQT_SITE_HOST cases + run() exit-code "
+          "legs)".format(len(cases), len(env_cases)))
     return 0
 
 

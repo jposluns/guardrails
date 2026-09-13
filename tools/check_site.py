@@ -32,7 +32,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 
 EN, EM = "–", "—"
-SITE_HOSTS = {"aiqt.ai", "www.aiqt.ai"}
+# Site host from AIQT_SITE_HOST (default, and empty-value fallback, aiqt.ai; lowercased), so a
+# non-aiqt.ai adopter can vendor the pack unpatched. Unchanged when the variable is unset or empty.
+_SITE_HOST = (os.environ.get("AIQT_SITE_HOST", "aiqt.ai") or "aiqt.ai").lower()
+SITE_HOSTS = {_SITE_HOST, "www." + _SITE_HOST}
 
 # Tags that never take an end tag; never pushed on the open-tag stack.
 VOID_ELEMENTS = {
@@ -264,12 +267,42 @@ def _self_test():
     named = logo_findings([("keep.html", good), ("keep2.html", good), ("drift.html", bad)])
     if not (len(named) == 1 and named[0].startswith("drift.html")):
         failures.append("outlier naming: expected drift.html named, got {}".format(named))
+    # AIQT_SITE_HOST derives SITE_HOSTS at import, so probe it in a child process under each env value.
+    # Unset/empty -> default aiqt.ai (unchanged from today); a set host -> that host and its www.; the
+    # env host is lowercased; a no-dot host derives its own exact pair.
+    import subprocess
+    tools_dir = str(Path(__file__).resolve().parent)
+    probe = ("import sys; sys.path.insert(0, {!r}); import check_site; "
+             "print(' '.join(sorted(check_site.SITE_HOSTS)))".format(tools_dir))
+
+    def hosts_under(env_val):
+        env = dict(os.environ)
+        if env_val is None:
+            env.pop("AIQT_SITE_HOST", None)
+        else:
+            env["AIQT_SITE_HOST"] = env_val
+        out = subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True, text=True,
+                             env=env, check=True)
+        return set(out.stdout.split())
+
+    host_cases = [
+        ("unset -> default aiqt.ai", None, {"aiqt.ai", "www.aiqt.ai"}),
+        ("empty -> fallback aiqt.ai", "", {"aiqt.ai", "www.aiqt.ai"}),
+        ("set host -> host + www.", "example.test", {"example.test", "www.example.test"}),
+        ("host lowercased", "EXAMPLE.TEST", {"example.test", "www.example.test"}),
+        ("no-dot host derives its own pair", "localhost", {"localhost", "www.localhost"}),
+    ]
+    for label, env_val, want in host_cases:
+        got = hosts_under(env_val)
+        if got != want:
+            failures.append("SITE_HOSTS {}: expected {} got {}".format(label, sorted(want), sorted(got)))
     if failures:
         print("SELF-TEST FAIL:")
         for x in failures:
             print("  - " + x)
         return 1
-    print("PASS: check_site logo-consistency self-test ({} cases)".format(len(cases)))
+    print("PASS: check_site self-test ({} logo cases + {} SITE_HOSTS env cases)".format(
+        len(cases), len(host_cases)))
     return 0
 
 

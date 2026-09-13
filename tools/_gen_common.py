@@ -2,6 +2,7 @@
 
 Requires Python 3.11+ for tomllib; CI pins 3.12. run_all_checks.sh runs these locally.
 """
+import os
 import sys
 
 try:
@@ -31,7 +32,11 @@ def is_external_url(href):
     Scope and residual: this classifies the project's own trusted, well-formed HTML to catch a forgotten
     target/rel on an off-site link; it is not a general validator of attacker-controlled hrefs. A host
     given as a raw IP or with a trailing dot is compared literally, and an internationalized host is not
-    punycode-folded; each errs toward EXTERNAL, never toward a missed off-site link."""
+    punycode-folded; each errs toward EXTERNAL, never toward a missed off-site link.
+
+    The site host is read from AIQT_SITE_HOST at call time (default, and empty-value fallback, aiqt.ai;
+    lowercased), so a non-aiqt.ai adopter can vendor the pack unpatched; behaviour is unchanged when it
+    is unset or empty."""
     s = (href or "").strip().translate({9: None, 10: None, 13: None}).replace("\\", "/")
     low = s.lower()
     if low.startswith(("http:", "https:")):
@@ -47,7 +52,8 @@ def is_external_url(href):
         return True                           # a web URL we cannot parse: fail-closed to external
     if not host:
         return True                           # web URL with no resolvable host: fail-closed to external
-    return not (host == "aiqt.ai" or host.endswith(".aiqt.ai"))
+    site = (os.environ.get("AIQT_SITE_HOST", "aiqt.ai") or "aiqt.ai").lower()  # empty/unset -> aiqt.ai
+    return not (host == site or host.endswith("." + site))
 
 
 def repo_root(start=None):
