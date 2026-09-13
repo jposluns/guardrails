@@ -17,13 +17,18 @@ the gate) fails closed (exit 2) rather than silently checking the WRONG root and
 This repository is not a DevProcess adopter, so the live leg prints render's own NOT APPLICABLE and exits 0,
 spec-honest like the crosswalk/doctor legs in run_all_checks.sh; the day this repo adopts, the same leg
 gates real view drift with no change. The exit contract is render's own and identical here: 0 clean, 1
-drift, 2 cannot-evaluate. The gate emits DRIFT (exit 1) only for a child that actually RAN and returned
-the defined drift signal: a child-LAUNCH failure (an OS refusal such as BlockingIOError under RLIMIT_NPROC
-pressure) is caught and reported as a cannot-evaluate (exit 2) rather than escaping as the gate's own exit
-1, and an unexpected or abnormal child status (a non 0/1/2 code, or a signal death surfacing as a negative
-return code) is clamped to 2 (fail-closed). The child's defined statuses stay UNMASKED and its output is
-streamed to the console unaltered; render's own internal failures fail closed to exit 2 upstream of this
-leg.
+drift, 2 cannot-evaluate. The gate recognizes DRIFT POSITIVELY, never from the bare child exit code: it
+emits DRIFT (exit 1) ONLY when the child exited with the drift code (1) AND its stdout carries the render
+check's drift MARKER (a `drift:` sentinel line, which `opf render --check` prints per drifted target). EVERY
+other child outcome routes to cannot-evaluate (exit 2), closing the exit-1=drift conflation at the
+INTERPRETATION layer rather than per failure mode: a child that exits 1 WITHOUT the drift marker (a
+module-import crash before opf.py's handler, an uncaught exception, or any abnormal exit-1 path) produced no
+render drift verdict and is a cannot-evaluate, never a false drift; a child-LAUNCH failure (an OS refusal
+such as BlockingIOError under RLIMIT_NPROC pressure) is caught and reported as a cannot-evaluate rather than
+escaping as the gate's own exit 1; and an unexpected or abnormal child status (a non 0/1/2 code, a signal
+death surfacing as a negative return code, or empty/garbled output) is a cannot-evaluate too. The child's
+stdout is surfaced to the console in the live leg; render's own internal failures fail closed to exit 2
+upstream of this leg.
 
 --self-test builds SYNTHETIC adopter stores in a tempdir and asserts that 0/1/2 contract END TO END through
 opf.py: 0 on a clean populated store, 1 after a view is edited, 2 on a broken store, and 0 (NOT APPLICABLE)
@@ -42,22 +47,45 @@ EXIT_OK = 0
 EXIT_DRIFT = 1
 EXIT_ERROR = 2
 
+# The render check's POSITIVE drift signal. `opf render --check` prints one `drift: <path>` line to STDOUT
+# per drifted target (see _opf_views.render / opf_render), then a regenerate hint, and exits 1. Errors go to
+# STDERR. The gate recognizes genuine DRIFT by this marker rather than by the bare exit code, so a child that
+# exits 1 for any OTHER reason (a module-import crash, an uncaught exception) cannot masquerade as drift. The
+# marker is matched at a line's START so an incidental mid-line occurrence cannot spoof it.
+DRIFT_MARKER = "drift:"
+
+
+def _has_drift_marker(text):
+    """True when `text` (the render child's captured stdout) carries the render check's drift sentinel: at
+    least one line BEGINNING with DRIFT_MARKER, the `drift: <path>` line _opf_views.render / opf_render emit
+    per drifted target. Matched at line start so an incidental mid-line occurrence cannot masquerade as it."""
+    return any(line.startswith(DRIFT_MARKER) for line in text.splitlines())
+
 
 def _run_render_check(root, capture):
-    """Run `opf.py render --check --root <root>` isolated (-I -B) and return its exit code, unmasked.
-    The gate reports DRIFT (exit 1) only on a CONFIRMED drift signal from a child that actually RAN. Any
-    other child outcome routes to cannot-evaluate (EXIT_ERROR), never a false drift 1: a child-LAUNCH
-    failure (an OS refusal such as BlockingIOError/OSError when a fork is refused under RLIMIT_NPROC
-    pressure) is caught HERE and reported as a located cannot-evaluate, because no child ran and no drift
-    verdict exists; and an unexpected (non 0/1/2) child status is clamped to EXIT_ERROR, never read as
-    clean or as drift."""
+    """Run `opf.py render --check --root <root>` isolated (-I -B) and CLASSIFY its outcome by a POSITIVE
+    drift signal, never by the exit code alone. The gate reports DRIFT (exit 1) ONLY on a CONFIRMED drift:
+    the child exited with the drift code (1) AND its stdout carries the render check's drift MARKER (a
+    `drift:` sentinel line). EVERY other outcome routes to cannot-evaluate (EXIT_ERROR), never a false drift
+    1. This closes the exit-1=drift conflation at the INTERPRETATION layer rather than per failure mode: a
+    child that exits 1 WITHOUT the drift marker (a module-import crash before opf.py's handler, an uncaught
+    exception, or any abnormal exit-1 path) produced NO render drift verdict, so it is a cannot-evaluate, not
+    drift; a child-LAUNCH failure (an OS refusal such as BlockingIOError/OSError when a fork is refused under
+    RLIMIT_NPROC pressure) is caught HERE; and exit 2, an unexpected non-0/1/2 status, a signal death
+    (negative return), or empty/garbled output is a cannot-evaluate. Only a clean child (exit 0) is clean.
+
+    stdout is CAPTURED so the marker can be recognized (decoded with errors='replace', so garbled bytes
+    route to cannot-evaluate rather than crashing the gate). In the live leg (capture False) it is re-emitted
+    to the console after the run so the operator still sees the child's `drift:`/regenerate output, and the
+    child's stderr is inherited (streamed) there; in the self-test leg (capture True) stdout is inspected but
+    not re-emitted and stderr is discarded, so a passing leg stays quiet."""
     tools_dir = Path(__file__).resolve().parent
-    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL} if capture else {}
+    err_sink = subprocess.DEVNULL if capture else None
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-B", str(tools_dir / "opf.py"),
              "render", "--check", "--root", str(root)],
-            **kwargs)
+            stdout=subprocess.PIPE, stderr=err_sink)
     except OSError as exc:
         # An OS refusal AT LAUNCH (BlockingIOError et al., e.g. fork refused under RLIMIT_NPROC) escapes
         # before any return code exists. Map it to a located cannot-evaluate (exit 2), never let it
@@ -65,8 +93,23 @@ def _run_render_check(root, capture):
         print("check_opf_drift: cannot evaluate: could not launch the render child for root {} ({}); "
               "no child ran, so no drift verdict exists".format(root, exc), file=sys.stderr)
         return EXIT_ERROR
+    out = (proc.stdout or b"").decode("utf-8", "replace")
+    if not capture and out:
+        sys.stdout.write(out)   # surface the child's stdout to the console in the live gate leg
     rc = proc.returncode
-    return rc if rc in (EXIT_OK, EXIT_DRIFT, EXIT_ERROR) else EXIT_ERROR
+    if rc == EXIT_OK:
+        return EXIT_OK
+    if rc == EXIT_DRIFT and _has_drift_marker(out):
+        return EXIT_DRIFT
+    # Every other outcome is a cannot-evaluate, NOT drift: exit 1 without the drift marker (an import crash,
+    # an uncaught exception, or a non-render child), exit 2, an unexpected non-0/1/2 status, or a signal
+    # death surfacing as a negative return code. This is the interpretation-layer close of the exit-1=drift
+    # conflation: DRIFT is recognized positively, never inferred from a bare exit code.
+    print("check_opf_drift: cannot evaluate: the render child for root {} did not produce a confirmed clean "
+          "(exit 0) or confirmed-drift (exit 1 with a '{}' marker line) result (child exit {}); a child that "
+          "exits 1 without the drift marker -- a module-import crash, an uncaught exception, or a launch "
+          "failure -- is not drift".format(root, DRIFT_MARKER, rc), file=sys.stderr)
+    return EXIT_ERROR
 
 
 def _self_test():
@@ -183,7 +226,8 @@ def _self_test():
             (broken / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR).mkdir(parents=True)
             (broken / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
              / _opf_store.MANIFEST_NAME).write_text("this is not valid toml {{{\n", encoding="utf-8")
-            expect("broken-store", _run_render_check(broken, capture=True), EXIT_ERROR)
+            with contextlib.redirect_stderr(io.StringIO()):   # cannot-evaluate leg emits a located
+                expect("broken-store", _run_render_check(broken, capture=True), EXIT_ERROR)  # diagnostic
 
             # Non-adopter root (no .working/) -> 0 (NOT APPLICABLE).
             empty = base / "empty"
@@ -205,6 +249,25 @@ def _self_test():
                     expect("child-launch-failure", _run_render_check(clean, capture=True), EXIT_ERROR)
             finally:
                 subprocess.run = real_run
+
+            # Child exit 1 WITHOUT the drift marker -> cannot-evaluate (exit 2), NEVER a false drift 1 (the
+            # r5 fix: the exit-1=drift conflation closed at the interpretation layer). A module-import crash
+            # or any uncaught exception in the render child exits 1 with a traceback on STDERR and NO `drift:`
+            # line on STDOUT; the exit-code-only reading would call that drift. Stub subprocess.run to return
+            # exit 1 with marker-free stdout and assert the gate returns EXIT_ERROR, not EXIT_DRIFT. Restored
+            # in a finally so no later leg runs under the stub; its diagnostic goes to stderr, suppressed.
+            real_run_nm = subprocess.run
+            def _exit1_no_marker(*_a, **_k):
+                return subprocess.CompletedProcess(
+                    args=[], returncode=EXIT_DRIFT,
+                    stdout=b"Traceback (most recent call last):\n"
+                           b"ImportError: simulated child module-import crash (no drift line)\n")
+            subprocess.run = _exit1_no_marker
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    expect("child-exit1-no-marker", _run_render_check(clean, capture=True), EXIT_ERROR)
+            finally:
+                subprocess.run = real_run_nm
 
             # No repository root discoverable from the gate's own anchor -> exit 2 (cannot-evaluate),
             # never a silent fall-through to cwd that would return a false 0 (FIX 1 regression). Anchor a
@@ -252,8 +315,9 @@ def _self_test():
     rc = _classify(_drift_suite)
     if rc == EXIT_OK:
         print("check_opf_drift self-test: PASS (opf render --check returns 0 clean / 1 drift / 2 broken / "
-              "0 NOT APPLICABLE end to end; no-repo-root -> 2; invalid-git-marker -> 2; status contract "
-              "1=assertion 2=harness)")
+              "0 NOT APPLICABLE end to end; drift recognized by the 'drift:' marker, not the bare exit code; "
+              "child exit 1 without the drift marker -> 2 (cannot-evaluate); no-repo-root -> 2; "
+              "invalid-git-marker -> 2; status contract 1=assertion 2=harness)")
     return rc
 
 
