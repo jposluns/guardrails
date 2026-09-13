@@ -87,10 +87,12 @@ SHUTIL_STATE_CHANGE = frozenset({"move", "copy", "copy2", "copyfile", "copytree"
 METHOD_STATE_CHANGE = frozenset({"mkdir", "unlink", "rename", "replace", "touch", "write_text",
                                  "write_bytes", "rmdir"})
 WRITE_MODES = ("w", "a", "x", "+")
-# pathlib provenance: a receiver is a PROVEN filesystem path only when it traces to a pathlib constructor,
+# pathlib provenance: a receiver is treated as a filesystem path when it traces to a pathlib constructor,
 # a path-returning method/attribute on one, a `/` join involving one, or a Path-typed annotation. This is
-# what separates a certain-shape advisory (proven fs receiver, exit 0) from a heuristic resist-static
-# advisory (unresolved receiver type).
+# one best-effort heuristic input the detector weighs; the tier a scope is reported at (certain-shape vs
+# resist-static), receiver recognition, and control-flow handling are all best-effort and defined by the
+# code below and its --self-test, not promised here. An unmodelled or ambiguous case may still be flagged,
+# at either tier; the detector over-fires rather than under-fires, harmless under WARN-only.
 PATH_CTORS = frozenset({"Path", "PurePath", "PosixPath", "WindowsPath", "PurePosixPath", "PureWindowsPath"})
 PATH_RETURNING_METHODS = frozenset({"joinpath", "resolve", "absolute", "expanduser", "with_name",
                                     "with_suffix", "with_stem", "relative_to", "readlink"})
@@ -131,16 +133,18 @@ class _Resolver:
                             self.path_ctor_names[a.asname or a.name] = a.name
 
     def scoped(self, shadowed):
-        """CATCH-ALL 1 (general shadowing): a per-scope view of this resolver with every os / os.path /
-        shutil / pathlib name SHADOWED by a local binding removed, so `def ensure(os): os.makedirs(...)`
+        """A per-scope view of this resolver with the os / os.path / shutil / pathlib module and
+        constructor names that a local binding SHADOWS removed, so `def ensure(os): os.makedirs(...)`
         (a parameter shadowing the module) is not read as the real os module, and `def refresh(Path):
-        Path("x")` (a parameter shadowing the constructor) is not read as the pathlib constructor. An
-        imported alias or a builtin name is credited as the real API only where no parameter or local
-        binding in the scope reuses its name; where one does, the receiver is not provably the API and the
-        scope's classifies and mutations fall to the resist-static advisory rather than convicting on an
-        ambiguous name. The
-        `os.path` marker is left intact: os.path.<name> resolution keys off the (now shadow-stripped)
-        os_aliases plus the literal `path` attribute, so dropping `os` already disables it."""
+        Path("x")` (a parameter shadowing the constructor) is not read as the pathlib constructor. This
+        shadow-stripping is a best-effort heuristic over the module/constructor aliases this resolver
+        tracks; it does not model every name a scope could rebind (a shadowing builtin such as `open`, for
+        instance, is not tracked here), so an unmodelled or ambiguous case may still be flagged, at either
+        tier. Receiver recognition, the emitted tier, and control-flow handling are best-effort and defined
+        by the code below and its --self-test, not promised here; the detector over-fires rather than
+        under-fires, harmless under WARN-only. The `os.path` marker is left intact: os.path.<name>
+        resolution keys off the (now shadow-stripped) os_aliases plus the literal `path` attribute, so
+        dropping `os` already disables it."""
         if not shadowed:
             return self
         r = _Resolver.__new__(_Resolver)
@@ -166,8 +170,10 @@ def _kw_is_false(call, name):
 
 
 def _is_path_ctor_call(call, resolver):
-    """True iff `call` is a pathlib constructor: a bare `Path(...)` bound from pathlib, or `pathlib.Path(...)`
-    (any alias). A local class shadowing the name is never credited, only the imported constructor."""
+    """True iff `call` resolves, against the resolver it is given, to a pathlib constructor: a bare
+    `Path(...)` bound from pathlib, or `pathlib.Path(...)` (any alias). Recognition is best-effort and only
+    as sound as the resolver passed in (a shadowed name is stripped only where the caller scoped it); the
+    detector over-fires rather than under-fires, harmless under WARN-only."""
     f = call.func
     if isinstance(f, ast.Name):
         return f.id in resolver.path_ctor_names
@@ -177,10 +183,12 @@ def _is_path_ctor_call(call, resolver):
 
 
 def _is_proven_path(node, path_names, resolver):
-    """True iff `node` is a PROVEN filesystem path object: a pathlib constructor call, a path-returning
-    method or attribute on a proven path, a `/` join involving one, or a name/param proven Path-typed. An
-    unresolved receiver type is NOT proven (it is heuristic, resist-static-tier at most, never a
-    certain-shape advisory)."""
+    """True iff `node` is recognized as a filesystem path object: a pathlib constructor call, a
+    path-returning method or attribute on a recognized path, a `/` join involving one, or a name/param
+    Path-typed. This is a best-effort provenance heuristic, not a decision procedure: an unresolved or
+    unmodelled receiver may still be flagged, at either tier. The emitted tier and receiver recognition
+    are best-effort and defined by the code below and its --self-test, not promised here; the detector
+    over-fires rather than under-fires, harmless under WARN-only."""
     if isinstance(node, ast.Name):
         return node.id in path_names
     if isinstance(node, ast.Call):
@@ -328,9 +336,12 @@ def _proven_path_names(func, resolver):
     # dropped when it is augmented, or ANY value bound to it is not a proven path under the current
     # (already shrinking) set, or it is not annotation-seeded and has no binding at all. Recomputing until
     # stable means `q = p; q = p` is dropped once `p` is dropped for a later non-path rebind (codex #3): an
-    # alias chain with a non-Path link this scan models, or a cross-branch rebind to an unproven value, is
-    # not a certain filesystem receiver, so it FALLS to the resist-static advisory rather than convicting on
-    # unproven provenance (an unmodelled `import ... as <name>` rebind can still leave stale provenance).
+    # alias chain with a non-Path link this scan models drops the dependent name from the recognized set.
+    # This provenance shrink is best-effort, not a tier guarantee: a rebind this scan does not model (an
+    # `import ... as <name>` rebind, or other unmodelled flow) can leave stale provenance, so an unmodelled
+    # or ambiguous case may still be flagged, at either tier. The emitted tier is defined by the code and
+    # its --self-test, not promised here; the detector over-fires rather than under-fires, harmless under
+    # WARN-only.
     changed = True
     while changed:
         changed = False
@@ -513,11 +524,15 @@ def _scope_bound_names(scope):
 
 def _state_change_targets(nodes, resolver, path_names):
     """The set of unparsed target-path expressions of PROVEN filesystem state-changing calls within `nodes`
-    (no nested defs). A module call (os.<state>, shutil.<state>, from-os bare) is inherently a filesystem
-    mutation; a method-form mutation (p.mkdir(), p.open('w'), ...) counts only when its receiver is a proven
-    pathlib path, so a str.replace() or a same-named non-path object is never read as a filesystem change.
-    The module-call branch is matched first and narrowly, so a Path-method call on a bare-Name receiver is
-    no longer swallowed before it can reach the method classification (codex #4 / claude B-3)."""
+    (no nested defs). A module call (os.<state>, shutil.<state>, from-os bare) is read as a filesystem
+    mutation; a method-form mutation (p.mkdir(), p.open('w'), ...) is counted mainly where its receiver is a
+    recognized pathlib path, so a str.replace() or a same-named non-path object is usually not read as a
+    filesystem change. Recognition here is a best-effort heuristic, not a guarantee (the builtin `open`
+    branch, for instance, is credited by spelling and does not model a shadowing local); an unmodelled or
+    ambiguous case may still be flagged, at either tier, and the exact behavior is defined by the code and
+    its --self-test, not promised here. The module-call branch is matched first and narrowly, so a
+    Path-method call on a bare-Name receiver is no longer swallowed before it can reach the method
+    classification (codex #4 / claude B-3)."""
     targets = set()
     for n in _walk_no_nested(nodes):
         if not isinstance(n, ast.Call):
@@ -548,12 +563,13 @@ def _state_change_targets(nodes, resolver, path_names):
 
 
 def _walk_stop_at_try(nodes):
-    """Walk `nodes` without descending into a nested function/lambda OR a nested `try` statement. CATCH-ALL
-    3 (control-flow): an operation inside a nested try may have its exceptions caught or transformed by
-    that try's own handlers before they could reach an OUTER handler, so it is not credited to the outer
-    try (codex #5: an inner `except PermissionError: raise RuntimeError` means the outer conflated handler
-    never receives that PermissionError). An op directly in the try body, or nested only in an `if`/`with`/
-    `for` that does not catch, still reaches this try's handlers and is walked."""
+    """Walk `nodes` without descending into a nested function/lambda OR a nested `try` statement. As a
+    best-effort control-flow heuristic, an operation inside a nested try may have its exceptions caught or
+    transformed by that try's own handlers before they could reach an OUTER handler, so it is not credited
+    to the outer try (codex #5: an inner `except PermissionError: raise RuntimeError` can keep the outer
+    conflated handler from receiving that PermissionError). This does not model every exception-flow shape;
+    an op directly in the try body, or nested only in an `if`/`with`/`for` that does not catch, still
+    reaches this try's handlers and is walked."""
     stack = list(nodes)
     while stack:
         n = stack.pop()
@@ -645,13 +661,14 @@ def _analyze_function(func, resolver, rel, deny, warn, path_names):
 
 
 def _analyze_try(func, resolver, rel, deny, warn, path_names):
-    """Analyze try/except conflation within a function/module scope. A conflated-except certain-shape
-    advisory is emitted only when the guarded operation is a CERTAIN filesystem classify/open, graded by
-    _classify_is_certain_fs on this conflated-except path: an os/os.path module classify, a builtin
-    open, or a method-form classify on a PROVEN pathlib receiver. On THIS conflated-except path a method-form
-    classify on an unproven receiver is not a filesystem certainty (codex #4) and anchors no finding; that
-    scoping is local to this path and does not hold for the if-branch same-path-mutation path in
-    _analyze_function, which does not consult this grade."""
+    """Analyze try/except conflation within a function/module scope. Whether a conflated-except scope is
+    reported, and at which tier, is decided by the code below and _classify_is_certain_fs, best-effort: it
+    weighs whether the guarded operation looks like a filesystem classify/open (an os/os.path module
+    classify, a builtin `open`, or a method-form classify on a recognized pathlib receiver), but the
+    recognition is syntactic and can be fooled (a scope that shadows `open` with a local binding, for
+    instance, is still credited by the spelling-only check), so an unmodelled or ambiguous case may still
+    be flagged, at either tier. The exact behavior is defined by the code and the --self-test, not promised
+    here; the detector over-fires rather than under-fires, harmless under WARN-only."""
     body = func.body if hasattr(func, "body") else []
     for node in _walk_no_nested(body):
         if not isinstance(node, ast.Try):
@@ -807,7 +824,7 @@ def scan(root, files):
                 # A huge declared input under memory pressure can raise MemoryError in the read/decode
                 # phase, before the parse-stage capacity catch below is reached. Fail closed as a located
                 # cannot-evaluate (exit 2), the same fail-closed path as an unreadable/unparseable input,
-                # never an uncaught error escaping as exit 1. Not portably self-testable (it needs an
+                # never an uncaught error escaping the run. Not portably self-testable (it needs an
                 # address-space ulimit), so it is covered by this catch rather than a flaky self-test leg.
                 errors.append((rel, 0, "declared input exceeds the analyzer's capacity (cannot evaluate): "
                                "{}".format(type(exc).__name__)))
@@ -832,7 +849,7 @@ def scan(root, files):
                 # A null-byte or otherwise malformed source makes ast.parse raise ValueError (not
                 # SyntaxError) on CPython < 3.12; 3.12+ raises SyntaxError, caught above. Close it
                 # fail-closed either way as a located cannot-evaluate (exit 2), never an uncaught error
-                # escaping as exit 1 (SC1 third state). RecursionError/MemoryError below are a disjoint
+                # escaping the run (SC1 third state). RecursionError/MemoryError below are a disjoint
                 # capacity case, unaffected.
                 errors.append((rel, 0, "declared input does not parse (malformed source): {}".format(exc)))
                 continue
@@ -849,7 +866,7 @@ def scan(root, files):
                 # closed as a located cannot-evaluate (exit 2), the same fail-closed path as an unreadable/
                 # unparseable input. RecursionError and MemoryError get this specific capacity message; any
                 # OTHER uncaught error is caught by the per-file broad backstop below as a located
-                # cannot-evaluate (surfaced, never masked), never an uncaught error escaping as exit 1.
+                # cannot-evaluate (surfaced, never masked), never an uncaught error escaping the run.
                 errors.append((rel, 0, "declared input exceeds the analyzer's capacity (cannot evaluate): "
                                "{}".format(type(exc).__name__)))
                 continue
@@ -859,7 +876,7 @@ def scan(root, files):
             # CLASS-WIDTH FAIL-CLOSED (SC1): any otherwise-uncaught error anywhere in this file's
             # read/decode/parse/diagnose pipeline is recorded as a LOCATED cannot-evaluate naming the file,
             # the phase, and the exception type+message, so a genuine bug is VISIBLE (never masked)
-            # and drives exit 2, never an uncaught error escaping as exit 1. This broad catch replaces the
+            # and drives exit 2, never an uncaught error escaping the run. This broad catch replaces the
             # piecemeal type-specific catches as the backstop; the narrower catches above stay for their
             # specific located messages. KeyboardInterrupt and SystemExit are BaseException, left uncaught.
             errors.append((rel, 0, "cannot evaluate declared input during {} ({}: {})".format(
@@ -915,8 +932,8 @@ def run(root):
             where = "{}:{}".format(rel, lineno) if lineno else rel
             _emit("cannot-evaluate: {}: {}".format(where, msg))
         # WARN-only v1: the certain-shape findings (deny) and the resist-static findings (warn) are both
-        # advisories on the same stream; neither sets a blocking exit. Sharper precision is a disclosed
-        # follow-on.
+        # advisories on the same stream; both tiers emit advisories at exit 0. Sharper precision is a
+        # disclosed follow-on.
         for rel, lineno, msg in warn:
             _emit("WARN: {}:{}: {}".format(rel, lineno, msg))
         for rel, lineno, msg in deny:
@@ -927,13 +944,13 @@ def run(root):
         _emit("PASS (advisory): {} certain-shape and {} resist-static advisory WARN(s) in the scanned "
               "surfaces; WARN-only v1 never blocks".format(len(deny), len(warn)))
         return 0
-    except Exception as exc:  # noqa: BLE001  final backstop: never let an uncaught error exit 1
-        # An unrecoverable output or scan failure fails closed to a cannot-evaluate exit 2, never escapes as
-        # exit 1. The stderr note is itself best-effort and encoding-safe.
+    except Exception as exc:  # noqa: BLE001  final backstop: never let an uncaught error escape the run
+        # An unrecoverable output or scan failure fails closed to a cannot-evaluate exit 2, and never
+        # escapes uncaught. The stderr note is itself best-effort and encoding-safe.
         try:
             _safe_write(sys.stderr, "cannot-evaluate: advisory run failed ({}: {}); fail-closed\n".format(
                 type(exc).__name__, exc))
-        except Exception:  # noqa: BLE001  stderr itself unwritable; still fail closed, never exit 1
+        except Exception:  # noqa: BLE001  stderr itself unwritable; still fail closed, never an uncaught-error escape
             pass
         return 2
 
@@ -959,9 +976,9 @@ def main():
 # resist-static advisory, and a "clean" case emits no advisory:
 #   each fixture in the `cases` table below is asserted against its own recorded kind, the cannot-evaluate
 #   legs assert exit 2 with a located diagnostic naming the input, and the subprocess legs assert the child
-#   never exits 1 and that run() emits a located WARN advisory. These assertions bind to the exact fixture
-#   inputs defined below, not to any general per-shape guarantee; the detector source is the authoritative
-#   account of what it flags.
+#   never exits 1 and that run() emits a located advisory for both a resist-static and a certain-shape
+#   fixture. These assertions bind to the exact fixture inputs defined below, not to any general per-shape
+#   guarantee; the detector source is the authoritative account of what it flags.
 
 _CERTAIN_STATE_SRC = '''\
 import os
@@ -1010,8 +1027,8 @@ def ensure(lock_path):
     proceed()
 '''
 
-# A method-form classify + mutation on an unproven (non-filesystem) receiver must NOT be convicted
-# (codex #3): the receiver's Path-ness cannot be proven, so it is not a certain-shape advisory.
+# fixture nonfs-receiver (`def refresh(self): if not self.cache.exists(): self.cache.write_text("data")`):
+# the receiver `self.cache` is not recognized as a filesystem path here; this fixture asserts kind clean.
 _NONFS_RECEIVER_SRC = '''\
 def refresh(self):
     if not self.cache.exists():
@@ -1092,8 +1109,9 @@ def ensure(os):
         os.makedirs("state.d")
 '''
 
-# CATCH-ALL 1 (codex #3): `Path` is a PARAMETER shadowing the constructor, so Path("state") is not a proven
-# filesystem receiver and the classify+mutation on it is not convicted (exit 0).
+# fixture shadowed-path-clean (`def refresh(Path): p = Path("state"); if not p.exists(): p.write_text(...)`):
+# `Path` is a parameter shadowing the constructor here, so Path("state") is not recognized as a filesystem
+# receiver; this fixture asserts kind clean (exit 0).
 _SHADOWED_PATH_CLEAN_SRC = '''\
 from pathlib import Path
 def refresh(Path):
@@ -1102,8 +1120,9 @@ def refresh(Path):
         p.write_text("data")
 '''
 
-# CATCH-ALL 2 (codex #4): a for-loop target REBINDS `p` from a proven Path to an unproven loop element, so
-# `p` loses filesystem provenance and the classify+mutation on it is not convicted (exit 0).
+# fixture loop-rebind-clean (`p = Path("state"); for p in [cache]: if not p.exists(): p.write_text(...)`):
+# the for-loop target rebinds `p` from a recognized Path to an unproven loop element, so `p` is no longer
+# recognized as a filesystem receiver here; this fixture asserts kind clean (exit 0).
 _LOOP_REBIND_CLEAN_SRC = '''\
 from pathlib import Path
 def refresh(cache):
@@ -1260,7 +1279,7 @@ def self_test_main():
                     failures.append("{}: expected no certain-shape advisory, got {}".format(name, len(deny)))
 
         # 5a. an unparseable declared input is a located cannot-evaluate (exit 2, fail-closed), never an
-        # uncaught error escaping as exit 1. This leg asserts exit 2 AND the located "does not parse
+        # uncaught error escaping the run. This leg asserts exit 2 AND the located "does not parse
         # (SyntaxError)" diagnostic, not just the exit code. Call scan() directly to inspect the located
         # diagnostic; run_quiet_files discards the messages this leg asserts on.
         rel, p = write(base, "tools/case_bad.py", "def broken(:\n    pass\n")
@@ -1274,7 +1293,7 @@ def self_test_main():
                             .format([msg for _, _, msg in bad_errors]))
 
         # 5b. an unreadable declared input is a located cannot-evaluate (exit 2, fail-closed), never an
-        # uncaught error escaping as exit 1. This leg asserts exit 2 AND the located "cannot read declared
+        # uncaught error escaping the run. This leg asserts exit 2 AND the located "cannot read declared
         # input" diagnostic, not just the exit code. Skipped if chmod-0 stays readable (root).
         rel, p = write(base, "tools/case_unread.py", "import os\n")
         os.chmod(p, 0)
@@ -1303,7 +1322,7 @@ def self_test_main():
 
         # 5d. a declared input that is valid UTF-8 and PARSES but whose AST is so deep the recursive
         # provenance/dataflow pass exceeds the interpreter's recursion limit is a cannot-evaluate (exit 2,
-        # fail-closed), never an uncaught RecursionError escaping as exit 1. This leg asserts exit 2 AND the
+        # fail-closed), never an uncaught RecursionError escaping the run. This leg asserts exit 2 AND the
         # located capacity ("exceeds the analyzer's capacity (cannot evaluate)") diagnostic, not just the
         # exit code.
         deep_src = "x = p" + ".parent" * 20000 + "\n"
@@ -1322,7 +1341,7 @@ def self_test_main():
 
         # 5e. a NUL-byte source is a malformed declared input: ast.parse raises SyntaxError on CPython >=
         # 3.12 and ValueError on < 3.12, and either way it is a located cannot-evaluate (exit 2, fail-closed),
-        # never an uncaught error escaping as exit 1. Written as raw bytes so the NUL survives. This leg
+        # never an uncaught error escaping the run. Written as raw bytes so the NUL survives. This leg
         # asserts exit 2 AND the located "does not parse" diagnostic, not just the exit code. Call scan()
         # directly to inspect the located diagnostic; run_quiet_files discards the messages this leg asserts on.
         rel = "tools/case_nul.py"
@@ -1376,14 +1395,14 @@ def self_test_main():
                 fp.write_text(text, encoding="utf-8")
             return froot
 
-        # deep-AST fixture -> cannot-evaluate (exit 2), never exit 1.
+        # deep-AST fixture -> cannot-evaluate (exit 2), never an uncaught-error escape.
         rc = child_exit(make_child_root("child_deep", "case_deep.py", text=deep_src))
         if rc == 1:
             failures.append("deep-ast (subprocess): child exited 1 (uncaught error escaped)")
         elif rc != 2:
             failures.append("deep-ast (subprocess): expected exit 2, got {}".format(rc))
 
-        # null-byte fixture -> cannot-evaluate (exit 2), never exit 1.
+        # null-byte fixture -> cannot-evaluate (exit 2), never an uncaught-error escape.
         rc = child_exit(make_child_root("child_nul", "case_nul.py", raw=b"import os\nx = 0\x00\n"))
         if rc == 1:
             failures.append("nul-byte (subprocess): child exited 1 (uncaught error escaped)")
@@ -1424,6 +1443,25 @@ def self_test_main():
             failures.append("run-emit early-return (subprocess): expected a LOCATED WARN advisory "
                             "(WARN: {}:<line>: <diagnostic>) with a positive line number and nonempty "
                             "diagnostic text, got {!r}".format(expected_rel, out))
+
+        # 5h. RUN-PATH ADVISORY-EMISSION leg for the CERTAIN-SHAPE tier: the run-emit leg above drives run()
+        # over a resist-static fixture, so a break confined to the certain-shape emitter (the `deny` render
+        # loop in run()) would pass it unseen. This companion drives run() end to end over a same-path
+        # check-then-create (a certain-shape fixture) and asserts BOTH the child exits 0 AND a LOCATED
+        # advisory is emitted for it, so a delocated or dropped certain-shape emission is caught.
+        _CERTAIN_RUN_SRC = ("import os\n"
+                            "def ensure():\n"
+                            "    if not os.path.isdir(\"state.d\"):\n"
+                            "        os.mkdir(\"state.d\")\n")
+        rc, out = child_run_out(make_child_root("child_certain_run", "case_certain_run.py",
+                                                text=_CERTAIN_RUN_SRC))
+        if rc != 0:
+            failures.append("run-emit certain-shape (subprocess): expected exit 0, got {}".format(rc))
+        expected_rel = "tools/case_certain_run.py"
+        if not _located_warn(out, expected_rel):
+            failures.append("run-emit certain-shape (subprocess): expected a LOCATED advisory "
+                            "(WARN: {}:<line>: <diagnostic>) with a positive line number and nonempty "
+                            "diagnostic text for the certain-shape fixture, got {!r}".format(expected_rel, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1435,8 +1473,9 @@ def self_test_main():
     print("SELF-TEST PASS (WARN-only v1): every scan that ran exited 0, every cases-table fixture matched "
           "its recorded kind, the malformed and unreadable declared inputs that ran each failed closed to a "
           "located cannot-evaluate (exit 2), and the subprocess legs confirmed the child never exits 1 and "
-          "that run() emits a located WARN advisory; these are the fixture-bound invariants the suite "
-          "exercises, not a general guarantee of the detector's behaviour{}"
+          "that run() emits a located advisory for both a resist-static and a certain-shape fixture; these "
+          "are the fixture-bound invariants the suite exercises, not a general guarantee of the "
+          "detector's behaviour{}"
           .format(tail))
     return 0
 

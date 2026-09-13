@@ -142,11 +142,14 @@ class _ModuleResolver:
         return False
 
     def scoped(self, shadowed):
-        """A per-scope view of this resolver with any timer/time alias SHADOWED by a local binding removed,
-        so `def f(signal): signal.alarm(...)` (a parameter shadowing the imported module) is not read as the
-        real signal module. An imported alias is treated as the module only where no parameter or local
-        binding in the scope reuses its name; where one does, the receiver is not provably the module and the
-        scope is left unrecognized rather than convicted on an ambiguous receiver."""
+        """A per-scope view of this resolver with the timer/time module aliases that a local binding SHADOWS
+        removed, so `def f(signal): signal.alarm(...)` (a parameter shadowing the imported module) is not
+        read as the real signal module. This shadow-stripping is a best-effort heuristic over the aliases
+        this resolver tracks and the local bindings _scope_bound_names detects (which do not include an
+        in-scope `import ... as <name>` rebind, for instance); it does not model every name a scope could
+        rebind, so an unmodelled or ambiguous case may still be flagged, at either tier. Receiver
+        recognition and the emitted tier are best-effort and defined by the code and its --self-test, not
+        promised here; the detector over-fires rather than under-fires, harmless under WARN-only."""
         if not shadowed:
             return self
         r = _ModuleResolver.__new__(_ModuleResolver)
@@ -256,14 +259,15 @@ def _is_nonzero_const(node):
 
 
 def _refs_saved_identity(node, saved, bound_names):
-    """True iff `node` is a saved name used identity-preserved: the bare name, a subscript/attribute of it,
-    or a copy/numeric cast wrapping it (int(x), float(x), x.copy()). CATCH-ALL 1 (general shadowing): a
-    bare-Name cast callable (int/float/copy/deepcopy from a builtin or import) is credited as identity-
-    preserving ONLY when that name is NOT locally bound in the scope. A parameter or local that shadows
-    `float` (or int/copy/deepcopy) is a caller-supplied callable that may adjust the value, not the
-    identity cast, so it does not establish an identity flow and the restore is treated as derived (WARN),
-    never a verbatim certain-shape advisory. The COPY_CASTS spelling alone never convicts; its binding must
-    resolve."""
+    """True iff `node` is recognized as a saved name used identity-preserved: the bare name, a
+    subscript/attribute of it, or a copy/numeric cast wrapping it (int(x), float(x), x.copy()). As a
+    best-effort heuristic, a bare-Name cast callable (int/float/copy/deepcopy from a builtin or import) is
+    treated as identity-preserving where that name is not locally bound in the scope, so a parameter or
+    local that shadows `float` (or int/copy/deepcopy) is not read as the identity cast. This is one
+    heuristic input, not a tier guarantee: recognition here is syntactic and does not model every rebind or
+    receiver, so an unmodelled or ambiguous case may still be flagged, at either tier. The exact behavior
+    is defined by the code below and the --self-test, not promised here; the detector over-fires rather
+    than under-fires, harmless under WARN-only."""
     if isinstance(node, ast.Name):
         return node.id in saved
     if isinstance(node, ast.Subscript):
@@ -303,20 +307,26 @@ def _analyze_scope(scope, resolver, bound_names):
     `import ... as <name>` alias binding the saved name, may leave the stale saved name in the set and yield a
     false-positive certain-shape advisory (harmless under WARN-only; precision a disclosed follow-on).
 
-    Three catch-all invariants keep the certain-shape advisory confined to the robustly-simple certain shape:
-      CATCH-ALL 1 (general shadowing): a cast callable spelled int/float/copy/deepcopy establishes an
-        identity flow only where that name resolves to the real builtin/import, i.e. it is not locally
-        bound (see _refs_saved_identity), so a shadowed `float` parameter never forges an identity restore.
-      CATCH-ALL 2 (element-wise save collection): a tuple/list assignment matches its RHS elements to its
+    The tier a scope is reported at (certain-shape vs resist-static), which names are recognized as saved
+    or as the timer API, and how control flow is threaded are all best-effort heuristics, not guarantees:
+    an unmodelled or ambiguous case may still be flagged, at either tier, and the exact behavior is defined
+    by the code below and the --self-test, not promised here. The detector over-fires rather than
+    under-fires, harmless under WARN-only. Three heuristics shape the certain-shape tier, each best-effort:
+      HEURISTIC 1 (shadowing): a cast callable spelled int/float/copy/deepcopy is treated as an identity
+        flow mainly where that name is not locally bound (see _refs_saved_identity), so a shadowed `float`
+        parameter is usually not read as the identity cast; this does not model every receiver or rebind.
+      HEURISTIC 2 (element-wise save collection): a tuple/list assignment matches its RHS elements to its
         targets element by element, so `saved, other = signal.alarm(0), 0` records the direct save on
         `saved` rather than clearing it as a whole-RHS non-save.
-      CATCH-ALL 3 (straightline-only own-arm): the own nonzero arm credits the identity restore only when
-        the arm certainly PRECEDES it on the SAME execution path. The `armed` state is threaded linearly
-        and ISOLATED across mutually-exclusive branches (each `if`/`elif`/`else` arm, loop body, match
-        case, and except handler is entered from the pre-branch armed state and its arm does not leak out),
-        so an own-arm in one branch never credits an identity restore in a sibling branch. A `try` body,
-        `else`, `finally`, and a `with` body are straightline continuations and carry the armed state
-        through, so the ordinary save -> arm -> restore-in-finally shape still convicts."""
+      HEURISTIC 3 (straightline own-arm): the own nonzero arm is credited toward the identity restore only
+        along the straightline flow this pass threads. The `armed` state is threaded linearly and reset
+        across the mutually-exclusive statement branches this scan models (each `if`/`elif`/`else` arm,
+        loop body, match case, and except handler is entered from the pre-branch armed state and its arm
+        does not leak out), while a `try` body, `else`, `finally`, and a `with` body are straightline
+        continuations that carry the armed state through, so the ordinary save -> arm -> restore-in-finally
+        shape is still flagged. A branch shape this pass does not model as mutually exclusive (a
+        conditional expression's arms, for instance) is not isolated, so a scope may still be flagged
+        certain-shape; this imprecision is a disclosed follow-on, harmless under WARN-only."""
     saved = set()
     state = {"monotonic": False,
              "identity_restore": False, "identity_restore_armed": False, "derived_restore": False}
@@ -331,9 +341,12 @@ def _analyze_scope(scope, resolver, bound_names):
         val = _first_value_arg(call, arm)
         if val is None:
             return armed
-        # An own nonzero arm marks THIS execution path armed (a live save must already exist), so
-        # `alarm(5); saved = alarm(0); alarm(saved)` (arm before save) never forges a certain-shape advisory, and an arm in
-        # a sibling branch never leaks to a restore in another (the caller isolates branch armed state).
+        # An own nonzero arm marks THIS straightline path armed (a live save must already exist), so
+        # `alarm(5); saved = alarm(0); alarm(saved)` (arm before save) is not read as the armed shape here,
+        # and an arm in a mutually-exclusive statement branch this pass models is reset rather than leaked
+        # to a restore in another (the caller isolates branch armed state); a branch shape this pass does
+        # not model as exclusive (a conditional expression, for instance) is not isolated. Best-effort,
+        # harmless under WARN-only.
         if _is_nonzero_const(val) and saved:
             return True
         if saved and _refs_saved_identity(val, saved, bound_names):
@@ -542,7 +555,7 @@ def scan(root, files):
                 # A huge declared input under memory pressure can raise MemoryError in the read/decode
                 # phase, before the parse-stage capacity catch below is reached. Fail closed as a located
                 # cannot-evaluate (exit 2), the same fail-closed path as an unreadable/unparseable input,
-                # never an uncaught error escaping as exit 1. Not portably self-testable (it needs an
+                # never an uncaught error escaping the run. Not portably self-testable (it needs an
                 # address-space ulimit), so it is covered by this catch rather than a flaky self-test leg.
                 errors.append((rel, 0, "declared input exceeds the analyzer's capacity (cannot evaluate): "
                                "{}".format(type(exc).__name__)))
@@ -567,7 +580,7 @@ def scan(root, files):
                 # A null-byte or otherwise malformed source makes ast.parse raise ValueError (not
                 # SyntaxError) on CPython < 3.12; 3.12+ raises SyntaxError, caught above. Close it
                 # fail-closed either way as a located cannot-evaluate (exit 2), never an uncaught error
-                # escaping as exit 1 (SC1 third state). RecursionError/MemoryError below are a disjoint
+                # escaping the run (SC1 third state). RecursionError/MemoryError below are a disjoint
                 # capacity case, unaffected.
                 errors.append((rel, 0, "declared input does not parse (malformed source): {}".format(exc)))
                 continue
@@ -585,7 +598,7 @@ def scan(root, files):
                 # a located cannot-evaluate (exit 2), the same fail-closed path as an unreadable/
                 # unparseable input. RecursionError and MemoryError get this specific capacity message; any
                 # OTHER uncaught error is caught by the per-file broad backstop below as a located
-                # cannot-evaluate (surfaced, never masked), never an uncaught error escaping as exit 1.
+                # cannot-evaluate (surfaced, never masked), never an uncaught error escaping the run.
                 errors.append((rel, 0, "declared input exceeds the analyzer's capacity (cannot evaluate): "
                                "{}".format(type(exc).__name__)))
                 continue
@@ -595,7 +608,7 @@ def scan(root, files):
             # CLASS-WIDTH FAIL-CLOSED (SC1): any otherwise-uncaught error anywhere in this file's
             # read/decode/parse/diagnose pipeline is recorded as a LOCATED cannot-evaluate naming the file,
             # the phase, and the exception type+message, so a genuine bug is VISIBLE (never masked)
-            # and drives exit 2, never an uncaught error escaping as exit 1. This broad catch replaces the
+            # and drives exit 2, never an uncaught error escaping the run. This broad catch replaces the
             # piecemeal type-specific catches as the backstop; the narrower catches above stay for their
             # specific located messages. KeyboardInterrupt and SystemExit are BaseException, left uncaught.
             errors.append((rel, 0, "cannot evaluate declared input during {} ({}: {})".format(
@@ -651,8 +664,8 @@ def run(root):
             where = "{}:{}".format(rel, lineno) if lineno else rel
             _emit("cannot-evaluate: {}: {}".format(where, msg))
         # WARN-only v1: the certain-shape findings (deny) and the resist-static findings (warn) are both
-        # advisories on the same stream; neither sets a blocking exit. Sharper precision is a disclosed
-        # follow-on.
+        # advisories on the same stream; both tiers emit advisories at exit 0. Sharper precision is a
+        # disclosed follow-on.
         for rel, lineno, msg in warn:
             _emit("WARN: {}:{}: {}".format(rel, lineno, msg))
         for rel, lineno, msg in deny:
@@ -663,13 +676,13 @@ def run(root):
         _emit("PASS (advisory): {} certain-shape and {} resist-static advisory WARN(s) in the scanned "
               "surfaces; WARN-only v1 never blocks".format(len(deny), len(warn)))
         return 0
-    except Exception as exc:  # noqa: BLE001  final backstop: never let an uncaught error exit 1
-        # An unrecoverable output or scan failure fails closed to a cannot-evaluate exit 2, never escapes as
-        # exit 1. The stderr note is itself best-effort and encoding-safe.
+    except Exception as exc:  # noqa: BLE001  final backstop: never let an uncaught error escape the run
+        # An unrecoverable output or scan failure fails closed to a cannot-evaluate exit 2, and never
+        # escapes uncaught. The stderr note is itself best-effort and encoding-safe.
         try:
             _safe_write(sys.stderr, "cannot-evaluate: advisory run failed ({}: {}); fail-closed\n".format(
                 type(exc).__name__, exc))
-        except Exception:  # noqa: BLE001  stderr itself unwritable; still fail closed, never exit 1
+        except Exception:  # noqa: BLE001  stderr itself unwritable; still fail closed, never an uncaught-error escape
             pass
         return 2
 
@@ -696,9 +709,9 @@ def main():
 # case emits no certain-shape advisory (a resist-static advisory is acceptable):
 #   each fixture in the `cases` table below is asserted against its own recorded kind, the cannot-evaluate
 #   legs assert exit 2 with a located diagnostic naming the input, and the subprocess legs assert the child
-#   never exits 1 and that run() emits a located WARN advisory. These assertions bind to the exact fixture
-#   inputs defined below, not to any general per-shape guarantee; the detector source is the authoritative
-#   account of what it flags.
+#   never exits 1 and that run() emits a located advisory for both a resist-static and a certain-shape
+#   fixture. These assertions bind to the exact fixture inputs defined below, not to any general per-shape
+#   guarantee; the detector source is the authoritative account of what it flags.
 
 _CERTAIN_SRC = '''\
 import signal
@@ -1045,7 +1058,7 @@ def self_test_main():
                     failures.append("{}: expected no certain-shape advisory, got {}".format(name, len(deny)))
 
         # 4a. an unparseable declared input is a located cannot-evaluate (exit 2, fail-closed), never an
-        # uncaught error escaping as exit 1. This leg asserts exit 2 AND the located "does not parse
+        # uncaught error escaping the run. This leg asserts exit 2 AND the located "does not parse
         # (SyntaxError)" diagnostic, not just the exit code. Call scan() directly to inspect the located
         # diagnostic; run_quiet_files discards the messages this leg asserts on.
         rel, p = write(base, "tools/case_bad.py", "def broken(:\n    pass\n")
@@ -1059,7 +1072,7 @@ def self_test_main():
                             .format([msg for _, _, msg in bad_errors]))
 
         # 4b. an unreadable declared input is a located cannot-evaluate (exit 2, fail-closed), never an
-        # uncaught error escaping as exit 1. This leg asserts exit 2 AND the located "cannot read declared
+        # uncaught error escaping the run. This leg asserts exit 2 AND the located "cannot read declared
         # input" diagnostic, not just the exit code. Skipped if chmod-0 stays readable (root).
         rel, p = write(base, "tools/case_unread.py", "import signal\n")
         os.chmod(p, 0)
@@ -1088,7 +1101,7 @@ def self_test_main():
 
         # 4d. a declared input that is valid UTF-8 and PARSES but whose AST is so deep the recursive
         # dataflow pass exceeds the interpreter's recursion limit is a cannot-evaluate (exit 2, fail-closed),
-        # never an uncaught RecursionError escaping as exit 1. This leg asserts exit 2 AND the located
+        # never an uncaught RecursionError escaping the run. This leg asserts exit 2 AND the located
         # capacity ("exceeds the analyzer's capacity (cannot evaluate)") diagnostic, not just the exit code.
         deep_src = "x = a" + ".b" * 20000 + "\n"
         rel, p = write(base, "tools/case_deep.py", deep_src)
@@ -1106,7 +1119,7 @@ def self_test_main():
 
         # 4e. a NUL-byte source is a malformed declared input: ast.parse raises SyntaxError on CPython >=
         # 3.12 and ValueError on < 3.12, and either way it is a located cannot-evaluate (exit 2, fail-closed),
-        # never an uncaught error escaping as exit 1. Written as raw bytes so the NUL survives. This leg
+        # never an uncaught error escaping the run. Written as raw bytes so the NUL survives. This leg
         # asserts exit 2 AND the located "does not parse" diagnostic, not just the exit code. Call scan()
         # directly to inspect the located diagnostic; run_quiet_files discards the messages this leg asserts on.
         rel = "tools/case_nul.py"
@@ -1160,14 +1173,14 @@ def self_test_main():
                 fp.write_text(text, encoding="utf-8")
             return froot
 
-        # deep-AST fixture -> cannot-evaluate (exit 2), never exit 1.
+        # deep-AST fixture -> cannot-evaluate (exit 2), never an uncaught-error escape.
         rc = child_exit(make_child_root("child_deep", "case_deep.py", text=deep_src))
         if rc == 1:
             failures.append("deep-ast (subprocess): child exited 1 (uncaught error escaped)")
         elif rc != 2:
             failures.append("deep-ast (subprocess): expected exit 2, got {}".format(rc))
 
-        # null-byte fixture -> cannot-evaluate (exit 2), never exit 1.
+        # null-byte fixture -> cannot-evaluate (exit 2), never an uncaught-error escape.
         rc = child_exit(make_child_root("child_nul", "case_nul.py", raw=b"import signal\nx = 0\x00\n"))
         if rc == 1:
             failures.append("nul-byte (subprocess): child exited 1 (uncaught error escaped)")
@@ -1208,6 +1221,26 @@ def self_test_main():
             failures.append("run-emit inline-container (subprocess): expected a LOCATED WARN advisory "
                             "(WARN: {}:<line>: <diagnostic>) with a positive line number and nonempty "
                             "diagnostic text, got {!r}".format(expected_rel, out))
+
+        # 4h. RUN-PATH ADVISORY-EMISSION leg for the CERTAIN-SHAPE tier: the run-emit leg above drives run()
+        # over a resist-static fixture, so a break confined to the certain-shape emitter (the `deny` render
+        # loop in run()) would pass it unseen. This companion drives run() end to end over a verbatim
+        # borrowed-timer save/arm/restore (a certain-shape fixture) and asserts BOTH the child exits 0 AND a
+        # LOCATED advisory is emitted for it, so a delocated or dropped certain-shape emission is caught.
+        _CERTAIN_RUN_SRC = ("import signal\n"
+                            "def borrow():\n"
+                            "    saved = signal.alarm(0)\n"
+                            "    signal.alarm(5)\n"
+                            "    signal.alarm(saved)\n")
+        rc, out = child_run_out(make_child_root("child_certain_run", "case_certain_run.py",
+                                                text=_CERTAIN_RUN_SRC))
+        if rc != 0:
+            failures.append("run-emit certain-shape (subprocess): expected exit 0, got {}".format(rc))
+        expected_rel = "tools/case_certain_run.py"
+        if not _located_warn(out, expected_rel):
+            failures.append("run-emit certain-shape (subprocess): expected a LOCATED advisory "
+                            "(WARN: {}:<line>: <diagnostic>) with a positive line number and nonempty "
+                            "diagnostic text for the certain-shape fixture, got {!r}".format(expected_rel, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1219,8 +1252,9 @@ def self_test_main():
     print("SELF-TEST PASS (WARN-only v1): every scan that ran exited 0, every cases-table fixture matched "
           "its recorded kind, the malformed and unreadable declared inputs that ran each failed closed to a "
           "located cannot-evaluate (exit 2), and the subprocess legs confirmed the child never exits 1 and "
-          "that run() emits a located WARN advisory; these are the fixture-bound invariants the suite "
-          "exercises, not a general guarantee of the detector's behaviour{}"
+          "that run() emits a located advisory for both a resist-static and a certain-shape fixture; these "
+          "are the fixture-bound invariants the suite exercises, not a general guarantee of the "
+          "detector's behaviour{}"
           .format(tail))
     return 0
 
