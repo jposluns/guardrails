@@ -1170,7 +1170,17 @@ def render(argv):
             return EXIT_CANNOT_EVALUATE
     if root is None:
         root = "."
-    product_root = Path(os.path.abspath(root))
+    try:
+        product_root = Path(os.path.abspath(root))
+    except OSError as exc:
+        # A relative --root (including the "." default) resolves through os.getcwd(); a deleted or
+        # otherwise unresolvable current directory or root makes abspath raise. Map that root-resolution
+        # filesystem error to a cannot-evaluate (exit 2) HERE, before render's own error handling, so an
+        # uncaught FileNotFoundError never exits 1 and collides with the documented DRIFT code
+        # (guard-input-soundness / fail-closed).
+        print("opf render: cannot evaluate: cannot resolve product root {!r} ({})".format(root, exc),
+              file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
 
     res = _opf_store.resolve_store(product_root)
     if res.status == _opf_store.NOT_ADOPTED:
