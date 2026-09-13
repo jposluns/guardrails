@@ -211,7 +211,10 @@ def _is_proven_path(node, path_names, resolver):
 
 
 def _is_path_annotation(ann, resolver):
-    """True iff an annotation names a pathlib type: `Path`, `pathlib.Path`, or a forward-ref string of one."""
+    """Best-effort: MATCHES an annotation that spells a pathlib type: a resolver-tracked `Path`,
+    `pathlib.Path` (any alias), or a forward-ref string whose tail token is a Path ctor name. The forward-ref
+    string branch matches by token spelling and does not establish the name resolves to pathlib at runtime.
+    Exact behavior is the code plus --self-test."""
     if isinstance(ann, ast.Name):
         return ann.id in resolver.path_ctor_names
     if isinstance(ann, ast.Attribute) and isinstance(ann.value, ast.Name):
@@ -362,8 +365,11 @@ def _proven_path_names(func, resolver):
 
 
 def _open_write_mode(call, mode_index):
-    """True iff an open call opens in a write/append/create mode: a `mode=` string keyword, or a positional
-    mode string at `mode_index` (1 for the builtin open(path, mode), 0 for Path.open(mode))."""
+    """Best-effort: MATCHES a LITERAL write/append/create mode string on an open call: a `mode=` string
+    keyword constant, or a positional mode string constant at `mode_index` (1 for the builtin
+    open(path, mode), 0 for Path.open(mode)). A non-constant mode expression (a variable, a formatted
+    string) is not matched, so this does not establish the runtime open mode. Exact behavior is the code
+    plus --self-test."""
     for kw in call.keywords:
         if kw.arg == "mode" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
             return any(m in kw.value.value for m in WRITE_MODES)
@@ -483,9 +489,12 @@ def _walk_no_nested(nodes):
 def _scope_bound_names(scope):
     """The set of names bound LOCALLY in one scope by a parameter or an in-scope binding (assignment,
     annotation, aug-assign, walrus, for/with/except/comprehension target, or a nested def/class), NOT
-    descending into a nested def and NOT counting a plain `import` (an import IS the module, so it never
-    shadows itself, and counting a module-level import here would wrongly disable module-scope detection).
-    Used by CATCH-ALL 1 to detect a local name that shadows an os/os.path/shutil/pathlib API name."""
+    descending into a nested def and NOT counting a plain `import` (import bindings are OMITTED by this
+    heuristic; counting a module-level import here would wrongly disable module-scope detection). Because
+    import bindings are omitted, an in-scope `import ... as <name>` rebind can leave stale API recognition
+    while runtime calls the rebound name (consistent with the module-level disclosure), a best-effort limit
+    of this scan. Used by CATCH-ALL 1 to match a local name that shadows an os/os.path/shutil/pathlib API
+    name."""
     names = set()
     args = getattr(scope, "args", None)
     if args is not None:
@@ -581,8 +590,10 @@ def _walk_stop_at_try(nodes):
 
 
 def _branch_refuses(nodes):
-    """True iff the branch clearly REFUSES (raises) rather than proceeding clean. A raise anywhere at the
-    branch's own statement level (not inside a nested def) is a refusal/suppressor."""
+    """Best-effort: MATCHES a raise present at the branch's own statement level (not inside a nested def),
+    a syntactic raise-PRESENCE heuristic. It does NOT establish that the branch refuses at runtime: a
+    caught raise (`try: raise ...; except: pass`), a conditional raise, or an unreachable raise can match
+    here without the branch actually refusing. Exact behavior is the code plus --self-test."""
     for n in nodes:
         for sub in _walk_no_nested([n]):
             if isinstance(sub, ast.Raise):
@@ -591,8 +602,11 @@ def _branch_refuses(nodes):
 
 
 def _function_has_suppressor(func, resolver):
-    """True iff the enclosing function carries any no-follow evidence: an lstat/lexists/is_symlink call, a
-    follow_symlinks=False or dir_fd= keyword, or an O_NOFOLLOW reference."""
+    """Best-effort scan for RECOGNIZED no-follow spellings in the enclosing function: an attribute-form
+    lstat/lexists/is_symlink call, a bare os.lstat, a follow_symlinks=False or dir_fd= keyword, or an
+    O_NOFOLLOW reference. It MATCHES these forms syntactically and can MISS a form it does not resolve, for
+    example a directly imported `from os.path import lexists; lexists(p)` called as a bare Name. It does not
+    establish that the function is symlink-safe. Exact behavior is the code plus --self-test."""
     for n in _walk_no_nested(func.body if hasattr(func, "body") else []):
         if isinstance(n, ast.Call):
             if _kw_is_false(n, "follow_symlinks") or _has_kw(n, "dir_fd"):
@@ -719,11 +733,13 @@ def _handler_exc_names(exc_type):
 
 
 def _is_benign_absence_value(value):
-    """True iff a returned value is a clear 'nothing here' sentinel that collapses to genuine absence:
-    a bare return, None, an empty string, or an empty list/dict/tuple/set literal or empty-constructor call.
-    A numeric or other constant (e.g. `return 2`), or a boolean, is NOT benign absence: it may be an explicit
-    failure status or a value the consumer treats as refusal, so it does not license a certain-shape
-    advisory."""
+    """Best-effort: MATCHES a returned value that spells a 'nothing here' sentinel: a bare return, None, an
+    empty string, an empty list/dict/tuple/set literal, or an empty set/list/dict/tuple constructor call.
+    A numeric or other constant (e.g. `return 2`) or a boolean is not matched, so it does not license a
+    certain-shape advisory. Recognition is by SPELLING: an empty-constructor match credits the name
+    (list/set/dict/tuple) syntactically, so a shadowed constructor (list/set/dict/tuple rebound as a local
+    or parameter that returns a failure code) can defeat it. It does not establish genuine runtime absence.
+    Exact behavior is the code plus --self-test."""
     if value is None:
         return True
     if isinstance(value, ast.Constant):
@@ -739,9 +755,12 @@ def _is_benign_absence_value(value):
 
 
 def _handler_is_benign(handler_body):
-    """True iff a handler body collapses to genuine absence: only pass, continue, or a return of an
-    clear absence sentinel (per _is_benign_absence_value), with no raise, no explicit failure status,
-    and no other statement. An except that returns a failure code or refuses is NOT benign."""
+    """Best-effort: MATCHES a handler body that reads syntactically as genuine absence: only pass, continue,
+    or a return of a recognized absence sentinel (per _is_benign_absence_value), with no raise and no other
+    statement. It matches known benign/return/refuse SPELLINGS syntactically; it does not establish that the
+    handler truly collapses to absence at runtime. A shadowed constructor (e.g. `except (...): return list()`
+    where `list` is a parameter returning a failure code) or a caller-defined return convention can defeat
+    it, so a match here does not establish benign absence. Exact behavior is the code plus --self-test."""
     if not handler_body:
         return False
     for n in handler_body:

@@ -186,9 +186,11 @@ def _names_bound(target):
 
 
 def _walk_no_nested(nodes):
-    """Walk statements/expressions without descending into a nested function or lambda body (each is its own
-    scope). A nested def/lambda is yielded but never entered, so a binding inside it is attributed to that
-    scope, not the enclosing one."""
+    """Walk statements/expressions without descending into a nested function or lambda body. A nested
+    def/lambda is yielded but never entered, so a binding inside it is not attributed to the enclosing
+    scope. A nested def body is separately analysed (it is its own scope via _scope_bodies); a lambda body
+    is NOT, because _scope_bodies enumerates only Module/FunctionDef, so a lambda body is SKIPPED and not
+    separately analysed."""
     stack = list(nodes)
     while stack:
         n = stack.pop()
@@ -202,8 +204,10 @@ def _walk_no_nested(nodes):
 def _scope_bound_names(scope):
     """The set of names bound LOCALLY in one scope by a parameter or an in-scope binding (assignment,
     annotation, walrus, aug-assign, for/with/except/comprehension target), NOT descending into a nested def
-    and NOT counting an `import` (an import IS the module, so it never shadows itself). Used to detect a local
-    name that shadows an imported timer/time module alias."""
+    and NOT counting an `import` (import bindings are OMITTED by this heuristic). Because import bindings are
+    omitted, an in-scope `import ... as <name>` rebind can leave stale API recognition while runtime calls
+    the rebound name, a best-effort limit of this scan. Used to match a local name that shadows an imported
+    timer/time module alias."""
     names = set()
     args = getattr(scope, "args", None)
     if args is not None:
@@ -296,7 +300,9 @@ def _analyze_scope(scope, resolver, bound_names):
     matrix.
 
     An ORDERED, per-flow pass over the scope's own statements (never descending into a nested function or
-    lambda, which is its own scope) tracks which local names currently hold a VERBATIM saved timer value. A
+    lambda: a nested def body is separately analysed as its own scope via _scope_bodies, but a lambda body is
+    SKIPPED and not separately analysed) tracks which local names currently hold a VERBATIM saved timer
+    value. A
     name ENTERS the saved set when it is bound to a timer save call (a plain assignment, an annotated
     assignment, a walrus, or a tuple unpack) or to an identity-preserving copy of a name already in the set
     (a bare name, a subscript, an attribute, or an int/float/copy wrap); it LEAVES the set when one of the
@@ -322,9 +328,11 @@ def _analyze_scope(scope, resolver, bound_names):
         along the straightline flow this pass threads. The `armed` state is threaded linearly and reset
         across the mutually-exclusive statement branches this scan models (each `if`/`elif`/`else` arm,
         loop body, match case, and except handler is entered from the pre-branch armed state and its arm
-        does not leak out), while a `try` body, `else`, `finally`, and a `with` body are straightline
-        continuations that carry the armed state through, so the ordinary save -> arm -> restore-in-finally
-        shape is still flagged. A branch shape this pass does not model as mutually exclusive (a
+        does not leak out), while a `try` body, `else`, `finally`, and a `with` body are TRAVERSED as
+        heuristic continuations that carry the armed state through, so the ordinary
+        save -> arm -> restore-in-finally shape is still flagged; this is a modeling choice, not a runtime
+        guarantee that the body runs (a `with` whose __enter__ raises never runs its body), consistent with
+        the disclosed over-fire. A branch shape this pass does not model as mutually exclusive (a
         conditional expression's arms, for instance) is not isolated, so a scope may still be flagged
         certain-shape; this imprecision is a disclosed follow-on, harmless under WARN-only."""
     saved = set()
@@ -416,7 +424,8 @@ def _analyze_scope(scope, resolver, bound_names):
 
     def visit_stmt(node, armed):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            return armed                          # a nested scope; analysed on its own, never entered here
+            return armed                          # a nested scope, never entered here (a def body is its own
+                                                  # scope via _scope_bodies; a lambda body is SKIPPED, not analysed)
         if isinstance(node, ast.Assign):
             armed = visit_expr(node.value, armed)
             return bind_assign(node.targets, node.value, armed)
@@ -451,7 +460,10 @@ def _analyze_scope(scope, resolver, bound_names):
                 armed = visit_expr(item.context_expr, armed)
                 if item.optional_vars is not None:
                     saved.difference_update(_names_bound(item.optional_vars))  # with-as rebinds the name
-            return walk(node.body, armed)         # a with body always runs: a straightline continuation
+            return walk(node.body, armed)         # the scan TRAVERSES the with body as a heuristic
+                                                  # continuation; it does not establish that context entry
+                                                  # succeeds or that the body runs (a `with Refuse():` whose
+                                                  # __enter__ raises never runs the body)
         if isinstance(node, ast.Try):
             armed_before = armed
             armed = walk(node.body, armed)        # the try body runs straightline
