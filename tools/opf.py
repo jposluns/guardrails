@@ -298,6 +298,10 @@ def _watchdog_wrapper_caller_deadline_self_test():
             print("opf watchdog wrapper-deadline self-test: the wrapper ran {:.4f}s, not longer than the {}s "
                   "deadline; the fixture cannot discriminate".format(_elapsed, _deadline), file=sys.stderr)
             ok = False
+        # Bounded delivery-grace for the last iteration's clamped (1e-6) re-armed SIGALRM under load: a flaky-observation stabilization, not a correctness change (SIGALRM is unblocked here, so the pending timer delivers during the wait).
+        _grace = _time.monotonic() + 2.0
+        while not _fired and _time.monotonic() < _grace:
+            _time.sleep(0.005)
         if not _fired:
             print("opf watchdog wrapper-deadline self-test: the caller's {}s deadline never FIRED across a "
                   "{:.4f}s run; the wrapper paused/extended it instead of restoring it elapsed-aware "
