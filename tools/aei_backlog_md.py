@@ -58,10 +58,16 @@ KINDS = ("tracked-task", "human-decision", "external", "foreign-lease", "not-bef
 SENTINEL_RE = re.compile(r"^<!--\s*aei:\s*empty\s+backlog\s*-->$")
 
 
+def _physical_lines(text):
+    """Split on physical line endings only (CR, LF, CRLF), never Unicode line separators or control
+    characters, so a separator embedded in a line cannot create a phantom column-0 line."""
+    return re.split(r"\r\n|\r|\n", text)
+
+
 def parse(text):
     """(items, errors). Errors are strings; any error means the enumeration must not be emitted."""
     items, errors, seen = [], [], set()
-    for n, line in enumerate(text.splitlines(), 1):
+    for n, line in enumerate(_physical_lines(text), 1):
         stripped = line.strip()
         if not (CANDIDATE_RE.match(stripped) or CHECKBOX_RE.match(stripped)
                 or BLOCKER_PREFIX_RE.search(stripped)):
@@ -131,7 +137,7 @@ def main():
         # A zero-item backlog is valid only when it affirms emptiness with the sentinel and carries no
         # operative content: every non-blank line must be a column-0 sentinel line (blank lines allowed).
         # Any other non-blank line is operative content the grammar did not recognize: fail closed.
-        nonblank = [ln for ln in text.splitlines() if ln.strip()]
+        nonblank = [ln for ln in _physical_lines(text) if ln.strip()]
         others = [ln for ln in nonblank if not SENTINEL_RE.match(ln.rstrip())]
         if others:
             print("enumerator error: backlog has content but zero items were recognized; the grammar "
@@ -196,16 +202,23 @@ def self_test():
     table = "| ID | State |\n| --- | --- |\n| A-1 | open |\n| A-2 | open |\n"
     sentinel = "<!-- aei: empty backlog -->\n"
     recognized = "# backlog\n- A-1 [ ] first\n- A-2 [x] done\n"
-    # (b) exit-0 affirmations: bare column-0 sentinel, the same with blank lines, and internal-whitespace
-    # variants alone (spaces or a tab between 'empty' and 'backlog').
+    # (b) exit-0 affirmations: bare column-0 sentinel, the same with blank lines, internal-whitespace
+    # variants alone (spaces or a tab between 'empty' and 'backlog'), and two sentinels on separate
+    # PHYSICAL lines (one or more column-0 sentinel lines is a valid empty backlog).
     affirm_cases = (sentinel,
                     "\n" + sentinel + "\n",
                     "<!-- aei: empty  backlog -->\n",
-                    "<!-- aei: empty\tbacklog -->\n")
+                    "<!-- aei: empty\tbacklog -->\n",
+                    sentinel + sentinel)
     # (c)+(d) exit-3 fail-closed: table/empty/whitespace/comment-only with no sentinel; the sentinel PLUS
     # operative content (a heading, a table, a '*'-bullet, a fenced example, prose, a comment masking work
     # between markers, a 4-space code block, or a unicode-prefixed heading), which the sentinel can never
-    # mask; a bare heading + sentinel; an indented (non-column-0) sentinel alone; the hyphen spelling.
+    # mask; a bare heading + sentinel; an indented (non-column-0) sentinel alone; the hyphen spelling; and a
+    # sentinel that is column-0 only because a Unicode line separator or control character precedes it on
+    # ONE physical line (U+2028, U+2029, U+0085/NEL, form feed, vertical tab, U+001C-U+001E, and
+    # indent+form-feed). Splitting on physical newlines keeps the separator INSIDE the line, so its leading
+    # non-space breaks the ^-anchored sentinel match: the line is operative content, never a phantom
+    # column-0 sentinel that would bypass the check.
     failclose_cases = (table, "", "   \n\n", "<!-- other note -->\n",
                        "# Backlog\n" + sentinel,
                        table + sentinel,
@@ -217,7 +230,16 @@ def self_test():
                        sentinel + " # DO WORK\n",
                        "#\n" + sentinel,
                        "    " + sentinel,
-                       "<!-- aei: empty-backlog -->\n")
+                       "<!-- aei: empty-backlog -->\n",
+                       "\u2028" + sentinel,
+                       "\u2029" + sentinel,
+                       "\u0085" + sentinel,
+                       "\x0c" + sentinel,
+                       "\x0b" + sentinel,
+                       "\x1c" + sentinel,
+                       "\x1d" + sentinel,
+                       "\x1e" + sentinel,
+                       "    \x0c" + sentinel)
 
     def run_backlog(tmp, name, body):
         p = Path(tmp) / name
