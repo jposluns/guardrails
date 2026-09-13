@@ -302,14 +302,10 @@ def _analyze_scope(scope, resolver, bound_names):
     An ORDERED, per-flow pass over the scope's own statements (never descending into a nested function or
     lambda: a nested def body is separately analysed as its own scope via _scope_bodies, but a lambda body is
     SKIPPED and not separately analysed) tracks which local names currently hold a VERBATIM saved timer
-    value. A
-    name ENTERS the saved set when it is bound to a timer save call (a plain assignment, an annotated
-    assignment, a walrus, or a tuple unpack) or to an identity-preserving copy of a name already in the set
-    (a bare name, a subscript, an attribute, or an int/float/copy wrap); it LEAVES the set when one of the
-    rebinding constructs this scan models (an assignment, annotation, walrus, tuple/list unpack, aug-assign,
-    for/loop target, with-as, except-as, or comprehension target) binds it to a non-save, non-identity value,
-    so a reassignment to a constant, an arithmetic derivation, or a value routed through an elapsed-aware
-    helper no longer carries the verbatim value. A rebind this scan does NOT model, such as an
+    value. A name ENTERS the saved set when it is bound to a timer save call or to an identity-preserving
+    copy of a name already in the set, and some rebindings this scan models can clear it again; which
+    constructs enter or clear the set is a best-effort heuristic defined by the code below and the
+    --self-test, not enumerated or promised here. A rebind this scan does NOT model, such as an
     `import ... as <name>` alias binding the saved name, may leave the stale saved name in the set and yield a
     false-positive certain-shape advisory (harmless under WARN-only; precision a disclosed follow-on).
 
@@ -349,12 +345,9 @@ def _analyze_scope(scope, resolver, bound_names):
         val = _first_value_arg(call, arm)
         if val is None:
             return armed
-        # An own nonzero arm marks THIS straightline path armed (a live save must already exist), so
-        # `alarm(5); saved = alarm(0); alarm(saved)` (arm before save) is not read as the armed shape here,
-        # and an arm in a mutually-exclusive statement branch this pass models is reset rather than leaked
-        # to a restore in another (the caller isolates branch armed state); a branch shape this pass does
-        # not model as exclusive (a conditional expression, for instance) is not isolated. Best-effort,
-        # harmless under WARN-only.
+        # An own nonzero arm marks THIS straightline path armed when a save already exists (see the
+        # condition below); branch armed state is isolated by the caller. Best-effort heuristic; the
+        # authoritative behavior is the code and the --self-test.
         if _is_nonzero_const(val) and saved:
             return True
         if saved and _refs_saved_identity(val, saved, bound_names):
@@ -489,7 +482,7 @@ def _analyze_scope(scope, resolver, bound_names):
     if state["identity_restore_armed"] and not state["monotonic"]:
         return "deny"
     if state["derived_restore"] and not state["identity_restore"] and state["monotonic"]:
-        return None   # the correct elapsed-aware form: derived restore with elapsed evidence
+        return None   # heuristic suppression: a derived restore with a monotonic read in scope; this does not establish an elapsed-aware restore
     return "warn"
 
 

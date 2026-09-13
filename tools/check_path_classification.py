@@ -17,7 +17,7 @@ local, per-scope dataflow pass; a regex never convicts) and EMITS WARN advisorie
 resist-static tier, for the following-classify-then-mutate and conflated-except scopes it recognizes,
 flagging them for human review against secspr and chkfcl/secfcl. It NEVER blocks CI. Recognition is
 syntactic and per-scope, and it applies internal suppression and downgrade heuristics: for example it can
-recognize an explicit-raise refusal on a negative branch, and no-follow evidence, which can suppress or
+recognize an explicit raise on a negative branch, and no-follow evidence, which can suppress or
 downgrade a finding. It guarantees neither a WARN for every risky case nor silence for any particular
 shape: a shape it does not model may emit or may go unflagged, so it can both miss a genuine collapse and,
 on dataflow it does not follow (for example an `import ... as <name>` rebind, an unproven receiver
@@ -662,7 +662,7 @@ def _analyze_function(func, resolver, rel, deny, warn, path_names):
         if not relevant:
             continue
         if _branch_refuses(absent_branch):
-            continue  # a refusing negative branch is the correct fail-closed posture, not a finding
+            continue  # raise-PRESENCE suppression (see _branch_refuses); a caught or unreachable raise can suppress a branch that does not actually refuse
         where = (rel, node.lineno)
         if same_path_mutation and not suppressed:
             deny.append(where + ("a following classify of {!r} whose absent/wrong-type branch mutates the "
