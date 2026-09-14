@@ -42,14 +42,13 @@ untracked-only, staged-only, config-hidden-untracked); the temp tree is removed 
 <dir>`/env/compound/wrapped/metacharacter form is deliberately NOT probed (not pristine-single-bare) and
 ASKS, which many cases below assert.
 
-It also covers the protected-line guard (protected_line, prtbrn/artbr1): a force-push OR a branch
-DELETION of a protected branch (main/master) denies, with the banner naming the actual act, while a
-force or delete to a feature branch allows; a refspec-less force-push, a forced or deleted HEAD/@, and
-a direct commit (the literal commit subcommand only) are judged by a read-only HEAD probe (fail-to-ASK
-when unresolvable); a --mirror/--all, wildcard, matching-':'/'+:', or --prune-with-wildcard sweep asks,
-as does a command-local remote.<name>.mirror=true config (or the key via --config-env) before the push
-subcommand (GD-146); and the parse-error/wrapper fallback fails safe for the force-push, deletion,
-mirror-config, AND commit spellings.
+It also covers the protected-line guard (protected_line, prtbrn/artbr1). The commit surface
+requires complete admitted syntax and a proved A/B/C non-protected local-branch certificate, or D,
+the narrow lone protected-name no-remote exemption. Unknown state, unsupported syntax, detached HEAD,
+and failed probes deny without an allow-note. Exact lone help forms are non-committing controls.
+The commit-free push surface remains separate: protected force/deletion and unprovable sweeps deny,
+while plain non-force and explicit non-protected pushes can allow. The suite inspects synthetic hook
+payloads; its submitted Bash command strings are not executed and establish no destination-ref movement.
 
 It covers branch_root (brnrot) through H1-H32: rooted creation allows, an orphaned explicit start
 denies, an unresolvable origin/HEAD asks, non-creation git commands allow, and non-git commands allow;
@@ -129,7 +128,8 @@ def _decision(handler, command, tool="Bash", cwd=None):
     a systemMessage and NO permissionDecision, the _allow_note shape the no-ask posture uses to surface an
     informational note while the user's own permission flow still governs); a deny carries permissionDecision
     "deny"; an "ask" (which these hooks must NEVER emit) carries permissionDecision "ask". Any other shape is
-    surfaced as a harness error string so a malformed decision cannot read as a pass."""
+    surfaced as a harness error string so a malformed decision cannot read as a pass. This helper does
+    not execute the submitted Bash command and supplies no evidence of commit/ref movement."""
     data = {"hook_event_name": "PreToolUse", "tool_name": tool,
             "tool_input": {"command": command}}
     if cwd is not None:
@@ -2218,10 +2218,44 @@ def main():
         # === protected_line (prtbrn/artbr1): force-push to a protected ref + direct protected commit ===
         plg = aiqt_hooks.protected_line
 
-        def pexpect(label, command, want, cwd=None):
-            got = _decision(plg, command, cwd=cwd)
+        def pexpect(label, command, want, cwd=None, detail=None, certificate=None):
+            """Inspect a synthetic hook payload; never execute its submitted Bash command."""
+            results, certificates = [], []
+            original_consumer = aiqt_hooks._commit_on_protected
+
+            def consume(*args, **kwargs):
+                cert = getattr(args[0], "certificate", None)
+                if cert is not None:
+                    certificates.append((cert.shape, cert.branch))
+                return original_consumer(*args, **kwargs)
+
+            def observe(data):
+                result = plg(data)
+                results.append(result)
+                return result
+
+            if certificate is not None:
+                aiqt_hooks._commit_on_protected = consume
+            try:
+                got = _decision(observe, command, cwd=cwd)
+            finally:
+                aiqt_hooks._commit_on_protected = original_consumer
             if got != want:
                 failures.append("{}: expected {}, got {}".format(label, want, got))
+            if detail is not None:
+                obj = results[0][1]
+                reason = (obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                          if isinstance(obj, dict) else "")
+                if detail not in reason:
+                    failures.append("{}: expected reason containing {!r}, got {!r}"
+                                    .format(label, detail, reason))
+            if certificate is not None:
+                if certificates != [certificate]:
+                    failures.append("{}: expected certificate {!r}, got {!r}"
+                                    .format(label, certificate, certificates))
+                if results != [(0, None, None)]:
+                    failures.append("{}: certified ALLOW must be silent exit 0, got {!r}"
+                                    .format(label, results))
 
         def dexpect(label, command, want):
             got = _decision(aiqt_hooks.diff_source_pretool, command)
@@ -2320,8 +2354,9 @@ def main():
                 "git --work-tree={} commit -m 'fix'".format(plf), "deny", cwd=plr)
         os.environ["GIT_DIR"] = str(pl_feat / ".git")
         try:
-            pexpect("(pl-j6) commit under an ambient GIT_DIR asks (unprovable view)",
-                    "git commit -m 'fix'", "allow", cwd=plr)
+            pexpect("(pl-j6) ambient GIT_DIR withholds commit proof even on a feature branch",
+                    "git commit -m 'fix'", "deny", cwd=plf,
+                    detail="non-cosmetic ambient GIT_* variable")
         finally:
             os.environ.pop("GIT_DIR", None)
 
@@ -2341,17 +2376,27 @@ def main():
         # the exemption block reds this (it reverts to deny).
         pexpect("(pl-nr2) commit on main in a repo with NO remote ALLOWS (no-remote exemption)",
                 "git commit -m 'fix'", "allow", cwd=str(nr_none))
-        # (iii) Fail-closed leg: when the remote probe cannot be evaluated the guard DENIES, never allows on
-        # an unverified basis. Inject _branch_root_git -> None (the primitive _repo_has_remote calls) so the
-        # probe is undecidable over the SAME no-remote repo that (ii) allows; the deny here proves the None
-        # path fails closed rather than exempting. Over-firing the exemption on None reds this.
-        _orig_brg = aiqt_hooks._branch_root_git
-        aiqt_hooks._branch_root_git = lambda repo, *args: None
+        # (iii) D requires a successful remote-absence probe. Fault only that read on the
+        # SAME no-remote fixture that (ii) allows; leave target and HEAD observations real.
+        _orig_commit_git = aiqt_hooks._commit_git
+        _nr_remote_reads = []
+
+        def _nr_remote_failure(repo, deadline, *args):
+            if args == ("remote",):
+                _nr_remote_reads.append(repo)
+                return subprocess.CompletedProcess(args, 1, "", "injected remote read failure")
+            return _orig_commit_git(repo, deadline, *args)
+
+        aiqt_hooks._commit_git = _nr_remote_failure
         try:
-            pexpect("(pl-nr3) commit on main DENIES when the remote probe cannot be evaluated (fail-closed)",
-                    "git commit -m 'fix'", "deny", cwd=str(nr_none))
+            pexpect("(pl-nr3) commit on main DENIES when the remote probe cannot be evaluated",
+                    "git commit -m 'fix'", "deny", cwd=str(nr_none),
+                    detail="remote absence could not be proved")
+            if _nr_remote_reads != [str(nr_none)]:
+                failures.append("(pl-nr3-probe) expected the no-remote fixture's remote query, got {!r}"
+                                .format(_nr_remote_reads))
         finally:
-            aiqt_hooks._branch_root_git = _orig_brg
+            aiqt_hooks._commit_git = _orig_commit_git
 
         # === F-R2-1: the no-remote exemption is restricted to a LONE, directly-bound `git commit`. A COMPOUND
         # command's pre-command remote-absence probe is STALE (a `cd remote-repo && commit` lands in a repo the
@@ -2465,6 +2510,511 @@ def main():
         pexpect("(pl-fr7c-0) lone commit on main in a genuinely no-remote repo ALLOWS (exemption intact)",
                 "git commit --allow-empty -m x", "allow", cwd=str(nr_ctl))
 
+        # A-D positive registry. The consumer spy in pexpect observes the certificate the
+        # public handler actually uses; an informational allow-note cannot satisfy these cases.
+        _pl239_allows = (
+            ("A-plain", "git commit -m x", plf, ("A", "refs/heads/other")),
+            ("A-quoted", "git commit -m 'literal ; git commit --help'", plf,
+             ("A", "refs/heads/other")),
+            ("B-absolute", "git -C {} commit -m x".format(shlex.quote(plf)), plr,
+             ("B", "refs/heads/other")),
+            ("B-after-cd", "cd {} && git -C {} commit -m x"
+             .format(shlex.quote(plr), shlex.quote(plf)), plf, ("B", "refs/heads/other")),
+            ("C-existing", "git switch other && git commit -m x", plr,
+             ("C", "refs/heads/other")),
+            ("C-create", "git switch -c pl239-new && git commit -m x", plr,
+             ("C", "refs/heads/pl239-new")),
+            ("C-checkout", "git checkout -b pl239-new && git commit -m x", plr,
+             ("C", "refs/heads/pl239-new")),
+            ("C-inert", "git switch -c pl239-new && true && git commit -m x", plr,
+             ("C", "refs/heads/pl239-new")),
+            ("C-explicit-commit", "git switch other && git -C {} commit -m x"
+             .format(shlex.quote(plr)), plr, ("C", "refs/heads/other")),
+            ("C-explicit-switch", "git -C {} switch other && git commit -m x"
+             .format(shlex.quote(plr)), plr, ("C", "refs/heads/other")),
+            ("B-separate-target", "git switch main && git -C {} commit -m x"
+             .format(shlex.quote(plf)), plr, ("B", "refs/heads/other")),
+            ("D-no-remote", "git commit -m x", str(nr_ctl), ("D", "refs/heads/main")),
+            ("A-trailing-cd", "git commit -m x && cd {}".format(shlex.quote(plr)), plf,
+             ("A", "refs/heads/other")),
+            ("A-printf-cd", "printf %s cd && git commit -m x", plf,
+             ("A", "refs/heads/other")),
+        )
+        for _case, _command, _cwd, _certificate in _pl239_allows:
+            pexpect("(pl239-{})".format(_case), _command, "allow", cwd=_cwd,
+                    certificate=_certificate)
+
+        # Exact help is non-committing and needs neither a cwd nor an A-D certificate.
+        pexpect("(pl239-help-long) exact lone help", "git commit --help", "allow")
+        pexpect("(pl239-help-short) exact lone short help", "git commit -h", "allow")
+
+        # Real detached fixture: no symbolic local HEAD, even though a commit object exists.
+        _pl239_detached = _init_repo(tmp / "pl239-detached")
+        _git(_pl239_detached, "checkout", "--detach", "HEAD")
+        pexpect("(pl239-detached) detached HEAD cannot obtain a commit certificate",
+                "git commit -m x", "deny", cwd=str(_pl239_detached),
+                detail="Git or filesystem probe did not succeed cleanly")
+
+        # Real unborn fixtures have a symbolic local HEAD and no existing commit object.
+        for _branch, _shape in (("pl239-unborn-feature", "A"), ("main", "D"), ("master", "D")):
+            _unborn = tmp / ("pl239-unborn-" + _branch)
+            _unborn.mkdir()
+            _git(_unborn, "init", "-q", "-b", _branch)
+            pexpect("(pl239-unborn-{}) valid symbolic HEAD".format(_branch),
+                    "git commit -m x", "allow", cwd=str(_unborn),
+                    certificate=(_shape, "refs/heads/" + _branch))
+            if _shape == "D":
+                pexpect("(pl239-unborn-{}-C) explicit target cannot obtain D".format(_branch),
+                        "git -C {} commit -m x".format(shlex.quote(str(_unborn))),
+                        "deny", cwd=plf, detail="would commit on protected branch")
+                _git(_unborn, "remote", "add", "upstream", str(tmp / "pl239-unborn-remote.git"))
+                pexpect("(pl239-unborn-{}-remote) remote presence withholds D".format(_branch),
+                        "git commit -m x", "deny", cwd=str(_unborn),
+                        detail="would commit on protected branch")
+
+        # #239 chunk 3b: hook-decision regressions, NOT executions of these Bash strings.
+        # F=pl_feat is on other; M=pl_repo is remote-backed on main. Both have local main.
+        # The nine required rows below must DENY; they ALLOW at the supplied regression
+        # baseline cdecf584581b47cd3dffd5043d2104b544b9941a. Additional rows sample the
+        # finite grammar's boundaries; this is not an exhaustive Bash-coverage claim.
+        _pl239_f, _pl239_m = shlex.quote(plf), shlex.quote(plr)
+        _pl239_gd = shlex.quote(str(pl_repo / ".git"))
+        _pl239_grammar = "segment outside the admitted commit grammar"
+        _pl239_protected = "would commit on protected branch"
+        _pl239_required = (
+            ("wrapper-command-p", "command -p cd {} && git commit".format(_pl239_m),
+             _pl239_grammar),
+            ("wrapper-builtin-options", "builtin -- cd {} && git commit".format(_pl239_m),
+             _pl239_grammar),
+            ("wrapper-time-p", "time -p cd {} && git commit".format(_pl239_m),
+             _pl239_grammar),
+            ("switch-attr-source", "git switch main && git --attr-source HEAD commit",
+             _pl239_grammar),
+            ("switch-namespace", "git switch main && git --namespace=qa commit",
+             _pl239_grammar),
+            ("switch-same-C", "git switch main && git -C {} commit".format(_pl239_f),
+             _pl239_protected),
+            ("mechanism-config", "git -c core.worktree={} -C {} commit"
+             .format(_pl239_m, _pl239_f), _pl239_grammar),
+            ("mechanism-config-env", "git --config-env=core.worktree=WT -C {} commit"
+             .format(_pl239_f), _pl239_grammar),
+            ("mechanism-assignment", "FOO=bar git -C {} commit".format(_pl239_f),
+             _pl239_grammar),
+        )
+        _pl239_saved_wt = os.environ.get("WT")
+        os.environ["WT"] = plr
+        try:
+            for _case, _command, _detail in _pl239_required:
+                pexpect("(pl239-required-{})".format(_case), _command, "deny", cwd=plf,
+                        detail=_detail)
+
+            # Bare, nested and unknown relocation wrappers cannot preserve session binding.
+            for _case, _prefix in (
+                    ("bare-command", "command"), ("bare-builtin", "builtin"),
+                    ("bare-time", "time"), ("nested", "command builtin --"),
+                    ("unknown", "pl239_unknown_wrapper")):
+                pexpect("(pl239-relocate-{})".format(_case),
+                        "{} cd {} && git commit".format(_prefix, _pl239_m),
+                        "deny", cwd=plf, detail=_pl239_grammar)
+            for _case, _command in (
+                    ("status-before", "git status && command -p cd {} && git commit"),
+                    ("status-after", "command -p cd {} && git commit && git status")):
+                pexpect("(pl239-relocate-{})".format(_case),
+                        _command.format(_pl239_m), "deny", cwd=plf, detail=_pl239_grammar)
+
+            # Resolving -C never launders an accompanying mechanism, in either order.
+            _pl239_mechanisms = (
+                ("config-reversed", "git -C {F} -c core.worktree={M} commit"),
+                ("config-env-separated", "git --config-env core.worktree=WT -C {F} commit"),
+                ("config-env-reversed", "git -C {F} --config-env=core.worktree=WT commit"),
+                ("config-env-separated-reversed",
+                 "git -C {F} --config-env core.worktree=WT commit"),
+                ("git-dir-assignment", "GIT_DIR={G} git -C {F} commit"),
+                ("git-work-tree-assignment", "GIT_WORK_TREE={M} git -C {F} commit"),
+                ("git-dir", "git --git-dir={G} -C {F} commit"),
+                ("git-dir-reversed", "git -C {F} --git-dir={G} commit"),
+                ("work-tree", "git --work-tree={M} -C {F} commit"),
+                ("work-tree-reversed", "git -C {F} --work-tree={M} commit"),
+                ("git-dir-separated", "git --git-dir {G} -C {F} commit"),
+                ("work-tree-separated", "git --work-tree {M} -C {F} commit"),
+                ("repeated-C", "git -C {M} -C {F} commit"),
+                ("repeated-same-C", "git -C {F} -C {F} commit"),
+                ("attached-C", "git -C{F} commit"),
+                ("relative-C", "git -C . commit"),
+                ("discard-opt-out", "GUARDRAIL_ALLOW_DISCARD=1 git -C {F} commit"),
+                ("cd-config", "cd {M} && git -c core.worktree={M} -C {F} commit"),
+                ("cd-config-env", "cd {M} && git --config-env=core.worktree=WT -C {F} commit"),
+                ("cd-assignment", "cd {M} && FOO=bar git -C {F} commit"),
+                ("cd-repeated-C", "cd {M} && git -C {F} -C {F} commit"),
+            )
+            for _case, _template in _pl239_mechanisms:
+                pexpect("(pl239-mechanism-{})".format(_case),
+                        _template.format(F=_pl239_f, M=_pl239_m, G=_pl239_gd),
+                        "deny", cwd=plf, detail=_pl239_grammar)
+        finally:
+            if _pl239_saved_wt is None:
+                os.environ.pop("WT", None)
+            else:
+                os.environ["WT"] = _pl239_saved_wt
+
+        # State-changing payloads above are not executed: both fixtures retain their HEADs.
+        pexpect("(pl239-required-feature-control)", "git commit", "allow", cwd=plf,
+                certificate=("A", "refs/heads/other"))
+        pexpect("(pl239-required-protected-control)", "git commit", "deny", cwd=plr,
+                detail=_pl239_protected)
+
+        # Unknown preceding/intervening/trailing effects cannot be repaired by absolute -C.
+        for _case, _template in (
+                ("make", "make test && git -C {F} commit"),
+                ("symbolic-ref", "git symbolic-ref HEAD refs/heads/main && git -C {F} commit"),
+                ("config", "git config core.worktree {M} && git -C {F} commit"),
+                ("ref-mutation", "git update-ref refs/heads/main HEAD && git -C {F} commit"),
+                ("intervening", "git switch other && git config core.worktree {M} && git -C {F} commit"),
+                ("trailing", "git -C {F} commit && make test"),
+                ("switch-long-create", "git switch --create pl239-new && git -C {F} commit"),
+                ("switch-force-create", "git switch -C main && git -C {F} commit"),
+                ("switch-startpoint", "git switch -c pl239-new HEAD && git -C {F} commit"),
+                ("switch-previous", "git switch - && git -C {F} commit"),
+                ("switch-reflog", "git switch '@{{-1}}' && git -C {F} commit"),
+                ("checkout-existing", "git checkout main && git -C {F} commit")):
+            pexpect("(pl239-effects-{})".format(_case),
+                    _template.format(F=_pl239_f, M=_pl239_m),
+                    "deny", cwd=plf, detail=_pl239_grammar)
+
+        for _case, _separator in (("semicolon", ";"), ("or", "||"), ("pipe", "|"),
+                                  ("pipe-stderr", "|&"), ("background", "&"), ("newline", "\n")):
+            pexpect("(pl239-flow-{})".format(_case),
+                    "git switch main {} git -C {} commit".format(_separator, _pl239_f),
+                    "deny", cwd=plf,
+                    detail="commit command is not an uninterrupted && chain")
+        for _case, _command in (
+                ("subshell", "(git switch main && git commit)"),
+                ("group", "{ git switch main && git commit; }"),
+                ("conditional", "if true; then git switch main && git commit; fi"),
+                ("substitution", 'git commit -m "$(printf %s x)"'),
+                ("backtick", "git commit -m " + chr(96) + "whoami" + chr(96)),
+                ("process-substitution", "git commit -F <(printf %s x)"),
+                ("redirect", "git commit > out"),
+                ("heredoc", "git commit <<'EOF'\nx\nEOF"),
+                ("trailing-background", "git commit &")):
+            pexpect("(pl239-flow-{})".format(_case), _command, "deny", cwd=plf)
+        pexpect("(pl239-flow-malformed)", 'git switch main && git commit -m "unterminated',
+                "deny", cwd=plf, detail="incomplete shell parse")
+        pexpect("(pl239-flow-malformed-fragmented)", 'g"it" com"mit" -m "unterminated',
+                "deny", cwd=plf, detail="incomplete shell parse")
+
+        # Same-worktree spelling must share switch state, including real symlinks.
+        _pl239_link = tmp / "pl239-feature-link"
+        _pl239_link.symlink_to(pl_feat, target_is_directory=True)
+        for _case, _path in (("dot", plf + "/."),
+                             ("parent", str(pl_feat.parent) + "/./" + pl_feat.name),
+                             ("symlink", str(_pl239_link))):
+            pexpect("(pl239-identity-{}-protected)".format(_case),
+                    "git switch main && git -C {} commit".format(shlex.quote(_path)),
+                    "deny", cwd=plf, detail=_pl239_protected)
+            pexpect("(pl239-identity-{}-feature)".format(_case),
+                    "git switch other && git -C {} commit".format(shlex.quote(_path)),
+                    "allow", cwd=plf, certificate=("C", "refs/heads/other"))
+
+        # Linked worktrees share a common repository, but not their Git-directory/HEAD identity.
+        _pl239_linked_main = _init_repo(tmp / "pl239-linked-main")
+        _git(_pl239_linked_main, "remote", "add", "origin", str(tmp / "pl239-linked-remote.git"))
+        _pl239_linked_feature = tmp / "pl239-linked-feature"
+        _git(_pl239_linked_main, "worktree", "add", str(_pl239_linked_feature), "other")
+        _pl239_lm, _pl239_lf = str(_pl239_linked_main), str(_pl239_linked_feature)
+        pexpect("(pl239-linked-feature)", "git commit", "allow", cwd=_pl239_lf,
+                certificate=("A", "refs/heads/other"))
+        pexpect("(pl239-linked-main)", "git commit", "deny", cwd=_pl239_lm,
+                detail=_pl239_protected)
+        pexpect("(pl239-linked-separate-feature)",
+                "git switch main && git -C {} commit".format(shlex.quote(_pl239_lf)),
+                "allow", cwd=_pl239_lm, certificate=("B", "refs/heads/other"))
+        pexpect("(pl239-linked-no-feature-state-transfer)",
+                "git switch -c pl239-linked-new && git -C {} commit".format(shlex.quote(_pl239_lm)),
+                "deny", cwd=_pl239_lf, detail=_pl239_protected)
+        pexpect("(pl239-linked-explicit-switch)",
+                "git -C {} switch -c pl239-linked-new && git -C {} commit"
+                .format(shlex.quote(_pl239_lm), shlex.quote(_pl239_lm)),
+                "allow", cwd=_pl239_lf, certificate=("C", "refs/heads/pl239-linked-new"))
+        pexpect("(pl239-cross-target-protected)",
+                "git switch other && git -C {} commit".format(_pl239_m),
+                "deny", cwd=plf, detail=_pl239_protected)
+        pexpect("(pl239-state-last-switch-protected)",
+                "git switch other && git switch main && git commit",
+                "deny", cwd=plf, detail=_pl239_protected)
+        pexpect("(pl239-state-last-switch-feature)",
+                "git switch main && git switch other && git commit",
+                "allow", cwd=plf, certificate=("C", "refs/heads/other"))
+        pexpect("(pl239-state-each-commit)",
+                "git commit && git switch main && git commit",
+                "deny", cwd=plf, detail=_pl239_protected)
+
+        # A feature-looking symbolic HEAD alias must resolve to its terminal protected ref.
+        _pl239_alias = _init_repo(tmp / "pl239-alias")
+        _git(_pl239_alias, "remote", "add", "origin", str(tmp / "pl239-alias-remote.git"))
+        _git(_pl239_alias, "symbolic-ref", "refs/heads/pl239-alias", "refs/heads/main")
+        _git(_pl239_alias, "symbolic-ref", "HEAD", "refs/heads/pl239-alias")
+        pexpect("(pl239-head-symbolic-alias)", "git commit", "deny", cwd=str(_pl239_alias),
+                detail=_pl239_protected)
+        _git(_pl239_alias, "symbolic-ref", "HEAD", "refs/heads/other")
+        pexpect("(pl239-switch-symbolic-alias)", "git switch pl239-alias && git commit",
+                "deny", cwd=str(_pl239_alias), detail="symbolic or unreadable switch destination")
+        _git(_pl239_alias, "tag", "other")
+        pexpect("(pl239-switch-ambiguous)", "git switch other && git commit",
+                "deny", cwd=str(_pl239_alias))
+        _git(_pl239_alias, "update-ref", "refs/remotes/origin/pl239-remote-only", "HEAD")
+        pexpect("(pl239-switch-remote-guess)", "git switch pl239-remote-only && git commit",
+                "deny", cwd=str(_pl239_alias),
+                detail="switch destination is not an existing local branch")
+
+        # Dispatch recognition sees decoded words even when raw git/commit tokens are fragmented.
+        _pl239_hidden = (
+            ("wrapped", "env git commit"), ("nested", "command env git commit"),
+            ("unknown", "pl239_unknown_wrapper git commit"),
+            ("script", "sh -c 'git commit'"),
+            ("fragmented", "env g'it' com'mit'"),
+            ("quoted", '"git" "commit"'),
+            ("backslash", "g\\it com\\mit"),
+        )
+        for _case, _command in _pl239_hidden:
+            for _position, _submitted in (("lone", _command),
+                                          ("before-status", _command + " && git status"),
+                                          ("after-status", "git status && " + _command)):
+                pexpect("(pl239-dispatch-{}-{})".format(_case, _position),
+                        _submitted, "deny", cwd=plr)
+        for _case, _command in (
+                ("global-attr-value", "git --attr-source --help commit"),
+                ("global-namespace-value", "git --namespace --help commit"),
+                ("message", "git commit -m --help"),
+                ("message-attached", "git commit --message=--help"),
+                ("pathspec", "git commit -- --help"),
+                ("help-with-message", "git commit --help -m x"),
+                ("compound-help", "true && git commit --help"),
+                ("wrapped-help", "env git commit --help")):
+            pexpect("(pl239-help-data-{})".format(_case), _command, "deny", cwd=plr)
+        for _case, _command in (
+                ("fragmented", "g'it' com'mit' -m x"),
+                ("quoted", '"git" "commit" -m x'),
+                ("message-help", "git commit -m --help"),
+                ("pathspec-help", "git commit -- --help"),
+                ("commit-c-argument", "git commit -c HEAD"),
+                ("literal-command-data", "printf %s 'env git commit' && git commit -m 'git commit'")):
+            pexpect("(pl239-literal-{})".format(_case), _command, "allow", cwd=plf,
+                    certificate=("A", "refs/heads/other"))
+
+        # Failure cases use an otherwise admitted feature commit. Missing cwd is never ambient cwd.
+        for _case, _cwd in (("missing", None), ("empty", ""), ("relative", "."), ("wrong-type", 7),
+                            ("absent", str(tmp / "pl239-missing")),
+                            ("file", str(pl_feat / "file.txt"))):
+            pexpect("(pl239-cwd-{})".format(_case), "git commit", "deny", cwd=_cwd)
+        pexpect("(pl239-target-absent)", "git -C {} commit"
+                .format(shlex.quote(str(tmp / "pl239-missing"))), "deny", cwd=plf)
+        pexpect("(pl239-cd-loses-session)", "cd {} && git commit".format(_pl239_f),
+                "deny", cwd=plf, detail="session directory binding is unavailable after cd")
+
+        # Unknown ambient GIT_* denies even with a resolvable explicit feature target.
+        _pl239_envkey = "GIT_PL239_UNKNOWN_OVERRIDE"
+        _pl239_saved_env = os.environ.get(_pl239_envkey)
+        os.environ[_pl239_envkey] = "1"
+        try:
+            for _case, _command in (("plain", "git commit"),
+                                    ("explicit", "git -C {} commit".format(_pl239_f)),
+                                    ("cd-explicit", "cd {} && git -C {} commit"
+                                     .format(_pl239_m, _pl239_f))):
+                pexpect("(pl239-environment-{})".format(_case), _command, "deny", cwd=plf,
+                        detail="non-cosmetic ambient GIT_* variable")
+        finally:
+            if _pl239_saved_env is None:
+                os.environ.pop(_pl239_envkey, None)
+            else:
+                os.environ[_pl239_envkey] = _pl239_saved_env
+
+        _pl239_view_query = ("rev-parse", "--is-inside-work-tree", "--absolute-git-dir")
+        _pl239_head_query = ("symbolic-ref", "--quiet", "--recurse", "HEAD")
+        _pl239_original_git = aiqt_hooks._commit_git
+        # Fault only the named Git read; keep other probes real and prove the injection was reached.
+        for _case, _query, _stdout, _stderr, _rc, _detail in (
+                ("view-failed", _pl239_view_query, "", "injected read failure", 1,
+                 "Git or filesystem probe did not succeed cleanly"),
+                ("view-relative", _pl239_view_query, "true\n.git\n", "", 0,
+                 "Git directory is not absolute"),
+                ("view-multiline", _pl239_view_query, "true\n/one\n/two\n", "", 0,
+                 "probe returned an empty or malformed value"),
+                ("head-no-terminator", _pl239_head_query, "refs/heads/other", "", 0,
+                 "probe omitted its output terminator"),
+                ("head-empty", _pl239_head_query, "\n", "", 0,
+                 "probe returned an empty or malformed value"),
+                ("head-namespace", _pl239_head_query, "refs/tags/other\n", "", 0,
+                 "HEAD or switch destination is not a local branch"),
+                ("head-invalid-ref", _pl239_head_query, "refs/heads/bad..ref\n", "", 0,
+                 "Git or filesystem probe did not succeed cleanly"),
+                ("head-warning", _pl239_head_query, "refs/heads/other\n", "warning\n", 0,
+                 "Git or filesystem probe did not succeed cleanly")):
+            _pl239_reads = []
+
+            def _pl239_bad_git(repo, deadline, *args):
+                if args == _query:
+                    _pl239_reads.append(repo)
+                    return subprocess.CompletedProcess(args, _rc, _stdout, _stderr)
+                return _pl239_original_git(repo, deadline, *args)
+
+            aiqt_hooks._commit_git = _pl239_bad_git
+            try:
+                pexpect("(pl239-probe-{})".format(_case), "git commit", "deny", cwd=plf,
+                        detail=_detail)
+                if _pl239_reads != [plf]:
+                    failures.append("(pl239-probe-{}) injection not reached exactly once: {!r}"
+                                    .format(_case, _pl239_reads))
+            finally:
+                aiqt_hooks._commit_git = _pl239_original_git
+
+        _pl239_original_fs = aiqt_hooks._commit_fs
+        for _case, _info in (("missing-fields", []), ("relative-path", [plf, ".git", 1, 1]),
+                             ("bool-device", [plf, str(pl_feat / ".git"), True, 1]),
+                             ("zero-inode", [plf, str(pl_feat / ".git"), 1, 0])):
+            _pl239_reads = []
+
+            def _pl239_bad_identity(deadline, operation, *paths):
+                if operation == "identity":
+                    _pl239_reads.append(paths)
+                    return _info
+                return _pl239_original_fs(deadline, operation, *paths)
+
+            aiqt_hooks._commit_fs = _pl239_bad_identity
+            try:
+                pexpect("(pl239-identity-fault-{})".format(_case), "git commit", "deny", cwd=plf,
+                        detail="malformed worktree directory identity")
+                if _pl239_reads != [(plf, str(pl_feat / ".git"))]:
+                    failures.append("(pl239-identity-fault-{}) unexpected injection calls: {!r}"
+                                    .format(_case, _pl239_reads))
+            finally:
+                aiqt_hooks._commit_fs = _pl239_original_fs
+
+        # Fault the filesystem worker response, so JSON decoding and read failure stay covered too.
+        _pl239_original_run = aiqt_hooks._commit_run
+        for _case, _rc, _stdout, _detail in (
+                ("unreadable-directory", 2, "", "Git or filesystem probe did not succeed cleanly"),
+                ("invalid-json", 0, "{", "malformed filesystem probe payload")):
+            _pl239_reads = []
+
+            def _pl239_bad_fs_run(argv, deadline):
+                if len(argv) >= 6 and argv[4:6] == [aiqt_hooks._COMMIT_FS_PROBE, "identity"]:
+                    _pl239_reads.append(tuple(argv[6:]))
+                    return subprocess.CompletedProcess(argv, _rc, _stdout, "")
+                return _pl239_original_run(argv, deadline)
+
+            aiqt_hooks._commit_run = _pl239_bad_fs_run
+            try:
+                pexpect("(pl239-filesystem-{})".format(_case), "git commit", "deny", cwd=plf,
+                        detail=_detail)
+                if _pl239_reads != [(plf, str(pl_feat / ".git"))]:
+                    failures.append("(pl239-filesystem-{}) unexpected injection calls: {!r}"
+                                    .format(_case, _pl239_reads))
+            finally:
+                aiqt_hooks._commit_run = _pl239_original_run
+
+        # Exercise the real bounded runner with a slow or oversized substitute probe.
+        for _case, _script, _detail in (
+                ("timeout", "import time; time.sleep(30)", "commit evaluation deadline exhausted"),
+                ("output-budget", "import sys; sys.stdout.write('x' * 65537)",
+                 "commit probe output budget exhausted")):
+            _pl239_reads = []
+
+            def _pl239_bounded_git(repo, deadline, *args):
+                if args == _pl239_view_query:
+                    _pl239_reads.append(repo)
+                    return aiqt_hooks._commit_run(
+                        [sys.executable, "-I", "-B", "-c", _script], deadline)
+                return _pl239_original_git(repo, deadline, *args)
+
+            aiqt_hooks._commit_git = _pl239_bounded_git
+            try:
+                pexpect("(pl239-probe-{})".format(_case), "git commit", "deny", cwd=plf,
+                        detail=_detail)
+                if _pl239_reads != [plf]:
+                    failures.append("(pl239-probe-{}) substitute probe not reached exactly once"
+                                    .format(_case))
+            finally:
+                aiqt_hooks._commit_git = _pl239_original_git
+        pexpect("(pl239-probe-restored)", "git commit", "allow", cwd=plf,
+                certificate=("A", "refs/heads/other"))
+
+        pexpect("(pl239-budget-command)", "git commit -m '" + "x" * 65536 + "'",
+                "deny", cwd=plf, detail="command size budget exhausted")
+        pexpect("(pl239-budget-segments)", "true && " * 64 + "git commit",
+                "deny", cwd=plf, detail="segment budget exhausted")
+        pexpect("(pl239-budget-segments-control)", "true && " * 63 + "git commit",
+                "allow", cwd=plf, certificate=("A", "refs/heads/other"))
+
+        # Exercise the generated entry point named by hooks.json, including its actual exit/JSON shape.
+        _pl239_plugin = repo_root() / "plugin" / "aiqt-guardrails-hooks"
+        _pl239_hooks = json.loads((_pl239_plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        _pl239_entries = [
+            hook for group in _pl239_hooks["hooks"]["PreToolUse"]
+            for hook in group["hooks"]
+            if group.get("matcher") == "Bash" and hook.get("args", [])[-1:] == ["protected_line"]
+        ]
+        _pl239_expected_entry = {
+            "type": "command", "command": "python3",
+            "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py", "protected_line"],
+            "timeout": 10,
+        }
+        if _pl239_entries != [_pl239_expected_entry]:
+            failures.append("(pl239-dispatch-registration) unexpected protected_line entry: {!r}"
+                            .format(_pl239_entries))
+        else:
+            _pl239_entry = _pl239_entries[0]
+            _pl239_argv = [_pl239_entry["command"]] + [
+                arg.replace("${CLAUDE_PLUGIN_ROOT}", str(_pl239_plugin))
+                for arg in _pl239_entry["args"]
+            ]
+            _pl239_dispatch_env = dict(os.environ, WT=plr)
+            _pl239_dispatch_cases = [
+                ("required-" + case, command, plf, "deny", detail)
+                for case, command, detail in _pl239_required
+            ] + [
+                ("hidden-after-git", "git status && env g'it' com'mit'", plf, "deny", _pl239_grammar),
+                ("hidden-before-git", "env g'it' com'mit' && git status", plf, "deny", _pl239_grammar),
+                ("help-message", "git commit -m --help", plr, "deny", _pl239_protected),
+                ("help-pathspec", "git commit -- --help", plr, "deny", _pl239_protected),
+                ("feature", "git commit", plf, "allow", None),
+                ("explicit-feature", "git -C {} commit".format(_pl239_f), plr, "allow", None),
+                ("help-only", "git commit --help", None, "allow", None),
+                ("push-control", "git push origin main", plr, "allow", None),
+            ]
+            for _case, _command, _cwd, _want, _detail in _pl239_dispatch_cases:
+                _payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                            "tool_input": {"command": _command}}
+                if _cwd is not None:
+                    _payload["cwd"] = _cwd
+                _result = subprocess.run(
+                    _pl239_argv, input=json.dumps(_payload), capture_output=True, text=True,
+                    env=_pl239_dispatch_env, timeout=_pl239_entry["timeout"] + 5)
+                if _result.returncode != 0 or _result.stderr:
+                    failures.append("(pl239-generated-{}) expected clean exit 0, got {!r}"
+                                    .format(_case, _result))
+                    continue
+                if _want == "allow":
+                    if _result.stdout != "":
+                        failures.append("(pl239-generated-{}) expected silent ALLOW, got {!r}"
+                                        .format(_case, _result.stdout))
+                    continue
+                try:
+                    _output = json.loads(_result.stdout)
+                    _specific = _output["hookSpecificOutput"]
+                    _valid = (
+                        _specific["hookEventName"] == "PreToolUse"
+                        and _specific["permissionDecision"] == "deny"
+                        and "rule artbr1" in _specific["permissionDecisionReason"]
+                        and _detail in _specific["permissionDecisionReason"]
+                        and bool(_output["systemMessage"])
+                    )
+                except (ValueError, KeyError, TypeError):
+                    _valid = False
+                if not _valid:
+                    failures.append("(pl239-generated-{}) expected structured artbr1 DENY, got {!r}"
+                                    .format(_case, _result.stdout))
+
         # === ROUND-2 FINDING 13: classify a commit against the branch it will ACTUALLY land on ===========
         # Direction 1 (false-DENY fix): a 'git switch -c <feature> && git commit' on a main HEAD lands on the
         # NEW branch, so it ALLOWS (was denied on the stale pre-command main HEAD). Discriminates: without the
@@ -2522,10 +3072,14 @@ def main():
         # No regression: a pure '&&' chain through the commit still exempts it (lands on the switched branch).
         pexpect("(pl-r6f1c) 'switch -c feat && true && commit' still ALLOWS (unbroken '&&' chain)",
                 "git switch -c feat && true && git commit --allow-empty -m x", "allow", cwd=plr)
-        # A new and-or list boundary (';') resets the pure-'&&' prefix, so 'x ; switch -c feat && commit' still
-        # exempts (the commit IS '&&'-gated on the switch within its own list).
-        pexpect("(pl-r6f1d) 'true ; switch -c feat && commit' still ALLOWS ('&&'-gated within its own list)",
-                "true ; git switch -c feat && git commit --allow-empty -m x", "allow", cwd=plr)
+        # The proof grammar requires the WHOLE command to be an uninterrupted && chain.
+        # A semicolon before an otherwise admitted switch is an intentional structural DENY.
+        pexpect("(pl-r6f1d) semicolon before switch/create and commit withholds proof",
+                "true ; git switch -c feat && git commit --allow-empty -m x", "deny", cwd=plr,
+                detail="commit command is not an uninterrupted && chain")
+        pexpect("(pl-r6f1d-control) the admitted && spelling obtains C",
+                "true && git switch -c feat && git commit --allow-empty -m x", "allow", cwd=plr,
+                certificate=("C", "refs/heads/feat"))
 
         # ROUND-6 FINDING 2 (Lens E): an ANSI-C ($'...') heredoc delimiter must resolve to its LITERAL value,
         # so the lexer ends the heredoc body at the real EOF line and a FOLLOWING command stays executable
@@ -2555,23 +3109,46 @@ def main():
         pexpect("(pl-cf1-outside) a real force-push OUTSIDE the quoted heredoc body still DENIES (CLAUDE-F1)",
                 "git push -f origin main <(echo x)", "deny", cwd=plr)
 
-        # Probe failure is fail-to-ASK for both surfaces (mocked like _tree_is_clean above).
+        # Push retains its HEAD probe. Commit uses the separate bounded proof probe.
         _orig_head = aiqt_hooks._head_branch
         aiqt_hooks._head_branch = lambda repo: None
         try:
             pexpect("(pl-i4) bare force-push asks when HEAD cannot be resolved",
                     "git push --force", "deny", cwd=plr)
-            pexpect("(pl-i5) direct commit asks when HEAD cannot be resolved",
-                    "git commit -m 'x'", "allow", cwd=plr)
         finally:
             aiqt_hooks._head_branch = _orig_head
+
+        _orig_commit_git = aiqt_hooks._commit_git
+        _commit_head_reads = []
+
+        def _commit_head_failure(repo, deadline, *args):
+            if args == ("symbolic-ref", "--quiet", "--recurse", "HEAD"):
+                _commit_head_reads.append(repo)
+                return subprocess.CompletedProcess(args, 1, "", "injected HEAD read failure")
+            return _orig_commit_git(repo, deadline, *args)
+
+        aiqt_hooks._commit_git = _commit_head_failure
+        try:
+            pexpect("(pl-i5) unreadable HEAD withholds proof on an otherwise allowed feature fixture",
+                    "git commit -m 'x'", "deny", cwd=plf,
+                    detail="Git or filesystem probe did not succeed cleanly")
+            if _commit_head_reads != [plf]:
+                failures.append("(pl-i5-probe) expected the feature fixture's HEAD query, got {!r}"
+                                .format(_commit_head_reads))
+        finally:
+            aiqt_hooks._commit_git = _orig_commit_git
+        pexpect("(pl-i5-control) the restored feature HEAD probe obtains A",
+                "git commit -m 'x'", "allow", cwd=plf,
+                certificate=("A", "refs/heads/other"))
 
         # Parse-error posture (unbalanced quote): fail-safe, never a silent allow.
         pexpect("(pl-k1) unparseable apparent force-push naming main asks (fallback recoverable)",
                 'git push --force origin main "unbalanced', "deny", cwd=plr)
         pexpect("(pl-k2) unparseable force-push with no readable protected target asks",
                 'git push --force "unbalanced', "deny", cwd=plr)
-        pexpect("(pl-k3) unparseable apparent commit asks", 'git commit -m "it broke', "allow", cwd=plr)
+        pexpect("(pl-k3) incomplete parsing withholds apparent-commit proof",
+                'git commit -m "it broke', "deny", cwd=plr,
+                detail="incomplete shell parse")
         pexpect("(pl-k4) unparseable non-git command allows", 'ls -la "unbalanced', "allow", cwd=plr)
 
         # === F-112 round-2: HEAD/@ proxy (B1), fallback +refspec/--for (B2/3B), the --recurse-submodules
@@ -2663,8 +3240,22 @@ def main():
         # value-options) must not mask a protected-branch action.
         pexpect("(f117r9-a) separated --attr-source global option does not mask a force-push",
                 "git --attr-source HEAD push --force origin main", "deny", cwd=plr)
-        pexpect("(f117r9-b) separated --attr-source does not mask a direct commit",
-                "git --attr-source HEAD commit -m x", "allow", cwd=plr)
+        pexpect("(f117r9-b) global --attr-source is outside the admitted commit prefix",
+                "git --attr-source HEAD commit -m x", "deny", cwd=plr,
+                detail="segment outside the admitted commit grammar")
+        # Hook-decision regression only: pexpect does not execute the submitted command
+        # or witness a commit/ref movement. Even a harmless global option withholds proof.
+        pexpect("(f117r9-b2) --attr-source on a feature fixture intentionally DENIES",
+                "git --attr-source HEAD commit -m x", "deny", cwd=plf,
+                detail="segment outside the admitted commit grammar")
+        pexpect("(f117r9-b3) plain feature counterpart obtains A",
+                "git commit -m x", "allow", cwd=plf,
+                certificate=("A", "refs/heads/other"))
+        # Empty -C leaves Git's cwd unchanged (https://git-scm.com/docs/git, OPTIONS).
+        # It is outside this guard's nonempty absolute-target grammar, not invalid Git syntax.
+        pexpect("(f117r9-b4) empty -C intentionally withholds absolute-target proof",
+                'git -C "" commit -m x', "deny", cwd=plf,
+                detail="segment outside the admitted commit grammar")
         pexpect("(f117r9-c) abbreviated --rep (=--repo) does not mask a refspec-less force",
                 "git push -f --rep backup origin", "deny", cwd=plr)
         pexpect("(f117r9-d) abbreviated --push-opt does not mask a refspec-less force",
@@ -3630,8 +4221,9 @@ def main():
                             "got: {!r}".format(_pm_reason))
         pexpect("(pl-y4) a wrapped clustered '-dv' delete asks via the widened fallback",
                 "env git push -dv origin main", "deny", cwd=plr)
-        pexpect("(pl-y5) a wrapped git commit asks via the fallback",
-                "sudo git commit -m 'fix'", "allow", cwd=plr)
+        pexpect("(pl-y5) an apparent wrapped commit obtains no certificate",
+                "sudo git commit -m 'fix'", "deny", cwd=plf,
+                detail="segment outside the admitted commit grammar")
         pexpect("(pl-z1) DISCLOSED over-deny: '--force --no-force' still denies (negation not "
                 "modelled)", "git push --force --no-force origin main", "deny", cwd=plr)
         pexpect("(pl-z2) DISCLOSED over-deny: '--delete --no-delete' still denies",
@@ -6297,10 +6889,10 @@ def main():
           "allow-with-note. prtbrn/artbr1 (protected_line) DENIES a force-push or protected-branch "
           "deletion, DENIES fail-safe a push it cannot prove misses the protected line (a "
           "--mirror/--all/wildcard/prune sweep) and an unparseable apparent force-push/delete, DENIES a "
-          "commit PROVABLY on the protected branch, and ALLOWS with a note a commit it merely cannot "
-          "prove lands off it (a normal detached-HEAD commit; server-side protection is the real gate), "
-          "and it now classifies a commit against the branch it will ACTUALLY land on - a same-command "
-          "switch's target or a -C target's HEAD (finding 13). brnrot (branch_root) DENIES a branch "
+          "recognized or apparent direct commit without an A/B/C non-protected local-branch proof "
+          "or D, the lone protected-name no-remote policy exemption; detached or unproved commits "
+          "DENY with no allow-note. Only the admitted && grammar propagates switch state, keyed by "
+          "worktree identity. brnrot (branch_root) DENIES a branch "
           "created from an orphaned start and DENIES-and-educates a form it cannot prove rooted (an "
           "--orphan form, an unresolved ancestry), is -C-AWARE (resolves and probes the -C/--work-tree "
           "target, so a -C/--work-tree target that resolves to a non-rooted concrete dir - nonexistent, "

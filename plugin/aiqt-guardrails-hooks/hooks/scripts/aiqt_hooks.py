@@ -166,12 +166,15 @@ import math
 import os
 import pathlib
 import re
+import selectors
 import shlex
+import signal
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 PRETOOL = "PreToolUse"
 STOP_EVENTS = ("Stop", "SubagentStop")
@@ -382,9 +385,9 @@ def _read_word(command, i, n):
             # parameter expansion, or globbing inside it - so a backtick or $( inside is NOT executable
             # (round-2 finding 15). It is read like a single quote (literal, NOT opaque); a backslash escapes
             # the next character (so an escaped \' does not end the string, and \\ is one backslash). The
-            # common ANSI-C escapes are not expanded to their control bytes (the guards that consume this
-            # judge substitution/expansion, not exact content), but the marker-bearing value is no longer
-            # flagged opaque, so a literal $'...msg...' commit message is allowed.
+            # common ANSI-C escapes are not expanded to their control bytes. Substitution-only consumers
+            # may use the opacity result, but commit branch proof rejects this syntax because the lexer
+            # has not established the execution-time bytes.
             if tilde_prefix_open:
                 leading_tilde = False
                 tilde_prefix_open = False
@@ -5219,6 +5222,261 @@ _RAW_PUSH_MIRRORCFG_RE = re.compile(
     r"|(?:^|[\s'\"])--config-env[=\s]['\"]*remote\.[^\s=]+\.mirror")
 _RAW_COMMIT_RE = re.compile(r"(?is)\bgit\b.*?\bcommit\b")
 
+# Commit proof contract. Recognizers establish syntax, never authorization.
+# The ordered evaluator supplies the evidence consumed by _commit_on_protected.
+# Recognized/apparent commits deny unless that evidence carries an A-D certificate.
+#
+# Certificate contract:
+# A: plain session commit, intact absolute session binding, validated non-protected HEAD.
+# B: exact absolute -C commit, proved target identity, applicable non-protected HEAD.
+# C: admitted switch and commit have equal worktree identities; the uninterrupted &&
+#    chain gates the commit on switch success; the conditional branch is non-protected.
+# D: exactly one plain session commit, valid protected local HEAD, and remote probe
+#    result exactly False. D is a policy exemption, NOT non-protected branch evidence.
+#
+# Every certificate additionally requires complete admitted syntax, literal arguments,
+# no redirects/wrappers/assignments, acceptable ambient environment, and successful
+# bounded probes. A syntax result is never a certificate. Unknown and protected states
+# are distinct; neither authorizes a commit without the separately identified D exemption.
+_COMMIT_CERTIFICATE_SHAPES = frozenset(("A", "B", "C", "D"))
+_COMMIT_MAX_COMMAND = 65536
+_COMMIT_MAX_SEGMENTS = 64
+
+# target is None for a session-bound Git command, otherwise the exact absolute -C
+# operand. branch is a literal switch operand, NOT a validated reference.
+_CommitStep = collections.namedtuple(
+    "_CommitStep", ("kind", "target", "branch", "segment"))
+
+# status: "outside", "unverifiable", "help", or "grammar".
+# "grammar" establishes syntax only. Records retain the original _Segment metadata.
+_CommitSyntax = collections.namedtuple(
+    "_CommitSyntax", ("status", "records", "steps", "commit_indexes", "detail"))
+
+# Identity must be worktree-specific: the canonical absolute Git directory plus its
+# validated filesystem identity, not merely the common repository directory.
+# head is the validated terminal full refs/heads/... reference, including unborn HEAD.
+_CommitTarget = collections.namedtuple(
+    "_CommitTarget", ("directory", "git_directory", "identity", "head"))
+
+# A switch postcondition describes what success WOULD establish; it is not an observed
+# branch change. Only a matching target identity in the admitted && chain may consume it.
+_CommitPostcondition = collections.namedtuple(
+    "_CommitPostcondition", ("identity", "branch", "switch_index"))
+
+# Only the ordered evaluator constructs certificates. switch_index is None
+# for A/B/D and names the applicable preceding switch for C.
+_CommitCertificate = collections.namedtuple(
+    "_CommitCertificate", ("shape", "commit_index", "identity", "branch", "switch_index"))
+
+# state: "proved", "protected", or "unverifiable". A proved result carries its explicit
+# certificate; a protected/unverifiable result carries no certificate.
+_CommitEvidence = collections.namedtuple(
+    "_CommitEvidence", ("state", "certificate", "detail"))
+
+
+def _commit_raw_literal(raw):
+    """Audit syntax the shared lexer does not preserve faithfully enough for proof.
+
+    Ordinary single/double quotes and backslash quoting are supported. ANSI-C and
+    locale quoting are cannot-evaluate here: the shared lexer does not fully decode
+    their execution-time bytes. A later decoder must establish those bytes before
+    such syntax can participate in a proof. Literal dollars inside ordinary single
+    quotes, or escaped dollars, remain supported.
+
+    Quoted heredocs require particular care: the shared lexer drops their bodies and
+    does not retain them as redirect records. Reject their raw operators here.
+    This audit never scans quoted message/printf data as executable commands.
+    """
+    quote = None
+    boundary = True
+    i = 0
+    while i < len(raw):
+        c = raw[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            i += 1
+            continue
+        if c == "\\":
+            if i + 1 >= len(raw):
+                return False
+            if quote == '"' and raw[i + 1] not in ('"', "\\", "$", chr(96), "\n"):
+                i += 1
+                continue
+            if raw[i + 1] != "\n":
+                boundary = False
+            i += 2
+            continue
+        if quote == '"':
+            if c == '"':
+                quote = None
+            elif c in ("$", chr(96)):
+                return False
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            boundary = False
+            i += 1
+            continue
+        if c == "#" and boundary:
+            # A comment runs to the end of this segment's raw slice.
+            return "\n" not in raw[i:]
+        if c in ("$", chr(96), "<", ">", ";", "|", "&", "(", ")", "\n"):
+            return False
+        boundary = c in " \t"
+        i += 1
+    return quote is None
+
+
+def _commit_literal_segment(seg):
+    """Require the full segment evidence, not just its argv projection."""
+    return (bool(seg.argv)
+            and not seg.redirects
+            and not seg.opaque_shell
+            and len(seg.argv_opaque) == len(seg.argv)
+            and not any(seg.argv_opaque)
+            and _commit_raw_literal(seg.raw))
+
+
+def _commit_exact_prefix(tokens):
+    """Return (target, verb, args) for ONLY the two accepted Git prefixes.
+
+    No wrapper peeling, assignment skipping, option abbreviation, or generic Git
+    option parser is an authorization input. Options after the verb remain arguments.
+    """
+    if len(tokens) >= 2 and tokens[0] == "git" and tokens[1] in (
+            "commit", "switch", "checkout"):
+        return None, tokens[1], tuple(tokens[2:])
+    if (len(tokens) >= 4 and tokens[:2] == ["git", "-C"]
+            and tokens[2] and os.path.isabs(tokens[2])
+            and tokens[3] in ("commit", "switch", "checkout")):
+        return tokens[2], tokens[3], tuple(tokens[4:])
+    return None
+
+
+def _commit_syntax_step(seg):
+    """Recognize one finite-grammar segment; perform no filesystem observation."""
+    if not _commit_literal_segment(seg):
+        return None
+    tokens = seg.argv
+    if len(tokens) == 1 and tokens[0] in (":", "true", "false"):
+        return _CommitStep("inert", None, None, seg)
+    if len(tokens) == 3 and tokens[:2] == ["printf", "%s"]:
+        return _CommitStep("inert", None, None, seg)
+    if (len(tokens) == 2 and tokens[0] == "cd"
+            and tokens[1] and os.path.isabs(tokens[1])):
+        # This invalidates session binding; it does not establish a replacement cwd.
+        return _CommitStep("cd", tokens[1], None, seg)
+    prefix = _commit_exact_prefix(tokens)
+    if prefix is None:
+        return None
+    target, verb, args = prefix
+    if verb == "commit":
+        return _CommitStep("commit", target, None, seg)
+    if verb == "switch" and len(args) == 1:
+        kind, branch = "switch-existing", args[0]
+    elif verb == "switch" and len(args) == 2 and args[0] == "-c":
+        kind, branch = "switch-create", args[1]
+    elif verb == "checkout" and len(args) == 2 and args[0] == "-b":
+        kind, branch = "switch-create", args[1]
+    else:
+        return None
+    if not branch or branch.startswith("-") or branch == "@" or "@{" in branch:
+        return None
+    # Namespace/format, symbolic aliases, and local existence remain probe obligations.
+    return _CommitStep(kind, target, branch, seg)
+
+
+def _commit_apparent_segment(seg):
+    """Conservative detection for an UNCLASSIFIED segment only.
+
+    Decoded words expose ordinary quote/backslash fragmentation. Raw text additionally
+    exposes apparent commands inside opaque syntax. Neither scan is applied to data
+    in an already admitted literal commit/printf segment.
+
+    This does not discover every renamed executable, alias, function, opaque script,
+    or unparseable fragmentation. Detection is not a Bash interpreter.
+    """
+    sub, _args = _git_sub_and_args(seg.argv)
+    if _command_word(seg.argv) == "git" and sub == "commit":
+        return True
+    return bool(_RAW_COMMIT_RE.search(" ".join(seg.argv))
+                or _RAW_COMMIT_RE.search(seg.raw))
+
+
+def _commit_quote_bytes_known(raw):
+    """Reject ANSI-C/locale quote syntax the shared lexer cannot decode exactly."""
+    quote = None
+    i = 0
+    while i < len(raw):
+        c = raw[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+        elif c == "\\":
+            if quote != '"' or (i + 1 < len(raw) and raw[i + 1] in '"\\$' + chr(96) + "\n"):
+                i += 1
+        elif quote == '"':
+            if c == '"':
+                quote = None
+        elif c == "$" and raw[i + 1:i + 2] in ("'", '"'):
+            return False
+        elif c in ("'", '"'):
+            quote = c
+        i += 1
+    return True
+
+
+def _commit_command_syntax(command):
+    """Return bounded syntax evidence, never an ALLOW decision.
+
+    Inspect every unclassified segment independently of other parsed Git commands.
+    Validate the whole command, including segments after a commit, before returning
+    grammar evidence. Exact lone help forms are non-committing syntax, not A-D.
+    """
+    if not isinstance(command, str):
+        return _CommitSyntax("unverifiable", (), (), (), "unreadable command")
+    if len(command) > _COMMIT_MAX_COMMAND:
+        return _CommitSyntax("unverifiable", (), (), (), "command size budget exhausted")
+    try:
+        records = tuple(_lex_command(command))
+    except ValueError:
+        # Partial records improve detection only. They can NEVER establish a proof.
+        partial, _complete = _lex_command(command, partial=True)
+        apparent = bool(_RAW_COMMIT_RE.search(command))
+        apparent = apparent or not _commit_quote_bytes_known(command)
+        apparent = apparent or any(_commit_apparent_segment(seg) for seg in partial)
+        status = "unverifiable" if apparent else "outside"
+        return _CommitSyntax(status, tuple(partial), (), (), "incomplete shell parse")
+    if len(records) > _COMMIT_MAX_SEGMENTS:
+        return _CommitSyntax("unverifiable", records, (), (), "segment budget exhausted")
+    steps = tuple(_commit_syntax_step(seg) for seg in records)
+    if any(not _commit_quote_bytes_known(seg.raw)
+           for seg, step in zip(records, steps) if step is None):
+        return _CommitSyntax("unverifiable", records, steps, (),
+                             "ANSI-C or locale quoting has unknown execution-time bytes")
+    commits = tuple(i for i, step in enumerate(steps)
+                    if step is not None and step.kind == "commit")
+    hidden = any(_commit_apparent_segment(seg)
+                 for seg, step in zip(records, steps) if step is None)
+    if not commits and not hidden:
+        return _CommitSyntax("outside", records, steps, (), "no apparent direct commit")
+    if (len(records) == 1 and steps[0] is not None
+            and steps[0].kind == "commit" and records[0].sep_after == ""
+            and records[0].argv in (["git", "commit", "--help"], ["git", "commit", "-h"])):
+        return _CommitSyntax("help", records, steps, commits, "exact lone help form")
+    if hidden or any(step is None for step in steps):
+        return _CommitSyntax("unverifiable", records, steps, commits,
+                             "segment outside the admitted commit grammar")
+    if (not records or records[-1].sep_after != ""
+            or any(seg.sep_after != "&&" for seg in records[:-1])):
+        return _CommitSyntax("unverifiable", records, steps, commits,
+                             "commit command is not an uninterrupted && chain")
+    return _CommitSyntax("grammar", records, steps, commits,
+                         "syntax established; target and state evidence still required")
+
+
 def _head_branch(repo):
     """The branch HEAD is on at `repo`, or None when it cannot be read: a detached HEAD (symbolic-ref
     exits non-zero), an unborn ref, a broken or absent repo, a timeout, or any subprocess error.
@@ -5610,189 +5868,368 @@ def _push_protected(tokens, args, cwd):
                         "itself".format(act, head), act_noun)
     return None  # HEAD provably a non-protected branch: the forced or deleted target is off the protected line
 
-def _commit_post_switch_branch(sub, args):
-    """ROUND-2 FINDING 13. The branch HEAD ends up on after a 'git switch'/'git checkout' segment, so a
-    LATER commit in the SAME compound command is classified against the branch it will ACTUALLY land on, not
-    the pre-command branch. Returns the resulting branch name (a -c/-C/-b/-B new-branch name, or a plain
-    'switch <branch>' operand), or None when it cannot be determined confidently (a detached checkout, '-',
-    a '--' pathspec form, an option-only or ambiguous 'checkout <arg>' that may be a pathspec). Deliberately
-    conservative: an undetermined switch leaves the caller to fall back to the pre-command HEAD probe."""
-    if sub not in ("switch", "checkout"):
-        return None
-    triggers = ("-c", "-C") if sub == "switch" else ("-b", "-B")
-    pre, post, _had = _split_pre_post(args)
-    if post:
-        return None  # a '--' pathspec form: not a plain branch switch
-    operands = []
-    i = 0
-    n = len(pre)
-    while i < n:
-        tok = pre[i]
-        if tok in ("-", "--detach", "--orphan"):
-            return None  # detached / orphan / previous-branch: HEAD is not a named protected/non-protected
-        for tr in triggers:
-            if tok == tr:  # separated value: -c NAME
-                return pre[i + 1] if i + 1 < n else None
-            if tok.startswith(tr) and len(tok) > len(tr) and not tok.startswith("--"):
-                return tok[len(tr):]  # attached short value: -cNAME
-        if sub == "switch" and tok in ("--create", "--force-create"):
-            return pre[i + 1] if i + 1 < n else None
-        if sub == "switch" and (tok.startswith("--create=") or tok.startswith("--force-create=")):
-            return tok.split("=", 1)[1]
-        if tok.startswith("-"):
-            i += 1
-            continue  # some other option (a flag or an option we do not model): skip it
-        operands.append(tok)
-        i += 1
-    if sub == "switch" and len(operands) == 1:
-        return operands[0]  # a plain 'git switch <branch>': HEAD moves to that branch
-    # 'git checkout <arg>' is ambiguous (a branch OR a pathspec), so it is not treated as a definite switch.
-    return None
+# One evaluation gets seven seconds, including parsing, Git and filesystem probes.
+# tools/gen_hooks.py gives the hook ten seconds. No probe resets this deadline.
+_COMMIT_SECONDS = 7.0
+_COMMIT_PROBE_SECONDS = 2.0
+_COMMIT_PROBE_BYTES = 65536
 
 
-def _repo_has_remote(repo):
-    """True when `repo` has a remote by ANY mechanism git resolves, False ONLY when every check is
-    evaluable AND finds none, None when any check is unevaluable (the caller fails CLOSED on None, so a
-    None denies). A repo with NO remote has no server-side branch protection and no PR/CI path, so
-    direct-to-main is its only model; the protected-branch COMMIT guard exempts it (a local record store's
-    handoff commit). The detection is COMPREHENSIVE across the ways git resolves a remote:
-      (a) CONFIG remotes (`[remote "<name>"]`), which `git remote` lists. Counted by LINES via
-          stdout.splitlines(), NOT stdout.strip() (F-R2-7b): a remote whose NAME is pure whitespace - which
-          git accepts and pushes through - prints a non-empty line that .strip() would erase, so a
-          line-presence test keeps it while a stripped test drops it. Zero remotes print no lines.
-      (b) LEGACY remotes that git resolves and pushes through but `git remote` does NOT enumerate
-          (F-R2-7a): the on-disk <git-common-dir>/remotes/<name> (URL:/Push:) and the very-legacy
-          <git-common-dir>/branches/<name> definitions. The git common dir is resolved via the same
-          scrubbed _branch_root_git primitive (common-dir, not git-dir, so a linked worktree sees the
-          main repo's legacy dirs), and each subdir is listed for ANY entry.
-    Fails CLOSED (None) when the config probe, the git-common-dir resolution, or a legacy-dir listing is
-    unevaluable (probe None/nonzero, an empty/opaque path, or an OSError other than absence). Inspection is
-    no-follow-safe: a symlinked legacy dir is not followed out, it fails closed to None; and only entry
-    NAMES are listed, never followed. Keys on remote ABSENCE, so every remote-backed repo stays protected
-    exactly as before."""
-    r = _branch_root_git(repo, "remote")
-    if r is None or r.returncode != 0:
-        return None
-    if r.stdout.splitlines():
-        return True  # (a) at least one config remote (a whitespace-named one is still a line)
-    # (b) legacy on-disk remote definitions git resolves but `git remote` does not list. Resolve the git
-    # COMMON dir (shared by all linked worktrees) via the scrubbed primitive; a relative path is anchored
-    # to repo, matching git's -C-relative output.
-    gd = _branch_root_git(repo, "rev-parse", "--git-common-dir")
-    if gd is None or gd.returncode != 0:
-        return None
-    common = gd.stdout.strip()
-    if not common:
-        return None
-    if not os.path.isabs(common):
-        common = os.path.join(repo, common)
-    for legacy in ("remotes", "branches"):
-        d = os.path.join(common, legacy)
-        if os.path.islink(d):
-            return None  # do not follow a symlinked legacy dir out; fail closed (deny)
-        try:
-            entries = os.listdir(d)
-        except FileNotFoundError:
-            continue  # the legacy dir is genuinely absent: no legacy remote by this mechanism
-        except OSError:
-            return None  # an unreadable legacy dir is a cannot-evaluate, not an absence
-        if entries:
-            return True  # a legacy remote (or branch shorthand) git resolves and pushes through
-    return False
+class _CommitCannotEvaluate(Exception):
+    pass
 
 
-def _commit_on_protected(tokens, cwd, switched_to=None, lone_direct=False):
-    """Classify a git commit segment against the protected line. Returns None (provably a non-protected
-    branch: silent allow), ("deny", detail) when the commit will PROVABLY land on a protected branch (a
-    confirmed direct commit on the protected line: deny-and-educate), or ("note", detail) when the guard
-    merely CANNOT PROVE the commit lands off the protected line (an unprovable repository view, a missing
-    session cwd, or an unresolvable HEAD: allow with an informational note). ROUND-2 FINDING 13: the
-    classification is against the branch the commit will ACTUALLY land on - `switched_to` (a branch an
-    earlier same-command 'git switch'/'checkout -b' moved HEAD to) when supplied, else the -C/--work-tree
-    TARGET repository's HEAD when the segment carries such a redirect, else the session cwd's HEAD - never the
-    stale pre-command session branch when a switch precedes it, and never a blanket allow-note for a
-    same-repo `git -C <repo> commit` that actually lands on the protected line. Only a CONFIRMED direct
-    commit on the protected branch is denied; a genuine cannot-prove case is allowed with a note."""
-    if switched_to is not None and _segment_dir_simple(tokens) and not _ambient_repo_view_override():
-        # ROUND-3 FINDING 4: an earlier same-command branch switch determines the POST-command branch this
-        # commit lands on ONLY when THIS commit runs in the SAME (session) repository the switch acted on.
-        # The switch was recorded only for a session-repo switch (no -C, no ambient override), so a commit
-        # that carries its OWN -C/--work-tree redirect (or runs under an ambient GIT_* view-override) lands
-        # in a DIFFERENT repository the switch never touched; it must NOT inherit the switch's exemption but
-        # be classified against that other repository's actual HEAD below.
-        if _is_protected_ref(switched_to):
-            return ("deny", "would commit on the protected branch {!r} that an earlier segment of this "
-                            "command switched to".format(switched_to))
-        return None  # switched to a non-protected branch in the same repo -> the commit lands off it
-    if _ambient_repo_view_override():
-        return ("note",
-                "runs under a non-cosmetic ambient GIT_* variable, so this guard cannot prove which "
-                "repository's HEAD it would commit on")
-    base = cwd if isinstance(cwd, str) and cwd else None
-    if not _segment_dir_simple(tokens):
-        # A command-local redirect: resolve the REPO git commits to and probe ITS HEAD (finding 13). ROUND-7
-        # (codex finding 2): --work-tree relocates ONLY the worktree, NEVER which repository a commit lands on;
-        # the repo is the ambient cwd, or a -C target, or a --git-dir (named directly). _segment_repo_dir
-        # resolves that (a -C target, or the session cwd when only --work-tree is present), treating
-        # --work-tree as worktree-only, so 'git --work-tree=B commit' is classified against the SESSION repo's
-        # HEAD (which it actually commits to), not B's. A --git-dir/GIT_DIR/-c form, or an unresolvable -C
-        # target, stays a cannot-prove note.
-        rd = _segment_repo_dir(tokens, base)
-        if isinstance(rd, str) and rd != "opaque":
-            base = rd
-        else:
-            return ("note",
-                    "carries a command-local redirect (--git-dir/GIT_DIR/-c, or an unresolvable "
-                    "-C target), so this guard cannot pin which repository's HEAD it would "
-                    "commit on")
-    head = _head_branch(base) if base is not None else None
-    if head is None:
-        return ("note",
-                "targets a repository whose HEAD this guard could not resolve (no usable session "
-                "directory, a detached HEAD, or a failed probe), so it cannot prove the commit lands "
-                "off the protected line")
-    if _is_protected_ref(head):
-        # No-remote exemption (cleanlanguage adopter report, 2026-09-12): a repo with NO configured remote
-        # has no server-side branch protection and no PR/CI path, so direct-to-main is its only model (a
-        # local record store committed once per session at handoff). F-R2-1 (2026-09-12): it is granted ONLY
-        # for a LONE, directly-bound `git commit` whose repo/remote context is provable - lone_direct (a single
-        # simple command: no compound &&/;/|, no preceding cd or remote mutation, no redirect, and (F-R2-4) no
-        # executable command/process substitution in the segment, which could mutate the repo/remote before git
-        # runs) AND
-        # _segment_dir_simple (base is the session cwd the commit actually runs in, not a -C/redirect target).
-        # A compound/cd-bearing/redirected commit is denied here EXACTLY as before the exemption, since its
-        # pre-command remote-absence probe is stale (a `cd remote-repo && commit` or a `git remote add && commit`
-        # would otherwise be wrongly exempted). Only a PROVABLE remote-absence exempts; an unresolvable probe
-        # fails CLOSED (still denied). A repo WITH a remote stays protected exactly as before, including on a
-        # branch with no upstream.
-        if lone_direct and _segment_dir_simple(tokens) and _repo_has_remote(base) is False:
+def _commit_remaining(deadline):
+    remaining = deadline - time.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0:
+        raise _CommitCannotEvaluate("commit evaluation deadline exhausted")
+    return remaining
+
+
+def _commit_run(argv, deadline):
+    """Read-only subprocess with bounded output and a shared monotonic deadline.
+
+    Filesystem probes also run here: a blocked stat/listing must not outlive the
+    proof budget. POSIX process groups bound descendants as well as the direct child.
+    Unsupported platforms, errors, excess output and timeouts withhold proof.
+    """
+    _commit_remaining(deadline)
+    if os.name != "posix":
+        raise _CommitCannotEvaluate("bounded commit probes require POSIX")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
+               GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+    end = min(deadline, time.monotonic() + _COMMIT_PROBE_SECONDS)
+    proc = None
+    try:
+        proc = subprocess.Popen(argv, cwd="/", env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True)
+        output = [bytearray(), bytearray()]
+        size = 0
+        with selectors.DefaultSelector() as sel:
+            for index, stream in enumerate((proc.stdout, proc.stderr)):
+                os.set_blocking(stream.fileno(), False)
+                sel.register(stream, selectors.EVENT_READ, index)
+            while sel.get_map():
+                for key, _events in sel.select(_commit_remaining(end)):
+                    part = os.read(key.fileobj.fileno(), 4096)
+                    if not part:
+                        sel.unregister(key.fileobj)
+                        continue
+                    size += len(part)
+                    if size > _COMMIT_PROBE_BYTES:
+                        raise _CommitCannotEvaluate("commit probe output budget exhausted")
+                    output[key.data].extend(part)
+            rc = proc.wait(timeout=_commit_remaining(end))
+        _commit_remaining(deadline)
+        return subprocess.CompletedProcess(argv, rc, output[0].decode("utf-8"),
+                                           output[1].decode("utf-8"))
+    except _CommitCannotEvaluate:
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise _CommitCannotEvaluate("commit probe failed: " + type(exc).__name__) from exc
+    finally:
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            for stream in (proc.stdout, proc.stderr):
+                stream.close()
+            # Cleanup has its own small allowance, never a fresh evaluation budget.
+            try:
+                proc.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def _commit_git(repo, deadline, *args):
+    return _commit_run(["git", "-C", repo, *args], deadline)
+
+
+def _commit_checked(result):
+    if result.returncode != 0 or result.stderr:
+        raise _CommitCannotEvaluate("Git or filesystem probe did not succeed cleanly")
+    return result.stdout
+
+
+def _commit_line(text):
+    if not text.endswith("\n"):
+        raise _CommitCannotEvaluate("probe omitted its output terminator")
+    value = text[:-1]
+    if not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise _CommitCannotEvaluate("probe returned an empty or malformed value")
+    return value
+
+
+# No filesystem access that supplies proof runs in the hook process itself.
+# This helper is isolated Python, takes literal argv, and prints one JSON payload.
+_COMMIT_FS_PROBE = r"""
+import json, os, pathlib, stat, sys
+def directory(value):
+    path = str(pathlib.Path(value).resolve(strict=True))
+    st = os.stat(path)
+    if not stat.S_ISDIR(st.st_mode):
+        raise ValueError("not a directory")
+    with os.scandir(path):
+        pass
+    return path, st
+try:
+    if sys.argv[1] == "identity":
+        repo, _ = directory(sys.argv[2])
+        gitdir, st = directory(sys.argv[3])
+        result = [repo, gitdir, st.st_dev, st.st_ino]
+    elif sys.argv[1] == "legacy":
+        common, _ = directory(sys.argv[2])
+        result = False
+        for name in ("remotes", "branches"):
+            path = os.path.join(common, name)
+            try:
+                st = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(st.st_mode):
+                raise ValueError("legacy remote directory is not a plain directory")
+            with os.scandir(path) as entries:
+                if next(entries, None) is not None:
+                    result = True
+                    break
+    else:
+        raise ValueError("unknown filesystem probe")
+    print(json.dumps(result))
+except Exception:
+    sys.exit(2)
+"""
+
+
+def _commit_fs(deadline, operation, *paths):
+    result = _commit_run([sys.executable, "-I", "-B", "-c", _COMMIT_FS_PROBE,
+                          operation, *paths], deadline)
+    try:
+        return json.loads(_commit_checked(result))
+    except ValueError as exc:
+        raise _CommitCannotEvaluate("malformed filesystem probe payload") from exc
+
+
+def _commit_validate_ref(repo, deadline, ref):
+    if not ref.startswith("refs/heads/") or not ref[len("refs/heads/"):]:
+        raise _CommitCannotEvaluate("HEAD or switch destination is not a local branch")
+    if _commit_checked(_commit_git(repo, deadline, "check-ref-format", ref)) != "":
+        raise _CommitCannotEvaluate("unexpected reference validation output")
+    return ref
+
+
+def _commit_ref_exists(repo, deadline, ref):
+    result = _commit_git(repo, deadline, "show-ref", "--exists", ref)
+    if result.returncode == 2 and not result.stdout:
+        return False  # documented missing-reference status; never other errors
+    if result.returncode == 0 and not result.stdout and not result.stderr:
+        return True
+    raise _CommitCannotEvaluate("local reference existence could not be established")
+
+
+def _commit_ref_object(repo, deadline, ref):
+    oid = _commit_line(_commit_checked(_commit_git(
+        repo, deadline, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}")))
+    if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", oid) is None:
+        raise _CommitCannotEvaluate("malformed branch object identity")
+    if _commit_checked(_commit_git(repo, deadline, "cat-file", "-t", oid)) != "commit\n":
+        raise _CommitCannotEvaluate("branch commit object is unavailable")
+
+
+def _commit_target(directory, deadline):
+    if not isinstance(directory, str) or not directory or not os.path.isabs(directory):
+        raise _CommitCannotEvaluate("target requires a valid absolute directory")
+    view = _commit_checked(_commit_git(
+        directory, deadline, "rev-parse", "--is-inside-work-tree", "--absolute-git-dir"))
+    if not view.startswith("true\n"):
+        raise _CommitCannotEvaluate("target is not a working tree")
+    gitdir = _commit_line(view[len("true\n"):])
+    if not os.path.isabs(gitdir):
+        raise _CommitCannotEvaluate("Git directory is not absolute")
+    info = _commit_fs(deadline, "identity", directory, gitdir)
+    if (not isinstance(info, list) or len(info) != 4
+            or any(not isinstance(p, str) or not os.path.isabs(p) for p in info[:2])
+            or any(type(n) is not int or n < 0 for n in info[2:]) or info[3] == 0):
+        raise _CommitCannotEvaluate("malformed worktree directory identity")
+    # symbolic-ref recurses to the terminal destination; never classify an alias name.
+    head = _commit_line(_commit_checked(_commit_git(
+        directory, deadline, "symbolic-ref", "--quiet", "--recurse", "HEAD")))
+    _commit_validate_ref(directory, deadline, head)
+    if _commit_ref_exists(directory, deadline, head):
+        _commit_ref_object(directory, deadline, head)
+    # A valid symbolic HEAD with an absent terminal local ref is an unborn branch.
+    _commit_remaining(deadline)
+    return _CommitTarget(info[0], info[1], tuple(info[2:]), head)
+
+
+def _commit_switch_ref(step, target, deadline, created):
+    repo, name = target.directory, step.branch
+    if not name or name.startswith("-") or name in ("@", "HEAD") or "@{" in name:
+        raise _CommitCannotEvaluate("switch requires a literal local branch name")
+    checked = _commit_checked(_commit_git(repo, deadline, "check-ref-format", "--branch", name))
+    if checked != name + "\n":
+        raise _CommitCannotEvaluate("switch branch was expanded or normalized")
+    ref = _commit_validate_ref(repo, deadline, "refs/heads/" + name)
+    key = (target.identity, ref)
+    if step.kind == "switch-create":
+        if key in created or _commit_ref_exists(repo, deadline, ref):
+            raise _CommitCannotEvaluate("new switch destination already exists")
+        created.add(key)
+        return ref
+    # A creation postcondition proves HEAD, not a fresh observation of a local ref.
+    # Existing switches still require observed local existence and unambiguous resolution.
+    if not _commit_ref_exists(repo, deadline, ref):
+        raise _CommitCannotEvaluate("switch destination is not an existing local branch")
+    symbolic = _commit_git(repo, deadline, "symbolic-ref", "--quiet", "--recurse", ref)
+    if symbolic.returncode != 1 or symbolic.stdout or symbolic.stderr:
+        raise _CommitCannotEvaluate("symbolic or unreadable switch destination")
+    resolved = _commit_line(_commit_checked(_commit_git(
+        repo, deadline, "rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", name)))
+    if resolved != ref:
+        raise _CommitCannotEvaluate("switch destination is ambiguous or shorthand")
+    _commit_ref_object(repo, deadline, ref)
+    return ref
+
+
+def _repo_has_remote(repo, deadline):
+    """D only: True for a remote, False for proved absence, None for any probe failure.
+
+    Preserve config remote line presence (including whitespace names) and both legacy
+    common-directory mechanisms. These observations consume the SAME commit deadline.
+    """
+    try:
+        output = _commit_checked(_commit_git(repo, deadline, "remote"))
+        if output.splitlines():
+            return True
+        common = _commit_line(_commit_checked(_commit_git(
+            repo, deadline, "rev-parse", "--git-common-dir")))
+        if not os.path.isabs(common):
+            common = os.path.join(repo, common)
+        result = _commit_fs(deadline, "legacy", common)
+        _commit_remaining(deadline)
+        return result if type(result) is bool else None
+    except _CommitCannotEvaluate:
+        return None
+
+
+def _commit_issue(syntax, index, step, target, post, deadline):
+    branch = target.head if post is None else post.branch
+    if post is not None and (post.identity != target.identity or post.switch_index >= index):
+        raise _CommitCannotEvaluate("switch evidence does not bind this commit")
+    _commit_remaining(deadline)
+    if _is_protected_ref(branch):
+        # D is a policy exemption, not a proof of a non-protected destination.
+        if len(syntax.steps) == 1 and step.target is None and post is None:
+            remote = _repo_has_remote(target.directory, deadline)
+            _commit_remaining(deadline)
+            if remote is False:
+                certificate = _CommitCertificate("D", index, target.identity, branch, None)
+                return _CommitEvidence("proved", certificate, "D: lone session commit; no remote")
+            if remote is None:
+                return _CommitEvidence("unverifiable", None, "remote absence could not be proved")
+        return _CommitEvidence("protected", None, "would commit on protected branch " + repr(branch))
+    shape = "C" if post is not None else ("B" if step.target is not None else "A")
+    certificate = _CommitCertificate(shape, index, target.identity, branch,
+                                     None if post is None else post.switch_index)
+    return _CommitEvidence("proved", certificate, shape + ": non-protected local branch")
+
+
+def _commit_evaluate(syntax, cwd, deadline):
+    """Issue evidence only after whole-command syntax and ordered effects are known.
+
+    State is keyed by the worktree Git directory's device/inode, so alternate paths
+    share postconditions while linked worktrees keep independent HEAD state.
+    cd permanently invalidates session binding; it never supplies a replacement cwd.
+    Trusted command resolution, stable config/paths and non-hostile hooks/editors/
+    helpers remain assumptions. Concurrent mutation and probe-to-execution races
+    remain residual risks. Switch aliases are refused; HEAD aliases are resolved.
+    """
+    try:
+        _commit_remaining(deadline)
+        if syntax.status != "grammar" or not syntax.commit_indexes:
+            raise _CommitCannotEvaluate(syntax.detail)
+        if _ambient_repo_view_override():
+            raise _CommitCannotEvaluate("non-cosmetic ambient GIT_* variable")
+        session_bound = isinstance(cwd, str) and bool(cwd) and os.path.isabs(cwd)
+        targets, identities, directory_ids, posts, created = {}, {}, {}, {}, set()
+        evidence = []
+        for index, step in enumerate(syntax.steps):
+            _commit_remaining(deadline)
+            if step.kind == "inert":
+                continue
+            if step.kind == "cd":
+                session_bound = False
+                continue
+            directory = step.target
+            if directory is None:
+                if not session_bound:
+                    raise _CommitCannotEvaluate("session directory binding is unavailable after cd")
+                directory = cwd
+            if directory not in targets:
+                target = _commit_target(directory, deadline)
+                prior_id = directory_ids.get(target.git_directory)
+                if prior_id is not None and prior_id != target.identity:
+                    raise _CommitCannotEvaluate("Git directory identity changed during evaluation")
+                prior = identities.get(target.identity)
+                if prior is not None and prior.head != target.head:
+                    raise _CommitCannotEvaluate("HEAD observations disagree for one worktree")
+                directory_ids[target.git_directory] = target.identity
+                identities[target.identity] = target
+                targets[directory] = target
+            target = targets[directory]
+            if step.kind in ("switch-existing", "switch-create"):
+                ref = _commit_switch_ref(step, target, deadline, created)
+                posts[target.identity] = _CommitPostcondition(target.identity, ref, index)
+            elif step.kind == "commit":
+                evidence.append(_commit_issue(syntax, index, step, target,
+                                              posts.get(target.identity), deadline))
+            else:
+                raise _CommitCannotEvaluate("unmodelled command effect")
+        _commit_remaining(deadline)
+        if len(evidence) != len(syntax.commit_indexes):
+            raise _CommitCannotEvaluate("missing commit evidence")
+        return tuple(evidence)
+    except _CommitCannotEvaluate as exc:
+        return (_CommitEvidence("unverifiable", None, str(exc)),)
+
+
+def _commit_on_protected(evidence):
+    """Consume proof only. Unknown/protected states DENY; there is no allow-note exit."""
+    if isinstance(evidence, _CommitEvidence) and evidence.state == "proved":
+        cert = evidence.certificate
+        if (isinstance(cert, _CommitCertificate) and cert.shape in _COMMIT_CERTIFICATE_SHAPES
+                and cert.identity and cert.branch.startswith("refs/heads/")
+                and (cert.shape == "D") == _is_protected_ref(cert.branch)
+                and ((cert.shape == "C" and type(cert.switch_index) is int
+                      and 0 <= cert.switch_index < cert.commit_index)
+                     or (cert.shape != "C" and cert.switch_index is None))):
             return None
-        return ("deny", "would commit directly on the protected branch {!r}".format(head))
-    return None
+    detail = evidence.detail if isinstance(evidence, _CommitEvidence) else "missing commit evidence"
+    return ("deny", detail)
+
+
+def _commit_denial(detail):
+    return _deny(
+        "AIQT rule artbr1 (branch-and-merge-on-green): " + detail + ". Commit denied because no "
+        "admitted proof or lone no-remote exemption authorizes it. Use a separate plain feature-branch "
+        "commit, or an exact absolute 'git -C /worktree commit' with a proved non-protected branch; "
+        "an admitted switch may precede it through &&. " + _PROTECTED_ALTS,
+        "AIQT guardrail: denied a protected or unproved direct commit (rule artbr1).")
 
 
 def _protected_line_fallback(command):
-    """FAIL-SAFE conservative raw scan for the two cases the parsed path cannot judge: the tokenizer could not
-    parse the command (unbalanced quotes), OR git is hidden under a command-word wrapper (env/sudo/...).
-    An apparent git force-push (any -f/--force/--for.../--mirror/--all form, or a '+'-refspec anchored
-    to start, whitespace, or either quote character, so a quoted '+main:main' under sudo is caught), or
-    an apparent branch DELETION (a '--de...' long flag or a '-d' cluster, protected-named or not - like
-    the force spellings, the true target may be unreadable or shell-expanded - or an empty-source
-    ':<protected>' refspec, judged by its visible name), protected-named or not, is a HAZARD-class
-    unparseable command that could rewrite the protected line and DENIES-and-educates (fail-safe: hooks
-    never ask, and an unparseable possible protected-line rewrite is blocked with the safe route named).
-    An apparent git commit is NOT hazard-class (a direct commit is recoverable and server-side protection is
-    the real gate), so it ALLOWS with a note. Anything else ALLOWS (the true boundary). It OVER-MATCHES by
-    design (a keyword in prose or an unrelated '+' or '-d' token trips it), the documented posture of the
-    sibling fallbacks (_diff_source_fallback, _git_discard_fallback).
+    """Commit-free push fallback; commit syntax is checked before this path.
 
-    CLAUDE-F1 (round-6): the raw scans run over the command with QUOTED-heredoc bodies STRIPPED (the same
-    _strip_quoted_heredoc_bodies pass git_discard's unconditional raw scan uses), so a 'git push --force ...'
-    or a branch-deletion spelling that appears only INSIDE a quoted heredoc body (literal data, e.g. a
-    'cat <(x) <<'EOF' ... EOF' whose process substitution forced this fallback) no longer produces a
-    false-positive DENY. It is body-STRIP only: a real force-push/deletion OUTSIDE a quoted heredoc body is
-    preserved verbatim and still DENIES, and an UNQUOTED heredoc body (which interpolates) is not stripped, so
-    no under-deny is introduced (the strip is conservative: on any ambiguity the text is left in place)."""
+    Retain conservative raw push coverage and quoted-heredoc stripping. Hidden
+    commits are checked independently of other Git segments by the commit recognizer.
+    """
+    syntax = _commit_command_syntax(command)
+    if syntax.status != "outside":
+        if syntax.status == "help":
+            return _allow()
+        return _commit_denial("apparent commit lacks complete proof: " + syntax.detail)
     scan = _strip_quoted_heredoc_bodies(command)
     if _RAW_PUSH_RE.search(scan) and (_RAW_PUSH_FORCE_RE.search(scan)
                                       or _RAW_PUSH_DELETE_RE.search(scan)
@@ -5806,42 +6243,18 @@ def _protected_line_fallback(command):
             "Re-issue it as a plain, parseable, non-force git command. {}".format(named, _PROTECTED_ALTS),
             "AIQT guardrail: denied an apparent force-push or branch deletion this guard cannot fully parse "
             "(rule prtbrn, fail-safe); push to a feature branch and merge on green.")
-    if _RAW_COMMIT_RE.search(scan):
-        return _allow_note(
-            "AIQT guardrail (rule artbr1, branch-and-merge-on-green): the command could not be parsed by the "
-            "shell lexer and it appears to run git commit; this guard cannot prove the commit lands off the "
-            "protected line. A direct commit is recoverable and server-side branch protection is the real "
-            "gate, so it is allowed; develop on a feature branch and land on the protected line through a "
-            "reviewed merge. {}".format(_PROTECTED_ALTS))
     return _allow()
 
 def protected_line(data):
-    """prtbrn + artbr1 (integ/protected-branch-integrity, integ/branch-and-merge-on-green),
-    PreToolUse/Bash. DENY a git push segment that force-pushes a protected branch - a force spelling
-    (--force, --force-with-lease bare or =value, --force-if-includes, a bare or clustered -f, a
-    conservative long prefix) or a '+'-prefixed refspec whose DESTINATION names a protected branch -
-    or that DELETES one: a --delete/-d flag with a protected refspec-position operand, or the
-    empty-source ':<dst>' delete refspec (F-112 round-3); the deny banner names the actual act,
-    force-push vs branch deletion (round-4). Destinations are judged only in REFSPEC position (the
-    first bare operand is the repository, so a remote literally named 'main' is not a false deny),
-    and flag detection is value-aware (a force or delete spelling in an option-value position,
-    '-o --force', is not a flag). A refspec-less force-push and a forced or deleted HEAD/@ resolve
-    their target through the read-only HEAD probe (deny on a protected HEAD, fail-safe DENY when
-    unprovable; the deleted-HEAD deny is a harmless over-deny, git itself rejecting a HEAD delete as
-    a nonexistent ref). NO-ASK posture: a sweep this guard cannot prove misses the protected names is a
-    hazard-class possible protected-line rewrite, so it DENIES fail-safe (naming a push that misses the
-    protected branch): a wildcard force or delete refspec over the branch namespace, --mirror, a forced
-    --all/--branches, the matching ':'/'+:' refspec, and --prune with a wildcard or matching refspec or
-    --all/--branches (round-4: prune deletes absent remote branches with no force flag). A force-push or
-    delete to a non-protected ref and a plain non-force push ALLOW. A git commit is treated by artbr1: a
-    commit PROVABLY on a protected branch (read-only HEAD probe under the ambient-GIT_* scrub) DENIES-and-
-    educates (switch to a feature branch); a commit the guard merely CANNOT PROVE lands off the protected
-    line (an unprovable repository view, a detached HEAD, a probe miss) is a common, recoverable case and
-    ALLOWS with a note, since server-side branch protection is the real gate for the accidental direct commit
-    this client guard targets (only the literal 'commit' subcommand; merge/cherry-pick/revert are out of
-    scope by design). A DENY in any segment wins over a pending allow-note (a confirmed or unprovable rewrite
-    outranks the recoverable commit note). No escape-hatch prefix; the deny mirrors commit_identity's
-    absoluteness."""
+    """Commit proof runs before information shortcuts; push retains its separate policy.
+
+    Direct/apparent commits require the finite grammar and an A-D certificate for
+    each committing segment. Unknown wrappers/effects/control flow and failed probes
+    deny. Literal detection cannot find every renamed executable, alias, function,
+    opaque script or unparseable fragmentation; other commit-producing verbs and
+    other tools remain outside this boundary. Server protection does not validate
+    this pre-execution proof. Push coverage retains its existing separate limits.
+    """
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: protected_line wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -5849,148 +6262,69 @@ def protected_line(data):
     if tool_name is None:
         return _deny_missing_tool_name("prtbrn")
     if tool_name != "Bash":
-        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+        return _allow()
     command = (data.get("tool_input") or {}).get("command")
     if not isinstance(command, str):
         return _deny(
             "AIQT rule prtbrn (protected-branch-integrity): the Bash payload carried no readable command "
             "string, so the protected-line check could not run; failing closed.",
             "AIQT guardrail: denied a Bash call with no readable command (rule prtbrn, fail-closed).")
+    deadline = time.monotonic() + _COMMIT_SECONDS
+    syntax = _commit_command_syntax(command)
+    if syntax.status == "help":
+        return _allow()  # only literal lone git commit --help / -h
+    if syntax.status == "unverifiable":
+        return _commit_denial(syntax.detail)
+    if syntax.status == "grammar":
+        evidence = _commit_evaluate(syntax, data.get("cwd"), deadline)
+        if not evidence:
+            return _commit_denial("missing commit evidence")
+        for item in evidence:
+            outcome = _commit_on_protected(item)
+            if outcome is not None:
+                return _commit_denial(outcome[1])
+        return _allow()
+
+    # Only commit-free commands reach the existing push classifier/help shortcut.
     try:
         seg_records = _lex_command(command)
     except ValueError:
         return _protected_line_fallback(command)
-    segments = [(seg.argv, seg.sep_after) for seg in seg_records]  # the (argv, sep) projection _segments gives
-    # F-R2-1: the no-remote commit exemption may only be granted to a LONE, directly-bound `git commit` whose
-    # repository/remote context is PROVABLE and unambiguous - a single simple command (no compound &&/;/|, so
-    # no preceding `cd` and no preceding `git remote add`/other repo/remote mutation, and no redirect). A
-    # compound/multi-segment/cd-bearing/redirected commit is handled EXACTLY as before the exemption existed
-    # (deny when it lands on a protected branch), because the pre-command repo/remote state the probe reads is
-    # then stale (cd changes the repo git commits to; `git remote add && commit` adds the remote after the
-    # probe ran). The commit segment must ALSO be _segment_dir_simple (base == the session cwd it actually runs
-    # in) for the exemption to apply; that is checked in _commit_on_protected.
-    # F-R2-4: a single segment with no redirects is NOT sufficient to prove the commit's repo/remote
-    # context is stable - an executable command/process substitution inside the command (a `$(...)`,
-    # a backtick, or a `<(`/`>(` process substitution) can mutate that context before git runs (e.g.
-    # `git commit -m "$(git remote add origin /path; echo qa)"` adds a remote the pre-command probe
-    # never saw). The segment's opaque_shell flag is exactly "an unquoted expansion/substitution the
-    # ALLOW proof may not rest on" (it is set for a double-quoted `$(...)` and an unquoted backtick;
-    # a `<(`/`>(` process substitution raises in the lexer and takes the fallback path), so a lone
-    # commit whose segment is opaque_shell is NOT exempted and falls through to the normal protected-
-    # branch deny. Conservative by direction: an opaque commit on a no-remote protected branch denies.
-    lone_direct_commit = (len(seg_records) == 1 and not seg_records[0].redirects
-                          and not seg_records[0].opaque_shell)
     cwd = data.get("cwd")
-    # No-ask posture: a CONFIRMED protected-line rewrite (force-push/delete of a protected ref, or a commit
-    # provably on the protected branch) DENIES-and-educates and returns immediately. A push this guard cannot
-    # prove misses the protected line is a fail-safe DENY (hazard class: it could rewrite the protected line),
-    # held in pending_deny so a confirmed deny elsewhere wins first. A commit it merely cannot prove lands off
-    # the protected line is a common, recoverable case (a normal 'git -C <repo> commit', a detached HEAD) and
-    # ALLOWS with a note (held in pending_note), since server-side protection is the real gate for the
-    # accidental direct commit this client guard targets.
     pending_deny = None
-    pending_note = None
-    saw_git = False     # did any parsed segment have 'git' as its command word?
-    # ROUND-2 FINDING 13: track the branch an earlier same-command 'git switch'/'checkout -b' moved HEAD to,
-    # so a following commit is classified against the branch it will ACTUALLY land on (not the stale
-    # pre-command session branch). Only a determinable switch on the SESSION repo (no -C redirect) whose
-    # SUCCESS GATES the following command updates it. ROUND-3 FINDING 5: only '&&' gates success - a
-    # ';'/'||'-sequenced switch runs the commit REGARDLESS of whether the switch succeeded (a failed
-    # 'git switch missing; git commit' lands the commit on the still-protected branch), so a ';'/'||' switch
-    # never establishes the branch moved and the commit is classified against the pre-command (protected)
-    # branch instead. This is a deliberate safe-direction over-deny for the ';' case (the guard cannot prove
-    # a bare-';' switch succeeded); re-issue the switch and commit joined by '&&' to exempt it.
-    switched_to = None
-    # ROUND-6 FINDING 1 (B-class). The switch->commit exemption holds ONLY when the commit is UNCONDITIONALLY
-    # gated on the switch's success: an unbroken '&&' chain from the start of the switch's and-or list through
-    # the commit. `sw_pure_and` tracks whether the CURRENT and-or list has had only '&&' separators so far
-    # (True at a list boundary ';'/'&'/newline, cleared by any '||'/'|'/'|&'), so a switch is recorded only
-    # when it is itself guaranteed to run (a pure '&&' prefix) AND is '&&'-joined to what follows; and
-    # switched_to is CLEARED the moment a non-'&&' separator precedes a later segment, because then the commit
-    # can run despite a failed/absent switch ('switch && true || commit', 'switch ; commit',
-    # 'x || switch && commit'). Fail toward protected: a cleared exemption classifies the commit against the
-    # pre-command (possibly protected) HEAD, which DENIES when that HEAD is protected.
-    sw_pure_and = True
-    for _idx, (tokens, _sep) in enumerate(segments):
-        prev_sep = segments[_idx - 1][1] if _idx > 0 else None
-        if prev_sep is not None:
-            if prev_sep in (";", "&", ""):     # a new and-or list begins: a prior switch cannot gate it
-                sw_pure_and = True
-                switched_to = None
-            elif prev_sep != "&&":             # '||'/'|'/'|&': the chain no longer requires the switch
-                sw_pure_and = False
-                switched_to = None
+    saw_git = False
+    for seg in seg_records:
+        tokens = seg.argv
         if _command_word(tokens) != "git":
             continue
         saw_git = True
         if _has_info_flag(tokens):
-            continue  # a --help/-h segment shows help, it pushes and commits nothing (see diff_source)
-        sub, args = _git_sub_and_args(tokens)
-        if sub in ("switch", "checkout") and _segment_dir_simple(tokens) \
-                and not _ambient_repo_view_override():
-            target = _commit_post_switch_branch(sub, args)
-            # Record the exemption only when this switch is itself guaranteed to run (an unbroken '&&' prefix
-            # of its list) AND is '&&'-joined to what follows, so a following commit is unconditionally gated
-            # on the switch's success (finding 5 + round-6 finding 1).
-            if target is not None and _sep == "&&" and sw_pure_and:
-                switched_to = target
             continue
-        if sub == "push":
-            outcome = _push_protected(tokens, args, cwd)
-            if outcome is None:
-                continue
-            decision, detail, act_noun = outcome
-            if decision == "deny":
-                return _deny(
-                    "AIQT rule prtbrn (protected-branch-integrity): this git push {}. The protected "
-                    "line is never rewritten or overwritten directly; it changes only through a "
-                    "reviewed, verified merge (artbr1). {}".format(detail, _PROTECTED_ALTS),
-                    "AIQT guardrail: denied a {} targeting a protected branch (rule prtbrn)."
-                    .format(act_noun))
-            if pending_deny is None:
-                pending_deny = _deny(
-                    "AIQT rule prtbrn (protected-branch-integrity): this git push {}. This guard cannot "
-                    "prove it will not rewrite the protected line, so it is denied fail-safe rather than "
-                    "run. Re-issue it as a push this guard can prove misses the protected branch (an "
-                    "explicit non-protected refspec, no --mirror/--all/wildcard/prune sweep). {}"
-                    .format(detail, _PROTECTED_ALTS),
-                    "AIQT guardrail: denied a git push this guard cannot prove misses the protected branch "
-                    "(rule prtbrn); push to a feature branch and merge on green.")
-        elif sub == "commit":
-            result = _commit_on_protected(tokens, cwd, switched_to=switched_to,
-                                          lone_direct=lone_direct_commit)
-            if result is None:
-                continue
-            severity, detail = result
-            if severity == "deny":
-                return _deny(
-                    "AIQT rule artbr1 (branch-and-merge-on-green): this git commit {}. A change develops "
-                    "on a feature branch and lands on the protected line only through a reviewed merge "
-                    "(prtbrn). Switch to a feature branch ('git switch -c <branch>') and commit there; "
-                    "server-side branch protection remains the real gate. {}"
-                    .format(detail, _PROTECTED_ALTS),
-                    "AIQT guardrail: denied a direct commit on the protected branch - switch to a feature "
-                    "branch first (rule artbr1).")
-            if pending_note is None:  # severity == "note": cannot prove, but commit is recoverable -> allow
-                pending_note = _allow_note(
-                    "AIQT guardrail (rule artbr1, branch-and-merge-on-green): this git commit {}. A change "
-                    "develops on a feature branch and lands on the protected line only through a reviewed "
-                    "merge (prtbrn); server-side branch protection remains the real gate, so this commit is "
-                    "allowed. If this is the protected line, move to a feature branch first. {}"
-                    .format(detail, _PROTECTED_ALTS))
+        sub, args = _git_sub_and_args(tokens)
+        if sub != "push":
+            continue
+        outcome = _push_protected(tokens, args, cwd)
+        if outcome is None:
+            continue
+        decision, detail, act_noun = outcome
+        if decision == "deny":
+            return _deny(
+                "AIQT rule prtbrn (protected-branch-integrity): this git push {}. The protected "
+                "line is never rewritten or overwritten directly; it changes only through a "
+                "reviewed, verified merge (artbr1). {}".format(detail, _PROTECTED_ALTS),
+                "AIQT guardrail: denied a {} targeting a protected branch (rule prtbrn)."
+                .format(act_noun))
+        if pending_deny is None:
+            pending_deny = _deny(
+                "AIQT rule prtbrn (protected-branch-integrity): this git push {}. This guard cannot "
+                "prove it will not rewrite the protected line, so it is denied fail-safe rather than "
+                "run. Re-issue it as a push this guard can prove misses the protected branch (an "
+                "explicit non-protected refspec, no --mirror/--all/wildcard/prune sweep). {}"
+                .format(detail, _PROTECTED_ALTS),
+                "AIQT guardrail: denied a git push this guard cannot prove misses the protected branch "
+                "(rule prtbrn); push to a feature branch and merge on green.")
     if pending_deny is not None:
         return pending_deny
-    if pending_note is not None:
-        return pending_note
-    # No parsed segment had 'git' as its command word, yet the raw command names git: a
-    # command-word wrapper (env/sudo/command/xargs/timeout/nohup/sh -c) or obfuscation hides the
-    # git call. Mirror git_discard's raw posture - an apparent wrapped force-push, deletion, or
-    # commit ASKS rather than passing silently; a FRAGMENTED command word or verb is the disclosed
-    # residual (F-112 1C), and so is a compound in which ANY OTHER segment - earlier OR later -
-    # parses with git as its command word ('git status && sudo git push -f ...', and equally
-    # 'env git push -f ... && git status'): the benign git segment satisfies saw_git and suppresses
-    # this catch - a round-3 disclosure reworded in round-4 (the suppression was never only-earlier),
-    # adversarial and best-effort like git_discard's fragmented-verb residual, not chased.
     if not saw_git and _RAW_GIT_RE.search(command):
         return _protected_line_fallback(command)
     return _allow()
