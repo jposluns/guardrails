@@ -1147,7 +1147,7 @@ def _archived_rotatable(rec):
 
 def _has_active_import_run(root_fd, machine_rel, rep):
     """True when an imports/<run-id> run directory (a valid U7 run-id shape) is actually present. A declared
-    import_status = "partial" is substantiated only by such a run (spec 11:942 requires an import or
+    import_status = "partial" is substantiated only by such a run (spec 11:943 requires an import or
     migration ACTUALLY running); with none present a partial declaration cannot license the triage posture
     that disables steady-state grading (codex-2). A listing failure is recorded CANNOT-EVALUATE by _list_dir
     and returns False (fail-closed: the cant dominates, so the paths then grade as findings). `machine_rel`
@@ -1801,14 +1801,14 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
             walk(full, depth + 1)
 
     # codex-2: a partial status is substantiated only by an import/migration ACTUALLY running (an
-    # imports/<run-id> run present; spec 11:942). Without one the partial declaration cannot license the
+    # imports/<run-id> run present; spec 11:943). Without one the partial declaration cannot license the
     # triage posture that would disable steady-state grading, so it is itself a finding and the stray paths
     # grade as findings, never a silent triage pass.
     partial_active = import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep)
     if import_status == "partial" and not partial_active:
         rep.finding("C-CONTAINMENT: the manifest declares import_status partial but no active "
                     "imports/<run-id> run is present; a partial status is substantiated only by an import "
-                    "or migration actually running (spec 11:942/14.2)")
+                    "or migration actually running (spec 11:943/14.2)")
     walk(WORKING_DIRNAME, 0)
     for p in sorted(unmanaged_files):
         if partial_active:
