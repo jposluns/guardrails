@@ -3369,7 +3369,7 @@ def self_test():
         check("cli-empty-root", render(["--root", ""]) == EXIT_CANNOT_EVALUATE)
         check("cli-option-looking-root", render(["--root", "--bogus"]) == EXIT_CANNOT_EVALUATE)
 
-        def _gate_store(mutate=None):
+        def _gate_store(mutate=None, declare_version=True):
             """Build a whole-store-VALID synthetic store that ALSO declares and pre-renders every view, plus
             the inert observations validate_store consumes, so the composed U6 write gate is exercised end to
             end. Mirrors the U6 clean-store shape (counters, populated indexes, worklog + archive coverage, a
@@ -3414,6 +3414,11 @@ def self_test():
                 ("BACKLOG_ITEM-INDEX.md", "deterministic", ["backlog_item"]),
                 ("BLOCK-INDEX.md", "deterministic", ["block"]),
             )
+            if not declare_version:
+                # Drop the root VERSION deliverable from the declared views so C-VERSION-FILE is UNOWNED (render
+                # never plans or regenerates it); the caller supplies a stale root VERSION to exercise the
+                # unowned-VERSION residual remedy end to end. VERSION.md (the markdown mirror) stays declared.
+                roster = tuple(r for r in roster if r[0] != "VERSION")
             views = {nm: {"kind": kd, "sources": list(srcs),
                           "target": nm if nm == "VERSION" else "{}/{}".format(WORKING_DIRNAME, nm)}
                      for nm, kd, srcs in roster}
@@ -3681,8 +3686,13 @@ def self_test():
         finally:
             globals()["_restore_preimages"] = _saved_restore
         check("prc-ownedmiss-partial-exit-2", _pa_rc == EXIT_CANNOT_EVALUATE)
-        check("prc-ownedmiss-partial-incomplete-labelled", "INCOMPLETE" in _pa_err)
-        check("prc-ownedmiss-partial-names-path", _pa_unrestored in _pa_err)
+        # DEFECT 1a hardening: the INCOMPLETE label AND the unrestored path must appear in the PRIMARY
+        # diagnostic line (the FIRST stderr line of the owned-miss message), not merely somewhere in stderr,
+        # so moving the failed-paths text onto a later line would NOT pass. Parse the first line and assert on
+        # it; still reject the false unconditional "rolled back" success wording anywhere in stderr.
+        _pa_first = _pa_err.splitlines()[0] if _pa_err else ""
+        check("prc-ownedmiss-partial-incomplete-labelled", "INCOMPLETE" in _pa_first)
+        check("prc-ownedmiss-partial-names-path", _pa_unrestored in _pa_first)
         check("prc-ownedmiss-partial-no-false-success",
               "rolled back to the pre-write bytes" not in _pa_err)
 
@@ -3706,6 +3716,65 @@ def self_test():
         check("prc-unowned-version-residual-finding-surfaced", _rv_msg in _rv_out)
         check("prc-unowned-version-residual-no-remove-advice", "remove the file" not in _rv_out)
         check("prc-unowned-version-residual-declare-advice", "declare the VERSION view" in _rv_out)
+
+        # --- VECTOR B (END-TO-END): the unowned-VERSION residual remedy driven through the REAL caller, not a
+        # synthesized _residual_write_exit call. Build a gate store that does NOT declare the root VERSION as a
+        # view (so C-VERSION-FILE is UNOWNED) with the version ledger carrying releases, a STALE root VERSION on
+        # disk, and a drifted OWNED view (TODO). render --write with honest observations exercises ownership
+        # discovery, real validation, Phase-B REGENERATION of the owned view, Phase-C owned_ok (VERSION not
+        # planned), and the caller's _residual_write_exit mapping the unowned C-VERSION-FILE FINDING to
+        # EXIT_DRIFT. Asserts: exit 1 (EXIT_DRIFT); the owned view REGENERATED (no longer the stale sentinel);
+        # the root VERSION still EXISTS and is byte-UNCHANGED (render owns and deletes nothing there); and the
+        # remedy carries the corrected QUALIFIED wording, never the harmful unconditional "remove the file".
+        # FAIL-TO-PASS: the pre-fix remedy carried "or remove the file", so the negative assertion FAILS then.
+        _ev_root, _ev_obs = _gate_store(declare_version=False)
+        _ev_todo = _ev_root / WORKING_DIRNAME / "TODO.md"
+        _ev_todo.write_text("stale sentinel\n", encoding="utf-8")     # drift the OWNED view
+        _ev_version = _ev_root / "VERSION"
+        _ev_version.write_text("0.0.0\n", encoding="utf-8")           # a STALE, UNDECLARED root VERSION
+        _ev_ver_before = _ev_version.read_bytes()
+        _ev_buf = io.StringIO()
+        with contextlib.redirect_stdout(_ev_buf):
+            _ev_rc = render(["--root", str(_ev_root), "--write"], observations=_ev_obs)
+        _ev_out = _ev_buf.getvalue()
+        check("prc-unowned-version-e2e-exit-drift", _ev_rc == EXIT_DRIFT)
+        check("prc-unowned-version-e2e-view-regenerated",
+              _ev_todo.read_text(encoding="utf-8") != "stale sentinel\n")
+        check("prc-unowned-version-e2e-root-version-exists", _ev_version.exists())
+        check("prc-unowned-version-e2e-root-version-unchanged",
+              _ev_version.read_bytes() == _ev_ver_before)
+        check("prc-unowned-version-e2e-no-remove-advice", "remove the file" not in _ev_out)
+        check("prc-unowned-version-e2e-qualified-remedy",
+              "removing the root VERSION is valid ONLY when the version ledger has no releases" in _ev_out)
+        check("prc-unowned-version-e2e-declare-advice", "declare the VERSION view" in _ev_out)
+
+        # --- VECTOR C (change-carries-check): the reopen-failure path of _restore_preimages must return the
+        # AFFECTED relpaths of EVERY captured target, not a single opaque sentinel (DEFECT-1c). Force the
+        # rollback reopen to fail by monkeypatching _opf_store._open_store_root_fd to raise OSError, then call
+        # _restore_preimages with a preimages dict of 2+ entries across DIFFERENT scopes/relpaths. Assert it
+        # returns WITHOUT raising and the returned list NAMES both affected relpaths. The monkeypatch is
+        # restored in a finally. FAIL-TO-PASS: reverting _restore_preimages to a single generic token loses the
+        # relpaths, so both name assertions FAIL.
+        _rp_root, _ = _gate_store()
+        _rp_res = _opf_store.resolve_store(Path(os.path.abspath(str(_rp_root))))
+        _rp_preimages = {("product", "VERSION"): None,
+                         ("store", WORKING_DIRNAME + "/TODO.md"): b"stale todo\n"}
+        def _rp_boom(*a, **k):
+            raise OSError("forced reopen failure for rollback")
+        _rp_saved = _opf_store._open_store_root_fd
+        _rp_raised = False
+        try:
+            _opf_store._open_store_root_fd = _rp_boom
+            try:
+                _rp_failed = _restore_preimages(_rp_root, _rp_res, _rp_preimages)
+            except Exception:
+                _rp_raised = True
+                _rp_failed = []
+        finally:
+            _opf_store._open_store_root_fd = _rp_saved
+        check("prc-reopen-fail-no-exception", _rp_raised is False)
+        check("prc-reopen-fail-names-version", "VERSION" in _rp_failed)
+        check("prc-reopen-fail-names-todo", (WORKING_DIRNAME + "/TODO.md") in _rp_failed)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
