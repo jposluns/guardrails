@@ -580,6 +580,22 @@ def main(report_path=None):
                  "Operating-mode: attended-autonomous\n", "allow"),
                 ("ask/mode-fully-attended-allows",
                  "Operating-mode: fully-attended\n", "allow"),
+                # JSON marker shape (the peer secureconfig writer): recognized in both directions.
+                ("ask/json-mode-attended-allows",
+                 '{"mode": "attended"}\n', "allow"),
+                ("ask/json-mode-unattended-denies",
+                 '{"mode": "unattended"}\n', "deny"),
+                ("ask/json-mode-whitespace-padded-unattended-denies",
+                 '  \n{"mode": "unattended"}\n  ', "deny"),
+                # FAIL CLOSED to guards-armed on a present-but-unusable marker (never a silent disarm):
+                ("ask/json-mode-malformed-denies-armed",
+                 '{"mode": "unattended"\n', "deny"),           # partial/malformed JSON
+                ("ask/json-mode-no-string-mode-denies-armed",
+                 '{"mode": 1}\n', "deny"),                     # JSON object, mode not a string
+                ("ask/json-mode-unrecognized-value-denies-armed",
+                 '{"mode": "bananas"}\n', "deny"),            # JSON mode outside the attended family
+                ("ask/line-mode-unrecognized-value-denies-armed",
+                 "Operating-mode: bananas\n", "deny"),        # line value outside the attended family
                 ("ask/mode-absent-allows", "", "allow")):  # absent mode line fails open
             h.mode.write_text(mode_text, encoding="utf-8")
             g_ask = h.payload("PreToolUse", "AskUserQuestion",
@@ -591,6 +607,14 @@ def main(report_path=None):
         g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
                           extra={"tool_use_id": "tu-2"})
         check("ask/unreadable-mode-fails-open", _verdict(ask()), "allow")
+        # a PRESENT but unreadable mode record fails CLOSED to guards-armed (distinct from the absent file
+        # above). A directory at the mode path raises an OSError that is NOT FileNotFoundError when opened,
+        # a hermetic proxy for an unreadable present file that holds on any uid, including root.
+        h.mode.mkdir()
+        g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
+                          extra={"tool_use_id": "tu-2b"})
+        check("ask/present-unreadable-mode-denies-armed", _verdict(ask()), "deny")
+        h.mode.rmdir()
         # idempotent pending append, redacted (digest + counts, never the question text)
         h.mode.write_text("Operating-mode: daytime-unattended\n", encoding="utf-8")
         g_ask = h.payload("PreToolUse", "AskUserQuestion",

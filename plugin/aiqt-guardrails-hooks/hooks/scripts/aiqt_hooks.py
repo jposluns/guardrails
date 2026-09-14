@@ -7553,6 +7553,12 @@ _ORCH_LOOP_BOUND = 2          # stop-path denies per epoch before ALLOW_WITH_FIN
 _ORCH_SCHEDULE_CAP = 3        # schedule-path denies on an unchanged basis before findings
 _ORCH_MAX_NAMED = 10          # actionable items named in a deny message
 _ORCH_MODE_RE = re.compile(r"^Operating-mode:\s*(.+?)\s*$", re.MULTILINE)
+# The guards-armed posture a present-but-unusable mode marker fails closed to: it carries the `unattended`
+# token, so the ask blocker arms on it and _orch_scope_live reads it as a live (non-None) mode. A recognized
+# mode value carries the `attended`/`unattended` family token (so both `unattended` and `attended` spellings,
+# and their compound forms, are recognized); a present value outside that family is unrecognized and fails
+# closed to this posture rather than silently disarming.
+_ORCH_MODE_ARMED = "unattended"
 _ORCH_ESCAPE_NAME = "ESCAPE-ALLOW-YIELD"
 _ORCH_QUIET_CLAIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*min(?:ute)?s?\b")  # minutes number; the "quiet" gate is applied separately
 # A human-decision blocker ref must look like a decision id (uppercase-prefixed, for example XY-12),
@@ -7761,8 +7767,22 @@ def _orch_save_turn_state(root, state):
 
 
 def _orch_mode(reg, root):
-    """The lowercased Operating-mode value from the declared mode record, or None (undeclared,
-    unreadable, or no mode line): the fail-open answer for the ask blocker."""
+    """The lowercased operating-mode value from the declared mode record. The record is recognized in BOTH
+    shapes: the plain `Operating-mode: <text>` line (searched anywhere in the file, so it may sit inside a
+    larger markdown document), and a JSON object with a top-level string "mode" key
+    ({"mode": "attended"} / {"mode": "unattended"}, with surrounding whitespace tolerated). Returns:
+      - None when NO marker is present, preserving the original fail-open answer for the ask blocker: an
+        undeclared mode path, a genuinely absent file (FileNotFoundError), or a present file that carries no
+        marker of either shape (empty, or non-JSON prose with no Operating-mode line);
+      - _ORCH_MODE_ARMED (the guards-armed posture) when a marker IS present but cannot yield a recognized
+        value, so the guard fails CLOSED rather than silently disarming: a present-but-unreadable file (an
+        OSError other than FileNotFoundError), a JSON-shaped marker that is malformed/partial or is not an
+        object with a string "mode", or a recognized-shape marker whose value is outside the
+        attended/unattended family;
+      - the recognized value (lowercased) otherwise, letting the downstream `unattended`-substring check arm
+        or disarm as before.
+    JSON is parsed defensively (try/except); the line form is tried first so an embedded Operating-mode line
+    in a markdown record still wins."""
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
@@ -7770,10 +7790,29 @@ def _orch_mode(reg, root):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             text = fh.read()
+    except FileNotFoundError:
+        return None                       # no marker file present: unchanged no-marker default (fail open)
     except OSError:
-        return None
+        return _ORCH_MODE_ARMED           # present but unreadable: fail closed to guards-armed
     m = _ORCH_MODE_RE.search(text)
-    return m.group(1).lower() if m else None
+    if m:
+        candidate = m.group(1).lower()
+        return candidate if "attended" in candidate else _ORCH_MODE_ARMED
+    stripped = text.strip()
+    if not stripped:
+        return None                       # empty/whitespace-only: no marker line present, unchanged (fail open)
+    if stripped.startswith("{"):
+        # A JSON marker (the peer secureconfig shape). A malformed/partial marker, or one that is not an
+        # object with a string "mode", is a present-but-unrecognized marker: fail closed to guards-armed.
+        try:
+            obj = json.loads(stripped)
+        except ValueError:
+            return _ORCH_MODE_ARMED
+        if isinstance(obj, dict) and isinstance(obj.get("mode"), str):
+            candidate = obj["mode"].strip().lower()
+            return candidate if "attended" in candidate else _ORCH_MODE_ARMED
+        return _ORCH_MODE_ARMED
+    return None                           # non-empty, non-JSON, no mode line: unchanged (fail open)
 
 
 def _orch_scope_live(reg, root, session_id=None):
