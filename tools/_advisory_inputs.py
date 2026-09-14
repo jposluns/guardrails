@@ -182,13 +182,16 @@ def _read_regular_file(name, dir_fd, relpath):
 
 
 def read_source_file(path):
-    """Read one required file's bytes through a no-follow descriptor on its final component, refusing a
-    symlinked or non-regular target. Raises a located input error on any refusal (the caller maps it to
-    exit 2). Best-effort heuristic advisory; the authoritative behavior is the code and the --self-test."""
+    """Read one required file's bytes with race-free, no-follow resolution on every path component: the
+    parent directory is resolved component-by-component under no-follow directory descriptors (the same
+    traversal collect_python_inputs uses via _open_root), then the final file is opened relative to that
+    parent descriptor with O_NOFOLLOW and confirmed to be a regular file. Any symlinked component (parent
+    or final) or a non-regular target is refused as a located input error (the caller maps it to exit 2).
+    Best-effort heuristic advisory; the authoritative behavior is the code and the --self-test."""
     s = os.fspath(path)
     if "\x00" in s:
         raise _LocatedInputError(s, "open", "required path contains a NUL byte")
-    parent = os.path.dirname(s) or "/"
+    parent = os.path.dirname(s) or "."
     name = os.path.basename(s)
     if not name:
         raise _LocatedInputError(s, "open", "required path has no file component")
@@ -196,10 +199,11 @@ def read_source_file(path):
         raise _LocatedInputError(s, "capability",
                                  "the platform lacks a required no-follow descriptor primitive "
                                  "(cannot evaluate)")
-    try:
-        pfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
-    except OSError as exc:
-        raise _LocatedInputError(s, "open", "cannot open parent directory: {}".format(exc))
+    # A relative parent is resolved against the current directory (preserving the prior contract) into an
+    # absolute path, then walked component-by-component under no-follow descriptors; abspath only prepends
+    # the working directory and normalizes, so every real component (symlink included) is still confirmed
+    # by the no-follow traversal below.
+    pfd = _open_root(os.path.abspath(parent))
     try:
         return _read_regular_file(name, pfd, s)
     finally:

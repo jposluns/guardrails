@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "c03e0e68df618298f10715ad0ba580ad2572a21c63d16a7f86f8becd042ce0d3"
+tree-sha256 = "08e2de5648983ce0c56919780844ae2f42c5499649ab6b8f2a7eee45f8d08a0a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2546,8 +2546,8 @@ sha256 = "c57746b75ebb827bbf7eaa8d876aabef23c3ee347c373a60df5a13cc80ee4358"
 
 [[sources]]
 path = "tools/_advisory_inputs.py"
-bytes = 9462
-sha256 = "073eeabfbc5818a123da2d717050163db7a14124e64808d2a95b74c3a73edc36"
+bytes = 9987
+sha256 = "94003eb84b5395dc3f90fa6433338e29a97a04151eeff9b3259a80aa5e686abe"
 
 [[sources]]
 path = "tools/_commonmark_headings.py"
@@ -2796,8 +2796,8 @@ sha256 = "b091e92022b8ce2028280a318a6f6f880b02b6a4f8167413b8985401beca77ad"
 
 [[sources]]
 path = "tools/check_advisory_contract.py"
-bytes = 21849
-sha256 = "d27bcf4ef4c756351c5dbef77abc0bcab330f39945808f1d385196254a26ee76"
+bytes = 26428
+sha256 = "404975c26008fb0591d1fd1ecae5bfed9ff50e1ebd94a8cb87acd8be3ec8bb8b"
 
 [[sources]]
 path = "tools/check_applies.py"

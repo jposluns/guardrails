@@ -177,6 +177,8 @@ def _load_manifest(root):
         data = tomllib.loads(raw.decode("utf-8"))
     except Exception as exc:  # noqa: BLE001
         raise _Refusal(MANIFEST_REL, "cannot read or parse the gate manifest: {}".format(exc))
+    if not isinstance(data, dict):
+        raise _Refusal(MANIFEST_REL, "the gate manifest is not a table")
     gates = data.get("gate")
     if not isinstance(gates, list):
         raise _Refusal(MANIFEST_REL, "the gate manifest has no [[gate]] array")
@@ -201,6 +203,8 @@ def _load_ledger(root):
         data = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_dup_pairs)
     except Exception as exc:  # noqa: BLE001
         raise _Refusal(LEDGER_REL, "cannot read or parse the enforceability ledger: {}".format(exc))
+    if not isinstance(data, dict):
+        raise _Refusal(LEDGER_REL, "the enforceability ledger is not a JSON object")
     if data.get("version") != 1:
         raise _Refusal(LEDGER_REL, "unexpected ledger version {!r}".format(data.get("version")))
     rules = data.get("rules")
@@ -214,7 +218,11 @@ def _scan_manifest(root, findings):
     gates = _load_manifest(root)
     seen = {}
     for g in gates:
+        if not isinstance(g, dict):
+            raise _Refusal(MANIFEST_REL, "a [[gate]] entry is not a table")
         gid = g.get("id")
+        if gid is not None and not isinstance(gid, str):
+            raise _Refusal(MANIFEST_REL, "a [[gate]] entry has a non-string id {!r}".format(gid))
         if gid in PROFILED_GATE_IDS:
             residue = g.get("residue", "")
             if not isinstance(residue, str) or not residue.strip():
@@ -224,6 +232,10 @@ def _scan_manifest(root, findings):
             rules = g.get("rules")
             if not isinstance(rules, list):
                 raise _Refusal(MANIFEST_REL, "gate {!r} has no rules list".format(gid))
+            for r in rules:
+                if not isinstance(r, str):
+                    raise _Refusal(MANIFEST_REL,
+                                   "gate {!r} has a non-string rule member {!r}".format(gid, r))
             seen[gid] = set(rules)
     for gid, want in EXPECTED_MEMBERS.items():
         if gid not in seen:
@@ -238,9 +250,21 @@ def _scan_ledger(root, findings):
     rules = _load_ledger(root)
     occurrences = {}
     for entry in rules:
+        if not isinstance(entry, dict):
+            raise _Refusal(LEDGER_REL, "a ledger rule entry is not an object")
         cid = entry.get("corpus-id")
-        for g in entry.get("gates", []):
+        if not isinstance(cid, str):
+            raise _Refusal(LEDGER_REL, "a ledger rule entry has a non-string corpus-id {!r}".format(cid))
+        gates = entry.get("gates", [])
+        if not isinstance(gates, list):
+            raise _Refusal(LEDGER_REL, "rule {!r} has a non-list gates value".format(cid))
+        for g in gates:
+            if not isinstance(g, dict):
+                raise _Refusal(LEDGER_REL, "rule {!r} has a gate entry that is not an object".format(cid))
             gid = g.get("id")
+            if gid is not None and not isinstance(gid, str):
+                raise _Refusal(LEDGER_REL,
+                               "rule {!r} has a gate with a non-string id {!r}".format(cid, gid))
             if gid in PROFILED_GATE_IDS:
                 residue = g.get("residue", "")
                 if not isinstance(residue, str) or not residue.strip():
@@ -267,6 +291,10 @@ def check(root):
         _scan_ledger(root, findings)
     except _Refusal as ref:
         print("cannot-evaluate: {}: {}".format(ref.where, ref.detail))
+        print("RESULT: cannot-evaluate; fail-closed")
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print("cannot-evaluate: {}: unexpected error: {}".format(root, exc))
         print("RESULT: cannot-evaluate; fail-closed")
         return 2
     if findings:
@@ -420,6 +448,53 @@ def self_test_main():
         if _quiet_check(str(bl)) != 2:
             failures.append("malformed ledger: expected 2")
 
+        # Fixture cases: a valid-JSON non-dict ledger (an array) is a located cannot-evaluate (2), not an
+        # uncaught traceback: the decoded document's structural type is confirmed before it is consumed.
+        ndl = tmp / "nondict_ledger"
+        _write_synthetic(ndl)
+        (ndl / ".aiqt/enforceability.json").write_text("[]\n", encoding="utf-8")
+        if _quiet_check(str(ndl)) != 2:
+            failures.append("non-dict ledger: expected 2")
+
+        # Fixture cases: a ledger rule entry of the wrong type (a non-object record) is a cannot-evaluate (2).
+        nor = tmp / "nonobj_ledger_record"
+        _write_synthetic(nor)
+        led = json.loads((nor / ".aiqt/enforceability.json").read_text(encoding="utf-8"))
+        led["rules"].append("not-an-object")
+        (nor / ".aiqt/enforceability.json").write_text(
+            json.dumps(led, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if _quiet_check(str(nor)) != 2:
+            failures.append("non-object ledger record: expected 2")
+
+        # Fixture cases: a ledger gate id of the wrong type is a cannot-evaluate (2), never an unhashable
+        # membership-test crash.
+        nid = tmp / "nonstr_ledger_id"
+        _write_synthetic(nid)
+        led = json.loads((nid / ".aiqt/enforceability.json").read_text(encoding="utf-8"))
+        led["rules"][0]["gates"][0]["id"] = ["timer-restore"]
+        (nid / ".aiqt/enforceability.json").write_text(
+            json.dumps(led, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if _quiet_check(str(nid)) != 2:
+            failures.append("non-string ledger gate id: expected 2")
+
+        # Fixture cases: a manifest [[gate]] value that is not a table is a cannot-evaluate (2) rather than
+        # an uncaught traceback (the same structural discipline on the manifest loader).
+        ntm = tmp / "nontable_manifest"
+        _write_synthetic(ntm)
+        (ntm / ".aiqt/core/gates/manifest.toml").write_text('gate = ["not-a-table"]\n', encoding="utf-8")
+        if _quiet_check(str(ntm)) != 2:
+            failures.append("non-table manifest gate: expected 2")
+
+        # Fixture cases: a symlinked parent component on the gate's own read path is a cannot-evaluate (2),
+        # never a clean pass, because read_source_file resolves the parent component-by-component under
+        # no-follow directory descriptors.
+        slp = tmp / "symlink_parent"
+        _write_synthetic(slp)
+        (slp / "tools").rename(slp / "tools_real")
+        os.symlink("tools_real", slp / "tools")
+        if _quiet_check(str(slp)) != 2:
+            failures.append("symlinked tools parent: expected 2")
+
         # Fixture cases: a missing required input is a cannot-evaluate (2).
         ms = tmp / "missing"
         _write_synthetic(ms)
@@ -468,8 +543,11 @@ def self_test_main():
     print("SELF-TEST PASS: the conforming synthetic surfaces are clean, each prohibited word family and "
           "phrase injected into a docstring, comment, and residue is caught, an unlisted clean paraphrase "
           "is accepted, coordinated membership and malformed-input cases fail closed to a cannot-evaluate, "
-          "and the CLI shows a 0->1->0 transition on injection and restoration; these are fixture-bound "
-          "invariants, not a general account of the checker's behavior.")
+          "a valid-JSON non-dict or structurally-malformed ledger record or id, a non-table manifest gate, "
+          "and a symlinked parent on the read path each fail closed to a located cannot-evaluate rather "
+          "than an uncaught traceback or a clean pass, and the CLI shows a 0->1->0 transition on injection "
+          "and restoration; these are fixture-bound invariants, not a general account of the checker's "
+          "behavior.")
     return 0
 
 
