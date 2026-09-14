@@ -11,7 +11,9 @@ trailer).
 
 The repo root is DERIVED by CONFIRMING the repository IDENTITY of the gate's OWN source location through a
 local git probe (git -C <gate-dir> rev-parse --show-toplevel, with the ambient Git environment scrubbed and
-git resolved to an absolute path), exactly as check_opf_drift.py does, NOT by the mere PRESENCE of a `.git`
+the git executable resolved via shutil.which then absolutized with os.path.abspath, anchoring a relative
+which() result to the cwd so the launched probe is pinned absolute against exec-time re-resolution), exactly
+as check_opf_drift.py does, NOT by the mere PRESENCE of a `.git`
 entry and NOT via _gen_common.repo_root() (which falls back to the current directory and would silently check
 the WRONG root, a guard-input-soundness regression). A run whose root cannot be confirmed (git missing, a
 launch failure, an invalid/garbage gitfile, or a toplevel that does not contain the gate) fails closed
@@ -87,6 +89,7 @@ def _self_test():
     import _opf_changelog  # noqa: E402  freeze digests for the changelog gates
 
     git = shutil.which("git")
+    git = os.path.abspath(git) if git else None
     if git is None:
         print("check_opf_doctor self-test: SKIP (git not found on PATH; the committed-store fixtures the "
               "tracked/prior observations need cannot be built)")
@@ -330,6 +333,28 @@ def _self_test():
                 expect("relative-toplevel", _git_toplevel(norepo_anchor), None)
             finally:
                 subprocess.run = real_run_rel
+
+            # The git EXECUTABLE is absolutized (os.path.abspath) so a relative which() result (a relative
+            # PATH entry) still launches an ABSOLUTE git, pinning the child against exec-time re-resolution
+            # (mirrors _opf_observe._git_path). Stub shutil.which to a RELATIVE "git" and capture the command
+            # _git_toplevel launches; assert its git argv[0] is absolute. Both stubs restored in a finally so
+            # no later leg is affected.
+            real_which_abs = shutil.which
+            real_run_abs = subprocess.run
+            launched = {}
+            def _relative_which(*_a, **_k):
+                return "git"
+            def _capture_run(cmd, *_a, **_k):
+                launched["cmd"] = cmd
+                return subprocess.CompletedProcess(args=cmd, returncode=EXIT_OK, stdout="/toplevel\n")
+            shutil.which = _relative_which
+            subprocess.run = _capture_run
+            try:
+                _git_toplevel(norepo_anchor)
+                expect("abspath-git-executable", os.path.isabs(launched.get("cmd", [""])[0]), True)
+            finally:
+                shutil.which = real_which_abs
+                subprocess.run = real_run_abs
         finally:
             shutil.rmtree(str(base), ignore_errors=True)
         return failures
@@ -357,7 +382,9 @@ def _self_test():
         print("check_opf_doctor self-test: PASS (opf doctor returns 0 on a clean committed store / 1 after an "
               "immutable-body mutation vs the committed prior / 2 on a broken store / 0 NOT APPLICABLE, end to "
               "end; child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
-              "relative-toplevel probe -> None (exit 2); status contract 1=assertion 2=harness)")
+              "relative-toplevel probe -> None (exit 2); "
+              "git executable absolutized (relative which() -> absolute argv[0]); "
+              "status contract 1=assertion 2=harness)")
     return rc
 
 
@@ -396,14 +423,17 @@ def _git_toplevel(anchor):
     standard as the sibling _opf_observe git boundary: `--no-replace-objects` so a replacement ref cannot
     substitute the bytes a read returns, an ALLOWLIST-scrubbed environment (every GIT_-prefixed variable
     dropped, so an inherited GIT_DIR/GIT_WORK_TREE/etc. cannot bind the probe to a DIFFERENT repository; only
-    PATH/HOME carried over, config-neutralizing vars re-applied), git resolved to an ABSOLUTE path, and a
-    bounded timeout. A missing git, a launch failure, a timeout, a nonzero return (an invalid/garbage `.git`
+    PATH/HOME carried over, config-neutralizing vars re-applied), the git executable resolved via shutil.which
+    and absolutized with os.path.abspath (a relative which() result anchored to the cwd, pinning the launched
+    probe against exec-time re-resolution; the which()-time PATH-shadowing residual remains), and a bounded
+    timeout. A missing git, a launch failure, a timeout, a nonzero return (an invalid/garbage `.git`
     gitfile yields git's own exit 128), or output that is empty or not an absolute path (git emits an absolute
     toplevel, so a relative value is malformed) all return None -- the caller maps that to a cannot-evaluate
     (exit 2), never a false pass. Mirrors check_opf_drift._git_toplevel (the sibling gate),
     never _gen_common.repo_root() (which falls back to cwd)."""
     import shutil
     git = shutil.which("git")
+    git = os.path.abspath(git) if git else None
     if git is None:
         return None
     try:
@@ -428,7 +458,8 @@ def _git_toplevel(anchor):
 
 def _run_gate(anchor):
     """Establish the repository root by CONFIRMING the repository IDENTITY of the gate's OWN location
-    `anchor` through a local git probe (ambient Git env scrubbed, git resolved absolute), then run the live
+    `anchor` through a local git probe (ambient Git env scrubbed, the git executable resolved via shutil.which
+    and absolutized with os.path.abspath), then run the live
     doctor check against it. A root established only by the PRESENCE of a `.git` entry is not enough: a stray
     or garbage `.git` file beside the gate satisfies a bare existence test yet is NOT a real repository root,
     so the gate would anchor to the wrong directory, find no `.working/`, and return a FALSE NOT-APPLICABLE 0.
