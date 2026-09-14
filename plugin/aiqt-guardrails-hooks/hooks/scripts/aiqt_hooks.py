@@ -8825,13 +8825,16 @@ def orch_ask_guard(data):
     declaration is parsed on its own PHYSICAL line (its value must begin with attended or unattended, compound
     annotations allowed, never a substring, or it fails closed); a JSON marker must be exactly
     {"mode": "<attended|unattended...>"} with no extra or duplicate keys or it fails closed. A mode marker that
-    is present but unreadable, non-UTF-8, malformed (an unterminated string, trailing garbage, or duplicate
-    keys), a non-mode JSON value (a scalar, an array, or an object without exactly a string "mode"), or a
-    present-but-unrecognized `Operating-mode:` declaration (empty, or not beginning with attended/unattended)
-    fails CLOSED to the guards-armed (unattended) posture, so the blocker arms rather than silently disarming;
-    only a genuinely absent file, an empty/whitespace file, or prose with no declaration and no JSON marker is
-    the fail-OPEN no-marker default (this guards one mistake shape, not a security boundary). Its regression
-    vectors are held by the behaviour self-test."""
+    is present but unreadable, non-UTF-8, a present-but-unrecognized `Operating-mode:` declaration (empty, or not
+    beginning with attended/unattended), a present JSON value that parses but is not exactly a single string
+    "mode" key (a scalar, an array, an object with extra keys, or an object without a string "mode"), or, with no
+    declaration line present, a JSON-shaped marker (content beginning with `{`, `[`, or `"`) that is malformed
+    (an unterminated string, trailing garbage, or duplicate keys) fails CLOSED to the guards-armed (unattended)
+    posture, so the blocker arms rather than silently disarming; only a genuinely absent file, an empty/whitespace
+    file, or content with no declaration line that does not parse as JSON and whose first non-whitespace character
+    is not `{`, `[`, or `"` (ordinary prose, for example `42 items done` or `true trailing`, so prose beginning
+    with a number or word does not arm) is the fail-OPEN no-marker default (this guards one mistake shape, not a
+    security boundary). Its regression vectors are held by the behaviour self-test."""
     if data.get("tool_name") != "AskUserQuestion":
         return _allow()
     root = _orch_root(data)

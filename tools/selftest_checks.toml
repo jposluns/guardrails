@@ -115,7 +115,7 @@ expected-check-ids = [
   "ask/json-object-trailing-garbage-denies-armed",
   "ask/prose-mentions-mode-allows",
   "ask/whitespace-only-allows",
-  "ask/mode-absent-allows",
+  "ask/empty-mode-file-allows",
   "ask/absent-mode-fails-open",
   "ask/present-unreadable-mode-denies-armed",
   "ask/invalid-utf8-mode-denies-armed",

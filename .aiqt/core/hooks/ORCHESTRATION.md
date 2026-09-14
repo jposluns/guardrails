@@ -52,13 +52,16 @@ strict-exact with a duplicate-key-rejecting hook and no extra keys) or it fails 
 whose value begins with the `unattended` token arms the ask blocker. The reader fails CLOSED to the
 guards-armed (`unattended`) posture, never silently disarming, when a marker IS present but cannot yield a
 recognized value: a present-but-unreadable or non-UTF-8 file, a present `Operating-mode:` declaration whose
-value is empty or does not begin with attended/unattended, a malformed or partial JSON marker (an
-unterminated string or trailing garbage included), a JSON marker with duplicate or extra keys, a present JSON
-marker that is not an object with a string `mode` (a scalar such as a number, boolean, or null, an array, or
-an object without a string `mode`), or a marker whose value falls outside the `attended`/`unattended` family.
-It preserves the fail-open (undeclared) answer only when NO marker is present: an undeclared mode path, a
-genuinely absent file, an empty or whitespace-only file, or prose that carries no `Operating-mode:`
-declaration line and no JSON marker (a sentence merely mentioning attended or unattended is such prose). The escape sentinel (default
+value is empty or does not begin with attended/unattended, a JSON-shaped marker (content beginning with `{`,
+`[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate keys
+included), a present JSON value that parses but is not an object with exactly a single string `mode` key (a
+scalar such as a number, boolean, or null, an array, an object with extra keys, or an object without a string
+`mode`), or a marker whose value falls outside the `attended`/`unattended` family. It preserves the fail-open
+(undeclared) answer only when NO marker is present: an undeclared mode path, a genuinely absent file, an empty
+or whitespace-only file, or content that carries no `Operating-mode:` declaration line, does not parse as
+JSON, and whose first non-whitespace character is not `{`, `[`, or `"` (ordinary prose: a sentence merely
+mentioning attended or unattended, or one beginning with a number or word such as `42 items done` or `true
+trailing`, is such prose and does not arm). The escape sentinel (default
 `<state_dir>/ESCAPE-ALLOW-YIELD`) is operator-owned by enforced acceptance, not convention: it is
 honoured only as a regular file (never a symlink), owned by a uid other than the assistant's
 effective uid, and not group- or other-writable. A present sentinel failing any condition is ignored

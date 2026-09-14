@@ -667,7 +667,7 @@ def main(report_path=None):
                  "Yesterday we worked unattended; today attended.\n", "allow"),
                 # A whitespace-only file carries no marker (fail open):
                 ("ask/whitespace-only-allows", "   \n\t\n", "allow"),
-                ("ask/mode-absent-allows", "", "allow")):  # absent mode line fails open
+                ("ask/empty-mode-file-allows", "", "allow")):  # empty mode file (present, no marker) fails open
             h.mode.write_text(mode_text, encoding="utf-8")
             g_ask = h.payload("PreToolUse", "AskUserQuestion",
                               {"questions": [{"question": "pick one"}]},
