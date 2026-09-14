@@ -578,8 +578,10 @@ def main(report_path=None):
                  "Operating-mode: daytime-unattended\n", "deny"),
                 ("ask/mode-attended-autonomous-allows",
                  "Operating-mode: attended-autonomous\n", "allow"),
-                ("ask/mode-fully-attended-allows",
-                 "Operating-mode: fully-attended\n", "allow"),
+                # A value whose mode word is NOT a leading prefix (`fully-attended` begins `fully`) is
+                # unrecognized under the word-anchored grammar and fails CLOSED to armed, never a substring allow:
+                ("ask/line-mode-fully-attended-suffix-denies-armed",
+                 "Operating-mode: fully-attended\n", "deny"),
                 # JSON marker shape (the peer secureconfig writer): recognized in both directions.
                 ("ask/json-mode-attended-allows",
                  '{"mode": "attended"}\n', "allow"),
@@ -626,6 +628,45 @@ def main(report_path=None):
                 # A shared text file with real prose PLUS a valid Operating-mode line: the line is still found:
                 ("ask/prose-with-valid-line-denies",
                  "Session state notes.\nSome context here.\nOperating-mode: unattended\nMore notes.\n", "deny"),
+                # ---------- round-4 sound-parser matrix (single reader, no regex+substring leaks) ----------
+                # Compound annotations begin with the mode word, so they classify (the real ipad compound):
+                ("ask/line-mode-attended-compound-allows",
+                 "Operating-mode: attended (iPad); continuous mode\n", "allow"),
+                ("ask/line-mode-unattended-compound-denies",
+                 "Operating-mode: unattended; continuous\n", "deny"),
+                # SUBSTRING must NOT match: a value whose `attended` is not a leading prefix fails CLOSED to armed:
+                ("ask/line-mode-disattended-denies-armed",
+                 "Operating-mode: disattended\n", "deny"),
+                ("ask/line-mode-not-attended-denies-armed",
+                 "Operating-mode: not-attended\n", "deny"),
+                ("ask/json-mode-disattended-denies-armed",
+                 '{"mode": "disattended"}\n', "deny"),
+                ("ask/json-mode-not-attended-denies-armed",
+                 '{"mode": "not-attended"}\n', "deny"),
+                # The declaration value is the rest of ITS physical line only: an empty value never crosses the
+                # newline to capture the NEXT line (the LF and the CRLF fail-open legs the old `\s*` regex leaked):
+                ("ask/line-mode-empty-value-next-line-not-captured-denies-armed",
+                 "Operating-mode:\nattended\n", "deny"),
+                ("ask/line-mode-crlf-empty-value-not-captured-denies-armed",
+                 "Operating-mode:\r\nattended\n", "deny"),
+                # A BOM-prefixed declaration line is stripped once and classified, never missed:
+                ("ask/line-mode-bom-unattended-denies",
+                 "\ufeffOperating-mode: unattended\n", "deny"),
+                # An indented declaration is handled consistently (no over-arm): indented attended -> allow:
+                ("ask/line-mode-indented-attended-allows",
+                 "  Operating-mode: attended\n", "allow"),
+                # JSON strict-exact: duplicate keys, extra keys, and trailing garbage after the object fail closed:
+                ("ask/json-mode-duplicate-keys-denies-armed",
+                 '{"mode": "unattended", "mode": "attended"}\n', "deny"),
+                ("ask/json-mode-extra-keys-denies-armed",
+                 '{"mode": "attended", "x": 1}\n', "deny"),
+                ("ask/json-object-trailing-garbage-denies-armed",
+                 '{"mode": "attended"} trailing\n', "deny"),
+                # Prose merely MENTIONING a mode word, with no declaration line and no JSON, stays fail-open:
+                ("ask/prose-mentions-mode-allows",
+                 "Yesterday we worked unattended; today attended.\n", "allow"),
+                # A whitespace-only file carries no marker (fail open):
+                ("ask/whitespace-only-allows", "   \n\t\n", "allow"),
                 ("ask/mode-absent-allows", "", "allow")):  # absent mode line fails open
             h.mode.write_text(mode_text, encoding="utf-8")
             g_ask = h.payload("PreToolUse", "AskUserQuestion",

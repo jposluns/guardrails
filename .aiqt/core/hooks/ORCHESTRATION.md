@@ -39,18 +39,26 @@ keys except `version` are optional; an undeclared surface simply removes the pro
 `backlog-checkpoint.json`, `attestations-validated.json`, and, when their events occur,
 `escape-spoof.json` (renamed with a `.surfaced` suffix once the resume audit has raised it) and the
 append-only `forced-exit.jsonl` (every non-closed-disposition forced exit appended as its own row,
-each surfaced exactly once, tracked by a companion `forced-exit-surfaced.json`). The mode record is recognized in EITHER of two shapes: a plain `Operating-mode: <text>` line (searched
-anywhere in the file, so it may sit inside a larger markdown document), or a JSON object with a
-top-level string `mode` key (`{"mode": "attended"}` / `{"mode": "unattended"}`, surrounding whitespace and
-a leading byte-order mark tolerated). A recognized mode whose value carries the `unattended` token arms the
-ask blocker. The reader fails CLOSED to the guards-armed (`unattended`) posture, never silently disarming,
-when a marker IS present but cannot yield a recognized value: a present-but-unreadable or non-UTF-8 file, a
-present `Operating-mode:` line declaration whose value is empty or unrecognized, a malformed or partial JSON
-marker (an unterminated string included), a present JSON marker that is not an object with a string `mode`
-(a scalar such as a number, boolean, or null, an array, or an object without a string `mode`), or a marker
-whose value falls outside the `attended`/`unattended` family. It preserves the fail-open (undeclared) answer
-only when NO marker is present: an undeclared mode path, a genuinely absent file, an empty or whitespace-only
-file, or prose that carries no `Operating-mode` declaration and no JSON marker. The escape sentinel (default
+each surfaced exactly once, tracked by a companion `forced-exit-surfaced.json`). The mode record is a SHARED text file, read by ONE sound parser (never an incremental regex-plus-substring
+scan), and is recognized in EITHER of two shapes: a plain `Operating-mode: <text>` declaration line, or a JSON
+object with exactly a top-level string `mode` key (`{"mode": "attended"}` / `{"mode": "unattended"}`). A
+leading byte-order mark is tolerated in both shapes (stripped once before any check). The `Operating-mode:`
+declaration is parsed on its OWN physical line (the value is the rest of that line only and never crosses a
+newline; leading horizontal whitespace is tolerated consistently), and its value must BEGIN with `attended`
+or `unattended` (compound annotations such as `attended (ipad); continuous mode` or `unattended; continuous`
+are allowed) or it fails closed; the match is word-anchored at the start, never a substring, so `disattended`
+and `not-attended` do not match. A JSON marker must be exactly `{"mode": "<attended|unattended...>"}` (parsed
+strict-exact with a duplicate-key-rejecting hook and no extra keys) or it fails closed. A recognized mode
+whose value begins with the `unattended` token arms the ask blocker. The reader fails CLOSED to the
+guards-armed (`unattended`) posture, never silently disarming, when a marker IS present but cannot yield a
+recognized value: a present-but-unreadable or non-UTF-8 file, a present `Operating-mode:` declaration whose
+value is empty or does not begin with attended/unattended, a malformed or partial JSON marker (an
+unterminated string or trailing garbage included), a JSON marker with duplicate or extra keys, a present JSON
+marker that is not an object with a string `mode` (a scalar such as a number, boolean, or null, an array, or
+an object without a string `mode`), or a marker whose value falls outside the `attended`/`unattended` family.
+It preserves the fail-open (undeclared) answer only when NO marker is present: an undeclared mode path, a
+genuinely absent file, an empty or whitespace-only file, or prose that carries no `Operating-mode:`
+declaration line and no JSON marker (a sentence merely mentioning attended or unattended is such prose). The escape sentinel (default
 `<state_dir>/ESCAPE-ALLOW-YIELD`) is operator-owned by enforced acceptance, not convention: it is
 honoured only as a regular file (never a symlink), owned by a uid other than the assistant's
 effective uid, and not group- or other-writable. A present sentinel failing any condition is ignored
