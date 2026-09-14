@@ -453,6 +453,17 @@ def discover_machine_store(store_root_fd, store_root):
     if len(matches) > 1:
         return "multiple", None, "{} machine stores declare the devprocess token: {}".format(
             len(matches), ", ".join(sorted(matches)))
+    # OPF-IMPORTS-RELOCATE: `imports` is reserved at the store level for the fixed import-run staging root
+    # `.working/imports/` (spec 4.4/14.1). Since the relocation, a machine store so named would EQUAL that
+    # staging root (staging would write into the machine store and containment would grade the machine store
+    # as the imports interior), so the sole-match `imports` name is refused fail-closed (StoreError ->
+    # CANNOT-EVALUATE at _resolve_at), matching this function's fail-closed convention. The literal is bound
+    # to _opf_import.IMPORTS_DIRNAME by contract; it is compared literally here to avoid inverting the module
+    # layering (_opf_import imports _opf_store, never the reverse).
+    if matches[0] == "imports":   # == _opf_import.IMPORTS_DIRNAME (spec 4.4 reserved store-level name)
+        raise StoreError("the machine subdirectory name {!r} is reserved for the store-level import-run "
+                         "staging root {}/{} (spec 4.4); it cannot name the machine store".format(
+                             matches[0], WORKING_DIRNAME, matches[0]))
     return "one", matches[0], "machine store at {}/{}".format(WORKING_DIRNAME, matches[0])
 
 
@@ -1575,6 +1586,12 @@ def self_test():
         # 5: two machine stores under the default .working -> CANNOT-EVALUATE (ambiguous).
         root = build_store(machine_subdirs={"toml": manifest_text(), "toml2": manifest_text()})
         check("two-manifests-cannot-eval", resolve_store(root).status == CANNOT_EVALUATE)
+
+        # 5b (OPF-IMPORTS-RELOCATE): `imports` is reserved at the store level for the fixed import-run staging
+        # root `.working/imports/` (spec 4.4/14.1), so a machine store so named fails resolution closed ->
+        # CANNOT-EVALUATE, never resolved as the machine store. A normal store keeps its `toml` machine dir.
+        root = build_store(machine_subdirs={"imports": manifest_text()})
+        check("reserved-imports-name-cannot-eval", resolve_store(root).status == CANNOT_EVALUATE)
 
         # 6: mistyped token via a POINTER -> CANNOT-EVALUATE (residual 17).
         typo_store = base / "typo-store"

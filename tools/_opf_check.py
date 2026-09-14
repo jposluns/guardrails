@@ -1147,11 +1147,13 @@ def _archived_rotatable(rec):
 
 def _has_active_import_run(root_fd, machine_rel, rep):
     """True when an imports/<run-id> run directory (a valid U7 run-id shape) is actually present. A declared
-    import_status = "partial" is substantiated only by such a run (spec 11:940 requires an import or
+    import_status = "partial" is substantiated only by such a run (spec 11:943 requires an import or
     migration ACTUALLY running); with none present a partial declaration cannot license the triage posture
     that disables steady-state grading (codex-2). A listing failure is recorded CANNOT-EVALUATE by _list_dir
-    and returns False (fail-closed: the cant dominates, so the paths then grade as findings)."""
-    imports_rel = _rel(machine_rel, _opf_import.IMPORTS_DIRNAME)
+    and returns False (fail-closed: the cant dominates, so the paths then grade as findings). `machine_rel`
+    is retained for call-site symmetry but is now unused: imports is store-scope (`.working/imports/`), read
+    from the shared _opf_import.IMPORTS_REL constant, not the machine subdir."""
+    imports_rel = _opf_import.IMPORTS_REL
     subdirs, _files = _list_dir(root_fd, imports_rel, rep)
     if not subdirs:
         return False
@@ -1668,7 +1670,10 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
                          "(spec 14.2); the unmanaged declaration cannot be evaluated".format(_safe_display(p)))
     ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, WORKLOG_NAME, LEASE_NAME})
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
-    imports_root = _rel(mrel, _opf_import.IMPORTS_DIRNAME)
+    # imports is store-scope (`.working/imports`), a SIBLING of the machine subdir (disjoint from mrel), read
+    # from the shared _opf_import.IMPORTS_REL constant so the checker and U7 cannot drift (spec 14.1). The
+    # walk starts at `.working/`, so this root is reached and graded exactly as before, one level up.
+    imports_root = _opf_import.IMPORTS_REL
 
     def managed_leaf(p):
         # A STRICT managed-leaf test: a ledger, an enabled type index, a per-record body, or a declared
@@ -1796,14 +1801,14 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
             walk(full, depth + 1)
 
     # codex-2: a partial status is substantiated only by an import/migration ACTUALLY running (an
-    # imports/<run-id> run present; spec 11:940). Without one the partial declaration cannot license the
+    # imports/<run-id> run present; spec 11:943). Without one the partial declaration cannot license the
     # triage posture that would disable steady-state grading, so it is itself a finding and the stray paths
     # grade as findings, never a silent triage pass.
     partial_active = import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep)
     if import_status == "partial" and not partial_active:
         rep.finding("C-CONTAINMENT: the manifest declares import_status partial but no active "
                     "imports/<run-id> run is present; a partial status is substantiated only by an import "
-                    "or migration actually running (spec 11:940/14.2)")
+                    "or migration actually running (spec 11:943/14.2)")
     walk(WORKING_DIRNAME, 0)
     for p in sorted(unmanaged_files):
         if partial_active:
@@ -2824,7 +2829,7 @@ def self_test():
         # the imports subtree, or an archive bucket) must not launder strays beneath it.
         for _udecl, _stray in ((".working/toml/finding", "toml/finding/evil.bin"),
                                (".working/toml/finding/sub", "toml/finding/sub/deep.toml"),
-                               (".working/toml/imports/leftover", "toml/imports/leftover/junk.bin"),
+                               (".working/imports/leftover", "imports/leftover/junk.bin"),
                                (".working/toml/archive/2026", "toml/archive/2026/evil.bin")):
             _cc = copy.deepcopy(pr_machine)
             _cc["manifest.toml"]["unmanaged"] = {"paths": [_udecl]}
@@ -3001,8 +3006,8 @@ def self_test():
         _c5 = clean_machine()
         _c5["manifest.toml"] = base_manifest()
         _c5["manifest.toml"]["devprocess"]["import_status"] = "partial"
-        _c5["imports/imp-20260601T000000Z-0123456789abcdef/junk.txt"] = "x"
-        _c5r = run(_c5, working=dict([("stray.md", "x")]))
+        _c5r = run(_c5, working={"stray.md": "x",
+                                 "imports/imp-20260601T000000Z-0123456789abcdef/junk.txt": "x"})
         check("c5-partial-no-plan-not-substantiated",
               _c5r is not None and _c5r.status == INVALID
               and any("no active" in f and "partial" in f for f in _c5r.findings))
@@ -3087,8 +3092,7 @@ def self_test():
         pm = clean_machine()
         pm["manifest.toml"] = base_manifest()
         pm["manifest.toml"]["devprocess"]["import_status"] = "partial"
-        pm["imports/{}/plan.toml".format(RUNID)] = "schema = 1"
-        partial = run(pm, working=dict([("junk.md", "x")]))
+        partial = run(pm, working={"junk.md": "x", "imports/{}/plan.toml".format(RUNID): "schema = 1"})
         check("partial-import-triage-not-finding",
               partial.status == VALID and any("junk.md" in t for t in partial.triage))
         # codex-2: a STALE partial with no active run does not launder; the stray path grades as a finding
@@ -3163,11 +3167,44 @@ def self_test():
         # under a run dir and a leftover run each -> INVALID.
         RUNID0 = "imp-20260601T000000Z-0123456789abcdef"
         imp1 = clean_machine()
-        imp1["imports/{}/candidate/evil.bin".format(RUNID0)] = "x"
-        check("imports-stray-bytes-none-invalid", run(imp1).status == INVALID)
+        check("imports-stray-bytes-none-invalid",
+              run(imp1, working={"imports/{}/candidate/evil.bin".format(RUNID0): "x"}).status == INVALID)
         imp2 = clean_machine()
-        imp2["imports/{}/plan.toml".format(RUNID0)] = "schema = 1"
-        check("imports-leftover-run-none-invalid", run(imp2).status == INVALID)
+        check("imports-leftover-run-none-invalid",
+              run(imp2, working={"imports/{}/plan.toml".format(RUNID0): "schema = 1"}).status == INVALID)
+        # OPF-IMPORTS-RELOCATE: the fail-closed legacy-location guard fires in `opf check` too. An import run
+        # at the OLD machine-subdir path `.working/toml/imports/` (a `machine`-dict fixture) is CANNOT-EVALUATE
+        # via C-STAGING with the legacy message; the cant DOMINATES, so a legacy run can never be silently
+        # triaged, ignored, or graded as an ordinary stray. Bite: pre-relocation the old path WAS the staging
+        # location and there was no guard, so a run there validated normally.
+        LEGRUN = "imp-20260601T000000Z-0123456789abcdef"
+        _lg = clean_machine()
+        _lg["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
+        _lgr = run(_lg)
+        check("legacy-imports-check-cannot-eval", _lgr is not None and _lgr.status == CANNOT_EVALUATE)
+        check("legacy-imports-check-named",
+              _lgr is not None and any("legacy location" in m for m in _lgr.cannot_evaluate))
+        # declaring the OLD path under [unmanaged] does NOT launder it: the C-STAGING guard is independent of
+        # the unmanaged-path machinery, so the store stays CANNOT-EVALUATE.
+        _lgu = clean_machine()
+        _lgu["manifest.toml"] = base_manifest()
+        _lgu["manifest.toml"]["unmanaged"] = {"paths": [".working/toml/imports"]}
+        _lgu["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
+        _lgur = run(_lgu)
+        check("legacy-imports-unmanaged-not-launderable",
+              _lgur is not None and _lgur.status == CANNOT_EVALUATE
+              and any("legacy location" in m for m in _lgur.cannot_evaluate))
+        # an OLD-path-only run does NOT substantiate import_status = "partial": the unsubstantiated-partial
+        # finding fires (imports is read at the NEW root, which is empty) AND the legacy cant dominates.
+        _lgp = clean_machine()
+        _lgp["manifest.toml"] = base_manifest()
+        _lgp["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _lgp["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
+        _lgpr = run(_lgp)
+        check("legacy-imports-partial-not-substantiated",
+              _lgpr is not None and _lgpr.status == CANNOT_EVALUATE
+              and any("legacy location" in m for m in _lgpr.cannot_evaluate)
+              and any("no active" in f and "partial" in f for f in _lgpr.findings))
 
         # --- C-LEASE (codex-1): the single-writer lease payload (spec 5.7) --------------------------
         def lease(**over):
@@ -3555,10 +3592,15 @@ def self_test():
         # because the staging enumerator contributes it to the uniqueness union; removing that enumeration
         # makes the store validate clean.
         stf = clean_machine()
-        stf["imports/imp-20260601T000000Z-0123456789abcdef/candidate/backlog_item.index.toml"] = \
-            idx([bi(1, "open")])
-        stfr = run(stf)
+        stfr = run(stf, working={
+            "imports/imp-20260601T000000Z-0123456789abcdef/candidate/backlog_item.index.toml":
+                idx([bi(1, "open")])})
         check("c-staging-collision-not-valid", stfr is not None and stfr.status != VALID)
+        # 4i: assert the SPECIFIC duplicate-id finding the relocated staging enumerator contributes (staged
+        # BI-1 vs committed BI-1), so containment cannot independently satisfy "not VALID" and mask a broken
+        # enumerator. If the enumeration no longer reads `.working/imports`, this exact finding vanishes.
+        check("c-staging-collision-duplicate-id-named",
+              stfr is not None and any("C-ID-SPACE" in f and "BI-1" in f for f in stfr.findings))
 
         # --- M2: archive destinations confined + verified --------------------------------------------
         m2a = clean_machine()
@@ -3880,7 +3922,7 @@ def self_test():
         # is now flagged as an unregistered directory at its first level (round-14), so the ceiling is
         # exercised here via the imports interior, which the walk does descend. -----------
         deep_root = build(clean_machine(), clean_product())
-        deep = deep_root / ".working" / "toml" / "imports" / "imp-20260601T000000Z-0123456789abcdef"
+        deep = deep_root / ".working" / "imports" / "imp-20260601T000000Z-0123456789abcdef"
         for _ in range(_CONTAINMENT_MAX_DEPTH + 16):
             deep = deep / "d"
         deep.mkdir(parents=True)
@@ -4010,7 +4052,7 @@ def self_test():
         # F-1: an EMPTY unregistered directory under the imports interior is graded like any other stray
         # (round-14 graded FILES only, so an empty rogue dir laundered to VALID). Steady state -> INVALID.
         _f1a = build(clean_machine())
-        os.makedirs(str(_f1a / ".working" / "toml" / "imports" / "rogue-empty"), exist_ok=False)
+        os.makedirs(str(_f1a / ".working" / "imports" / "rogue-empty"), exist_ok=False)
         _f1ar = validate_store(resolve_store(_f1a), observations=clean_prior())
         check("imports-empty-rogue-dir-none-invalid", _f1ar.status == INVALID)
         check("imports-empty-rogue-dir-named",
@@ -4018,7 +4060,7 @@ def self_test():
                   for f in _f1ar.findings))
         # a tree of ONLY-empty dirs under imports is still graded (its deepest empty leaf) -> INVALID.
         _f1b = build(clean_machine())
-        os.makedirs(str(_f1b / ".working" / "toml" / "imports" / "a" / "b" / "c"), exist_ok=False)
+        os.makedirs(str(_f1b / ".working" / "imports" / "a" / "b" / "c"), exist_ok=False)
         _f1br = validate_store(resolve_store(_f1b), observations=clean_prior())
         check("imports-empty-tree-none-invalid", _f1br.status == INVALID)
         # under a SUBSTANTIATED partial (an active run carries plan.toml) an empty dir under imports
@@ -4026,16 +4068,15 @@ def self_test():
         _f1c = clean_machine()
         _f1c["manifest.toml"] = base_manifest()
         _f1c["manifest.toml"]["devprocess"]["import_status"] = "partial"
-        _f1c["imports/{}/plan.toml".format(RUNID16)] = "schema = 1"
-        _f1croot = build(_f1c)
-        os.makedirs(str(_f1croot / ".working" / "toml" / "imports" / "empty-under-partial"),
+        _f1croot = build(_f1c, working={"imports/{}/plan.toml".format(RUNID16): "schema = 1"})
+        os.makedirs(str(_f1croot / ".working" / "imports" / "empty-under-partial"),
                     exist_ok=False)
         _f1cr = validate_store(resolve_store(_f1croot), observations=clean_prior())
         check("imports-empty-dir-partial-triaged",
               _f1cr.status == VALID and any("empty-under-partial" in t for t in _f1cr.triage))
         # the empty imports ROOT itself (no runs) is a legitimate empty namespace and stays clean.
         _f1d = build(clean_machine())
-        os.makedirs(str(_f1d / ".working" / "toml" / "imports"), exist_ok=False)
+        os.makedirs(str(_f1d / ".working" / "imports"), exist_ok=False)
         _f1dr = validate_store(resolve_store(_f1d), observations=clean_prior())
         check("imports-empty-root-valid", _f1dr.status == VALID)
 
@@ -4049,9 +4090,8 @@ def self_test():
               and any("C-ARCHIVE-ENUM" in f and "strayfile.txt" in f for f in _f2r.findings))
         _f2p = clean_machine()
         _f2p["manifest.toml"]["devprocess"]["import_status"] = "partial"
-        _f2p["imports/{}/plan.toml".format(RUNID16)] = "schema = 1"
         _f2p["archive/2026/strayfile.txt"] = "x\n"
-        _f2pr = run(_f2p)
+        _f2pr = run(_f2p, working={"imports/{}/plan.toml".format(RUNID16): "schema = 1"})
         check("archive-bucket-stray-file-partial-triaged",
               _f2pr is not None and _f2pr.status == VALID
               and any("strayfile.txt" in t for t in _f2pr.triage))

@@ -4,7 +4,7 @@ Formal name: AIQT Development Operational Standard. Public brand: DevProcess
 (devprocess.ai). Base discovery token: `devprocess`. Status: draft (specification only;
 schemas and the reference tooling, the scaffolder `opf init`, the importer `opf import`, the
 validator `opf doctor`, the renderer `opf render`, the relocator `opf migrate`, and the
-synchronizer `opf sync`, ship in later releases). Date: 2026-09-07 (UTC).
+synchronizer `opf sync`, ship in later releases). Date: 2026-09-14 (UTC).
 
 DevProcess is a neutral, self-contained operational-files standard, owned by AIQT and
 published under CC BY-SA 4.0. A project conforms to DevProcess with this specification and
@@ -122,7 +122,7 @@ Two roots organize every path in this standard:
           archive.toml             # enumerates rotated IDs and spans (section 12)
           done.index.toml
           worklog.toml
-      imports/<import-run-id>/     # staged import plans, mappings, fragments (section 14)
+    imports/<import-run-id>/       # staged import plans, mappings, fragments (section 14; store scope)
 ```
 
 When the store has been relocated, the `.working/` tree lives at the store repository root exactly
@@ -174,7 +174,9 @@ the named fixed root for this file; any other path in a pointer MUST be absolute
 
 All machine-readable TOML lives in `.working/toml/`. The directory name `.working` at the store
 repository root is fixed by this standard. The machine subdirectory's standard name is `toml`;
-tooling MUST NOT hardcode it, and MUST locate it by discovery.
+tooling MUST NOT hardcode it, and MUST locate it by discovery. The name `imports` is reserved at
+the store level for the import-run staging tree (`.working/imports/`, section 14.1) and MUST NOT be
+used as a machine subdirectory name; discovery fails closed on a machine store so named.
 
 ### 4.5 Manifest discovery
 
@@ -1024,8 +1026,10 @@ section fixes the posture the tooling must honour.
   `incomplete`, `unmapped`, `ignored`, or `cannot_evaluate`. Everything not confidently mapped
   becomes quarantined `legacy_fragment` data with source path, digest, span, and run ID; nothing is
   dropped.
-- Import runs stage under `.working/toml/imports/<run-id>/` and promote only a fully validated
-  candidate, leaving originals in place.
+- Import runs stage under `.working/imports/<run-id>/` and promote only a fully validated
+  candidate, leaving originals in place. The staging tree is a store-level area beside the machine
+  store, not inside it: the machine store carries TOML records only, so an import run's non-TOML
+  content (the preserved source bodies) never lands under the machine subdirectory.
 
 ### 14.2 Pre-existing files at the store location
 
@@ -1043,7 +1047,7 @@ assistant driving the adoption on the adopter's behalf) three options:
   confirms no unmanaged path collides with the name of any OPF-managed file or declared view
   target.
 - **Migrate.** Import the file's content into the appropriate OPF type through the same import
-  machinery as any other source (staged under `imports/<run-id>/`, validated, promoted only on a
+  machinery as any other source (staged under `.working/imports/<run-id>/`, validated, promoted only on a
   full pass) and generate its view. Where the generated view lands at the same path as the
   original file, the replacement happens only as part of the promoted, validated, reviewed import,
   with the original's full content preserved in the import run (digest and fragments), never as a
