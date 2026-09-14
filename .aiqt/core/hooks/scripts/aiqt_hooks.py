@@ -7552,7 +7552,23 @@ _ORCH_STATES = frozenset(("open", "closed", "proposed"))
 _ORCH_LOOP_BOUND = 2          # stop-path denies per epoch before ALLOW_WITH_FINDINGS
 _ORCH_SCHEDULE_CAP = 3        # schedule-path denies on an unchanged basis before findings
 _ORCH_MAX_NAMED = 10          # actionable items named in a deny message
-_ORCH_MODE_RE = re.compile(r"^Operating-mode:\s*(.+?)\s*$", re.MULTILINE)
+# The `Operating-mode:` declaration is parsed per PHYSICAL line (the reader splits on newlines first, so the
+# value can never cross a line boundary): optional leading horizontal whitespace, then the key, then the value
+# is the REST OF THAT LINE ONLY. A present declaration whose value does not classify (empty or unrecognized)
+# fails closed to guards-armed rather than falling through to the no-marker None.
+_ORCH_MODE_DECL_LINE_RE = re.compile(r"^[ \t]*Operating-mode:[ \t]*(.*)$")
+# The mode grammar (used for both the declaration value and the JSON `mode` string): a PREFIX/word-anchored
+# match on the trimmed lowercased value, never a substring, so `disattended` (begins `dis`) and `not-attended`
+# (begins `not`) do NOT match and fail closed to armed, while `unattended; continuous` and the real compound
+# `attended (ipad); continuous mode` begin with the mode word and classify. Order: unattended before attended.
+_ORCH_MODE_UNATTENDED_RE = re.compile(r"unattended(\b|$)")
+_ORCH_MODE_ATTENDED_RE = re.compile(r"attended(\b|$)")
+# The guards-armed posture a present-but-unusable mode marker fails closed to: it carries the `unattended`
+# token, so the ask blocker arms on it and _orch_scope_live reads it as a live (non-None) mode. A recognized
+# mode value carries the `attended`/`unattended` family token (so both `unattended` and `attended` spellings,
+# and their compound forms, are recognized); a present value outside that family is unrecognized and fails
+# closed to this posture rather than silently disarming.
+_ORCH_MODE_ARMED = "unattended"
 _ORCH_ESCAPE_NAME = "ESCAPE-ALLOW-YIELD"
 _ORCH_QUIET_CLAIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*min(?:ute)?s?\b")  # minutes number; the "quiet" gate is applied separately
 # A human-decision blocker ref must look like a decision id (uppercase-prefixed, for example XY-12),
@@ -7760,20 +7776,101 @@ def _orch_save_turn_state(root, state):
         return False
 
 
+def _orch_mode_classify(value):
+    """Classify a raw operating-mode value string by the mode grammar (used for both the declaration value and
+    the JSON `mode` string). Trims and lowercases, then matches word-anchored at the START, never as a
+    substring: returns _ORCH_MODE_ARMED (the `unattended` token) when the value BEGINS with `unattended`,
+    `"attended"` when it BEGINS with `attended`, and None when it does neither (empty or unrecognized, which
+    the caller maps to _ORCH_MODE_ARMED). So `unattended; continuous` and the real compound `attended (ipad);
+    continuous mode` classify, while `disattended`, `not-attended`, and `bananas` begin with neither mode word
+    and return None."""
+    v = value.strip().lower()
+    if _ORCH_MODE_UNATTENDED_RE.match(v):
+        return _ORCH_MODE_ARMED
+    if _ORCH_MODE_ATTENDED_RE.match(v):
+        return "attended"
+    return None
+
+
+def _orch_reject_duplicate_keys(pairs):
+    """A json object_pairs_hook that rejects an object carrying a duplicate key by raising ValueError, so a
+    marker such as {"mode": "unattended", "mode": "attended"} cannot silently collapse to json's last-wins
+    value and disarm the guard; the caller treats the raised ValueError as a malformed marker (fail closed)."""
+    seen = {}
+    for key, val in pairs:
+        if key in seen:
+            raise ValueError("duplicate key: {}".format(key))
+        seen[key] = val
+    return seen
+
+
 def _orch_mode(reg, root):
-    """The lowercased Operating-mode value from the declared mode record, or None (undeclared,
-    unreadable, or no mode line): the fail-open answer for the ask blocker."""
+    """The operating-mode token from the declared mode record, parsed by ONE sound reader (never an
+    incremental regex-plus-substring scan). The mode file is a SHARED text file: either a state-record file
+    carrying an `Operating-mode:` line amid prose, or a peer JSON mode file. Contract:
+      - None when NO marker is present, preserving the fail-open answer for the ask blocker (the file is
+        shared, so prose must NOT arm): an undeclared mode path, a genuinely absent file (FileNotFoundError),
+        an empty or whitespace-only file, or prose with no `Operating-mode:` declaration line and no JSON
+        marker (including a sentence that merely mentions attended or unattended);
+      - _ORCH_MODE_ARMED (the guards-armed `unattended` posture) when a marker IS present but cannot yield a
+        recognized value, so the guard fails CLOSED rather than silently disarming: a present-but-unreadable
+        file (an OSError other than FileNotFoundError) or one whose bytes are not valid UTF-8 (strict decode);
+        a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
+        unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
+        `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
+        keys), or that parses to anything other than a dict with EXACTLY the single key `mode` whose value is a
+        string beginning with attended or unattended (a scalar, an array, an object with extra keys, or an
+        object whose `mode` is absent, non-string, or an unrecognized value all fail closed here);
+      - "attended" when a recognized attended marker is present: a non-None value that does NOT contain
+        `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard allows the ask.
+    Soundness rules the reader enforces (each closing a fail-open leg an incremental scan leaked):
+      1. A leading byte-order mark is stripped ONCE at the top, so every later check sees BOM-free text and a
+         BOM-prefixed declaration OR JSON marker is classified rather than missed.
+      2. The declaration is parsed per PHYSICAL line (split on \\r\\n, \\r, or \\n first), so the value is the
+         rest of THAT line only and can never cross a newline to capture the next line; leading horizontal
+         whitespace is tolerated consistently, so an indented declaration does not over-arm.
+      3. The value and the JSON `mode` string are classified by the word-anchored mode grammar
+         (_orch_mode_classify), a prefix match at the start, never a substring, so `disattended` and
+         `not-attended` do NOT match `attended`.
+      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and an exactly-{"mode": str} shape,
+         so duplicate keys, extra keys, and non-object or non-string-mode values all fail closed."""
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
         return None
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    except OSError:
-        return None
-    m = _ORCH_MODE_RE.search(text)
-    return m.group(1).lower() if m else None
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()               # strict decode: invalid UTF-8 raises UnicodeDecodeError
+    except FileNotFoundError:
+        return None                       # no marker file present: unchanged no-marker default (fail open)
+    except (OSError, UnicodeDecodeError):
+        return _ORCH_MODE_ARMED           # present but unreadable or non-UTF-8: fail closed to guards-armed
+    text = text.lstrip("\ufeff")          # strip a leading byte-order mark ONCE, before every subsequent check
+    # DECLARATION (line form): parse each PHYSICAL line so the value never crosses a newline. The FIRST line
+    # that matches is the declaration; a present declaration never falls through to the no-marker None (an
+    # empty or unrecognized value fails CLOSED to guards-armed).
+    for line in re.split(r"\r\n|\r|\n", text):
+        m = _ORCH_MODE_DECL_LINE_RE.match(line)
+        if m:
+            classified = _orch_mode_classify(m.group(1))
+            return classified if classified is not None else _ORCH_MODE_ARMED
+    # No declaration line: classify the whole BOM-stripped content as a strict-exact JSON marker.
+    stripped = text.strip()
+    if not stripped:
+        return None                       # empty/whitespace-only: no marker present, unchanged (fail open)
+    try:
+        obj = json.loads(stripped, object_pairs_hook=_orch_reject_duplicate_keys)
+    except ValueError:
+        # Unparseable (malformed, trailing garbage, or duplicate keys): a JSON-SHAPED marker attempt (the
+        # content begins with `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no
+        # declaration and no JSON, the no-marker None (fail open, because the file is shared).
+        return _ORCH_MODE_ARMED if stripped[:1] in ("{", "[", '"') else None
+    if isinstance(obj, dict) and set(obj) == {"mode"} and isinstance(obj["mode"], str):
+        classified = _orch_mode_classify(obj["mode"])
+        return classified if classified is not None else _ORCH_MODE_ARMED
+    # Any other JSON (a scalar, an array, an object with extra keys, or a dict without a string `mode`) is a
+    # present-but-unrecognized marker and fails CLOSED to guards-armed.
+    return _ORCH_MODE_ARMED
 
 
 def _orch_scope_live(reg, root, session_id=None):
@@ -8723,8 +8820,21 @@ def orch_yield_tool(data):
 
 def orch_ask_guard(data):
     """cntdef/recfst bounded by humovs, PreToolUse AskUserQuestion: deny a blocking question in
-    unattended mode with the record-and-continue instruction; fail OPEN on an absent or unreadable
-    mode (this guards one mistake shape, not a security boundary). Its regression vectors are held by the behaviour self-test."""
+    unattended mode with the record-and-continue instruction. The operating mode is read by _orch_mode, one
+    sound parser over the shared mode file: a leading byte-order mark is tolerated; the `Operating-mode:`
+    declaration is parsed on its own PHYSICAL line (its value must begin with attended or unattended, compound
+    annotations allowed, never a substring, or it fails closed); a JSON marker must be exactly
+    {"mode": "<attended|unattended...>"} with no extra or duplicate keys or it fails closed. A mode marker that
+    is present but unreadable, non-UTF-8, a present-but-unrecognized `Operating-mode:` declaration (empty, or not
+    beginning with attended/unattended), a present JSON value that parses but is not exactly a single string
+    "mode" key (a scalar, an array, an object with extra keys, or an object without a string "mode"), or, with no
+    declaration line present, a JSON-shaped marker (content beginning with `{`, `[`, or `"`) that is malformed
+    (an unterminated string, trailing garbage, or duplicate keys) fails CLOSED to the guards-armed (unattended)
+    posture, so the blocker arms rather than silently disarming; only a genuinely absent file, an empty/whitespace
+    file, or content with no declaration line that does not parse as JSON and whose first non-whitespace character
+    is not `{`, `[`, or `"` (ordinary prose, for example `42 items done` or `true trailing`, so prose beginning
+    with a number or word does not arm) is the fail-OPEN no-marker default (this guards one mistake shape, not a
+    security boundary). Its regression vectors are held by the behaviour self-test."""
     if data.get("tool_name") != "AskUserQuestion":
         return _allow()
     root = _orch_root(data)
@@ -8736,7 +8846,8 @@ def orch_ask_guard(data):
     mode = _orch_mode(reg, root)
     if mode is None or "unattended" not in mode:
         if mode is None:
-            _orch_guard_event(root, "ask-guard", "fail-open", "mode record absent or unreadable")
+            _orch_guard_event(root, "ask-guard", "fail-open",
+                              "mode record absent, empty, or prose with no declaration or JSON marker")
         return _allow()
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []

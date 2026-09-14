@@ -578,19 +578,120 @@ def main(report_path=None):
                  "Operating-mode: daytime-unattended\n", "deny"),
                 ("ask/mode-attended-autonomous-allows",
                  "Operating-mode: attended-autonomous\n", "allow"),
-                ("ask/mode-fully-attended-allows",
-                 "Operating-mode: fully-attended\n", "allow"),
-                ("ask/mode-absent-allows", "", "allow")):  # absent mode line fails open
+                # A value whose mode word is NOT a leading prefix (`fully-attended` begins `fully`) is
+                # unrecognized under the word-anchored grammar and fails CLOSED to armed, never a substring allow:
+                ("ask/line-mode-fully-attended-suffix-denies-armed",
+                 "Operating-mode: fully-attended\n", "deny"),
+                # JSON marker shape (the peer secureconfig writer): recognized in both directions.
+                ("ask/json-mode-attended-allows",
+                 '{"mode": "attended"}\n', "allow"),
+                ("ask/json-mode-unattended-denies",
+                 '{"mode": "unattended"}\n', "deny"),
+                ("ask/json-mode-whitespace-padded-unattended-denies",
+                 '  \n{"mode": "unattended"}\n  ', "deny"),
+                # A leading byte-order mark before the JSON object is stripped, so the object is still read:
+                ("ask/json-mode-bom-unattended-denies",
+                 '\ufeff{"mode": "unattended"}\n', "deny"),   # BOM + unattended object -> armed/deny
+                ("ask/json-mode-bom-attended-allows",
+                 '\ufeff{"mode": "attended"}\n', "allow"),    # BOM + attended object -> attended/allow
+                # FAIL CLOSED to guards-armed on a present-but-unusable marker (never a silent disarm):
+                ("ask/json-mode-malformed-denies-armed",
+                 '{"mode": "unattended"\n', "deny"),           # partial/malformed JSON
+                ("ask/json-mode-no-string-mode-denies-armed",
+                 '{"mode": 1}\n', "deny"),                     # JSON object, mode not a string
+                ("ask/json-mode-empty-object-denies-armed",
+                 '{}\n', "deny"),                              # JSON object without a mode key
+                ("ask/json-mode-array-denies-armed",
+                 '[{"mode": "unattended"}]\n', "deny"),        # JSON array (not an object) -> armed
+                ("ask/json-mode-unrecognized-value-denies-armed",
+                 '{"mode": "bananas"}\n', "deny"),            # JSON mode outside the attended family
+                ("ask/line-mode-unrecognized-value-denies-armed",
+                 "Operating-mode: bananas\n", "deny"),        # line value outside the attended family
+                # A JSON SCALAR is a present marker attempt, not an object with a string mode -> armed/deny.
+                ("ask/json-scalar-bool-denies-armed",
+                 "true\n", "deny"),                           # JSON boolean scalar
+                ("ask/json-scalar-number-denies-armed",
+                 "42\n", "deny"),                             # JSON number scalar
+                ("ask/json-scalar-null-denies-armed",
+                 "null\n", "deny"),                           # JSON null scalar
+                ("ask/json-scalar-string-denies-armed",
+                 '"unattended"\n', "deny"),                   # terminated JSON string scalar (not an object)
+                # An UNTERMINATED JSON string is a malformed string-shaped marker attempt -> armed/deny.
+                ("ask/json-unterminated-string-denies-armed",
+                 '"unattended\n', "deny"),
+                # A present `Operating-mode:` declaration with an EMPTY value fails CLOSED (not the no-marker None):
+                ("ask/empty-value-declaration-denies-armed",
+                 "Operating-mode:\n", "deny"),
+                # Ordinary prose with NO declaration and NO JSON stays the fail-open no-marker default (no over-fire):
+                ("ask/prose-no-declaration-allows",
+                 "This is a shared session-state note with no mode declaration.\n", "allow"),
+                # A shared text file with real prose PLUS a valid Operating-mode line: the line is still found:
+                ("ask/prose-with-valid-line-denies",
+                 "Session state notes.\nSome context here.\nOperating-mode: unattended\nMore notes.\n", "deny"),
+                # ---------- round-4 sound-parser matrix (single reader, no regex+substring leaks) ----------
+                # Compound annotations begin with the mode word, so they classify (the real ipad compound):
+                ("ask/line-mode-attended-compound-allows",
+                 "Operating-mode: attended (iPad); continuous mode\n", "allow"),
+                ("ask/line-mode-unattended-compound-denies",
+                 "Operating-mode: unattended; continuous\n", "deny"),
+                # SUBSTRING must NOT match: a value whose `attended` is not a leading prefix fails CLOSED to armed:
+                ("ask/line-mode-disattended-denies-armed",
+                 "Operating-mode: disattended\n", "deny"),
+                ("ask/line-mode-not-attended-denies-armed",
+                 "Operating-mode: not-attended\n", "deny"),
+                ("ask/json-mode-disattended-denies-armed",
+                 '{"mode": "disattended"}\n', "deny"),
+                ("ask/json-mode-not-attended-denies-armed",
+                 '{"mode": "not-attended"}\n', "deny"),
+                # The declaration value is the rest of ITS physical line only: an empty value never crosses the
+                # newline to capture the NEXT line (the LF and the CRLF fail-open legs the old `\s*` regex leaked):
+                ("ask/line-mode-empty-value-next-line-not-captured-denies-armed",
+                 "Operating-mode:\nattended\n", "deny"),
+                ("ask/line-mode-crlf-empty-value-not-captured-denies-armed",
+                 "Operating-mode:\r\nattended\n", "deny"),
+                # A BOM-prefixed declaration line is stripped once and classified, never missed:
+                ("ask/line-mode-bom-unattended-denies",
+                 "\ufeffOperating-mode: unattended\n", "deny"),
+                # An indented declaration is handled consistently (no over-arm): indented attended -> allow:
+                ("ask/line-mode-indented-attended-allows",
+                 "  Operating-mode: attended\n", "allow"),
+                # JSON strict-exact: duplicate keys, extra keys, and trailing garbage after the object fail closed:
+                ("ask/json-mode-duplicate-keys-denies-armed",
+                 '{"mode": "unattended", "mode": "attended"}\n', "deny"),
+                ("ask/json-mode-extra-keys-denies-armed",
+                 '{"mode": "attended", "x": 1}\n', "deny"),
+                ("ask/json-object-trailing-garbage-denies-armed",
+                 '{"mode": "attended"} trailing\n', "deny"),
+                # Prose merely MENTIONING a mode word, with no declaration line and no JSON, stays fail-open:
+                ("ask/prose-mentions-mode-allows",
+                 "Yesterday we worked unattended; today attended.\n", "allow"),
+                # A whitespace-only file carries no marker (fail open):
+                ("ask/whitespace-only-allows", "   \n\t\n", "allow"),
+                ("ask/empty-mode-file-allows", "", "allow")):  # empty mode file (present, no marker) fails open
             h.mode.write_text(mode_text, encoding="utf-8")
             g_ask = h.payload("PreToolUse", "AskUserQuestion",
                               {"questions": [{"question": "pick one"}]},
                               extra={"tool_use_id": "tu-1"})
             check(check_id, _verdict(ask()), want)
-        # unreadable mode record fails open
+        # absent mode record fails open (no marker): the fixture DELETES the file, so this tests ABSENCE
         h.mode.unlink()
         g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
                           extra={"tool_use_id": "tu-2"})
-        check("ask/unreadable-mode-fails-open", _verdict(ask()), "allow")
+        check("ask/absent-mode-fails-open", _verdict(ask()), "allow")
+        # a PRESENT but unreadable mode record fails CLOSED to guards-armed (distinct from the absent file
+        # above). A directory at the mode path raises an OSError that is NOT FileNotFoundError when opened,
+        # a hermetic proxy for an unreadable present file that holds on any uid, including root.
+        h.mode.mkdir()
+        g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
+                          extra={"tool_use_id": "tu-2b"})
+        check("ask/present-unreadable-mode-denies-armed", _verdict(ask()), "deny")
+        h.mode.rmdir()
+        # a PRESENT mode record whose bytes are not valid UTF-8 fails CLOSED to guards-armed (strict decode,
+        # not errors="replace"): a raw 0xFF start byte cannot decode, so the reader arms rather than disarms.
+        h.mode.write_bytes(b'\xff\xfe{"mode": "attended"}')
+        g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
+                          extra={"tool_use_id": "tu-2c"})
+        check("ask/invalid-utf8-mode-denies-armed", _verdict(ask()), "deny")
         # idempotent pending append, redacted (digest + counts, never the question text)
         h.mode.write_text("Operating-mode: daytime-unattended\n", encoding="utf-8")
         g_ask = h.payload("PreToolUse", "AskUserQuestion",
