@@ -10,9 +10,11 @@ NOT-YET-IMPLEMENTED and fail closed (exit 2) until their unit lands, so a stub c
 passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exactly one of
 `--check | --write` (a bare `render` is a usage error, exit 2); `--check` is IMPLEMENTED (read-only drift
 check, forwarding to the U4 engine) and `--write` is recognized but fail-closed (exit 2) pending VC-4, the
-composition of the EXISTING U6 `validate_store` store-integrity gate INTENDED FOR the deferred `opf doctor`
-verb. `doctor` itself is NOT yet wired: it is a recognized KNOWN_VERB that reports NOT-YET-IMPLEMENTED and
-fails closed (exit 2), so validate_store is the engine doctor WILL compose, not one it already uses.
+composition of the EXISTING U6 `validate_store` store-integrity gate. `doctor` HAS landed (PR-B): `opf doctor
+[--root DIR]` RESOLVES the store, gathers the inert git-derived observations (_opf_observe.gather: tracked,
+actual_remote, prior), and runs the U6 `validate_store` store-integrity engine over them, returning that
+engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0). Doctor is read-only; its
+observation gather is the caller-side git seam validate_store itself never touches.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -51,7 +53,7 @@ def _bootstrap():
     invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
     that could not be brought in."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
-    global _opf_emit, _opf_views, _opf_fuzz, _opf_import
+    global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_observe
     try:
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
         import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
@@ -62,6 +64,7 @@ def _bootstrap():
         import _opf_views       # U4: deterministic view generators + the closed transform vocabulary
         import _opf_fuzz        # adversarial input-hardening proof (membership/type-guard class closure)
         import _opf_import      # U7: import staging (module + self-test; the live import verb stays unwired)
+        import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
         return EXIT_MALFORMED
@@ -513,17 +516,103 @@ def _cmd_render(rest):
         return EXIT_MALFORMED
 
 
+def _doctor_report(result):
+    """Print a CONCISE doctor report: the ordered per-check verdict map, then the findings and
+    cannot-evaluates, then a one-line residual count. NO diff-style dump (no-console-diff-dumps): this is a
+    structured verdict list, not a wall of before/after lines."""
+    print("opf doctor: store integrity: {}".format(result.status))
+    for cid, verdict in result.checks.items():
+        print("  {}: {}".format(cid, verdict))
+    for f in result.findings:
+        print("  FINDING: {}".format(f))
+    for c in result.cannot_evaluate:
+        print("  CANNOT-EVALUATE: {}".format(c))
+    if result.triage:
+        print("  partial-import triage entries: {}".format(len(result.triage)))
+    print("  residuals (disclosed by-design, not gradeable): {}".format(len(result.residuals)))
+
+
+def _cmd_doctor(rest):
+    """`opf doctor [--root DIR]`: the store-integrity verb.
+
+    Doctor RESOLVES the store at --root (default: the cwd product repository root), gathers the inert
+    git-derived observations (_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 whole-store
+    integrity engine (_opf_check.validate_store) over them, returning that engine's own 0/1/2 contract via
+    _opf_check.exit_code (0 VALID, 1 INVALID, 2 CANNOT-EVALUATE). A NOT-ADOPTED root reports NOT APPLICABLE
+    and exits 0 (the pack's own `--root .` case, mirroring render); any other non-RESOLVED status is a located
+    cannot-evaluate (exit 2). Doctor is READ-ONLY: it makes no store change (SECI-preview-has-no-side-effects);
+    the observation gather is git reads only. The parser is the house fail-closed idiom (unknown token, an
+    empty or option-looking or duplicate --root value -> exit 2), matching _cmd_render's --root loop. Every
+    residual escape from the resolver, the git gather, or the engine fails closed to exit 2 (never a false
+    verdict), the same class-width backstop the render dispatch carries."""
+    root = None
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "--root":
+            if i + 1 >= len(rest):
+                print("opf doctor: --root requires a directory argument", file=sys.stderr)
+                return EXIT_MALFORMED
+            if root is not None:
+                print("opf doctor: --root given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            val = rest[i + 1]
+            if val == "" or val.startswith("-"):
+                print("opf doctor: --root requires a non-empty directory argument, not {!r}".format(val),
+                      file=sys.stderr)
+                return EXIT_MALFORMED
+            root = val
+            i += 2
+        else:
+            print("opf doctor: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            return EXIT_MALFORMED
+    root = root if root is not None else "."
+    try:
+        res = _opf_store.resolve_store(Path(os.path.abspath(root)))
+    except Exception as exc:  # noqa: BLE001  fail-closed: a resolver escape is cannot-evaluate, never a verdict
+        print("opf doctor: cannot evaluate: unexpected error resolving the store at {!r} ({!r}); failing "
+              "closed to exit 2".format(root, exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    if res.status == _opf_store.NOT_ADOPTED:
+        print("opf doctor: NOT APPLICABLE ({})".format(res.detail))
+        return EXIT_OK
+    if res.status != _opf_store.RESOLVED:
+        print("opf doctor: cannot evaluate: {}".format(res.detail), file=sys.stderr)
+        return EXIT_MALFORMED
+    try:
+        obs, notes = _opf_observe.gather(res)
+    except Exception as exc:  # noqa: BLE001  a gather escape must not become a false verdict; fail closed
+        print("opf doctor: cannot evaluate: unexpected error gathering git observations ({!r}); failing "
+              "closed to exit 2".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    for note in notes:
+        # Surface each honest observation gap so an adopter's CI does not misread it as store corruption.
+        print("opf doctor: note: {}".format(note))
+    try:
+        result = _opf_check.validate_store(res, observations=obs)
+    except Exception as exc:  # noqa: BLE001  the engine contracts never to raise; a residual escape fails closed
+        print("opf doctor: cannot evaluate: unexpected error validating the store ({!r}); failing closed to "
+              "exit 2".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    _doctor_report(result)
+    return _opf_check.exit_code(result)
+
+
 def _cli_self_test():
-    """Guard the opf.py dispatcher's verb ROUTING (PR-A: the `render` verb). Judged on the returned exit
-    code ONLY (never by grepping output, per the isolate-verifiers rule); each case drives main() with an
-    explicit argv, its stdout/stderr redirected so this leg's own output stays clean. Cases: an unknown
-    verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`, `render
-    --write`, both flags together, an unrecognized render flag, a `--root` with no value, and an empty
+    """Guard the opf.py dispatcher's verb ROUTING (PR-A: the `render` verb; PR-B: the `doctor` verb). Judged
+    on the returned exit code ONLY (never by grepping output, per the isolate-verifiers rule); each case
+    drives main() with an explicit argv, its stdout/stderr redirected so this leg's own output stays clean.
+    Cases: an unknown verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`,
+    `render --write`, both flags together, an unrecognized render flag, a `--root` with no value, and an empty
     `--root` are usage errors (exit 2); and `render --check` FORWARDS to the U4 engine -- a NOT-ADOPTED root
     returns 0 (the wiring discriminator: reverting the render wiring routes it to the fail-closed KNOWN_VERBS
-    branch and returns 2, failing this case) and a garbage store returns 2. The clean/drift 0/1
-    discrimination over a populated store rides check_opf_drift.py --self-test, which drives the same wiring
-    end to end. Returns 0 clean, 1 on a failure, 2 on a harness error.
+    branch and returns 2, failing this case) and a garbage store returns 2. For `doctor`: bad-flag / usage
+    cases (a `--root` with no value, an unknown flag) fail closed (exit 2); a NOT-ADOPTED root returns 0 (the
+    doctor wiring discriminator: reverting the doctor route routes `doctor` to the fail-closed KNOWN_VERBS
+    branch and returns 2, failing this case); a garbage store returns 2. The render clean/drift 0/1
+    discrimination rides check_opf_drift.py --self-test, and the doctor clean(0)/mutation(1) discrimination
+    over a validate_store-VALID COMMITTED store rides check_opf_doctor.py --self-test, each driving the same
+    wiring end to end. Returns 0 clean, 1 on a failure, 2 on a harness error.
 
     HARNESS fail-close (FIX 2): the fixture SETUP (tempfile.mkdtemp) and the fixture I/O (directory creation
     and writes) are the harness surface; an OSError from any of them is caught and returned as a located
@@ -553,7 +642,7 @@ def _cli_self_test():
         expect([], EXIT_MALFORMED)
         expect(["frobnicate"], EXIT_MALFORMED)
         for verb in KNOWN_VERBS:
-            if verb != "render":
+            if verb not in ("render", "doctor"):
                 expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
         expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
         expect(["render", "--write"], EXIT_MALFORMED)   # the write half is not yet wired, fail-closed
@@ -561,6 +650,11 @@ def _cli_self_test():
         expect(["render", "--bogus"], EXIT_MALFORMED)   # unknown render flag
         expect(["render", "--root"], EXIT_MALFORMED)    # --root needs a value
         expect(["render", "--check", "--root", ""], EXIT_MALFORMED)   # empty root refused
+
+        # doctor verb ROUTING (PR-B), judged on exit code only. Bad-flag / usage cases need no store on disk.
+        expect(["doctor", "--root"], EXIT_MALFORMED)    # --root needs a value
+        expect(["doctor", "--check", "--root", ""], EXIT_MALFORMED)   # unknown doctor flag (and empty root)
+        expect(["doctor", "--bogus"], EXIT_MALFORMED)   # unknown doctor flag
 
         def _fixture_leg():
             """Build the on-disk fixtures and drive render --check over them. Assertion outcomes are recorded
@@ -592,6 +686,14 @@ def _cli_self_test():
                     return EXIT_MALFORMED
                 expect(["render", "--check", "--root", not_adopted], EXIT_OK)
                 expect(["render", "--check", "--root", broken], EXIT_MALFORMED)
+                # doctor over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and returns
+                # 0 -- the wiring discriminator (reverting the doctor route sends `doctor` to the fail-closed
+                # KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store fails closed
+                # (exit 2). The clean(0)/mutation(1) discrimination over a validate_store-VALID COMMITTED store
+                # rides check_opf_doctor.py --self-test end to end (a committed HEAD is needed for the prior
+                # observation), mirroring how the render clean/drift 0/1 rides check_opf_drift.py --self-test.
+                expect(["doctor", "--root", not_adopted], EXIT_OK)
+                expect(["doctor", "--root", broken], EXIT_MALFORMED)
             finally:
                 shutil.rmtree(base, ignore_errors=True)
             return None
@@ -626,9 +728,10 @@ def _cli_self_test():
             for f in failures:
                 print("opf cli self-test: FAIL: {}".format(f), file=sys.stderr)
             return EXIT_FINDING
-        print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render usage errors fail "
-              "closed; render --check forwards to the U4 engine; fixture-setup and fixture-I/O OSError fail "
-              "closed to exit 2)")
+        print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render/doctor usage errors "
+              "fail closed; render --check forwards to the U4 engine; doctor resolves + validates a store, "
+              "NOT-ADOPTED -> 0 and a garbage store -> 2; fixture-setup and fixture-I/O OSError fail closed "
+              "to exit 2)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("opf cli self-test: harness error: unexpected error ({!r}); failing closed to exit 2".format(
@@ -651,6 +754,7 @@ def _self_tests():
     ("opf-emit", _opf_emit.self_test),
     ("opf-views", _opf_views.self_test),
     ("opf-import", _opf_import.self_test),
+    ("opf-observe", _opf_observe.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-watchdog-hostile-ambient", _watchdog_hostile_ambient_self_test),
@@ -740,6 +844,8 @@ def main(argv=None):
     rest = args[1:]
     if verb == "render":
         return _cmd_render(rest)
+    if verb == "doctor":
+        return _cmd_doctor(rest)
     if verb in KNOWN_VERBS:
         # A recognized verb whose unit has not landed: fail closed (exit 2), never a silent success, so
         # a stub is never mistaken for a completed operation.

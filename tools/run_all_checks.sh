@@ -76,6 +76,8 @@ run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
 run_gate "opf-tooling-selftest" python3 -I -B tools/opf.py --self-test
 run_gate "opf-drift-selftest" python3 -I -B tools/check_opf_drift.py --self-test
 run_gate "opf-drift" python3 -I -B tools/check_opf_drift.py
+run_gate "opf-doctor-selftest" python3 -I -B tools/check_opf_doctor.py --self-test
+run_gate "opf-doctor" python3 -I -B tools/check_opf_doctor.py
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
