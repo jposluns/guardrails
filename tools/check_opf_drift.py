@@ -294,6 +294,21 @@ def _self_test():
             (badmarker_anchor / ".git").write_text("not a git marker\n", encoding="utf-8")
             with contextlib.redirect_stderr(io.StringIO()):
                 expect("invalid-git-marker", _run_gate(badmarker_anchor), EXIT_ERROR)
+
+            # git emits a RELATIVE toplevel (e.g. `.`) -> _git_toplevel returns None -> exit 2
+            # (cannot-evaluate), never a false NOT-APPLICABLE 0 (B1 regression). `git rev-parse
+            # --show-toplevel` emits an ABSOLUTE path in the normal case; a relative value is malformed and
+            # must fail closed. Without the isabs guard, Path(".").resolve() resolves against the CWD and can
+            # pass the caller's containment check, yielding a false 0. Stub subprocess.run to emit a relative
+            # toplevel and assert the probe returns None; restored in a finally so no later leg is affected.
+            real_run_rel = subprocess.run
+            def _relative_toplevel(*_a, **_k):
+                return subprocess.CompletedProcess(args=[], returncode=EXIT_OK, stdout=".\n")
+            subprocess.run = _relative_toplevel
+            try:
+                expect("relative-toplevel", _git_toplevel(norepo_anchor), None)
+            finally:
+                subprocess.run = real_run_rel
         finally:
             shutil.rmtree(base, ignore_errors=True)
         return failures
@@ -322,36 +337,68 @@ def _self_test():
         print("check_opf_drift self-test: PASS (opf render --check returns 0 clean / 1 drift / 2 broken / "
               "0 NOT APPLICABLE end to end; drift recognized by the 'drift:' marker, not the bare exit code; "
               "child exit 1 without the drift marker -> 2 (cannot-evaluate); no-repo-root -> 2; "
-              "invalid-git-marker -> 2; status contract 1=assertion 2=harness)")
+              "invalid-git-marker -> 2; relative-toplevel probe -> None (exit 2); "
+              "status contract 1=assertion 2=harness)")
     return rc
+
+
+# A per-git-call runtime bound (SECA resource-bounds): a hung or pathological git probe fails SAFE to a
+# cannot-evaluate (exit 2) rather than blocking the gate indefinitely. Mirrors _opf_observe._GIT_TIMEOUT_S.
+_GIT_TIMEOUT_S = 30
+
+
+def _scrubbed_env():
+    """Build the minimal, allowlist environment every git call runs under. Every ambient `GIT_`-prefixed
+    variable is DROPPED (an inherited GIT_DIR/GIT_WORK_TREE/GIT_CONFIG/GIT_OBJECT_DIRECTORY could otherwise
+    rebind the call to a DIFFERENT repository, inject configuration, or redirect object lookup); only PATH
+    and HOME are carried over. The few variables git genuinely needs to run non-interactively and free of
+    ambient configuration are then RE-APPLIED: global and system config neutralized to os.devnull, the
+    system config search disabled, the terminal prompt disabled, optional locks turned off (read-only), and
+    the locale pinned so output is deterministic."""
+    env = {}
+    for name in ("PATH", "HOME"):
+        val = os.environ.get(name)
+        if val is not None:
+            env[name] = val
+    # Re-apply only what git needs, config injection neutralized (allowlist stance).
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["LC_ALL"] = "C"
+    return env
 
 
 def _git_toplevel(anchor):
     """Confirm the repository IDENTITY of `anchor` (the gate's own tools dir) through a local git probe bound
     to that location, returning the resolved repository toplevel Path, or None if it cannot be established.
-    The probe is `git -C <anchor> rev-parse --show-toplevel` with the ambient Git environment SCRUBBED (every
-    GIT_-prefixed variable removed, so an inherited GIT_DIR/GIT_WORK_TREE/etc. cannot bind the probe to a
-    DIFFERENT repository) and the git executable resolved to an ABSOLUTE path. A missing git, a launch
-    failure, a nonzero return (an invalid/garbage `.git` gitfile yields git's own exit 128), or empty/
-    malformed output all return None -- the caller maps that to a cannot-evaluate (exit 2), never a false
-    pass."""
+    The probe is `git --no-replace-objects -C <anchor> rev-parse --show-toplevel`, hardened to the same
+    standard as the sibling _opf_observe git boundary: `--no-replace-objects` so a replacement ref cannot
+    substitute the bytes a read returns, an ALLOWLIST-scrubbed environment (every GIT_-prefixed variable
+    dropped, so an inherited GIT_DIR/GIT_WORK_TREE/etc. cannot bind the probe to a DIFFERENT repository; only
+    PATH/HOME carried over, config-neutralizing vars re-applied), the git executable resolved to an ABSOLUTE
+    path, and a bounded timeout. A missing git, a launch failure, a timeout, a nonzero return (an invalid/
+    garbage `.git` gitfile yields git's own exit 128), or output that is empty or not an absolute path (git
+    emits an absolute toplevel, so a relative value is malformed) all return None -- the caller maps that to a
+    cannot-evaluate (exit 2), never a false pass."""
     import shutil
     git = shutil.which("git")
     if git is None:
         return None
-    # Allowlist-scrub the ambient Git environment: an inherited GIT_DIR/GIT_WORK_TREE/GIT_* could otherwise
-    # rebind rev-parse to a repository other than the one the gate physically lives in.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
         proc = subprocess.run(
-            [git, "-C", str(anchor), "rev-parse", "--show-toplevel"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, text=True)
-    except OSError:
+            [git, "--no-replace-objects", "-C", str(anchor), "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=_scrubbed_env(),
+            text=True, timeout=_GIT_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
     out = (proc.stdout or "").strip()
     if not out:
+        return None
+    if not os.path.isabs(out):
         return None
     try:
         return Path(out).resolve()

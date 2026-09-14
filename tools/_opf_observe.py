@@ -81,14 +81,13 @@ def _git_path():
 
 
 def _scrubbed_env():
-    """Build the minimal, allowlist environment every git call runs under. Every ambient `GIT_*` variable is
-    DROPPED (an inherited GIT_DIR / GIT_WORK_TREE / GIT_CONFIG / GIT_OBJECT_DIRECTORY could otherwise rebind
-    the call to a different repository, inject configuration, or redirect object lookup); only PATH and HOME
-    are carried over. The few variables git genuinely needs to run non-interactively and free of ambient
-    configuration are then RE-APPLIED: global and system config are neutralized to os.devnull, the terminal
-    prompt is disabled, optional locks are turned off (this is read-only), and the locale is pinned so output
-    is deterministic. A read that the scrub breaks fails SAFE to omit-plus-note upstream, never a silent
-    allow."""
+    """Build the minimal, allowlist environment every git call runs under. Every ambient `GIT_`-prefixed
+    variable is DROPPED (an inherited GIT_DIR/GIT_WORK_TREE/GIT_CONFIG/GIT_OBJECT_DIRECTORY could otherwise
+    rebind the call to a DIFFERENT repository, inject configuration, or redirect object lookup); only PATH
+    and HOME are carried over. The few variables git genuinely needs to run non-interactively and free of
+    ambient configuration are then RE-APPLIED: global and system config neutralized to os.devnull, the
+    system config search disabled, the terminal prompt disabled, optional locks turned off (read-only), and
+    the locale pinned so output is deterministic."""
     env = {}
     for name in ("PATH", "HOME"):
         val = os.environ.get(name)
@@ -423,11 +422,17 @@ def self_test():
         return env
 
     def _git_setup(cwd, home, *args):
-        """Run a git FIXTURE command, raising OSError (mapped to a harness error, exit 2) on failure."""
-        cmd = [git, "-C", str(cwd),
+        """Run a git FIXTURE command, raising OSError (mapped to a harness error, exit 2) on failure or
+        timeout. --no-replace-objects so a replacement ref cannot substitute the bytes a git data command
+        reads; a bounded timeout so a hung fixture call fails SAFE rather than hangs (mirrors _run_git)."""
+        cmd = [git, "--no-replace-objects", "-C", str(cwd),
                "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
                "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"] + list(args)
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_setup_env(home))
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  env=_setup_env(home), timeout=_GIT_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            raise OSError("git {} timed out after {}s".format(" ".join(args), _GIT_TIMEOUT_S))
         if proc.returncode != 0:
             raise OSError("git {} failed (rc {}): {}".format(
                 " ".join(args), proc.returncode, (proc.stderr or b"").decode("utf-8", "replace").strip()))
