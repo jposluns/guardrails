@@ -1291,14 +1291,35 @@ def render(argv, observations=None):
                 and ("VERSION" not in planned_names or post.checks.get("C-VERSION-FILE") == "PASS"))
     if not owned_ok:
         failed = _restore_preimages(product_root, res, preimages)
-        print("opf render: cannot evaluate: post-write validation disagreed with the regenerate over an "
-              "OWNED deliverable; rolled back to the pre-write bytes", file=sys.stderr)
-        for m in post.by_check.get("C-VIEW-DRIFT", []) + post.by_check.get("C-VERSION-FILE", []):
-            print("  {}".format(m), file=sys.stderr)
+        # The rollback claim rests on OBSERVATION (claims-rest-on-observation, no-concealed-failure): assert a
+        # completed rollback ONLY when _restore_preimages restored every captured target (failed empty). On a
+        # partial failure state the rollback was INCOMPLETE and name the unrestored paths in the PRIMARY
+        # statement, not merely a trailing warning that overstates the primary claim.
+        if failed:
+            rollback = ("the rollback was INCOMPLETE: these targets could NOT be restored and may be left "
+                        "mid-write: {}".format(", ".join(sorted(failed))))
+        else:
+            rollback = "rolled back to the pre-write bytes"
+        # Attribute the miss to the cause that ACTUALLY fired (claims-rest-on-observation): owned_ok is False on
+        # EITHER a post-write SOURCE-integrity regression OR an owned-deliverable miss. A freshly-written view
+        # tripping a SOURCE check is NOT an owned-deliverable disagreement, so label it a SOURCE-INTEGRITY
+        # regression and evidence it from SOURCE_INTEGRITY_CHECKS (the same REQUIRED_CHECKS-ordered, source-
+        # filtered print Phase A uses); otherwise keep the owned-deliverable wording and print C-VIEW-DRIFT /
+        # C-VERSION-FILE. Either way roll back, print post.unattributed, and exit 2.
+        if not _opf_check.source_integrity_ok(post):
+            print("opf render: cannot evaluate: post-write validation found a SOURCE-INTEGRITY regression "
+                  "after the regenerate; {}".format(rollback), file=sys.stderr)
+            for cid in _opf_check.REQUIRED_CHECKS:
+                if cid in _opf_check.SOURCE_INTEGRITY_CHECKS:
+                    for m in post.by_check.get(cid, []):
+                        print("  {}: {}".format(post.checks.get(cid, "?"), m), file=sys.stderr)
+        else:
+            print("opf render: cannot evaluate: post-write validation disagreed with the regenerate over an "
+                  "OWNED deliverable; {}".format(rollback), file=sys.stderr)
+            for m in post.by_check.get("C-VIEW-DRIFT", []) + post.by_check.get("C-VERSION-FILE", []):
+                print("  {}".format(m), file=sys.stderr)
         for m in post.unattributed:
             print("  UNATTRIBUTED: {}".format(m), file=sys.stderr)
-        if failed:
-            print("  WARNING: could not restore: {}".format(", ".join(sorted(failed))), file=sys.stderr)
         return EXIT_CANNOT_EVALUATE
 
     # The OWNED set is now current. An AUTHORED C-CHANGELOG-GATES state, or an UNOWNED C-VERSION-FILE state (a
@@ -1506,8 +1527,11 @@ def _residual_write_exit(post, planned_names):
     (the exit ints are ordered, so max() gives the dominating code)."""
     worst = EXIT_OK
     # An UNOWNED C-VERSION-FILE state: a stale VERSION the manifest does not declare as a view is not render's
-    # to regenerate or delete. Direct the maintainer to declare the view or remove the file; render deletes
-    # nothing.
+    # to regenerate or delete. Direct the maintainer to declare the view (so render owns and regenerates it) or
+    # bring the root VERSION into line with the version ledger; removal is advised ONLY when the ledger has no
+    # releases, because C-VERSION-FILE REQUIRES a root VERSION whenever the ledger has releases, so a blanket
+    # "remove the file" would convert a stale-VERSION finding into a MISSING-VERSION one (harmful advice).
+    # render deletes nothing.
     if "VERSION" not in planned_names:
         v = post.checks.get("C-VERSION-FILE")
         if v == "CANNOT-EVALUATE":
@@ -1515,14 +1539,19 @@ def _residual_write_exit(post, planned_names):
             for m in post.by_check.get("C-VERSION-FILE", []):
                 print("opf render: cannot evaluate: {}".format(m), file=sys.stderr)
             print("opf render: the root VERSION deliverable is not a declared view; declare the VERSION view "
-                  "or remove the file, then re-run 'opf doctor' (render does not own an undeclared VERSION)",
-                  file=sys.stderr)
+                  "so render owns and regenerates it, or bring the root VERSION into line with the version "
+                  "ledger per the cannot-evaluate above (removing the root VERSION is valid ONLY when the "
+                  "version ledger has no releases); then re-run 'opf doctor' (render does not own an "
+                  "undeclared VERSION)", file=sys.stderr)
         elif v == "FINDING":
             worst = max(worst, EXIT_DRIFT)
             for m in post.by_check.get("C-VERSION-FILE", []):
                 print("opf render: finding: {}".format(m))
             print("opf render: the root VERSION deliverable is not a declared view; declare the VERSION view "
-                  "or remove the file, then re-run 'opf doctor' (render does not own an undeclared VERSION)")
+                  "so render owns and regenerates it, or bring the root VERSION into line with the version "
+                  "ledger per the finding above (removing the root VERSION is valid ONLY when the version "
+                  "ledger has no releases); then re-run 'opf doctor' (render does not own an undeclared "
+                  "VERSION)")
     # C-CHANGELOG-GATES is authored content render NEVER generates; surface it and name the manual fix. A
     # CANNOT-EVALUATE (e.g. a non-UTF-8 CHANGELOG) still exits 2 after the owned set was regenerated -- an
     # unreadable authored file does not hold the generated deliverables hostage (SETTLED).
@@ -1597,7 +1626,12 @@ def _restore_preimages(product_root, res, preimages):
             store_root_fd = _opf_store._open_store_root_fd(res.store_root, res.pointer_source != "default")
             product_root_fd = _opf_store._open_root_fd(product_root)
         except OSError as exc:
-            return ["<reopen for rollback failed: {}>".format(exc)]
+            # The reopen failed, so NOT ONE captured target could be restored. Return every affected relpath
+            # (the relpath element of each preimage key), so the caller can NAME the paths that may be left
+            # mid-write rather than a single opaque sentinel that LOSES them (DEFECT-1c; no-concealed-failure),
+            # and still convey the reopen error alongside them. Non-raising.
+            affected = sorted(relpath for (_scope, relpath) in preimages)
+            return affected + ["<reopen for rollback failed: {}>".format(exc)]
         for (scope, relpath), old in preimages.items():
             fd = product_root_fd if scope == "product" else store_root_fd
             try:
@@ -3562,6 +3596,116 @@ def self_test():
                   _fs_todo.read_text(encoding="utf-8") == _fs_before)
         finally:
             globals()["_WRITE_GATE_COMPOSED"] = _saved_flag
+
+        # --- VECTOR A (change-carries-check): EXERCISE the Phase-C owned-miss ROLLBACK + corrected diagnostic.
+        # The natural PR-C vectors above never reach owned-miss (a source-sound store regenerates cleanly and
+        # Phase C witnesses 1->0), so this seam monkeypatches _opf_check.validate_store to FORCE a PRE=valid /
+        # POST=owned-miss disagreement over an ALREADY-rewritten target. Phase B is UNAFFECTED (it renders
+        # directly and calls no validate_store), so the write really happens and the preimage is really rolled
+        # back. Three variants prove: exit 2 always; the OWNED-deliverable miss is labelled and rolled back with
+        # a truthful success claim; a POST SOURCE-integrity regression is labelled a SOURCE regression printing
+        # the source reason (DEFECT 1b); and a PARTIAL rollback failure states the rollback was INCOMPLETE and
+        # names the paths in the PRIMARY line, never claiming plain success (DEFECT 1a). FAIL-TO-PASS: the
+        # pre-fix branch prints the UNCONDITIONAL "rolled back to the pre-write bytes" and only the owned
+        # C-VIEW-DRIFT / C-VERSION-FILE messages, so the source-regression and partial-failure assertions FAIL
+        # on the old wording and PASS after DEFECT 1.
+        import io
+        import contextlib
+        import _opf_check as _oc_seam
+
+        class _FakeResult(object):
+            def __init__(self, checks, by_check=None, unattributed=None):
+                self.checks = checks
+                self.by_check = by_check or {}
+                self.unattributed = unattributed or []
+
+        def _all_pass():
+            return {cid: "PASS" for cid in _oc_seam.REQUIRED_CHECKS}
+
+        def _seam_render(root, obs, post_result):
+            """Force PRE=valid (source-sound, so Phase A proceeds) and POST=post_result across render's two
+            validate_store calls, capturing stderr. Restores validate_store in a finally. source_integrity_ok
+            is NOT patched: it reads the fake result's real .checks/.unattributed."""
+            calls = [0]
+            def _fake_validate(resolution, supported_profiles=None, *, observations=None):
+                calls[0] += 1
+                return _FakeResult(_all_pass()) if calls[0] == 1 else post_result
+            _orig = _oc_seam.validate_store
+            _oc_seam.validate_store = _fake_validate
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(buf):
+                    rc = render(["--root", str(root), "--write"], observations=obs)
+            finally:
+                _oc_seam.validate_store = _orig
+            return rc, buf.getvalue()
+
+        # Variant 1: an OWNED-deliverable disagreement (C-VIEW-DRIFT != PASS) over a rewritten target -> full
+        # rollback. TODO.md == "stale sentinel\n" pre-write; Phase B regenerates it; Phase C rolls it back.
+        _oa_root, _oa_obs = _gate_store_drifted("view")
+        _oa_todo = _oa_root / WORKING_DIRNAME / "TODO.md"
+        _oa_pre = _oa_todo.read_text(encoding="utf-8")
+        _oa_post = _FakeResult(dict(_all_pass(), **{"C-VIEW-DRIFT": "FINDING"}),
+                               by_check={"C-VIEW-DRIFT": ["TODO.md drifted from source"]})
+        _oa_rc, _oa_err = _seam_render(_oa_root, _oa_obs, _oa_post)
+        check("prc-ownedmiss-owned-exit-2", _oa_rc == EXIT_CANNOT_EVALUATE)
+        check("prc-ownedmiss-owned-preimage-restored", _oa_todo.read_text(encoding="utf-8") == _oa_pre)
+        check("prc-ownedmiss-owned-labelled-owned", "OWNED deliverable" in _oa_err)
+        check("prc-ownedmiss-owned-rollback-success", "rolled back to the pre-write bytes" in _oa_err)
+
+        # Variant 2: a POST SOURCE-INTEGRITY regression (a source check FINDING) must be LABELLED a source
+        # regression and print the source reason, NOT mislabelled "OWNED deliverable" (DEFECT 1b).
+        _sa_root, _sa_obs = _gate_store_drifted("view")
+        _sa_todo = _sa_root / WORKING_DIRNAME / "TODO.md"
+        _sa_pre = _sa_todo.read_text(encoding="utf-8")
+        _sa_post = _FakeResult(dict(_all_pass(), **{"C-RECORDS": "FINDING"}),
+                               by_check={"C-RECORDS": ["post-write record fault"]})
+        _sa_rc, _sa_err = _seam_render(_sa_root, _sa_obs, _sa_post)
+        check("prc-ownedmiss-source-exit-2", _sa_rc == EXIT_CANNOT_EVALUATE)
+        check("prc-ownedmiss-source-preimage-restored", _sa_todo.read_text(encoding="utf-8") == _sa_pre)
+        check("prc-ownedmiss-source-labelled-source", "SOURCE-INTEGRITY regression" in _sa_err)
+        check("prc-ownedmiss-source-reason-printed", "post-write record fault" in _sa_err)
+        check("prc-ownedmiss-source-not-mislabelled-owned", "OWNED deliverable" not in _sa_err)
+
+        # Variant 3: a PARTIAL rollback failure (DEFECT 1a). Stub _restore_preimages (module-global, called
+        # unqualified by render) to report an unrestored target; the corrected primary statement must say the
+        # rollback was INCOMPLETE and name the path, and must NOT claim plain success.
+        _pa_post = _FakeResult(dict(_all_pass(), **{"C-VIEW-DRIFT": "FINDING"}),
+                               by_check={"C-VIEW-DRIFT": ["TODO.md drifted from source"]})
+        _pa_unrestored = WORKING_DIRNAME + "/TODO.md"
+        _saved_restore = globals()["_restore_preimages"]
+        try:
+            globals()["_restore_preimages"] = lambda *a, **k: [_pa_unrestored]
+            _pa_root, _pa_obs = _gate_store_drifted("view")
+            _pa_rc, _pa_err = _seam_render(_pa_root, _pa_obs, _pa_post)
+        finally:
+            globals()["_restore_preimages"] = _saved_restore
+        check("prc-ownedmiss-partial-exit-2", _pa_rc == EXIT_CANNOT_EVALUATE)
+        check("prc-ownedmiss-partial-incomplete-labelled", "INCOMPLETE" in _pa_err)
+        check("prc-ownedmiss-partial-names-path", _pa_unrestored in _pa_err)
+        check("prc-ownedmiss-partial-no-false-success",
+              "rolled back to the pre-write bytes" not in _pa_err)
+
+        # --- VECTOR B (change-carries-check): the unowned-VERSION residual remedy. Per the brief's sanctioned
+        # alternative, drive _residual_write_exit DIRECTLY with a synthesized POST for an UNOWNED C-VERSION-FILE
+        # FINDING (a fully-synthetic unowned-VERSION whole-store is awkward to build from the VERSION-declaring
+        # gate fixtures) and capture its stdout. The version ledger HAS releases here, so C-VERSION-FILE REQUIRES
+        # a root VERSION and "remove the file" would turn a stale-VERSION finding into a MISSING-VERSION one.
+        # Asserts: exit 1 (EXIT_DRIFT); the finding is surfaced; the remedy does NOT carry the harmful
+        # unconditional "remove the file" advice; and it still directs to declaring the view. The mapper makes
+        # NO filesystem write, so render deletes nothing. FAIL-TO-PASS: the pre-fix wording contains "remove the
+        # file", so the negative assertion FAILS now and PASSES after DEFECT 2.
+        _rv_msg = "root VERSION 0.0.0 is stale; the version ledger's latest release is 1.1.0"
+        _rv_post = _FakeResult({"C-VERSION-FILE": "FINDING", "C-CHANGELOG-GATES": "PASS"},
+                               by_check={"C-VERSION-FILE": [_rv_msg]})
+        _rv_buf = io.StringIO()
+        with contextlib.redirect_stdout(_rv_buf):
+            _rv_rc = _residual_write_exit(_rv_post, set())   # "VERSION" NOT planned -> the unowned branch
+        _rv_out = _rv_buf.getvalue()
+        check("prc-unowned-version-residual-exit-drift", _rv_rc == EXIT_DRIFT)
+        check("prc-unowned-version-residual-finding-surfaced", _rv_msg in _rv_out)
+        check("prc-unowned-version-residual-no-remove-advice", "remove the file" not in _rv_out)
+        check("prc-unowned-version-residual-declare-advice", "declare the VERSION view" in _rv_out)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
