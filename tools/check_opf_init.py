@@ -295,11 +295,17 @@ def _suite(invoke):
                 check("existing changelog preserved",
                       (changelog / "CHANGELOG.md").read_bytes() == b"Existing changelog.\n")
 
-                # Symlinked root, isolated: the target is a FRESH uninitialized git repo with no
-                # pointer or store, so the refusal is unambiguously the symlink rejection, never a
-                # pre-existing store pointer at the target.
-                symlink_target = make_git("symlink-target")
-                linked = base / "linked-root"
+                # Symlinked root, containment-isolated: the symlink target is a REAL directory INSIDE
+                # the same git repo, and --root names the sibling symlink. _init_repo's repo-containment
+                # check therefore passes (git reports the enclosing repo, which lexically contains the
+                # symlink path), leaving _open_dir_nofollow's O_NOFOLLOW on the final component as the
+                # ONLY guard that can refuse. A fresh separate repo as target would instead be caught by
+                # the containment check, so the no-follow protection would stay unexercised.
+                symlink_repo = make_git("symlink-repo")
+                symlink_target = symlink_repo / "realdir"
+                symlink_target.mkdir()
+                (symlink_target / "keep").write_bytes(b"target\n")
+                linked = symlink_repo / "linkdir"
                 linked.symlink_to(symlink_target, target_is_directory=True)
                 before = _snapshot(symlink_target)
                 rc, output = run(linked)
@@ -340,6 +346,39 @@ def _suite(invoke):
                 check("ignored destination refused",
                       rc == EXIT_ERROR and "git-ignored" in output)
                 check("ignored destination preserved", _snapshot(ignored) == before)
+
+                # Local pointer gitignored -> SUCCESS: the machine-local pointer is a path init NEVER
+                # creates and adopters legitimately gitignore, so an ignore rule naming only it must not
+                # block init. This proves the ignore check is scoped to the CREATED destinations; it
+                # FAILS if the check is passed index_paths (which carry the local pointer).
+                local_ignored = make_git("local-pointer-ignored")
+                (local_ignored / ".gitignore").write_bytes(
+                    _opf_store.LOCAL_POINTER_REL.encode("ascii") + b"\n")
+                git_call(local_ignored, ["--literal-pathspecs", "add", "--", ".gitignore"])
+                git_call(local_ignored, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                         "commit", "-m", "seed"])
+                rc, output = run(local_ignored)
+                check("local-pointer-ignored init succeeds",
+                      rc == EXIT_OK and valid_sources(local_ignored))
+
+                # Magic-named ignored root -> REFUSE: a --root whose repo-relative prefix begins with a
+                # pathspec-magic sigil (a leading colon). A repo-local rule ignores that subdir's store
+                # tree, so init must refuse. Without the literal "./" prefix in _init_unignored the colon
+                # is consumed as an empty magic signature, the check bypasses (rc 1), and init would
+                # wrongly succeed; this vector discriminates the ./ neutralization.
+                magic = make_git("magic-root")
+                magic_sub = magic / ":magic"
+                magic_sub.mkdir()
+                (magic_sub / "keep").write_bytes(b"target\n")
+                (magic / ".gitignore").write_bytes(b"/:magic/" + working.encode("ascii") + b"\n")
+                git_call(magic, ["--literal-pathspecs", "add", "--", ".gitignore"])
+                git_call(magic, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                 "commit", "-m", "seed"])
+                before = _snapshot(magic_sub)
+                rc, output = run(magic_sub)
+                check("magic-named ignored root refused",
+                      rc == EXIT_ERROR and "git-ignored" in output)
+                check("magic-named ignored root preserved", _snapshot(magic_sub) == before)
 
                 # Defence in depth: after a successful init, the staged-and-committed store resolves
                 # end to end, at the standard machine subdir. resolve_store reads the working tree, so

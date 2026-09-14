@@ -751,15 +751,23 @@ def _init_unignored(git, repo, root, paths):
     check-ignore reports at least one ignored path with rc 0, none ignored with rc 1, and an error
     with rc >= 128. The rc drives the three-way decision; the output is only for the diagnostic. Paths
     are passed as arguments (git check-ignore accepts neither -z without --stdin, which _run_git has no
-    channel for, nor --literal-pathspecs, which it rejects as unsupported magic), so the output is one
-    path per line over the controlled, newline-free internal destinations. Residual: without literal
-    pathspecs a planned destination whose adopter-supplied path prefix contained pathspec-magic
-    characters would be glob-interpreted; the internal store names never do, and a magic error fails
-    closed (rc >= 128 -> refuse). Called directly (not via _init_git, which raises on rc != 0) because
-    rc 1 is the success case here; a timeout, launch failure, or unexpected rc fails closed and refuses.
+    channel for, nor --literal-pathspecs, which it rejects as unsupported magic). Each scoped path is
+    given a literal "./" prefix so a leading colon or other pathspec-magic sigil in an adopter-supplied
+    --root prefix is read as a path, not as magic: without it a ":name/..." prefix has its colon consumed
+    as an empty magic signature and the check silently bypasses (rc 1, the store looks unignored), while a
+    recognized short-magic letter over-refuses (rc >= 128). The prefix is a plain string because Path
+    would normalize "./x" back to "x". The output is then one path per line over the controlled,
+    newline-free internal destinations. Residual: the check runs under _opf_observe._run_git's scrubbed
+    observer environment, which pins GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM to os.devnull and so does NOT
+    consult a global or system core.excludesFile; a store ignored ONLY by the adopter's global git config
+    is therefore not caught here. This is a best-effort repo-local plus repo-config check; the
+    global-config-aware refusal is deferred to D2b, and the completion output warns the adopter that a
+    silently ignored store may still leave `git add` staging nothing. Called directly (not via _init_git,
+    which raises on rc != 0) because rc 1 is the success case here; a timeout, launch failure, or
+    unexpected rc fails closed and refuses.
     """
     prefix = root.relative_to(repo)
-    scoped = sorted(str(prefix / path) for path in paths)
+    scoped = sorted("./" + str(prefix / path) for path in paths)
     result = _opf_observe._run_git(
         git, repo, ["check-ignore", "--"] + scoped)
     if not result.completed:
@@ -938,7 +946,11 @@ def _cmd_init(rest):
             raise RuntimeError("existing pointer: " + _opf_store.LOCAL_POINTER_REL)
         index_paths = set(payloads) | {working, _opf_store.LOCAL_POINTER_REL}
         _init_untracked(git, repo, root, index_paths)
-        _init_unignored(git, repo, root, index_paths)
+        # The ignore check is scoped to the destinations init actually CREATES (store dirs plus the
+        # committed pointer, the machine sources, and the optional CHANGELOG); the local pointer that
+        # index_paths carries for _init_untracked's prior-state detection is a path init never creates
+        # and adopters legitimately gitignore, so it must not make init refuse.
+        _init_unignored(git, repo, root, set(directories) | set(payloads))
         _init_same_root(root, root_fd)
 
         publishing = True
@@ -983,6 +995,8 @@ def _cmd_init(rest):
         print("Review the created files, then stage the reviewed paths:")
         print("  git -C {} --literal-pathspecs add -- {}".format(
             shlex.quote(str(root)), " ".join(shlex.quote(path) for path in payloads)))
+        print("opf init: if that git add stages nothing, the paths may be git-ignored (including via a")
+        print("  global core.excludesFile, which this preflight cannot see); adjust .gitignore or git add -f.")
         print("Commit the reviewed init paths, then materialize the Markdown views:")
         print("  opf render --write --root {}".format(shlex.quote(str(root))))
         print("opf init: exit 0 means valid sources were created; tracking and rendering are pending.")
