@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "5607eba9e32b44e1a47021e31f186faf341515a5c499728e1b557962f3c5b9c9"
+tree-sha256 = "be198e98121944d0da6b0d5914e68d9293d2aa133c9f0e388a1dcf12c7c73371"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2576,8 +2576,8 @@ sha256 = "2d41bb396a91ff9a9609786f1de85b42ac8160a462eae2febeea7547207c0bec"
 
 [[sources]]
 path = "tools/_opf_observe.py"
-bytes = 32108
-sha256 = "61dfbbd5dbef510224181e1a1fce4d62eccb84fa45d717d4db373bde2d0ae7c5"
+bytes = 32926
+sha256 = "0a74d8671285e3fbfc44b05ebf19c1b7d62bd5d438e1cf08356b73156724fc9a"
 
 [[sources]]
 path = "tools/_opf_release.py"
@@ -3051,8 +3051,8 @@ sha256 = "64f2adcf49949237202e7e5e2b6770442319eab85afc813eafd1d82597de4c0c"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 58347
-sha256 = "b15eb478275c3f7bdc35be4ce6201961516df81669319f53263497fc7aa13923"
+bytes = 60897
+sha256 = "e37c0998f5507604df6826ad2835d4e9555955dd987a186193dbb5e9cfeab6a0"
 
 [[sources]]
 path = "tools/gen_mappings.py"

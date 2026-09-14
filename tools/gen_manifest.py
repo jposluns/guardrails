@@ -662,6 +662,21 @@ def run(root, check):
 
 def main():
     args = sys.argv[1:]
+    # UNKNOWN-OPTION REJECTION precedes every dispatch: main() recognizes only --check, --self-test, and
+    # --root (which consumes the following token as its value); any other token (a misspelled --checkx, a
+    # stray --help, a bare positional) is a LOUD exit 2, never a silent fall-through to a full regeneration
+    # that writes the five outputs (the unknown-option-fails-loud pattern the sibling self-tests assert).
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--root":
+            i += 2  # skip the flag and its value (missing/validated below in the --root branch)
+            continue
+        if tok in ("--check", "--self-test"):
+            i += 1
+            continue
+        print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
+        return 2
     if "--self-test" in args:
         return self_test_main()
     root = repo_root()
@@ -832,6 +847,19 @@ def self_test_main():
                 return run(root, check)
             except SystemExit as exc:
                 return "raised SystemExit({!r})".format(exc.code)
+
+    def run_main_quiet(argv):
+        # Exercise main()'s argv parsing (where the unknown-option guard lives), pointing --root at a fixture.
+        saved = sys.argv
+        sys.argv = ["gen_manifest.py"] + argv
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                try:
+                    return main()
+                except SystemExit as exc:
+                    return "raised SystemExit({!r})".format(exc.code)
+        finally:
+            sys.argv = saved
 
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-manifest-selftest-"))
@@ -1015,6 +1043,20 @@ def self_test_main():
         _git(relmiss, "commit", "-q", "-m", "relmiss", "--no-verify")
         if run_quiet(relmiss, check=False) != 2:
             failures.append("F-237: a releases row missing the mandatory commit_sha expected exit 2")
+
+        # (l) F-GENMANIFEST-UNKNOWN-OPT: an unrecognized option is a LOUD exit 2 BEFORE any regeneration, so a
+        #     misspelled --checkx (or a stray --help) can never silently run a full regeneration that writes
+        #     the five outputs. A freshly built fixture has no generated outputs yet; the guard returns 2 and
+        #     leaves them absent. Removing the guard lets --checkx fall through to run(check=False), which
+        #     writes the outputs and returns 0, so this vector fails on both counts (it bites).
+        unk = _build_fixture(tmp / "unknown-opt")
+        if unk is None:
+            failures.append("F-GENMANIFEST-UNKNOWN-OPT: cannot init a git fixture for the unknown-option vector")
+        else:
+            if run_main_quiet(["--root", str(unk), "--checkx"]) != 2:
+                failures.append("F-GENMANIFEST-UNKNOWN-OPT: an unrecognized option expected a loud exit 2")
+            if any((unk / rel).exists() for rel in GENERATED_OUTPUTS_REL):
+                failures.append("F-GENMANIFEST-UNKNOWN-OPT: an unrecognized option must not write any output")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1033,7 +1075,8 @@ def self_test_main():
           "outside the EXACT-literal exclusion set trips COMPLETENESS (exit 2) while a glob would swallow "
           "it silently (F-235); an output at git index mode 100755 fails closed (exit 2) while a clean "
           "100644 set passes (F-236); and a releases row with an unknown key or a missing mandatory field "
-          "each fail closed (exit 2) under the minimal Step-2 row guard (F-237)")
+          "each fail closed (exit 2) under the minimal Step-2 row guard (F-237); and an unrecognized option "
+          "is a loud exit 2 that writes no output (F-GENMANIFEST-UNKNOWN-OPT)")
     return 0
 
 

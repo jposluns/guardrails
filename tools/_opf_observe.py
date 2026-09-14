@@ -25,8 +25,9 @@ cwd, and runs under an ALLOWLIST-scrubbed environment (every ambient `GIT_*` var
 GIT_DIR / GIT_WORK_TREE / GIT_CONFIG cannot rebind or reconfigure the call; only PATH and HOME are carried
 over, and the few config-neutralizing variables git genuinely needs are re-applied). Each call is bounded by
 a timeout; a timeout, an OS launch failure, or a read the scrub breaks all fail SAFE to omit-plus-note,
-never a silent allow. git is resolved to an absolute path; when git is absent from PATH entirely the
-observations are all omitted (and `self_test` SKIPs clean, like the POSIX-signal watchdogs).
+never a silent allow. git is resolved via shutil.which and absolutized (os.path.abspath), so the launched
+child is pinned to an absolute path and cannot be re-resolved at exec time; when git is absent from PATH
+entirely the observations are all omitted (and `self_test` SKIPs clean, like the POSIX-signal watchdogs).
 
 Stdlib only (`subprocess`, `tomllib`, `shutil`); imports `_opf_check` (for the per-record body digest) and
 `_opf_emit` (for its EmitError). Launched via opf.py under `-I -B`.
@@ -75,9 +76,16 @@ _GitOutcome = namedtuple("_GitOutcome", "completed rc out err")
 
 
 def _git_path():
-    """The absolute path to the git executable, or None when git is not on PATH. Resolved absolute (never a
-    bare `git`) so the invocation cannot be redirected by a PATH-shadowing binary."""
-    return shutil.which("git")
+    """The absolute path to the git executable, or None when git is not on PATH. Resolved via shutil.which
+    and then made absolute with os.path.abspath (a relative which() result, from a relative PATH entry, is
+    anchored to the cwd at resolution time), so in ALL cases the launched child is pinned to an absolute path
+    rather than a bare `git` and cannot be re-resolved at exec time by a later PATH change or a relative-name
+    re-lookup. os.path.abspath (not realpath) is used so symlinks are preserved: git is often a symlink and
+    the symlink is what must run. One disclosed residual: PATH-based resolution at which()-time reads the
+    ambient PATH, so a PATH-shadowing binary can still be CHOSEN at lookup; the chosen binary is then pinned
+    absolute. This is consistent with the corpus's disclosed PATH-resolution residual."""
+    p = shutil.which("git")
+    return os.path.abspath(p) if p else None
 
 
 def _scrubbed_env():
