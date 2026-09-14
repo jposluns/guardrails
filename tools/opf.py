@@ -8,9 +8,11 @@ This is the dispatcher the OPF core-tooling units grow into. U1 lands it with th
 self-test wired in; store verbs that have not yet landed are recognized names that report
 NOT-YET-IMPLEMENTED and fail closed (exit 2) until their unit lands, so a stub can never read as a
 passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exactly one of
-`--check | --write` (a bare `render` is a usage error, exit 2); `--check` is IMPLEMENTED (read-only drift
-check, forwarding to the U4 engine) and `--write` is recognized but fail-closed (exit 2) pending VC-4, the
-composition of the EXISTING U6 `validate_store` store-integrity gate. `doctor` HAS landed (PR-B): `opf doctor
+`--check | --write` (a bare `render` is a usage error, exit 2); `--check` is the read-only drift check
+(forwarding to the U4 engine) and `--write` (VC-4/PR-C) is the mutating half: it gathers the inert git-derived
+observations caller-side (_opf_observe.gather) and hands them to the U4 engine, which composes the EXISTING U6
+`validate_store` store-integrity gate and permits the write only on a VALID verdict, refusing an INVALID or
+CANNOT-EVALUATE store with exit 2 and writing nothing. `doctor` HAS landed (PR-B): `opf doctor
 [--root DIR]` RESOLVES the store, gathers the inert git-derived observations (_opf_observe.gather: tracked,
 actual_remote, prior), and runs the U6 `validate_store` store-integrity engine over them, returning that
 engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0). Doctor is read-only; its
@@ -461,13 +463,16 @@ def _watchdog_shared_restore_deadline_self_test():
 def _cmd_render(rest):
     """`opf render [--root DIR] (--check | --write)`: the store render verb.
 
-    PR-A wires the READ-ONLY `--check` half, forwarding to the U4 engine `_opf_views.render`, whose 0/1/2
-    contract is exactly the required one (0 clean, 1 drift, 2 cannot-evaluate; a NOT-ADOPTED root reports
-    NOT APPLICABLE and exits 0, the pack's own `--root .` case). The mutating `--write` half is recognized
-    but fails closed until a later unit composes the U6 store-integrity gate, so a write can never read as a
-    silent no-op. Exactly one of `--check`/`--write` is required: a bare `opf render` is a usage error (a
-    preview never defaults into a write). The parser is the house fail-closed idiom (unknown token, an empty
-    or option-looking or duplicate --root value -> exit 2), matching _opf_views.render's own parser."""
+    The READ-ONLY `--check` half forwards to the U4 engine `_opf_views.render`, whose 0/1/2 contract is
+    exactly the required one (0 clean, 1 drift, 2 cannot-evaluate; a NOT-ADOPTED root reports NOT APPLICABLE
+    and exits 0, the pack's own `--root .` case). The mutating `--write` half (VC-4/PR-C) gathers the inert
+    git-derived observations caller-side (_opf_observe.gather over the RESOLVED store, exactly as doctor does)
+    and hands them to the same engine, which composes the U6 store-integrity gate and permits the write only
+    on a VALID verdict, printing the findings/cannot-evaluates and returning 2 (writing nothing) otherwise, so
+    a write can never read as a silent no-op. Exactly one of `--check`/`--write` is required: a bare
+    `opf render` is a usage error (a preview never defaults into a write). The parser is the house fail-closed
+    idiom (unknown token, an empty or option-looking or duplicate --root value -> exit 2), matching
+    _opf_views.render's own parser."""
     root = None
     mode = None
     i = 0
@@ -500,10 +505,35 @@ def _cmd_render(rest):
         print("opf render: give exactly one of --check / --write", file=sys.stderr)
         return EXIT_MALFORMED
     if mode == "write":
-        # The mutating --write half composes the U6 store-integrity gate in a later unit; until then it
-        # fails closed (exit 2), never a silent no-op, exactly like a not-yet-landed verb.
-        print("opf render --write: not yet implemented in this build (fail-closed)", file=sys.stderr)
-        return EXIT_MALFORMED
+        # The mutating --write half composes the U6 store-integrity gate in the U4 engine. Resolve here to
+        # gather the inert git-derived observations (tracked, actual_remote, prior) the gate consumes; the
+        # engine re-resolves (idempotent) and owns the NOT-ADOPTED (0) / non-resolved (2) messaging and the
+        # gate itself, so a NOT-ADOPTED or unresolved root needs no observations and never writes.
+        argv = ["--write"] if root is None else ["--root", root, "--write"]
+        try:
+            res = _opf_store.resolve_store(Path(os.path.abspath(root if root is not None else ".")))
+        except Exception as exc:  # noqa: BLE001  a resolver escape is cannot-evaluate, never a write
+            print("opf render: cannot evaluate: unexpected error resolving the store ({!r}); failing closed "
+                  "to exit 2".format(exc), file=sys.stderr)
+            return EXIT_MALFORMED
+        obs = None
+        if res.status == _opf_store.RESOLVED:
+            try:
+                obs, notes = _opf_observe.gather(res)
+            except Exception as exc:  # noqa: BLE001  a gather escape must not become a silent write; fail closed
+                print("opf render: cannot evaluate: unexpected error gathering git observations ({!r}); "
+                      "failing closed to exit 2".format(exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            for note in notes:
+                # Surface each honest observation gap so the gate's cannot-evaluate reads as an explained
+                # disclosure, not silent store corruption (the doctor idiom).
+                print("opf render: note: {}".format(note))
+        try:
+            return _opf_views.render(argv, observations=obs)
+        except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
+            print("opf render: cannot evaluate: unexpected error in the render write ({!r}); failing closed "
+                  "to exit 2".format(exc), file=sys.stderr)
+            return EXIT_MALFORMED
     argv = ["--check"] if root is None else ["--root", root, "--check"]
     # Class-width backstop: the render dispatch forwards the U4 engine's defined 0/1/2 contract unchanged;
     # any residual, unforeseen error from it routes to a located cannot-evaluate (exit 2), never an uncaught
@@ -603,10 +633,12 @@ def _cli_self_test():
     on the returned exit code ONLY (never by grepping output, per the isolate-verifiers rule); each case
     drives main() with an explicit argv, its stdout/stderr redirected so this leg's own output stays clean.
     Cases: an unknown verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`,
-    `render --write`, both flags together, an unrecognized render flag, a `--root` with no value, and an empty
-    `--root` are usage errors (exit 2); and `render --check` FORWARDS to the U4 engine -- a NOT-ADOPTED root
-    returns 0 (the wiring discriminator: reverting the render wiring routes it to the fail-closed KNOWN_VERBS
-    branch and returns 2, failing this case) and a garbage store returns 2. For `doctor`: bad-flag / usage
+    both flags together, an unrecognized render flag, a `--root` with no value, and an empty `--root` are usage
+    errors (exit 2); `render --check` and `render --write` FORWARD to the U4 engine -- a NOT-ADOPTED root
+    returns 0 for each (the wiring discriminator: reverting the render wiring routes it to the fail-closed
+    KNOWN_VERBS branch and returns 2, failing this case; render --write is never run against a mutating
+    adopter store here, only NOT-ADOPTED / garbage synthetic roots) and a garbage store returns 2. For
+    `doctor`: bad-flag / usage
     cases (a `--root` with no value, an unknown flag) fail closed (exit 2); a NOT-ADOPTED root returns 0 (the
     doctor wiring discriminator: reverting the doctor route routes `doctor` to the fail-closed KNOWN_VERBS
     branch and returns 2, failing this case); a garbage store returns 2. The render clean/drift 0/1
@@ -645,7 +677,6 @@ def _cli_self_test():
             if verb not in ("render", "doctor"):
                 expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
         expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
-        expect(["render", "--write"], EXIT_MALFORMED)   # the write half is not yet wired, fail-closed
         expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
         expect(["render", "--bogus"], EXIT_MALFORMED)   # unknown render flag
         expect(["render", "--root"], EXIT_MALFORMED)    # --root needs a value
@@ -686,6 +717,14 @@ def _cli_self_test():
                     return EXIT_MALFORMED
                 expect(["render", "--check", "--root", not_adopted], EXIT_OK)
                 expect(["render", "--check", "--root", broken], EXIT_MALFORMED)
+                # render --write over synthetic roots ONLY (never a mutating adopter store, per the no-live-
+                # write-in-CI posture): a NOT-ADOPTED root is NOT APPLICABLE and returns 0 writing nothing
+                # (the write-wiring discriminator; an unwired --write routes to the fail-closed KNOWN_VERBS
+                # branch and returns 2), and a garbage store fails closed (exit 2: gather + the U6 gate
+                # refuse). The VALID/INVALID gate discrimination over a whole-store-valid fixture with
+                # injected observations rides _opf_views.self_test end to end.
+                expect(["render", "--write", "--root", not_adopted], EXIT_OK)
+                expect(["render", "--write", "--root", broken], EXIT_MALFORMED)
                 # doctor over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and returns
                 # 0 -- the wiring discriminator (reverting the doctor route sends `doctor` to the fail-closed
                 # KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store fails closed
