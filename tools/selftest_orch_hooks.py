@@ -587,11 +587,20 @@ def main(report_path=None):
                  '{"mode": "unattended"}\n', "deny"),
                 ("ask/json-mode-whitespace-padded-unattended-denies",
                  '  \n{"mode": "unattended"}\n  ', "deny"),
+                # A leading byte-order mark before the JSON object is stripped, so the object is still read:
+                ("ask/json-mode-bom-unattended-denies",
+                 '\ufeff{"mode": "unattended"}\n', "deny"),   # BOM + unattended object -> armed/deny
+                ("ask/json-mode-bom-attended-allows",
+                 '\ufeff{"mode": "attended"}\n', "allow"),    # BOM + attended object -> attended/allow
                 # FAIL CLOSED to guards-armed on a present-but-unusable marker (never a silent disarm):
                 ("ask/json-mode-malformed-denies-armed",
                  '{"mode": "unattended"\n', "deny"),           # partial/malformed JSON
                 ("ask/json-mode-no-string-mode-denies-armed",
                  '{"mode": 1}\n', "deny"),                     # JSON object, mode not a string
+                ("ask/json-mode-empty-object-denies-armed",
+                 '{}\n', "deny"),                              # JSON object without a mode key
+                ("ask/json-mode-array-denies-armed",
+                 '[{"mode": "unattended"}]\n', "deny"),        # JSON array (not an object) -> armed
                 ("ask/json-mode-unrecognized-value-denies-armed",
                  '{"mode": "bananas"}\n', "deny"),            # JSON mode outside the attended family
                 ("ask/line-mode-unrecognized-value-denies-armed",
@@ -615,6 +624,12 @@ def main(report_path=None):
                           extra={"tool_use_id": "tu-2b"})
         check("ask/present-unreadable-mode-denies-armed", _verdict(ask()), "deny")
         h.mode.rmdir()
+        # a PRESENT mode record whose bytes are not valid UTF-8 fails CLOSED to guards-armed (strict decode,
+        # not errors="replace"): a raw 0xFF start byte cannot decode, so the reader arms rather than disarms.
+        h.mode.write_bytes(b'\xff\xfe{"mode": "attended"}')
+        g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
+                          extra={"tool_use_id": "tu-2c"})
+        check("ask/invalid-utf8-mode-denies-armed", _verdict(ask()), "deny")
         # idempotent pending append, redacted (digest + counts, never the question text)
         h.mode.write_text("Operating-mode: daytime-unattended\n", encoding="utf-8")
         g_ask = h.payload("PreToolUse", "AskUserQuestion",

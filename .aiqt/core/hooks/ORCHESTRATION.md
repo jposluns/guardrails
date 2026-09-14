@@ -41,11 +41,12 @@ keys except `version` are optional; an undeclared surface simply removes the pro
 append-only `forced-exit.jsonl` (every non-closed-disposition forced exit appended as its own row,
 each surfaced exactly once, tracked by a companion `forced-exit-surfaced.json`). The mode record is recognized in EITHER of two shapes: a plain `Operating-mode: <text>` line (searched
 anywhere in the file, so it may sit inside a larger markdown document), or a JSON object with a
-top-level string `mode` key (`{"mode": "attended"}` / `{"mode": "unattended"}`, surrounding whitespace
-tolerated). A recognized mode whose value carries the `unattended` token arms the ask blocker. The reader
-fails CLOSED to the guards-armed (`unattended`) posture, never silently disarming, when a marker IS present
-but cannot yield a recognized value: a present-but-unreadable file, a malformed or partial JSON marker (or a
-JSON that is not an object with a string `mode`), or a marker whose value falls outside the
+top-level string `mode` key (`{"mode": "attended"}` / `{"mode": "unattended"}`, surrounding whitespace and
+a leading byte-order mark tolerated). A recognized mode whose value carries the `unattended` token arms the
+ask blocker. The reader fails CLOSED to the guards-armed (`unattended`) posture, never silently disarming,
+when a marker IS present but cannot yield a recognized value: a present-but-unreadable or non-UTF-8 file, a
+malformed or partial JSON marker (or a present JSON marker, including an array or other non-object value,
+that is not an object with a string `mode`), or a marker whose value falls outside the
 `attended`/`unattended` family. It preserves the fail-open (undeclared) answer only when NO marker is
 present: an undeclared mode path, a genuinely absent file, or a present file that carries no marker of either
 shape (empty, or non-JSON prose with no `Operating-mode` line). The escape sentinel (default

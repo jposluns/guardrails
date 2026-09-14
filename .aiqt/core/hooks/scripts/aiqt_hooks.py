@@ -7770,14 +7770,16 @@ def _orch_mode(reg, root):
     """The lowercased operating-mode value from the declared mode record. The record is recognized in BOTH
     shapes: the plain `Operating-mode: <text>` line (searched anywhere in the file, so it may sit inside a
     larger markdown document), and a JSON object with a top-level string "mode" key
-    ({"mode": "attended"} / {"mode": "unattended"}, with surrounding whitespace tolerated). Returns:
+    ({"mode": "attended"} / {"mode": "unattended"}, with surrounding whitespace and a leading byte-order
+    mark tolerated). Returns:
       - None when NO marker is present, preserving the original fail-open answer for the ask blocker: an
         undeclared mode path, a genuinely absent file (FileNotFoundError), or a present file that carries no
         marker of either shape (empty, or non-JSON prose with no Operating-mode line);
       - _ORCH_MODE_ARMED (the guards-armed posture) when a marker IS present but cannot yield a recognized
         value, so the guard fails CLOSED rather than silently disarming: a present-but-unreadable file (an
-        OSError other than FileNotFoundError), a JSON-shaped marker that is malformed/partial or is not an
-        object with a string "mode", or a recognized-shape marker whose value is outside the
+        OSError other than FileNotFoundError) or one whose bytes are not valid UTF-8 (strict decode), a
+        JSON-shaped marker that is malformed/partial or whose parsed value is not an object with a string
+        "mode" (a non-object or an array included), or a recognized-shape marker whose value is outside the
         attended/unattended family;
       - the recognized value (lowercased) otherwise, letting the downstream `unattended`-substring check arm
         or disarm as before.
@@ -7788,22 +7790,23 @@ def _orch_mode(reg, root):
     if not path:
         return None
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()               # strict decode: invalid UTF-8 raises UnicodeDecodeError
     except FileNotFoundError:
         return None                       # no marker file present: unchanged no-marker default (fail open)
-    except OSError:
-        return _ORCH_MODE_ARMED           # present but unreadable: fail closed to guards-armed
+    except (OSError, UnicodeDecodeError):
+        return _ORCH_MODE_ARMED           # present but unreadable or non-UTF-8: fail closed to guards-armed
     m = _ORCH_MODE_RE.search(text)
     if m:
         candidate = m.group(1).lower()
         return candidate if "attended" in candidate else _ORCH_MODE_ARMED
-    stripped = text.strip()
+    stripped = text.lstrip("\ufeff").strip()  # tolerate a leading byte-order mark before the prefix test
     if not stripped:
         return None                       # empty/whitespace-only: no marker line present, unchanged (fail open)
-    if stripped.startswith("{"):
-        # A JSON marker (the peer secureconfig shape). A malformed/partial marker, or one that is not an
-        # object with a string "mode", is a present-but-unrecognized marker: fail closed to guards-armed.
+    if stripped.startswith(("{", "[")):
+        # A JSON marker (the peer secureconfig shape), a leading BOM already stripped. A malformed/partial
+        # marker, or any parsed value that is not an object with a string "mode" (a non-object, an array, or
+        # an object without a string "mode"), is a present-but-unrecognized marker: fail closed to guards-armed.
         try:
             obj = json.loads(stripped)
         except ValueError:
@@ -8762,8 +8765,11 @@ def orch_yield_tool(data):
 
 def orch_ask_guard(data):
     """cntdef/recfst bounded by humovs, PreToolUse AskUserQuestion: deny a blocking question in
-    unattended mode with the record-and-continue instruction; fail OPEN on an absent or unreadable
-    mode (this guards one mistake shape, not a security boundary). Its regression vectors are held by the behaviour self-test."""
+    unattended mode with the record-and-continue instruction. A mode marker that is present but
+    unreadable, undecodable, malformed, or unrecognized fails CLOSED to the guards-armed (unattended)
+    posture, so the blocker arms rather than silently disarming; only a genuinely absent, empty, or
+    no-marker mode fails OPEN (this guards one mistake shape, not a security boundary). Its regression
+    vectors are held by the behaviour self-test."""
     if data.get("tool_name") != "AskUserQuestion":
         return _allow()
     root = _orch_root(data)
@@ -8775,7 +8781,7 @@ def orch_ask_guard(data):
     mode = _orch_mode(reg, root)
     if mode is None or "unattended" not in mode:
         if mode is None:
-            _orch_guard_event(root, "ask-guard", "fail-open", "mode record absent or unreadable")
+            _orch_guard_event(root, "ask-guard", "fail-open", "mode record absent, empty, or unmarked")
         return _allow()
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
