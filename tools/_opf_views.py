@@ -98,18 +98,18 @@ EXIT_CANNOT_EVALUATE = 2
 GENERATOR_NAME = "opf-views"
 GENERATOR_VERSION = "1"
 SCHEMA_VERSION = _opf_schema.SUPPORTED_SCHEMA
-REGEN_COMMAND = "opf render"
+REGEN_COMMAND = "opf render --write"
 
-# spec 5.7/5.8/11: a mutating render must gate on the U6 store-integrity layer (validate_store:
-# cross-record uniqueness, coverage, reconciliation). validate_store EXISTS (U6; the engine intended for
-# the deferred opf doctor verb, not yet wired), but render does not yet COMPOSE its write-gate invocation
-# (VC-4, deferred), so WRITE mode fails closed: an ungated write against a RESOLVED adopter store is
-# refused (a non-adopter root reports NOT APPLICABLE (0) first, since resolution precedes the refusal).
-# VC-4 flips this to True only WHEN it wires the actual gate invocation; until then every ungated write
-# against an adopter store is refused. The opf render CLI requires exactly one of --check / --write (no
-# default), and --check keeps working meanwhile. This is not a fabricated gate; it is a refusal pending
-# the real one.
-_WRITE_GATE_COMPOSED = False
+# spec 5.7/5.8/11: a mutating render gates on the U6 store-integrity layer (validate_store: cross-record
+# uniqueness, coverage, reconciliation, view drift, changelog/version integrity). render() NOW COMPOSES
+# that gate on the WRITE path (VC-4/PR-C): after resolve_store succeeds it calls validate_store and permits
+# the write ONLY on a VALID verdict, printing the findings/cannot-evaluates and returning EXIT_CANNOT_EVALUATE
+# on any INVALID or CANNOT-EVALUATE store, writing nothing. This flag RECORDS that the gate is composed; the
+# defence-in-depth guard at the single write choke point (_write_contained) reads it as an overlapping,
+# before-the-write refusal so a mutating write can never bypass the composed gate through a different helper
+# (defence-in-depth-default). The opf render CLI requires exactly one of --check / --write (no default), and
+# --check stays strictly read-only (SECI-preview-has-no-side-effects).
+_WRITE_GATE_COMPOSED = True
 
 # The mode installed on a NEWLY-created view/deliverable file. An EXISTING target's own mode is preserved
 # across the atomic replace instead (a restrictive mode is never widened); this default applies only when
@@ -1040,15 +1040,18 @@ def _write_contained(root_fd, relpath, text, check):
     non-directory intermediate path component, which _open_parent signals as a JournalError rather than an
     OSError), is a ViewsError, never a silent skip. Byte-stable: an unchanged target is not rewritten.
 
-    This is the single choke point EVERY view and deliverable write passes through, so the F1 write-gate
-    refusal is enforced HERE at the write boundary, not only at the render() entry: while the U6 store-
-    integrity gate is uncomposed, no real write can open or truncate a file regardless of which helper
-    reached this sink (a direct _write_contained or _render_resolved call included). --check is read-only
-    and unaffected. The render() guard is retained as an early, before-any-fd refusal (defence in depth)."""
+    This is the single choke point EVERY view and deliverable write passes through, so the write-gate
+    refusal is the DEFENCE-IN-DEPTH layer HERE at the write boundary, overlapping render()'s composed U6
+    gate: the real store-integrity gate runs in render() (validate_store, VALID-only), and this guard is the
+    low-cost before-any-truncation backstop that refuses a mutating write whenever _WRITE_GATE_COMPOSED is
+    somehow False, so no helper (a direct _write_contained or _render_resolved call included) can open or
+    truncate a file with the gate flag cleared (defence-in-depth-default). --check is read-only and
+    unaffected. With the gate composed the flag is True, so this backstop passes and render()'s validate_store
+    verdict is what actually gates the write (spec 5.7/5.8/11)."""
     if not check and not _WRITE_GATE_COMPOSED:
         raise ViewsError("refusing to write {}: store-integrity gate (U6 validate_store) not composed; a "
-                         "mutating render is refused at the write boundary until VC-4 wires the gate "
-                         "(fail-closed pending U6, spec 5.7/5.8/11)".format(relpath))
+                         "mutating render is refused at the write boundary as a defence-in-depth backstop "
+                         "(fail-closed, spec 5.7/5.8/11)".format(relpath))
     new_bytes = text.encode("utf-8")
     try:
         pfd, name = _journal._open_parent(root_fd, relpath)
@@ -1149,18 +1152,29 @@ def _registered_vendors_and_kinds(manifest):
     return registered, None
 
 
-def render(argv):
-    """`opf render [--root DIR] [--check]`: render every declared view of the store at a PRODUCT root.
-    Returns 0 clean, 1 on drift under --check, 2 cannot-evaluate. NOT-ADOPTED reports NOT APPLICABLE and
-    exits 0 (the pack's own `--root .` case). Two-phase like run_generator: every payload is rendered
-    before any target is written, so a fail-closed source aborts before a single file is touched."""
+def render(argv, observations=None):
+    """`opf render [--root DIR] (--check | --write)`: render every declared view of the store at a PRODUCT
+    root. Exactly one of --check / --write is required (a bare `render` is a usage error, exit 2). --check is
+    strictly read-only and returns 0 clean, 1 on drift, 2 cannot-evaluate. --write is the MUTATING half: it
+    composes the U6 store-integrity gate (validate_store) after resolve_store succeeds and BEFORE any file is
+    touched, permitting the write ONLY on a VALID verdict; an INVALID or CANNOT-EVALUATE store prints the
+    findings/cannot-evaluates and returns 2, writing nothing. `observations` is the inert git-derived facts
+    object the git-aware caller (opf.py's render --write, via _opf_observe.gather) injects for the gate;
+    validate_store reads no git itself, so a write can only ever pass when honest observations are supplied.
+    NOT-ADOPTED reports NOT APPLICABLE and exits 0 (the pack's own `--root .` case). Two-phase like
+    run_generator: every payload is rendered before any target is written, so a fail-closed source aborts
+    before a single file is touched."""
     root = None
-    check = False
+    check = None
     i = 0
     while i < len(argv):
         tok = argv[i]
-        if tok == "--check":
-            check = True
+        if tok in ("--check", "--write"):
+            if check is not None:
+                # Exactly one mode: both flags, or a repeated flag, is a usage error (fail-closed CLI, B3).
+                print("opf render: give exactly one of --check / --write", file=sys.stderr)
+                return EXIT_CANNOT_EVALUATE
+            check = tok == "--check"
             i += 1
         elif tok == "--root":
             if i + 1 >= len(argv):
@@ -1182,6 +1196,11 @@ def render(argv):
         else:
             print("opf render: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_CANNOT_EVALUATE
+    if check is None:
+        # Neither --check nor --write: a bare render never defaults into a write (a preview never mutates).
+        # This matches opf.py's own _cmd_render parser (exactly one of --check / --write required).
+        print("opf render: give exactly one of --check / --write", file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
     if root is None:
         root = "."
     try:
@@ -1205,15 +1224,36 @@ def render(argv):
         print("opf render: cannot evaluate: {}".format(res.detail), file=sys.stderr)
         return EXIT_CANNOT_EVALUATE
 
-    if not check and not _WRITE_GATE_COMPOSED:
-        # spec 5.7/5.8/11 (F1/F2): a mutating render must gate on the U6 store-integrity layer
-        # (validate_store), which EXISTS (U6) but render does not yet COMPOSE (VC-4, deferred). Refuse the
-        # ungated write here, BEFORE any fd is opened or any payload rendered, so nothing on disk is
-        # touched. --check reads only and is unaffected.
-        print("opf render: cannot evaluate: store-integrity gate (U6 validate_store) not available; "
-              "render write refused", file=sys.stderr)
-        return EXIT_CANNOT_EVALUATE
+    if not check:
+        # spec 5.7/5.8/11 (VC-4): a mutating render composes the U6 store-integrity gate HERE, after the
+        # store resolves and BEFORE any fd is opened or any payload rendered, so a non-VALID store is refused
+        # with nothing touched on disk. validate_store owns the cross-record uniqueness, coverage,
+        # reconciliation, view-drift, and changelog/version invariants; only status == VALID permits the
+        # write, and an INVALID or CANNOT-EVALUATE verdict prints its findings/cannot-evaluates and returns
+        # exit 2. The import is CALL-TIME: _opf_check imports _opf_views at module top, so a top-level back-
+        # import would be circular; a call-time import resolves against the fully loaded module.
+        import _opf_check
+        result = _opf_check.validate_store(res, observations=observations)
+        if result.status != _opf_check.VALID:
+            print("opf render: cannot evaluate: refusing to write a non-VALID store (U6 validate_store: {}); "
+                  "nothing written".format(result.status), file=sys.stderr)
+            for f in result.findings:
+                print("  FINDING: {}".format(f), file=sys.stderr)
+            for c in result.cannot_evaluate:
+                print("  CANNOT-EVALUATE: {}".format(c), file=sys.stderr)
+            return EXIT_CANNOT_EVALUATE
 
+    return _render_resolved_store(product_root, res, check)
+
+
+def _render_resolved_store(product_root, res, check):
+    """render()'s post-resolution, post-gate body: open the store/product no-follow fds for a RESOLVED store
+    and render (drift-check when `check`, write otherwise) via _render_resolved, mapping U4's ViewsError (and
+    defensively RecursionError/ValueError/OSError) to a controlled exit 2 and closing both fds in a finally.
+    Extracted so the self-test can exercise the render/write LOGIC over synthetic stores WITHOUT re-composing
+    the U6 gate (render() composes that gate on the write path before calling this; the gate itself is
+    exercised by the dedicated valid/invalid render() vectors). A mutating write still passes through
+    _write_contained's defence-in-depth guard (the module _WRITE_GATE_COMPOSED flag)."""
     store_root = res.store_root
     machine_rel = res.machine_rel
     # OPF store paths are UTF-8 by convention. A DISCOVERED machine-dir name that is not valid UTF-8 arrives
@@ -1594,7 +1634,6 @@ def self_test():
 
     failures = []
     checked = [0]
-    global _WRITE_GATE_COMPOSED   # F1 scaffold: write-dependent cases toggle this True, restored below
 
     def check(name, cond):
         checked[0] += 1
@@ -1612,6 +1651,21 @@ def self_test():
 
     def write_toml(root, name, text):
         (root / WORKING_DIRNAME / "toml" / name).write_text(text, encoding="utf-8")
+
+    def render_write(root):
+        """Drive the render WRITE path over a synthetic store WITHOUT the U6 store-integrity gate, so the
+        render-LOGIC vectors below (transforms, joins, goldens, and the fail-closed source cases) exercise
+        _render_resolved directly over stores that are NOT full valid whole-stores. The composed U6 write
+        gate is exercised separately by the dedicated valid/invalid render() vectors near the end. Mirrors
+        render()'s resolution handling (NOT-ADOPTED -> 0, non-RESOLVED -> 2) then calls the shared post-gate
+        body; a mutating write still passes _write_contained's defence-in-depth guard (the module flag)."""
+        product_root = Path(os.path.abspath(str(root)))
+        res = _opf_store.resolve_store(product_root)
+        if res.status == _opf_store.NOT_ADOPTED:
+            return EXIT_OK
+        if res.status != _opf_store.RESOLVED:
+            return EXIT_CANNOT_EVALUATE
+        return _render_resolved_store(product_root, res, False)
 
     # Every view and two mirrors, declared with the kind/sources this generator renders.
     manifest = "\n".join([
@@ -1818,12 +1872,9 @@ def self_test():
         _f4victim = _f4dir / "victim"; _f4victim.write_text("VICTIM-INTACT", encoding="utf-8")
         os.link(str(_f4victim), str(_f4dir / "TODO.md"))   # destination is a hardlink to the victim inode
         _f4fd = os.open(str(_f4dir), os.O_RDONLY | os.O_DIRECTORY)
-        _f4saved_gate = _WRITE_GATE_COMPOSED
         try:
-            _WRITE_GATE_COMPOSED = True                    # exercise a real write through the sink
-            _write_contained(_f4fd, "TODO.md", "NEW-VIEW-CONTENT\n", False)
+            _write_contained(_f4fd, "TODO.md", "NEW-VIEW-CONTENT\n", False)   # real write (gate composed)
         finally:
-            _WRITE_GATE_COMPOSED = _f4saved_gate
             os.close(_f4fd)
         check("write-hardlink-swap-victim-intact", _f4victim.read_text(encoding="utf-8") == "VICTIM-INTACT")
         check("write-hardlink-swap-dest-updated",
@@ -1838,12 +1889,9 @@ def self_test():
         _utplanted = _utdir / ".TODO.md.opf-tmp"
         _utplanted.write_text("ANOTHER-CALLERS-TEMP", encoding="utf-8")
         _utfd = os.open(str(_utdir), os.O_RDONLY | os.O_DIRECTORY)
-        _utsaved_gate = _WRITE_GATE_COMPOSED
         try:
-            _WRITE_GATE_COMPOSED = True
             _write_contained(_utfd, "TODO.md", "NEW\n", False)
         finally:
-            _WRITE_GATE_COMPOSED = _utsaved_gate
             os.close(_utfd)
         check("write-unique-temp-does-not-clobber-fixed-name",
               _utplanted.exists() and _utplanted.read_text(encoding="utf-8") == "ANOTHER-CALLERS-TEMP")
@@ -1859,16 +1907,13 @@ def self_test():
         _tcfd = os.open(str(_tcdir), os.O_RDONLY | os.O_DIRECTORY)
         _tc_orig_write_all = _journal._write_all
         _journal._write_all = lambda fd, data: (_ for _ in ()).throw(OSError(28, "No space left on device"))
-        _tcsaved_gate = _WRITE_GATE_COMPOSED
         _tc_err = None
         try:
-            _WRITE_GATE_COMPOSED = True
             _write_contained(_tcfd, "TODO.md", "NEW\n", False)
         except ViewsError as _e:
             _tc_err = str(_e)
         finally:
             _journal._write_all = _tc_orig_write_all
-            _WRITE_GATE_COMPOSED = _tcsaved_gate
             os.close(_tcfd)
         check("write-midfailure-surfaces-original-error",
               _tc_err is not None and "No space left" in _tc_err)
@@ -1882,12 +1927,9 @@ def self_test():
         _mpview = _mpdir / "TODO.md"; _mpview.write_text("OLD\n", encoding="utf-8")
         os.chmod(str(_mpview), 0o600)
         _mpfd = os.open(str(_mpdir), os.O_RDONLY | os.O_DIRECTORY)
-        _mpsaved_gate = _WRITE_GATE_COMPOSED
         try:
-            _WRITE_GATE_COMPOSED = True
             _write_contained(_mpfd, "TODO.md", "NEW\n", False)
         finally:
-            _WRITE_GATE_COMPOSED = _mpsaved_gate
             os.close(_mpfd)
         check("write-preserves-existing-restrictive-mode",
               stat.S_IMODE(os.stat(str(_mpview)).st_mode) == 0o600
@@ -2461,702 +2503,784 @@ def self_test():
             {"rel": "receipt_of", "id": "BI-10"}]}]})
         check("done-receipt-dedup-numeric-order", "(receipt_of BI-2, BI-10)" in _donebody)
 
-        _saved_gate = _WRITE_GATE_COMPOSED
-        try:
-            _WRITE_GATE_COMPOSED = True   # F1 test scaffold: exercise real rendered bytes and let the
-                                          # full-render fail-closed cases reach _render_resolved and
-                                          # fail for their intended reason, not merely the write gate.
-            # --- a POPULATED store, exercising every transform and both joins -------------------------------
-            root = new_root()
-            write_toml(root, "manifest.toml", manifest)
-            write_toml(root, "backlog_item.index.toml", "\n".join([
-                "schema = 1",
-                _rec("BI-10", "backlog_item", "open", "ten open"),
-                _rec("BI-2", "backlog_item", "active", "two active"),
-                _rec("BI-3", "backlog_item", "open", "three open"),
-                _rec("BI-4", "backlog_item", "done", "four done"),
-            ]) + "\n")
-            write_toml(root, "block.index.toml", "\n".join([
-                "schema = 1",
-                _rec("BL-1", "block", "active", "grant", scopes=["BI-2"]),
-                _rec("BL-2", "block", "active/proposed", "proposal", actor="assistant", scopes=["BI-3"]),
-            ]) + "\n")
-            write_toml(root, "done.index.toml", "\n".join([
-                "schema = 1",
-                _rec("DN-1", "done", "recorded", "receipt", links=[("receipt_of", "BI-4")]),
-            ]) + "\n")
-            write_toml(root, "finding.index.toml", "\n".join([
-                "schema = 1",
-                _rec("FN-1", "finding", "open", "open finding"),
-                _rec("FN-2", "finding", "fixed", "fixed finding", severity="minor"),
-            ]) + "\n")
-            write_toml(root, "pending_decision.index.toml", "\n".join([
-                "schema = 1",
-                _rec("PD-1", "pending_decision", "decided", "first ruling",
-                     decision="do X", decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
-                _rec("PD-2", "pending_decision", "decided", "revised ruling",
-                     decision="do Y", decided_at="2026-09-02T00:00:00Z", decided_by="maintainer",
-                     links=[("supersedes", "PD-1")]),
-                _rec("PD-3", "pending_decision", "open", "still open"),
-            ]) + "\n")
-            write_toml(root, "autonomous_decision.index.toml", "\n".join([
-                "schema = 1",
-                _rec("AD-1", "autonomous_decision", "recorded", "acted",
-                     classification="ACT", action="did the thing"),
-            ]) + "\n")
-            write_toml(root, "handoff.index.toml", "\n".join([
-                "schema = 1",
-                _rec("HO-1", "handoff", "superseded", "old handoff"),
-                _rec("HO-2", "handoff", "current", "current handoff"),
-            ]) + "\n")
-            write_toml(root, "reference.index.toml", "\n".join([
-                "schema = 1",
-                _rec("RF-1", "reference", "recorded", "a source",
-                     refs=[("doc", "OPF-SPEC.md 10.2")]),
-            ]) + "\n")
-            write_toml(root, "worklog.toml", "\n".join([
-                "schema = 1",
-                _entry("WL-1", "added", "first change"),
-                _entry("WL-2", "fixed", "second change"),
-            ]) + "\n")
-            write_toml(root, "version.toml", "\n".join([
-                "schema = 1",
-                "",
-                "[[release]]",
-                'version = "1.3.0"',
-                'date = "2026-08-30T00:00:00Z"',
-                'worklog_span = ["WL-1", "WL-2"]',
-                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([
-                    {"id": "WL-1", "date": "2026-01-01T00:00:00Z", "actor": {"kind": "maintainer"},
-                     "kind": "added", "summary": "first change"},
-                    {"id": "WL-2", "date": "2026-01-01T00:00:00Z", "actor": {"kind": "maintainer"},
-                     "kind": "fixed", "summary": "second change"}])),
-                "",
-                "[[summary]]",
-                'covers = "unreleased"',
-                'status = "working"',
-            ]) + "\n")
+        # --- a POPULATED store, exercising every transform and both joins -------------------------------
+        root = new_root()
+        write_toml(root, "manifest.toml", manifest)
+        write_toml(root, "backlog_item.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BI-10", "backlog_item", "open", "ten open"),
+            _rec("BI-2", "backlog_item", "active", "two active"),
+            _rec("BI-3", "backlog_item", "open", "three open"),
+            _rec("BI-4", "backlog_item", "done", "four done"),
+        ]) + "\n")
+        write_toml(root, "block.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BL-1", "block", "active", "grant", scopes=["BI-2"]),
+            _rec("BL-2", "block", "active/proposed", "proposal", actor="assistant", scopes=["BI-3"]),
+        ]) + "\n")
+        write_toml(root, "done.index.toml", "\n".join([
+            "schema = 1",
+            _rec("DN-1", "done", "recorded", "receipt", links=[("receipt_of", "BI-4")]),
+        ]) + "\n")
+        write_toml(root, "finding.index.toml", "\n".join([
+            "schema = 1",
+            _rec("FN-1", "finding", "open", "open finding"),
+            _rec("FN-2", "finding", "fixed", "fixed finding", severity="minor"),
+        ]) + "\n")
+        write_toml(root, "pending_decision.index.toml", "\n".join([
+            "schema = 1",
+            _rec("PD-1", "pending_decision", "decided", "first ruling",
+                 decision="do X", decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
+            _rec("PD-2", "pending_decision", "decided", "revised ruling",
+                 decision="do Y", decided_at="2026-09-02T00:00:00Z", decided_by="maintainer",
+                 links=[("supersedes", "PD-1")]),
+            _rec("PD-3", "pending_decision", "open", "still open"),
+        ]) + "\n")
+        write_toml(root, "autonomous_decision.index.toml", "\n".join([
+            "schema = 1",
+            _rec("AD-1", "autonomous_decision", "recorded", "acted",
+                 classification="ACT", action="did the thing"),
+        ]) + "\n")
+        write_toml(root, "handoff.index.toml", "\n".join([
+            "schema = 1",
+            _rec("HO-1", "handoff", "superseded", "old handoff"),
+            _rec("HO-2", "handoff", "current", "current handoff"),
+        ]) + "\n")
+        write_toml(root, "reference.index.toml", "\n".join([
+            "schema = 1",
+            _rec("RF-1", "reference", "recorded", "a source",
+                 refs=[("doc", "OPF-SPEC.md 10.2")]),
+        ]) + "\n")
+        write_toml(root, "worklog.toml", "\n".join([
+            "schema = 1",
+            _entry("WL-1", "added", "first change"),
+            _entry("WL-2", "fixed", "second change"),
+        ]) + "\n")
+        write_toml(root, "version.toml", "\n".join([
+            "schema = 1",
+            "",
+            "[[release]]",
+            'version = "1.3.0"',
+            'date = "2026-08-30T00:00:00Z"',
+            'worklog_span = ["WL-1", "WL-2"]',
+            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([
+                {"id": "WL-1", "date": "2026-01-01T00:00:00Z", "actor": {"kind": "maintainer"},
+                 "kind": "added", "summary": "first change"},
+                {"id": "WL-2", "date": "2026-01-01T00:00:00Z", "actor": {"kind": "maintainer"},
+                 "kind": "fixed", "summary": "second change"}])),
+            "",
+            "[[summary]]",
+            'covers = "unreleased"',
+            'status = "working"',
+        ]) + "\n")
 
-            # Write mode renders cleanly, then --check is clean (a byte-stable re-render).
-            check("populated-write-ok", render(["--root", str(root)]) == EXIT_OK)
-            check("populated-check-clean", render(["--root", str(root), "--check"]) == EXIT_OK)
-            _wl_on_disk = tomllib.loads((root / WORKING_DIRNAME / "toml" / "worklog.toml").read_text(encoding="utf-8"))
-            _ver_on_disk = tomllib.loads((root / WORKING_DIRNAME / "toml" / "version.toml").read_text(encoding="utf-8"))
-            check("coverage-digest-reconciles-worklog",
-                  _opf_release.coverage_digest(_wl_on_disk.get("entry", []))
-                  == _ver_on_disk["release"][0]["coverage_digest"])
+        # Write mode renders cleanly, then --check is clean (a byte-stable re-render).
+        check("populated-write-ok", render_write(root) == EXIT_OK)
+        check("populated-check-clean", render(["--root", str(root), "--check"]) == EXIT_OK)
+        _wl_on_disk = tomllib.loads((root / WORKING_DIRNAME / "toml" / "worklog.toml").read_text(encoding="utf-8"))
+        _ver_on_disk = tomllib.loads((root / WORKING_DIRNAME / "toml" / "version.toml").read_text(encoding="utf-8"))
+        check("coverage-digest-reconciles-worklog",
+              _opf_release.coverage_digest(_wl_on_disk.get("entry", []))
+              == _ver_on_disk["release"][0]["coverage_digest"])
 
-            def read_view(name):
-                return (root / WORKING_DIRNAME / name).read_text(encoding="utf-8")
+        def read_view(name):
+            return (root / WORKING_DIRNAME / name).read_text(encoding="utf-8")
 
-            todo = read_view("TODO.md")
-            check("join-block-hides-active-block", "BI-2" not in todo)
-            check("join-block-keeps-proposed-block", "BI-3" in todo)
-            check("todo-keeps-open", "BI-10" in todo)
-            check("todo-drops-done", "BI-4" not in todo)
-            check("sort-id-tiebreak-numeric", todo.index("BI-3") < todo.index("BI-10"))
-            check("header-present", todo.startswith("<!-- GENERATED by opf render"))
-            check("header-has-sources", "sources: .working/toml/backlog_item.index.toml" in todo)
-            check("header-has-digest", "source-set-digest: sha256:" in todo)
-            check("header-has-regen", "regenerate: opf render" in todo)
-            check("header-no-timestamp", not re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d", todo.split("-->", 1)[0]))
+        todo = read_view("TODO.md")
+        check("join-block-hides-active-block", "BI-2" not in todo)
+        check("join-block-keeps-proposed-block", "BI-3" in todo)
+        check("todo-keeps-open", "BI-10" in todo)
+        check("todo-drops-done", "BI-4" not in todo)
+        check("sort-id-tiebreak-numeric", todo.index("BI-3") < todo.index("BI-10"))
+        check("header-present", todo.startswith("<!-- GENERATED by opf render"))
+        check("header-has-sources", "sources: .working/toml/backlog_item.index.toml" in todo)
+        check("header-has-digest", "source-set-digest: sha256:" in todo)
+        check("header-has-regen", "regenerate: opf render" in todo)
+        check("header-no-timestamp", not re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d", todo.split("-->", 1)[0]))
 
-            # --- INDEPENDENT expected-bytes goldens for EVERY view (F-09) ------------------------------------
-            # Each golden is a HAND-AUTHORED constant, NOT produced by this module's renderers; it pins the
-            # exact bytes AFTER the do-not-edit header (the header carries a source-set digest, so the body is
-            # the byte-stable region), compared with ==, so corrupting ANY renderer flips this to FAIL. A
-            # LIST-valued field (block scopes) and an ACTOR dict are golden-covered by the two mirror goldens.
-            def body_of(text):
-                marker = "-->\n"
-                return text[text.index(marker) + len(marker):]
+        # --- INDEPENDENT expected-bytes goldens for EVERY view (F-09) ------------------------------------
+        # Each golden is a HAND-AUTHORED constant, NOT produced by this module's renderers; it pins the
+        # exact bytes AFTER the do-not-edit header (the header carries a source-set digest, so the body is
+        # the byte-stable region), compared with ==, so corrupting ANY renderer flips this to FAIL. A
+        # LIST-valued field (block scopes) and an ACTOR dict are golden-covered by the two mirror goldens.
+        def body_of(text):
+            marker = "-->\n"
+            return text[text.index(marker) + len(marker):]
 
-            goldens = {
-                "TODO.md": "\n# TODO\n\n- BI-3 (open) three open\n- BI-10 (open) ten open\n",
-                "BACKLOG.md": ("\n# BACKLOG\n\n- BI-2 (active) two active -- blocked by BL-1\n"
-                               "- BI-3 (open) three open -- actionable\n"
-                               "- BI-4 (done) four done -- not actionable (done)\n"
-                               "- BI-10 (open) ten open -- actionable\n"),
-                "PIPELINE.md": ("\n# PIPELINE\n\n## open\n- BI-3 three open\n- BI-10 ten open\n\n"
-                                "## active\n- BI-2 two active [blocked by BL-1]\n\n## done\n- BI-4 four done\n"),
-                "DONE.md": "\n# DONE\n\n- DN-1 receipt (receipt_of BI-4)\n",
-                "FINDINGS.md": ("\n# FINDINGS\n\n## fixed\n- FN-2 (severity: minor) fixed finding\n\n"
-                                "## open\n- FN-1 open finding\n"),
-                "DECISIONS.md": ("\n# DECISIONS\n\n## Pending decisions\n- PD-3 still open\n\n"
-                                 "## Effective resolutions\n- PD-2 revised ruling (supersedes PD-1)\n\n"
-                                 "## Superseded resolutions\n- PD-1 first ruling\n\n"
-                                 "## Autonomous decisions\n- AD-1 acted\n"),
-                "BLOCKS.md": ("\n# BLOCKS\n\n- BL-1 (active) scopes [BI-2] -- grant\n"
-                              "- BL-2 (active/proposed) scopes [BI-3] -- proposal\n"),
-                "HANDOFF.md": ("\n# HANDOFF\n\n## Current\n- HO-2 current handoff\n\n"
-                               "## Superseded\n- HO-1 old handoff\n"),
-                "REFERENCES.md": "\n# REFERENCES\n\n- RF-1 a source\n  - doc: OPF-SPEC.md 10.2\n",
-                "WORKLOG.md": ("\n# WORKLOG\n\n- WL-1 (2026-01-01T00:00:00Z) [added] first change\n"
-                               "- WL-2 (2026-01-01T00:00:00Z) [fixed] second change\n"),
-                "VERSION.md": ("\n# VERSION\n\n## Releases\n"
-                               "- 1.3.0 (2026-08-30T00:00:00Z) worklog WL-1..WL-2\n\n"
-                               "## Changelog summaries\n- unreleased (working)\n"),
-                "BACKLOG_ITEM-INDEX.md": (
-                    "\n# BACKLOG_ITEM index\n\n"
-                    "## BI-2\n- type: backlog\\_item\n- status: active\n- title: two active\n"
-                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
-                    "## BI-3\n- type: backlog\\_item\n- status: open\n- title: three open\n"
-                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
-                    "## BI-4\n- type: backlog\\_item\n- status: done\n- title: four done\n"
-                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
-                    "## BI-10\n- type: backlog\\_item\n- status: open\n- title: ten open\n"
-                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n"),
-                "BLOCK-INDEX.md": (
-                    "\n# BLOCK index\n\n"
-                    "## BL-1\n- type: block\n- status: active\n- title: grant\n"
-                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- scopes: [BI-2]\n"
-                    "- actor: maintainer\n\n"
-                    "## BL-2\n- type: block\n- status: active/proposed\n- title: proposal\n"
-                    "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- scopes: [BI-3]\n"
-                    "- actor: assistant\n"),
-            }
-            for gname, gbody in sorted(goldens.items()):
-                check("golden-body-" + gname, body_of(read_view(gname)) == gbody)
-            check("golden-version-file-bytes",
-                  (root / "VERSION").read_text(encoding="utf-8") == "1.3.0\n")
+        goldens = {
+            "TODO.md": "\n# TODO\n\n- BI-3 (open) three open\n- BI-10 (open) ten open\n",
+            "BACKLOG.md": ("\n# BACKLOG\n\n- BI-2 (active) two active -- blocked by BL-1\n"
+                           "- BI-3 (open) three open -- actionable\n"
+                           "- BI-4 (done) four done -- not actionable (done)\n"
+                           "- BI-10 (open) ten open -- actionable\n"),
+            "PIPELINE.md": ("\n# PIPELINE\n\n## open\n- BI-3 three open\n- BI-10 ten open\n\n"
+                            "## active\n- BI-2 two active [blocked by BL-1]\n\n## done\n- BI-4 four done\n"),
+            "DONE.md": "\n# DONE\n\n- DN-1 receipt (receipt_of BI-4)\n",
+            "FINDINGS.md": ("\n# FINDINGS\n\n## fixed\n- FN-2 (severity: minor) fixed finding\n\n"
+                            "## open\n- FN-1 open finding\n"),
+            "DECISIONS.md": ("\n# DECISIONS\n\n## Pending decisions\n- PD-3 still open\n\n"
+                             "## Effective resolutions\n- PD-2 revised ruling (supersedes PD-1)\n\n"
+                             "## Superseded resolutions\n- PD-1 first ruling\n\n"
+                             "## Autonomous decisions\n- AD-1 acted\n"),
+            "BLOCKS.md": ("\n# BLOCKS\n\n- BL-1 (active) scopes [BI-2] -- grant\n"
+                          "- BL-2 (active/proposed) scopes [BI-3] -- proposal\n"),
+            "HANDOFF.md": ("\n# HANDOFF\n\n## Current\n- HO-2 current handoff\n\n"
+                           "## Superseded\n- HO-1 old handoff\n"),
+            "REFERENCES.md": "\n# REFERENCES\n\n- RF-1 a source\n  - doc: OPF-SPEC.md 10.2\n",
+            "WORKLOG.md": ("\n# WORKLOG\n\n- WL-1 (2026-01-01T00:00:00Z) [added] first change\n"
+                           "- WL-2 (2026-01-01T00:00:00Z) [fixed] second change\n"),
+            "VERSION.md": ("\n# VERSION\n\n## Releases\n"
+                           "- 1.3.0 (2026-08-30T00:00:00Z) worklog WL-1..WL-2\n\n"
+                           "## Changelog summaries\n- unreleased (working)\n"),
+            "BACKLOG_ITEM-INDEX.md": (
+                "\n# BACKLOG_ITEM index\n\n"
+                "## BI-2\n- type: backlog\\_item\n- status: active\n- title: two active\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
+                "## BI-3\n- type: backlog\\_item\n- status: open\n- title: three open\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
+                "## BI-4\n- type: backlog\\_item\n- status: done\n- title: four done\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n\n"
+                "## BI-10\n- type: backlog\\_item\n- status: open\n- title: ten open\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- actor: maintainer\n"),
+            "BLOCK-INDEX.md": (
+                "\n# BLOCK index\n\n"
+                "## BL-1\n- type: block\n- status: active\n- title: grant\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- scopes: [BI-2]\n"
+                "- actor: maintainer\n\n"
+                "## BL-2\n- type: block\n- status: active/proposed\n- title: proposal\n"
+                "- created_at: 2026-01-01T00:00:00Z\n- updated_at: 2026-01-02T00:00:00Z\n- scopes: [BI-3]\n"
+                "- actor: assistant\n"),
+        }
+        for gname, gbody in sorted(goldens.items()):
+            check("golden-body-" + gname, body_of(read_view(gname)) == gbody)
+        check("golden-version-file-bytes",
+              (root / "VERSION").read_text(encoding="utf-8") == "1.3.0\n")
 
-            # Retained substring checks (redundant with the goldens, kept as readable anchors).
-            backlog = read_view("BACKLOG.md")
-            check("backlog-annotates-blocked", "blocked by BL-1" in backlog)
-            check("backlog-annotates-actionable", "actionable" in backlog)
-            pipeline = read_view("PIPELINE.md")
-            check("pipeline-groups-in-order",
-                  0 < pipeline.index("## open") < pipeline.index("## active") < pipeline.index("## done"))
-            check("pipeline-blocked-marker", "[blocked by BL-1]" in pipeline)
-            decisions = read_view("DECISIONS.md")
-            eff = decisions.index("## Effective resolutions")
-            sup = decisions.index("## Superseded resolutions")
-            check("resolution-head-effective", "PD-2" in decisions[eff:sup])
-            check("resolution-head-names-superseded", "supersedes PD-1" in decisions[eff:sup])
-            check("resolution-superseded-listed", "PD-1" in decisions[sup:])
-            check("resolution-open-listed", "PD-3" in decisions[:eff])
-            check("resolution-autonomous-listed", "AD-1" in decisions)
-            done = read_view("DONE.md")
-            check("done-project-receipt", "receipt_of BI-4" in done)
-            findings = read_view("FINDINGS.md")
-            check("findings-project-severity", "severity: minor" in findings)
-            check("findings-group-status", "## open" in findings and "## fixed" in findings)
-            handoff = read_view("HANDOFF.md")
-            check("handoff-current-first", handoff.index("HO-2") < handoff.index("## Superseded"))
-            version_file = (root / "VERSION").read_text(encoding="utf-8")
-            check("version-file-exact-bytes", version_file == "1.3.0\n")
-            check("version-file-no-header", not version_file.startswith("<!--"))
-            mirror = read_view("BACKLOG_ITEM-INDEX.md")
-            check("mirror-title", "# BACKLOG_ITEM index" in mirror and mirror.startswith("<!-- GENERATED"))
-            check("mirror-projects-record", "## BI-2" in mirror and "- status: active" in mirror)
+        # Retained substring checks (redundant with the goldens, kept as readable anchors).
+        backlog = read_view("BACKLOG.md")
+        check("backlog-annotates-blocked", "blocked by BL-1" in backlog)
+        check("backlog-annotates-actionable", "actionable" in backlog)
+        pipeline = read_view("PIPELINE.md")
+        check("pipeline-groups-in-order",
+              0 < pipeline.index("## open") < pipeline.index("## active") < pipeline.index("## done"))
+        check("pipeline-blocked-marker", "[blocked by BL-1]" in pipeline)
+        decisions = read_view("DECISIONS.md")
+        eff = decisions.index("## Effective resolutions")
+        sup = decisions.index("## Superseded resolutions")
+        check("resolution-head-effective", "PD-2" in decisions[eff:sup])
+        check("resolution-head-names-superseded", "supersedes PD-1" in decisions[eff:sup])
+        check("resolution-superseded-listed", "PD-1" in decisions[sup:])
+        check("resolution-open-listed", "PD-3" in decisions[:eff])
+        check("resolution-autonomous-listed", "AD-1" in decisions)
+        done = read_view("DONE.md")
+        check("done-project-receipt", "receipt_of BI-4" in done)
+        findings = read_view("FINDINGS.md")
+        check("findings-project-severity", "severity: minor" in findings)
+        check("findings-group-status", "## open" in findings and "## fixed" in findings)
+        handoff = read_view("HANDOFF.md")
+        check("handoff-current-first", handoff.index("HO-2") < handoff.index("## Superseded"))
+        version_file = (root / "VERSION").read_text(encoding="utf-8")
+        check("version-file-exact-bytes", version_file == "1.3.0\n")
+        check("version-file-no-header", not version_file.startswith("<!--"))
+        mirror = read_view("BACKLOG_ITEM-INDEX.md")
+        check("mirror-title", "# BACKLOG_ITEM index" in mirror and mirror.startswith("<!-- GENERATED"))
+        check("mirror-projects-record", "## BI-2" in mirror and "- status: active" in mirror)
 
-            # drift: hand-edit a rendered view; --check must report exit 1 with a drift line.
-            (root / WORKING_DIRNAME / "TODO.md").write_text("hand edited\n", encoding="utf-8")
-            check("drift-detected", render(["--root", str(root), "--check"]) == EXIT_DRIFT)
+        # drift: hand-edit a rendered view; --check must report exit 1 with a drift line.
+        (root / WORKING_DIRNAME / "TODO.md").write_text("hand edited\n", encoding="utf-8")
+        check("drift-detected", render(["--root", str(root), "--check"]) == EXIT_DRIFT)
 
-            # --- an EMPTY store renders VALID EMPTY views; its declared VERSION carries one release ----------
-            eroot = new_root()
-            write_toml(eroot, "manifest.toml", manifest)
-            empty_indexes(eroot)
-            # The record indexes stay empty, but the DECLARED VERSION deliverable needs a latest release to
-            # render (spec 6.1): one release, empty span, empty-coverage digest (validate_version is structural
-            # and does not cross-check the worklog, so this is VALID).
-            write_toml(eroot, "version.toml", "\n".join([
-                "schema = 1", "", "[[release]]",
-                'version = "0.1.0"',
-                'date = "2026-01-01T00:00:00Z"',
-                'worklog_span = []',
-                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
-            ]) + "\n")
-            check("empty-write-ok", render(["--root", str(eroot)]) == EXIT_OK)
-            etodo = (eroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
-            check("empty-todo-valid-empty", _EMPTY in etodo and etodo.startswith("<!-- GENERATED"))
-            check("empty-store-version-bytes", (eroot / "VERSION").read_text(encoding="utf-8") == "0.1.0\n")
-
-            # --- F3: a declared VERSION with an EMPTY version ledger fails closed, never a zero-byte write ----
-            # (Runs under the scaffolded gate ON, so it reaches rendering and fails at F3, not the F1 write gate.)
-            vroot = new_root()
-            write_toml(vroot, "manifest.toml", manifest)
-            empty_indexes(vroot)
-            write_toml(vroot, "version.toml", "schema = 1\n")   # OVERRIDE: declared but no-release ledger
-            check("empty-version-cannot-eval", render(["--root", str(vroot)]) == EXIT_CANNOT_EVALUATE)
-            check("empty-version-not-zero-byte", not (vroot / "VERSION").exists())
-
-            # --- a MISSING declared source fails closed (exit 2) --------------------------------------------
-            mroot = new_root()
-            write_toml(mroot, "manifest.toml", manifest)
-            empty_indexes(mroot)
-            (mroot / WORKING_DIRNAME / "toml" / "block.index.toml").unlink()   # TODO/BACKLOG/BLOCKS/BLOCK-INDEX need it
-            check("missing-source-cannot-eval", render(["--root", str(mroot)]) == EXIT_CANNOT_EVALUATE)
-
-            # --- a MALFORMED record fails closed (exit 2), never a silent partial view ----------------------
-            broot = new_root()
-            write_toml(broot, "manifest.toml", manifest)
-            empty_indexes(broot)
-            write_toml(broot, "finding.index.toml", "\n".join([
-                "schema = 1",
-                _rec("FN-1", "finding", "not-a-state", "bad status"),   # illegal status: INVALID record
-            ]) + "\n")
-            check("malformed-record-cannot-eval", render(["--root", str(broot)]) == EXIT_CANNOT_EVALUATE)
-
-            s2root = new_root(); write_toml(s2root, "manifest.toml", manifest); empty_indexes(s2root)
-            write_toml(s2root, "backlog_item.index.toml", "schema = 2\n")
-            check("index-schema-pin-cannot-eval", render(["--root", str(s2root)]) == EXIT_CANNOT_EVALUATE)
-            stroot = new_root(); write_toml(stroot, "manifest.toml", manifest); empty_indexes(stroot)
-            write_toml(stroot, "backlog_item.index.toml", "schema = true\n")
-            check("index-schema-bool-cannot-eval", render(["--root", str(stroot)]) == EXIT_CANNOT_EVALUATE)
-            saroot = new_root(); write_toml(saroot, "manifest.toml", manifest); empty_indexes(saroot)
-            write_toml(saroot, "backlog_item.index.toml", "record = []\n")
-            check("index-schema-absent-cannot-eval", render(["--root", str(saroot)]) == EXIT_CANNOT_EVALUATE)
-            ukroot = new_root(); write_toml(ukroot, "manifest.toml", manifest); empty_indexes(ukroot)
-            write_toml(ukroot, "backlog_item.index.toml", "schema = 1\nbogus_table = 1\n")
-            check("index-unknown-key-cannot-eval", render(["--root", str(ukroot)]) == EXIT_CANNOT_EVALUATE)
-            naroot = new_root(); write_toml(naroot, "manifest.toml", manifest); empty_indexes(naroot)
-            write_toml(naroot, "backlog_item.index.toml", "schema = 1\nrecord = 3\n")
-            check("index-record-not-array-cannot-eval", render(["--root", str(naroot)]) == EXIT_CANNOT_EVALUATE)
-            duroot = new_root()
-            write_toml(duroot, "manifest.toml",
-                       manifest.replace('sources = ["done"]', 'sources = ["done", "done"]'))
-            empty_indexes(duroot)
-            check("duplicate-source-cannot-eval", render(["--root", str(duroot)]) == EXIT_CANNOT_EVALUATE)
-
-            # --- F-01: a manifest target that does not match the view's spec destination fails closed --------
-            troot = new_root()
-            write_toml(troot, "manifest.toml",
-                       manifest.replace('target = "{}/TODO.md"'.format(WORKING_DIRNAME), 'target = "README.md"'))
-            empty_indexes(troot)
-            check("target-rebind-cannot-eval", render(["--root", str(troot)]) == EXIT_CANNOT_EVALUATE)
-            check("target-rebind-not-written", not (troot / "README.md").exists())
-
-            # --- F-01: a pre-planted symlink destination is refused (no-follow), the link target untouched ---
-            symroot = new_root()
-            write_toml(symroot, "manifest.toml", manifest)
-            empty_indexes(symroot)
-            write_toml(symroot, "version.toml", "\n".join([
-                "schema = 1", "", "[[release]]",
-                'version = "0.1.0"',
-                'date = "2026-01-01T00:00:00Z"',
-                'worklog_span = []',
-                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
-            ]) + "\n")
-            outside = symroot / "outside.txt"
-            outside.write_text("original\n", encoding="utf-8")
-            (symroot / WORKING_DIRNAME / "TODO.md").symlink_to(outside)
-            check("symlink-dest-cannot-eval", render(["--root", str(symroot)]) == EXIT_CANNOT_EVALUATE)
-            check("symlink-dest-not-followed", outside.read_text(encoding="utf-8") == "original\n")
-
-            # --- F-03: an EXTRA declared source beyond a view's required set fails closed --------------------
-            xroot = new_root()
-            write_toml(xroot, "manifest.toml",
-                       manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
-            empty_indexes(xroot)
-            check("extra-source-cannot-eval", render(["--root", str(xroot)]) == EXIT_CANNOT_EVALUATE)
-
-            # --- F-03: the same extra declared source, now MALFORMED, also fails closed ----------------------
-            xmroot = new_root()
-            write_toml(xmroot, "manifest.toml",
-                       manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
-            empty_indexes(xmroot)
-            write_toml(xmroot, "finding.index.toml", "\n".join([
-                "schema = 1", _rec("FN-1", "finding", "not-a-state", "bad status")]) + "\n")
-            check("extra-source-malformed-cannot-eval", render(["--root", str(xmroot)]) == EXIT_CANNOT_EVALUATE)
-
-            # --- F-04: a FORK in the decision-resolution graph (two heads for one chain) fails closed --------
-            fkroot = new_root()
-            write_toml(fkroot, "manifest.toml", manifest)
-            empty_indexes(fkroot)
-            write_toml(fkroot, "pending_decision.index.toml", "\n".join([
-                "schema = 1",
-                _rec("PD-1", "pending_decision", "decided", "base", decision="d",
-                     decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
-                _rec("PD-2", "pending_decision", "decided", "two", decision="d",
-                     decided_at="2026-09-02T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
-                _rec("PD-3", "pending_decision", "decided", "three", decision="d",
-                     decided_at="2026-09-03T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
-            ]) + "\n")
-            check("resolution-fork-cannot-eval", render(["--root", str(fkroot)]) == EXIT_CANNOT_EVALUATE)
-
-            # --- F-04: a CYCLE in the decision-resolution graph fails closed (and does not hang) ------------
-            cyroot = new_root()
-            write_toml(cyroot, "manifest.toml", manifest)
-            empty_indexes(cyroot)
-            write_toml(cyroot, "pending_decision.index.toml", "\n".join([
-                "schema = 1",
-                _rec("PD-1", "pending_decision", "decided", "one", decision="d",
-                     decided_at="2026-09-01T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-2")]),
-                _rec("PD-2", "pending_decision", "decided", "two", decision="d",
-                     decided_at="2026-09-02T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
-            ]) + "\n")
-            check("resolution-cycle-cannot-eval", render(["--root", str(cyroot)]) == EXIT_CANNOT_EVALUATE)
-
-            # --- F-07: deeply nested TOML trips tomllib recursion; mapped to cannot-evaluate, not a crash ---
-            rroot = new_root()
-            write_toml(rroot, "manifest.toml", manifest)
-            empty_indexes(rroot)
-            deep = "schema = 1\ndeep = " + "[" * 2000 + "]" * 2000 + "\n"   # nesting safely above the recursion limit
-            write_toml(rroot, "finding.index.toml", deep)
-            check("deep-toml-recursion-cannot-eval", render(["--root", str(rroot)]) == EXIT_CANNOT_EVALUATE)
-
-            # --- a non-UTF-8 machine-dir name is rejected fail-closed UNIVERSALLY, even for a header-exempt
-            # VERSION-only store. Before render()'s explicit early machine_rel UTF-8 check this store rendered
-            # exit 0: the VERSION deliverable is header-exempt, so _source_set_digest never encoded the bad
-            # path and nothing else keyed on its UTF-8 validity. A discovered machine-dir name is UTF-8 by
-            # convention; a surrogate-escaped non-UTF-8 byte must be refused (exit 2) regardless of which
-            # views are declared. This vector FAILS if that early check is reverted.
-            nuroot = base / "case-nonutf8"
-            nuworking = nuroot / WORKING_DIRNAME
-            nuworking.mkdir(parents=True)
-            nu_machine = os.fsencode(str(nuworking)) + b"/bad-\xff-dir"   # non-UTF-8 machine-dir name (bytes)
-            os.mkdir(nu_machine)
-            version_only_manifest = "\n".join([
-                "[devprocess]",
-                'standard = "devprocess"',
-                'spec_version = "1.0.0"',
-                'layout = "inline"',
-                'posture = "required"',
-                'import_status = "none"',
-                "",
-                "[store]",
-                'sync_target = ""',
-                "",
-                "[modules]",
-                "governance = true",
-                "operational_policy = true",
-                "concurrent_operation = true",
-                "",
-                "[types.backlog_item]", 'namespace = "BI"',
-                "[types.done]", 'namespace = "DN"',
-                "[types.worklog]", 'namespace = "WL"',
-                "[types.finding]", 'namespace = "FN"',
-                "[types.pending_decision]", 'namespace = "PD"',
-                "[types.autonomous_decision]", 'namespace = "AD"',
-                "[types.block]", 'namespace = "BL"',
-                "[types.handoff]", 'namespace = "HO"',
-                "[types.reference]", 'namespace = "RF"',
-                "",
-                "[vendors]", "registered = []",
-                "",
-                _view("VERSION", "deterministic", ["version"]),
-            ]) + "\n"
-            with open(os.path.join(nu_machine, b"manifest.toml"), "w", encoding="utf-8") as _mf:
-                _mf.write(version_only_manifest)
-            with open(os.path.join(nu_machine, b"version.toml"), "w", encoding="utf-8") as _vf:
-                _vf.write("\n".join([
-                    "schema = 1", "", "[[release]]",
-                    'version = "0.1.0"',
-                    'date = "2026-01-01T00:00:00Z"',
-                    'worklog_span = []',
-                    'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
-                ]) + "\n")
-            # A matching root VERSION, so pre-fix --check would drift-compare to exit 0; post-fix the early
-            # UTF-8 refusal returns exit 2 BEFORE any view is rendered or compared.
-            (nuroot / "VERSION").write_text("0.1.0\n", encoding="utf-8")
-            check("nonutf8-machine-dir-cannot-eval",
-                  render(["--root", str(nuroot), "--check"]) == EXIT_CANNOT_EVALUATE)
-
-            # --- F-08: a free-text field cannot forge markdown/HTML structure (escaped, render still clean) --
-            forgeroot = new_root()
-            write_toml(forgeroot, "manifest.toml", manifest)
-            empty_indexes(forgeroot)
-            write_toml(forgeroot, "version.toml", "\n".join([
-                "schema = 1", "", "[[release]]",
-                'version = "0.1.0"',
-                'date = "2026-01-01T00:00:00Z"',
-                'worklog_span = []',
-                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
-            ]) + "\n")
-            write_toml(forgeroot, "reference.index.toml", "\n".join([
-                "schema = 1",
-                _rec("RF-1", "reference", "recorded", "a source",
-                     refs=[("doc", "safe\\n# Forged heading\\n<!-- injected -->")]),
-            ]) + "\n")
-            check("forged-field-write-ok", render(["--root", str(forgeroot)]) == EXIT_OK)
-            forged_view = (forgeroot / WORKING_DIRNAME / "REFERENCES.md").read_text(encoding="utf-8")
-            check("forged-heading-neutralized", "\n# Forged heading" not in body_of(forged_view))
-            check("forged-comment-neutralized", "<!-- injected -->" not in forged_view)
-
-            # --- F-05: a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --
-            prroot = new_root()
-            write_toml(prroot, "manifest.toml", manifest.replace('layout = "inline"', 'layout = "per-record"'))
-            empty_indexes(prroot)
-            check("per-record-deferred-cannot-eval", render(["--root", str(prroot)]) == EXIT_CANNOT_EVALUATE)
-
-            # --- B2 class-wide: a VALID record in EVERY free-text sink carries the P payload; each view
-            # renders it as LITERAL text. This drives the FULL pipeline (validate -> render -> write ->
-            # read) under the scaffolded gate, so every record is a schema-valid envelope, not a hand-built
-            # dict. Each affected view is asserted to contain the EXACT escaped bytes ESC and NOT the raw
-            # payload P, so removing _md_text from any sink that feeds that view flips an assertion. The
-            # schema-CONSTRAINED sinks (id, status/state, scopes, link ids, timestamps) cannot carry a
-            # metacharacter, so their escaping is a verified no-op; the free-text sinks are the movable ones.
-            injroot = new_root()
-            write_toml(injroot, "manifest.toml", manifest)
-            empty_indexes(injroot)
-            write_toml(injroot, "backlog_item.index.toml", "\n".join([
-                "schema = 1",
-                _rec("BI-1", "backlog_item", "open", P),
-            ]) + "\n")
-            write_toml(injroot, "block.index.toml", "\n".join([
-                "schema = 1",
-                _rec("BL-1", "block", "active", P, scopes=["BI-2"]),   # scopes BI-2, not BI-1: BI-1 stays actionable
-            ]) + "\n")
-            write_toml(injroot, "done.index.toml", "\n".join([
-                "schema = 1",
-                _rec("DN-1", "done", "recorded", P, links=[("receipt_of", "BI-1")]),
-            ]) + "\n")
-            write_toml(injroot, "finding.index.toml", "\n".join([
-                "schema = 1",
-                _rec("FN-1", "finding", "fixed", "f", severity=P),
-            ]) + "\n")
-            write_toml(injroot, "pending_decision.index.toml", "\n".join([
-                "schema = 1",
-                _rec("PD-1", "pending_decision", "decided", P, decision=P,
-                     decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
-            ]) + "\n")
-            write_toml(injroot, "autonomous_decision.index.toml", "\n".join([
-                "schema = 1",
-                _rec("AD-1", "autonomous_decision", "recorded", P, classification=P, action=P),
-            ]) + "\n")
-            write_toml(injroot, "handoff.index.toml", "\n".join([
-                "schema = 1",
-                _rec("HO-1", "handoff", "current", P),
-            ]) + "\n")
-            write_toml(injroot, "reference.index.toml", "\n".join([
-                "schema = 1",
-                _rec("RF-1", "reference", "recorded", P, refs=[("doc", P)]),
-            ]) + "\n")
-            write_toml(injroot, "worklog.toml", "\n".join([
-                "schema = 1",
-                _entry("WL-1", "added", P),
-            ]) + "\n")
-            write_toml(injroot, "version.toml", "\n".join([
-                "schema = 1", "", "[[release]]",
-                'version = "0.1.0"',
-                'date = "2026-01-01T00:00:00Z"',
-                'worklog_span = []',
-                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
-            ]) + "\n")
-            check("class-wide-injection-write-ok", render(["--root", str(injroot)]) == EXIT_OK)
-
-            def iview(name):
-                return body_of((injroot / WORKING_DIRNAME / name).read_text(encoding="utf-8"))
-
-            # Every view whose body carries a free-text sink fed by P must contain ESC and never the raw
-            # P: TODO/BACKLOG/PIPELINE (backlog title), DONE (done title), FINDINGS (severity), DECISIONS
-            # (pending + autonomous titles), BLOCKS (block title), HANDOFF (handoff title), REFERENCES
-            # (reference title + ref locator), WORKLOG (summary), and the two declared mirrors (title
-            # projection). VERSION/VERSION.md are covered by the unit render_version_md vector above
-            # (their release/summary fields are grammar-constrained).
-            for _vn in ("TODO.md", "BACKLOG.md", "PIPELINE.md", "DONE.md", "FINDINGS.md",
-                        "DECISIONS.md", "BLOCKS.md", "HANDOFF.md", "REFERENCES.md", "WORKLOG.md",
-                        "BACKLOG_ITEM-INDEX.md", "BLOCK-INDEX.md"):
-                _body = iview(_vn)
-                check("class-wide-esc-present-" + _vn, ESC in _body)
-                check("class-wide-no-raw-payload-" + _vn, P not in _body)
-
-            # CLASS B (codex, full-render fail-closed): a SCHEMA-VALID backlog_item whose title carries a
-            # zero-width or bidi-control codepoint renders a view body whose bytes fail the authoritative
-            # byte-canon scan. The generator FAILS CLOSED (cannot-evaluate) and writes NOTHING, rather than
-            # emitting an invalid view. Driven under the scaffolded write gate; pre-fix this rendered clean
-            # (exit 0) and wrote invalid bytes. A lone CR is excluded: _md_text collapses it upstream.
-            _bc_version = "\n".join([
-                "schema = 1", "", "[[release]]",
-                'version = "0.1.0"',
-                'date = "2026-01-01T00:00:00Z"',
-                'worklog_span = []',
-                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
-            ]) + "\n"
-            for _bcls, _bcp in (("zero-width-u200b", 0x200B), ("zero-width-u200c", 0x200C),
-                                ("zero-width-u200d", 0x200D), ("word-joiner-u2060", 0x2060),
-                                ("bom-ufeff", 0xFEFF), ("bidi-rlo-u202e", 0x202E)):
-                _bcroot = new_root()
-                write_toml(_bcroot, "manifest.toml", manifest)
-                empty_indexes(_bcroot)
-                write_toml(_bcroot, "version.toml", _bc_version)
-                write_toml(_bcroot, "backlog_item.index.toml", "\n".join([
-                    "schema = 1",
-                    _rec("BI-1", "backlog_item", "open", "title" + chr(_bcp) + "here"),
-                ]) + "\n")
-                check("byte-canon-fail-closed-" + _bcls,
-                      render(["--root", str(_bcroot)]) == EXIT_CANNOT_EVALUATE)
-                check("byte-canon-wrote-nothing-" + _bcls,
-                      not (_bcroot / WORKING_DIRNAME / "TODO.md").exists())
-
-            # round-3 (CLASS B positive): a SCHEMA-VALID backlog_item whose title merely ends in a SPACE
-            # renders a body line ending in whitespace; _render_resolved now normalizes trailing line
-            # whitespace before the byte-canon scan, so the render SUCCEEDS (EXIT_OK) and writes a clean
-            # view. Pre round-3 this failed closed at exit 2 over benign trailing whitespace. Modelled on the
-            # CLASS B store construction; proves the over-fire fix end to end, not only at a unit level.
-            import check_byte_canon  # authoritative byte-canon leg; pure function over bytes
-            _tsroot = new_root()
-            write_toml(_tsroot, "manifest.toml", manifest)
-            empty_indexes(_tsroot)
-            write_toml(_tsroot, "version.toml", _bc_version)
-            write_toml(_tsroot, "backlog_item.index.toml", "\n".join([
-                "schema = 1",
-                _rec("BI-1", "backlog_item", "open", "trailing space title "),
-            ]) + "\n")
-            check("trailing-space-title-renders",
-                  render(["--root", str(_tsroot)]) == EXIT_OK)
-            _tstodo = (_tsroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
-            # (a) the title text survived, minus its trailing whitespace (no rendered line ends in space/tab);
-            # (b) exactly one terminal newline; (c) the emitted bytes pass the authoritative byte-canon scan.
-            check("trailing-space-title-text-survived", "trailing space title" in _tstodo)
-            check("trailing-space-title-no-trailing-ws",
-                  all(not ln.endswith((" ", "\t")) for ln in _tstodo.split("\n")))
-            check("trailing-space-title-one-terminal-newline",
-                  _tstodo.endswith("\n") and not _tstodo.endswith("\n\n"))
-            check("trailing-space-title-byte-canon-clean",
-                  check_byte_canon.scan_bytes(_tstodo.encode("utf-8")) == [])
-
-            # round-3 (Unicode fix): a title ending in a NON-BREAKING SPACE (U+00A0) is ALSO normalized out
-            # by _render_resolved's Unicode str.rstrip() (the SAME predicate check_byte_canon uses), so it
-            # renders clean (EXIT_OK) rather than over-firing the byte-canon refusal. This proves the fix
-            # covers the Unicode trailing-whitespace codepoints, not only ASCII space/tab.
-            _tsnbroot = new_root()
-            write_toml(_tsnbroot, "manifest.toml", manifest)
-            empty_indexes(_tsnbroot)
-            write_toml(_tsnbroot, "version.toml", _bc_version)
-            write_toml(_tsnbroot, "backlog_item.index.toml", "\n".join([
-                "schema = 1",
-                _rec("BI-1", "backlog_item", "open", "trailing nbsp title" + chr(0x00A0)),
-            ]) + "\n")
-            check("trailing-nbsp-title-renders",
-                  render(["--root", str(_tsnbroot)]) == EXIT_OK)
-            _tsnbtodo = (_tsnbroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
-            check("trailing-nbsp-title-text-survived", "trailing nbsp title" in _tsnbtodo)
-            check("trailing-nbsp-title-normalized", chr(0x00A0) not in _tsnbtodo)
-            check("trailing-nbsp-title-byte-canon-clean",
-                  check_byte_canon.scan_bytes(_tsnbtodo.encode("utf-8")) == [])
-
-            # CLASS 3 (B3): /proposed is NONTERMINAL, and `withdrawn` is a valid terminal. In PIPELINE,
-            # DECISIONS, and HANDOFF a proposed record is surfaced as AWAITING RATIFICATION (never under its
-            # effective/terminal state, never omitted), and no valid status is dropped. This full VALID
-            # store carries a done/proposed backlog item, a withdrawn and a decided/proposed decision, and a
-            # superseded/proposed handoff; reverting any Class-3 renderer flips an assertion below. Runs
-            # under the scaffolded write gate so the full validate->render->write->read pipeline exercises
-            # schema-valid envelopes (a decided/proposed carries the full resolution bundle, spec 8.5).
-            proproot = new_root()
-            write_toml(proproot, "manifest.toml", manifest)
-            empty_indexes(proproot)
-            write_toml(proproot, "backlog_item.index.toml", "\n".join([
-                "schema = 1",
-                _rec("BI-1", "backlog_item", "open", "still open"),
-                _rec("BI-7", "backlog_item", "done/proposed", "proposed done", actor="assistant"),
-            ]) + "\n")
-            write_toml(proproot, "pending_decision.index.toml", "\n".join([
-                "schema = 1",
-                _rec("PD-1", "pending_decision", "withdrawn", "withdrew it"),
-                _rec("PD-2", "pending_decision", "decided/proposed", "proposed ruling", actor="assistant",
-                     decision="do Z", decided_at="2026-09-02T00:00:00Z", decided_by="maintainer"),
-            ]) + "\n")
-            write_toml(proproot, "handoff.index.toml", "\n".join([
-                "schema = 1",
-                _rec("HO-1", "handoff", "current", "the current handoff"),
-                _rec("HO-2", "handoff", "superseded/proposed", "proposed supersede", actor="assistant"),
-            ]) + "\n")
-            write_toml(proproot, "version.toml", "\n".join([
-                "schema = 1", "", "[[release]]",
-                'version = "0.1.0"',
-                'date = "2026-01-01T00:00:00Z"',
-                'worklog_span = []',
-                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
-            ]) + "\n")
-            check("proposed-store-write-ok", render(["--root", str(proproot)]) == EXIT_OK)
-
-            def pview(name):
-                return (proproot / WORKING_DIRNAME / name).read_text(encoding="utf-8")
-
-            ppl = pview("PIPELINE.md")
-            check("pipeline-proposed-awaiting-section", "## awaiting ratification" in ppl)
-            check("pipeline-proposed-shows-full-status", "done/proposed" in ppl)
-            check("pipeline-proposed-not-in-effective-group", "## done" not in ppl)
-            pdec = pview("DECISIONS.md")
-            check("decisions-withdrawn-section", "## Withdrawn decisions" in pdec)
-            check("decisions-withdrawn-record-listed", "PD-1" in pdec)
-            check("decisions-proposed-awaiting-section", "## Awaiting ratification" in pdec)
-            check("decisions-proposed-shows-full-status", "decided/proposed" in pdec)
-            _eff = pdec.index("## Effective resolutions")
-            _awa = pdec.index("## Awaiting ratification")
-            check("decisions-proposed-not-effective", "PD-2" in pdec[_awa:] and "PD-2" not in pdec[_eff:_awa])
-            pho = pview("HANDOFF.md")
-            check("handoff-proposed-awaiting-section", "## Awaiting ratification" in pho)
-            check("handoff-proposed-shows-full-status", "superseded/proposed" in pho)
-            _sup = pho.index("## Superseded")
-            _hawa = pho.index("## Awaiting ratification")
-            check("handoff-proposed-not-in-superseded", "HO-2" in pho[_hawa:] and "HO-2" not in pho[_sup:_hawa])
-        finally:
-            _WRITE_GATE_COMPOSED = _saved_gate
-
-        # --- gate-OFF fail-safe region (F1 write gate at its default False) -------------------------
-        na = base / "not-adopted"
-        na.mkdir()
-        check("not-adopted-not-applicable", render(["--root", str(na)]) == EXIT_OK)
-        # F1: an ungated WRITE via any entry is refused (cannot-evaluate) and writes nothing. wroot carries
-        # a VALID one-release version.toml (like eroot/symroot), so that with the F1 sentinel flipped True
-        # the render would proceed to a clean write (exit 0) rather than fail at F3's empty-VERSION guard;
-        # that makes this pair FAIL for the F1 mutant (unmasking the write-gate test, M2), while at the real
-        # default (gate False) the write is refused at exit 2 and nothing is written.
-        wroot = new_root()
-        write_toml(wroot, "manifest.toml", manifest)
-        empty_indexes(wroot)
-        write_toml(wroot, "version.toml", "\n".join([
+        # --- an EMPTY store renders VALID EMPTY views; its declared VERSION carries one release ----------
+        eroot = new_root()
+        write_toml(eroot, "manifest.toml", manifest)
+        empty_indexes(eroot)
+        # The record indexes stay empty, but the DECLARED VERSION deliverable needs a latest release to
+        # render (spec 6.1): one release, empty span, empty-coverage digest (validate_version is structural
+        # and does not cross-check the worklog, so this is VALID).
+        write_toml(eroot, "version.toml", "\n".join([
             "schema = 1", "", "[[release]]",
             'version = "0.1.0"',
             'date = "2026-01-01T00:00:00Z"',
             'worklog_span = []',
             'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
         ]) + "\n")
-        check("write-refused-without-integrity-gate", render(["--root", str(wroot)]) == EXIT_CANNOT_EVALUATE)
-        check("write-refused-wrote-nothing", not (wroot / WORKING_DIRNAME / "TODO.md").exists())
-        # --check is unaffected by the write gate: eroot's views were already written under the scaffold
-        # above, and eroot is byte-stable (nothing edited it), so a read-only re-check is clean.
-        check("check-mode-works-without-gate", render(["--root", str(eroot), "--check"]) == EXIT_OK)
-        # F10 CLI fail-closed parse (parse precedes resolution; na isolates this from the write gate).
+        check("empty-write-ok", render_write(eroot) == EXIT_OK)
+        etodo = (eroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
+        check("empty-todo-valid-empty", _EMPTY in etodo and etodo.startswith("<!-- GENERATED"))
+        check("empty-store-version-bytes", (eroot / "VERSION").read_text(encoding="utf-8") == "0.1.0\n")
+
+        # --- F3: a declared VERSION with an EMPTY version ledger fails closed, never a zero-byte write ----
+        # (Runs under the scaffolded gate ON, so it reaches rendering and fails at F3, not the F1 write gate.)
+        vroot = new_root()
+        write_toml(vroot, "manifest.toml", manifest)
+        empty_indexes(vroot)
+        write_toml(vroot, "version.toml", "schema = 1\n")   # OVERRIDE: declared but no-release ledger
+        check("empty-version-cannot-eval", render_write(vroot) == EXIT_CANNOT_EVALUATE)
+        check("empty-version-not-zero-byte", not (vroot / "VERSION").exists())
+
+        # --- a MISSING declared source fails closed (exit 2) --------------------------------------------
+        mroot = new_root()
+        write_toml(mroot, "manifest.toml", manifest)
+        empty_indexes(mroot)
+        (mroot / WORKING_DIRNAME / "toml" / "block.index.toml").unlink()   # TODO/BACKLOG/BLOCKS/BLOCK-INDEX need it
+        check("missing-source-cannot-eval", render_write(mroot) == EXIT_CANNOT_EVALUATE)
+
+        # --- a MALFORMED record fails closed (exit 2), never a silent partial view ----------------------
+        broot = new_root()
+        write_toml(broot, "manifest.toml", manifest)
+        empty_indexes(broot)
+        write_toml(broot, "finding.index.toml", "\n".join([
+            "schema = 1",
+            _rec("FN-1", "finding", "not-a-state", "bad status"),   # illegal status: INVALID record
+        ]) + "\n")
+        check("malformed-record-cannot-eval", render_write(broot) == EXIT_CANNOT_EVALUATE)
+
+        s2root = new_root(); write_toml(s2root, "manifest.toml", manifest); empty_indexes(s2root)
+        write_toml(s2root, "backlog_item.index.toml", "schema = 2\n")
+        check("index-schema-pin-cannot-eval", render_write(s2root) == EXIT_CANNOT_EVALUATE)
+        stroot = new_root(); write_toml(stroot, "manifest.toml", manifest); empty_indexes(stroot)
+        write_toml(stroot, "backlog_item.index.toml", "schema = true\n")
+        check("index-schema-bool-cannot-eval", render_write(stroot) == EXIT_CANNOT_EVALUATE)
+        saroot = new_root(); write_toml(saroot, "manifest.toml", manifest); empty_indexes(saroot)
+        write_toml(saroot, "backlog_item.index.toml", "record = []\n")
+        check("index-schema-absent-cannot-eval", render_write(saroot) == EXIT_CANNOT_EVALUATE)
+        ukroot = new_root(); write_toml(ukroot, "manifest.toml", manifest); empty_indexes(ukroot)
+        write_toml(ukroot, "backlog_item.index.toml", "schema = 1\nbogus_table = 1\n")
+        check("index-unknown-key-cannot-eval", render_write(ukroot) == EXIT_CANNOT_EVALUATE)
+        naroot = new_root(); write_toml(naroot, "manifest.toml", manifest); empty_indexes(naroot)
+        write_toml(naroot, "backlog_item.index.toml", "schema = 1\nrecord = 3\n")
+        check("index-record-not-array-cannot-eval", render_write(naroot) == EXIT_CANNOT_EVALUATE)
+        duroot = new_root()
+        write_toml(duroot, "manifest.toml",
+                   manifest.replace('sources = ["done"]', 'sources = ["done", "done"]'))
+        empty_indexes(duroot)
+        check("duplicate-source-cannot-eval", render_write(duroot) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-01: a manifest target that does not match the view's spec destination fails closed --------
+        troot = new_root()
+        write_toml(troot, "manifest.toml",
+                   manifest.replace('target = "{}/TODO.md"'.format(WORKING_DIRNAME), 'target = "README.md"'))
+        empty_indexes(troot)
+        check("target-rebind-cannot-eval", render_write(troot) == EXIT_CANNOT_EVALUATE)
+        check("target-rebind-not-written", not (troot / "README.md").exists())
+
+        # --- F-01: a pre-planted symlink destination is refused (no-follow), the link target untouched ---
+        symroot = new_root()
+        write_toml(symroot, "manifest.toml", manifest)
+        empty_indexes(symroot)
+        write_toml(symroot, "version.toml", "\n".join([
+            "schema = 1", "", "[[release]]",
+            'version = "0.1.0"',
+            'date = "2026-01-01T00:00:00Z"',
+            'worklog_span = []',
+            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+        ]) + "\n")
+        outside = symroot / "outside.txt"
+        outside.write_text("original\n", encoding="utf-8")
+        (symroot / WORKING_DIRNAME / "TODO.md").symlink_to(outside)
+        check("symlink-dest-cannot-eval", render_write(symroot) == EXIT_CANNOT_EVALUATE)
+        check("symlink-dest-not-followed", outside.read_text(encoding="utf-8") == "original\n")
+
+        # --- F-03: an EXTRA declared source beyond a view's required set fails closed --------------------
+        xroot = new_root()
+        write_toml(xroot, "manifest.toml",
+                   manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
+        empty_indexes(xroot)
+        check("extra-source-cannot-eval", render_write(xroot) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-03: the same extra declared source, now MALFORMED, also fails closed ----------------------
+        xmroot = new_root()
+        write_toml(xmroot, "manifest.toml",
+                   manifest.replace('sources = ["done"]', 'sources = ["done", "finding"]'))
+        empty_indexes(xmroot)
+        write_toml(xmroot, "finding.index.toml", "\n".join([
+            "schema = 1", _rec("FN-1", "finding", "not-a-state", "bad status")]) + "\n")
+        check("extra-source-malformed-cannot-eval", render_write(xmroot) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-04: a FORK in the decision-resolution graph (two heads for one chain) fails closed --------
+        fkroot = new_root()
+        write_toml(fkroot, "manifest.toml", manifest)
+        empty_indexes(fkroot)
+        write_toml(fkroot, "pending_decision.index.toml", "\n".join([
+            "schema = 1",
+            _rec("PD-1", "pending_decision", "decided", "base", decision="d",
+                 decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
+            _rec("PD-2", "pending_decision", "decided", "two", decision="d",
+                 decided_at="2026-09-02T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
+            _rec("PD-3", "pending_decision", "decided", "three", decision="d",
+                 decided_at="2026-09-03T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
+        ]) + "\n")
+        check("resolution-fork-cannot-eval", render_write(fkroot) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-04: a CYCLE in the decision-resolution graph fails closed (and does not hang) ------------
+        cyroot = new_root()
+        write_toml(cyroot, "manifest.toml", manifest)
+        empty_indexes(cyroot)
+        write_toml(cyroot, "pending_decision.index.toml", "\n".join([
+            "schema = 1",
+            _rec("PD-1", "pending_decision", "decided", "one", decision="d",
+                 decided_at="2026-09-01T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-2")]),
+            _rec("PD-2", "pending_decision", "decided", "two", decision="d",
+                 decided_at="2026-09-02T00:00:00Z", decided_by="maintainer", links=[("supersedes", "PD-1")]),
+        ]) + "\n")
+        check("resolution-cycle-cannot-eval", render_write(cyroot) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-07: deeply nested TOML trips tomllib recursion; mapped to cannot-evaluate, not a crash ---
+        rroot = new_root()
+        write_toml(rroot, "manifest.toml", manifest)
+        empty_indexes(rroot)
+        deep = "schema = 1\ndeep = " + "[" * 2000 + "]" * 2000 + "\n"   # nesting safely above the recursion limit
+        write_toml(rroot, "finding.index.toml", deep)
+        check("deep-toml-recursion-cannot-eval", render_write(rroot) == EXIT_CANNOT_EVALUATE)
+
+        # --- a non-UTF-8 machine-dir name is rejected fail-closed UNIVERSALLY, even for a header-exempt
+        # VERSION-only store. Before render()'s explicit early machine_rel UTF-8 check this store rendered
+        # exit 0: the VERSION deliverable is header-exempt, so _source_set_digest never encoded the bad
+        # path and nothing else keyed on its UTF-8 validity. A discovered machine-dir name is UTF-8 by
+        # convention; a surrogate-escaped non-UTF-8 byte must be refused (exit 2) regardless of which
+        # views are declared. This vector FAILS if that early check is reverted.
+        nuroot = base / "case-nonutf8"
+        nuworking = nuroot / WORKING_DIRNAME
+        nuworking.mkdir(parents=True)
+        nu_machine = os.fsencode(str(nuworking)) + b"/bad-\xff-dir"   # non-UTF-8 machine-dir name (bytes)
+        os.mkdir(nu_machine)
+        version_only_manifest = "\n".join([
+            "[devprocess]",
+            'standard = "devprocess"',
+            'spec_version = "1.0.0"',
+            'layout = "inline"',
+            'posture = "required"',
+            'import_status = "none"',
+            "",
+            "[store]",
+            'sync_target = ""',
+            "",
+            "[modules]",
+            "governance = true",
+            "operational_policy = true",
+            "concurrent_operation = true",
+            "",
+            "[types.backlog_item]", 'namespace = "BI"',
+            "[types.done]", 'namespace = "DN"',
+            "[types.worklog]", 'namespace = "WL"',
+            "[types.finding]", 'namespace = "FN"',
+            "[types.pending_decision]", 'namespace = "PD"',
+            "[types.autonomous_decision]", 'namespace = "AD"',
+            "[types.block]", 'namespace = "BL"',
+            "[types.handoff]", 'namespace = "HO"',
+            "[types.reference]", 'namespace = "RF"',
+            "",
+            "[vendors]", "registered = []",
+            "",
+            _view("VERSION", "deterministic", ["version"]),
+        ]) + "\n"
+        with open(os.path.join(nu_machine, b"manifest.toml"), "w", encoding="utf-8") as _mf:
+            _mf.write(version_only_manifest)
+        with open(os.path.join(nu_machine, b"version.toml"), "w", encoding="utf-8") as _vf:
+            _vf.write("\n".join([
+                "schema = 1", "", "[[release]]",
+                'version = "0.1.0"',
+                'date = "2026-01-01T00:00:00Z"',
+                'worklog_span = []',
+                'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+            ]) + "\n")
+        # A matching root VERSION, so pre-fix --check would drift-compare to exit 0; post-fix the early
+        # UTF-8 refusal returns exit 2 BEFORE any view is rendered or compared.
+        (nuroot / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+        check("nonutf8-machine-dir-cannot-eval",
+              render(["--root", str(nuroot), "--check"]) == EXIT_CANNOT_EVALUATE)
+
+        # --- F-08: a free-text field cannot forge markdown/HTML structure (escaped, render still clean) --
+        forgeroot = new_root()
+        write_toml(forgeroot, "manifest.toml", manifest)
+        empty_indexes(forgeroot)
+        write_toml(forgeroot, "version.toml", "\n".join([
+            "schema = 1", "", "[[release]]",
+            'version = "0.1.0"',
+            'date = "2026-01-01T00:00:00Z"',
+            'worklog_span = []',
+            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+        ]) + "\n")
+        write_toml(forgeroot, "reference.index.toml", "\n".join([
+            "schema = 1",
+            _rec("RF-1", "reference", "recorded", "a source",
+                 refs=[("doc", "safe\\n# Forged heading\\n<!-- injected -->")]),
+        ]) + "\n")
+        check("forged-field-write-ok", render_write(forgeroot) == EXIT_OK)
+        forged_view = (forgeroot / WORKING_DIRNAME / "REFERENCES.md").read_text(encoding="utf-8")
+        check("forged-heading-neutralized", "\n# Forged heading" not in body_of(forged_view))
+        check("forged-comment-neutralized", "<!-- injected -->" not in forged_view)
+
+        # --- F-05: a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --
+        prroot = new_root()
+        write_toml(prroot, "manifest.toml", manifest.replace('layout = "inline"', 'layout = "per-record"'))
+        empty_indexes(prroot)
+        check("per-record-deferred-cannot-eval", render_write(prroot) == EXIT_CANNOT_EVALUATE)
+
+        # --- B2 class-wide: a VALID record in EVERY free-text sink carries the P payload; each view
+        # renders it as LITERAL text. This drives the FULL pipeline (validate -> render -> write ->
+        # read) under the scaffolded gate, so every record is a schema-valid envelope, not a hand-built
+        # dict. Each affected view is asserted to contain the EXACT escaped bytes ESC and NOT the raw
+        # payload P, so removing _md_text from any sink that feeds that view flips an assertion. The
+        # schema-CONSTRAINED sinks (id, status/state, scopes, link ids, timestamps) cannot carry a
+        # metacharacter, so their escaping is a verified no-op; the free-text sinks are the movable ones.
+        injroot = new_root()
+        write_toml(injroot, "manifest.toml", manifest)
+        empty_indexes(injroot)
+        write_toml(injroot, "backlog_item.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BI-1", "backlog_item", "open", P),
+        ]) + "\n")
+        write_toml(injroot, "block.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BL-1", "block", "active", P, scopes=["BI-2"]),   # scopes BI-2, not BI-1: BI-1 stays actionable
+        ]) + "\n")
+        write_toml(injroot, "done.index.toml", "\n".join([
+            "schema = 1",
+            _rec("DN-1", "done", "recorded", P, links=[("receipt_of", "BI-1")]),
+        ]) + "\n")
+        write_toml(injroot, "finding.index.toml", "\n".join([
+            "schema = 1",
+            _rec("FN-1", "finding", "fixed", "f", severity=P),
+        ]) + "\n")
+        write_toml(injroot, "pending_decision.index.toml", "\n".join([
+            "schema = 1",
+            _rec("PD-1", "pending_decision", "decided", P, decision=P,
+                 decided_at="2026-09-01T00:00:00Z", decided_by="maintainer"),
+        ]) + "\n")
+        write_toml(injroot, "autonomous_decision.index.toml", "\n".join([
+            "schema = 1",
+            _rec("AD-1", "autonomous_decision", "recorded", P, classification=P, action=P),
+        ]) + "\n")
+        write_toml(injroot, "handoff.index.toml", "\n".join([
+            "schema = 1",
+            _rec("HO-1", "handoff", "current", P),
+        ]) + "\n")
+        write_toml(injroot, "reference.index.toml", "\n".join([
+            "schema = 1",
+            _rec("RF-1", "reference", "recorded", P, refs=[("doc", P)]),
+        ]) + "\n")
+        write_toml(injroot, "worklog.toml", "\n".join([
+            "schema = 1",
+            _entry("WL-1", "added", P),
+        ]) + "\n")
+        write_toml(injroot, "version.toml", "\n".join([
+            "schema = 1", "", "[[release]]",
+            'version = "0.1.0"',
+            'date = "2026-01-01T00:00:00Z"',
+            'worklog_span = []',
+            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+        ]) + "\n")
+        check("class-wide-injection-write-ok", render_write(injroot) == EXIT_OK)
+
+        def iview(name):
+            return body_of((injroot / WORKING_DIRNAME / name).read_text(encoding="utf-8"))
+
+        # Every view whose body carries a free-text sink fed by P must contain ESC and never the raw
+        # P: TODO/BACKLOG/PIPELINE (backlog title), DONE (done title), FINDINGS (severity), DECISIONS
+        # (pending + autonomous titles), BLOCKS (block title), HANDOFF (handoff title), REFERENCES
+        # (reference title + ref locator), WORKLOG (summary), and the two declared mirrors (title
+        # projection). VERSION/VERSION.md are covered by the unit render_version_md vector above
+        # (their release/summary fields are grammar-constrained).
+        for _vn in ("TODO.md", "BACKLOG.md", "PIPELINE.md", "DONE.md", "FINDINGS.md",
+                    "DECISIONS.md", "BLOCKS.md", "HANDOFF.md", "REFERENCES.md", "WORKLOG.md",
+                    "BACKLOG_ITEM-INDEX.md", "BLOCK-INDEX.md"):
+            _body = iview(_vn)
+            check("class-wide-esc-present-" + _vn, ESC in _body)
+            check("class-wide-no-raw-payload-" + _vn, P not in _body)
+
+        # CLASS B (codex, full-render fail-closed): a SCHEMA-VALID backlog_item whose title carries a
+        # zero-width or bidi-control codepoint renders a view body whose bytes fail the authoritative
+        # byte-canon scan. The generator FAILS CLOSED (cannot-evaluate) and writes NOTHING, rather than
+        # emitting an invalid view. Driven under the scaffolded write gate; pre-fix this rendered clean
+        # (exit 0) and wrote invalid bytes. A lone CR is excluded: _md_text collapses it upstream.
+        _bc_version = "\n".join([
+            "schema = 1", "", "[[release]]",
+            'version = "0.1.0"',
+            'date = "2026-01-01T00:00:00Z"',
+            'worklog_span = []',
+            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+        ]) + "\n"
+        for _bcls, _bcp in (("zero-width-u200b", 0x200B), ("zero-width-u200c", 0x200C),
+                            ("zero-width-u200d", 0x200D), ("word-joiner-u2060", 0x2060),
+                            ("bom-ufeff", 0xFEFF), ("bidi-rlo-u202e", 0x202E)):
+            _bcroot = new_root()
+            write_toml(_bcroot, "manifest.toml", manifest)
+            empty_indexes(_bcroot)
+            write_toml(_bcroot, "version.toml", _bc_version)
+            write_toml(_bcroot, "backlog_item.index.toml", "\n".join([
+                "schema = 1",
+                _rec("BI-1", "backlog_item", "open", "title" + chr(_bcp) + "here"),
+            ]) + "\n")
+            check("byte-canon-fail-closed-" + _bcls,
+                  render_write(_bcroot) == EXIT_CANNOT_EVALUATE)
+            check("byte-canon-wrote-nothing-" + _bcls,
+                  not (_bcroot / WORKING_DIRNAME / "TODO.md").exists())
+
+        # round-3 (CLASS B positive): a SCHEMA-VALID backlog_item whose title merely ends in a SPACE
+        # renders a body line ending in whitespace; _render_resolved now normalizes trailing line
+        # whitespace before the byte-canon scan, so the render SUCCEEDS (EXIT_OK) and writes a clean
+        # view. Pre round-3 this failed closed at exit 2 over benign trailing whitespace. Modelled on the
+        # CLASS B store construction; proves the over-fire fix end to end, not only at a unit level.
+        import check_byte_canon  # authoritative byte-canon leg; pure function over bytes
+        _tsroot = new_root()
+        write_toml(_tsroot, "manifest.toml", manifest)
+        empty_indexes(_tsroot)
+        write_toml(_tsroot, "version.toml", _bc_version)
+        write_toml(_tsroot, "backlog_item.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BI-1", "backlog_item", "open", "trailing space title "),
+        ]) + "\n")
+        check("trailing-space-title-renders",
+              render_write(_tsroot) == EXIT_OK)
+        _tstodo = (_tsroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
+        # (a) the title text survived, minus its trailing whitespace (no rendered line ends in space/tab);
+        # (b) exactly one terminal newline; (c) the emitted bytes pass the authoritative byte-canon scan.
+        check("trailing-space-title-text-survived", "trailing space title" in _tstodo)
+        check("trailing-space-title-no-trailing-ws",
+              all(not ln.endswith((" ", "\t")) for ln in _tstodo.split("\n")))
+        check("trailing-space-title-one-terminal-newline",
+              _tstodo.endswith("\n") and not _tstodo.endswith("\n\n"))
+        check("trailing-space-title-byte-canon-clean",
+              check_byte_canon.scan_bytes(_tstodo.encode("utf-8")) == [])
+
+        # round-3 (Unicode fix): a title ending in a NON-BREAKING SPACE (U+00A0) is ALSO normalized out
+        # by _render_resolved's Unicode str.rstrip() (the SAME predicate check_byte_canon uses), so it
+        # renders clean (EXIT_OK) rather than over-firing the byte-canon refusal. This proves the fix
+        # covers the Unicode trailing-whitespace codepoints, not only ASCII space/tab.
+        _tsnbroot = new_root()
+        write_toml(_tsnbroot, "manifest.toml", manifest)
+        empty_indexes(_tsnbroot)
+        write_toml(_tsnbroot, "version.toml", _bc_version)
+        write_toml(_tsnbroot, "backlog_item.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BI-1", "backlog_item", "open", "trailing nbsp title" + chr(0x00A0)),
+        ]) + "\n")
+        check("trailing-nbsp-title-renders",
+              render_write(_tsnbroot) == EXIT_OK)
+        _tsnbtodo = (_tsnbroot / WORKING_DIRNAME / "TODO.md").read_text(encoding="utf-8")
+        check("trailing-nbsp-title-text-survived", "trailing nbsp title" in _tsnbtodo)
+        check("trailing-nbsp-title-normalized", chr(0x00A0) not in _tsnbtodo)
+        check("trailing-nbsp-title-byte-canon-clean",
+              check_byte_canon.scan_bytes(_tsnbtodo.encode("utf-8")) == [])
+
+        # CLASS 3 (B3): /proposed is NONTERMINAL, and `withdrawn` is a valid terminal. In PIPELINE,
+        # DECISIONS, and HANDOFF a proposed record is surfaced as AWAITING RATIFICATION (never under its
+        # effective/terminal state, never omitted), and no valid status is dropped. This full VALID
+        # store carries a done/proposed backlog item, a withdrawn and a decided/proposed decision, and a
+        # superseded/proposed handoff; reverting any Class-3 renderer flips an assertion below. Runs
+        # under the scaffolded write gate so the full validate->render->write->read pipeline exercises
+        # schema-valid envelopes (a decided/proposed carries the full resolution bundle, spec 8.5).
+        proproot = new_root()
+        write_toml(proproot, "manifest.toml", manifest)
+        empty_indexes(proproot)
+        write_toml(proproot, "backlog_item.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BI-1", "backlog_item", "open", "still open"),
+            _rec("BI-7", "backlog_item", "done/proposed", "proposed done", actor="assistant"),
+        ]) + "\n")
+        write_toml(proproot, "pending_decision.index.toml", "\n".join([
+            "schema = 1",
+            _rec("PD-1", "pending_decision", "withdrawn", "withdrew it"),
+            _rec("PD-2", "pending_decision", "decided/proposed", "proposed ruling", actor="assistant",
+                 decision="do Z", decided_at="2026-09-02T00:00:00Z", decided_by="maintainer"),
+        ]) + "\n")
+        write_toml(proproot, "handoff.index.toml", "\n".join([
+            "schema = 1",
+            _rec("HO-1", "handoff", "current", "the current handoff"),
+            _rec("HO-2", "handoff", "superseded/proposed", "proposed supersede", actor="assistant"),
+        ]) + "\n")
+        write_toml(proproot, "version.toml", "\n".join([
+            "schema = 1", "", "[[release]]",
+            'version = "0.1.0"',
+            'date = "2026-01-01T00:00:00Z"',
+            'worklog_span = []',
+            'coverage_digest = "{}"'.format(_opf_release.coverage_digest([])),
+        ]) + "\n")
+        check("proposed-store-write-ok", render_write(proproot) == EXIT_OK)
+
+        def pview(name):
+            return (proproot / WORKING_DIRNAME / name).read_text(encoding="utf-8")
+
+        ppl = pview("PIPELINE.md")
+        check("pipeline-proposed-awaiting-section", "## awaiting ratification" in ppl)
+        check("pipeline-proposed-shows-full-status", "done/proposed" in ppl)
+        check("pipeline-proposed-not-in-effective-group", "## done" not in ppl)
+        pdec = pview("DECISIONS.md")
+        check("decisions-withdrawn-section", "## Withdrawn decisions" in pdec)
+        check("decisions-withdrawn-record-listed", "PD-1" in pdec)
+        check("decisions-proposed-awaiting-section", "## Awaiting ratification" in pdec)
+        check("decisions-proposed-shows-full-status", "decided/proposed" in pdec)
+        _eff = pdec.index("## Effective resolutions")
+        _awa = pdec.index("## Awaiting ratification")
+        check("decisions-proposed-not-effective", "PD-2" in pdec[_awa:] and "PD-2" not in pdec[_eff:_awa])
+        pho = pview("HANDOFF.md")
+        check("handoff-proposed-awaiting-section", "## Awaiting ratification" in pho)
+        check("handoff-proposed-shows-full-status", "superseded/proposed" in pho)
+        _sup = pho.index("## Superseded")
+        _hawa = pho.index("## Awaiting ratification")
+        check("handoff-proposed-not-in-superseded", "HO-2" in pho[_hawa:] and "HO-2" not in pho[_sup:_hawa])
+
+        # --- the composed U6 write gate (VC-4): render --write gates on validate_store == VALID ----------
+        # A bare `render` (neither --check nor --write) is a usage error; --write on a NOT-ADOPTED root is
+        # NOT APPLICABLE (0) and writes nothing (resolution precedes the gate); the CLI parser rejects a
+        # dangling/empty/option-looking --root before the mode check. The gate ITSELF is exercised over a
+        # whole-store-VALID synthetic store (the U6 clean-store shape, with every view pre-rendered so
+        # C-VIEW-DRIFT passes) plus the inert git-derived observations validate_store consumes; --check stays
+        # read-only throughout.
+        na = base / "not-adopted"
+        na.mkdir()
+        check("render-requires-a-mode", render(["--root", str(na)]) == EXIT_CANNOT_EVALUATE)
+        check("render-both-modes-refused",
+              render(["--root", str(na), "--check", "--write"]) == EXIT_CANNOT_EVALUATE)
+        check("write-not-adopted-not-applicable", render(["--root", str(na), "--write"]) == EXIT_OK)
+        check("write-not-adopted-wrote-nothing", not (na / WORKING_DIRNAME).exists())
+        # CLI fail-closed parse (parse precedes the mode check and resolution; na isolates from the gate).
         check("cli-dangling-root", render(["--root", str(na), "--root"]) == EXIT_CANNOT_EVALUATE)
         check("cli-unknown-arg", render(["--root", str(na), "--bogus"]) == EXIT_CANNOT_EVALUATE)
         check("cli-misspelled-check-refused", render(["--root", str(na), "--chek"]) == EXIT_CANNOT_EVALUATE)
-
-        # B3: `--root` requires a non-empty, non-option-looking directory argument. An empty value (which
-        # would silently normalize to the cwd) and an option-looking token (a swallowed next flag) are each
-        # a parser-level cannot-evaluate (exit 2), fail-closed. Parse precedes store resolution, so these
-        # are independent of the write gate.
+        # B3: `--root` requires a non-empty, non-option-looking directory argument (an empty value would
+        # normalize to the cwd, an option-looking token is a swallowed next flag); each is a parse-level 2.
         check("cli-empty-root", render(["--root", ""]) == EXIT_CANNOT_EVALUATE)
         check("cli-option-looking-root", render(["--root", "--bogus"]) == EXIT_CANNOT_EVALUATE)
 
-        # F9(4): individually record-valid but cross-record NONCONFORMANT stores can no longer be
-        # silently WRITTEN. These assert the F1 write-refusal fail-safe ONLY: the cross-record
-        # uniqueness / handoff / resolution GRADING remains U6 validate_store's job (F2, deferred).
-        # They do NOT claim U4 grades cross-record conformance now.
-        dupidroot = new_root()
-        write_toml(dupidroot, "manifest.toml", manifest)
-        empty_indexes(dupidroot)
-        write_toml(dupidroot, "backlog_item.index.toml", "\n".join([
-            "schema = 1",
-            _rec("BI-1", "backlog_item", "open", "first"),
-            _rec("BI-1", "backlog_item", "open", "duplicate id"),   # cross-record duplicate ID
-        ]) + "\n")
-        check("duplicate-id-write-refused", render(["--root", str(dupidroot)]) == EXIT_CANNOT_EVALUATE)
+        def _gate_store(mutate=None):
+            """Build a whole-store-VALID synthetic store that ALSO declares and pre-renders every view, plus
+            the inert observations validate_store consumes, so the composed U6 write gate is exercised end to
+            end. Mirrors the U6 clean-store shape (counters, populated indexes, worklog + archive coverage, a
+            two-release version with published freeze digests, and the product VERSION + CHANGELOG) that
+            validate_store grades VALID; the views are pre-rendered through the ungated write path so
+            C-VIEW-DRIFT passes. `mutate(root, bi)` optionally edits the store AFTER pre-rendering (e.g. to
+            inject a duplicate id), yielding a renderable-but-INVALID store whose views are now stale, the
+            change-carries-check discriminator. Returns (root, observations). The fixture builders (_opf_emit
+            / _opf_changelog / _opf_check) are imported at call time to keep the module-top imports unchanged
+            and to avoid _opf_check's top-level back-import into this module."""
+            import _opf_emit
+            import _opf_changelog
+            import _opf_check
+            ts = "2026-06-01T00:00:00Z"
+            def _wl(n):
+                return {"id": "WL-{}".format(n), "date": "2026-06-{:02d}T00:00:00Z".format((n % 27) + 1),
+                        "actor": {"kind": "maintainer"}, "kind": "added", "summary": "w{}".format(n)}
+            def _env(rid, rtype, status, **over):
+                r = {"id": rid, "type": rtype, "status": status, "title": "t", "created_at": ts,
+                     "updated_at": ts, "actor": {"kind": "maintainer"}}
+                r.update(over)
+                return r
+            def _bi(n, status):
+                return _env("BI-{}".format(n), "backlog_item", status)
+            def _dn(n, bid):
+                return _env("DN-{}".format(n), "done", "recorded", links=[{"rel": "receipt_of", "id": bid}])
+            def _ho(n):
+                return _env("HO-{}".format(n), "handoff", "current")
+            roster = (
+                ("TODO.md", "composed", ["backlog_item", "block"]),
+                ("BACKLOG.md", "composed", ["backlog_item", "block"]),
+                ("PIPELINE.md", "composed", ["backlog_item", "block"]),
+                ("DONE.md", "composed", ["done"]),
+                ("FINDINGS.md", "composed", ["finding"]),
+                ("DECISIONS.md", "composed", ["pending_decision", "autonomous_decision"]),
+                ("BLOCKS.md", "composed", ["block"]),
+                ("HANDOFF.md", "composed", ["handoff"]),
+                ("REFERENCES.md", "composed", ["reference"]),
+                ("WORKLOG.md", "deterministic", ["worklog"]),
+                ("VERSION.md", "deterministic", ["version"]),
+                ("VERSION", "deterministic", ["version"]),
+                ("BACKLOG_ITEM-INDEX.md", "deterministic", ["backlog_item"]),
+                ("BLOCK-INDEX.md", "deterministic", ["block"]),
+            )
+            views = {nm: {"kind": kd, "sources": list(srcs),
+                          "target": nm if nm == "VERSION" else "{}/{}".format(WORKING_DIRNAME, nm)}
+                     for nm, kd, srcs in roster}
+            types = {t: {"namespace": ns} for t, ns in (
+                ("backlog_item", "BI"), ("done", "DN"), ("worklog", "WL"), ("finding", "FN"),
+                ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
+                ("autonomous_decision", "AD"), ("block", "BL"))}
+            man = {"devprocess": {"standard": "devprocess", "spec_version": "1.0.0", "layout": "inline",
+                                  "posture": "required", "import_status": "none"},
+                   "store": {"sync_target": ""}, "types": types, "vendors": {"registered": []},
+                   "archive": {"period": "year"}, "views": views}
+            cnt = {"schema": 1, "counters": {"BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0,
+                                             "BL": 0, "HO": 1, "RF": 0}}
+            full_wl = {n: _wl(n) for n in (1, 2, 3, 4)}
+            d12 = _opf_release.compute_span_digest(full_wl, (1, 2))
+            d34 = _opf_release.compute_span_digest(full_wl, (3, 4))
+            def _rr(v, a, b, dig):
+                return {"version": v, "date": ts, "worklog_span": ["WL-{}".format(a), "WL-{}".format(b)],
+                        "coverage_digest": dig}
+            cl = "\n".join(["# Changelog", "", "## unreleased", "", "## 1.1.0", "", "- 1.1.0 notes", "",
+                            "## 1.0.0", "", "- 1.0.0 notes", ""]) + "\n"
+            entries, _f = _opf_changelog._changelog_entries(cl)
+            emap = {}
+            for tok, text in entries:
+                emap.setdefault(tok, []).append(text)
+            digs = {tok: _opf_changelog.freeze_digest(emap[tok][0]) for tok in ("1.1.0", "1.0.0")}
+            ver = {"schema": 1, "release": [_rr("1.0.0", 1, 2, d12), _rr("1.1.0", 3, 4, d34)],
+                   "summary": [{"covers": "1.0.0", "status": "published", "digest": digs["1.0.0"]},
+                               {"covers": "1.1.0", "status": "published", "digest": digs["1.1.0"]},
+                               {"covers": "unreleased", "status": "working"}]}
+            machine = {
+                "manifest.toml": man, "counters.toml": cnt,
+                "backlog_item.index.toml": {"schema": 1, "record": [_bi(1, "done"), _bi(2, "open")]},
+                "done.index.toml": {"schema": 1, "record": [_dn(1, "BI-1")]},
+                "finding.index.toml": {"schema": 1, "record": []},
+                "pending_decision.index.toml": {"schema": 1, "record": []},
+                "handoff.index.toml": {"schema": 1, "record": [_ho(1)]},
+                "reference.index.toml": {"schema": 1, "record": []},
+                "autonomous_decision.index.toml": {"schema": 1, "record": []},
+                "block.index.toml": {"schema": 1, "record": []},
+                "worklog.toml": {"schema": 1, "entry": [_wl(3), _wl(4)]}, "version.toml": ver,
+                "archive/2026/archive.toml": {"schema": 1, "moved": [], "worklog_moved": [
+                    {"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]},
+                "archive/2026/worklog.toml": {"schema": 1, "entry": [_wl(1), _wl(2)]}}
+            root = new_root()
+            for rel, doc in machine.items():
+                p = root / WORKING_DIRNAME / "toml" / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(_opf_emit.emit(doc), encoding="utf-8")
+            (root / "CHANGELOG.md").write_text(cl, encoding="utf-8")
+            render_write(root)   # pre-render every view (incl. the product VERSION) so C-VIEW-DRIFT passes
+            obs = {"tracked": "tracked",
+                   "prior": {"releases": [_rr("1.0.0", 1, 2, d12), _rr("1.1.0", 3, 4, d34)],
+                             "counters_high": cnt["counters"],
+                             "records": {"BI-1": ("backlog_item", "done"), "BI-2": ("backlog_item", "open"),
+                                         "DN-1": ("done", "recorded"), "HO-1": ("handoff", "current")},
+                             "digests": {"DN-1": _opf_check._record_digest(_dn(1, "BI-1"))}}}
+            if mutate is not None:
+                mutate(root, _bi)
+            return root, obs
 
-        dangroot = new_root()
-        write_toml(dangroot, "manifest.toml", manifest)
-        empty_indexes(dangroot)
-        write_toml(dangroot, "pending_decision.index.toml", "\n".join([
-            "schema = 1",
-            _rec("PD-3", "pending_decision", "decided", "dangling", decision="d",
-                 decided_at="2026-09-03T00:00:00Z", decided_by="maintainer",
-                 links=[("supersedes", "PD-999")]),                 # target absent from the store
-        ]) + "\n")
-        check("dangling-supersedes-write-refused", render(["--root", str(dangroot)]) == EXIT_CANNOT_EVALUATE)
+        # A VALID committed store: --write is permitted (byte-stable over the already-rendered views) and a
+        # following --check is clean (0 -> writes -> 0).
+        gvroot, gvobs = _gate_store()
+        check("gate-valid-store-write-ok",
+              render(["--root", str(gvroot), "--write"], observations=gvobs) == EXIT_OK)
+        check("gate-valid-store-check-clean",
+              render(["--root", str(gvroot), "--check"]) == EXIT_OK)
+        # An untracked observation flips the SAME store to INVALID (C-TRACKED): --write is refused (exit 2).
+        check("gate-untracked-invalid-write-refused",
+              render(["--root", str(gvroot), "--write"],
+                     observations=dict(gvobs, tracked="untracked")) == EXIT_CANNOT_EVALUATE)
+        # No observations -> the topology/history anchors CANNOT-EVALUATE -> --write refused (exit 2).
+        check("gate-no-observations-write-refused",
+              render(["--root", str(gvroot), "--write"], observations=None) == EXIT_CANNOT_EVALUATE)
 
-        multihoroot = new_root()
-        write_toml(multihoroot, "manifest.toml", manifest)
-        empty_indexes(multihoroot)
-        write_toml(multihoroot, "handoff.index.toml", "\n".join([
-            "schema = 1",
-            _rec("HO-1", "handoff", "current", "one current"),
-            _rec("HO-2", "handoff", "current", "two current"),      # spec 8.5 allows at most one
-        ]) + "\n")
-        check("multiple-current-handoff-write-refused",
-              render(["--root", str(multihoroot)]) == EXIT_CANNOT_EVALUATE)
+        # change-carries-check: a duplicate id injected AFTER the views were pre-rendered makes the store
+        # INVALID (U6 C-ID-SPACE) with its views now STALE. render --write must REFUSE (exit 2) and leave the
+        # target bytes UNCHANGED. Were the gate bypassed, render would re-render and REWRITE TODO.md to
+        # include the duplicate, so this vector flips (wrote-something) without the composed gate.
+        def _inject_dup(root, bi):
+            import _opf_emit
+            (root / WORKING_DIRNAME / "toml" / "backlog_item.index.toml").write_text(
+                _opf_emit.emit({"schema": 1, "record": [bi(1, "done"), bi(2, "open"), bi(2, "open")]}),
+                encoding="utf-8")
+        gdroot, gdobs = _gate_store(mutate=_inject_dup)
+        _dup_todo = gdroot / WORKING_DIRNAME / "TODO.md"
+        _dup_before = _dup_todo.read_text(encoding="utf-8")
+        check("gate-invalid-duplicate-id-write-refused",
+              render(["--root", str(gdroot), "--write"], observations=gdobs) == EXIT_CANNOT_EVALUATE)
+        check("gate-invalid-duplicate-id-wrote-nothing",
+              _dup_todo.read_text(encoding="utf-8") == _dup_before)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
@@ -3180,8 +3304,9 @@ def self_test():
           "deep-TOML and free-text (severity and covers) fail-closed AND whole-body byte-canon "
           "fail-closed (zero-width/bidi refused, never emitted), per-record and module-type "
           "deferrals, missing-and-malformed-source fail-closed, empty-store valid-empty with a rendered "
-          "VERSION, the empty-VERSION-ledger fail-closed, the CLI fail-closed parse, and the F1 "
-          "write-refusal fail-safe (ungated write refused, --check unaffected)".format(checked[0]))
+          "VERSION, the empty-VERSION-ledger fail-closed, the CLI fail-closed parse, and the composed U6 "
+          "write gate (render --write permits a VALID store and refuses an INVALID / CANNOT-EVALUATE one, "
+          "writing nothing; --check unaffected)".format(checked[0]))
     return EXIT_OK
 
 
