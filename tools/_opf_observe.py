@@ -423,11 +423,17 @@ def self_test():
         return env
 
     def _git_setup(cwd, home, *args):
-        """Run a git FIXTURE command, raising OSError (mapped to a harness error, exit 2) on failure."""
-        cmd = [git, "-C", str(cwd),
+        """Run a git FIXTURE command, raising OSError (mapped to a harness error, exit 2) on failure or
+        timeout. --no-replace-objects so a replacement ref cannot substitute the bytes a git data command
+        reads; a bounded timeout so a hung fixture call fails SAFE rather than hangs (mirrors _run_git)."""
+        cmd = [git, "--no-replace-objects", "-C", str(cwd),
                "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
                "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"] + list(args)
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_setup_env(home))
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  env=_setup_env(home), timeout=_GIT_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            raise OSError("git {} timed out after {}s".format(" ".join(args), _GIT_TIMEOUT_S))
         if proc.returncode != 0:
             raise OSError("git {} failed (rc {}): {}".format(
                 " ".join(args), proc.returncode, (proc.stderr or b"").decode("utf-8", "replace").strip()))
