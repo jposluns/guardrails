@@ -473,7 +473,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 13
 end-line = 14
 canonical-text = "Do not assert what a system shows, renders, prints, outputs, or does in its live state unless you observed\nthat behaviour directly."
-source-digest = "f18d33c14b8c55437d4f58ba6f0480fd0ca948686b81ba3474e49d22c3868edf"
+source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
 
 [[clause]]
 clause-id = "obsbeh.2"
@@ -482,7 +482,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 17
 end-line = 19
 canonical-text = "A claim that a system is launch-ready,\nlive, or working is such a behavioural claim: it rests on having exercised the relevant runtime path and\nobserved the expected result, not on a static check that the configuration or registration looks correct."
-source-digest = "f18d33c14b8c55437d4f58ba6f0480fd0ca948686b81ba3474e49d22c3868edf"
+source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
 
 [[clause]]
 clause-id = "obsbeh.3"
@@ -491,7 +491,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "f18d33c14b8c55437d4f58ba6f0480fd0ca948686b81ba3474e49d22c3868edf"
+source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
 
 [[clause]]
 clause-id = "obsbeh.4"
@@ -500,7 +500,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "f18d33c14b8c55437d4f58ba6f0480fd0ca948686b81ba3474e49d22c3868edf"
+source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
 
 [[clause]]
 clause-id = "obsbeh.5"
@@ -509,7 +509,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "f18d33c14b8c55437d4f58ba6f0480fd0ca948686b81ba3474e49d22c3868edf"
+source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
 
 [[clause]]
 clause-id = "obsbeh.6"
@@ -518,7 +518,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 20
 end-line = 21
 canonical-text = "Either observe the behaviour and quote what you saw, or state the claim as an inference, naming the\nconfiguration it rests on and the observation that would confirm it."
-source-digest = "f18d33c14b8c55437d4f58ba6f0480fd0ca948686b81ba3474e49d22c3868edf"
+source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
 
 [[clause]]
 clause-id = "obsbeh.7"
@@ -527,7 +527,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "f18d33c14b8c55437d4f58ba6f0480fd0ca948686b81ba3474e49d22c3868edf"
+source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
 
 [[clause]]
 clause-id = "obsbeh.8"
@@ -536,7 +536,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "f18d33c14b8c55437d4f58ba6f0480fd0ca948686b81ba3474e49d22c3868edf"
+source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
 
 [[clause]]
 clause-id = "obsbeh.9"
@@ -545,7 +545,7 @@ source-path = ".aiqt/core/rules/accur-observe-before-asserting-behaviour.md"
 start-line = 21
 end-line = 24
 canonical-text = "The same holds for a status a document,\ntest, or record asserts about the live system: bind a machine-checkable status to a probe that exercises the\nsystem, or generate it from an observation, and refresh it before relying on it as current; hand-written\nprose asserting such a status, free to diverge from what the system now does, is not recorded as settled fact."
-source-digest = "f18d33c14b8c55437d4f58ba6f0480fd0ca948686b81ba3474e49d22c3868edf"
+source-digest = "7dacbce3d155aced6bcea0474834ca59907b4f4a38ba6556090fdb0ce6ec78e7"
 
 [[clause]]
 clause-id = "rdbchr.1"
