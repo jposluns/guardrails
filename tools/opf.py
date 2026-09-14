@@ -31,7 +31,9 @@ repo-relative target, so this family gates as self-tests instead (the U1 build-p
 Launched isolated (-I -B) per the Python-launcher-isolation gate; sibling helpers are imported through
 the sys.path insert idiom the repo's tools share.
 """
+import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -628,10 +630,365 @@ def _cmd_doctor(rest):
     return _opf_check.exit_code(result)
 
 
+_INIT_MAX_ENTRIES = 4096
+_INIT_MAX_DEPTH = 32
+_INIT_MAX_NAME_BYTES = 1 << 20
+
+
+def _init_kind(st):
+    if stat.S_ISDIR(st.st_mode):
+        return "directory"
+    if stat.S_ISREG(st.st_mode):
+        return "file"
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    return "special"
+
+
+def _init_inventory(root_fd):
+    """Inventory .working without following links, including hidden entries and empty directories.
+
+    Bounds cover entry count, accumulated path bytes, and directory depth. An exceeded bound or
+    unreadable entry produces an explicitly incomplete report and refuses initialization. This is
+    an observation, not a filesystem snapshot: concurrent changes after enumeration remain possible.
+    """
+    journal = _opf_store._journal
+    report = {"entries": [], "complete": False}
+    name_bytes = 0
+
+    def add(relpath, st):
+        nonlocal name_bytes
+        name_bytes += len(os.fsencode(relpath))
+        if (len(report["entries"]) >= _INIT_MAX_ENTRIES
+                or name_bytes > _INIT_MAX_NAME_BYTES):
+            raise RuntimeError("foreign inventory exceeds entry/path-byte bounds")
+        report["entries"].append({"path": relpath, "kind": _init_kind(st)})
+
+    def walk(fd, prefix, depth):
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                relpath = prefix + "/" + entry.name
+                st = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+                add(relpath, st)
+                if stat.S_ISDIR(st.st_mode):
+                    if depth >= _INIT_MAX_DEPTH:
+                        raise RuntimeError("foreign inventory exceeds directory-depth bound")
+                    child_fd = os.open(
+                        entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    try:
+                        walk(child_fd, relpath, depth + 1)
+                    finally:
+                        os.close(child_fd)
+
+    try:
+        working = _opf_store.WORKING_DIRNAME
+        st = journal._lstat_at(root_fd, working)
+        if st is not None:
+            if not stat.S_ISDIR(st.st_mode):
+                add(working, st)
+            else:
+                working_fd = os.open(
+                    working, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+                try:
+                    walk(working_fd, working, 0)
+                finally:
+                    os.close(working_fd)
+        report["complete"] = True
+    except Exception as exc:  # noqa: BLE001  an incomplete inventory never licenses a write
+        report["error"] = ascii(exc)
+    report["entries"].sort(key=lambda row: row["path"])
+    return report
+
+
+def _init_git(git, root, args):
+    """Reuse the existing explicit -C, scrubbed-environment, timeout-bounded git boundary."""
+    result = _opf_observe._run_git(git, root, args)
+    if not result.completed or result.rc != 0:
+        raise RuntimeError("git preflight/read failed at {!r}: {}".format(
+            str(root), result.err))
+    return result.out
+
+
+def _init_repo(root):
+    """Confirm a real non-bare worktree at or above root, without requiring a commit."""
+    git = _opf_observe._git_path()
+    if git is None:
+        raise RuntimeError("git preflight: git not found on PATH")
+    args = ["rev-parse", "--is-inside-work-tree", "--is-bare-repository", "--show-toplevel"]
+    raw = _init_git(git, root, args)
+    lines = raw.split(b"\n")
+    if (len(lines) != 4 or lines[:2] != [b"true", b"false"]
+            or lines[-1] != b"" or not os.path.isabs(os.fsdecode(lines[2]))):
+        raise RuntimeError("git preflight: root is not a confirmed non-bare worktree")
+    repo = Path(os.path.abspath(os.fsdecode(lines[2])))
+    if root != repo and repo not in root.parents:
+        raise RuntimeError("git preflight: reported repository does not contain root")
+    repo_fd = _opf_store._open_dir_nofollow(repo)
+    os.close(repo_fd)
+    if _init_git(git, repo, args) != raw:
+        raise RuntimeError("git preflight: repository identity changed during confirmation")
+    return git, repo
+
+
+def _init_untracked(git, repo, root, paths):
+    """Read the index, refusing unreadable state or already-tracked planned destinations.
+
+    Checking .working also detects tracked sources whose working-tree copies were deleted. Those
+    paths cannot honestly be described as newly untracked sources. No HEAD observation is needed.
+    """
+    prefix = root.relative_to(repo)
+    scoped = sorted(str(prefix / path) for path in paths)
+    tracked = _init_git(
+        git, repo, ["--literal-pathspecs", "ls-files", "--cached", "-z", "--"] + scoped)
+    if tracked:
+        raise RuntimeError("planned destination already git-tracked: {!r}".format(
+            os.fsdecode(tracked)))
+
+
+def _init_same_root(root, root_fd):
+    check_fd = _opf_store._open_dir_nofollow(root)
+    try:
+        current = os.fstat(check_fd)
+        opened = os.fstat(root_fd)
+        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError("root changed since its contained directory was opened")
+    finally:
+        os.close(check_fd)
+
+
+def _init_create(root_fd, relpath, data):
+    """Create through the existing shared O_EXCL primitive; never replace or remove an entry.
+
+    _journal._recreate_file uses descriptor-relative O_CREAT|O_EXCL|O_NOFOLLOW, writes and fsyncs
+    the new inode, and performs no rollback. A write failure can therefore leave a partial file.
+    Parent handles prevent symlink redirection; concurrent directory renames are not serialized.
+    """
+    journal = _opf_store._journal
+    pfd, name = journal._open_parent(root_fd, relpath)
+    try:
+        try:
+            journal._recreate_file(pfd, name, data, 0o644)
+            os.fsync(pfd)
+        except Exception as exc:
+            raise RuntimeError("create-only publication refused {!r}: {!r}".format(
+                relpath, exc)) from exc
+    finally:
+        os.close(pfd)
+
+
+def _init_observed(root_fd, directories, payloads):
+    """Report the planned paths beneath the opened root, without inferring entry ownership."""
+    journal = _opf_store._journal
+    rows = []
+    for relpath in list(directories) + list(payloads):
+        row = {"path": relpath}
+        try:
+            st = journal._lstat_contained(root_fd, relpath)
+            if st is None:
+                row["state"] = "absent"
+            elif relpath in directories:
+                row["state"] = _init_kind(st)
+            elif not stat.S_ISREG(st.st_mode):
+                row["state"] = _init_kind(st)
+            elif st.st_size != len(payloads[relpath]):
+                row["state"] = "different-size"
+                row["bytes"] = st.st_size
+            else:
+                pfd, name = journal._open_parent(root_fd, relpath)
+                try:
+                    data, opened = journal._read_at(
+                        pfd, name, relpath, cap=len(payloads[relpath]) + 1)
+                finally:
+                    os.close(pfd)
+                row["state"] = (
+                    "matches-payload" if opened.st_nlink == 1 and data == payloads[relpath]
+                    else "different-content-or-link-count")
+        except Exception as exc:  # noqa: BLE001  unknown is never reported as absent or complete
+            row["state"] = "cannot-evaluate"
+            row["error"] = ascii(exc)
+        rows.append(row)
+    return rows
+
+
+def _cmd_init(rest):
+    """Create validated store sources and a pointer, without git writes or rendering.
+
+    Preflight is read-only. Publication is create-only and deliberately not transactional: a
+    later failure reports observed planned paths and leaves them for review. Enumeration, root
+    identity checks, and final rereads do not serialize concurrent writers or directory renames.
+    No lock, lease, rollback, adoption policy, or whole-store success verdict is supplied here.
+    """
+    root = None
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "--root":
+            if i + 1 >= len(rest):
+                print("opf init: --root requires a directory argument", file=sys.stderr)
+                return EXIT_MALFORMED
+            if root is not None:
+                print("opf init: --root given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            val = rest[i + 1]
+            if val == "" or val.startswith("-"):
+                print("opf init: --root requires a non-empty directory argument, not {!r}".format(val),
+                      file=sys.stderr)
+                return EXIT_MALFORMED
+            root = val
+            i += 2
+        else:
+            print("opf init: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            return EXIT_MALFORMED
+    root = root if root is not None else "."
+    root_fd = None
+    directories = []
+    payloads = {}
+    publishing = False
+    stage = "preflight"
+    try:
+        import shlex
+        import _opf_init
+
+        journal = _opf_store._journal
+        journal.require_containment()
+        root = Path(os.path.abspath(root))
+        root_fd = _opf_store._open_dir_nofollow(root)
+        git, repo = _init_repo(root)
+
+        inventory = _init_inventory(root_fd)
+        if inventory["entries"] or not inventory["complete"]:
+            print(json.dumps(dict(inventory, event="foreign-content", root=str(root)),
+                             sort_keys=True))
+        if not inventory["complete"]:
+            raise RuntimeError("foreign .working inventory incomplete; refusing initialization")
+
+        # Resolution detects stores through either pointer and through default discovery. Inventory
+        # remains independent so malformed stores and foreign content also receive a concrete report.
+        res = _opf_store.resolve_store(root)
+        pointers = [
+            name for name in (_opf_store.POINTER_REL, _opf_store.LOCAL_POINTER_REL)
+            if journal._lstat_at(root_fd, name) is not None
+        ]
+        if pointers:
+            raise RuntimeError("existing pointer(s): {}".format(", ".join(pointers)))
+        if res.status == _opf_store.RESOLVED:
+            raise RuntimeError("existing store: {}".format(res.detail))
+        if inventory["entries"]:
+            raise RuntimeError("foreign .working content; {}; refusing initialization".format(
+                res.detail))
+        if res.status != _opf_store.NOT_ADOPTED:
+            # The resolver also refuses an existing, empty .working directory. Do not reinterpret a
+            # CANNOT-EVALUATE result as permission to initialize a partial store.
+            raise RuntimeError("store resolution refused: {}".format(res.detail))
+
+        stage = "building and validating source payloads"
+        working = _opf_store.WORKING_DIRNAME
+        machine = working + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
+        documents = [
+            (_opf_store.MANIFEST_NAME, _opf_init.build_manifest()),
+            (_opf_check.COUNTERS_NAME, _opf_init.build_counters()),
+            (_opf_check.VERSION_NAME, _opf_init.build_version()),
+            (_opf_check.WORKLOG_NAME, _opf_init.build_worklog()),
+        ]
+        documents.extend(
+            (name + _opf_check.INDEX_SUFFIX, _opf_init.build_index(name))
+            for name in _opf_init.INDEX_TYPES)
+        payloads = {
+            machine + "/" + name: text.encode("utf-8") for name, text in documents
+        }
+        payloads[_opf_store.POINTER_REL] = _opf_emit.emit_checked(
+            {"store": {"target": "dir:."}}).encode("utf-8")
+        if journal._lstat_at(root_fd, "CHANGELOG.md") is None:
+            payloads["CHANGELOG.md"] = b"# Changelog\n"
+        directories = [working, machine]
+
+        stage = "checking the destination inventory"
+        for relpath in directories + list(payloads):
+            journal._check_rel(relpath)
+            if journal._lstat_contained(root_fd, relpath) is not None:
+                raise RuntimeError("destination already exists: {!r}".format(relpath))
+        if journal._lstat_at(root_fd, _opf_store.LOCAL_POINTER_REL) is not None:
+            raise RuntimeError("existing pointer: " + _opf_store.LOCAL_POINTER_REL)
+        index_paths = set(payloads) | {working, _opf_store.LOCAL_POINTER_REL}
+        _init_untracked(git, repo, root, index_paths)
+        _init_same_root(root, root_fd)
+
+        publishing = True
+        for relpath in directories:
+            stage = "creating directory " + relpath
+            pfd, name = journal._open_parent(root_fd, relpath)
+            try:
+                os.mkdir(name, 0o755, dir_fd=pfd)
+                os.fsync(pfd)
+            finally:
+                os.close(pfd)
+        for relpath, data in payloads.items():
+            stage = "creating " + relpath
+            _init_same_root(root, root_fd)
+            _init_create(root_fd, relpath, data)
+
+        stage = "observing published source paths"
+        observed = _init_observed(root_fd, directories, payloads)
+        if any(row["state"] != (
+                "directory" if row["path"] in directories else "matches-payload")
+               for row in observed):
+            raise RuntimeError("published paths do not match the validated payloads")
+        final_inventory = _init_inventory(root_fd)
+        expected_working = {machine} | {
+            path for path in payloads if path.startswith(working + "/")
+        }
+        if (not final_inventory["complete"]
+                or {row["path"] for row in final_inventory["entries"]} != expected_working):
+            print(json.dumps(dict(final_inventory, event="post-publish-inventory", root=str(root)),
+                             sort_keys=True))
+            raise RuntimeError("working inventory changed during publication")
+        if journal._lstat_at(root_fd, _opf_store.LOCAL_POINTER_REL) is not None:
+            raise RuntimeError("local pointer appeared during publication")
+        _init_same_root(root, root_fd)
+        _init_untracked(git, repo, root, index_paths)
+
+        print("opf init: store SOURCES created and {} pointer written.".format(
+            _opf_store.POINTER_REL))
+        print(json.dumps({"event": "created", "root": str(root), "paths": list(payloads)},
+                         sort_keys=True))
+        print("opf init: these created paths are NOT yet git-tracked (final index read).")
+        print("Review the created files, then stage the reviewed paths:")
+        print("  git -C {} --literal-pathspecs add -- {}".format(
+            shlex.quote(str(root)), " ".join(shlex.quote(path) for path in payloads)))
+        print("Commit the reviewed init paths, then materialize the Markdown views:")
+        print("  opf render --write --root {}".format(shlex.quote(str(root))))
+        print("opf init: exit 0 means valid sources were created; tracking and rendering are pending.")
+        return EXIT_OK
+    except Exception as exc:  # noqa: BLE001  includes InitError and residual I/O/import errors
+        print("opf init: cannot evaluate at {} during {}: {}; exit 2".format(
+            ascii(str(root)), stage, ascii(exc)), file=sys.stderr)
+        if publishing and root_fd is not None:
+            try:
+                _init_same_root(root, root_fd)
+                binding = "same-root"
+            except Exception as binding_exc:
+                binding = "cannot-confirm-root: " + ascii(binding_exc)
+            print(json.dumps({
+                "event": "partial-publication",
+                "root": str(root),
+                "scope": "opened-root-descriptor",
+                "root_binding": binding,
+                "paths": _init_observed(root_fd, directories, payloads),
+            }, sort_keys=True), file=sys.stderr)
+            print("opf init: publication may be partial; review the observed state. No rollback performed.",
+                  file=sys.stderr)
+        else:
+            print("opf init: preflight refused; no publication attempted.", file=sys.stderr)
+        return EXIT_MALFORMED
+    finally:
+        if root_fd is not None:
+            _opf_store._journal._close_fd_quietly(root_fd)
+
+
 def _cli_self_test():
-    """Guard the opf.py dispatcher's verb ROUTING (PR-A: the `render` verb; PR-B: the `doctor` verb). Judged
-    on the returned exit code ONLY (never by grepping output, per the isolate-verifiers rule); each case
-    drives main() with an explicit argv, its stdout/stderr redirected so this leg's own output stays clean.
+    """Guard the dispatcher's render, doctor, and source-only init routes.
+    Render/doctor cases below judge return codes; init also checks payload validation, refusal reasons,
+    and preservation through check_opf_init._suite(main). Each case captures stdout and stderr.
     Cases: an unknown verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`,
     both flags together, an unrecognized render flag, a `--root` with no value, and an empty `--root` are usage
     errors (exit 2); `render --check` and `render --write` FORWARD to the U4 engine -- a NOT-ADOPTED root
@@ -674,7 +1031,7 @@ def _cli_self_test():
         expect([], EXIT_MALFORMED)
         expect(["frobnicate"], EXIT_MALFORMED)
         for verb in KNOWN_VERBS:
-            if verb not in ("render", "doctor"):
+            if verb not in ("init", "render", "doctor"):
                 expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
         expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
         expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
@@ -762,6 +1119,15 @@ def _cli_self_test():
 
         _expect_harness("mkdtemp-oserror", tempfile, "mkdtemp")
         _expect_harness("makedirs-oserror", os, "makedirs")
+
+        # The same fixture vectors drive this in-process dispatcher and the dedicated gate's
+        # isolated child. A refusal must name its reason and preserve the fixture, not merely return 2.
+        import check_opf_init
+        init_rc = check_opf_init._suite(main)
+        if init_rc == EXIT_MALFORMED:
+            return EXIT_MALFORMED
+        if init_rc != EXIT_OK:
+            failures.append("source-only init fixture vectors failed")
 
         if failures:
             for f in failures:
@@ -885,6 +1251,8 @@ def main(argv=None):
         return _cmd_render(rest)
     if verb == "doctor":
         return _cmd_doctor(rest)
+    if verb == "init":
+        return _cmd_init(rest)
     if verb in KNOWN_VERBS:
         # A recognized verb whose unit has not landed: fail closed (exit 2), never a silent success, so
         # a stub is never mistaken for a completed operation.
