@@ -81,14 +81,13 @@ def _git_path():
 
 
 def _scrubbed_env():
-    """Build the minimal, allowlist environment every git call runs under. Every ambient `GIT_*` variable is
-    DROPPED (an inherited GIT_DIR / GIT_WORK_TREE / GIT_CONFIG / GIT_OBJECT_DIRECTORY could otherwise rebind
-    the call to a different repository, inject configuration, or redirect object lookup); only PATH and HOME
-    are carried over. The few variables git genuinely needs to run non-interactively and free of ambient
-    configuration are then RE-APPLIED: global and system config are neutralized to os.devnull, the terminal
-    prompt is disabled, optional locks are turned off (this is read-only), and the locale is pinned so output
-    is deterministic. A read that the scrub breaks fails SAFE to omit-plus-note upstream, never a silent
-    allow."""
+    """Build the minimal, allowlist environment every git call runs under. Every ambient `GIT_`-prefixed
+    variable is DROPPED (an inherited GIT_DIR/GIT_WORK_TREE/GIT_CONFIG/GIT_OBJECT_DIRECTORY could otherwise
+    rebind the call to a DIFFERENT repository, inject configuration, or redirect object lookup); only PATH
+    and HOME are carried over. The few variables git genuinely needs to run non-interactively and free of
+    ambient configuration are then RE-APPLIED: global and system config neutralized to os.devnull, the
+    system config search disabled, the terminal prompt disabled, optional locks turned off (read-only), and
+    the locale pinned so output is deterministic."""
     env = {}
     for name in ("PATH", "HOME"):
         val = os.environ.get(name)

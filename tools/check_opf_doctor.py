@@ -315,6 +315,21 @@ def _self_test():
             (badmarker_anchor / ".git").write_text("not a git marker\n", encoding="utf-8")
             with contextlib.redirect_stderr(io.StringIO()):
                 expect("invalid-git-marker", _run_gate(badmarker_anchor), EXIT_ERROR)
+
+            # git emits a RELATIVE toplevel (e.g. `.`) -> _git_toplevel returns None -> exit 2
+            # (cannot-evaluate), never a false NOT-APPLICABLE 0 (B1 regression). `git rev-parse
+            # --show-toplevel` emits an ABSOLUTE path in the normal case; a relative value is malformed and
+            # must fail closed. Without the isabs guard, Path(".").resolve() resolves against the CWD and can
+            # pass the caller's containment check, yielding a false 0. Stub subprocess.run to emit a relative
+            # toplevel and assert the probe returns None; restored in a finally so no later leg is affected.
+            real_run_rel = subprocess.run
+            def _relative_toplevel(*_a, **_k):
+                return subprocess.CompletedProcess(args=[], returncode=EXIT_OK, stdout=".\n")
+            subprocess.run = _relative_toplevel
+            try:
+                expect("relative-toplevel", _git_toplevel(norepo_anchor), None)
+            finally:
+                subprocess.run = real_run_rel
         finally:
             shutil.rmtree(str(base), ignore_errors=True)
         return failures
@@ -341,8 +356,8 @@ def _self_test():
     if rc == EXIT_OK:
         print("check_opf_doctor self-test: PASS (opf doctor returns 0 on a clean committed store / 1 after an "
               "immutable-body mutation vs the committed prior / 2 on a broken store / 0 NOT APPLICABLE, end to "
-              "end; child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; status contract "
-              "1=assertion 2=harness)")
+              "end; child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
+              "relative-toplevel probe -> None (exit 2); status contract 1=assertion 2=harness)")
     return rc
 
 
@@ -352,19 +367,19 @@ _GIT_TIMEOUT_S = 30
 
 
 def _scrubbed_env():
-    """Build the minimal, allowlist environment the git probe runs under, mirroring _opf_observe._scrubbed_env
-    (the sibling module's hardened git boundary). Every ambient `GIT_`-prefixed variable is DROPPED (an
-    inherited GIT_DIR/GIT_WORK_TREE/GIT_CONFIG/GIT_OBJECT_DIRECTORY could otherwise rebind the probe to a
-    DIFFERENT repository, inject configuration, or redirect object lookup); only PATH and HOME are carried
-    over. The few variables git genuinely needs to run non-interactively and free of ambient configuration
-    are then RE-APPLIED: global and system config neutralized to os.devnull, the system config search
-    disabled, the terminal prompt disabled, optional locks turned off (this is a read-only probe), and the
-    locale pinned so output is deterministic."""
+    """Build the minimal, allowlist environment every git call runs under. Every ambient `GIT_`-prefixed
+    variable is DROPPED (an inherited GIT_DIR/GIT_WORK_TREE/GIT_CONFIG/GIT_OBJECT_DIRECTORY could otherwise
+    rebind the call to a DIFFERENT repository, inject configuration, or redirect object lookup); only PATH
+    and HOME are carried over. The few variables git genuinely needs to run non-interactively and free of
+    ambient configuration are then RE-APPLIED: global and system config neutralized to os.devnull, the
+    system config search disabled, the terminal prompt disabled, optional locks turned off (read-only), and
+    the locale pinned so output is deterministic."""
     env = {}
     for name in ("PATH", "HOME"):
         val = os.environ.get(name)
         if val is not None:
             env[name] = val
+    # Re-apply only what git needs, config injection neutralized (allowlist stance).
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -383,8 +398,9 @@ def _git_toplevel(anchor):
     dropped, so an inherited GIT_DIR/GIT_WORK_TREE/etc. cannot bind the probe to a DIFFERENT repository; only
     PATH/HOME carried over, config-neutralizing vars re-applied), git resolved to an ABSOLUTE path, and a
     bounded timeout. A missing git, a launch failure, a timeout, a nonzero return (an invalid/garbage `.git`
-    gitfile yields git's own exit 128), or empty/malformed output all return None -- the caller maps that to a
-    cannot-evaluate (exit 2), never a false pass. Mirrors check_opf_drift._git_toplevel (the sibling gate),
+    gitfile yields git's own exit 128), or output that is empty or not an absolute path (git emits an absolute
+    toplevel, so a relative value is malformed) all return None -- the caller maps that to a cannot-evaluate
+    (exit 2), never a false pass. Mirrors check_opf_drift._git_toplevel (the sibling gate),
     never _gen_common.repo_root() (which falls back to cwd)."""
     import shutil
     git = shutil.which("git")
@@ -401,6 +417,8 @@ def _git_toplevel(anchor):
         return None
     out = (proc.stdout or "").strip()
     if not out:
+        return None
+    if not os.path.isabs(out):
         return None
     try:
         return Path(out).resolve()
