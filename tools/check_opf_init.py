@@ -174,10 +174,22 @@ def _suite(invoke):
                 git_call(root, args)
                 return root
 
+            # Isolate git's default ignore discovery ($XDG_CONFIG_HOME/git/ignore, or ~/.config/git/ignore
+            # when XDG is unset) from the caller's real HOME: a host personal git-ignore matching .working/,
+            # .opf.toml, or CHANGELOG.md would otherwise spuriously fail the positive vectors. HOME reaches
+            # every fixture git call and the in-process init via _opf_observe._scrubbed_env, and the
+            # subprocess init via inherited os.environ; the saved values are restored in the finally below.
+            home = base / "home"
+            home.mkdir()
+            saved_env = {name: os.environ.get(name)
+                         for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS")}
             # Even a broken parser that ignores --root defaults into this isolated, non-git directory.
             # Restore the caller's cwd before TemporaryDirectory removes the fixture.
             saved_cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
             try:
+                os.environ["HOME"] = str(home)
+                os.environ.pop("XDG_CONFIG_HOME", None)
+                os.environ.pop("XDG_CONFIG_DIRS", None)
                 os.chdir(base)
                 parser_root = base / "parser"
                 parser_root.mkdir()
@@ -395,6 +407,11 @@ def _suite(invoke):
                       resolution.status == _opf_store.RESOLVED
                       and resolution.machine_rel == working + "/" + machine_name)
             finally:
+                for name, value in saved_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
                 try:
                     os.fchdir(saved_cwd)
                 finally:
