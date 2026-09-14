@@ -100,15 +100,20 @@ GENERATOR_VERSION = "1"
 SCHEMA_VERSION = _opf_schema.SUPPORTED_SCHEMA
 REGEN_COMMAND = "opf render --write"
 
-# spec 5.7/5.8/11: a mutating render gates on the U6 store-integrity layer (validate_store: cross-record
-# uniqueness, coverage, reconciliation, view drift, changelog/version integrity). render() NOW COMPOSES
-# that gate on the WRITE path (VC-4/PR-C): after resolve_store succeeds it calls validate_store and permits
-# the write ONLY on a VALID verdict, printing the findings/cannot-evaluates and returning EXIT_CANNOT_EVALUATE
-# on any INVALID or CANNOT-EVALUATE store, writing nothing. This flag RECORDS that the gate is composed; the
-# defence-in-depth guard at the single write choke point (_write_contained) reads it as an overlapping,
-# before-the-write refusal so a mutating write can never bypass the composed gate through a different helper
-# (defence-in-depth-default). The opf render CLI requires exactly one of --check / --write (no default), and
-# --check stays strictly read-only (SECI-preview-has-no-side-effects).
+# spec 5.7/5.8/11: a mutating render composes the U6 store-integrity layer (validate_store: cross-record
+# uniqueness, coverage, reconciliation, view drift, changelog/version integrity) on the WRITE path
+# (VC-4/PR-C). render --write is now SOURCE-GATED-REGENERATE, three phases: (A) validate_store and refuse
+# (exit 2, nothing written) unless _opf_check.source_integrity_ok holds, printing ONLY the source-attributed
+# messages; (B) regenerate the OWNED deliverable set (the declared views + the VERSION deliverable) through
+# the two-phase plan-everything-then-write path, capturing preimages; (C) re-validate and require every OWNED
+# drift check to now pass, rolling back on a render/check disagreement. A stale OWNED deliverable is render's
+# OUTPUT to fix, not a refusal; an AUTHORED residual (C-CHANGELOG-GATES, or an UNOWNED C-VERSION-FILE state)
+# never blocks the regenerate but is surfaced with a manual remedy and a nonzero exit (1 finding / 2 cannot-
+# evaluate), NEVER a `render --write` hint. This flag RECORDS that the gate is composed; the defence-in-depth
+# guard at the single write choke point (_write_contained) reads it as an overlapping, before-the-write
+# refusal so a mutating write can never bypass the composed gate through a different helper (defence-in-depth-
+# default). The opf render CLI requires exactly one of --check / --write (no default), and --check stays
+# strictly read-only (SECI-preview-has-no-side-effects).
 _WRITE_GATE_COMPOSED = True
 
 # The mode installed on a NEWLY-created view/deliverable file. An EXISTING target's own mode is preserved
@@ -1030,7 +1035,7 @@ def _spec_destination(view_name):
     return "store", "{}/{}".format(WORKING_DIRNAME, view_name)
 
 
-def _write_contained(root_fd, relpath, text, check):
+def _write_contained(root_fd, relpath, text, check, preimages=None, scope=None):
     """Write `text` (UTF-8) to a contained regular file beneath root_fd, no-follow, or (check mode) return
     True when the on-disk bytes differ (the drift signal). This is U4's OWN view-write primitive, the
     no-follow counterpart of the `_journal` contained READS the module already uses: a symlinked
@@ -1071,6 +1076,12 @@ def _write_contained(root_fd, relpath, text, check):
             return current != new_bytes
         if current == new_bytes:
             return False                                  # already current: byte-stable, no rewrite
+        if preimages is not None:
+            # PR-C Phase B: record the pre-write bytes of every target this render ACTUALLY rewrites (None
+            # when the target did not exist -> a rollback deletes it), keyed by (scope, relpath) so a Phase-C
+            # rollback knows which no-follow root to reopen. Recorded only for a REAL write, after the
+            # byte-stable early return above, so an unchanged target is never marked for rollback.
+            preimages[(scope, relpath)] = current
         # Reopen-TOCTOU hardening: never open the destination NAME for truncation. O_NOFOLLOW refuses a
         # symlink but NOT a hardlink or a regular-file swap raced in after the lstat/read above, so an
         # O_TRUNC of `name` could truncate a victim the attacker hardlinked in over the destination. Instead
@@ -1155,15 +1166,21 @@ def _registered_vendors_and_kinds(manifest):
 def render(argv, observations=None):
     """`opf render [--root DIR] (--check | --write)`: render every declared view of the store at a PRODUCT
     root. Exactly one of --check / --write is required (a bare `render` is a usage error, exit 2). --check is
-    strictly read-only and returns 0 clean, 1 on drift, 2 cannot-evaluate. --write is the MUTATING half: it
-    composes the U6 store-integrity gate (validate_store) after resolve_store succeeds and BEFORE any file is
-    touched, permitting the write ONLY on a VALID verdict; an INVALID or CANNOT-EVALUATE store prints the
-    findings/cannot-evaluates and returns 2, writing nothing. `observations` is the inert git-derived facts
-    object the git-aware caller (opf.py's render --write, via _opf_observe.gather) injects for the gate;
-    validate_store reads no git itself, so a write can only ever pass when honest observations are supplied.
-    NOT-ADOPTED reports NOT APPLICABLE and exits 0 (the pack's own `--root .` case). Two-phase like
-    run_generator: every payload is rendered before any target is written, so a fail-closed source aborts
-    before a single file is touched."""
+    strictly read-only and returns 0 clean, 1 on drift, 2 cannot-evaluate. --write is the MUTATING half and is
+    SOURCE-GATED-REGENERATE (PR-C): after resolve_store succeeds it (A) composes the U6 gate and refuses
+    (exit 2, nothing written) unless source integrity is sound (_opf_check.source_integrity_ok), which
+    EXCLUDES the deliverable-drift checks render itself regenerates; (B) regenerates the owned set (the
+    declared views + the VERSION deliverable); (C) re-validates and requires every OWNED drift check to now
+    pass, rolling back on a render/check disagreement (exit 2). A drifted OWNED deliverable is thus render's
+    OUTPUT, fixed when source integrity holds, not a refusal; a source problem is reported to fix first. An
+    AUTHORED residual after a clean regenerate never blocks it but forces a nonzero exit: a C-CHANGELOG-GATES
+    (or UNOWNED C-VERSION-FILE) FINDING exits 1 and a CANNOT-EVALUATE exits 2, each naming the MANUAL fix
+    (edit CHANGELOG.md / declare-or-remove VERSION) and NEVER advertising a `render --write` re-run.
+    `observations` is the inert git-derived facts object the git-aware caller (opf.py's render --write, via
+    _opf_observe.gather) injects for the gate; validate_store reads no git itself, so a write can only ever
+    pass when honest observations are supplied. NOT-ADOPTED reports NOT APPLICABLE and exits 0 (the pack's own
+    `--root .` case). Two-phase like run_generator: every payload is rendered before any target is written, so
+    a fail-closed source aborts before a single file is touched."""
     root = None
     check = None
     i = 0
@@ -1224,30 +1241,78 @@ def render(argv, observations=None):
         print("opf render: cannot evaluate: {}".format(res.detail), file=sys.stderr)
         return EXIT_CANNOT_EVALUATE
 
-    if not check:
-        # spec 5.7/5.8/11 (VC-4): a mutating render composes the U6 store-integrity gate HERE, after the
-        # store resolves and BEFORE any fd is opened or any payload rendered, so a non-VALID store is refused
-        # with nothing touched on disk. validate_store owns the cross-record uniqueness, coverage,
-        # reconciliation, view-drift, and changelog/version invariants; only status == VALID permits the
-        # write, and an INVALID or CANNOT-EVALUATE verdict prints its findings/cannot-evaluates and returns
-        # exit 2. The import is CALL-TIME: _opf_check imports _opf_views at module top, so a top-level back-
-        # import would be circular; a call-time import resolves against the fully loaded module.
-        import _opf_check
-        result = _opf_check.validate_store(res, observations=observations)
-        if result.status != _opf_check.VALID:
-            print("opf render: cannot evaluate: refusing to write a non-VALID store (U6 validate_store: {}); "
-                  "nothing written".format(result.status), file=sys.stderr)
-            for f in result.findings:
-                print("  FINDING: {}".format(f), file=sys.stderr)
-            for c in result.cannot_evaluate:
-                print("  CANNOT-EVALUATE: {}".format(c), file=sys.stderr)
-            return EXIT_CANNOT_EVALUATE
+    if check:
+        return _render_resolved_store(product_root, res, check)
 
-    return _render_resolved_store(product_root, res, check)
+    # --- the mutating --write path: SOURCE-gate, regenerate the OWNED set, WITNESS the result (PR-C) -------
+    # The import is CALL-TIME: _opf_check imports _opf_views at module top, so a top-level back-import would
+    # be circular; a call-time import resolves against the fully loaded module.
+    import _opf_check
+
+    # Phase A -- SOURCE gate (nothing touched). validate_store grades the whole store; render gates ONLY on
+    # SOURCE integrity (the 26 non-deliverable checks) via the engine predicate, so an out-of-date deliverable
+    # (a drifted view or VERSION) is render's OUTPUT to fix, not a refusal. A source violation (a duplicate
+    # id, untracked, no/malformed observations, an unreadable required input, any internal fault) refuses with
+    # exit 2 and nothing written, printing ONLY the source-attributed messages so the false "regenerate"
+    # remedy is never advertised over a store render will not touch (guard-input-soundness; never-advertise).
+    pre = _opf_check.validate_store(res, observations=observations)
+    if not _opf_check.source_integrity_ok(pre):
+        print("opf render: cannot evaluate: refusing to write; store SOURCE integrity is not sound "
+              "(U6 validate_store); nothing written", file=sys.stderr)
+        for cid in _opf_check.REQUIRED_CHECKS:
+            if cid in _opf_check.SOURCE_INTEGRITY_CHECKS:
+                for m in pre.by_check.get(cid, []):
+                    print("  {}: {}".format(pre.checks.get(cid, "?"), m), file=sys.stderr)
+        for m in pre.unattributed:
+            print("  UNATTRIBUTED: {}".format(m), file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
+
+    # Phase B -- regenerate the OWNED set (the declared views + the VERSION deliverable). plan_views renders
+    # every payload before any target is written (stage-then-promote for this artefact class); a source or
+    # layout fault (a per-record store, a declared VERSION with zero releases, a byte-canon-invalid render)
+    # aborts writeless as exit 2 through _render_resolved_store's handler. `capture` collects the planned view
+    # names and the in-memory preimage of every target actually rewritten, so Phase C can witness and roll
+    # back. The OWNED set is EXACTLY the planned targets.
+    capture = {"preimages": {}}
+    rc = _render_resolved_store(product_root, res, False, capture=capture)
+    if rc != EXIT_OK:
+        return rc
+    planned_names = set(capture.get("planned", ()))
+    preimages = capture["preimages"]
+
+    # Phase C -- witnessed re-validation. Re-grade with the SAME observations and require that source
+    # integrity STILL holds AND every OWNED deliverable drift check now passes: C-VIEW-DRIFT ALWAYS (it grades
+    # exactly the set plan_views just wrote), and C-VERSION-FILE only when "VERSION" was planned (render never
+    # certifies, or fails on, a deliverable it did not and could not regenerate). A miss on an owned check is a
+    # render/check DISAGREEMENT: roll back to the captured preimages, name the affected paths, exit 2.
+    post = _opf_check.validate_store(res, observations=observations)
+    owned_ok = (_opf_check.source_integrity_ok(post)
+                and post.checks.get("C-VIEW-DRIFT") == "PASS"
+                and ("VERSION" not in planned_names or post.checks.get("C-VERSION-FILE") == "PASS"))
+    if not owned_ok:
+        failed = _restore_preimages(product_root, res, preimages)
+        print("opf render: cannot evaluate: post-write validation disagreed with the regenerate over an "
+              "OWNED deliverable; rolled back to the pre-write bytes", file=sys.stderr)
+        for m in post.by_check.get("C-VIEW-DRIFT", []) + post.by_check.get("C-VERSION-FILE", []):
+            print("  {}".format(m), file=sys.stderr)
+        for m in post.unattributed:
+            print("  UNATTRIBUTED: {}".format(m), file=sys.stderr)
+        if failed:
+            print("  WARNING: could not restore: {}".format(", ".join(sorted(failed))), file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
+
+    # The OWNED set is now current. An AUTHORED C-CHANGELOG-GATES state, or an UNOWNED C-VERSION-FILE state (a
+    # stale VERSION the manifest does not declare as a view), NEVER blocks or reverts the regenerate but is
+    # surfaced with a MANUAL remedy and forces a nonzero exit -- never a `render --write` hint.
+    return _residual_write_exit(post, planned_names)
 
 
-def _render_resolved_store(product_root, res, check):
+def _render_resolved_store(product_root, res, check, capture=None):
     """render()'s post-resolution, post-gate body: open the store/product no-follow fds for a RESOLVED store
+    and render (drift-check when `check`, write otherwise). `capture`, when a dict, receives the PR-C Phase-B
+    witness data: capture["planned"] is set to the sorted planned view names, and capture["preimages"] (seeded
+    by the caller) receives the pre-write bytes of every target actually rewritten, so render()'s Phase C can
+    check ownership and roll back. Left None on the --check path and the ungated self-test write path.
     and render (drift-check when `check`, write otherwise) via _render_resolved, mapping U4's ViewsError (and
     defensively RecursionError/ValueError/OSError) to a controlled exit 2 and closing both fds in a finally.
     Extracted so the self-test can exercise the render/write LOGIC over synthetic stores WITHOUT re-composing
@@ -1283,7 +1348,7 @@ def _render_resolved_store(product_root, res, check):
         return EXIT_CANNOT_EVALUATE
     try:
         try:
-            return _render_resolved(store_root_fd, product_root_fd, machine_rel, check)
+            return _render_resolved(store_root_fd, product_root_fd, machine_rel, check, capture)
         except (ViewsError, RecursionError, ValueError, OSError) as exc:
             # ViewsError is U4's cannot-evaluate; RecursionError, (defensively) ValueError, and OSError are
             # widened here as defence in depth, so a parse recursion or a raw OSError (e.g. an unwrapped
@@ -1404,13 +1469,18 @@ def plan_views(store_root_fd, machine_rel):
     return planned
 
 
-def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
+def _render_resolved(store_root_fd, product_root_fd, machine_rel, check, capture=None):
     """The resolved-store render, split out so its ViewsError maps to exit 2 in render()'s handler. Views
     write beneath store_root_fd (`.working/<name>`); the one public VERSION deliverable writes beneath
     product_root_fd. Every target is bound to its spec destination (never the manifest `target`) and
     written through U4's no-follow contained write. Phase 1 is the reusable `plan_views`; this performs the
     writes."""
     planned = plan_views(store_root_fd, machine_rel)
+    if capture is not None:
+        # PR-C: the OWNED set is exactly the planned targets. Record the planned view NAMES so render()'s
+        # Phase C can decide C-VERSION-FILE ownership (owned iff "VERSION" is a declared, planned view).
+        capture["planned"] = sorted(name for name, _s, _d, _t in planned)
+    preimages = capture.get("preimages") if capture is not None else None
 
     # Phase 2: write (or drift-report under --check) each target in the stable (view-name) order, through
     # U4's no-follow contained write. `.working/<name>` writes beneath the store root; the public VERSION
@@ -1418,13 +1488,134 @@ def _render_resolved(store_root_fd, product_root_fd, machine_rel, check):
     drift = False
     for _name, scope, dest_rel, text in sorted(planned, key=lambda p: p[0]):
         write_fd = product_root_fd if scope == "product" else store_root_fd
-        if _write_contained(write_fd, dest_rel, text, check):
+        if _write_contained(write_fd, dest_rel, text, check, preimages=preimages, scope=scope):
             print("drift: {}".format(dest_rel))
             drift = True
     if check and drift:
         print("run '{}' to regenerate".format(REGEN_COMMAND))
         return EXIT_DRIFT
     return EXIT_OK
+
+
+def _residual_write_exit(post, planned_names):
+    """Map any residual AUTHORED-deliverable state left after a clean OWNED regenerate to render's exit code
+    (PR-C), surfacing it with a MANUAL remedy and NEVER a `render --write` hint (SETTLED policy; never-
+    advertise, no-concealed-failure). C-CHANGELOG-GATES is always authored content render does not generate;
+    C-VERSION-FILE is authored-owned only when "VERSION" is NOT a declared/planned view. A CANNOT-EVALUATE
+    (EXIT_CANNOT_EVALUATE=2) dominates a FINDING (EXIT_DRIFT=1); a fully clean residual returns EXIT_OK=0
+    (the exit ints are ordered, so max() gives the dominating code)."""
+    worst = EXIT_OK
+    # An UNOWNED C-VERSION-FILE state: a stale VERSION the manifest does not declare as a view is not render's
+    # to regenerate or delete. Direct the maintainer to declare the view or remove the file; render deletes
+    # nothing.
+    if "VERSION" not in planned_names:
+        v = post.checks.get("C-VERSION-FILE")
+        if v == "CANNOT-EVALUATE":
+            worst = max(worst, EXIT_CANNOT_EVALUATE)
+            for m in post.by_check.get("C-VERSION-FILE", []):
+                print("opf render: cannot evaluate: {}".format(m), file=sys.stderr)
+            print("opf render: the root VERSION deliverable is not a declared view; declare the VERSION view "
+                  "or remove the file, then re-run 'opf doctor' (render does not own an undeclared VERSION)",
+                  file=sys.stderr)
+        elif v == "FINDING":
+            worst = max(worst, EXIT_DRIFT)
+            for m in post.by_check.get("C-VERSION-FILE", []):
+                print("opf render: finding: {}".format(m))
+            print("opf render: the root VERSION deliverable is not a declared view; declare the VERSION view "
+                  "or remove the file, then re-run 'opf doctor' (render does not own an undeclared VERSION)")
+    # C-CHANGELOG-GATES is authored content render NEVER generates; surface it and name the manual fix. A
+    # CANNOT-EVALUATE (e.g. a non-UTF-8 CHANGELOG) still exits 2 after the owned set was regenerated -- an
+    # unreadable authored file does not hold the generated deliverables hostage (SETTLED).
+    cg = post.checks.get("C-CHANGELOG-GATES")
+    if cg == "CANNOT-EVALUATE":
+        worst = max(worst, EXIT_CANNOT_EVALUATE)
+        for m in post.by_check.get("C-CHANGELOG-GATES", []):
+            print("opf render: cannot evaluate: {}".format(m), file=sys.stderr)
+        print("opf render: CHANGELOG.md could not be evaluated; fix the named input above, then re-run "
+              "'opf doctor' (render does not generate the curated changelog)", file=sys.stderr)
+    elif cg == "FINDING":
+        worst = max(worst, EXIT_DRIFT)
+        for m in post.by_check.get("C-CHANGELOG-GATES", []):
+            print("opf render: finding: {}".format(m))
+        print("opf render: edit CHANGELOG.md to resolve the finding above, then re-run 'opf doctor' "
+              "(render does not generate the curated changelog)")
+    return worst
+
+
+def _restore_contained(root_fd, relpath, old_bytes):
+    """Best-effort rollback primitive (PR-C Phase-C owned-miss): restore a target this render rewrote to its
+    captured preimage `old_bytes`, or DELETE it when old_bytes is None (this render created it). Atomic
+    entry-replace beneath a no-follow parent fd, the SAME reopen-TOCTOU discipline _write_contained uses (an
+    O_EXCL temp renamed over the entry, never an O_TRUNC of the destination name). Raises
+    ViewsError/OSError/JournalError on failure so the caller can name the unrestored path; never a silent
+    skip (no-concealed-failure)."""
+    pfd, name = _journal._open_parent(root_fd, relpath)
+    try:
+        if old_bytes is None:
+            try:
+                os.unlink(name, dir_fd=pfd)               # the target did not exist pre-write: undo the create
+            except FileNotFoundError:
+                pass
+            return
+        st = _journal._lstat_at(pfd, name)
+        if st is not None and not stat.S_ISREG(st.st_mode):
+            raise ViewsError("refusing to restore {}: destination is not a regular file".format(relpath))
+        tmpname = ".{}.opf-restore.{}.{}".format(name, os.getpid(), os.urandom(8).hex())
+        fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=pfd)
+        _renamed = False
+        try:
+            try:
+                os.fchmod(fd, stat.S_IMODE(st.st_mode) if st is not None else _VIEW_FILE_MODE)
+                _journal._write_all(fd, old_bytes)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)
+            _renamed = True
+            os.fsync(pfd)
+        finally:
+            if not _renamed:
+                try:
+                    os.unlink(tmpname, dir_fd=pfd)
+                except OSError:
+                    pass
+    finally:
+        os.close(pfd)
+
+
+def _restore_preimages(product_root, res, preimages):
+    """Best-effort rollback of a render/check disagreement (PR-C Phase-C owned-miss): restore each target this
+    render actually rewrote to its captured preimage bytes, or delete a target this render newly created
+    (preimage None). Reopens the no-follow store/product fds and restores descriptor-relative. Returns the
+    list of relpaths it could NOT restore (empty on full success). Never raises: a failed restore is REPORTED,
+    never masked (no-concealed-failure). The residual non-atomicity across multiple files is disclosed in the
+    render docstring/spec; this restore is the best-effort recovery, not an all-or-nothing transaction."""
+    failed = []
+    store_root_fd = product_root_fd = None
+    try:
+        try:
+            store_root_fd = _opf_store._open_store_root_fd(res.store_root, res.pointer_source != "default")
+            product_root_fd = _opf_store._open_root_fd(product_root)
+        except OSError as exc:
+            return ["<reopen for rollback failed: {}>".format(exc)]
+        for (scope, relpath), old in preimages.items():
+            fd = product_root_fd if scope == "product" else store_root_fd
+            try:
+                _restore_contained(fd, relpath, old)
+            except (ViewsError, OSError, _journal.JournalError):
+                failed.append(relpath)
+    finally:
+        if store_root_fd is not None:
+            try:
+                os.close(store_root_fd)
+            except OSError:
+                pass
+        if product_root_fd is not None:
+            try:
+                os.close(product_root_fd)
+            except OSError:
+                pass
+    return failed
 
 
 # --- self-test (the opf.py --self-test render leg) ---------------------------------------------------
@@ -3282,6 +3473,96 @@ def self_test():
         check("gate-invalid-duplicate-id-wrote-nothing",
               _dup_todo.read_text(encoding="utf-8") == _dup_before)
 
+        # --- PR-C: SOURCE-gated REGENERATE. A stale OWNED deliverable (a drifted view, a drifted VERSION, a
+        # missing view target) is render's OUTPUT, not a refusal: SOURCE integrity is sound, so --write
+        # REGENERATES it and Phase C witnesses the 1->0 transition. The OLD VALID-only gate REFUSED each of
+        # these (they are INVALID stores on the deliverable checks); they pass ONLY after the source-gate
+        # rework -- the fail-to-pass transition the fix rests on. `_gate_store_drifted(kind)` corrupts ONE
+        # owned deliverable AFTER the pre-render so exactly that owned drift check fails while source integrity
+        # stays sound.
+        def _gate_store_drifted(kind):
+            root, obs = _gate_store()
+            if kind == "view":
+                (root / WORKING_DIRNAME / "TODO.md").write_text("stale sentinel\n", encoding="utf-8")
+            elif kind == "version":
+                (root / "VERSION").write_text("0.0.0\n", encoding="utf-8")
+            elif kind == "missing":
+                (root / WORKING_DIRNAME / "TODO.md").unlink()
+            else:
+                raise AssertionError("unknown drift kind {!r}".format(kind))
+            return root, obs
+
+        for _kind, _target, _expect in (("view", WORKING_DIRNAME + "/TODO.md", None),
+                                        ("version", "VERSION", "1.1.0\n"),
+                                        ("missing", WORKING_DIRNAME + "/TODO.md", None)):
+            _droot, _dobs = _gate_store_drifted(_kind)
+            _tp = _droot / _target
+            _before = _tp.read_text(encoding="utf-8") if _tp.exists() else None
+            _cl_before = (_droot / "CHANGELOG.md").read_text(encoding="utf-8")
+            check("prc-drifted-{}-write-ok".format(_kind),
+                  render(["--root", str(_droot), "--write"], observations=_dobs) == EXIT_OK)
+            _after = _tp.read_text(encoding="utf-8") if _tp.exists() else None
+            check("prc-drifted-{}-regenerated".format(_kind), _after is not None and _after != _before)
+            if _expect is not None:
+                check("prc-drifted-{}-exact-bytes".format(_kind), _after == _expect)
+            # A following --check is CLEAN: the witnessed 1->0 transition (change-carries-check).
+            check("prc-drifted-{}-check-clean".format(_kind),
+                  render(["--root", str(_droot), "--check"]) == EXIT_OK)
+            # Whole-target-set witness (completeness): CHANGELOG.md is AUTHORED, byte-stable across the
+            # regenerate; VERSION is regenerated to the latest release's exact bytes.
+            check("prc-drifted-{}-changelog-untouched".format(_kind),
+                  (_droot / "CHANGELOG.md").read_text(encoding="utf-8") == _cl_before)
+            check("prc-drifted-{}-version-current".format(_kind),
+                  (_droot / "VERSION").read_text(encoding="utf-8") == "1.1.0\n")
+
+        # --- non-hostage: an AUTHORED changelog defect NEVER holds the generated deliverables hostage -------
+        # A drifted view PLUS a changelog with a published release heading removed: --write REGENERATES the
+        # view (owned) and exits 1 (EXIT_DRIFT) on the residual authored FINDING, leaving CHANGELOG.md bytes
+        # UNTOUCHED; doctor stays INVALID solely on C-CHANGELOG-GATES.
+        _nh_root, _nh_obs = _gate_store_drifted("view")
+        _nh_todo = _nh_root / WORKING_DIRNAME / "TODO.md"
+        (_nh_root / "CHANGELOG.md").write_text(
+            "\n".join(["# Changelog", "", "## unreleased", "", "## 1.1.0", "", "- 1.1.0 notes", ""]) + "\n",
+            encoding="utf-8")   # the published 1.0.0 section removed -> a C-CHANGELOG-GATES FINDING
+        _nh_cl_before = (_nh_root / "CHANGELOG.md").read_text(encoding="utf-8")
+        check("prc-nonhostage-finding-exit-drift",
+              render(["--root", str(_nh_root), "--write"], observations=_nh_obs) == EXIT_DRIFT)
+        check("prc-nonhostage-view-regenerated",
+              _nh_todo.read_text(encoding="utf-8") != "stale sentinel\n")
+        check("prc-nonhostage-changelog-untouched",
+              (_nh_root / "CHANGELOG.md").read_text(encoding="utf-8") == _nh_cl_before)
+
+        # A drifted view PLUS a NON-UTF-8 CHANGELOG: --write REGENERATES the view and exits 2 naming the
+        # unevaluable input, leaving the changelog bytes untouched (SETTLED: regenerate-and-exit-2, never a
+        # whole-write refusal).
+        _nu_root2, _nu_obs = _gate_store_drifted("view")
+        _nu_todo = _nu_root2 / WORKING_DIRNAME / "TODO.md"
+        (_nu_root2 / "CHANGELOG.md").write_bytes(b"# Changelog\n\xff\xfe not utf-8\n")
+        _nu_cl_before = (_nu_root2 / "CHANGELOG.md").read_bytes()
+        check("prc-nonhostage-cannot-eval-exit-2",
+              render(["--root", str(_nu_root2), "--write"], observations=_nu_obs) == EXIT_CANNOT_EVALUATE)
+        check("prc-nonhostage-cannot-eval-view-regenerated",
+              _nu_todo.read_text(encoding="utf-8") != "stale sentinel\n")
+        check("prc-nonhostage-cannot-eval-changelog-untouched",
+              (_nu_root2 / "CHANGELOG.md").read_bytes() == _nu_cl_before)
+
+        # --- fail-safe: the _write_contained backstop refuses ANY mutating write when the gate flag is
+        # cleared, source-sound or not (defence-in-depth-default). On a drifted store with the flag False,
+        # --write exits 2 (Phase B's first write raises before touching any byte) and every target is
+        # byte-unchanged; the flag is restored in a finally.
+        _fs_root, _fs_obs = _gate_store_drifted("view")
+        _fs_todo = _fs_root / WORKING_DIRNAME / "TODO.md"
+        _fs_before = _fs_todo.read_text(encoding="utf-8")
+        _saved_flag = _WRITE_GATE_COMPOSED
+        try:
+            globals()["_WRITE_GATE_COMPOSED"] = False
+            check("prc-uncomposed-gate-write-refused",
+                  render(["--root", str(_fs_root), "--write"], observations=_fs_obs) == EXIT_CANNOT_EVALUATE)
+            check("prc-uncomposed-gate-wrote-nothing",
+                  _fs_todo.read_text(encoding="utf-8") == _fs_before)
+        finally:
+            globals()["_WRITE_GATE_COMPOSED"] = _saved_flag
+
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -3304,9 +3585,13 @@ def self_test():
           "deep-TOML and free-text (severity and covers) fail-closed AND whole-body byte-canon "
           "fail-closed (zero-width/bidi refused, never emitted), per-record and module-type "
           "deferrals, missing-and-malformed-source fail-closed, empty-store valid-empty with a rendered "
-          "VERSION, the empty-VERSION-ledger fail-closed, the CLI fail-closed parse, and the composed U6 "
-          "write gate (render --write permits a VALID store and refuses an INVALID / CANNOT-EVALUATE one, "
-          "writing nothing; --check unaffected)".format(checked[0]))
+          "VERSION, the empty-VERSION-ledger fail-closed, the CLI fail-closed parse, and the PR-C source-"
+          "gated write path (render --write refuses a SOURCE-integrity violation writing nothing, but "
+          "REGENERATES a drifted OWNED deliverable -- a drifted view, a drifted VERSION, a missing target -- "
+          "and witnesses the 1->0 transition; an authored CHANGELOG finding exits 1 and a changelog cannot-"
+          "evaluate exits 2, each with a manual remedy and never a re-run hint; the source/deliverable "
+          "partition and attribution predicate gate; the _write_contained backstop refuses any mutating "
+          "write when the gate flag is cleared; --check unaffected)".format(checked[0]))
     return EXIT_OK
 
 

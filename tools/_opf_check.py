@@ -154,6 +154,39 @@ REQUIRED_CHECKS = (
 )
 _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
 
+# --- source-integrity vs deliverable-drift partition (PR-C, the render --write source gate) ---------
+# The three DELIVERABLE_DRIFT_CHECKS grade the GENERATED public deliverables (the declared views, the root
+# VERSION deliverable, and the curated CHANGELOG.md). `opf render --write` REGENERATES the views and the
+# VERSION deliverable, so those checks are its OUTPUT, not its precondition: a mutating render gates on
+# SOURCE integrity (the other 26 required checks) and then makes the deliverables current. The source set is
+# derived by SUBTRACTION, so an unclassified FUTURE required check defaults into the must-pass source set
+# (the safe direction; guard-input-soundness), and the partition is drift-gated for exactness/disjointness
+# in self_test beside the closed-roster reconciliation.
+#
+# STANDING RULE (never-advertise; TRUST-change-tracking-ext): C-CHANGELOG-GATES is AUTHORED content render
+# does NOT generate, and an UNOWNED C-VERSION-FILE state (a stale VERSION the manifest does not declare as a
+# view) is likewise not render's to regenerate or delete. Their adopter-facing messages direct the maintainer
+# to edit the authored artefact (or declare the VERSION view / remove the file) and re-run `opf doctor`, and
+# must NEVER gain an `opf render --write` remedy hint.
+DELIVERABLE_DRIFT_CHECKS = frozenset({"C-VIEW-DRIFT", "C-VERSION-FILE", "C-CHANGELOG-GATES"})
+SOURCE_INTEGRITY_CHECKS = _REQUIRED_SET - DELIVERABLE_DRIFT_CHECKS
+
+
+def source_integrity_ok(result):
+    """True IFF every SOURCE_INTEGRITY_CHECK graded EXACTLY "PASS" and the report carries no unattributed or
+    internal fault. This is the predicate render()'s --write SOURCE gate calls: it EXCLUDES the deliverable-
+    drift checks (which render regenerates) while failing CLOSED on a source check that is FINDING,
+    CANNOT-EVALUATE, or never ran (result() force-appends CANNOT-EVALUATE for a skipped required check), and
+    on ANY internal/unattributed fault (a duplicate ran(), an unknown check id, or a finding/cant emitted
+    with no current check on an early-return path). The predicate reads the per-check verdict MAP and the
+    `unattributed` list, never a message prefix, so the guard's input can genuinely answer the question asked
+    of it (guard-input-soundness). An empty/malformed result reads as not-ok (fail-closed)."""
+    if getattr(result, "unattributed", None):
+        return False
+    checks = getattr(result, "checks", None) or {}
+    return all(checks.get(cid) == "PASS" for cid in SOURCE_INTEGRITY_CHECKS)
+
+
 # Disclosed by-design residuals (OPF-SPEC 17): the sub-checks a parse-only, read-only whole-store engine
 # cannot soundly reach from its inputs, or that another layer owns. They are reported alongside every result
 # and never fold into the gradeable status. The membership test is that no residual may ever let a broken
@@ -204,10 +237,11 @@ class StoreValidation:
     and `unevaluated_profiles` name the profile scope (spec 16); `residuals` are the disclosed by-design
     uncovered sub-checks, reported but never changing the status."""
     __slots__ = ("status", "findings", "cannot_evaluate", "residuals", "checks", "triage",
-                 "evaluated_profiles", "unevaluated_profiles")
+                 "evaluated_profiles", "unevaluated_profiles", "by_check", "unattributed")
 
     def __init__(self, status, findings=None, cannot_evaluate=None, residuals=None, checks=None,
-                 triage=None, evaluated_profiles=None, unevaluated_profiles=None):
+                 triage=None, evaluated_profiles=None, unevaluated_profiles=None,
+                 by_check=None, unattributed=None):
         self.status = status
         self.findings = findings or []
         self.cannot_evaluate = cannot_evaluate or []
@@ -216,6 +250,13 @@ class StoreValidation:
         self.triage = triage or []
         self.evaluated_profiles = evaluated_profiles or []
         self.unevaluated_profiles = unevaluated_profiles or []
+        # PR-C ADDITIVE attribution (no existing field, verdict, status, or roster behaviour changes):
+        # `by_check` maps a check id to the source-attributed message strings it emitted (so a caller can
+        # print EXACTLY the messages a given check owns, no prefix parsing); `unattributed` collects any
+        # message with no current check plus the duplicate-ran / unknown-id internal faults, so a caller can
+        # fail closed on an internal fault the per-check map does not carry.
+        self.by_check = by_check or {}
+        self.unattributed = unattributed or []
 
 
 def exit_code(result):
@@ -235,7 +276,8 @@ class _Report:
     it to the current check. `result` reconciles the emitted check set against REQUIRED_CHECKS: a required
     check that never registered `ran` is routed to CANNOT-EVALUATE naming it, so a silently-skipped check is
     never a pass."""
-    __slots__ = ("findings", "cannot", "residuals", "checks", "triage", "_current")
+    __slots__ = ("findings", "cannot", "residuals", "checks", "triage", "_current", "by_check",
+                 "unattributed")
 
     def __init__(self):
         self.findings = []
@@ -244,31 +286,43 @@ class _Report:
         self.checks = {}                  # insertion-ordered check-id -> "PASS" / "FINDING" / "CANNOT-EVALUATE"
         self.triage = []
         self._current = None
+        self.by_check = {}                # check-id -> list of the source-attributed message strings it emitted
+        self.unattributed = []            # no-current findings/cants + duplicate-ran / unknown-id internal faults
 
     def ran(self, check_id):
         # Register a required check as executed and make it the attribution target. A second ran() for the
-        # same id is an internal fault (a check double-counted), fail-closed.
+        # same id is an internal fault (a check double-counted), fail-closed: it is recorded as a report-wide
+        # cannot AND as an `unattributed` entry so source_integrity_ok refuses it (the verdict in the map is
+        # deliberately left unchanged, so this fault is invisible to a bare per-check scan without it).
         if check_id in self.checks:
-            self.cannot.append("internal: check {!r} was run more than once".format(check_id))
+            msg = "internal: check {!r} was run more than once".format(check_id)
+            self.cannot.append(msg)
+            self.unattributed.append(msg)
         else:
             self.checks[check_id] = "PASS"
         self._current = check_id
 
     def finding(self, msg):
         self.findings.append(msg)
-        self._attribute("FINDING")
+        self._attribute("FINDING", msg)
 
     def cant(self, msg):
         self.cannot.append(msg)
-        self._attribute("CANNOT-EVALUATE")
+        self._attribute("CANNOT-EVALUATE", msg)
 
     def triage_path(self, msg):
         self.triage.append(msg)
 
-    def _attribute(self, status):
+    def _attribute(self, status, msg):
+        # Attribute the verdict AND the message to the current check. A finding/cant emitted with NO current
+        # check (an early-return path that cant()s before any ran(), e.g. the obs_err or unresolved-store
+        # paths) is UNATTRIBUTED: recorded in `unattributed` so source_integrity_ok fails closed on it,
+        # since no per-check entry would otherwise carry it.
         cid = self._current
         if cid is None:
+            self.unattributed.append(msg)
             return
+        self.by_check.setdefault(cid, []).append(msg)
         cur = self.checks.get(cid)
         if cur is None or status == "CANNOT-EVALUATE":
             self.checks[cid] = status
@@ -281,13 +335,17 @@ class _Report:
         # fail-closed internal fault. Neither can read as a pass.
         for cid in REQUIRED_CHECKS:
             if cid not in self.checks:
-                self.cannot.append("internal: required check {!r} did not run; routed to CANNOT-EVALUATE "
-                                   "(a skipped check is never a pass)".format(cid))
+                msg = ("internal: required check {!r} did not run; routed to CANNOT-EVALUATE "
+                       "(a skipped check is never a pass)".format(cid))
+                self.cannot.append(msg)
+                self.by_check.setdefault(cid, []).append(msg)   # so the source gate can print the reason
                 self.checks[cid] = "CANNOT-EVALUATE"
         for cid in list(self.checks):
             if cid not in _REQUIRED_SET:
-                self.cannot.append("internal: an unknown check id {!r} was run (not in REQUIRED_CHECKS; "
-                                   "fail-closed)".format(cid))
+                msg = ("internal: an unknown check id {!r} was run (not in REQUIRED_CHECKS; "
+                       "fail-closed)".format(cid))
+                self.cannot.append(msg)
+                self.unattributed.append(msg)                   # an unknown id has no roster verdict to carry it
         ordered = {cid: self.checks[cid] for cid in REQUIRED_CHECKS}
         for cid in self.checks:
             if cid not in ordered:
@@ -299,7 +357,8 @@ class _Report:
         else:
             status = VALID
         return StoreValidation(status, self.findings, self.cannot, self.residuals, ordered, self.triage,
-                               sorted(evaluated_profiles or []), sorted(unevaluated_profiles or []))
+                               sorted(evaluated_profiles or []), sorted(unevaluated_profiles or []),
+                               by_check=self.by_check, unattributed=self.unattributed)
 
 
 # --- a lightweight record descriptor for the cross-record checks -------------------------------------
@@ -2782,6 +2841,46 @@ def self_test():
         check("clean-checks-cover-roster",
               clean is not None and set(clean.checks) == set(REQUIRED_CHECKS)
               and all(v == "PASS" for v in clean.checks.values()))
+
+        # --- PR-C: the source-integrity / deliverable-drift partition, attribution, and the render predicate.
+        # The partition is derived by SUBTRACTION, so it must EXHAUST the roster and stay DISJOINT; drift-gated
+        # here beside the roster-coverage vector so an unclassified new required check defaults into the
+        # must-pass source set rather than silently escaping the source gate (change-carries-check).
+        check("prc-partition-exhausts-roster",
+              SOURCE_INTEGRITY_CHECKS | DELIVERABLE_DRIFT_CHECKS == _REQUIRED_SET)
+        check("prc-partition-disjoint", not (SOURCE_INTEGRITY_CHECKS & DELIVERABLE_DRIFT_CHECKS))
+        check("prc-partition-deliverables-are-required",
+              DELIVERABLE_DRIFT_CHECKS <= _REQUIRED_SET and len(DELIVERABLE_DRIFT_CHECKS) == 3)
+        # source_integrity_ok over the clean store: every source check PASSes and nothing is unattributed.
+        check("prc-predicate-clean-source-ok", clean is not None and source_integrity_ok(clean))
+        # A store whose ONLY defect is a DELIVERABLE-drift FINDING still passes the source gate (render
+        # regenerates that deliverable). Synthesized directly from the clean map so all 26 source checks read
+        # PASS while a deliverable check is FINDING and nothing is unattributed.
+        if clean is not None:
+            _srcok = dict(clean.checks); _srcok["C-VIEW-DRIFT"] = "FINDING"
+            check("prc-predicate-deliverable-finding-passes",
+                  source_integrity_ok(StoreValidation(INVALID, checks=_srcok)))
+            # A SOURCE check that is CANNOT-EVALUATE refuses the predicate.
+            _srcbad = dict(clean.checks); _srcbad["C-MANIFEST"] = "CANNOT-EVALUATE"
+            check("prc-predicate-source-cannot-eval-refuses",
+                  not source_integrity_ok(StoreValidation(CANNOT_EVALUATE, checks=_srcbad)))
+            # A non-empty `unattributed` refuses the predicate REGARDLESS of the per-check map (an internal
+            # fault the map does not carry).
+            check("prc-predicate-unattributed-refuses",
+                  not source_integrity_ok(StoreValidation(VALID, checks=dict(clean.checks),
+                                                          unattributed=["synthetic internal fault"])))
+        # Attribution: a finding is recorded under its current check in `by_check`; a cant() with NO current
+        # check lands in `unattributed`; a duplicate ran() is an internal fault in `unattributed`.
+        _rp = _Report()
+        _rp.ran("C-VIEW-DRIFT"); _rp.finding("C-VIEW-DRIFT: synthetic drift")
+        check("prc-by-check-attributes-finding",
+              _rp.result().by_check.get("C-VIEW-DRIFT") == ["C-VIEW-DRIFT: synthetic drift"])
+        _rp2 = _Report(); _rp2.cant("no-current early-return cannot-evaluate")
+        check("prc-unattributed-collects-no-current",
+              "no-current early-return cannot-evaluate" in _rp2.unattributed)
+        _rp3 = _Report(); _rp3.ran("C-MANIFEST"); _rp3.ran("C-MANIFEST")
+        check("prc-duplicate-ran-is-unattributed",
+              any("run more than once" in m for m in _rp3.unattributed))
 
         # --- unanchored leg: no observations -> exactly the topology/history anchors cannot-evaluate ---
         unanch = run(clean_machine(), obs=None)
