@@ -81,7 +81,7 @@ ROSTER_FILES = ("tools/run_all_checks.sh", ".github/workflows/quality.yml")
 
 GATE_KEYS = {"id", "script", "rules", "platform", "default", "class", "residue"}
 PLATFORMS = {"ci"}
-DEFAULTS = {"block"}
+DEFAULTS = {"block", "warn"}   # block: a finding fails CI; warn: an advisory gate whose findings are reported but never fail CI (only a tool crash does)
 CLASSES = {"a", "c"}   # b is the hook axis; d is never authored on a control (see the rubric)
 SCRIPT_RE = re.compile(r"^tools/[A-Za-z0-9_]+\.py$")
 # Matches the isolated python3 -I -B tools/*.py roster steps (the house launcher grammar the
@@ -376,7 +376,11 @@ def main():
 #   (p) a roster whose ONLY occurrence of a manifest script is inside an inline comment does not
 #       enumerate that script, so its manifest entry reads as a linkage claim with no roster step and
 #       fails closed (exit 2): proves the F-148 comment strip (the quoted-argument / heredoc residual
-#       stays a disclosed limit and is deliberately not asserted here).
+#       stays a disclosed limit and is deliberately not asserted here),
+#   (q) a gate row with default = "warn" is ACCEPTED (exit 0) and its ledger linkage row records
+#       "default": "warn": an advisory gate reports its findings for review but never fails CI,
+#   (r) a bogus gate default (for example "off") fails closed (exit 2): the default vocabulary is
+#       validated, so a nonsense value cannot ship an un-graded gate.
 # These cases exercise this tool's OWN logic (the gates manifest shape, the class-d ledger boundary, the
 # hook and gate no-orphan checks, the roster reconciliation, and drift). The corpus and hooks-manifest
 # read-failure paths and the empty-hook-residue path are validated fail-closed by the reused loaders
@@ -708,6 +712,29 @@ def self_test_main():
         if run_quiet(pinl, check=True) != 2:
             failures.append("a manifest script named only in a roster inline comment must not enumerate "
                             "(F-148 strip); expected exit 2 (a linkage claim with no roster step)")
+
+        # (q) A gate row with default = "warn" is ACCEPTED (exit 0) and its ledger linkage row records it:
+        #     an advisory gate reports its findings for review but never fails CI (only a tool crash does).
+        qwarn = _build(tmp / "warn-default")
+        replace_in(qwarn / GATES_MANIFEST_REL,
+                   'default = "block"\nclass = "a"\nresidue = "A self-test drift gate."',
+                   'default = "warn"\nclass = "a"\nresidue = "A self-test drift gate."')
+        if run_quiet(qwarn, check=False) != 0:
+            failures.append("a gate default of warn expected exit 0 (an advisory gate is accepted)")
+        else:
+            ledger_obj = json.loads((qwarn / LEDGER_REL).read_text(encoding="utf-8"))
+            alpha_rows = [g for e in ledger_obj["rules"] for g in e["gates"] if g["id"] == "gate-alpha"]
+            if not alpha_rows or any(g["default"] != "warn" for g in alpha_rows):
+                failures.append("a warn-default gate's ledger linkage row must record default warn")
+
+        # (r) A bogus gate default (for example "off") fails closed (exit 2): the default vocabulary is
+        #     validated, so a nonsense value cannot ship an un-graded gate.
+        rbad = _build(tmp / "bad-default")
+        replace_in(rbad / GATES_MANIFEST_REL,
+                   'default = "block"\nclass = "a"\nresidue = "A self-test drift gate."',
+                   'default = "off"\nclass = "a"\nresidue = "A self-test drift gate."')
+        if run_quiet(rbad, check=True) != 2:
+            failures.append("a bogus gate default expected exit 2 (fail-closed)")
     finally:
         if unread_manifest is not None:
             os.chmod(unread_manifest, 0o644)  # restore even on an unexpected early exit
@@ -728,8 +755,9 @@ def self_test_main():
           "manifest entry, a manifest gate running in no roster, a missing gate script, an unreadable "
           "gates manifest, a duplicate gate id, a duplicate gate script, an absent gates manifest, an "
           "absent roster file, a roster with zero scripts, an unknown corpus-id in the hooks manifest, an "
-          "unknown gates-manifest top-level key, an unknown [[gate]] entry key, and a manifest script "
-          "named only inside a roster inline comment all fail closed (exit 2)" + note)
+          "unknown gates-manifest top-level key, an unknown [[gate]] entry key, a manifest script "
+          "named only inside a roster inline comment, and a bogus gate default all fail closed (exit 2); "
+          "and a gate default of warn is accepted with its ledger linkage row recording it" + note)
     return 0
 
 

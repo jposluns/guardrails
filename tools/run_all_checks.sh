@@ -150,6 +150,12 @@ run_gate "enforceability-selftest" python3 -I -B tools/gen_enforceability.py --s
 run_gate "enforceability-drift" python3 -I -B tools/gen_enforceability.py --check
 run_gate "launcher-isolation-selftest" python3 -I -B tools/check_python_launcher_isolation.py --self-test
 run_gate "launcher-isolation" python3 -I -B tools/check_python_launcher_isolation.py
+run_gate "timer-restore-selftest" python3 -I -B tools/check_timer_restore.py --self-test
+run_gate "timer-restore" python3 -I -B tools/check_timer_restore.py
+run_gate "path-classification-selftest" python3 -I -B tools/check_path_classification.py --self-test
+run_gate "path-classification" python3 -I -B tools/check_path_classification.py
+run_gate "advisory-contract-selftest" python3 -I -B tools/check_advisory_contract.py --self-test
+run_gate "advisory-contract" python3 -I -B tools/check_advisory_contract.py
 run_gate "renderers-selftest"    python3 -I -B tools/gen_renderers.py --self-test
 run_gate "renderers-drift"       python3 -I -B tools/gen_renderers.py --check
 run_gate "manifest-gen-selftest" python3 -I -B tools/gen_manifest.py --self-test

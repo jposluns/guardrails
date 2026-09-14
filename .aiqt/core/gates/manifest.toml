@@ -28,7 +28,8 @@
 #   rules     the corpus-id(s) this gate cites (a list; MAY be empty but must be PRESENT; every
 #             element must resolve to a real corpus-id in .aiqt/core/rules/)
 #   platform  "ci" (the Quality workflow plus its local mirror; a neutrality dimension, not an abstraction)
-#   default   "block" (a failing gate exits nonzero; no roster step carries continue-on-error)
+#   default   "block" (a finding fails CI, a failing gate exits nonzero) or "warn" (an ADVISORY gate: a
+#             finding is reported for human review but never fails CI; only a tool crash, an exit 2, fails)
 #   class     the EN-5 enforceability letter, restricted to a (deterministic gate) or c (partial) here;
 #             b is the hook axis and never appears in a gates manifest, d is never authored on a control.
 #             The a-versus-c line is TOTALITY over the examined class, not determinism of the scan (the
@@ -651,6 +652,33 @@ platform = "ci"
 default = "block"
 class = "c"
 residue = "A deterministic scan over a RECOGNIZABLE SUBSET of the repo's Python launcher configuration: the generated plugin hooks.json, tools/run_all_checks.sh, every regular *.yml/*.yaml under .github/workflows/, and the optional .claude/settings.json files. A direct python3 launcher there is FAILed unless it runs isolated (-I, or the full -P -E -s), so a tool-written sibling cannot shadow a stdlib import and neuter the control; the gate itself refuses to run non-isolated (exit 2) so a sibling cannot neuter the gate first, and it fails closed (exit 2) on a missing, unreadable, non-regular, or malformed input rather than passing it as clean. It does NOT catch: wrapper or indirect launchers (a bash -c string, a .sh re-launcher), $PYTHON or shell aliases and functions, a dynamically assembled argv, the programmatic subprocess children in the tools and the regenerate strings in .aiqt/gensrc.json (a separate follow-up), a script that mutates its own sys.path at runtime (which -I cannot prevent), an unrecognized interpreter name, launcher configuration outside the enumerated surfaces, YAML or shell constructs beyond the supported line grammar, and the PATH provenance of python3 itself; a python3 token embedded in a quoted argument or a heredoc may be miscounted."
+
+[[gate]]
+id = "timer-restore"
+script = "tools/check_timer_restore.py"
+rules = ["tmrrst"]
+platform = "ci"
+default = "warn"
+class = "c"
+residue = "best-effort heuristic advisory; the authoritative behavior is the code and the --self-test. Potential limitations: alias rebinding, cross-scope dataflow, containers, dynamic dispatch, definition-time expressions, unmodelled control flow, and non-Python timer manipulation. False positives and false negatives remain possible."
+
+[[gate]]
+id = "path-classification"
+script = "tools/check_path_classification.py"
+rules = ["secspr", "chkfcl"]
+platform = "ci"
+default = "warn"
+class = "c"
+residue = "best-effort heuristic advisory; the authoritative behavior is the code and the --self-test. Potential limitations: receiver provenance, alias rebinding, compound conditions, cross-scope dataflow, exception flow, syntactic suppression, dynamic dispatch, and non-Python operations. False positives and false negatives remain possible."
+
+[[gate]]
+id = "advisory-contract"
+script = "tools/check_advisory_contract.py"
+rules = ["clmobs", "dscres"]
+platform = "ci"
+default = "block"
+class = "c"
+residue = "A wording and structure check over the registered advisory documentation surfaces. Potential gaps: claims outside the selected regions, semantic errors in approved text, and changes to the checker or its profile. Human review remains necessary."
 
 [[gate]]
 id = "branch-root"
