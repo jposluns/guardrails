@@ -745,6 +745,33 @@ def _init_untracked(git, repo, root, paths):
             os.fsdecode(tracked)))
 
 
+def _init_unignored(git, repo, root, paths):
+    """Refuse a planned destination git would ignore: an ignored store cannot be staged or discovered.
+
+    check-ignore reports at least one ignored path with rc 0, none ignored with rc 1, and an error
+    with rc >= 128. The rc drives the three-way decision; the output is only for the diagnostic. Paths
+    are passed as arguments (git check-ignore accepts neither -z without --stdin, which _run_git has no
+    channel for, nor --literal-pathspecs, which it rejects as unsupported magic), so the output is one
+    path per line over the controlled, newline-free internal destinations. Residual: without literal
+    pathspecs a planned destination whose adopter-supplied path prefix contained pathspec-magic
+    characters would be glob-interpreted; the internal store names never do, and a magic error fails
+    closed (rc >= 128 -> refuse). Called directly (not via _init_git, which raises on rc != 0) because
+    rc 1 is the success case here; a timeout, launch failure, or unexpected rc fails closed and refuses.
+    """
+    prefix = root.relative_to(repo)
+    scoped = sorted(str(prefix / path) for path in paths)
+    result = _opf_observe._run_git(
+        git, repo, ["check-ignore", "--"] + scoped)
+    if not result.completed:
+        raise RuntimeError("git preflight: could not evaluate ignore status for planned destinations")
+    if result.rc == 0:
+        ignored = [p for p in os.fsdecode(result.out).splitlines() if p]
+        raise RuntimeError("planned destination is git-ignored: {!r}".format(ignored))
+    if result.rc != 1:
+        raise RuntimeError("git preflight: check-ignore failed (rc={}): {}".format(
+            result.rc, result.err))
+
+
 def _init_same_root(root, root_fd):
     check_fd = _opf_store._open_dir_nofollow(root)
     try:
@@ -911,6 +938,7 @@ def _cmd_init(rest):
             raise RuntimeError("existing pointer: " + _opf_store.LOCAL_POINTER_REL)
         index_paths = set(payloads) | {working, _opf_store.LOCAL_POINTER_REL}
         _init_untracked(git, repo, root, index_paths)
+        _init_unignored(git, repo, root, index_paths)
         _init_same_root(root, root_fd)
 
         publishing = True

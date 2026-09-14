@@ -16,6 +16,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -294,13 +295,66 @@ def _suite(invoke):
                 check("existing changelog preserved",
                       (changelog / "CHANGELOG.md").read_bytes() == b"Existing changelog.\n")
 
+                # Symlinked root, isolated: the target is a FRESH uninitialized git repo with no
+                # pointer or store, so the refusal is unambiguously the symlink rejection, never a
+                # pre-existing store pointer at the target.
+                symlink_target = make_git("symlink-target")
                 linked = base / "linked-root"
-                linked.symlink_to(clean, target_is_directory=True)
-                before = _snapshot(clean)
+                linked.symlink_to(symlink_target, target_is_directory=True)
+                before = _snapshot(symlink_target)
                 rc, output = run(linked)
                 check("symlink root refused",
                       rc == EXIT_ERROR and "preflight refused" in output)
-                check("symlink root target preserved", _snapshot(clean) == before)
+                check("symlink root target preserved",
+                      _snapshot(symlink_target) == before)
+
+                # A destination tracked in the index but absent from the working tree (the deleted-copy
+                # case _init_untracked exists for): commit it, then remove the working copy. With the
+                # file left present the earlier existence/resolution checks would fire first, so removing
+                # the working copy routes the refusal through _init_untracked's index read; init must
+                # refuse rather than publish over a tracked-but-deleted path.
+                tracked = make_git("tracked-dest")
+                tracked_machine = tracked / working / machine_name
+                tracked_machine.mkdir(parents=True)
+                (tracked_machine / _opf_store.MANIFEST_NAME).write_bytes(b"x = 1\n")
+                git_call(tracked, ["--literal-pathspecs", "add", "--",
+                                   working + "/" + machine_name + "/" + _opf_store.MANIFEST_NAME])
+                git_call(tracked, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "seed"])
+                shutil.rmtree(tracked / working)
+                before = _snapshot(tracked)
+                rc, output = run(tracked)
+                check("tracked destination refused",
+                      rc == EXIT_ERROR and "planned destination already git-tracked" in output)
+                check("tracked destination preserved", _snapshot(tracked) == before)
+
+                # A planned destination under a .gitignore rule: init must refuse, because an ignored
+                # store cannot be staged (git add silently no-ops on an ignored path) or discovered.
+                ignored = make_git("ignored-target")
+                (ignored / ".gitignore").write_bytes(working.encode("ascii") + b"/\n")
+                git_call(ignored, ["--literal-pathspecs", "add", "--", ".gitignore"])
+                git_call(ignored, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "-m", "seed"])
+                before = _snapshot(ignored)
+                rc, output = run(ignored)
+                check("ignored destination refused",
+                      rc == EXIT_ERROR and "git-ignored" in output)
+                check("ignored destination preserved", _snapshot(ignored) == before)
+
+                # Defence in depth: after a successful init, the staged-and-committed store resolves
+                # end to end, at the standard machine subdir. resolve_store reads the working tree, so
+                # the commit is not required for resolution; it is included to exercise the realistic
+                # adopter flow (init -> stage -> commit -> resolvable).
+                resolvable = make_git("resolve-store")
+                rc, output = run(resolvable)
+                check("resolve-store init succeeds", rc == EXIT_OK)
+                git_call(resolvable, ["--literal-pathspecs", "add", "-A"])
+                git_call(resolvable, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                      "commit", "-m", "init"])
+                resolution = _opf_store.resolve_store(resolvable)
+                check("resolve-store resolves committed store",
+                      resolution.status == _opf_store.RESOLVED
+                      and resolution.machine_rel == working + "/" + machine_name)
             finally:
                 try:
                     os.fchdir(saved_cwd)
