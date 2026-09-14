@@ -353,6 +353,19 @@ jobs:
       - name: Launcher isolation
         run: python3 -I -B tools/check_python_launcher_isolation.py
 
+      - name: Timer restore self-test
+        run: python3 -I -B tools/check_timer_restore.py --self-test
+      - name: Timer restore
+        run: python3 -I -B tools/check_timer_restore.py
+      - name: Path classification self-test
+        run: python3 -I -B tools/check_path_classification.py --self-test
+      - name: Path classification
+        run: python3 -I -B tools/check_path_classification.py
+      - name: Advisory contract wording self-test
+        run: python3 -I -B tools/check_advisory_contract.py --self-test
+      - name: Advisory contract wording
+        run: python3 -I -B tools/check_advisory_contract.py
+
       - name: Renderer declaration self-test
         run: python3 -I -B tools/gen_renderers.py --self-test
       - name: Renderer declaration drift

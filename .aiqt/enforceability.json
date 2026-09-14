@@ -141,10 +141,19 @@
     {
       "corpus-id": "chkfcl",
       "family": "aiqt",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "warn",
+          "id": "path-classification",
+          "platform": "ci",
+          "residue": "best-effort heuristic advisory; the authoritative behavior is the code and the --self-test. Potential limitations: receiver provenance, alias rebinding, compound conditions, cross-scope dataflow, exception flow, syntactic suppression, dynamic dispatch, and non-Python operations. False positives and false negatives remain possible.",
+          "script": "tools/check_path_classification.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/integ-check-fails-closed-on-unreadable.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "chtrk1",
@@ -166,10 +175,19 @@
     {
       "corpus-id": "clmobs",
       "family": "aiqt",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "advisory-contract",
+          "platform": "ci",
+          "residue": "A wording and structure check over the registered advisory documentation surfaces. Potential gaps: claims outside the selected regions, semantic errors in approved text, and changes to the checker or its profile. Human review remains necessary.",
+          "script": "tools/check_advisory_contract.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/accur-claims-rest-on-observation.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "clrfy1",
@@ -358,10 +376,19 @@
     {
       "corpus-id": "dscres",
       "family": "aiqt",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "block",
+          "id": "advisory-contract",
+          "platform": "ci",
+          "residue": "A wording and structure check over the registered advisory documentation surfaces. Potential gaps: claims outside the selected regions, semantic errors in approved text, and changes to the checker or its profile. Human review remains necessary.",
+          "script": "tools/check_advisory_contract.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/accur-disclose-guard-residuals.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "estsep",
@@ -1371,10 +1398,19 @@
     {
       "corpus-id": "secspr",
       "family": "security",
-      "gates": [],
+      "gates": [
+        {
+          "class": "c",
+          "default": "warn",
+          "id": "path-classification",
+          "platform": "ci",
+          "residue": "best-effort heuristic advisory; the authoritative behavior is the code and the --self-test. Potential limitations: receiver provenance, alias rebinding, compound conditions, cross-scope dataflow, exception flow, syntactic suppression, dynamic dispatch, and non-Python operations. False positives and false negatives remain possible.",
+          "script": "tools/check_path_classification.py"
+        }
+      ],
       "hooks": [],
       "source": ".aiqt/core/rules/security-seci-symlink-resolution.md",
-      "status": "prose-only"
+      "status": "gate-linked"
     },
     {
       "corpus-id": "secssr",
@@ -1583,6 +1619,23 @@
       "hooks": [],
       "source": ".aiqt/core/rules/integ-stage-then-promote-on-green.md",
       "status": "prose-only"
+    },
+    {
+      "corpus-id": "tmrrst",
+      "family": "aiqt",
+      "gates": [
+        {
+          "class": "c",
+          "default": "warn",
+          "id": "timer-restore",
+          "platform": "ci",
+          "residue": "best-effort heuristic advisory; the authoritative behavior is the code and the --self-test. Potential limitations: alias rebinding, cross-scope dataflow, containers, dynamic dispatch, definition-time expressions, unmodelled control flow, and non-Python timer manipulation. False positives and false negatives remain possible.",
+          "script": "tools/check_timer_restore.py"
+        }
+      ],
+      "hooks": [],
+      "source": ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md",
+      "status": "gate-linked"
     },
     {
       "corpus-id": "trkasy",
