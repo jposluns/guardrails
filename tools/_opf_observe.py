@@ -75,8 +75,12 @@ _GitOutcome = namedtuple("_GitOutcome", "completed rc out err")
 
 
 def _git_path():
-    """The absolute path to the git executable, or None when git is not on PATH. Resolved absolute (never a
-    bare `git`) so the invocation cannot be redirected by a PATH-shadowing binary."""
+    """The absolute path to the git executable, or None when git is not on PATH. Resolved to an absolute path
+    (never a bare `git`) so the launched child cannot be RE-RESOLVED at exec time: once resolved, git is
+    launched by absolute path, so a later PATH change or a relative-name re-lookup cannot redirect it.
+    PATH-based resolution at which()-time remains a disclosed residual (shutil.which reads the ambient PATH,
+    so a PATH-shadowing binary can still be chosen at lookup), consistent with the corpus's disclosed
+    PATH-resolution residual."""
     return shutil.which("git")
 
 
