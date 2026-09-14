@@ -45,11 +45,12 @@ top-level string `mode` key (`{"mode": "attended"}` / `{"mode": "unattended"}`, 
 a leading byte-order mark tolerated). A recognized mode whose value carries the `unattended` token arms the
 ask blocker. The reader fails CLOSED to the guards-armed (`unattended`) posture, never silently disarming,
 when a marker IS present but cannot yield a recognized value: a present-but-unreadable or non-UTF-8 file, a
-malformed or partial JSON marker (or a present JSON marker, including an array or other non-object value,
-that is not an object with a string `mode`), or a marker whose value falls outside the
-`attended`/`unattended` family. It preserves the fail-open (undeclared) answer only when NO marker is
-present: an undeclared mode path, a genuinely absent file, or a present file that carries no marker of either
-shape (empty, or non-JSON prose with no `Operating-mode` line). The escape sentinel (default
+present `Operating-mode:` line declaration whose value is empty or unrecognized, a malformed or partial JSON
+marker (an unterminated string included), a present JSON marker that is not an object with a string `mode`
+(a scalar such as a number, boolean, or null, an array, or an object without a string `mode`), or a marker
+whose value falls outside the `attended`/`unattended` family. It preserves the fail-open (undeclared) answer
+only when NO marker is present: an undeclared mode path, a genuinely absent file, an empty or whitespace-only
+file, or prose that carries no `Operating-mode` declaration and no JSON marker. The escape sentinel (default
 `<state_dir>/ESCAPE-ALLOW-YIELD`) is operator-owned by enforced acceptance, not convention: it is
 honoured only as a regular file (never a symlink), owned by a uid other than the assistant's
 effective uid, and not group- or other-writable. A present sentinel failing any condition is ignored

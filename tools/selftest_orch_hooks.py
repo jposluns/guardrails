@@ -605,17 +605,38 @@ def main(report_path=None):
                  '{"mode": "bananas"}\n', "deny"),            # JSON mode outside the attended family
                 ("ask/line-mode-unrecognized-value-denies-armed",
                  "Operating-mode: bananas\n", "deny"),        # line value outside the attended family
+                # A JSON SCALAR is a present marker attempt, not an object with a string mode -> armed/deny.
+                ("ask/json-scalar-bool-denies-armed",
+                 "true\n", "deny"),                           # JSON boolean scalar
+                ("ask/json-scalar-number-denies-armed",
+                 "42\n", "deny"),                             # JSON number scalar
+                ("ask/json-scalar-null-denies-armed",
+                 "null\n", "deny"),                           # JSON null scalar
+                ("ask/json-scalar-string-denies-armed",
+                 '"unattended"\n', "deny"),                   # terminated JSON string scalar (not an object)
+                # An UNTERMINATED JSON string is a malformed string-shaped marker attempt -> armed/deny.
+                ("ask/json-unterminated-string-denies-armed",
+                 '"unattended\n', "deny"),
+                # A present `Operating-mode:` declaration with an EMPTY value fails CLOSED (not the no-marker None):
+                ("ask/empty-value-declaration-denies-armed",
+                 "Operating-mode:\n", "deny"),
+                # Ordinary prose with NO declaration and NO JSON stays the fail-open no-marker default (no over-fire):
+                ("ask/prose-no-declaration-allows",
+                 "This is a shared session-state note with no mode declaration.\n", "allow"),
+                # A shared text file with real prose PLUS a valid Operating-mode line: the line is still found:
+                ("ask/prose-with-valid-line-denies",
+                 "Session state notes.\nSome context here.\nOperating-mode: unattended\nMore notes.\n", "deny"),
                 ("ask/mode-absent-allows", "", "allow")):  # absent mode line fails open
             h.mode.write_text(mode_text, encoding="utf-8")
             g_ask = h.payload("PreToolUse", "AskUserQuestion",
                               {"questions": [{"question": "pick one"}]},
                               extra={"tool_use_id": "tu-1"})
             check(check_id, _verdict(ask()), want)
-        # unreadable mode record fails open
+        # absent mode record fails open (no marker): the fixture DELETES the file, so this tests ABSENCE
         h.mode.unlink()
         g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
                           extra={"tool_use_id": "tu-2"})
-        check("ask/unreadable-mode-fails-open", _verdict(ask()), "allow")
+        check("ask/absent-mode-fails-open", _verdict(ask()), "allow")
         # a PRESENT but unreadable mode record fails CLOSED to guards-armed (distinct from the absent file
         # above). A directory at the mode path raises an OSError that is NOT FileNotFoundError when opened,
         # a hermetic proxy for an unreadable present file that holds on any uid, including root.
