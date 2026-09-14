@@ -3,7 +3,7 @@
 
 This is the DevProcess (OPF-SPEC.md) new-document writer: it serializes a Python model (a dict) to a
 canonical, byte-reproducible TOML string, used ONLY where no TOML preimage exists (import staging under
-`.working/toml/imports/<run-id>/`, and any `opf init` scaffolding). It is NOT a round-trip editor of
+`.working/imports/<run-id>/`, and any `opf init` scaffolding). It is NOT a round-trip editor of
 existing TOML (that writer stays held behind a licence-review dossier, build-plan U8 / fable H4-B3);
 editing an existing document in place is out of scope here.
 

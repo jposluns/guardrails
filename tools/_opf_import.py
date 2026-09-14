@@ -3,9 +3,10 @@
 
 Offline, stdlib only, fail-closed. This module takes an operator-enumerated set of legacy SOURCE files
 and an untrusted MAPPING PLAN, validates both, mints record ids from the store's counters, and STAGES a
-byte-canonical candidate under `<machine>/imports/<run-id>/`. Its writes are confined to the `imports/`
-staging ROOT (created if absent; spec 14 stages under `imports/<run-id>/`, so the staging root is part of
-the staging area, not the active store) and the new run directory beneath it: the active store, its
+byte-canonical candidate under `.working/imports/<run-id>/` (store scope, a sibling of the machine subdir,
+which carries TOML records only; spec 14.1). Its writes are confined to the `.working/imports/` staging ROOT
+(created if absent; spec 14 stages under `.working/imports/<run-id>/`, so the staging root is part of the
+staging area, not the active store) and the new run directory beneath it: the active store, its
 `counters.toml`, its indexes, its archive, and the sources are read-only inputs, never written. It
 composes U1 (store resolution + manifest), U2 (record envelope + counters + id helpers), U3 (the worklog
 release-boundary gate), and U8 (the constrained-subset canonical emitter) rather than re-deriving them.
@@ -98,6 +99,10 @@ FINDING = 1          # a validation finding (R6 collision, bad plan/candidate, p
 CANNOT_EVALUATE = 2  # unreadable/malformed/exotic/out-of-subset: stage nothing (fail-closed)
 
 IMPORTS_DIRNAME = "imports"
+# The import-run staging tree is store-scope (`.working/imports/`), a sibling of the machine subdir, NOT
+# under it: the machine store carries TOML records only (OPF-SPEC 14.1). This single constant is the one
+# path authority both U7 (staging) and the checker consume, so the two cannot drift.
+IMPORTS_REL = "{}/{}".format(_opf_store.WORKING_DIRNAME, IMPORTS_DIRNAME)   # ".working/imports"
 ARCHIVE_DIRNAME = "archive"
 DIR_MODE = 0o755
 FILE_MODE = 0o644
@@ -590,14 +595,36 @@ def _dir_entries_no_symlink(store_root_fd, rel):
 
 
 def _sibling_ids(store_root_fd, machine_rel, roster, registered_vendors=frozenset(), skip_run_id=None):
-    """Enumerate staged ids across sibling runs under `<machine>/imports/`.
+    """Enumerate staged ids across sibling runs under `.working/imports/`.
 
     Every candidate/fragments index is read through _record_ids. Baseline and importer records receive
     complete validation; ANY non-empty module-tier sibling index is CANNOT-EVALUATE until the module
     schemas release. Unknown index types and malformed sibling artefacts are refused. An incomplete
     sibling still enumerates artefacts already written. Symlinked/non-directory entries are refused.
-    `skip_run_id` excludes this run during the post-claim re-check."""
-    imports_rel = "{}/{}".format(machine_rel, IMPORTS_DIRNAME)
+    `skip_run_id` excludes this run during the post-claim re-check. `machine_rel` is retained to feed the
+    fail-closed legacy-location guard below (the ONLY consumer of it here)."""
+    # Fail-closed legacy-location guard (OPF-IMPORTS-RELOCATE): import runs now stage at `.working/imports/`,
+    # so the OLD machine-subdir path `.working/toml/imports/` must never carry a run. ANY object there
+    # (directory empty or not, regular file, or symlink) is CANNOT-EVALUATE, never silently ignored: the
+    # enumerator below reads only the new root, so a legacy run's staged ids would otherwise vanish from the
+    # R6 uniqueness union (a fail-OPEN id-collision hazard) or be triaged away under a new-path partial. No
+    # automatic dual-location fallback and no automatic migration (settled greenfield): the content is
+    # surfaced for manual review and relocation. An existence predicate is total over the input space (no
+    # run-id-grammar edge, symlink/file/dir uniform), so it cannot false-fire (the machine-name reservation
+    # removes the only legitimate claimant of the name, and `imports` is not a declarable type).
+    legacy_rel = "{}/{}".format(machine_rel, IMPORTS_DIRNAME)
+    try:
+        legacy_st = _journal._lstat_contained(store_root_fd, legacy_rel)
+    except _journal.JournalError as exc:
+        raise _cannot("cannot probe the legacy import-run location {} ({}); fail-closed".format(
+            legacy_rel, exc))
+    if legacy_st is not None:
+        raise _cannot(
+            "an import run exists at the legacy location {!r}; since the relocation import runs stage under "
+            "{!r} and the machine store carries TOML records only (spec 14.1). The legacy content needs "
+            "manual review and relocation (no automatic dual-location fallback, no automatic "
+            "migration).".format(legacy_rel, IMPORTS_REL))
+    imports_rel = IMPORTS_REL
     runs = _dir_entries_no_symlink(store_root_fd, imports_rel)
     if runs is None:
         return []
@@ -814,10 +841,10 @@ def _tile_spans(rows, source_len, where):
 
 def stage_import(product_root, import_set, plan, *, now, run_nonce):
     """Validate an enumerated import set against an untrusted mapping plan and, on a full pass, stage the
-    byte-canonical candidate under `<machine>/imports/<run-id>/`. Writes only the `imports/` staging root
-    (created if absent) and the new run directory beneath it; the active store, its counters, indexes,
-    archive, and the sources are read-only. Returns a StageResult; fail-closed on anything unreadable,
-    malformed, exotic, or outside the supported subset, never a silent clean pass."""
+    byte-canonical candidate under `.working/imports/<run-id>/` (store scope; spec 14.1). Writes only the
+    `.working/imports/` staging root (created if absent) and the new run directory beneath it; the active
+    store, its counters, indexes, archive, and the sources are read-only. Returns a StageResult; fail-closed
+    on anything unreadable, malformed, exotic, or outside the supported subset, never a silent clean pass."""
     try:
         _journal.require_containment()
     except _journal.JournalError as exc:
@@ -1022,7 +1049,7 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
             raise _finding("source {!r} has no plan.fragments entry (every source must be mapped)".format(sp))
 
     run_id = _run_id(sources, plan_bytes, now, run_nonce)
-    run_rel = "{}/{}/{}".format(machine_rel, IMPORTS_DIRNAME, run_id)
+    run_rel = "{}/{}".format(IMPORTS_REL, run_id)   # store-scope `.working/imports/<run-id>` (spec 14.1)
 
     # --- counters: validate, then mint above the recorded high-water --------------------------------
     counters_rel = "{}/counters.toml".format(machine_rel)
@@ -1444,11 +1471,12 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
 
     # --- pass 1: claim the exclusive run dir and stage every file EXCEPT report.toml ------------------
     ops = []
-    imports_rel = "{}/{}".format(machine_rel, IMPORTS_DIRNAME)
+    imports_rel = IMPORTS_REL   # store-scope `.working/imports` staging root (spec 14.1)
     imports_st = _journal._lstat_contained(store_root_fd, imports_rel)
     if imports_st is None:
-        # The imports/ staging ROOT (spec 14) is created if absent: part of the staging area, not the
-        # active store (F1). A race surfaces as a JournalError -> CANNOT-EVALUATE.
+        # The `.working/imports/` staging ROOT (spec 14) is created if absent: part of the staging area, not
+        # the active store (F1); its parent `.working` always exists on a resolved store. A race surfaces as
+        # a JournalError -> CANNOT-EVALUATE.
         ops.append({"op": "mkdir", "path": imports_rel, "poststate": {"kind": "dir", "mode": DIR_MODE}})
     elif not stat.S_ISDIR(imports_st.st_mode):
         raise _cannot("{} exists but is not a directory (fail-closed)".format(imports_rel))
@@ -1558,12 +1586,16 @@ def self_test():
     base = Path(tempfile.mkdtemp(prefix="opf-import-selftest-")).resolve()
     counter = [0]
 
-    def build_store(counters="BI=0,LF=0,WL=0", sources=None, extra=None):
-        """A default-resolution store with a valid manifest + counters, plus optional source files and
-        extra store files ({rel-under-machine: text})."""
+    def build_store(counters="BI=0,LF=0,WL=0", sources=None, extra=None, working_extra=None):
+        """A default-resolution store with a valid manifest + counters, plus optional source files, extra
+        MACHINE-relative store files (`extra=` {rel-under-.working/toml: text}), and extra WORKING-relative
+        store files (`working_extra=` {rel-under-.working: text}). The working-relative channel is EXPLICIT
+        (never a silent reroute of `imports/`-prefixed keys) so a fixture that stages under the store-scope
+        `.working/imports/` tree is written there deliberately, not inferred (OPF-IMPORTS-RELOCATE)."""
         counter[0] += 1
         root = base / "case-{:02d}".format(counter[0])
-        machine = root / ".working" / "toml"
+        working = root / ".working"
+        machine = working / "toml"
         machine.mkdir(parents=True)
         (machine / "manifest.toml").write_text(manifest_text(), encoding="utf-8")
         kv = {}
@@ -1578,6 +1610,10 @@ def self_test():
             p.write_bytes(text if isinstance(text, bytes) else text.encode("utf-8"))
         for rel, text in (extra or {}).items():
             p = machine / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        for rel, text in (working_extra or {}).items():
+            p = working / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
         return root, machine
@@ -1605,20 +1641,18 @@ def self_test():
         return {"fragments": {"a.txt": [
             {"span": [0, source_len], "state": "mapped", "record": bi_candidate()}]}}
 
-    def snapshot(machine, include_imports=True):
-        """A byte snapshot of the machine tree for a before/after comparison. With include_imports=False it
-        covers only the ACTIVE store (manifest, counters, indexes, archive, version/worklog), excluding the
-        imports/ staging area, so an active-store-unchanged assertion can allow the new imports/<run-id>/
-        subtree while still pinning that nothing outside imports/ changed (F1/F11.3). Default INCLUDES
-        imports/ so an out-of-run-dir write becomes visible."""
+    def snapshot(machine):
+        """A byte snapshot of the machine tree (`.working/toml/`) for a before/after comparison. Since the
+        relocation the staging area lives at `.working/imports/` (a SIBLING of the machine subdir, never
+        under it), so the machine tree is the pure ACTIVE store: a clean stage leaves it byte-identical, and
+        `snapshot(machine) == before` is the strongest machine-subdir-untouched proof (F1/F11.3). A snapshot
+        meant to catch an out-of-run-dir write UNDER imports must re-root at `.working` (imports is no longer
+        reachable from the machine tree)."""
         snap = {}
         for p in sorted(machine.rglob("*")):
             if not p.is_file():
                 continue
-            rel = p.relative_to(machine)
-            if not include_imports and "imports" in rel.parts:
-                continue
-            snap[str(rel)] = p.read_bytes()
+            snap[str(p.relative_to(machine))] = p.read_bytes()
         return snap
 
     try:
@@ -1626,14 +1660,19 @@ def self_test():
         # unmapped fragment carrying all four provenance fields, active store + counters unchanged.
         src = "hello world body"
         root, machine = build_store(sources={"a.txt": src})
-        before = snapshot(machine, include_imports=False)
+        before = snapshot(machine)
         rows = [{"span": [0, 5], "state": "mapped", "record": bi_candidate()},
                 {"span": [5, len(src)], "state": "unmapped"}]
         res = stage_import(root, ["a.txt"], {"fragments": {"a.txt": rows}}, now=NOW, run_nonce=NONCE)
         check("1-positive-clean", res.verdict == 0)
         check("1-run-id-grammar", bool(res.run_id and INDEP_RUN_ID_RE.match(res.run_id)))
         check("1-migration-incomplete", res.migration_incomplete is True)
-        run_dir = machine / "imports" / (res.run_id or "MISSING")
+        # OPF-IMPORTS-RELOCATE: the run stages at the STORE-scope `.working/imports/<run-id>` path, asserted
+        # with an INDEPENDENT literal (never derived from the production IMPORTS_REL constant, so a wrong
+        # relocation cannot satisfy its own expectation). Pre-relocation run_rel was `.working/toml/imports/
+        # <run-id>`, so this literal flips red against pre-edit code.
+        check("1-run-rel-new-path", res.run_rel == ".working/imports/" + (res.run_id or "MISSING"))
+        run_dir = machine.parent / "imports" / (res.run_id or "MISSING")
         check("1-run-dir-exists", run_dir.is_dir())
         check("1-report-present", (run_dir / "report.toml").is_file())
         check("1-candidate-present", (run_dir / "candidate" / "backlog_item.index.toml").is_file())
@@ -1653,11 +1692,15 @@ def self_test():
             check("1-candidate-no-fabricated-created-at", "created_at" not in crec)
             check("1-candidate-has-provenance-ref",
                   isinstance(crec.get("refs"), list) and bool(crec.get("refs")))
-        check("1-store-unchanged", snapshot(machine, include_imports=False) == before)
-        # F1/F11.3: the ONLY new entry under imports/ is this run's dir (the staging root plus one run
-        # dir); nothing outside imports/<run-id>/ was written, and no active index/counter/archive byte
-        # changed (asserted above with include_imports=False).
-        imports_children = sorted(d.name for d in (machine / "imports").iterdir())
+        # The FULL machine tree is byte-identical across a clean stage: since the relocation the machine
+        # subdir carries no staging area, so this is the strongest machine-subdir-untouched proof (F1/F11.3).
+        # Pre-relocation staging wrote `.working/toml/imports/<run-id>` INTO the machine tree, so this
+        # full-identity assertion flips red against pre-edit code.
+        check("1-store-unchanged", snapshot(machine) == before)
+        check("1-no-imports-under-machine", not (machine / "imports").exists())
+        # F1/F11.3: the ONLY entry under the store-scope `.working/imports/` root is this run's dir (the
+        # staging root plus one run dir); nothing outside `.working/imports/<run-id>/` was written.
+        imports_children = sorted(d.name for d in (machine.parent / "imports").iterdir())
         check("1-only-run-dir-under-imports", imports_children == [res.run_id])
         check("1-two-ids", len(res.staged_ids) == 2)
 
@@ -1691,7 +1734,7 @@ def self_test():
         cp = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--root", str(root4)],
                             capture_output=True)
         check("3-verb-exits-2", cp.returncode == 2)
-        check("3-verb-stages-nothing", not (machine4 / "imports").exists())
+        check("3-verb-stages-nothing", not (machine4.parent / "imports").exists())
 
         # 4: R6 active collision: a fully-valid active index already carries the id next_id will mint (BI-1
         # above the BI=0 high-water) -> verdict 1, nothing written. The active record is now routed through
@@ -1700,7 +1743,7 @@ def self_test():
                                       extra={"backlog_item.index.toml": bi_index_text()})
         res5 = stage_import(root5, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
         check("4-active-collision-finding", res5.verdict == 1)
-        check("4-active-collision-no-run", not (machine5 / "imports").exists())
+        check("4-active-collision-no-run", not (machine5.parent / "imports").exists())
 
         # 5: an archived collision is real only when the declared machine-relative destination opens and
         # carries the exact archived id.
@@ -1720,12 +1763,12 @@ def self_test():
         # complete-contract sibling validation (B4) and its id is scanned into the union.
         sib = {"imports/imp-20260101T000000Z-0000000000000000/candidate/backlog_item.index.toml":
                bi_index_text()}
-        root7, machine7 = build_store(sources={"a.txt": src}, extra=sib)
+        root7, machine7 = build_store(sources={"a.txt": src}, working_extra=sib)
         res7 = stage_import(root7, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
         check("6-sibling-collision-finding", res7.verdict == 1)
         bad_sib = {"imports/imp-20260101T000000Z-0000000000000000/candidate/backlog_item.index.toml":
                    "this is not = valid toml ["}
-        root8, machine8 = build_store(sources={"a.txt": src}, extra=bad_sib)
+        root8, machine8 = build_store(sources={"a.txt": src}, working_extra=bad_sib)
         res8 = stage_import(root8, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
         check("6-sibling-unparseable-cannot-eval", res8.verdict == 2)
 
@@ -1805,14 +1848,14 @@ def self_test():
                                             "note": [[1, 2]]}]}}
         res21 = stage_import(root21, ["a.txt"], badplan, now=NOW, run_nonce=NONCE)
         check("13-emitter-boundary-cannot-eval", res21.verdict == 2)
-        check("13-emitter-no-run", not (machine21 / "imports").exists())
+        check("13-emitter-no-run", not (machine21.parent / "imports").exists())
 
         # 14: run-dir refusal: a pre-created run directory -> verdict 2, pre-existing content byte-intact.
         root22, machine22 = build_store(sources={"a.txt": src})
         pre = stage_import(root22, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
         rid = pre.run_id
-        shutil.rmtree(machine22 / "imports")
-        target = machine22 / "imports" / rid
+        shutil.rmtree(machine22.parent / "imports")
+        target = machine22.parent / "imports" / rid
         target.mkdir(parents=True)
         (target / "sentinel").write_text("keep", encoding="utf-8")
         res22 = stage_import(root22, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
@@ -1882,7 +1925,7 @@ def self_test():
         # the re-check would see this run's own on-disk BI-1 twice and turn the clean stage into verdict 2.
         sib_run = "imp-20260101T000000Z-0000000000000000"
         sibx = {"imports/{}/candidate/backlog_item.index.toml".format(sib_run): bi_index_text()}
-        rootA, machineA = build_store(sources={"a.txt": src}, extra=sibx)
+        rootA, machineA = build_store(sources={"a.txt": src}, working_extra=sibx)
         resolA = _opf_store.resolve_store(rootA)
         fdA = _opf_store._open_store_root_fd(resolA.store_root, resolA.pointer_source != "default")
         try:
@@ -1907,7 +1950,7 @@ def self_test():
                                         extra={"done.index.toml": 'schema = 1\n\n[[record]]\nid = "BI-1"\n'})
         resF3 = stage_import(rootF3, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
         check("F3-misplaced-id-cannot-eval", resF3.verdict == 2)
-        check("F3-misplaced-id-no-run", not (machineF3 / "imports").exists())
+        check("F3-misplaced-id-no-run", not (machineF3.parent / "imports").exists())
 
         # F4: a SYMLINKED sibling run is CANNOT-EVALUATE (fail-closed), never silently dropped.
         realsib = base / "real-sibling"
@@ -1916,8 +1959,8 @@ def self_test():
             'schema = 1\n\n[[record]]\nid = "BI-1"\ntype = "backlog_item"\nstatus = "open"\ntitle = "x"\n',
             encoding="utf-8")
         rootF4, machineF4 = build_store(sources={"a.txt": src})
-        (machineF4 / "imports").mkdir()
-        os.symlink(str(realsib), str(machineF4 / "imports" / sib_run))
+        (machineF4.parent / "imports").mkdir()
+        os.symlink(str(realsib), str(machineF4.parent / "imports" / sib_run))
         check("F4-symlink-sibling-cannot-eval",
               stage_import(rootF4, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
 
@@ -1925,13 +1968,13 @@ def self_test():
         # explicit empty index (schema = 1, record = []) still reads as zero and stages clean.
         def _sib_index(text):
             return {"imports/{}/candidate/backlog_item.index.toml".format(sib_run): text}
-        rootF5a, mF5a = build_store(sources={"a.txt": src}, extra=_sib_index("schema = 2\n"))
+        rootF5a, mF5a = build_store(sources={"a.txt": src}, working_extra=_sib_index("schema = 2\n"))
         check("F5-bad-schema-cannot-eval",
               stage_import(rootF5a, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
-        rootF5b, mF5b = build_store(sources={"a.txt": src}, extra=_sib_index("schema = 1\n"))
+        rootF5b, mF5b = build_store(sources={"a.txt": src}, working_extra=_sib_index("schema = 1\n"))
         check("F5-missing-record-cannot-eval",
               stage_import(rootF5b, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
-        rootF5c, mF5c = build_store(sources={"a.txt": src}, extra=_sib_index("schema = 1\nrecord = []\n"))
+        rootF5c, mF5c = build_store(sources={"a.txt": src}, working_extra=_sib_index("schema = 1\nrecord = []\n"))
         check("F5-empty-index-clean",
               stage_import(rootF5c, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 0)
 
@@ -1945,7 +1988,7 @@ def self_test():
         resF6 = stage_import(rootF6, ["a.txt"], f6_plan, now=NOW, run_nonce=NONCE)
         check("F6-byte-span-clean", resF6.verdict == 0)
         if resF6.run_id:
-            lfp = mF6 / "imports" / resF6.run_id / "fragments" / "legacy_fragment.index.toml"
+            lfp = mF6.parent / "imports" / resF6.run_id / "fragments" / "legacy_fragment.index.toml"
             check("F6-byte-span-body-X",
                   lfp.is_file() and tomllib.loads(lfp.read_text())["record"][0]["body"] == "X")
         # a span splitting the multi-byte é ([0,1]) is refused fail-closed (not silently emptied).
@@ -1962,7 +2005,7 @@ def self_test():
         resF7 = stage_import(rootF7, ["a.txt"], plan_mapped(len(marker)), now=NOW, run_nonce=NONCE)
         check("F7-fully-mapped-clean", resF7.verdict == 0)
         if resF7.run_id:
-            run_dir7 = mF7 / "imports" / resF7.run_id
+            run_dir7 = mF7.parent / "imports" / resF7.run_id
             src_dir7 = run_dir7 / "sources"
             hits = [p for p in run_dir7.rglob("*") if p.is_file() and marker.encode() in p.read_bytes()]
             check("F7-source-preserved",
@@ -1984,7 +2027,7 @@ def self_test():
         rootF9, mF9 = build_store(sources={"a.txt": src})
         resF9 = stage_import(rootF9, ["a.txt"], f9_plan, now=NOW, run_nonce=NONCE)
         check("F9-mapped-target-finding", resF9.verdict == 1)
-        check("F9-mapped-target-no-run", not (mF9 / "imports").exists())
+        check("F9-mapped-target-no-run", not (mF9.parent / "imports").exists())
 
         # F10: an accepted lexical internal '..' source (sub/../a.txt) -> verdict 2, NO uncaught raise.
         rootF10, mF10 = build_store(sources={"a.txt": src})
@@ -1996,14 +2039,39 @@ def self_test():
         # unsafe path-based writer would resolve the link and populate the target, failing this assertion.
         rootS, machineS = build_store(sources={"a.txt": src})
         rid_s = stage_import(rootS, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).run_id
-        shutil.rmtree(machineS / "imports")
+        shutil.rmtree(machineS.parent / "imports")
         external = base / "external-link-target"
         external.mkdir()
-        (machineS / "imports").mkdir()
-        os.symlink(str(external), str(machineS / "imports" / rid_s))
+        (machineS.parent / "imports").mkdir()
+        os.symlink(str(external), str(machineS.parent / "imports" / rid_s))
         resS = stage_import(rootS, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
         check("F11.1-symlink-run-dir-refused", resS.verdict == 2)
         check("F11.1-symlink-target-untouched", list(external.iterdir()) == [])
+
+        # --- OPF-IMPORTS-RELOCATE: the fail-closed legacy-location guard ---------------------------------
+        # An import-run tree at the OLD machine-subdir path `.working/toml/imports/` (a `machine`-relative
+        # `extra=` fixture) is CANNOT-EVALUATE (verdict 2) with the legacy message, never silently staged at
+        # the new root. Existence predicate: a valid run, a bare empty dir, and a symlink at the old path each
+        # fire. Bite: pre-relocation there was NO guard and staging itself lived at the old path, so every
+        # vector here flips against pre-edit production code.
+        legacy_sib = {"imports/{}/candidate/backlog_item.index.toml".format(sib_run): bi_index_text()}
+        rootLG, mLG = build_store(sources={"a.txt": src}, extra=legacy_sib)
+        resLG = stage_import(rootLG, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
+        check("REL-legacy-run-cannot-eval", resLG.verdict == 2)
+        check("REL-legacy-run-message", any("legacy location" in f for f in resLG.findings))
+        check("REL-legacy-run-nothing-at-new-root", not (mLG.parent / "imports").exists())
+        # a bare EMPTY machine/imports/ dir fires the existence predicate (not run-shape).
+        rootLGe, mLGe = build_store(sources={"a.txt": src})
+        (mLGe / "imports").mkdir()
+        check("REL-legacy-empty-dir-cannot-eval",
+              stage_import(rootLGe, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
+        # a SYMLINK at machine/imports fires too (lstat sees a present entry, never followed).
+        rootLGs, mLGs = build_store(sources={"a.txt": src})
+        _lg_ext = base / "legacy-symlink-target"
+        _lg_ext.mkdir()
+        os.symlink(str(_lg_ext), str(mLGs / "imports"))
+        check("REL-legacy-symlink-cannot-eval",
+              stage_import(rootLGs, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
 
         # --- B2/B3/B4/B6/B7/M2 discrimination + the worklog-ledger relaxation (M11) ----------------------
 
@@ -2033,21 +2101,21 @@ def self_test():
         def _sib_cand(text):
             return {"imports/{}/candidate/backlog_item.index.toml".format(sib_run): text}
         rootB4a, mB4a = build_store(sources={"a.txt": src},
-                                    extra=_sib_cand('schema = 1\n\n[[record]]\nid = "BI-2"\n'
-                                                    'type = "backlog_item"\nstatus = "open"\ntitle = "x"\n'))
+                                    working_extra=_sib_cand('schema = 1\n\n[[record]]\nid = "BI-2"\n'
+                                                            'type = "backlog_item"\nstatus = "open"\ntitle = "x"\n'))
         check("B4-sibling-missing-envelope-cannot-eval",
               stage_import(rootB4a, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
         rootB4b, mB4b = build_store(
             sources={"a.txt": src},
-            extra=_sib_cand(bi_index_text().replace('type = "backlog_item"', 'type = "finding"')))
+            working_extra=_sib_cand(bi_index_text().replace('type = "backlog_item"', 'type = "finding"')))
         check("B4-sibling-type-disagreement-cannot-eval",
               stage_import(rootB4b, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
         rootB4c, mB4c = build_store(sources={"a.txt": src},
-                                    extra=_sib_cand('schema = 1\nunknown_top = 1\nrecord = []\n'))
+                                    working_extra=_sib_cand('schema = 1\nunknown_top = 1\nrecord = []\n'))
         check("B4-sibling-unknown-top-key-cannot-eval",
               stage_import(rootB4c, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
         # a fully-valid sibling record is scanned (its id enters the union) and stages the non-colliding run.
-        rootB4d, mB4d = build_store(sources={"a.txt": src}, extra=_sib_cand(bi_index_text("BI-9")))
+        rootB4d, mB4d = build_store(sources={"a.txt": src}, working_extra=_sib_cand(bi_index_text("BI-9")))
         check("B4-valid-sibling-clean",
               stage_import(rootB4d, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 0)
 
@@ -2057,7 +2125,7 @@ def self_test():
         rootB6, mB6 = build_store(sources={"a.txt": src})
         resB6 = stage_import(rootB6, ["a.txt"], b6a, now=NOW, run_nonce=NONCE)
         check("B6-unmapped-with-target-finding", resB6.verdict == 1)
-        check("B6-unmapped-with-target-no-run", not (mB6 / "imports").exists())
+        check("B6-unmapped-with-target-no-run", not (mB6.parent / "imports").exists())
         b6b = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate",
                                         "record": bi_candidate(), "target": "BI-1"}]}}
         rootB6b, mB6b = build_store(sources={"a.txt": src})
@@ -2072,7 +2140,7 @@ def self_test():
                              {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
                                                        "record": link_bad}]}}, now=NOW, run_nonce=NONCE)
         check("B7-dangling-candidate-link-finding", resB7.verdict == 1)
-        check("B7-dangling-candidate-link-no-run", not (mB7 / "imports").exists())
+        check("B7-dangling-candidate-link-no-run", not (mB7.parent / "imports").exists())
         # a candidate linking to an EXISTING active record resolves clean (it mints BI-2 above BI=1).
         link_ok = bi_candidate(); link_ok["links"] = [{"rel": "relates", "id": "BI-1"}]
         rootB7b, mB7b = build_store(sources={"a.txt": src}, counters="BI=1,LF=0,WL=0",
@@ -2101,7 +2169,7 @@ def self_test():
         finally:
             _opf_store._open_store_root_fd = _saved_open
         check("M2-post-resolution-oserror-cannot-eval", resM2.verdict == 2)
-        check("M2-post-resolution-oserror-no-run", not (mM2 / "imports").exists())
+        check("M2-post-resolution-oserror-no-run", not (mM2.parent / "imports").exists())
 
         # MINOR: an explicitly-empty worklog candidate list mints no worklog entry, so the version ledger
         # is NOT required (the release-boundary gate has no new WL number to check); the run stages clean.
@@ -2197,7 +2265,7 @@ def self_test():
         rootC4, mC4 = build_store(sources={"a.txt": src})
         resC4 = stage_import(rootC4, ["a.txt"], c4_plan, now=NOW, run_nonce=NONCE)
         check("C4-wrong-typed-note-finding", resC4.verdict == 1)
-        check("C4-wrong-typed-note-no-run", not (mC4 / "imports").exists())
+        check("C4-wrong-typed-note-no-run", not (mC4.parent / "imports").exists())
 
         # CLASS 5 (isolation contract guard): the staged candidate is a DEEP, independent copy of the plan
         # model, so it cannot share a mutable with the staged plan snapshot, and staging treats the caller's
@@ -2216,7 +2284,7 @@ def self_test():
         check("C5-isolation-clean", resC5.verdict == 0)
         check("C5-input-plan-read-only", c5_plan == c5_before)
         if resC5.run_id:
-            c5_run = mC5 / "imports" / resC5.run_id
+            c5_run = mC5.parent / "imports" / resC5.run_id
             staged_cand = tomllib.loads(
                 (c5_run / "candidate" / "backlog_item.index.toml").read_text())["record"][0]
             staged_plan_rec = tomllib.loads(
@@ -2251,13 +2319,16 @@ def self_test():
         # convert an os.listdir OSError to the module's fail-closed CANNOT-EVALUATE (_StageError verdict 2),
         # never an empty listing. Drive each directly with a patched os.listdir over real store dirs.
         rootL, mL = build_store(sources={"a.txt": src})
-        (mL / "imports").mkdir(); (mL / "archive").mkdir()
+        # imports is store-scope (`.working/imports`), archive stays machine-rooted (`.working/toml/archive`).
+        (mL.parent / "imports").mkdir(); (mL / "archive").mkdir()
         resolL = _opf_store.resolve_store(rootL)
         fdL = _opf_store._open_store_root_fd(resolL.store_root, resolL.pointer_source != "default")
         _saved_listdir = os.listdir
-        def _probe_listdir(relsuffix):
+        imports_probe_rel = "{}/imports".format(_opf_store.WORKING_DIRNAME)   # ".working/imports" (store scope)
+        archive_probe_rel = "{}/archive".format(resolL.machine_rel)           # archive stays machine-rooted
+        def _probe_listdir(rel):
             try:
-                _dir_entries_no_symlink(fdL, "{}/{}".format(resolL.machine_rel, relsuffix))
+                _dir_entries_no_symlink(fdL, rel)
                 return "no-raise"
             except _StageError as exc:
                 return exc.verdict
@@ -2265,9 +2336,9 @@ def self_test():
                 return "escaped"
         try:
             os.listdir = (lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "simulated listdir error")))
-            v_imp, v_arc = _probe_listdir("imports"), _probe_listdir("archive")
+            v_imp, v_arc = _probe_listdir(imports_probe_rel), _probe_listdir(archive_probe_rel)
             try:
-                _list_contained(fdL, "{}/imports".format(resolL.machine_rel))
+                _list_contained(fdL, imports_probe_rel)
                 v_lc = "no-raise"
             except _StageError as exc:
                 v_lc = exc.verdict
@@ -2296,13 +2367,13 @@ def self_test():
         finally:
             _journal._read_contained = _saved_rc
         check("C1-boundary-backstop-cannot-eval", vbk == 2)
-        check("C1-boundary-backstop-no-run", not (mBK / "imports").exists())
+        check("C1-boundary-backstop-no-run", not (mBK.parent / "imports").exists())
 
         # CLASS 3 (empty/unsupported sibling index): an index whose TYPE is unsupported is CANNOT-EVALUATE even
         # when its record list is EMPTY (an empty or unsupported index is never zero records). Pre-fix an empty
         # record list skipped the per-record type check, so the unsupported type slipped past as clean.
         sib_unsup = {"imports/{}/candidate/not_a_type.index.toml".format(sib_run): "schema = 1\nrecord = []\n"}
-        rootC3u, mC3u = build_store(sources={"a.txt": src}, extra=sib_unsup)
+        rootC3u, mC3u = build_store(sources={"a.txt": src}, working_extra=sib_unsup)
         check("C3-empty-unsupported-index-cannot-eval",
               stage_import(rootC3u, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE).verdict == 2)
 
@@ -2341,7 +2412,7 @@ def self_test():
                                                        "record": cand_full}]}}, now=NOW, run_nonce=NONCE)
         check("C6-fully-timestamped-clean", resC6.verdict == 0)
         if resC6.run_id:
-            c6rec = tomllib.loads((mC6 / "imports" / resC6.run_id / "candidate"
+            c6rec = tomllib.loads((mC6.parent / "imports" / resC6.run_id / "candidate"
                                    / "backlog_item.index.toml").read_text())["record"][0]
             src_digest = _sha256_hex(src.encode("utf-8"))
             check("C6-candidate-provenance-present",
@@ -2405,7 +2476,7 @@ def self_test():
         sibling_module = {
             "imports/{}/candidate/maintainer_action.index.toml".format(sib_run): module_index
         }
-        rootB1s, mB1s = build_store(sources={"a.txt": src}, extra=sibling_module)
+        rootB1s, mB1s = build_store(sources={"a.txt": src}, working_extra=sibling_module)
         rootB1b, mB1b = build_store(sources={"a.txt": src})
         rootB1p, mB1p = build_store(sources={"a.txt": src})
         (mB1p / "manifest.toml").write_text(
@@ -2589,7 +2660,7 @@ def self_test():
                                                        "record": cand_full_a}]}}, now=NOW, run_nonce=NONCE)
         check("M-a-clean", resMa.verdict == 0)
         if resMa.run_id:
-            ma_rec = tomllib.loads((mMa / "imports" / resMa.run_id / "candidate"
+            ma_rec = tomllib.loads((mMa.parent / "imports" / resMa.run_id / "candidate"
                                     / "backlog_item.index.toml").read_text())["record"][0]
             ma_digest = _sha256_hex(src.encode("utf-8"))
             ma_expected_note = "imported fragment [0:{}] of a.txt (sha256:{}) in run {}".format(
@@ -2654,7 +2725,7 @@ def self_test():
         mc_staged_cand = None
         mc_staged_wl = None
         if resMc.run_id:
-            mc_run = mMc / "imports" / resMc.run_id / "candidate"
+            mc_run = mMc.parent / "imports" / resMc.run_id / "candidate"
             mc_staged_cand = tomllib.loads(
                 (mc_run / "backlog_item.index.toml").read_text())["record"][0]
             mc_staged_wl = tomllib.loads(
@@ -2791,7 +2862,7 @@ def self_test():
         except RecursionError:
             vG3 = "escaped"
         check("G3-deep-nested-plan-cannot-eval", vG3 == 2)
-        check("G3-deep-nested-plan-no-run", not (mG3 / "imports").exists())
+        check("G3-deep-nested-plan-no-run", not (mG3.parent / "imports").exists())
 
         # G7 (no-concealed-failure, ValueError narrowing): an INTERNAL invariant ValueError raised PAST the
         # store-parse/fs-codec boundary (here from _stage_resolved, a programming failure, not malformed
@@ -2823,7 +2894,7 @@ def self_test():
                                   extra={"backlog_item.index.toml": bi_index_text("BI-5")})
         resG4 = stage_import(rootG4, ["a.txt"], plan_mapped(len(src)), now=NOW, run_nonce=NONCE)
         check("G4-counters-regressed-cannot-eval", resG4.verdict == 2)
-        check("G4-counters-regressed-no-run", not (mG4 / "imports").exists())
+        check("G4-counters-regressed-no-run", not (mG4.parent / "imports").exists())
         # the gate refuses ONLY a genuine regression: a high-water AT or ABOVE the observed durable id still
         # stages (BI=5 with an existing BI-5, minting BI-6 above it), so a well-formed high store is not
         # false-rejected.
@@ -2854,7 +2925,7 @@ def self_test():
                                   extra=dict([("backlog_item.index.toml", bi_index_text("BI-5"))]))
         resG6 = stage_import(rootG6, ["a.txt"], lf_only, now=NOW, run_nonce=NONCE)
         check("G6-counters-absent-namespace-regressed-cannot-eval", resG6.verdict == 2)
-        check("G6-counters-absent-namespace-no-run", not (mG6 / "imports").exists())
+        check("G6-counters-absent-namespace-no-run", not (mG6.parent / "imports").exists())
         # the gate refuses ONLY a genuine untracked-namespace regression: an LF-only plan against a store
         # with NO seated BI id (BI legitimately absent from counters) still stages clean.
         rootG6b, mG6b = build_store(counters="LF=0,WL=0", sources=dict([("a.txt", src)]))
