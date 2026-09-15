@@ -1,9 +1,9 @@
 +++
 title = "About AIQT: origin, direction, and the maintainer"
-description = "Where AIQT comes from: it began inside the GRC Library, a public documentation project written under an AI-managed workflow, and became a portable standard in its own right. Created and led by Jeff Posluns, CC BY-SA 4.0."
+description = "Where AIQT comes from: it began inside the GRC Library, a public documentation project written under an AI-managed workflow, and became a portable standard in its own right. Created and led by Jeff Posluns, source-available under the Elastic License 2.0."
 canonical = "https://aiqt.ai/about"
 og-title = "About AIQT: origin, direction, and the maintainer"
-og-description = "Where AIQT comes from: it began inside the GRC Library, a public documentation project written under an AI-managed workflow, and became a portable standard in its own right. Created and led by Jeff Posluns, CC BY-SA 4.0."
+og-description = "Where AIQT comes from: it began inside the GRC Library, a public documentation project written under an AI-managed workflow, and became a portable standard in its own right. Created and led by Jeff Posluns, source-available under the Elastic License 2.0."
 og-url = "https://aiqt.ai/about"
 sidebar-active = "about"
 +++
@@ -63,11 +63,11 @@ sidebar-active = "about"
     <p class="lead">As the projects progress, decisions about AIQT's evolution are made by
       lead maintainer Jeff Posluns, and they orient toward one question: what will best
       help the world.</p>
-    <p>Open, portable, and shared is the working answer. AIQT is published under Creative
-      Commons Attribution-ShareAlike 4.0, contributions come back under CC BY-SA 4.0 or later, or a BY-SA Compatible License,
-      and the direction is chosen for public benefit rather than lock-in. A guardrail that
-      travels between tools and teams helps more people than one that binds you to
-      either.</p>
+    <p>Source-available, portable, and shared is the working answer. AIQT is source-available
+      under the Elastic License 2.0, contributing an improvement back is Rule 5's voluntary
+      Guardrail-Seed give-back, separate from the software licence, and the direction is chosen
+      for public benefit rather than lock-in. A guardrail that travels between tools and teams
+      helps more people than one that binds you to either.</p>
   </div>
 </section>
 

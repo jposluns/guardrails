@@ -2,7 +2,7 @@
 """Published-artifact checksum gate for the pack downloads (GD-7). Offline, stdlib only, fail-closed.
 
 check_site.py:21-22 records the deferral this closes: "Download-artifact checksums are tracked separately
-(they need a final content baseline)." The baseline does not exist until the 1.0.0 content freeze, so this
+(they need a final content baseline)." The baseline does not exist until the 1.0.5 content freeze, so this
 gate ships DORMANT in the GA-3 layer-B pattern: dormancy is decided from the single-source FILE, never by
 probing the environment (check_version_monotonicity.py:25-28, the guard-input-soundness rationale).
 
@@ -13,10 +13,10 @@ only version and tag), so all three stay green with and without it. The digests 
 attest, whose history GA-3 already freezes append-only. Shape:
 
     [[release]]
-    version = "1.0.0"
+    version = "1.0.5"
     ...
     [release.artifacts]
-    "site/downloads/aiqt-skill-1.0.4.zip" = "sha256:<64 lowercase hex>"
+    "site/downloads/aiqt-skill-1.0.5.zip" = "sha256:<64 lowercase hex>"
     "site/downloads/aiqt-instructions.txt" = "sha256:<64 lowercase hex>"
 
 DORMANT (no release carries `artifacts`): print NOT APPLICABLE and contribute exit 0. One dormant-side

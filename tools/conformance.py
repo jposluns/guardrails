@@ -749,7 +749,7 @@ A self-test rule asserting one id as both tight and broad, which mutual exclusiv
 _SKILL_SRC_FIXTURE = """=== meta ===
 name: aiqt
 version: __ZIPVER__
-license: CC-BY-SA-4.0
+license: Elastic-2.0
 date: 2026-01-01
 apex-id: apex01
 
@@ -859,6 +859,11 @@ def _add_skill_surface(base):
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text('[plugin]\nauthor-name = "Self Test"\nhomepage = "https://example.test"\n',
                             encoding="utf-8")
+    # gen_skill.build_outputs packs the pack-root LICENSE into the download zip (fail-closed if absent);
+    # provide a minimal one when the fixture does not already carry it.
+    licence = base.joinpath(*gen_skill.LICENSE_PARTS)
+    if not licence.exists():
+        licence.write_text("Elastic License 2.0\n\n(conformance fixture licence text)\n", encoding="utf-8")
     reserved_map, standalone, binary = gen_skill.build_outputs(base)
     reserved_dir = base.joinpath(*gen_skill.RESERVED_PARTS)
     reserved_dir.mkdir(parents=True, exist_ok=True)

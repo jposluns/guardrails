@@ -1,5 +1,5 @@
 {
-  "date": "2026-09-01",
+  "date": "2026-09-15",
   "generator": "tools/gen_skill.py",
   "generator-version": "2",
   "included-rule-ids": [
@@ -42,8 +42,8 @@
     "tstamp",
     "valinf"
   ],
-  "license": "CC-BY-SA-4.0",
+  "license": "Elastic-2.0",
   "name": "aiqt",
   "source-corpus-hash": "sha256:1b576c0d54dde868957a616f5754103fb3b7ff5a21ba04d5afe96b5b0247e9e9",
-  "version": "1.0.4"
+  "version": "1.0.5"
 }

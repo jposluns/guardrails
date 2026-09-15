@@ -267,9 +267,10 @@
       "sources": [
         ".aiqt/core/skill/skill-source.md",
         ".aiqt/core/rules/",
-        ".aiqt/core/hooks/manifest.toml"
+        ".aiqt/core/hooks/manifest.toml",
+        "LICENSE"
       ],
-      "target": "site/downloads/aiqt-skill-1.0.4.zip"
+      "target": "site/downloads/aiqt-skill-1.0.5.zip"
     },
     {
       "kind": "file",
@@ -277,7 +278,8 @@
       "sources": [
         ".aiqt/core/skill/skill-source.md",
         ".aiqt/core/rules/",
-        ".aiqt/core/hooks/manifest.toml"
+        ".aiqt/core/hooks/manifest.toml",
+        "LICENSE"
       ],
       "target": "site/downloads/aiqt-skill.zip"
     },
