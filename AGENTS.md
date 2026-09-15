@@ -590,6 +590,30 @@ violation. A layer that over-fires is not cheap: one that raises false alarms tr
 erodes trust in the controls around it, so a noisy layer is not the low-cost overlap this prefers, and adding
 one is not warranted by this rule.
 
+## A borrowed process timer is restored elapsed-aware
+
+Code that borrows a caller's process-global deadline facility for a bounded window, a signal
+handler, an interval timer, or a pending single-shot alarm, restores the caller's state
+elapsed-aware, never verbatim. On restore an active caller timer holds exactly the countdown
+it would have reached had the borrow not occurred, measured by that timer's own semantics: its
+clock domain (wall or monotonic time for a real-time timer, the relevant process or thread CPU
+time for a CPU-time timer), its relative or absolute mode, and how it accounts for a clock
+adjustment, so a CPU-time timer is charged only the CPU actually consumed during the window and
+a relative timer is not disturbed by a wall-clock jump. An inactive caller timer remains inactive
+rather than being armed. A pending notification or single-shot alarm is preserved, not consumed
+or discarded, and a caller deadline that came due during the window is delivered, not dropped. A
+periodic timer's repeat interval, and its phase to the extent the platform can express it, are
+preserved. The original handler is reinstalled through exception-safe cleanup. The save and the
+elapsed-aware restore live once, in a single shared, nesting-safe helper, so no call site can
+hand-roll a variant that reintroduces the verbatim restore, and the helper itself remains subject
+to the same inspection as any call site. Where the timer's own semantics cannot be faithfully
+reproduced on restore, including a countdown the borrower cannot measure or an already-due
+notification the platform cannot make promptly deliverable, the code uses a timeout mechanism
+that is not process-global, or refuses the borrow, rather than approximating and corrupting the
+caller's deadline, most dangerously a watchdog's. This is the companion of the kill-timeout rule:
+that one keeps a wrapper's bound from cutting a correctly-waiting callee short, while this one
+keeps a borrower's restore from silently moving or losing the deadline the caller had already set.
+
 ## A verification finding is fixed, not argued away
 
 A finding raised by an adversarial verification pass is fixed, not argued away. A real blocker or major
@@ -1284,6 +1308,17 @@ outside the intended tree. After the object is opened it confirms the opened obj
 because a name-based check performed before the open describes a path that may no longer point where it did.
 Where the platform offers no race-free containment primitive, the operation fails closed rather than
 falling back to an unguarded name-based resolution.
+
+When such code classifies a control or state path, a lock, marker, journal, or state directory, to
+decide what to do, the classification is a no-follow inspection bound to a trusted directory
+descriptor, never a re-resolved string-path existence or type check that follows links. The result
+is three-way: genuine absence, which may legitimately mean nothing to do; presence with exactly the
+expected type, confirmed on the opened object rather than on the name; and everything else, a
+regular file where a directory was expected, a symbolic link, a dangling link, any other wrong-type
+entry, a malformed name, or an entry the code cannot evaluate, which is refused as an error and
+never collapsed into absence or treated as clean. Enumeration and use after classification stay
+bound to the same descriptor rather than re-resolving the string path, so a substitution of the
+name cannot redirect those operations to a different object.
 
 ## Threat-model new trust boundaries before implementation
 
