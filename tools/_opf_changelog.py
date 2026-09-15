@@ -954,7 +954,7 @@ def self_test():
     # --- end-to-end store resolution over synthetic on-disk stores -----------------------------------
     manifest = ("[devprocess]\n"
                 'standard = "devprocess"\n'
-                'spec_version = "1.0.0"\n'
+                'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
                 'layout = "inline"\n'
                 'posture = "required"\n'
                 'import_status = "none"\n\n'
@@ -1120,7 +1120,7 @@ def self_test():
         # come back CANNOT-EVALUATE. Pre-fix only [vendors] was checked, so this clean-passed.
         manifest_no_types = ("[devprocess]\n"
                              'standard = "devprocess"\n'
-                             'spec_version = "1.0.0"\n'
+                             'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
                              'layout = "inline"\n'
                              'posture = "required"\n'
                              'import_status = "none"\n')

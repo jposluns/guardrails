@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "1bf33cccdc6f5e930e9cb2037f531310c1b2f74b5895ef4a3d37fde318e2bbd8"
+tree-sha256 = "d2e5092b576a12be46e754c68aad6774aff189fcec055ff16e9e1db72254797f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2566,8 +2566,8 @@ sha256 = "f256ccc18ee7f85a4c6e3092c551de173b1d09ea64299e3ac23f1eeeb75fd4e6"
 
 [[sources]]
 path = "tools/_opf_changelog.py"
-bytes = 79946
-sha256 = "fed5c2db4f8c663767d090781b12a47ecc0fde047d857220e53a46a35c691b4c"
+bytes = 80018
+sha256 = "c191bfd7482d45ffcf54a9bb1a22902c8caaabc0ba00d9605ce6227377a98a23"
 
 [[sources]]
 path = "tools/_opf_check.py"
@@ -2581,13 +2581,13 @@ sha256 = "99440909847fd8f605fc30b26133d97d18dc5e81beb54a649a015ab94161c00d"
 
 [[sources]]
 path = "tools/_opf_fuzz.py"
-bytes = 75598
-sha256 = "2374cb91ae5a3a5f7702c9a437f981d1de1e6c0dd68c36c08892016ac567f994"
+bytes = 76396
+sha256 = "efcb2fd7b40bc85f3365bdfe27146fc2893ead84bbbd1939e9d50ee8eb21e31f"
 
 [[sources]]
 path = "tools/_opf_import.py"
-bytes = 186917
-sha256 = "2d41bb396a91ff9a9609786f1de85b42ac8160a462eae2febeea7547207c0bec"
+bytes = 187077
+sha256 = "63179620ea92e037aeb17241b6abc3e058b0941936670dd35fb7bddfa6d5a60f"
 
 [[sources]]
 path = "tools/_opf_init.py"
@@ -2901,13 +2901,13 @@ sha256 = "f64934bd8d6522f9c01f804b0722d31d2708c4e6f89007be5200e5bbb9a3bb85"
 
 [[sources]]
 path = "tools/check_opf_doctor.py"
-bytes = 27670
-sha256 = "214dcc10f248955e6ec97a9955a686812636b313246e8fda569f6e3260d6c8ad"
+bytes = 28017
+sha256 = "218bea570770a291d467e7ec751ac00db9cd42966260c2cbc11e61473cb730d5"
 
 [[sources]]
 path = "tools/check_opf_drift.py"
-bytes = 29203
-sha256 = "2c1791e0d853e4cf47f9cf800801cbdfabf7165c8f6f5157389f83a988a14b24"
+bytes = 29239
+sha256 = "03fa2804477c4941eb87eb5019868e2686d3bbf9a794b90a1908a718a25854d4"
 
 [[sources]]
 path = "tools/check_opf_init.py"
@@ -3181,8 +3181,8 @@ sha256 = "0bde2aca2733e2114c43d9175dbc95bd00eb26a6491e172d288d459cad9e2158"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 13572
-sha256 = "a074029a70a75099f45a8aaa44b7b4e0b390e3ed2cee7202bebe1653a30e395a"
+bytes = 13721
+sha256 = "91ca3bf7b77647c13d2b17ff7daac1f612c3037d49388af46ddc7eb84184de31"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

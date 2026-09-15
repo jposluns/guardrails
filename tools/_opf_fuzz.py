@@ -696,6 +696,18 @@ def run():
         probe("specs-malformed({!r})-not-VALID".format(mal),
               _opf_schema.validate_record(_full_record(), specs=mal).status != VALID)
 
+    # FO8a contribution.delivery unknown-key (spec 8.5): a surplus delivery key surfaces an INVALID
+    # unknown-key finding and is never tolerated silently. Exercises the _safe_key_names render at the
+    # contribution delivery site (one key-name-render coverage class with the actor/links/refs sites).
+    contrib_bad_delivery = {
+        "id": "CN-1", "type": "contribution", "status": "proposed", "title": "t",
+        "created_at": TS, "updated_at": TS, "actor": {"kind": "maintainer"},
+        "recipient": "r", "dedup_class": "d", "content_digest": "x",
+        "delivery": {"channel": "c", "ref": "r", "zzz": 1}}
+    probe("contribution-delivery-unknown-key-INVALID",
+          _opf_schema.validate_record(contrib_bad_delivery, expected_type="contribution").status
+          == INVALID)
+
     # FO9 next_id.known_complete: known_complete is a genuine-bool PROOF flag, not a truthiness test. Its
     # empty/false/omitted baseline REFUSES allocating from a namespace with no recorded high-water (an
     # absent counter reading as 0 could reuse an existing id, spec 8.2). A non-bool (e.g. the truthy string

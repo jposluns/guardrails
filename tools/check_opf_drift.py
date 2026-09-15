@@ -163,7 +163,7 @@ def _self_test():
         manifest = (
             "[devprocess]\n"
             'standard = "devprocess"\n'
-            'spec_version = "1.0.0"\n'
+            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
             'layout = "inline"\n'
             'posture = "required"\n'
             'import_status = "none"\n'

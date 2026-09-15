@@ -156,6 +156,7 @@ class _LegacyFragmentSpec(_opf_schema.TypeSpec):
         self.terminal = frozenset({"resolved", "ignored"})
         self.transitions = {"quarantined": frozenset({"resolved", "ignored"})}
         self.proposable = frozenset({"resolved", "ignored"})
+        self.gated = frozenset()   # legacy_fragment has no gated states: its proposable states are terminal
         self.extra_keys = frozenset({"source_path", "source_digest", "span", "run_id", "body"})
         self.reduced = False
         self.states = frozenset({"quarantined", "resolved", "ignored"})
@@ -1569,7 +1570,8 @@ def self_test():
 
     def manifest_text():
         return "\n".join([
-            "[devprocess]", 'standard = "devprocess"', 'spec_version = "1.0.0"',
+            "[devprocess]", 'standard = "devprocess"',
+            'spec_version = "{}"'.format(_opf_store.SUPPORTED_SPEC_VERSION),
             'layout = "inline"', 'posture = "required"', 'import_status = "none"',
             "", "[store]", 'sync_target = ""',
             "", "[modules]", "governance = true",
