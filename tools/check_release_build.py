@@ -393,6 +393,34 @@ def _fresh_git_env():
     return env
 
 
+def _pin_fixture_version(repo, failures, env, version="1.0.0"):
+    """Shared normalization for the archive-extracting self-test fixtures: pin an `git archive HEAD`-
+    extracted tree to a CHOSEN release-version (default "1.0.0") so its committed manifest release-version
+    is the fixture's chosen version rather than the LIVE pack version. Without the pin, at any non-1.0.0
+    live version the tagged/committed tree's manifest release-version tracks the live repo and post-tag
+    correctly fails ("tag points at a tree whose manifest release-version is ..."), masking the fixture's
+    intended assertion. Writes VERSION + the changelog source at `version`, git-inits and stages the tree
+    under the caller's neutralized `env`, then regenerates the fixture manifest via gen_manifest --root
+    (gen_manifest enumerates the tracked surface via `git ls-files`, so the tree is init + add'd first). A
+    gen_manifest FAILURE is a real fixture-setup failure that FAILS the self-test (never a silent pass): it
+    appends to `failures` (which makes self_test_main return nonzero) and returns False. Returns True on
+    success, with the tree staged and the regenerated manifest ready for the caller to commit."""
+    (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
+    (repo / "changelog.toml").write_text('[[release]]\nversion = "{}"\n'.format(version), encoding="utf-8")
+    for a in (["init", "-q"], ["add", "-A"]):
+        if subprocess.run(["git", "-C", str(repo), *a], capture_output=True, env=env).returncode != 0:
+            failures.append("fixture setup ({}): could not init/stage the archive-extracted tree for "
+                            "version pinning; the archive-backed case cannot be normalized".format(repo.name))
+            return False
+    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)],
+                      capture_output=True, env=env).returncode != 0:
+        failures.append("fixture setup ({}): gen_manifest --root failed while pinning to {}; a fixture-setup "
+                        "gen failure FAILS the self-test rather than silently passing as the intended "
+                        "assertion".format(repo.name, version))
+        return False
+    return True
+
+
 def _materialized_check(root, sha, commands_fn, what):
     """Raw-materialize `sha` into a throwaway FRESH git repo and run each check command `commands_fn(co)`
     returns inside it. The tree is materialized from RAW blob bytes (git ls-tree + cat-file, round-4 finding
@@ -1703,6 +1731,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 try:
                     with tarfile.open(fileobj=io.BytesIO(arch.stdout), mode="r:") as tf:
                         tf.extractall(gcand)
+                    # test-hermeticity: this candidate is GENESIS (zero-row releases, manifest genesis = true)
+                    # and asserts NO 1.0.0 release-order row, so its verdict (run_pre_tag auto-requiring first-
+                    # pin evidence, exit 1) is independent of the pack version: the committed archive tree is
+                    # internally self-consistent at whatever version it carries, so no version pin is needed
+                    # (and pinning it to 1.0.0 would leave a changelog release row against a zero-row releases
+                    # record, tripping the candidate's own reproduce checks to cannot-evaluate). It is version-
+                    # hermetic by construction; only fixtures that assert a fixed 1.0.0 row are pinned.
                     ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
                                             env=_fresh_git_env()).returncode == 0
                              for a in (["init", "-q"],
@@ -2121,10 +2156,18 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.invalid",
                                "GIT_COMMITTER_DATE": "2000-01-01T00:00:00"})
-                    ok6 = all(subprocess.run(["git", "-C", str(ac), *a], capture_output=True,
-                                             env=ge).returncode == 0
-                              for a in (["init", "-q"], ["add", "-A"],
-                                        ["commit", "-q", "-m", "release 1.0.0 tree", "--no-verify"]))
+                    # test-hermeticity: the archived tree carries the LIVE repo's release-version, so pin the
+                    # extracted tree to the fixture's chosen 1.0.0 via the shared helper (writes VERSION +
+                    # changelog, inits, stages, and regenerates the manifest; a gen failure FAILS the self-
+                    # test rather than passing silently) before it is committed and tagged v1.0.0. Without the
+                    # pin the tagged tree's manifest release-version tracks the live repo (e.g. 1.0.5) and
+                    # post-tag correctly fails ("tag points at a tree whose manifest release-version is ...").
+                    ok6 = _pin_fixture_version(ac, failures, ge)
+                    if ok6:
+                        ok6 = all(subprocess.run(["git", "-C", str(ac), *a], capture_output=True,
+                                                 env=ge).returncode == 0
+                                  for a in (["add", "-A"],
+                                            ["commit", "-q", "-m", "release 1.0.0 tree", "--no-verify"]))
                     if ok6:
                         subprocess.run(["git", "-C", str(ac), "tag", "-a", "v1.0.0", "-m", "1.0.0"],
                                        check=True, capture_output=True, env=ge)
