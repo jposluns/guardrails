@@ -52,6 +52,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Preserve compatibility or provide a migration path](rules/aiqt/10-QUALI-compatibility-or-migration.md)
 - [Confirm the execution target before a side-effectful operation](rules/aiqt/10-QUALI-confirm-execution-target.md)
 - [Defence in depth by default](rules/aiqt/10-QUALI-defence-in-depth-default.md)
+- [A borrowed process timer is restored elapsed-aware](rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md)
 - [A verification finding is fixed, not argued away](rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md)
 - [Goal fidelity across a long trajectory](rules/aiqt/10-QUALI-goal-fidelity-across-trajectory.md)
 - [High-assurance verification](rules/aiqt/10-QUALI-high-assurance-verification.md)
