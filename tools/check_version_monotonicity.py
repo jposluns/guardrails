@@ -271,9 +271,17 @@ def _parse_base_releases(text):
 # --- the two layers ---------------------------------------------------------------------------------
 
 def _base_is_genesis(root, base_commit, base_releases):
-    """True when nothing was shipped as of base_commit. Reads the BASE snapshot only. An absent base
-    releases.toml is NOT genesis (guard-input-soundness). A present-but-unparseable ledger is
-    fail-closed (GateError, exit 2), mirroring layer_c's base-parse handling."""
+    """True when no shipment SIGNAL is recorded in the base files: no changelog release carries a tag AND
+    a present releases.toml has zero rows. Reads the BASE snapshot only. An absent base releases.toml is
+    NOT genesis (guard-input-soundness). A present-but-unparseable or schema-invalid ledger is fail-closed
+    (GateError, exit 2), mirroring layer_c's base-parse handling."""
+    # DISCLOSED RESIDUAL: the gate decides shipment from single-source files (the changelog tag key and
+    # releases.toml rows), not by probing git tags, whose absence is ambiguous under a shallow fetch
+    # (matching Layer B's stated design). A TRANSIENT first-release window therefore exists where a git
+    # tag object has been created but its changelog tag key / releases.toml row has not yet landed, and in
+    # that window the base reads as genesis. This residual is bounded (first release only; once the first
+    # ledger row lands, every later base has prior rows) and is closed by the release process landing the
+    # tag key / ledger row promptly and not basing a relabel PR in that window.
     present = _path_in_commit(root, base_commit, RELEASES_REL)
     rows = []
     if present:
@@ -281,6 +289,14 @@ def _base_is_genesis(root, base_commit, base_releases):
             base_rel = tomllib.loads(_show_file(root, base_commit, RELEASES_REL))
         except (tomllib.TOMLDecodeError, ValueError) as exc:
             raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
+        unknown = set(base_rel) - {"format-version", "release"}
+        if unknown:
+            raise GateError("baseline {} has unknown top-level key(s): {}; expected a subset of "
+                            "'format-version', 'release'".format(RELEASES_REL, ", ".join(sorted(unknown))))
+        fmt = base_rel.get("format-version")
+        if not (type(fmt) is int and fmt == 1):
+            raise GateError("baseline {} has an unsupported format-version {!r}; expected 1".format(
+                RELEASES_REL, fmt))
         rows = _rows_of(base_rel, "release", "baseline " + RELEASES_REL)
     return _genesis_from_signals([r.get("tag") for r in base_releases], present, rows)
 
@@ -303,9 +319,10 @@ def layer_a(root, base, head_releases):
         return []
     base_releases = _parse_base_releases(_show_file(root, base_commit, "changelog.toml"))
     if _base_is_genesis(root, base_commit, base_releases):
-        print("changelog-history: NOT APPLICABLE (base {} is pre-release genesis: no release carries a "
-              "tag and {} has zero rows, so every changelog entry is an unshipped draft; append-only "
-              "release identity activates when the first release ships)".format(base, RELEASES_REL))
+        print("changelog-history: NOT APPLICABLE (base {} is pre-release: no changelog release carries a "
+              "tag and {} has zero release rows; append-only release identity is enforced from the first "
+              "recorded release. See the tag-created-but-unrecorded residual at "
+              "_base_is_genesis)".format(base, RELEASES_REL))
         return []
     base_versions = [r["version"] for r in base_releases]
     head_versions = [r["version"] for r in head_releases]
@@ -481,8 +498,8 @@ def run(root, base):
         for finding in findings:
             print("  " + finding)
         return 1
-    print("PASS: version monotonicity holds (changelog history append-only; tag layer checked; "
-          "release-order and id-history registers append-only)")
+    print("PASS: version-monotonicity gate passed (see each layer's status line above for what was "
+          "checked or exempted)")
     return 0
 
 
@@ -831,7 +848,11 @@ def self_test_main():
             if _run_quiet(g5b, s_sha) != 1:
                 failures.append("git case G6: relabel 1.0.5 -> 1.0.6 from a shipped base expected exit 1")
 
-            # G7 a malformed base ledger fails closed (exit 2): the genesis read cannot parse releases.toml.
+            # G7 ISOLATES the base-ledger fail-closed read: the base commit carries changelog [1.0.0]
+            # untagged plus a MALFORMED (unparseable) releases.toml; the working tree DELETES releases.toml
+            # (so layer_c is NOT APPLICABLE at head) and relabels the changelog to [1.0.5]. The base-read
+            # GateError in _base_is_genesis is then the ONLY source of exit 2, so G7 detects a fail-open
+            # regression of that read rather than an exit 2 that any head parse could also produce.
             g7 = base_tmp / "malformed-ledger"
             _init(g7)
             _root(g7)
@@ -840,9 +861,11 @@ def self_test_main():
             core7.mkdir(parents=True, exist_ok=True)
             (core7 / "releases.toml").write_text("format-version = 1\n[[release]\nbroken\n", encoding="utf-8")
             _commit(g7, "base with unparseable ledger")
+            (core7 / "releases.toml").unlink()
             _write(g7, _changelog_text(["1.0.5"]))
             if _run_quiet(g7, "HEAD") != 2:
-                failures.append("git case G7: a malformed base ledger expected fail-closed exit 2")
+                failures.append("git case G7: a malformed base ledger (base read isolated) expected "
+                                "fail-closed exit 2")
 
             # G8 tag-preservation isolates the new check: base changelog [1.0.0] tag="v1.0.0" + header-only
             # ledger + a real git tag; head keeps version 1.0.0 but DROPS the tag key -> exit 1 from
@@ -858,6 +881,45 @@ def self_test_main():
             _write(g8, _changelog_text(["1.0.0"]))
             if _run_quiet(g8, "HEAD") != 1:
                 failures.append("git case G8: dropping a shipped release's tag key expected exit 1")
+
+            # G9 (FIX 1) a base ledger that is valid TOML but records its rows under a MISSPELLED top-level
+            # key ([[releases]] not [[release]]) fails closed (exit 2): the base-read schema check rejects
+            # the unknown key rather than reading zero [[release]] rows and passing. Base changelog [1.0.0]
+            # untagged; the working tree carries a valid header-only ledger and relabels to [1.0.5], so the
+            # base read is the only source of exit 2. Without FIX 1 this read zero rows and exited 0.
+            g9 = base_tmp / "misspelled-ledger-key"
+            _init(g9)
+            _root(g9)
+            _write(g9, _changelog_text(["1.0.0"]))
+            core9 = g9 / ".aiqt" / "core"
+            core9.mkdir(parents=True, exist_ok=True)
+            (core9 / "releases.toml").write_text(
+                'format-version = 1\n\n[[releases]]\nversion = "1.0.0"\ncommit_sha = "aaa"\n',
+                encoding="utf-8")
+            _commit(g9, "base ledger with a misspelled top-level key")
+            _write_ledger(g9)
+            _write(g9, _changelog_text(["1.0.5"]))
+            if _run_quiet(g9, "HEAD") != 2:
+                failures.append("git case G9: a base ledger with a misspelled top-level key expected "
+                                "fail-closed exit 2 (FIX 1)")
+
+            # G10 (FIX 1) a base ledger with an unsupported format-version fails closed (exit 2): the
+            # base-read schema check rejects format-version = 999. Base changelog [1.0.0] untagged; the
+            # working tree carries a valid header-only ledger and relabels to [1.0.5], so the base read is
+            # the only source of exit 2. Without FIX 1 this read zero rows and exited 0.
+            g10 = base_tmp / "bad-format-version"
+            _init(g10)
+            _root(g10)
+            _write(g10, _changelog_text(["1.0.0"]))
+            core10 = g10 / ".aiqt" / "core"
+            core10.mkdir(parents=True, exist_ok=True)
+            (core10 / "releases.toml").write_text("format-version = 999\n", encoding="utf-8")
+            _commit(g10, "base ledger with an unsupported format-version")
+            _write_ledger(g10)
+            _write(g10, _changelog_text(["1.0.5"]))
+            if _run_quiet(g10, "HEAD") != 2:
+                failures.append("git case G10: a base ledger with format-version = 999 expected "
+                                "fail-closed exit 2 (FIX 1)")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
