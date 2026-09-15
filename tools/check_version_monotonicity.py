@@ -170,6 +170,35 @@ def check_no_decrease(base_versions, head_versions):
     return []
 
 
+def _genesis_from_signals(base_release_tags, base_ledger_present, base_ledger_rows):
+    """Pure genesis predicate. base_release_tags: the `tag` values (None where absent) of the base
+    changelog releases. base_ledger_present: whether the base releases.toml exists. base_ledger_rows:
+    its [[release]] rows (empty list for zero). Genesis iff no base release carries a tag AND the
+    ledger is present with zero rows. An ABSENT ledger is NOT genesis (protection is retained: the
+    source cannot confirm zero shipped)."""
+    if any(t is not None for t in base_release_tags):
+        return False
+    if not base_ledger_present:
+        return False
+    return not base_ledger_rows
+
+
+def check_tag_preservation(base_releases, head_releases):
+    """A base changelog release that carries a `tag` must keep that exact tag at the same position
+    when its version is unchanged. This makes the changelog tag key append-only across a gated
+    comparison, so the tag shipment-signal cannot be stripped (which would otherwise let a later base
+    re-enter genesis). When the version at the position differs or the entry is gone, check_prefix
+    already reports it, so this avoids a redundant finding. Returns a list of finding strings."""
+    findings = []
+    for i in range(min(len(base_releases), len(head_releases))):
+        b, h = base_releases[i], head_releases[i]
+        if b.get("tag") is not None and h.get("version") == b.get("version") and h.get("tag") != b.get("tag"):
+            findings.append("release {}: base tag {!r} != head tag {!r} (a shipped release's tag "
+                            "declaration must not be removed or changed)".format(
+                                b.get("version"), b.get("tag"), h.get("tag")))
+    return findings
+
+
 def _tag_version(tag):
     """The numeric part of a `vX.Y.Z` tag string, or None if it is not v-prefixed."""
     return tag[1:] if isinstance(tag, str) and tag.startswith("v") else None
@@ -241,6 +270,21 @@ def _parse_base_releases(text):
 
 # --- the two layers ---------------------------------------------------------------------------------
 
+def _base_is_genesis(root, base_commit, base_releases):
+    """True when nothing was shipped as of base_commit. Reads the BASE snapshot only. An absent base
+    releases.toml is NOT genesis (guard-input-soundness). A present-but-unparseable ledger is
+    fail-closed (GateError, exit 2), mirroring layer_c's base-parse handling."""
+    present = _path_in_commit(root, base_commit, RELEASES_REL)
+    rows = []
+    if present:
+        try:
+            base_rel = tomllib.loads(_show_file(root, base_commit, RELEASES_REL))
+        except (tomllib.TOMLDecodeError, ValueError) as exc:
+            raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
+        rows = _rows_of(base_rel, "release", "baseline " + RELEASES_REL)
+    return _genesis_from_signals([r.get("tag") for r in base_releases], present, rows)
+
+
 def layer_a(root, base, head_releases):
     """Changelog-history append-only. Prints its own status; returns a list of finding strings. Raises
     GateError on any fail-closed condition."""
@@ -257,9 +301,16 @@ def layer_a(root, base, head_releases):
         print("changelog-history: NOT APPLICABLE (changelog.toml is absent at base {}; introduced since "
               "base)".format(base))
         return []
-    base_versions = [r["version"] for r in _parse_base_releases(_show_file(root, base_commit, "changelog.toml"))]
+    base_releases = _parse_base_releases(_show_file(root, base_commit, "changelog.toml"))
+    if _base_is_genesis(root, base_commit, base_releases):
+        print("changelog-history: NOT APPLICABLE (base {} is pre-release genesis: no release carries a "
+              "tag and {} has zero rows, so every changelog entry is an unshipped draft; append-only "
+              "release identity activates when the first release ships)".format(base, RELEASES_REL))
+        return []
+    base_versions = [r["version"] for r in base_releases]
     head_versions = [r["version"] for r in head_releases]
     findings = check_prefix(base_versions, head_versions) + check_no_decrease(base_versions, head_versions)
+    findings += check_tag_preservation(base_releases, head_releases)
     if not findings:
         print("changelog-history: PASS (base {}: {} base release(s) prefix-preserved into {} head "
               "release(s), no decrease)".format(base, len(base_versions), len(head_versions)))
@@ -521,6 +572,34 @@ def self_test_main():
     if _prefix_findings([r1, r2], [r1, r2], "x"):
         failures.append("_prefix_findings: an identical row list expected no finding")
 
+    # Genesis predicate (_genesis_from_signals): file-level, binary, read at BASE only. (tags, present,
+    # rows, expect). An absent ledger is NOT genesis; a tag or a ledger row means shipped.
+    genesis_cases = [
+        ([None], True, [], True),                        # one draft, header-only ledger
+        ([None, None], True, [], True),                  # multiple drafts
+        (["v1.0.0"], True, [], False),                   # tagged => shipped
+        ([None], True, [{"version": "1.0.0"}], False),   # a ledger row => shipped
+        ([None], False, [], False),                      # absent ledger => NOT genesis
+        ([], True, [], True),                            # no releases, header-only ledger
+    ]
+    for tags, present, rows, expect in genesis_cases:
+        got = _genesis_from_signals(tags, present, rows)
+        if got is not expect:
+            failures.append("_genesis_from_signals({}, {}, {}) = {}; expected {}".format(
+                tags, present, rows, got, expect))
+
+    # Tag-preservation (check_tag_preservation): a shipped release's tag must not be dropped or changed
+    # while its version is unchanged; a changed version is check_prefix's finding, not this one.
+    if check_tag_preservation([{"version": "1.0.0", "tag": "v1.0.0"}],
+                              [{"version": "1.0.0", "tag": "v1.0.0"}]):
+        failures.append("check_tag_preservation: an unchanged tagged release expected no finding")
+    if not check_tag_preservation([{"version": "1.0.0", "tag": "v1.0.0"}], [{"version": "1.0.0"}]):
+        failures.append("check_tag_preservation: dropping a base tag expected a finding")
+    if check_tag_preservation([{"version": "1.0.0"}], [{"version": "1.0.0"}]):
+        failures.append("check_tag_preservation: no base tag expected no finding")
+    if check_tag_preservation([{"version": "1.0.0", "tag": "v1.0.0"}], [{"version": "1.0.5"}]):
+        failures.append("check_tag_preservation: a changed version is check_prefix's finding, not this one")
+
     # Git-level cases: real repositories in a private tempdir. Skipped (with a note) where unavailable.
     import shutil
     import tempfile
@@ -562,6 +641,13 @@ def self_test_main():
             # separately below rather than masking the real comparison in every fixture.
             (path / "README.md").write_text("seed\n", encoding="utf-8")
             _commit(path, "initial")
+
+        def _write_ledger(path, body=""):
+            # A header-only .aiqt/core/releases.toml (zero [[release]] rows) is the genesis ledger signal;
+            # `body` appends [[release]] rows for the non-genesis (shipped) fixtures.
+            core = path / ".aiqt" / "core"
+            core.mkdir(parents=True, exist_ok=True)
+            (core / "releases.toml").write_text("format-version = 1\n" + body, encoding="utf-8")
 
         try:
             # (1) append-in-working-tree passes; (2) a tail rewrite fails; (4) a garbage base is exit 2.
@@ -667,6 +753,111 @@ def self_test_main():
             if _run_quiet(r5, "HEAD") != 0:
                 failures.append("git case: a releases record absent at HEAD expected NOT APPLICABLE "
                                 "(exit 0)")
+
+            # G1 genesis relabel passes: base changelog [1.0.0] untagged + header-only ledger; the
+            # working tree relabels it to [1.0.5]. Without the genesis exemption check_prefix -> exit 1.
+            g1 = base_tmp / "genesis-relabel"
+            _init(g1)
+            _root(g1)
+            _write(g1, _changelog_text(["1.0.0"]))
+            _write_ledger(g1)
+            _commit(g1, "genesis: 1.0.0 draft, header-only ledger")
+            _write(g1, _changelog_text(["1.0.5"]))
+            if _run_quiet(g1, "HEAD") != 0:
+                failures.append("git case G1: genesis relabel 1.0.0 -> 1.0.5 expected exit 0")
+
+            # G2 genesis draft consolidation that lowers the latest version passes (M2 suspended in
+            # genesis): base [1.0.0, 1.1.0] untagged + header-only ledger; head consolidates to [1.0.5].
+            g2 = base_tmp / "genesis-consolidate"
+            _init(g2)
+            _root(g2)
+            _write(g2, _changelog_text(["1.0.0", "1.1.0"]))
+            _write_ledger(g2)
+            _commit(g2, "genesis: two drafts, header-only ledger")
+            _write(g2, _changelog_text(["1.0.5"]))
+            if _run_quiet(g2, "HEAD") != 0:
+                failures.append("git case G2: genesis consolidation to a lower latest expected exit 0")
+
+            # G3 a ledger ROW makes the base non-genesis, so relabel fails: base [1.0.0] untagged with a
+            # one-row ledger; head relabels the changelog to [1.0.5] (ledger row untouched) -> exit 1.
+            g3 = base_tmp / "ledger-row-relabel"
+            _init(g3)
+            _root(g3)
+            _write(g3, _changelog_text(["1.0.0"]))
+            _write_ledger(g3, '\n[[release]]\nversion = "1.0.0"\ncommit_sha = "aaa"\n')
+            _commit(g3, "shipped: one ledger row")
+            _write(g3, _changelog_text(["1.0.5"]))
+            if _run_quiet(g3, "HEAD") != 1:
+                failures.append("git case G3: relabel once a ledger row exists expected exit 1")
+
+            # G4 a tagged base is non-genesis, so relabel fails: base changelog [1.0.0] tag="v1.0.0" +
+            # header-only ledger + a real git tag; head relabels to [1.0.5] -> exit 1.
+            g4 = base_tmp / "tagged-relabel"
+            _init(g4)
+            _root(g4)
+            _write(g4, _changelog_text(["1.0.0"], tag_on={"1.0.0": "v1.0.0"}))
+            _write_ledger(g4)
+            _commit(g4, "shipped: tagged 1.0.0")
+            subprocess.run(["git", "-C", str(g4), "tag", "v1.0.0", "HEAD"],
+                           check=True, capture_output=True, text=True)
+            _write(g4, _changelog_text(["1.0.5"]))
+            if _run_quiet(g4, "HEAD") != 1:
+                failures.append("git case G4: relabel once tagged expected exit 1")
+
+            # G5 the boundary commit passes: commit P is genesis (changelog [1.0.0] untagged + header-only
+            # ledger); commit S ships 1.0.5 (changelog [1.0.5] tag="v1.0.5" + a ledger row) with a real git
+            # tag. With base P (genesis) layer_a is NOT APPLICABLE, layer_b validates v1.0.5, layer_c the
+            # appended ledger row -> exit 0.
+            g5b = base_tmp / "boundary"
+            _init(g5b)
+            _root(g5b)
+            _write(g5b, _changelog_text(["1.0.0"]))
+            _write_ledger(g5b)
+            _commit(g5b, "P: genesis 1.0.0 draft")
+            p_sha = subprocess.run(["git", "-C", str(g5b), "rev-parse", "HEAD"],
+                                   check=True, capture_output=True, text=True).stdout.strip()
+            _write(g5b, _changelog_text(["1.0.5"], tag_on={"1.0.5": "v1.0.5"}))
+            _write_ledger(g5b, '\n[[release]]\nversion = "1.0.5"\ncommit_sha = "ccc"\n')
+            _commit(g5b, "S: ship 1.0.5")
+            subprocess.run(["git", "-C", str(g5b), "tag", "v1.0.5", "HEAD"],
+                           check=True, capture_output=True, text=True)
+            s_sha = subprocess.run(["git", "-C", str(g5b), "rev-parse", "HEAD"],
+                                   check=True, capture_output=True, text=True).stdout.strip()
+            if _run_quiet(g5b, p_sha) != 0:
+                failures.append("git case G5: the boundary commit (base P genesis) expected exit 0")
+
+            # G6 a commit after the boundary is non-genesis, so relabeling the shipped 1.0.5 -> 1.0.6 fails.
+            _write(g5b, _changelog_text(["1.0.6"]))
+            if _run_quiet(g5b, s_sha) != 1:
+                failures.append("git case G6: relabel 1.0.5 -> 1.0.6 from a shipped base expected exit 1")
+
+            # G7 a malformed base ledger fails closed (exit 2): the genesis read cannot parse releases.toml.
+            g7 = base_tmp / "malformed-ledger"
+            _init(g7)
+            _root(g7)
+            _write(g7, _changelog_text(["1.0.0"]))
+            core7 = g7 / ".aiqt" / "core"
+            core7.mkdir(parents=True, exist_ok=True)
+            (core7 / "releases.toml").write_text("format-version = 1\n[[release]\nbroken\n", encoding="utf-8")
+            _commit(g7, "base with unparseable ledger")
+            _write(g7, _changelog_text(["1.0.5"]))
+            if _run_quiet(g7, "HEAD") != 2:
+                failures.append("git case G7: a malformed base ledger expected fail-closed exit 2")
+
+            # G8 tag-preservation isolates the new check: base changelog [1.0.0] tag="v1.0.0" + header-only
+            # ledger + a real git tag; head keeps version 1.0.0 but DROPS the tag key -> exit 1 from
+            # check_tag_preservation alone (layer_b NA with no head tag, layer_c header-only both sides).
+            g8 = base_tmp / "tag-preservation"
+            _init(g8)
+            _root(g8)
+            _write(g8, _changelog_text(["1.0.0"], tag_on={"1.0.0": "v1.0.0"}))
+            _write_ledger(g8)
+            _commit(g8, "shipped: tagged 1.0.0, header-only ledger")
+            subprocess.run(["git", "-C", str(g8), "tag", "v1.0.0", "HEAD"],
+                           check=True, capture_output=True, text=True)
+            _write(g8, _changelog_text(["1.0.0"]))
+            if _run_quiet(g8, "HEAD") != 1:
+                failures.append("git case G8: dropping a shipped release's tag key expected exit 1")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -677,13 +868,15 @@ def self_test_main():
         return 1
     if git_ran:
         print("SELF-TEST PASS: prefix identity (M1), no-decrease (M2), tag name/ceiling logic, the "
-              "_parse fullmatch regression (4e), the full-row register prefix logic (append/edit/delete/"
-              "empty/identical), and the git-level history, tag, and release-order/id-history "
-              "append-only cases all hold")
+              "genesis predicate and tag-preservation logic, the _parse fullmatch regression (4e), the "
+              "full-row register prefix logic (append/edit/delete/empty/identical), and the git-level "
+              "history, tag, release-order/id-history append-only, genesis-exemption, and "
+              "tag-preservation cases all hold")
     else:
-        print("SELF-TEST PASS (PARTIAL): prefix identity (M1), no-decrease (M2), and tag name/ceiling "
-              "logic hold; the git-level history and tag cases were SKIPPED (git or a writable temp "
-              "directory was unavailable), so those invariants are UNVERIFIED this run")
+        print("SELF-TEST PASS (PARTIAL): prefix identity (M1), no-decrease (M2), tag name/ceiling "
+              "logic, and the genesis predicate and tag-preservation logic hold; the git-level history, "
+              "tag, and genesis-exemption cases were SKIPPED (git or a writable temp directory was "
+              "unavailable), so those invariants are UNVERIFIED this run")
     return 0
 
 
