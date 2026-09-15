@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "d27580dd1fbbf8384182d4dea16edc519e82f857db0d82551da88175e4f9cc52"
+tree-sha256 = "f777fa3f38ccf9ee673ed2a2ec31ff64dc564fb1363dbbe5f9af85ea3dc49d56"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -86,13 +86,13 @@ sha256 = "e1391be5a8cf1d83c17171f576f923ad662b4d1842dcb89771c2a7f517a5c2c7"
 
 [[sources]]
 path = ".aiqt/core/opf/OPF-QUICKSTART.md"
-bytes = 8473
-sha256 = "dc68d43dbf4a9b3b5e1c2593d761e0d7f89be181e7f7d52f7f956736ca1fda44"
+bytes = 8474
+sha256 = "0985e43ee32204e3429bffe1ac50b23ac7ce4395f8d415e54e7541b5ef2a1a78"
 
 [[sources]]
 path = ".aiqt/core/opf/OPF-SPEC.md"
-bytes = 76359
-sha256 = "f2c38ef01be34c6736afa28c89b2de32d09e495a643d869119fd570ad1826634"
+bytes = 84209
+sha256 = "63c8d313b6bc3410cc0138b820e6d3d0cf8c96d6171773f272345db19817e74f"
 
 [[sources]]
 path = ".aiqt/core/order.toml"
@@ -2606,13 +2606,13 @@ sha256 = "8716109b7b039900d572afc25c7d7d6a84822a200b73c912ef88027a7c267acf"
 
 [[sources]]
 path = "tools/_opf_schema.py"
-bytes = 127628
-sha256 = "0a180fd115d92a7f80acbe66df5ec121f4911702b5045a99300b968b9b102782"
+bytes = 151807
+sha256 = "b4328932bcb3b28c6e0f284da28baa2aed1a8de63589c131b375c549d0978db5"
 
 [[sources]]
 path = "tools/_opf_store.py"
-bytes = 141776
-sha256 = "ea1c24d442dd2c649091f39eae67259d66fc3c7579d0c07d13d3209687d70e26"
+bytes = 143577
+sha256 = "41936243c8d066f866f5418d0ed154b580a9cf689ab325fc6727539c9cb2f799"
 
 [[sources]]
 path = "tools/_opf_views.py"

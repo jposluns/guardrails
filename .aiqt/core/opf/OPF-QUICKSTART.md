@@ -62,7 +62,7 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 1. Run `opf init` (until the tooling ships: create `.working/toml/` by hand with `manifest.toml`
    declaring `standard = "devprocess"` in its `[devprocess]` table, plus `counters.toml`,
-   `version.toml`, `worklog.toml`, and the eight baseline `<type>.index.toml` files (worklog is the
+   `version.toml`, `worklog.toml`, and the eleven baseline `<type>.index.toml` files (worklog is the
    exempt ledger listed above, not an index); specification
    sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` is detected and you choose, per file: keep it, import it

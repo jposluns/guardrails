@@ -90,6 +90,9 @@ MANIFEST_NAME = "manifest.toml"        # discovery marker filename (spec 4.5)
 STANDARD_TOKEN = "devprocess"          # exact discovery token in [devprocess].standard (spec 4.5)
 MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (manifest/pointer); a larger
                                        # store input is refused rather than read unboundedly (SECA)
+SUPPORTED_SPEC_VERSION = "1.1.0"       # the DevProcess base spec_version this tooling implements; a store
+                                       # declaring an OLDER spec_version is fail-closed with a distinct
+                                       # migration-needed finding naming the `opf upgrade` remedy (spec 9.x)
 
 # Resolution outcomes.
 RESOLVED = "RESOLVED"                  # a machine store was resolved and located
@@ -108,7 +111,7 @@ IMPORT_STATES = ("none", "partial", "complete")
 
 # Base optional-capability modules (spec 9 [modules]; the roster is section 8.1's module families).
 KNOWN_MODULES = ("governance", "delivery_assurance", "operational_policy",
-                 "concurrent_operation", "decision_support")
+                 "concurrent_operation")
 
 # Section 8.1 record-model type taxonomy (the single source-of-truth type-name -> namespace binding).
 # A declared [types.<name>] is valid only when <name> is a known type carrying its NORMATIVE namespace;
@@ -125,11 +128,13 @@ BASELINE_TYPES = {
     "block": "BL",
     "handoff": "HO",
     "reference": "RF",
+    "contribution": "CN",
+    "maintainer_decision": "MD",
+    "preference_pattern": "PP",
 }
 # Module-tier types: type name -> (normative namespace, the module that must be enabled in [modules]).
 MODULE_TYPES = {
     "maintainer_action": ("MA", "governance"),
-    "maintainer_decision": ("MD", "governance"),
     "artifact": ("AR", "delivery_assurance"),
     "gate_run": ("GR", "delivery_assurance"),
     "release": ("RL", "delivery_assurance"),
@@ -137,7 +142,6 @@ MODULE_TYPES = {
     "mode": ("MO", "operational_policy"),
     "tier_assessment": ("TA", "operational_policy"),
     "session_lease": ("SL", "concurrent_operation"),
-    "preference_pattern": ("PP", "decision_support"),
 }
 # Importer-only quarantine type: a known, namespace-bound type gated by no module toggle (created only
 # by an importer, never scaffolded, spec 8.1).
@@ -160,7 +164,7 @@ TYPE_KEYS = frozenset({"namespace"})
 PROVIDER_KEYS = frozenset({"handler", "roles"})
 PROVIDER_ROLES = ("create", "auth", "sync")
 VIEW_KEYS = frozenset({"kind", "sources", "target"})
-VIEW_KINDS = ("deterministic", "composed")
+VIEW_KINDS = ("deterministic", "composed", "projection")
 DELIVERABLE_KEYS = frozenset({"kind", "target"})
 DELIVERABLE_KINDS = ("curated",)
 ARCHIVE_KEYS = frozenset({"period"})
@@ -1023,6 +1027,14 @@ def _validate_base(base, findings):
         spec_tuple = _parse(sv) if isinstance(sv, str) else None
         if spec_tuple is None:
             findings.append("[devprocess].spec_version {} is not a bare SemVer".format(_safe_display(sv)))
+        elif spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
+            # A store declaring an OLDER base spec_version than this tooling implements is fail-closed with
+            # its OWN named, remedy-carrying finding, rather than cascading into the confusing C-ROSTER /
+            # missing-type findings a newer roster would otherwise raise against the older store (spec 9.x).
+            findings.append("[devprocess].spec_version {} is older than the {} this tooling implements; "
+                            "run the store schema upgrade (`opf upgrade`) to migrate this store to {} "
+                            "(spec 9.x; fail-closed)".format(
+                                _safe_display(sv), SUPPORTED_SPEC_VERSION, SUPPORTED_SPEC_VERSION))
     # Each closed-vocabulary field is type-checked BEFORE its membership test (MAJOR 3), so a wrong-typed
     # value (e.g. posture as a list) is a fail-closed finding here rather than an unhashable-value crash
     # in a later rank/membership test.
@@ -1430,7 +1442,7 @@ def self_test():
             return default
 
     # A minimal valid base + a valid aiqt profile, as a manifest text builder.
-    def manifest_text(standard=STANDARD_TOKEN, spec_version="1.0.0", posture="required",
+    def manifest_text(standard=STANDARD_TOKEN, spec_version=SUPPORTED_SPEC_VERSION, posture="required",
                       with_aiqt=False, aiqt_floor="required", aiqt_compat=">=1.0.0 <2.0.0",
                       aiqt_version="1.0.0", register_xaiqt=True, ops_enabled=True, with_acme=False,
                       extra_top=""):
@@ -1738,6 +1750,17 @@ def self_test():
         aware = validate_manifest(m_badtype, supported_profiles={"aiqt": {1}})
         check("wrong-typed-posture-invalid", aware.status == INVALID)
         check("wrong-typed-posture-named", any("posture must be a string" in f for f in aware.findings))
+
+        # 10g: a store declaring a spec_version OLDER than SUPPORTED_SPEC_VERSION is fail-closed with a
+        # distinct migration-needed finding naming the `opf upgrade` remedy (not the confusing roster
+        # cascade); a store at the current spec_version is clean.
+        m_old = _t.loads(manifest_text(spec_version="1.0.0"))
+        mv_old = validate_manifest(m_old)
+        check("spec-version-floor-invalid", mv_old.status == INVALID)
+        check("spec-version-floor-named",
+              any("older than the" in f and "opf upgrade" in f for f in mv_old.findings))
+        check("spec-version-current-ok",
+              validate_manifest(_t.loads(manifest_text(spec_version=SUPPORTED_SPEC_VERSION))).status == VALID)
 
         # 11: the base_compat range grammar (defined here).
         check("compat-match", _match_base_compat(">=1.0.0 <2.0.0", (1, 2, 3)) == (True, None))

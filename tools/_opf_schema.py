@@ -146,8 +146,11 @@ ACTOR_KINDS = ("maintainer", "assistant", "automation", "importer")
 # an importer records imported history as settled fact, so neither proposes.
 PROPOSER_KINDS = frozenset({"assistant", "automation"})
 
-# The closed link-relation vocabulary (spec 8.6). Extending it is a spec version change.
-LINK_RELS = ("supersedes", "resolves", "remediates", "receipt_of", "corrects", "follows", "relates")
+# The closed link-relation vocabulary (spec 8.6). Extending it is a spec version change. `exemplifies`
+# (target constrained to a preference_pattern, spec 8.6) and `derives_from` (directional, any-type source)
+# ride the 1.1.0 base-schema bump.
+LINK_RELS = ("supersedes", "resolves", "remediates", "receipt_of", "corrects", "follows", "relates",
+             "exemplifies", "derives_from")
 # The closed reference-capture kinds (spec 8.6).
 REF_KINDS = ("path", "url", "doc")
 
@@ -159,6 +162,11 @@ WORKLOG_KINDS = ("added", "changed", "fixed", "removed", "security", "docs", "in
 ACTOR_KEYS = frozenset({"kind", "id"})
 LINK_KEYS = frozenset({"rel", "id"})
 REF_KEYS = frozenset({"kind", "locator", "note"})
+# The contribution delivery bundle (spec 8.5; the OUTWARD counterpart to a reference's receipt): the
+# delivery pointer plus (when available) the recipient-side receipt. channel/ref/sent_at are required
+# once a contribution has been sent; the receipt fields are legal only at acknowledged (see
+# _validate_type_specific).
+DELIVERY_KEYS = frozenset({"channel", "ref", "sent_at", "receipt_ref", "receipted_at"})
 
 # The full (non-worklog) envelope keyset; types add their own extra keys on top (EXTRA_KEYS below).
 ENVELOPE_KEYS = frozenset({"id", "type", "status", "title", "created_at", "updated_at",
@@ -185,14 +193,21 @@ COUNTERS_TOP_KEYS = frozenset({"schema", "counters"})
 
 class TypeSpec:
     """One baseline record type's schema: its namespace (from U1's taxonomy), its closed state set and
-    legal transitions, the states that may carry `/proposed`, its extra (non-envelope) field keys, and
-    whether it uses the reduced worklog envelope. `states` is precomputed (initial + working + terminal).
+    legal transitions, the states that may carry `/proposed`, the subset of NON-TERMINAL states whose
+    entry by a proposer actor is gated (the generalized `gated` attribute, spec 8.4), its extra
+    (non-envelope) field keys, and whether it uses the reduced worklog envelope. `states` is precomputed
+    (initial + working + terminal).
+
+    `gated` generalizes the one-off block `active/proposed` special case into a single mechanism: a
+    gated NON-TERMINAL state entered by an assistant/automation actor takes the `/proposed` qualifier (a
+    proposal a maintainer ratifies to the unqualified state), while a maintainer/importer lands it
+    unqualified. Every gated state is a proposable non-terminal state (checked at construction).
     """
     __slots__ = ("name", "namespace", "initial", "working", "terminal", "transitions",
-                 "proposable", "extra_keys", "reduced", "states")
+                 "proposable", "gated", "extra_keys", "reduced", "states")
 
     def __init__(self, name, initial, working, terminal, transitions, proposable,
-                 extra_keys=frozenset(), reduced=False):
+                 gated=frozenset(), extra_keys=frozenset(), reduced=False):
         self.name = name
         self.namespace = BASELINE_TYPES[name]     # single source of truth for the type->namespace bind
         self.initial = initial
@@ -200,13 +215,22 @@ class TypeSpec:
         self.terminal = frozenset(terminal)
         self.transitions = {k: frozenset(v) for k, v in transitions.items()}
         self.proposable = frozenset(proposable)
+        self.gated = frozenset(gated)
         self.extra_keys = frozenset(extra_keys)
         self.reduced = reduced
         self.states = frozenset({initial}) | self.working | self.terminal
+        # A gated state is a NON-TERMINAL proposable state; a construction-time contradiction (a gated
+        # terminal, or a gated state absent from `proposable`) is a fail-closed programming error here,
+        # never a silently mis-specified grammar (guard-input-soundness; spec 8.4).
+        for g in self.gated:
+            if g in self.terminal or g not in self.proposable or g not in self.states:
+                raise ValueError("TypeSpec {!r}: gated state {!r} must be a proposable non-terminal "
+                                 "state (spec 8.4)".format(name, g))
 
 
-# The nine baseline types (spec 8.5). Single-state types (done/autonomous_decision/reference/worklog)
-# have `recorded` as both initial and terminal with no transitions (created terminal, immutable).
+# The twelve baseline types (spec 8.5). Single-state types (done/autonomous_decision/reference/worklog/
+# maintainer_decision) have `recorded` as both initial and terminal with no transitions (created
+# terminal, immutable).
 BASELINE_SPECS = {
     "backlog_item": TypeSpec(
         "backlog_item", initial="open", working={"active"}, terminal={"done", "dropped"},
@@ -235,11 +259,13 @@ BASELINE_SPECS = {
         "autonomous_decision", initial="recorded", working=set(), terminal={"recorded"},
         transitions={}, proposable=set(), extra_keys={"classification", "action"}),
     "block": TypeSpec(
-        # The one type whose non-terminal initial state is proposable: an assistant/automation block is
-        # `active/proposed`, a proposal a maintainer ratifies to `active` (spec 8.5).
+        # A type whose non-terminal initial state is gated: an assistant/automation block is
+        # `active/proposed`, a proposal a maintainer ratifies to `active` (spec 8.5). The gating rides the
+        # generalized `gated` attribute (spec 8.4), the same mechanism contribution `sent` and
+        # preference_pattern `active` use.
         "block", initial="active", working=set(), terminal={"released", "expired"},
         transitions={"active": {"released", "expired"}},
-        proposable={"active", "released", "expired"}, extra_keys={"scopes"}),
+        proposable={"active", "released", "expired"}, gated={"active"}, extra_keys={"scopes"}),
     "handoff": TypeSpec(
         "handoff", initial="current", working=set(), terminal={"superseded"},
         transitions={"current": {"superseded"}}, proposable={"superseded"}),
@@ -248,6 +274,33 @@ BASELINE_SPECS = {
         # proposable (spec 8.4), mirroring worklog.
         "reference", initial="recorded", working=set(), terminal={"recorded"},
         transitions={}, proposable=set()),
+    "contribution": TypeSpec(
+        # The OUTWARD counterpart to `reference`: an artifact/fix/proposal this project SENT to a peer
+        # project, with a delivery receipt (spec 8.5). `sent` is a gated non-terminal state: an
+        # assistant/automation lands `sent/proposed`, a maintainer ratifies to `sent`; a valid standing
+        # authorization for the declared recipient may deactivate that per-send gating (see
+        # _validate_gated_snapshot). `acknowledged` is the single positive terminal (responded/adopted/
+        # reshaped/declined all live in `summary`/`x-aiqt`, never as a state).
+        "contribution", initial="proposed", working={"sent"},
+        terminal={"acknowledged", "superseded", "withdrawn"},
+        transitions={"proposed": {"sent", "withdrawn"}, "sent": {"acknowledged", "superseded"}},
+        proposable={"sent", "acknowledged", "superseded", "withdrawn"}, gated={"sent"},
+        extra_keys={"recipient", "dedup_class", "content_digest", "delivery"}),
+    "maintainer_decision": TypeSpec(
+        # A maintainer ruling: created-terminal `recorded` (immutable, the AD shape), never proposable (a
+        # maintainer-authored recorded ruling awaits no ratification, spec 8.4). actor.kind is restricted
+        # to {maintainer, importer} (D-7). It carries its decision text and MAY `exemplifies` the
+        # preference_pattern it instantiates.
+        "maintainer_decision", initial="recorded", working=set(), terminal={"recorded"},
+        transitions={}, proposable=set(), extra_keys={"decision"}),
+    "preference_pattern": TypeSpec(
+        # A distilled preference pattern (active -> retired). `active` is a gated non-terminal state
+        # (D-8): an assistant-distilled pattern lands `active/proposed` awaiting maintainer ratification;
+        # a maintainer ratifies to unqualified `active`. `title` rides the envelope; `context` and
+        # `rationale` are the type-specific fields.
+        "preference_pattern", initial="active", working=set(), terminal={"retired"},
+        transitions={"active": {"retired"}},
+        proposable={"active", "retired"}, gated={"active"}, extra_keys={"context", "rationale"}),
 }
 
 
@@ -441,6 +494,15 @@ def _validate_links(record, findings):
             # record: reconcile against the section 8.1 taxonomy, not just the <NS>-<n> shape (spec 8.1/8.2).
             findings.append("{}.id {!r} uses namespace {!r} that is bound to no record type in the "
                             "section 8.1 taxonomy (spec 8.1/8.2)".format(where, link.get("id"), shape[0]))
+        # `exemplifies` targets a preference_pattern (PP) specifically (spec 8.6): the link asserts the
+        # source record instantiates the linked pattern, so a well-formed exemplifies id whose namespace
+        # is not PP is invalid (the source side is unconstrained; modelled on the done receipt_of->BI
+        # constraint). The rel is usable by any type; only its TARGET namespace is constrained.
+        if link.get("rel") == "exemplifies" and shape is not None \
+                and shape[0] != BASELINE_TYPES["preference_pattern"]:
+            findings.append("{} exemplifies must target a preference_pattern ({} namespace), not {!r} "
+                            "(spec 8.6)".format(where, BASELINE_TYPES["preference_pattern"],
+                                                link.get("id")))
 
 
 def _validate_refs(record, findings):
@@ -499,11 +561,78 @@ def _check_keyset(record, allowed, registered_vendors, findings):
             findings.append("unknown key {} (schemas are closed; spec 8.3)".format(_safe_display(key)))
 
 
-def _validate_type_specific(record, spec, findings):
+def _standing_auth_permits(standing_auth, recipient):
+    """True when `standing_auth` is a WELL-FORMED standing-authorization declaration that names
+    `recipient` among its authorized recipients, deactivating per-send `sent` gating for that recipient
+    (the contribution `sent` standing authorization, spec 8.4). A malformed or absent declaration fails
+    CLOSED (returns False, so gating stays active).
+
+    Declaration shape (defined here pending the adopter-config home; see the build note the finalizer
+    resolves): a table `{"recipients": [<recipient-string>, ...]}` whose `recipients` is a non-empty list
+    of non-empty strings. Any other shape (a non-table, a missing/empty/non-list `recipients`, a
+    non-string or blank element) is malformed and denies the relief. The `recipient` matched against it is
+    the contribution record's own `recipient` field."""
+    if not isinstance(standing_auth, dict):
+        return False
+    recips = standing_auth.get("recipients")
+    if not (isinstance(recips, list) and recips
+            and all(isinstance(r, str) and r.strip() for r in recips)):
+        return False
+    if not (isinstance(recipient, str) and recipient.strip()):
+        return False
+    return recipient in recips
+
+
+def _validate_gated_snapshot(record, spec, findings, standing_auth=None):
+    """The creation-time snapshot rule for a type with gated non-terminal state(s) (the generalized
+    `gated` TypeSpec attribute, spec 8.4). A record whose STATE is a gated state records its creator in
+    `actor`, so the `/proposed` qualifier is a creation-time snapshot rule: an assistant/automation
+    creator MUST land `state/proposed` (a proposal a maintainer ratifies); a maintainer/importer creator
+    MUST land the bare `state` grant (only assistant/automation carry the proposal qualifier). This is
+    the ONE mechanism block/contribution/preference_pattern all share, folded out of the former block-only
+    special case, so it never weakens block's behaviour or the terminal-`/proposed` rule.
+
+    Contribution `sent` additionally honours a valid STANDING AUTHORIZATION for the record's declared
+    recipient: a well-formed declaration deactivates per-send gating for that recipient, letting an
+    assistant/automation land the bare `sent` grant; a malformed or absent declaration fails closed to
+    gated (spec 8.4)."""
+    if not spec.gated:
+        return
+    parsed, _ = parse_status(record.get("status"), spec)
+    if parsed is None:
+        return                                 # a malformed status is surfaced by parse_status elsewhere
+    state, qual = parsed
+    if state not in spec.gated:
+        return
+    actor = record.get("actor")
+    akind = actor.get("kind") if isinstance(actor, dict) else None
+    # akind may be a TOML-valid non-string (list/dict) which is unhashable and would raise on the
+    # membership tests below; guard by type first (a non-string actor kind is flagged by _validate_actor).
+    if not isinstance(akind, str):
+        akind = None
+    # A valid standing authorization for the declared recipient relieves contribution `sent` of per-send
+    # gating; every other gated state (and a malformed/absent declaration) stays gated (fail-closed).
+    authorized = (spec.name == "contribution" and state == "sent"
+                  and _standing_auth_permits(standing_auth, record.get("recipient")))
+    if akind in PROPOSER_KINDS and qual is None and not authorized:
+        findings.append("a {} created by an {} actor entering the gated {!r} state must be "
+                        "'{}/proposed', not a bare '{}' grant (spec 8.4/8.5)".format(
+                            spec.name, akind, state, state, state))
+    elif akind in ("maintainer", "importer") and qual == "proposed":
+        findings.append("a {} created by a {} actor must be a bare '{}' grant, not '{}/proposed' "
+                        "(only assistant/automation carry the proposal qualifier, spec 8.4/8.5)".format(
+                            spec.name, akind, state, state))
+
+
+def _validate_type_specific(record, spec, findings, standing_auth=None):
     """Per-type field rules the envelope does not carry (spec 8.5). Reads the record's status STATE (the
-    qualifier does not change these rules) to apply conditional bundles."""
+    qualifier does not change these rules) to apply conditional bundles. `standing_auth` is the optional
+    contribution standing-authorization declaration (spec 8.4), consulted only for the gated snapshot."""
     parsed, _ = parse_status(record.get("status"), spec) if not spec.reduced else (None, None)
     state = parsed[0] if parsed else None
+
+    # The generalized gated-snapshot rule (block/contribution/preference_pattern share it, spec 8.4).
+    _validate_gated_snapshot(record, spec, findings, standing_auth)
 
     if spec.name == "finding":
         # Severity is graded at or after the fix decision, never before: forbidden while open (spec 8.5).
@@ -556,24 +685,9 @@ def _validate_type_specific(record, spec, findings):
                     # a namespace bound to no type (e.g. ZZ) scopes nothing (M3).
                     findings.append("block.scopes entry {!r} uses namespace {!r} bound to no record type "
                                     "in the section 8.1 taxonomy (spec 8.1/8.2)".format(s, sshape[0]))
-        # A block's actor names its creator, so the proposal qualifier is a creation-time rule on the
-        # snapshot (spec 8.4/8.5): an assistant/automation block MUST be 'active/proposed' (a proposal,
-        # not a grant); a maintainer/importer block MUST be a bare 'active' grant (only assistant and
-        # automation carry the proposal qualifier) (M2).
-        actor = record.get("actor")
-        akind = actor.get("kind") if isinstance(actor, dict) else None
-        # akind may be a TOML-valid non-string (list/dict) which is unhashable and would raise on the
-        # membership tests below; guard by type first (a non-string actor kind is flagged by
-        # _validate_actor). Only a string kind is compared against the proposer/maintainer sets.
-        if not isinstance(akind, str):
-            akind = None
-        if akind in PROPOSER_KINDS and record.get("status") == "active":
-            findings.append("a block created by an {} actor must be 'active/proposed', not a bare "
-                            "'active' grant (spec 8.4/8.5)".format(akind))
-        elif akind in ("maintainer", "importer") and record.get("status") == "active/proposed":
-            findings.append("a block created by a {} actor must be a bare 'active' grant, not "
-                            "'active/proposed' (only assistant/automation carry the proposal qualifier, "
-                            "spec 8.4/8.5)".format(akind))
+        # The block `active/proposed` creation-time snapshot rule is enforced by the generalized
+        # _validate_gated_snapshot (block.gated == {"active"}), the one mechanism this and the other gated
+        # types share (spec 8.4/8.5).
 
     elif spec.name == "done":
         # A done record is a one-to-one completion receipt: it MUST link EXACTLY ONE `receipt_of` to a
@@ -620,6 +734,84 @@ def _validate_type_specific(record, spec, findings):
         refs = record.get("refs")
         if not isinstance(refs, list) or not refs:
             findings.append("a reference must carry at least one {kind, locator, note} ref (spec 8.6)")
+
+    elif spec.name == "contribution":
+        # The outward record of what this project SENT to a peer (spec 8.5). Its identity fields are each
+        # a required non-empty string; its delivery bundle is state-conditional (modelled on the
+        # pending_decision all-or-none idiom). The `sent` creation-gating snapshot is handled generically
+        # by _validate_gated_snapshot above.
+        for k in ("recipient", "dedup_class", "content_digest"):
+            if k not in record:
+                findings.append("a contribution must carry a non-empty {} (spec 8.5)".format(k))
+            elif not isinstance(record.get(k), str) or not record.get(k).strip():
+                findings.append("contribution.{} must be a non-empty string".format(k))
+        delivery = record.get("delivery")
+        if "delivery" in record and not isinstance(delivery, dict):
+            findings.append("contribution.delivery must be a table {channel, ref, sent_at, ...} "
+                            "(spec 8.5)")
+            delivery = None
+        d = delivery if isinstance(delivery, dict) else {}
+        extra = set(d) - DELIVERY_KEYS
+        if extra:
+            findings.append("contribution.delivery unknown key(s): {}".format(
+                ", ".join(_safe_key_names(extra))))
+        # channel/ref/sent_at are ALL required once the contribution has been sent (sent/acknowledged/
+        # superseded); channel/ref MAY be present earlier as a planned delivery; sent_at is FORBIDDEN
+        # before the contribution is sent (proposed/withdrawn).
+        if state in ("sent", "acknowledged", "superseded"):
+            for k in ("channel", "ref", "sent_at"):
+                if k not in d:
+                    findings.append("a {} contribution must carry delivery.{} (all-or-none delivery "
+                                    "bundle, spec 8.5)".format(state, k))
+            if "sent_at" in d and not _valid_timestamp(d.get("sent_at")):
+                findings.append("contribution.delivery.sent_at must be an RFC 3339 UTC timestamp")
+        elif state in ("proposed", "withdrawn"):
+            if "sent_at" in d:
+                findings.append("contribution.delivery.sent_at is forbidden before the contribution is "
+                                "sent (state {}, spec 8.5)".format(state))
+        for k in ("channel", "ref"):
+            if k in d and (not isinstance(d.get(k), str) or not d.get(k).strip()):
+                findings.append("contribution.delivery.{} must be a non-empty string".format(k))
+        # A recipient-side receipt (receipt_ref/receipted_at) is legal ONLY at acknowledged and is always
+        # optional (a receipt may lag or never come).
+        if state == "acknowledged":
+            if "receipt_ref" in d and (not isinstance(d.get("receipt_ref"), str)
+                                       or not d.get("receipt_ref").strip()):
+                findings.append("contribution.delivery.receipt_ref must be a non-empty string when present")
+            if "receipted_at" in d and not _valid_timestamp(d.get("receipted_at")):
+                findings.append("contribution.delivery.receipted_at must be an RFC 3339 UTC timestamp")
+        else:
+            for k in ("receipt_ref", "receipted_at"):
+                if k in d:
+                    findings.append("contribution.delivery.{} is legal only at acknowledged "
+                                    "(spec 8.5)".format(k))
+
+    elif spec.name == "maintainer_decision":
+        # A maintainer ruling, created-terminal `recorded` (spec 8.5). It carries its decision text (the
+        # answer plus rationale), and actor.kind is restricted to {maintainer, importer} (D-7): a
+        # maintainer ruling with assistant/automation attribution is a contradiction; importer covers
+        # migrated history. An `exemplifies` link (target constrained to a PP) is validated in
+        # _validate_links.
+        if "decision" not in record:
+            findings.append("a maintainer_decision must carry a non-empty decision (spec 8.5)")
+        elif not isinstance(record.get("decision"), str) or not record.get("decision").strip():
+            findings.append("maintainer_decision.decision must be a non-empty string")
+        actor = record.get("actor")
+        akind = actor.get("kind") if isinstance(actor, dict) else None
+        if isinstance(akind, str) and akind not in ("maintainer", "importer"):
+            findings.append("a maintainer_decision must be authored by a maintainer or importer actor, "
+                            "not {!r} (a maintainer ruling with assistant attribution is a "
+                            "contradiction; spec 8.5, D-7)".format(akind))
+
+    elif spec.name == "preference_pattern":
+        # A distilled preference pattern (active -> retired, spec 8.5). Its context and rationale are
+        # required non-empty strings (title rides the envelope); the `active/proposed` creation-gating
+        # snapshot is handled generically by _validate_gated_snapshot above (D-8).
+        for k in ("context", "rationale"):
+            if k not in record:
+                findings.append("a preference_pattern must carry a non-empty {} (spec 8.5)".format(k))
+            elif not isinstance(record.get(k), str) or not record.get(k).strip():
+                findings.append("preference_pattern.{} must be a non-empty string".format(k))
 
 
 def _validate_worklog(record, spec, registered_vendors, findings, registered_kinds=None):
@@ -672,7 +864,7 @@ def _validate_worklog(record, spec, registered_vendors, findings, registered_kin
 # --- the record validator (spec 8.3) -----------------------------------------------------------------
 
 def validate_record(record, expected_type=None, specs=None, registered_vendors=frozenset(),
-                    registered_kinds=None):
+                    registered_kinds=None, standing_auth=None):
     """Validate one parsed record against its baseline type schema. Returns a RecordValidation.
 
     The type is taken from the record's `type` field, or, for a typeless worklog entry (Appendix C omits
@@ -681,7 +873,10 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
     baseline types (U2M passes an extended roster). `registered_vendors` is the manifest's registered
     `x-<vendor>` set (U1's [vendors].registered) against which extension tables are checked.
     `registered_kinds` is the manifest's additional worklog change kinds (spec 6.2); the built-in
-    WORKLOG_KINDS remain the accepted default when it is None.
+    WORKLOG_KINDS remain the accepted default when it is None. `standing_auth` is the optional
+    contribution standing-authorization declaration (spec 8.4): a valid declaration for a contribution's
+    declared recipient deactivates per-send `sent` gating for that recipient; absent or malformed, gating
+    stays active (fail-closed). It is consulted only for the contribution gated snapshot.
 
     Outcome: CANNOT-EVALUATE when the input is not a table or its type cannot be identified; INVALID when
     an identified record violates its schema; VALID otherwise."""
@@ -812,7 +1007,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
 
     _validate_links(record, findings)
     _validate_refs(record, findings)
-    _validate_type_specific(record, spec, findings)
+    _validate_type_specific(record, spec, findings, standing_auth)
 
     return RecordValidation(INVALID if findings else VALID, findings, rtype, rid)
 
@@ -931,15 +1126,23 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
         if to_state not in spec.transitions.get(from_state, frozenset()):
             findings.append("illegal transition {!r} to {!r} for a {} (spec 8.5)".format(
                 from_state, to_state, spec.name))
-        elif to_state in spec.terminal:
+        elif to_state in spec.terminal or to_state in spec.gated:
+            # Landing on a TERMINAL state, or ENTERING a gated non-terminal state (the generalized
+            # `gated` attribute, spec 8.4): an assistant/automation actor MUST land '/proposed' (a
+            # proposal a maintainer ratifies); a maintainer/importer lands unqualified. Contribution
+            # `sent` may be relieved of per-send gating by a valid standing authorization, but that is a
+            # record-level policy overlay (validate_record), not part of the base transition grammar,
+            # which stays fail-closed here (spec 8.4/8.5).
+            kind_label = "terminal" if to_state in spec.terminal else "gated"
             if isinstance(actor_kind, str) and actor_kind in PROPOSER_KINDS:
                 if to_qual != "proposed":
-                    findings.append("a terminal transition by an {} actor must land '/proposed', not "
-                                    "{!r} (spec 8.4)".format(actor_kind, to_status))
+                    findings.append("a {} transition into the {!r} state by an {} actor must land "
+                                    "'/proposed', not {!r} (spec 8.4)".format(
+                                        kind_label, to_state, actor_kind, to_status))
             elif to_qual is not None:
-                findings.append("a terminal transition by a {} actor lands unqualified, not {!r} "
-                                "(only assistant/automation propose, spec 8.4)".format(
-                                    _safe_display(actor_kind), to_status))
+                findings.append("a {} transition into the {!r} state by a {} actor lands unqualified, "
+                                "not {!r} (only assistant/automation propose, spec 8.4)".format(
+                                    kind_label, to_state, _safe_display(actor_kind), to_status))
         elif to_qual is not None:
             findings.append("a non-terminal transition does not carry '/proposed', got {!r}".format(to_status))
 
@@ -1925,6 +2128,129 @@ def self_test():
     # not a silent clean pass; a present marker still validates clean.
     check("d1-counters-absent-schema-finding", bool(validate_counters({"counters": {}})[1]))
     check("d1-counters-present-schema-ok", not validate_counters({"schema": 1, "counters": {}})[1])
+
+    # ----- 1.1.0 base-schema additions: contribution (CN), maintainer_decision (MD), preference_pattern
+    # (PP), the generalized `gated` attribute, and the exemplifies/derives_from link rels. Each new state/
+    # transition/bundle/link constraint carries a discriminating valid+invalid pair (change-carries-check).
+    contrib_base = dict(recipient="peer-project", dedup_class="rule-fix", content_digest="sha256:abc")
+    sent_delivery = {"channel": "inbox", "ref": "msg-1", "sent_at": TS}
+
+    # contribution: a maintainer-authored proposed contribution is VALID (proposed is not gated); a
+    # maintainer sent contribution lands the bare `sent` grant with a complete delivery bundle.
+    check("contribution-proposed-ok",
+          validate_record(envelope("contribution", 1, "proposed", **contrib_base)).status == VALID)
+    check("contribution-sent-maintainer-ok",
+          validate_record(envelope("contribution", 2, "sent", delivery=dict(sent_delivery),
+                                   **contrib_base)).status == VALID)
+    # `sent` gating: an assistant lands `sent/proposed` (legal); a bare `sent` by an assistant is INVALID
+    # absent a standing authorization; a maintainer ratification of `sent` is a transition (below).
+    check("contribution-sent-proposed-assistant-ok",
+          validate_record(envelope("contribution", 3, "sent/proposed", actor={"kind": "assistant"},
+                                   delivery=dict(sent_delivery), **contrib_base)).status == VALID)
+    c_unauth = validate_record(envelope("contribution", 4, "sent", actor={"kind": "assistant"},
+                                        delivery=dict(sent_delivery), **contrib_base))
+    check("contribution-sent-assistant-unqualified-invalid", c_unauth.status == INVALID)
+    check("contribution-sent-assistant-unqualified-named",
+          any("gated 'sent' state must be 'sent/proposed'" in f for f in c_unauth.findings))
+    # a VALID standing authorization for the declared recipient relieves per-send gating; a MALFORMED one,
+    # or one naming a different recipient, fails closed to gated (bare `sent` by assistant stays INVALID).
+    check("contribution-sent-assistant-standing-auth-ok",
+          validate_record(envelope("contribution", 5, "sent", actor={"kind": "assistant"},
+                                   delivery=dict(sent_delivery), **contrib_base),
+                          standing_auth={"recipients": ["peer-project"]}).status == VALID)
+    check("contribution-sent-assistant-malformed-auth-invalid",
+          validate_record(envelope("contribution", 6, "sent", actor={"kind": "assistant"},
+                                   delivery=dict(sent_delivery), **contrib_base),
+                          standing_auth={"recipients": "peer-project"}).status == INVALID)
+    check("contribution-sent-assistant-auth-other-recipient-invalid",
+          validate_record(envelope("contribution", 7, "sent", actor={"kind": "assistant"},
+                                   delivery=dict(sent_delivery), **contrib_base),
+                          standing_auth={"recipients": ["someone-else"]}).status == INVALID)
+    # delivery bundle: sent_at is forbidden at proposed; a sent contribution missing the bundle is INVALID;
+    # receipt fields are legal only at acknowledged.
+    check("contribution-sent-at-at-proposed-invalid",
+          validate_record(envelope("contribution", 8, "proposed", delivery={"sent_at": TS},
+                                   **contrib_base)).status == INVALID)
+    check("contribution-sent-missing-delivery-invalid",
+          validate_record(envelope("contribution", 9, "sent", **contrib_base)).status == INVALID)
+    check("contribution-receipt-at-sent-invalid",
+          validate_record(envelope("contribution", 10, "sent",
+                                   delivery=dict(sent_delivery, receipt_ref="r-1"),
+                                   **contrib_base)).status == INVALID)
+    check("contribution-acknowledged-with-receipt-ok",
+          validate_record(envelope("contribution", 11, "acknowledged",
+                                   delivery=dict(sent_delivery, receipt_ref="r-1", receipted_at=TS),
+                                   **contrib_base)).status == VALID)
+    check("contribution-missing-recipient-invalid",
+          validate_record(envelope("contribution", 12, "proposed",
+                                   dedup_class="rule-fix", content_digest="sha256:abc")).status == INVALID)
+    # contribution transitions: proposed -> sent/proposed by assistant legal; proposed -> acknowledged
+    # illegal; maintainer ratifies sent/proposed -> sent; a bare `sent` entry by an assistant is INVALID
+    # at the base grammar (standing-auth relief is a record-level overlay), a maintainer lands it bare.
+    check("txn-contribution-proposed-to-sent-proposed-legal",
+          validate_transition("contribution", "proposed", "sent/proposed", "assistant").status == VALID)
+    check("txn-contribution-proposed-to-acknowledged-illegal",
+          validate_transition("contribution", "proposed", "acknowledged", "maintainer").status == INVALID)
+    check("txn-contribution-ratify-sent-legal",
+          validate_transition("contribution", "sent/proposed", "sent", "maintainer").status == VALID)
+    check("txn-contribution-assistant-sent-bare-invalid",
+          validate_transition("contribution", "proposed", "sent", "assistant").status == INVALID)
+    check("txn-contribution-maintainer-sent-bare-legal",
+          validate_transition("contribution", "proposed", "sent", "maintainer").status == VALID)
+    check("txn-contribution-sent-to-acknowledged-proposed-legal",
+          validate_transition("contribution", "sent", "acknowledged/proposed", "assistant").status == VALID)
+
+    # maintainer_decision: created-terminal `recorded` carrying its decision; actor.kind restricted to
+    # {maintainer, importer}; never proposable; exemplifies must target a PP.
+    check("maintainer-decision-ok",
+          validate_record(envelope("maintainer_decision", 1, "recorded",
+                                   decision="Chose option 1 for its reversibility")).status == VALID)
+    check("maintainer-decision-importer-actor-ok",
+          validate_record(envelope("maintainer_decision", 2, "recorded", actor={"kind": "importer"},
+                                   decision="migrated ruling")).status == VALID)
+    check("maintainer-decision-assistant-actor-invalid",
+          validate_record(envelope("maintainer_decision", 3, "recorded", actor={"kind": "assistant"},
+                                   decision="x")).status == INVALID)
+    check("maintainer-decision-missing-decision-invalid",
+          validate_record(envelope("maintainer_decision", 4, "recorded")).status == INVALID)
+    check("maintainer-decision-proposed-invalid",
+          validate_record(envelope("maintainer_decision", 5, "recorded/proposed",
+                                   decision="x")).status == INVALID)
+    check("maintainer-decision-exemplifies-pp-ok",
+          validate_record(envelope("maintainer_decision", 6, "recorded", decision="x",
+                                   links=[{"rel": "exemplifies", "id": "PP-1"}])).status == VALID)
+    md_ex = validate_record(envelope("maintainer_decision", 7, "recorded", decision="x",
+                                     links=[{"rel": "exemplifies", "id": "FN-1"}]))
+    check("maintainer-decision-exemplifies-non-pp-invalid", md_ex.status == INVALID)
+    check("maintainer-decision-exemplifies-non-pp-named",
+          any("exemplifies must target a preference_pattern" in f for f in md_ex.findings))
+
+    # preference_pattern: active -> retired; `active` is gated (assistant lands active/proposed, a
+    # maintainer lands bare active); context and rationale are required.
+    check("preference-pattern-active-maintainer-ok",
+          validate_record(envelope("preference_pattern", 1, "active",
+                                   context="when X", rationale="because Y")).status == VALID)
+    check("preference-pattern-active-proposed-assistant-ok",
+          validate_record(envelope("preference_pattern", 2, "active/proposed", actor={"kind": "assistant"},
+                                   context="when X", rationale="because Y")).status == VALID)
+    check("preference-pattern-active-assistant-bare-invalid",
+          validate_record(envelope("preference_pattern", 3, "active", actor={"kind": "assistant"},
+                                   context="when X", rationale="because Y")).status == INVALID)
+    check("preference-pattern-active-proposed-maintainer-invalid",
+          validate_record(envelope("preference_pattern", 4, "active/proposed",
+                                   context="when X", rationale="because Y")).status == INVALID)
+    check("preference-pattern-missing-fields-invalid",
+          validate_record(envelope("preference_pattern", 5, "active")).status == INVALID)
+    check("txn-preference-pattern-retire-proposed-legal",
+          validate_transition("preference_pattern", "active", "retired/proposed", "assistant").status == VALID)
+    check("txn-preference-pattern-ratify-legal",
+          validate_transition("preference_pattern", "active/proposed", "active", "maintainer").status == VALID)
+
+    # link rels: derives_from is now a valid rel (any-type source); exemplifies is validated above.
+    check("derives-from-link-ok",
+          validate_record(envelope("contribution", 30, "proposed",
+                                   links=[{"rel": "derives_from", "id": "FN-1"}],
+                                   **contrib_base)).status == VALID)
 
     if failures:
         print("OPF-SCHEMA SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))

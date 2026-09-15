@@ -3,8 +3,9 @@
 Formal name: AIQT Development Operational Standard. Public brand: DevProcess
 (devprocess.ai). Base discovery token: `devprocess`. Status: draft (specification only;
 schemas and the reference tooling, the scaffolder `opf init`, the importer `opf import`, the
-validator `opf doctor`, the renderer `opf render`, the relocator `opf migrate`, and the
-synchronizer `opf sync`, ship in later releases). Date: 2026-09-14 (UTC).
+validator `opf doctor`, the renderer `opf render`, the relocator `opf migrate`, the
+synchronizer `opf sync`, and the schema-upgrader `opf upgrade`, ship in later releases).
+Date: 2026-09-14 (UTC).
 
 DevProcess is a neutral, self-contained operational-files standard, owned by AIQT and
 published under CC BY-SA 4.0. A project conforms to DevProcess with this specification and
@@ -34,7 +35,7 @@ can name, with history and the durable worklog preserved (section 5).
 
 OPF specifies formats, layout, naming, lifecycle, and enforcement posture, and names the standard
 command vocabulary of the reference tooling (`opf init`, `opf import`, `opf doctor`, `opf render`,
-`opf migrate`, `opf sync`). It does not specify tooling internals; a reference implementation
+`opf migrate`, `opf sync`, `opf upgrade`). It does not specify tooling internals; a reference implementation
 follows in later releases of the AIQT Guardrails reference suite. A project can conform to this
 specification with hand-maintained files and its own checks.
 
@@ -100,7 +101,8 @@ Two roots organize every path in this standard:
     VERSION.md                     # optional human view of version.toml
     TODO.md  BACKLOG.md  PIPELINE.md
     DONE.md  FINDINGS.md  DECISIONS.md
-    BLOCKS.md  HANDOFF.md  REFERENCES.md
+    BLOCKS.md  HANDOFF.md  REFERENCES.md  CONTRIBUTIONS.md
+    DECISIONS.toml                 # machine projection (deterministic; section 10.5)
     <TYPE>-INDEX.md ...            # optional 1:1 index mirrors (section 10.1)
     IMPORT-REPORT.md               # present only while a migration is unresolved
     toml/
@@ -117,6 +119,9 @@ Two roots organize every path in this standard:
       block.index.toml
       handoff.index.toml
       reference.index.toml
+      contribution.index.toml
+      maintainer_decision.index.toml
+      preference_pattern.index.toml
       archive/
         2026/
           archive.toml             # enumerates rotated IDs and spans (section 12)
@@ -584,8 +589,10 @@ is assistance, not authority; the published words are the curator's.
 | Baseline | block | BL |
 | Baseline | handoff | HO |
 | Baseline | reference | RF |
+| Baseline | contribution | CN |
+| Baseline | maintainer_decision | MD |
+| Baseline | preference_pattern | PP |
 | Governance module | maintainer_action | MA |
-| Governance module | maintainer_decision | MD |
 | Delivery-assurance module | artifact | AR |
 | Delivery-assurance module | gate_run | GR |
 | Delivery-assurance module | release | RL |
@@ -593,7 +600,6 @@ is assistance, not authority; the published words are the curator's.
 | Operational-policy module | mode | MO |
 | Operational-policy module | tier_assessment | TA |
 | Concurrent-operation module | session_lease | SL |
-| Decision-support module | preference_pattern | PP |
 | Migration quarantine (importer-only) | legacy_fragment | LF |
 | Reserved, excluded | transaction | TX |
 | Reserved, unassigned | (none) | CL |
@@ -611,6 +617,13 @@ Notes on the roster:
   `done`; a standalone receipt is legal only for imported history with provenance.
 - A `finding` records the observation and links its remediation rather than containing it.
 - A `block` scopes one or more enumerated records and feeds actionability (section 8.5).
+- `contribution` records an artifact, fix, or proposal this project SENT to a peer project, with a
+  delivery receipt: the outward counterpart to `reference`, which records what comes in. It carries no
+  fleet-specific semantics; those ride a registered `x-<vendor>` extension (section 8.7).
+- `maintainer_decision` and `preference_pattern` are baseline as of spec_version 1.1.0; they were
+  module-tier in 1.0.0. With that change the governance module carries `maintainer_action` alone, and
+  the now-empty decision-support module is retired. A store upgrades across the change with the
+  additive migration (section 9.2).
 - The delivery-assurance `release` record, where enabled, references a `version.toml` release row
   by version string; the ledger row is the fact, the record is the delivery-assurance envelope
   around it.
@@ -673,12 +686,23 @@ qualifier ::= "proposed"
   record as unfinished, and views surface it as awaiting ratification. The `/proposed` qualifier
   attaches to any transition an assistant or automation makes that awaits a maintainer's
   ratification: the assistant or automation terminal transitions above (for example `done/proposed`
-  or `fixed/proposed`), and a proposed `block`, recorded as `active/proposed` (section 8.5), which is
-  a proposal rather than a grant even though `active` is not a terminal state. A recorded factual
-  entry that proposes nothing and awaits no ratification is exempt: the worklog, whose entries record
-  facts rather than propose a transition, never takes `/proposed`, so an assistant-authored or
-  automation-authored worklog entry (status `recorded`) is a conformant recorded fact rather than an
-  unratified proposal.
+  or `fixed/proposed`), and the gated non-terminal states, which are proposals rather than grants even
+  though they are not terminal. A type declares its gated states: `block` gates `active` (a proposed
+  block, `active/proposed`), `contribution` gates `sent` (an assistant-sent contribution,
+  `sent/proposed`, awaiting a maintainer's ratification that it was genuinely sent), and
+  `preference_pattern` gates `active` (an assistant-distilled pattern, `active/proposed`, awaiting
+  ratification). This is one mechanism, not a set of per-type special cases: entering a gated state as
+  an assistant or automation takes `/proposed`, and only a maintainer ratifies it to the unqualified
+  state. A recorded factual entry that proposes nothing and awaits no ratification is exempt: the
+  worklog, whose entries record facts rather than propose a transition, never takes `/proposed`, so an
+  assistant-authored or automation-authored worklog entry (status `recorded`) is a conformant recorded
+  fact rather than an unratified proposal.
+- Standing authorization for `contribution` `sent`: `sent` gating is on by default, but an adopter MAY
+  declare a standing authorization for a named recipient that deactivates per-send gating for that
+  recipient, letting an assistant or automation land the unqualified `sent` grant to it without a
+  per-send ratification. A valid declaration for the contribution's declared recipient relieves the
+  gating; an absent or malformed declaration fails closed, so gating stays on. The declaration is an
+  adopter configuration surface; a store that declares none keeps every `sent` gated.
 - No resurrection: a record in an unqualified terminal state never re-enters a working state. A
   revived concern is a new record linking the old one.
 - Supersession is a link, not a state edit: the superseding record links `supersedes`, and where
@@ -706,14 +730,17 @@ Baseline types:
 | block | `active` > `released` or `expired` | Scopes an enumerated list of record IDs. A block created by an assistant or automation actor is `active/proposed` and is a proposal, not a grant: it does not count toward blocked-ness or justify a stop until a maintainer ratifies it. |
 | handoff | `current` > `superseded` | Posting a new handoff supersedes the previous in the same act; at most one `current` handoff exists. |
 | reference | `recorded` | Immutable captured reference. |
+| contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project sent to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` are required once sent, `sent_at` is forbidden before, and the receipt fields are legal only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome lives in `summary`/`x-<vendor>`, never as a state. A re-send is a new record linking `supersedes`; the superseded record records `superseded`. |
+| maintainer_decision | `recorded` | Created-terminal, immutable maintainer ruling carrying its `decision` (answer plus rationale). `actor.kind` is `maintainer` or `importer` only (a maintainer ruling with assistant attribution is a contradiction; `importer` covers migrated history). Overturning is a new record linking the old. It MAY `exemplifies` the preference_pattern it instantiates. |
+| preference_pattern | `active` > `retired` | A distilled preference pattern carrying `context` and `rationale` (with the envelope `title`). `active` is gated: an assistant-distilled pattern lands `active/proposed` awaiting maintainer ratification to the unqualified `active`. |
 
 Module types, in outline (full schemas ship with the module schemas release): maintainer_action
-`open` > `done` or `dropped`; maintainer_decision `recorded`; artifact `staged` > `promoted` or
+`open` > `done` or `dropped`; artifact `staged` > `promoted` or
 `rejected`; gate_run `recorded` with a three-valued verdict field (`pass`, `fail`,
 `cannot_evaluate`), never folded into status; release `planned` > `published` or `abandoned`;
 waiver `active` > `expired` or `revoked`, expiry required at creation; mode `active` > `retired`;
-tier_assessment `recorded`; session_lease `held` > `released` or `reconciled`; preference_pattern
-`active` > `retired`; legacy_fragment `quarantined` > `resolved` or `ignored`.
+tier_assessment `recorded`; session_lease `held` > `released` or `reconciled`;
+legacy_fragment `quarantined` > `resolved` or `ignored`.
 
 Actionability: a backlog item is actionable when its state is `open` or `active` and no unqualified
 `active` block scopes it. This is the block join every scheduling view renders.
@@ -721,8 +748,15 @@ Actionability: a backlog item is actionable when its state is `open` or `active`
 ### 8.6 Links and reference capture
 
 `links` relate records to records; `rel` comes from a closed vocabulary: `supersedes`, `resolves`,
-`remediates`, `receipt_of`, `corrects`, `follows`, `relates`. Extending the vocabulary is a
-specification version change.
+`remediates`, `receipt_of`, `corrects`, `follows`, `relates`, `exemplifies`, `derives_from`.
+Extending the vocabulary is a specification version change.
+
+- `exemplifies`: the source record instantiates the linked pattern. Its target is constrained to a
+  `preference_pattern` (PP); the source side is unconstrained. Its primary user is
+  `maintainer_decision` (a ruling exemplifies the pattern it instantiates).
+- `derives_from`: the source record was derived from the linked record; directional, usable by any
+  type. Its primary user is `contribution` (a contribution derives from the internal finding,
+  decision, or backlog item that motivated it).
 
 `refs` capture external sources at the moment a claim or artifact is produced: each is
 `{kind, locator, note}` with `kind` one of `path` (a repository path, with a line where
@@ -747,7 +781,7 @@ shape (the schema release that follows this specification is normative):
 
 [devprocess]
 standard = "devprocess"        # discovery token; exact value required
-spec_version = "1.0.0"         # DevProcess base spec version this store conforms to
+spec_version = "1.1.0"         # DevProcess base spec version this store conforms to
 layout = "inline"              # storage layout: "inline" or "per-record" (was layout_profile)
 posture = "required"           # "off", "warn", or "required" (section 11)
 import_status = "none"         # "none", "partial", or "complete"
@@ -761,7 +795,6 @@ governance = true              # the [profiles.aiqt] profile below requires thes
 delivery_assurance = false
 operational_policy = true      # (required by [profiles.aiqt].required_modules)
 concurrent_operation = true    # (required by [profiles.aiqt].required_modules)
-decision_support = false
 
 # --- Profiles: additive requirement bundles, namespaced, ignored by base-only tooling ---
 
@@ -808,6 +841,11 @@ target = ".working/BACKLOG.md"
 kind = "deterministic"
 sources = ["worklog"]
 target = ".working/WORKLOG.md"
+
+[views."DECISIONS.toml"]       # a machine projection (section 10.5): deterministic, byte-drift-gated
+kind = "projection"
+sources = ["pending_decision", "autonomous_decision", "maintainer_decision", "preference_pattern"]
+target = ".working/DECISIONS.toml"
 
 [views."VERSION"]
 kind = "deterministic"
@@ -881,6 +919,28 @@ the reference verification floor, and its `x-aiqt` extension namespace. The `[pr
 namespace and these contract rules are reserved and documented; the profile-authoring interface is
 not yet a committed public contract for third-party authors.
 
+### 9.2 Store schema upgrades
+
+A base-schema version bump ships a tested, in-place store-schema upgrade (`opf upgrade`). The upgrade
+is additive, idempotent, and runs under the store consistency contract and the single-writer lease
+(section 5.7). It fails closed on an unresolvable store, a declared `spec_version` ABOVE the tooling,
+a divergence, a held lease, or any populated state that contradicts its preconditions; it never
+lowers the fail-closed floor. It never commits: it stages the change and requires a full doctor VALID
+before the change is offered for the adopter's own branch-and-merge.
+
+The manifest and counters rewrite is a model regeneration through the canonical new-document emitter,
+never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED
+parsed model reproduces the on-disk bytes exactly (proving the file is canonical and comment-free, so
+nothing can be lost), failing closed otherwise; and a postcondition that the model diff equals exactly
+the allowed delta, failing closed otherwise. For the 1.0.0 to 1.1.0 upgrade the allowed delta is: bump
+`spec_version` to 1.1.0; remove the retired `decision_support` module key; add the `[types]` rows for
+`contribution`, `maintainer_decision`, and `preference_pattern`; add the two new view rows; extend
+`counters.toml` with the `CN`/`MD`/`PP` zeros while preserving every existing high-water; and create
+the three missing empty `*.index.toml` files (skipping any that already exist, such as a
+`maintainer_decision.index.toml` where governance was enabled, whose records are preserved
+byte-for-byte). The upgrade weakens nothing: `preference_pattern` simply moves to always-on, so a
+populated decision-support index is kept as is.
+
 ## 10. Views and deliverables
 
 ### 10.1 Deterministic views
@@ -891,8 +951,8 @@ manifest's view map:
 - **1:1 index mirrors**: `<TYPE>-INDEX.md` (the type name uppercased, hyphen, INDEX), one per
   enabled type where declared, mirroring the machine index for human reading.
 - **Composed views**: `TODO.md`, `BACKLOG.md`, `PIPELINE.md`, `DONE.md`, `FINDINGS.md`,
-  `DECISIONS.md`, `BLOCKS.md`, `HANDOFF.md`, `REFERENCES.md`, `WORKLOG.md`, and the optional
-  `VERSION.md`, each composed from declared sources through the transform vocabulary.
+  `DECISIONS.md`, `BLOCKS.md`, `HANDOFF.md`, `REFERENCES.md`, `CONTRIBUTIONS.md`, `WORKLOG.md`, and the
+  optional `VERSION.md`, each composed from declared sources through the transform vocabulary.
 
 The root `VERSION` file is a deterministic deliverable rendered from `version.toml` into the
 product repository (section 5.8).
@@ -920,6 +980,31 @@ set, and the regeneration command; the header carries no timestamp.
 never byte-drift-gated. Its gates are range coverage and freeze (section 7). Its entries carry no
 do-not-edit header; instead the changelog opens with a short note that it is a curated summary of
 the project's worklog, gated on coverage and publication freeze.
+
+### 10.5 Machine projections
+
+A machine projection is a third generated-output class beside deterministic views and the curated
+changelog: a deterministic, byte-drift-gated TOML deliverable at `.working/` top level, its name
+UPPERCASE per the casing convention (section 4.6) because it is generated, never hand-authored truth.
+It is declared in the manifest view map with the view kind `projection`, so it is covered by the same
+render, drift, and doctor gates as any declared view with no new gate. Every determinism requirement of
+section 10.3 applies verbatim (UTF-8, LF, stable ordering, no locale-dependent sorting, no wall-clock
+content, no network access, no model involvement, and a leading do-not-edit header naming its sources,
+the schema and generator versions, a source-set digest, and the regeneration command, with no
+timestamp), the header being a leading TOML comment block. Advisory activity over a projection, an
+assistant-side prediction, dedup, or pattern-spotting pass, is a READ-TIME activity outside the
+generator, so no model output can ever be baked into the generated bytes.
+
+The shipped projection is `DECISIONS.toml`, the machine counterpart to the composed `DECISIONS.md`
+view, projected from `pending_decision`, `autonomous_decision`, `maintainer_decision`, and
+`preference_pattern`. Its payload (projection contract v1) carries `schema = 1` (the projection
+contract's own version, bumped independently) and `projection = "decisions"`; four arrays of tables,
+one per source type, each row sorted by numeric ID and projecting the full base record (the envelope
+fields, the type's declared extra fields, and `links`/`refs` as nested arrays of tables), with
+`x-<vendor>` extension tables excluded as profile-owned data; and one `[derived]` table carrying the
+existing decision-resolution join's output (`effective` and `superseded` pending_decision IDs,
+numerically sorted) and nothing beyond the closed section-10.2 vocabulary, so no new join is
+introduced.
 
 ## 11. Enforcement posture
 
