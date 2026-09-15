@@ -393,6 +393,49 @@ def _fresh_git_env():
     return env
 
 
+def _pin_fixture_version(repo, failures, env, version="1.0.0"):
+    """Shared normalization for the archive-extracting self-test fixtures: pin an `git archive HEAD`-
+    extracted tree to a CHOSEN release-version (default "1.0.0") so its committed manifest release-version
+    is the fixture's chosen version rather than the LIVE pack version. Without the pin, at any non-1.0.0
+    live version the tagged/committed tree's manifest release-version tracks the live repo and post-tag
+    correctly fails ("tag points at a tree whose manifest release-version is ..."), masking the fixture's
+    intended assertion. Writes VERSION + the changelog source at `version`, git-inits and stages the tree
+    under the caller's neutralized `env`, then regenerates the fixture manifest via gen_manifest --root
+    (gen_manifest enumerates the tracked surface via `git ls-files`, so the tree is init + add'd first). A
+    gen_manifest FAILURE is a real fixture-setup failure that FAILS the self-test (never a silent pass): it
+    appends to `failures` (which makes self_test_main return nonzero) and returns False. Returns True on
+    success, with the tree staged and the regenerated manifest ready for the caller to commit."""
+    (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
+    (repo / "changelog.toml").write_text('[[release]]\nversion = "{}"\n'.format(version), encoding="utf-8")
+    for a in (["init", "-q"], ["add", "-A"]):
+        if subprocess.run(["git", "-C", str(repo), *a], capture_output=True, env=env).returncode != 0:
+            failures.append("fixture setup ({}): could not init/stage the archive-extracted tree for "
+                            "version pinning; the archive-backed case cannot be normalized".format(repo.name))
+            return False
+    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)],
+                      capture_output=True, env=env).returncode != 0:
+        failures.append("fixture setup ({}): gen_manifest --root failed while pinning to {}; a fixture-setup "
+                        "gen failure FAILS the self-test rather than silently passing as the intended "
+                        "assertion".format(repo.name, version))
+        return False
+    return True
+
+
+def _regen_fixture_manifest(root, case, failures, env):
+    """Regenerate a fixture's manifest via gen_manifest --root as SELF-TEST SETUP, failing CLOSED on a
+    nonzero gen exactly as _pin_fixture_version does. A setup gen-failure is a real fixture-setup failure:
+    it appends a DISTINCT "fixture setup ... gen_manifest --root failed" entry to `failures` and returns
+    False, so the affected fixture does NOT proceed to its verdict assertion, where a coincidental exit
+    could otherwise be misread (or misattributed to the behaviour under test) as the intended gate verdict.
+    Returns True only when the manifest was actually regenerated."""
+    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(root)],
+                      capture_output=True, env=env).returncode != 0:
+        failures.append("fixture setup ({}): gen_manifest --root failed; a fixture-setup gen failure FAILS "
+                        "the self-test rather than silently passing as the intended assertion".format(case))
+        return False
+    return True
+
+
 def _materialized_check(root, sha, commands_fn, what):
     """Raw-materialize `sha` into a throwaway FRESH git repo and run each check command `commands_fn(co)`
     returns inside it. The tree is materialized from RAW blob bytes (git ls-tree + cat-file, round-4 finding
@@ -1703,6 +1746,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 try:
                     with tarfile.open(fileobj=io.BytesIO(arch.stdout), mode="r:") as tf:
                         tf.extractall(gcand)
+                    # test-hermeticity: this candidate is GENESIS (zero-row releases, manifest genesis = true)
+                    # and asserts NO 1.0.0 release-order row, so its verdict (run_pre_tag auto-requiring first-
+                    # pin evidence, exit 1) is independent of the pack version: the committed archive tree is
+                    # internally self-consistent at whatever version it carries, so no version pin is needed
+                    # (and pinning it to 1.0.0 would leave a changelog release row against a zero-row releases
+                    # record, tripping the candidate's own reproduce checks to cannot-evaluate). It is version-
+                    # hermetic by construction; only fixtures that assert a fixed 1.0.0 row are pinned.
                     ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
                                             env=_fresh_git_env()).returncode == 0
                              for a in (["init", "-q"],
@@ -2121,10 +2171,18 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.invalid",
                                "GIT_COMMITTER_DATE": "2000-01-01T00:00:00"})
-                    ok6 = all(subprocess.run(["git", "-C", str(ac), *a], capture_output=True,
-                                             env=ge).returncode == 0
-                              for a in (["init", "-q"], ["add", "-A"],
-                                        ["commit", "-q", "-m", "release 1.0.0 tree", "--no-verify"]))
+                    # test-hermeticity: the archived tree carries the LIVE repo's release-version, so pin the
+                    # extracted tree to the fixture's chosen 1.0.0 via the shared helper (writes VERSION +
+                    # changelog, inits, stages, and regenerates the manifest; a gen failure FAILS the self-
+                    # test rather than passing silently) before it is committed and tagged v1.0.0. Without the
+                    # pin the tagged tree's manifest release-version tracks the live repo (e.g. 1.0.5) and
+                    # post-tag correctly fails ("tag points at a tree whose manifest release-version is ...").
+                    ok6 = _pin_fixture_version(ac, failures, ge)
+                    if ok6:
+                        ok6 = all(subprocess.run(["git", "-C", str(ac), *a], capture_output=True,
+                                                 env=ge).returncode == 0
+                                  for a in (["add", "-A"],
+                                            ["commit", "-q", "-m", "release 1.0.0 tree", "--no-verify"]))
                     if ok6:
                         subprocess.run(["git", "-C", str(ac), "tag", "-a", "v1.0.0", "-m", "1.0.0"],
                                        check=True, capture_output=True, env=ge)
@@ -2146,61 +2204,69 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
                             'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
                                 a_tobj, a_csha, a_qa_sha, a_tagger - 100), encoding="utf-8")
-                        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(ac)],
-                                       capture_output=True, env=ge)
+                        base_ok = _regen_fixture_manifest(ac, "attestation base commit", failures, ge)
                         subprocess.run(["git", "-C", str(ac), "add", "-A"], capture_output=True, env=ge)
                         subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m",
                                         "attestation commit: append row 1", "--no-verify"],
                                        capture_output=True, env=ge)
                         a_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
                                                capture_output=True, text=True).stdout.strip()
-                        gmc = subprocess.run(["python3", "tools/gen_manifest.py", "--check", "--root",
-                                              str(ac)], capture_output=True)
-                        cmc = subprocess.run(["python3", "tools/check_manifest.py"], cwd=str(ac),
-                                             capture_output=True)
-                        if gmc.returncode != 0 or cmc.returncode != 0:
-                            failures.append("attestation commit is not green under the wired manifest gates "
-                                            "(gen_manifest --check rc={}, check_manifest rc={}); round-7 "
-                                            "finding 6".format(gmc.returncode, cmc.returncode))
-                        if _run_post_tag_quiet(ac, a_oid, str(a_qa)) != 0:
-                            failures.append("post-tag must validate the regenerated attestation-commit "
-                                            "artifacts, exit 0 (round-7 finding 6)")
+                        # The attestation-green verdict (finding 6) is meaningful only when the base manifest
+                        # was actually regenerated; a setup gen-failure is recorded DISTINCTLY above and must
+                        # NOT be misattributed here as a finding-6 non-green result.
+                        if base_ok:
+                            gmc = subprocess.run(["python3", "tools/gen_manifest.py", "--check", "--root",
+                                                  str(ac)], capture_output=True)
+                            cmc = subprocess.run(["python3", "tools/check_manifest.py"], cwd=str(ac),
+                                                 capture_output=True)
+                            if gmc.returncode != 0 or cmc.returncode != 0:
+                                failures.append("attestation commit is not green under the wired manifest "
+                                                "gates (gen_manifest --check rc={}, check_manifest rc={}); "
+                                                "round-7 finding 6".format(gmc.returncode, cmc.returncode))
+                            if _run_post_tag_quiet(ac, a_oid, str(a_qa)) != 0:
+                                failures.append("post-tag must validate the regenerated attestation-commit "
+                                                "artifacts, exit 0 (round-7 finding 6)")
 
-                        # === ROUND-8 archive-based post-tag cases (need a full pack tree for the #2
-                        # branch-integrity recompute) ================================================
-                        # A QA object not matching the recorded digest -> exit 1 (the branch-integrity
-                        # recompute stays green, so the QA-digest leg drives the verdict).
-                        bad_qa8 = tmp / "attestation-bad-qa.toml"
-                        bad_qa8.write_text(a_qa_body + "# tampered\n", encoding="utf-8")
-                        if _run_post_tag_quiet(ac, a_oid, str(bad_qa8)) != 1:
-                            failures.append("(post-tag) a QA object not matching the recorded digest must "
-                                            "exit 1")
+                            # === ROUND-8 archive-based post-tag cases (need a full pack tree for the #2
+                            # branch-integrity recompute) ================================================
+                            # A QA object not matching the recorded digest -> exit 1 (the branch-integrity
+                            # recompute stays green, so the QA-digest leg drives the verdict).
+                            bad_qa8 = tmp / "attestation-bad-qa.toml"
+                            bad_qa8.write_text(a_qa_body + "# tampered\n", encoding="utf-8")
+                            if _run_post_tag_quiet(ac, a_oid, str(bad_qa8)) != 1:
+                                failures.append("(post-tag) a QA object not matching the recorded digest must "
+                                                "exit 1")
 
-                        # (#4) an ORPHAN commit carrying the SAME valid attestation tree does not descend
-                        # from the tagged candidate -> exit 1 (the pre-fix gate accepted it).
-                        a_tree = subprocess.run(["git", "-C", str(ac), "rev-parse", a_oid + "^{tree}"],
-                                                capture_output=True, text=True).stdout.strip()
-                        orphan_oid = subprocess.run(
-                            ["git", "-C", str(ac), "commit-tree", a_tree, "-m", "orphan"],
-                            capture_output=True, text=True, env=ge).stdout.strip()
-                        if _run_post_tag_quiet(ac, orphan_oid, str(a_qa)) != 1:
-                            failures.append("(#4) an orphan attestation commit not descending from the "
-                                            "tagged candidate must be rejected exit 1")
-
-                        # (#2) a TAMPERED branch-integrity artifact on the attestation commit is REJECTED by
-                        # the recompute, not merely schema-validated. Tamper root.txt (without regenerating)
-                        # in a follow-up commit; the delta is still within the allowed set, but the recompute
-                        # flags the drift -> exit 1.
-                        (ac / ".aiqt" / "release" / "root.txt").write_text("TAMPERED\n", encoding="utf-8")
-                        subprocess.run(["git", "-C", str(ac), "add", "-A"], capture_output=True, env=ge)
-                        subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", "tamper root.txt",
-                                        "--no-verify"], capture_output=True, env=ge)
-                        tamper_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
+                            # (#4) an ORPHAN commit carrying the SAME valid attestation tree does not descend
+                            # from the tagged candidate -> exit 1 (the pre-fix gate accepted it).
+                            a_tree = subprocess.run(["git", "-C", str(ac), "rev-parse", a_oid + "^{tree}"],
                                                     capture_output=True, text=True).stdout.strip()
-                        if _run_post_tag_quiet(ac, tamper_oid, str(a_qa)) != 1:
-                            failures.append("(#2) a tampered branch-integrity artifact on the attestation "
-                                            "commit must be REJECTED by the recompute (exit 1)")
+                            orphan_oid = subprocess.run(
+                                ["git", "-C", str(ac), "commit-tree", a_tree, "-m", "orphan"],
+                                capture_output=True, text=True, env=ge).stdout.strip()
+                            if _run_post_tag_quiet(ac, orphan_oid, str(a_qa)) != 1:
+                                failures.append("(#4) an orphan attestation commit not descending from the "
+                                                "tagged candidate must be rejected exit 1")
 
+                            # (#2) a TAMPERED branch-integrity artifact on the attestation commit is REJECTED by
+                            # the recompute, not merely schema-validated. Tamper root.txt (without regenerating)
+                            # in a follow-up commit; the delta is still within the allowed set, but the recompute
+                            # flags the drift -> exit 1.
+                            (ac / ".aiqt" / "release" / "root.txt").write_text("TAMPERED\n", encoding="utf-8")
+                            subprocess.run(["git", "-C", str(ac), "add", "-A"], capture_output=True, env=ge)
+                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", "tamper root.txt",
+                                            "--no-verify"], capture_output=True, env=ge)
+                            tamper_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
+                                                        capture_output=True, text=True).stdout.strip()
+                            if _run_post_tag_quiet(ac, tamper_oid, str(a_qa)) != 1:
+                                failures.append("(#2) a tampered branch-integrity artifact on the attestation "
+                                                "commit must be REJECTED by the recompute (exit 1)")
+
+                        # CHRONOLOGY FORGING is BASE-INDEPENDENT so it runs OUTSIDE base_ok (it builds its own
+                        # QA object, rewrites the release row, regenerates its OWN manifest via forge_ok and
+                        # asserts on forge_oid; it needs the tagged candidate from ok6 but not the base
+                        # attestation regeneration or a_oid/a_tree/a_qa). Gating it under base_ok would need-
+                        # lessly drop its coverage when only the base setup fails.
                         # CHRONOLOGY FORGING end-to-end on a full pack tree (round-2 finding 6): a QA object
                         # whose retrieved timestamps POSTDATE the tag while the row lists an early timestamp.
                         # The armed gate compares the RETRIEVED epochs against the tag and requires the row
@@ -2217,149 +2283,149 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
                             'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
                                 a_tobj, a_csha, forge_qa_sha, a_tagger - 100), encoding="utf-8")
-                        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(ac)],
-                                       capture_output=True, env=ge)
+                        forge_ok = _regen_fixture_manifest(ac, "forge-chronology commit", failures, ge)
                         subprocess.run(["git", "-C", str(ac), "add", "-A"], capture_output=True, env=ge)
                         subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", "forge chronology",
                                         "--no-verify"], capture_output=True, env=ge)
                         forge_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
                                                    capture_output=True, text=True).stdout.strip()
-                        if _run_post_tag_quiet(ac, forge_oid, str(forge_qa)) != 1:
+                        if forge_ok and _run_post_tag_quiet(ac, forge_oid, str(forge_qa)) != 1:
                             failures.append("(post-tag) a QA object whose retrieved timestamps postdate the "
                                             "tag while the row lists an early timestamp must exit 1 (#6)")
 
-                        # (round-9 finding 3) EXECUTABLE-BIT / MODE SMUGGLE: an attestation commit that
-                        # chmods releases.toml to 0o755 rides the ALLOWED releases.toml path under a
-                        # name-only delta, but the raw mode/type delta check flags mode 100755 -> exit 1.
-                        # The mode is not part of the manifest, so the branch-integrity recompute stays
-                        # green and the MODE leg alone drives the verdict. update-index --chmod sets the
-                        # index mode explicitly, so the case does not depend on core.fileMode (hermetic).
-                        subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_oid],
-                                       capture_output=True, env=ge)
-                        subprocess.run(["git", "-C", str(ac), "update-index", "--chmod=+x", RELEASES_REL],
-                                       capture_output=True, env=ge)
-                        subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m",
-                                        "chmod releases.toml 0o755", "--no-verify"],
-                                       capture_output=True, env=ge)
-                        chmod_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                   capture_output=True, text=True).stdout.strip()
-                        if _run_post_tag_quiet(ac, chmod_oid, str(a_qa)) != 1:
-                            failures.append("(finding 3) an attestation commit that chmods releases.toml to "
-                                            "0o755 must be rejected by the raw mode/type delta check "
-                                            "(exit 1); a name-only delta missed the executable-bit smuggle")
-
-                        # (round-11 finding 7) EXIT-CODE PRECEDENCE: a symlink (120000), gitlink (160000),
-                        # delete (000000), or file-to-tree tamper on an ALLOWED branch-integrity artifact is
-                        # a definite CONTENT finding (exit 1), reported by the raw mode/type delta BEFORE the
-                        # branch-integrity recompute can materialize the tree. Pre-fix, materialization
-                        # RAISED (a symlink/gitlink is rejected at materialize; gen_manifest --check cannot
-                        # evaluate a deleted/replaced artifact) and the caught GateError reclassified the
-                        # verdict to cannot-evaluate (exit 2), OVERRIDING the delta's exit-1 content finding.
-                        # The tamper targets root.txt (an allowed artifact NOT loaded before the delta, so
-                        # the early strict loads stay clean and the delta leg drives the verdict); each is
-                        # constructed purely in the index (cacheinfo/force-remove), so it is hermetic. With
-                        # the short-circuit removed, the symlink/gitlink cases return 2 and these fail.
-                        root_rel = gen_manifest.ROOT_REL
-
-                        def _run_precedence_tamper(index_ops, msg):
+                        if base_ok:
+                            # (round-9 finding 3) EXECUTABLE-BIT / MODE SMUGGLE: an attestation commit that
+                            # chmods releases.toml to 0o755 rides the ALLOWED releases.toml path under a
+                            # name-only delta, but the raw mode/type delta check flags mode 100755 -> exit 1.
+                            # The mode is not part of the manifest, so the branch-integrity recompute stays
+                            # green and the MODE leg alone drives the verdict. update-index --chmod sets the
+                            # index mode explicitly, so the case does not depend on core.fileMode (hermetic).
                             subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_oid],
                                            capture_output=True, env=ge)
-                            for op in index_ops:
-                                subprocess.run(["git", "-C", str(ac), *op], capture_output=True, env=ge)
-                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", msg, "--no-verify"],
+                            subprocess.run(["git", "-C", str(ac), "update-index", "--chmod=+x", RELEASES_REL],
                                            capture_output=True, env=ge)
-                            return subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                  capture_output=True, text=True).stdout.strip()
+                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m",
+                                            "chmod releases.toml 0o755", "--no-verify"],
+                                           capture_output=True, env=ge)
+                            chmod_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
+                                                       capture_output=True, text=True).stdout.strip()
+                            if _run_post_tag_quiet(ac, chmod_oid, str(a_qa)) != 1:
+                                failures.append("(finding 3) an attestation commit that chmods releases.toml to "
+                                                "0o755 must be rejected by the raw mode/type delta check "
+                                                "(exit 1); a name-only delta missed the executable-bit smuggle")
 
-                        # symlink (120000): the blob content is the link target; only the raw dst mode drives
-                        # the finding, so the target text is immaterial.
-                        link_blob = subprocess.run(
-                            ["git", "-C", str(ac), "hash-object", "-w", "--stdin"],
-                            input=b"root.txt.target", capture_output=True, env=ge).stdout.strip().decode()
-                        sym_oid = _run_precedence_tamper(
-                            [["update-index", "--cacheinfo",
-                              "120000,{},{}".format(link_blob, root_rel)]], "symlink root.txt")
-                        if _run_post_tag_quiet(ac, sym_oid, str(a_qa)) != 1:
-                            failures.append("(finding 7) a symlink (120000) on an allowed artifact is a "
-                                            "content finding (exit 1); the branch-integrity recompute must "
-                                            "not reclassify it to cannot-evaluate (exit 2)")
+                            # (round-11 finding 7) EXIT-CODE PRECEDENCE: a symlink (120000), gitlink (160000),
+                            # delete (000000), or file-to-tree tamper on an ALLOWED branch-integrity artifact is
+                            # a definite CONTENT finding (exit 1), reported by the raw mode/type delta BEFORE the
+                            # branch-integrity recompute can materialize the tree. Pre-fix, materialization
+                            # RAISED (a symlink/gitlink is rejected at materialize; gen_manifest --check cannot
+                            # evaluate a deleted/replaced artifact) and the caught GateError reclassified the
+                            # verdict to cannot-evaluate (exit 2), OVERRIDING the delta's exit-1 content finding.
+                            # The tamper targets root.txt (an allowed artifact NOT loaded before the delta, so
+                            # the early strict loads stay clean and the delta leg drives the verdict); each is
+                            # constructed purely in the index (cacheinfo/force-remove), so it is hermetic. With
+                            # the short-circuit removed, the symlink/gitlink cases return 2 and these fail.
+                            root_rel = gen_manifest.ROOT_REL
 
-                        # gitlink (160000): mode-160000 tree entry naming a commit (a_csha is a real commit).
-                        glink_oid = _run_precedence_tamper(
-                            [["update-index", "--cacheinfo",
-                              "160000,{},{}".format(a_csha, root_rel)]], "gitlink root.txt")
-                        if _run_post_tag_quiet(ac, glink_oid, str(a_qa)) != 1:
-                            failures.append("(finding 7) a gitlink (160000) on an allowed artifact is a "
-                                            "content finding (exit 1); the branch-integrity recompute must "
-                                            "not reclassify it to cannot-evaluate (exit 2)")
+                            def _run_precedence_tamper(index_ops, msg):
+                                subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_oid],
+                                               capture_output=True, env=ge)
+                                for op in index_ops:
+                                    subprocess.run(["git", "-C", str(ac), *op], capture_output=True, env=ge)
+                                subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", msg, "--no-verify"],
+                                               capture_output=True, env=ge)
+                                return subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
+                                                      capture_output=True, text=True).stdout.strip()
 
-                        # delete (000000): the allowed artifact is removed from the tree.
-                        del_oid = _run_precedence_tamper(
-                            [["update-index", "--force-remove", root_rel]], "delete root.txt")
-                        if _run_post_tag_quiet(ac, del_oid, str(a_qa)) != 1:
-                            failures.append("(finding 7) a delete (000000) of an allowed artifact is a "
-                                            "content finding (exit 1); the branch-integrity recompute must "
-                                            "not reclassify it to cannot-evaluate (exit 2)")
-
-                        # file-to-tree: the allowed FILE is replaced by a TREE (a child blob under its path),
-                        # so its own dst mode is a delete and an out-of-scope path appears; both are findings.
-                        child_blob = subprocess.run(
-                            ["git", "-C", str(ac), "hash-object", "-w", "--stdin"],
-                            input=b"child\n", capture_output=True, env=ge).stdout.strip().decode()
-                        f2t_oid = _run_precedence_tamper(
-                            [["update-index", "--force-remove", root_rel],
-                             ["update-index", "--add", "--cacheinfo",
-                              "100644,{},{}/child".format(child_blob, root_rel)]], "file-to-tree root.txt")
-                        if _run_post_tag_quiet(ac, f2t_oid, str(a_qa)) != 1:
-                            failures.append("(finding 7) a file-to-tree change on an allowed artifact is a "
-                                            "content finding (exit 1); the branch-integrity recompute must "
-                                            "not reclassify it to cannot-evaluate (exit 2)")
-
-                        # (round-4 finding 8) EARLY-PARSED ARTIFACTS: the SAME four shape tampers on
-                        # manifest.toml AND releases.toml. Pre-fix, these two are parsed EARLY
-                        # (load_strict_manifest / _show_toml) BEFORE the attestation-delta short-circuit,
-                        # so a symlink/gitlink/delete/file-to-tree tamper made the early parse RAISE and
-                        # the caught GateError reclassified the exit-1 content finding to cannot-evaluate
-                        # (exit 2). The pre-flight shape check now reports each as a content finding
-                        # (exit 1) before the parse. Mutation: with the pre-flight removed, at least one
-                        # of these manifest.toml/releases.toml mode-type cases returns 2 and fails here.
-                        for _early_rel in (MANIFEST_REL, RELEASES_REL):
-                            _e_sym = _run_precedence_tamper(
+                            # symlink (120000): the blob content is the link target; only the raw dst mode drives
+                            # the finding, so the target text is immaterial.
+                            link_blob = subprocess.run(
+                                ["git", "-C", str(ac), "hash-object", "-w", "--stdin"],
+                                input=b"root.txt.target", capture_output=True, env=ge).stdout.strip().decode()
+                            sym_oid = _run_precedence_tamper(
                                 [["update-index", "--cacheinfo",
-                                  "120000,{},{}".format(link_blob, _early_rel)]],
-                                "symlink " + _early_rel)
-                            if _run_post_tag_quiet(ac, _e_sym, str(a_qa)) != 1:
-                                failures.append("(finding 8) a symlink (120000) on the early-parsed {} "
-                                                "must be a content finding (exit 1); the early parse "
-                                                "must not reclassify it to cannot-evaluate (exit "
-                                                "2)".format(_early_rel))
-                            _e_glink = _run_precedence_tamper(
+                                  "120000,{},{}".format(link_blob, root_rel)]], "symlink root.txt")
+                            if _run_post_tag_quiet(ac, sym_oid, str(a_qa)) != 1:
+                                failures.append("(finding 7) a symlink (120000) on an allowed artifact is a "
+                                                "content finding (exit 1); the branch-integrity recompute must "
+                                                "not reclassify it to cannot-evaluate (exit 2)")
+
+                            # gitlink (160000): mode-160000 tree entry naming a commit (a_csha is a real commit).
+                            glink_oid = _run_precedence_tamper(
                                 [["update-index", "--cacheinfo",
-                                  "160000,{},{}".format(a_csha, _early_rel)]],
-                                "gitlink " + _early_rel)
-                            if _run_post_tag_quiet(ac, _e_glink, str(a_qa)) != 1:
-                                failures.append("(finding 8) a gitlink (160000) on the early-parsed {} "
-                                                "must be a content finding (exit 1); the early parse "
-                                                "must not reclassify it to cannot-evaluate (exit "
-                                                "2)".format(_early_rel))
-                            _e_del = _run_precedence_tamper(
-                                [["update-index", "--force-remove", _early_rel]],
-                                "delete " + _early_rel)
-                            if _run_post_tag_quiet(ac, _e_del, str(a_qa)) != 1:
-                                failures.append("(finding 8) a delete (000000) of the early-parsed {} "
-                                                "must be a content finding (exit 1); the early parse "
-                                                "must not reclassify it to cannot-evaluate (exit "
-                                                "2)".format(_early_rel))
-                            _e_f2t = _run_precedence_tamper(
-                                [["update-index", "--force-remove", _early_rel],
+                                  "160000,{},{}".format(a_csha, root_rel)]], "gitlink root.txt")
+                            if _run_post_tag_quiet(ac, glink_oid, str(a_qa)) != 1:
+                                failures.append("(finding 7) a gitlink (160000) on an allowed artifact is a "
+                                                "content finding (exit 1); the branch-integrity recompute must "
+                                                "not reclassify it to cannot-evaluate (exit 2)")
+
+                            # delete (000000): the allowed artifact is removed from the tree.
+                            del_oid = _run_precedence_tamper(
+                                [["update-index", "--force-remove", root_rel]], "delete root.txt")
+                            if _run_post_tag_quiet(ac, del_oid, str(a_qa)) != 1:
+                                failures.append("(finding 7) a delete (000000) of an allowed artifact is a "
+                                                "content finding (exit 1); the branch-integrity recompute must "
+                                                "not reclassify it to cannot-evaluate (exit 2)")
+
+                            # file-to-tree: the allowed FILE is replaced by a TREE (a child blob under its path),
+                            # so its own dst mode is a delete and an out-of-scope path appears; both are findings.
+                            child_blob = subprocess.run(
+                                ["git", "-C", str(ac), "hash-object", "-w", "--stdin"],
+                                input=b"child\n", capture_output=True, env=ge).stdout.strip().decode()
+                            f2t_oid = _run_precedence_tamper(
+                                [["update-index", "--force-remove", root_rel],
                                  ["update-index", "--add", "--cacheinfo",
-                                  "100644,{},{}/child".format(child_blob, _early_rel)]],
-                                "file-to-tree " + _early_rel)
-                            if _run_post_tag_quiet(ac, _e_f2t, str(a_qa)) != 1:
-                                failures.append("(finding 8) a file-to-tree change on the early-parsed "
-                                                "{} must be a content finding (exit 1); the early parse "
-                                                "must not reclassify it to cannot-evaluate (exit "
-                                                "2)".format(_early_rel))
+                                  "100644,{},{}/child".format(child_blob, root_rel)]], "file-to-tree root.txt")
+                            if _run_post_tag_quiet(ac, f2t_oid, str(a_qa)) != 1:
+                                failures.append("(finding 7) a file-to-tree change on an allowed artifact is a "
+                                                "content finding (exit 1); the branch-integrity recompute must "
+                                                "not reclassify it to cannot-evaluate (exit 2)")
+
+                            # (round-4 finding 8) EARLY-PARSED ARTIFACTS: the SAME four shape tampers on
+                            # manifest.toml AND releases.toml. Pre-fix, these two are parsed EARLY
+                            # (load_strict_manifest / _show_toml) BEFORE the attestation-delta short-circuit,
+                            # so a symlink/gitlink/delete/file-to-tree tamper made the early parse RAISE and
+                            # the caught GateError reclassified the exit-1 content finding to cannot-evaluate
+                            # (exit 2). The pre-flight shape check now reports each as a content finding
+                            # (exit 1) before the parse. Mutation: with the pre-flight removed, at least one
+                            # of these manifest.toml/releases.toml mode-type cases returns 2 and fails here.
+                            for _early_rel in (MANIFEST_REL, RELEASES_REL):
+                                _e_sym = _run_precedence_tamper(
+                                    [["update-index", "--cacheinfo",
+                                      "120000,{},{}".format(link_blob, _early_rel)]],
+                                    "symlink " + _early_rel)
+                                if _run_post_tag_quiet(ac, _e_sym, str(a_qa)) != 1:
+                                    failures.append("(finding 8) a symlink (120000) on the early-parsed {} "
+                                                    "must be a content finding (exit 1); the early parse "
+                                                    "must not reclassify it to cannot-evaluate (exit "
+                                                    "2)".format(_early_rel))
+                                _e_glink = _run_precedence_tamper(
+                                    [["update-index", "--cacheinfo",
+                                      "160000,{},{}".format(a_csha, _early_rel)]],
+                                    "gitlink " + _early_rel)
+                                if _run_post_tag_quiet(ac, _e_glink, str(a_qa)) != 1:
+                                    failures.append("(finding 8) a gitlink (160000) on the early-parsed {} "
+                                                    "must be a content finding (exit 1); the early parse "
+                                                    "must not reclassify it to cannot-evaluate (exit "
+                                                    "2)".format(_early_rel))
+                                _e_del = _run_precedence_tamper(
+                                    [["update-index", "--force-remove", _early_rel]],
+                                    "delete " + _early_rel)
+                                if _run_post_tag_quiet(ac, _e_del, str(a_qa)) != 1:
+                                    failures.append("(finding 8) a delete (000000) of the early-parsed {} "
+                                                    "must be a content finding (exit 1); the early parse "
+                                                    "must not reclassify it to cannot-evaluate (exit "
+                                                    "2)".format(_early_rel))
+                                _e_f2t = _run_precedence_tamper(
+                                    [["update-index", "--force-remove", _early_rel],
+                                     ["update-index", "--add", "--cacheinfo",
+                                      "100644,{},{}/child".format(child_blob, _early_rel)]],
+                                    "file-to-tree " + _early_rel)
+                                if _run_post_tag_quiet(ac, _e_f2t, str(a_qa)) != 1:
+                                    failures.append("(finding 8) a file-to-tree change on the early-parsed "
+                                                    "{} must be a content finding (exit 1); the early parse "
+                                                    "must not reclassify it to cannot-evaluate (exit "
+                                                    "2)".format(_early_rel))
                     else:
                         # (round-9 finding 2) the archive candidate could not be staged (git init/add/commit
                         # or tag failed): the archive-backed cases cannot be verified, so the self-test fails
