@@ -115,15 +115,6 @@ clean; a pattern that flagged a legitimate line would be too broad):
     misses. INTENT-guarded, and the softened intent form reads bare "work" ("is meant to work to the same
     rules"), so it is not "works|working" and stays clean; "works under the same rules as the session that
     spawned it" is "under", not "to", so the subagent mechanism claim stays clean.
-  - "the same ... licen[cs]e": the ShareAlike imprecision. CC BY-SA's ShareAlike is same-or-later-or-BY-SA-
-    compatible (LICENSE clause 3(b)(1): a CC license with the same License Elements, this version or later,
-    or a BY-SA Compatible License), so a "the same ... licence" claim that omits any of those alternatives
-    overstates it. This catches the bare absolute ("the same ShareAlike licence") AND the two-alternative
-    form ("the same or a compatible ShareAlike licence", which drops "or later"), with "ShareAlike"
-    optionally interposed and the verbs under/carry/come-back/reused. SHAREALIKE-guarded: clean only when
-    the surrounding sentence names BOTH the later-version AND the BY-SA-compatible alternatives, so the
-    decided softened form ("CC BY-SA 4.0 or later, or a BY-SA Compatible License", which drops "the same")
-    does not even match, and the LICENSE's own full wording matches but is cleared.
   - "foolproof": a bare guarantee-of-perfection adjective.
 
 The RELEASE-INTEGRITY vocabulary (VER-CORE 4.4a, runs on every surface) is, like the guarantee-flavoured
@@ -278,17 +269,6 @@ CLAUSE_BOUNDARY = re.compile(
 INTENT_HEDGE = re.compile(
     r"\b(?:intend(?:s|ed|ing)?|design(?:s|ed|ing)?|meant|aim(?:s|ed|ing)?|aspir(?:e|es|ed|ing)?|intent)\b",
     re.IGNORECASE)
-# The SHAREALIKE clean form names the full permitted set from LICENSE clause 3(b)(1): a CC license with
-# the same License Elements, THIS VERSION OR LATER, OR a BY-SA Compatible License. A "the same ... licence"
-# claim is honest only when BOTH the later-version alternative AND the BY-SA-compatible alternative are
-# stated in the same sentence; a two-alternative form ("the same or a compatible ShareAlike licence",
-# missing "or later") and a bare absolute ("the same ShareAlike licence") both understate the permitted
-# set and trip. These are searched over the whole SENTENCE around the match, not the pre-match clause
-# window, because the alternatives follow the licence noun ("... licence, this version or later, or a
-# BY-SA Compatible License").
-LATER_ALT = re.compile(r"\blater\b", re.IGNORECASE)
-COMPAT_ALT = re.compile(r"\bcompatible\b", re.IGNORECASE)
-
 # PREDICATE-FINAL boundary for the adjacent-denial (paired with the pre-match surface): a denial clears only
 # when the banned term ENDS the predicate, i.e. the first non-space AFTER the matched span is end-of-string,
 # a HARD sentence/clause boundary (. ; ! ?), or a contrastive conjunction (but|yet|however|though|although|
@@ -332,8 +312,7 @@ REPO_PROSE_ROSTER = ("README.md", "SCOPE.md", "SYSTEM-HARDENING.md", "aiqt-bareb
                      ".aiqt/core/gates/manifest.toml")
 
 # (name, pattern, guard): guard is "" (none), "neg" (skip when a negator is in the pre-match clause
-# window), "intent" (skip when a negator OR an intent hedge is in that window), "sharealike" (skip only
-# when the later-version AND BY-SA-compatible alternatives are both named in the surrounding sentence), or
+# window), "intent" (skip when a negator OR an intent hedge is in that window), or
 # "release" (skip when an allowlisted third-party control title WHOLLY CONTAINS the match, or a negator
 # DIRECTLY negates the banned term by tight adjacency; see _guard_clears).
 #
@@ -407,7 +386,7 @@ SITE_PATTERNS = [
     ("universal-subject (every assistant works to the same)", re.compile(
         r"\b(?:all|every)\s+assistants?\b[^.]{0,30}?\bworks\s+to\s+the\s+same\b", re.IGNORECASE), ""),
     # COMPATIBILITY, "portable across ...": the pack asserted portable across tools/assistants/toolchains
-    # as a verified property ("the guardrails are portable across tools"). CC BY-SA aside, cross-assistant
+    # as a verified property ("the guardrails are portable across tools"). Licence aside, cross-assistant
     # reach is not yet verified (the evidence page marks every platform pending), so the flat assertion
     # overstates it. INTENT-guarded: the softened "designed/intended to be portable across ..." carries a
     # hedge in-clause and stays clean, while the bare "is portable across ..." trips.
@@ -441,17 +420,6 @@ SITE_PATTERNS = [
         r"\b(?:one|a|the\s+same)\s+(?:shared\s+)?(?:standard|rules?)\b[^.]{0,50}?"
         r"\b(?:appl(?:y|ies|ied)|works?)\b[^.]{0,80}?\b(?:wherever|whichever)\b"
         r"[^.]{0,40}?\b(?:assistant|model|tool)s?\b", re.IGNORECASE), "intent"),
-    # ShareAlike imprecision: a "the same ... licence" claim that does not name the full permitted set from
-    # LICENSE 3(b)(1) (same License Elements, this version or later, OR a BY-SA Compatible License). This
-    # catches the absolute ("under/carry the same ShareAlike licence") AND the two-alternative form ("the
-    # same or a compatible ShareAlike licence", which drops "or later"), with "ShareAlike" optionally
-    # interposed and any of the verbs under/carry/come-back/reused. SHAREALIKE-guarded: clean only when the
-    # surrounding sentence names BOTH the later-version and BY-SA-compatible alternatives, so the correct
-    # form ("CC BY-SA 4.0 or later, or a BY-SA Compatible License", which drops "the same") does not even
-    # match, and the LICENSE's own "the same License Elements, this version or later, or a BY-SA Compatible
-    # License" matches but is cleared by the guard.
-    ("sharealike imprecision (the same licence)", re.compile(
-        r"\b(?:the\s+)?same\b[^.]{0,40}?\blicen[cs]e\b", re.IGNORECASE), "sharealike"),
     # "foolproof": a bare guarantee-of-perfection adjective, an overclaim wherever it appears.
     ("foolproof", re.compile(r"\bfool-?proof\b", re.IGNORECASE), ""),
 ]
@@ -642,18 +610,6 @@ def _clause_window(text, start):
     return text[boundary:start]
 
 
-def _sentence_window(text, start, end):
-    """The whole sentence around the match: from the last sentence-ending punctuation (.!?) before the
-    match to the next one after it. Used by the SHAREALIKE guard, whose exonerating alternatives ("this
-    version or later, or a BY-SA Compatible License") follow the licence noun and so fall outside the
-    pre-match clause window, and by the future guard's third-party title allowlist."""
-    left = 0
-    for m in re.finditer(r"[.!?]", text[:start]):
-        left = m.end()
-    right = re.search(r"[.!?]", text[end:])
-    return text[left:end + right.start()] if right else text[left:]
-
-
 def _adjacent_denial_clears(text, start, end):
     """True when a negator DIRECTLY negates the banned term (tight adjacency), the ONLY negation clearance in
     the simplified deny-list. Within the pre-match clause (bounded by the last CLAUSE_BOUNDARY before the
@@ -726,9 +682,8 @@ def _title_allowlisted(text, start, end):
 
 def _guard_clears(guard, text, m):
     """True when the pattern's guard exonerates this match. "neg": an in-clause negator. "intent": an
-    in-clause negator OR intent hedge (the compat softening frames reach as an aim). "sharealike": the
-    surrounding sentence names BOTH the later-version and the BY-SA-compatible alternatives, the full
-    permitted set from LICENSE 3(b)(1). "release" (release-integrity): a shipped third-party control TITLE
+    in-clause negator OR intent hedge (the compat softening frames reach as an aim). "release"
+    (release-integrity): a shipped third-party control TITLE
     that WHOLLY CONTAINS the matched span, OR a negator that DIRECTLY negates the banned term by tight
     adjacency (_adjacent_denial_clears). There is no future-tense clearance. "" never clears."""
     if guard == "neg":
@@ -736,9 +691,6 @@ def _guard_clears(guard, text, m):
     if guard == "intent":
         window = _clause_window(text, m.start())
         return bool(NEGATOR.search(window) or INTENT_HEDGE.search(window))
-    if guard == "sharealike":
-        window = _sentence_window(text, m.start(), m.end())
-        return bool(LATER_ALT.search(window) and COMPAT_ALT.search(window))
     if guard == "release":
         if _title_allowlisted(text, m.start(), m.end()):
             return True
@@ -898,9 +850,6 @@ POSITIVE = [
     "The guardrails are portable across every toolchain.",            # portable-across compat (draft/teams.html)
     "It reaches across every assistant on your team.",                # across-every/all compat
     "A colleague on one assistant is working to the same rules as a colleague on another.",  # working-to-same compat (teams.html)
-    "Improvements come back under the same licence.",                 # ShareAlike absolute (about/development.html)
-    "Improvements contributed back carry the same ShareAlike licence.",  # ShareAlike absolute, verb carry, ShareAlike interposed (teams.html)
-    "A fix can be reused under the same or a compatible ShareAlike licence.",  # ShareAlike two-alternative: names compatible but drops "or later" (teams/about/development.html)
     "The result is one standard applied the same way wherever the work runs and whichever model does the reviewing.",  # F-108 live tech-details:293 regression: reach by whichever model
     "The same rules apply whichever assistant you use.",              # F-108 reach-by-whichever paraphrase
     "All assistants work to the same rules.",                        # F-108 bare-work plural-subject assertion (no hedge)
@@ -1017,8 +966,6 @@ NEGATIVE = [
     "It is intended to reach across every assistant on your team.",                      # softened across-every/all (intent)
     "A colleague on one assistant is meant to work to the same rules as a colleague on another.",  # softened working-to-same (intent, bare "work")
     "A subagent works under the same rules as the session that spawned it.",             # development.html mechanism claim: "works under", not "works to"; no licence
-    "Contributions come back under CC BY-SA 4.0 or later, or a BY-SA Compatible License.",  # precise ShareAlike wording: all three alternatives, drops "the same"
-    "The Adapter's License You apply must be a Creative Commons license with the same License Elements, this version or later, or a BY-SA Compatible License.",  # LICENSE 3(b)(1): names "the same" but the full permitted set clears it
     "Add AIQT from one page for all assistants you use.",                                # benign "All assistants" nav sense
     "The 1.1.0 design gives local and CI reviewers the same QA brief. Its intent is to reduce variation caused by who runs the check or which tool they use; provider behaviour and results remain to be verified.",  # softened tech-details:293 (intent hedge + which tool, not whichever)
     # RELEASE-INTEGRITY negatives (VER-CORE 4.4): the corrected copy the gate must NOT flag. Under the

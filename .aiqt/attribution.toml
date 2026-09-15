@@ -1,8 +1,8 @@
 # attribution.toml: single source of truth for the generated root NOTICE.
 #
-# The AIQT pack is published under CC BY-SA 4.0 (see the repository LICENSE file). The pack's crosswalk
-# mappings reproduce third-party framework control/clause IDENTIFIERS and TITLES as navigational
-# pointers only. NO specification prose, requirement text, control or clause bodies, figures, or tables
+# The AIQT pack is published under the Elastic License 2.0 (see the repository LICENSE file). The pack's
+# crosswalk mappings reproduce third-party framework control/clause IDENTIFIERS and TITLES as
+# uncopyrightable factual pointers only. NO specification prose, requirement text, control or clause bodies, figures, or tables
 # are reproduced. tools/gen_notice.py renders the root NOTICE from this file plus the live set of id
 # manifests under .aiqt/standards/.
 #
@@ -21,8 +21,8 @@ slug = "owasp"
 legal-name = "OWASP Foundation, Inc."
 licence = "CC BY-SA 4.0"
 licence-url = "https://creativecommons.org/licenses/by-sa/4.0/"
-basis = "Reused under the Creative Commons Attribution-ShareAlike 4.0 International License; the pack's own CC BY-SA 4.0 satisfies ShareAlike. Only framework identifiers and their titles are reproduced as navigational pointers; the mappings are the pack's own work."
-attribution = "Framework identifiers and titles are Copyright the OWASP Foundation, Inc., reused under CC BY-SA 4.0."
+basis = "The OWASP materials are copyright the OWASP Foundation, Inc. and published under CC BY-SA 4.0. This pack reproduces only OWASP framework identifiers and their titles as uncopyrightable factual pointers, with OWASP attributed; it reproduces no OWASP specification or requirement prose, so no ShareAlike obligation is triggered. The mappings are the pack's own work. This pack does not redistribute or relicense the OWASP material, and its own Elastic License 2.0 does not depend on OWASP's ShareAlike terms."
+attribution = "Framework identifiers and titles are Copyright the OWASP Foundation, Inc., used as factual references with attribution."
 trademark = "OWASP is a registered trademark of the OWASP Foundation, Inc."
 non-endorsement = "The OWASP Foundation does not endorse and is not affiliated with this pack; the OWASP name and marks are not used to imply endorsement."
 verified = true
@@ -77,7 +77,7 @@ slug = "csa"
 legal-name = "Cloud Security Alliance"
 licence = "Proprietary CSA copyright licence (non-commercial, no-redistribution reference use)"
 licence-url = "https://cloudsecurityalliance.org/artifacts/ccm-aicm-licensing-faq"
-basis = "The CSA matrices are copyright the Cloud Security Alliance under a non-commercial, no-redistribution, no-modification reference licence. This pack reproduces only control identifiers and titles as uncopyrightable factual pointers, with CSA attributed; it does NOT redistribute or relicense the CSA matrices, and reproduces no control-specification text. This pack's CC BY-SA 4.0 covers its own mappings, not the CSA catalogue."
+basis = "The CSA matrices are copyright the Cloud Security Alliance under a non-commercial, no-redistribution, no-modification reference licence. This pack reproduces only control identifiers and titles as uncopyrightable factual pointers, with CSA attributed; it does NOT redistribute or relicense the CSA matrices, and reproduces no control-specification text. This pack's own Elastic License 2.0 covers its own mappings, not the CSA catalogue."
 attribution = "Control identifiers and titles are Copyright the Cloud Security Alliance, used as factual references with attribution."
 trademark = "CCM, AICM, and Cloud Security Alliance are works and marks of the Cloud Security Alliance."
 non-endorsement = "The Cloud Security Alliance does not endorse and is not affiliated with this pack; CSA marks are not used to imply endorsement."
@@ -90,7 +90,7 @@ verified-source = "Verbatim CSA copyright notices in the CCM v4.1.0 and AICM v1.
 
 [manifest."owasp-mcp"]
 licence = "CC BY-NC-SA 4.0"
-note = "The OWASP MCP Top 10 is licensed CC BY-NC-SA 4.0 (NonCommercial), which is not compatible with this pack's CC BY-SA 4.0. Its risk identifiers and titles are reproduced only as uncopyrightable factual pointers, NOT under the MCP CC BY-NC-SA licence, and no MCP prose is reproduced."
+note = "The OWASP MCP Top 10 is licensed CC BY-NC-SA 4.0 (NonCommercial). Its risk identifiers and titles are reproduced only as uncopyrightable factual pointers, NOT under the MCP CC BY-NC-SA licence, and no MCP prose is reproduced, so no ShareAlike or NonCommercial obligation is triggered."
 verified = true
 verified-date = "2026-08-17"
 

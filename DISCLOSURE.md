@@ -4,15 +4,15 @@ For each thing AIQT does, the claim and its limitation stand side by side, each 
 
 ## What exists today
 
-Claim: AIQT 1.0.0, the chat assistant, is released and downloadable today: a Skill for Claude, and a portable instruction file intended for any assistant that accepts standing instructions. The development assistant, version 1.1.0, is in development. Teams and Enterprise are ideas under consideration, with no dates and no commitments.
+Claim: AIQT 1.0.5, the chat assistant, is released and downloadable today: a Skill for Claude, and a portable instruction file intended for any assistant that accepts standing instructions. The development assistant, version 1.1.0, is in development. Teams and Enterprise are ideas under consideration, with no dates and no commitments.
 
 Limitation: No platform test result is published yet: the evidence page marks every platform pending, and ChatGPT, Gemini, and Copilot as not yet tested, so compatibility with a given assistant is intended, not verified. A 1.1.0 feature described on this site is a design, not a shipped product; it ships when it does what these pages say it does. Nothing labelled an idea is promised at all.
 
-Evidence: [The 1.0.0 release](https://aiqt.ai/evidence#release) [Where 1.1.0 stands](https://aiqt.ai/development#availability)
+Evidence: [The 1.0.5 release](https://aiqt.ai/evidence#release) [Where 1.1.0 stands](https://aiqt.ai/development#availability)
 
 ## What the product is made of
 
-Claim: The 1.0.0 artefacts are prose instructions and reference material only, with no executable code and no network calls.
+Claim: The 1.0.5 artefacts are prose instructions and reference material only, with no executable code and no network calls.
 
 Limitation: Instructions cannot do anything your assistant platform cannot already do. The 1.1.0 design adds local tooling whose exact behaviour is documented before it ships.
 
@@ -28,7 +28,7 @@ Evidence: [What AIQT does not do](https://aiqt.ai/evidence#limits)
 
 ## Security coverage
 
-Claim: AIQT's source corpus carries a universal, language-neutral security baseline: behavioural rules covering secrets, authentication, authorization, input validation, untrusted content, logging, and data minimization. The 1.0.0 chat skill ships the subset a chat assistant can act on directly: keeping secrets out of the transcript, treating pasted or fetched content as data, resisting social pressure, and sending only the data a task needs. The fuller per-language and development-time delivery is a 1.1.0 design, not yet shipped.
+Claim: AIQT's source corpus carries a universal, language-neutral security baseline: behavioural rules covering secrets, authentication, authorization, input validation, untrusted content, logging, and data minimization. The 1.0.5 chat skill ships the subset a chat assistant can act on directly: keeping secrets out of the transcript, treating pasted or fetched content as data, resisting social pressure, and sending only the data a task needs. The fuller per-language and development-time delivery is a 1.1.0 design, not yet shipped.
 
 Limitation: It is not a static analyzer, a vulnerability scanner, a penetration test, or an audit, and it does not guarantee that generated code is secure. Deeper per-language depth is a 1.1.0 design, composed at install from third-party sources you choose, which AIQT lists and credits but does not author or vouch for.
 
@@ -52,11 +52,11 @@ Evidence: [One QA standard, whichever model checks](https://aiqt.ai/tech-details
 
 ## Data handling
 
-Claim: The 1.0.0 pack sends nothing anywhere: it is instructions your assistant reads, with no code and no network calls. What you type still goes to your assistant's vendor under that vendor's terms, exactly as it would without AIQT. In the 1.1.0 design, routine checks run locally and send nothing to a model.
+Claim: The 1.0.5 pack sends nothing anywhere: it is instructions your assistant reads, with no code and no network calls. What you type still goes to your assistant's vendor under that vendor's terms, exactly as it would without AIQT. In the 1.1.0 design, routine checks run locally and send nothing to a model.
 
 Limitation: The 1.1.0 substantive and delicate review tiers will send content to model providers. The providers, credentials, retention, and cost stay marked pending until they are documented before 1.1.0 ships. AIQT cannot intercept, encrypt, or block data that your assistant platform itself sends.
 
-Evidence: [What the 1.0.0 files are](https://aiqt.ai/install#pick) [The data flow, by tier](https://aiqt.ai/tech-details#qa-where)
+Evidence: [What the 1.0.5 files are](https://aiqt.ai/install#pick) [The data flow, by tier](https://aiqt.ai/tech-details#qa-where)
 
 ## Platform support and currency
 
@@ -68,9 +68,9 @@ Evidence: [Platform test status](https://aiqt.ai/evidence#platform-tests)
 
 ## Licence, warranty, and endorsement
 
-Claim: AIQT is published under CC BY-SA 4.0: you may use, adapt, and share it, and a shared adaptation must use a qualifying ShareAlike licence (CC BY-SA 4.0 or later, or a BY-SA Compatible License).
+Claim: AIQT is source-available under the Elastic License 2.0: you may use, copy, adapt, distribute, and prepare derivative works of it freely, and you keep your changes. The main restriction is that you may not provide it to others as a hosted or managed service that gives them access to a substantial set of its features; you must also keep the licence, copyright, and other notices intact, and if you redistribute it you pass these terms along and note any modifications.
 
-Limitation: It is provided as-is, with no warranty of any kind. No patent or trademark rights are licensed. Using AIQT does not mean the project or its maintainer endorses you, and nothing permits you to imply sponsorship or official status. Equally, no framework publisher or platform vendor endorses AIQT.
+Limitation: It is provided as-is, with no warranty or condition of any kind. No trademark rights are licensed, and its patent grant is limited to the terms of the Elastic License 2.0. Using AIQT does not mean the project or its maintainer endorses you, and nothing permits you to imply sponsorship or official status. Equally, no framework publisher or platform vendor endorses AIQT.
 
 Evidence: [The licence](https://github.com/jposluns/guardrails/blob/main/LICENSE) [No endorsement or compliance claim](https://aiqt.ai/mappings#methodology)
 

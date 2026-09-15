@@ -17,6 +17,7 @@ Outputs (all under the reserved site/downloads/aiqt/ subtree, plus the standalon
   site/downloads/aiqt/provenance.md   human-readable provenance for the same facts
   site/downloads/aiqt-instructions.txt  the same body wrapped in the no-Skills-feature preamble
   site/downloads/aiqt-skill.zip       the public download, packed deterministically from that SKILL.md
+  site/downloads/aiqt-skill-1.0.5.zip the version-numbered copy the site links to (byte-identical alias)
 
   gen_skill.py            regenerate every output
   gen_skill.py --check    fail (exit 1) on drift; exit 2 on a malformed source or an unknown corpus-id
@@ -58,7 +59,7 @@ ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named B
 # "latest" alias, kept byte-identical to the version-numbered copy so a direct link never breaks across
 # releases. The site links to the version-numbered copy; both are written from the same bytes, so
 # gen_skill --check (which compares each to disk) keeps the two byte-identical.
-ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.4.zip")  # the version-numbered copy the site
+ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.5.zip")  # the version-numbered copy the site
 # links to. The literal version here is tied to the skill meta version (skill-source.md) by a fail-closed
 # assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
@@ -91,7 +92,7 @@ GENSRC_OUTPUTS = (
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
-    {"target": "site/downloads/aiqt-skill-1.0.4.zip", "kind": "file",
+    {"target": "site/downloads/aiqt-skill-1.0.5.zip", "kind": "file",
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
@@ -336,7 +337,7 @@ def _header_block(data):
             "Author: {name}  \n"
             "Website: {homepage}  \n"
             "GitHub: {github}  \n"
-            "Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)").format(
+            "Licence: Elastic License 2.0 (https://www.elastic.co/licensing/elastic-license)").format(
                 version=data["meta"]["version"], name=data["identity_name"],
                 homepage=data["identity_homepage"], github=ATTRIBUTION_SOURCE_URL)
 
@@ -349,7 +350,7 @@ def render_skill(data):
         _conduct_block(data),
         _security_block(data),
         # Public attribution footer (GD-56): attributes both the project and the maintainer under the
-        # pack's CC BY-SA. The portability gate carries a narrow, reviewed exemption for exactly this line.
+        # pack's Elastic License 2.0. The portability gate carries a narrow, reviewed exemption for exactly this line.
         "---\n\n" + data["attribution"],
     ]
     return "\n\n".join(blocks) + "\n"
@@ -394,8 +395,8 @@ def render_zip(data):
 
 def render_instructions(data):
     header = ("AIQT™: a standard for your AI assistant\n"
-              "Version {v} . Licensed under CC BY-SA 4.0 "
-              "(https://creativecommons.org/licenses/by-sa/4.0/)\n"
+              "Version {v} . Licensed under the Elastic License 2.0 "
+              "(https://www.elastic.co/licensing/elastic-license)\n"
               "{attr}").format(v=data["meta"]["version"], attr=data["attribution"])
     blocks = [
         header,
@@ -433,7 +434,7 @@ def render_provenance(data):
         "",
         "- Skill: {}".format(m["name"]),
         "- Version: {}".format(m["version"]),
-        "- Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)",
+        "- Licence: Elastic License 2.0 (https://www.elastic.co/licensing/elastic-license)",
         "- Date: {}".format(m["date"]),
         "- Source corpus hash: {}".format(data["corpus_hash"]),
         "- Included rules (by corpus id): {}".format(", ".join(data["included_ids"])),
@@ -468,7 +469,7 @@ def attribution_string(name):
     """The public attribution line (GD-56), built from the operator name plus the pack's public source URL,
     so the maintainer's name is never a literal in a scanned source file. The exact string must match the
     portability gate's exempt line."""
-    return "AIQT Guardrails by {}, {}, CC BY-SA 4.0".format(name, ATTRIBUTION_SOURCE_URL)
+    return "AIQT Guardrails by {}, {}, Elastic License 2.0".format(name, ATTRIBUTION_SOURCE_URL)
 
 
 def build_outputs(root):
@@ -684,7 +685,7 @@ A second self-test conduct rule body.
 _SKILL_SRC = """=== meta ===
 name: aiqt
 version: __ZIPVER__
-license: CC-BY-SA-4.0
+license: Elastic-2.0
 date: 2026-01-01
 apex-id: prjint1
 

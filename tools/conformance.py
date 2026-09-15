@@ -749,7 +749,7 @@ A self-test rule asserting one id as both tight and broad, which mutual exclusiv
 _SKILL_SRC_FIXTURE = """=== meta ===
 name: aiqt
 version: __ZIPVER__
-license: CC-BY-SA-4.0
+license: Elastic-2.0
 date: 2026-01-01
 apex-id: apex01
 

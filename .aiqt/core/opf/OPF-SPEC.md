@@ -7,7 +7,7 @@ validator `opf doctor`, the renderer `opf render`, the relocator `opf migrate`, 
 synchronizer `opf sync`, ship in later releases). Date: 2026-09-14 (UTC).
 
 DevProcess is a neutral, self-contained operational-files standard, owned by AIQT and
-published under CC BY-SA 4.0. A project conforms to DevProcess with this specification and
+published under the Elastic License 2.0. A project conforms to DevProcess with this specification and
 its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer
 of the standard, not its definition. AIQT-specific requirements are layered as one optional
 profile, `[profiles.aiqt]` (section 9), and a base adopter need not adopt AIQT.
