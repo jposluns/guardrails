@@ -35,7 +35,8 @@ except ModuleNotFoundError:
 
 _INITIAL_VIEW_NAMES = (
     "TODO.md", "BACKLOG.md", "PIPELINE.md", "DONE.md", "FINDINGS.md", "DECISIONS.md",
-    "BLOCKS.md", "HANDOFF.md", "REFERENCES.md", "WORKLOG.md", "VERSION.md",
+    "BLOCKS.md", "HANDOFF.md", "REFERENCES.md", "CONTRIBUTIONS.md", "WORKLOG.md",
+    "VERSION.md", "DECISIONS.toml",
 )
 INDEX_TYPES = tuple(sorted(set(_opf_store.BASELINE_TYPES) - {"worklog"}))
 
@@ -67,7 +68,7 @@ def _manifest_model():
     return {
         "devprocess": {
             "standard": _opf_store.STANDARD_TOKEN,
-            "spec_version": "1.0.0",
+            "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
             "layout": _choice("inline", _opf_store.LAYOUTS),
             "posture": _choice("required", _opf_store.POSTURES),
             "import_status": _choice("none", _opf_store.IMPORT_STATES),
@@ -184,7 +185,7 @@ def self_test():
               manifest_text == _opf_emit.emit_checked(dict(reversed(list(model.items())))))
         check("manifest top tables", set(manifest) == _opf_store.TOP_LEVEL_TABLES - {"profiles"})
         check("devprocess defaults", manifest["devprocess"] == {
-            "standard": _opf_store.STANDARD_TOKEN, "spec_version": "1.0.0",
+            "standard": _opf_store.STANDARD_TOKEN, "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
             "layout": "inline", "posture": "required", "import_status": "none",
         })
         check("store default", manifest["store"] == {"sync_target": ""})
@@ -210,12 +211,16 @@ def self_test():
             "PIPELINE.md": ("composed", ["backlog_item", "block"]),
             "DONE.md": ("composed", ["done"]),
             "FINDINGS.md": ("composed", ["finding"]),
-            "DECISIONS.md": ("composed", ["pending_decision", "autonomous_decision"]),
+            "DECISIONS.md": ("composed", ["pending_decision", "autonomous_decision",
+                                          "maintainer_decision", "preference_pattern"]),
             "BLOCKS.md": ("composed", ["block"]),
             "HANDOFF.md": ("composed", ["handoff"]),
             "REFERENCES.md": ("composed", ["reference"]),
+            "CONTRIBUTIONS.md": ("composed", ["contribution"]),
             "WORKLOG.md": ("deterministic", ["worklog"]),
             "VERSION.md": ("deterministic", ["version"]),
+            "DECISIONS.toml": ("projection", ["pending_decision", "autonomous_decision",
+                                              "maintainer_decision", "preference_pattern"]),
         }
         check("pinned view inventory and destinations", manifest["views"] == {
             name: {"kind": kind, "sources": sources, "target": ".working/" + name}
@@ -236,7 +241,8 @@ def self_test():
         schema_line = "schema = {}\n".format(SUPPORTED_SCHEMA)
         expected_counters = (
             schema_line + "\n[counters]\n"
-            "AD = 0\nBI = 0\nBL = 0\nDN = 0\nFN = 0\nHO = 0\nPD = 0\nRF = 0\nWL = 0\n"
+            "AD = 0\nBI = 0\nBL = 0\nCN = 0\nDN = 0\nFN = 0\nHO = 0\nMD = 0\nPD = 0\n"
+            "PP = 0\nRF = 0\nWL = 0\n"
         )
         expected_version = "release = []\n" + schema_line + "summary = []\n"
         expected_worklog = "entry = []\n" + schema_line
