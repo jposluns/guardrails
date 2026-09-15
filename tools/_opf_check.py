@@ -64,7 +64,7 @@ from _opf_store import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, RESOLVED, MANIFEST_NAME, WORKING_DIRNAME, StoreError,
     _read_toml_contained, _open_store_root_fd, _open_root_fd, validate_manifest, classify_target,
     _sorted_key_names, _safe_display, _is_contained_relpath,
-    BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES, KNOWN_MODULES,
+    BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES, KNOWN_MODULES, SUPPORTED_SPEC_VERSION,
     snapshot_caller_alarm,  # round-17 F-R16-1: capture caller ITIMER+pending before a fixture borrows SIGALRM
     restore_caller_alarm,   # round-15 F2 + round-17 F-R16-1: shared elapsed-aware caller-alarm save/restore
 )
@@ -2611,7 +2611,7 @@ def _enabled_modules(manifest_data):
 
 
 def _authoritative_types(enabled_modules, declared_types):
-    """The type -> NORMATIVE-namespace roster the store must carry: the nine baseline types, each
+    """The type -> NORMATIVE-namespace roster the store must carry: the twelve baseline types, each
     module-tier type whose module is enabled, and any importer-only type (legacy_fragment) the manifest
     actually declares (present only after an import). Namespaces are U1's normative ones, never the
     manifest's declared values (validate_manifest already graded those; guard-input-soundness)."""
@@ -2699,14 +2699,31 @@ def self_test():
     def fn(n):
         return envelope("FN-{}".format(n), "finding", "open")
 
+    def cn(n, status="proposed", **over):
+        r = envelope("CN-{}".format(n), "contribution", status,
+                     recipient="peer", dedup_class="rule-fix", content_digest="sha256:x")
+        r.update(over)
+        return r
+
+    def md(n, **over):
+        r = envelope("MD-{}".format(n), "maintainer_decision", "recorded", decision="x")
+        r.update(over)
+        return r
+
+    def pp(n, status="active", **over):
+        r = envelope("PP-{}".format(n), "preference_pattern", status, context="c", rationale="r")
+        r.update(over)
+        return r
+
     def base_manifest(layout="inline", types=None, views=None):
         if types is None:
             types = {t: {"namespace": ns} for t, ns in (
                 ("backlog_item", "BI"), ("done", "DN"), ("worklog", "WL"), ("finding", "FN"),
                 ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
-                ("autonomous_decision", "AD"), ("block", "BL"))}
+                ("autonomous_decision", "AD"), ("block", "BL"), ("contribution", "CN"),
+                ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
         m = {
-            "devprocess": {"standard": "devprocess", "spec_version": "1.0.0", "layout": layout,
+            "devprocess": {"standard": "devprocess", "spec_version": SUPPORTED_SPEC_VERSION, "layout": layout,
                            "posture": "required", "import_status": "none"},
             "store": {"sync_target": ""},
             "types": types,
@@ -2721,7 +2738,8 @@ def self_test():
         return {"schema": 1, "record": records}
 
     def counters(**over):
-        c = {"BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0, "BL": 0, "HO": 1, "RF": 0}
+        c = {"BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0, "BL": 0, "HO": 1, "RF": 0,
+             "CN": 0, "MD": 0, "PP": 0}
         c.update(over)
         return {"schema": 1, "counters": c}
 
@@ -2774,6 +2792,9 @@ def self_test():
             "reference.index.toml": idx([]),
             "autonomous_decision.index.toml": idx([]),
             "block.index.toml": idx([]),
+            "contribution.index.toml": idx([]),
+            "maintainer_decision.index.toml": idx([]),
+            "preference_pattern.index.toml": idx([]),
             "worklog.toml": {"schema": 1, "entry": [wl(3), wl(4)]},
             "version.toml": copy.deepcopy(clean_version),
             "archive/2026/archive.toml": {"schema": 1, "moved": [],
@@ -2967,6 +2988,36 @@ def self_test():
         check("legacy-fragment-deferred-cannot-eval", _lfr is not None and _lfr.status == CANNOT_EVALUATE)
         check("legacy-fragment-deferred-named",
               _lfr is not None and any("legacy_fragment" in m and "deferred" in m for m in _lfr.cannot_evaluate))
+        # STEP 5 (checks group): the three 1.1.0 baseline types (contribution/CN, maintainer_decision/MD,
+        # preference_pattern/PP) now carry shipped BASELINE_SPECS schemas, so C-RECORDS GRADES their records
+        # rather than deferring them (contrast the module-tier / legacy_fragment deferral above). A clean
+        # populated store validates VALID; a one-dimension mutation of each named per-record invariant
+        # (the maintainer_decision exemplifies-target and the contribution delivery bundle) flips INVALID,
+        # proving the baseline validator is wired for these types through the doctor.
+        _md = clean_machine()
+        _md["counters.toml"] = counters(MD=1, PP=1)
+        _md["preference_pattern.index.toml"] = idx([pp(1)])
+        _md["maintainer_decision.index.toml"] = idx([md(1, links=[{"rel": "exemplifies", "id": "PP-1"}])])
+        check("baseline-md-pp-graded-valid", run(_md).status == VALID)
+        _mdx = clean_machine()
+        _mdx["counters.toml"] = counters(MD=1, PP=1)
+        _mdx["preference_pattern.index.toml"] = idx([pp(1)])
+        _mdx["maintainer_decision.index.toml"] = idx([md(1, links=[{"rel": "exemplifies", "id": "BI-1"}])])
+        _mdxr = run(_mdx)
+        check("baseline-md-exemplifies-nonpp-invalid", _mdxr is not None and _mdxr.status == INVALID)
+        check("baseline-md-exemplifies-nonpp-named",
+              _mdxr is not None and any("exemplifies" in f for f in _mdxr.findings))
+        _cn = clean_machine()
+        _cn["counters.toml"] = counters(CN=1)
+        _cn["contribution.index.toml"] = idx([cn(1)])
+        check("baseline-contribution-graded-valid", run(_cn).status == VALID)
+        _cnx = clean_machine()
+        _cnx["counters.toml"] = counters(CN=1)
+        _cnx["contribution.index.toml"] = idx([cn(1, status="sent")])
+        _cnxr = run(_cnx)
+        check("baseline-contribution-delivery-bundle-invalid", _cnxr is not None and _cnxr.status == INVALID)
+        check("baseline-contribution-delivery-bundle-named",
+              _cnxr is not None and any("delivery" in f for f in _cnxr.findings))
         # F-3: a remote spelling the scheme DEFAULT port names the same endpoint as the port-less shorthand
         # (VALID); a NON-default port stays distinct (INVALID).
         _dpf = clean_machine()
