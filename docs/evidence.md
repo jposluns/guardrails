@@ -1,9 +1,9 @@
 +++
 title = "AIQT evidence and assurance: the proof behind the claims"
-description = "The evidence behind AIQT: the 1.0.0 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending."
+description = "The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending."
 canonical = "https://aiqt.ai/evidence"
 og-title = "AIQT evidence and assurance: the proof behind the claims"
-og-description = "The evidence behind AIQT: the 1.0.0 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending."
+og-description = "The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending."
 og-url = "https://aiqt.ai/evidence"
 sidebar-active = "evidence"
 +++
@@ -19,9 +19,9 @@ sidebar-active = "evidence"
 <section id="release">
   <div class="wrap">
     <p class="eyebrow">The release</p>
-    <h2>AIQT 1.0.0</h2>
+    <h2>AIQT 1.0.5</h2>
     <ul class="clean">
-      <li><b style="color:var(--ink)">Version:</b> 1.0.0, the chat-assistant Skill.</li>
+      <li><b style="color:var(--ink)">Version:</b> 1.0.5, the chat-assistant Skill.</li>
       <li><b style="color:var(--ink)">The artefact:</b> the packaged skill zip, plus a
         portable instruction file, both on the <a href="/install">install page</a>.</li>
       <li><b style="color:var(--ink)">Built from:</b> <span class="evidence-label">the exact source tag or commit: pending</span></li>
@@ -47,7 +47,7 @@ sidebar-active = "evidence"
     <p class="eyebrow">Platform test status</p>
     <h2>What has been tested, and when</h2>
     <div class="tablewrap"><table class="dtable">
-      <caption class="vh">Platform test status for AIQT 1.0.0</caption>
+      <caption class="vh">Platform test status for AIQT 1.0.5</caption>
       <thead><tr><th scope="col">Platform</th><th scope="col">Install method</th><th scope="col">Last tested</th><th scope="col">Result</th><th scope="col">Known constraints</th></tr></thead>
       <tbody>
         <tr><td>Claude</td><td>Skill upload</td><td class="pending">pending</td><td class="pending">pending</td><td>Desktop browser; mobile Skill upload not documented</td></tr>

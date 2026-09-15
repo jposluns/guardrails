@@ -313,7 +313,7 @@ _MIN_SKILL = "=== meta ===\nversion: {v}\n"
 
 def _wrap(version, body=""):
     """A minimal instruction-file body carrying a line-anchored Version line and optional filler."""
-    return "AIQT instructions\nVersion {}. Licensed under CC BY-SA 4.0\n\n{}".format(version, body)
+    return "AIQT instructions\nVersion {}. Licensed under the Elastic License 2.0\n\n{}".format(version, body)
 
 
 def _build(root, version="1.2.3", caps_ok=True, versions_ok=True, record=True):

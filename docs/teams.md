@@ -17,8 +17,8 @@ sidebar-active = "teams"
       Claude, ChatGPT, and Copilot, so a colleague on one assistant is meant to work to the same rules as a
       colleague on another. That cross-assistant reach is the intent, not a verified result yet: the
       evidence page marks every platform pending, with ChatGPT, Gemini, and Copilot not yet tested.
-      Because the pack is published under CC BY-SA, a fix one
-      team contributes can be reused by other teams under CC BY-SA 4.0 or later, or a BY-SA Compatible License. Adoption today is
+      Contributing a fix back is Rule 5's voluntary Guardrail-Seed give-back, separate from the
+      software licence, so a fix one team contributes can strengthen every other team's guardrails. Adoption today is
       human-led: each person adds AIQT to their own assistant, under a rollout your team
       runs. Central deployment, policy enforcement, and cross-team reporting do not exist today;
       two of them are ideas we are considering.</p>
@@ -45,7 +45,7 @@ sidebar-active = "teams"
       </div>
       <div class="card">
         <h3>Sign-off backed by evidence you can check</h3>
-        <p>Claims trace to sources, catches are named, and overrides are logged. With the 1.0.0
+        <p>Claims trace to sources, catches are named, and overrides are logged. With the 1.0.5
           chat Skill, that record lives in the conversation itself: the stated sources, the
           named catches, and the logged overrides you can scroll back to. Repository-level
           records are part of the 1.1.0 design, in development, and aggregate reporting across a
@@ -60,8 +60,8 @@ sidebar-active = "teams"
       <div class="card">
         <h3>Improvements that compound, opt-in</h3>
         <p>When a gap lets an issue through, the guardrail is improved so it should not recur,
-          and teams that opt in can contribute the portable fix back. Sharing is opt-in, and the
-          ShareAlike licence keeps every contributed improvement open, so one team's lesson can
+          and teams that opt in can contribute the portable fix back. Sharing is opt-in, a voluntary
+          Rule 5 Guardrail-Seed give-back separate from the software licence, so one team's lesson can
           become every team's guardrail.</p>
       </div>
     </div>
@@ -98,7 +98,7 @@ sidebar-active = "teams"
     <ol class="steps">
       <li><b>Choose a small group</b> and the assistants they already use (Claude, ChatGPT, or
         Copilot).</li>
-      <li><b>Each person installs AIQT 1.0.0</b> and confirms that it is on.</li>
+      <li><b>Each person installs AIQT 1.0.5</b> and confirms that it is on.</li>
       <li><b>Run two or three weeks of normal work</b>, noting a few observations: unsupported
         factual claims, completion claims without a check, missed requirements, clarification
         questions asked, overrides, rework, and reviewer confidence.</li>
@@ -155,13 +155,13 @@ sidebar-active = "teams"
 
 <section id="open">
   <div class="wrap">
-    <p class="eyebrow">Open source</p>
-    <h2>Open, portable, and shared</h2>
-    <p>AIQT is published under Creative Commons Attribution-ShareAlike 4.0. The guardrails
+    <p class="eyebrow">Source-available</p>
+    <h2>Source-available, portable, and shared</h2>
+    <p>AIQT is source-available under the Elastic License 2.0. The guardrails
       are designed to be portable across toolchains, so adopting the standard leaves your team free to
-      change tools without changing rules. Improvements contributed back are shared under
-      CC BY-SA 4.0 or later, or a BY-SA Compatible License, so a fix one team contributes can be reused by any other team.
-      Contribution is opt-in. Start with the
+      change tools without changing rules. Contributing an improvement back is Rule 5's voluntary
+      Guardrail-Seed give-back, separate from the software licence, so a fix one team contributes can
+      strengthen every other team's guardrails. Contribution is opt-in. Start with the
       <a href="/">overview on the home page</a>, or go straight to the source.</p>
     <div class="cta" style="justify-content:flex-start">
       <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>

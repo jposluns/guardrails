@@ -16,7 +16,7 @@ signed; the independently published digest is the authenticated reference.
 
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. After the freeze the release artifacts
-   (the version-numbered `site/downloads/aiqt-skill-1.0.4.zip`, which the site links to, and
+   (the version-numbered `site/downloads/aiqt-skill-1.0.5.zip`, which the site links to, and
    `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
    byte-identical to the version-numbered copy (both are written from the same bytes, and `gen_skill
@@ -43,8 +43,8 @@ signed; the independently published digest is the authenticated reference.
    drift or portability gate. Finally, run `python3 tools/gen_install.py` to repoint the install-page
    download button at the new versioned filename.
 2. Compute. From the repository root on the frozen tree, run
-   `sha256sum site/downloads/aiqt-skill-1.0.4.zip site/downloads/aiqt-instructions.txt`. These two files
-   are the 1.0.0 release artifacts (the packaged skill and its instructions), matching the set named in
+   `sha256sum site/downloads/aiqt-skill-1.0.5.zip site/downloads/aiqt-instructions.txt`. These two files
+   are the 1.0.5 release artifacts (the packaged skill and its instructions), matching the set named in
    the evidence page and the `changelog.toml` reserved-key example. The mapping exports under
    `site/downloads/` (`mappings.csv`, `mappings.json`) are reference data regenerated from the corpus and
    covered by the drift and reference-facts gates, so they are not part of the release-integrity set.
@@ -63,8 +63,8 @@ signed; the independently published digest is the authenticated reference.
 5. Verify. `python3 tools/check_artifact_checksums.py` must report armed and passing, and
    `bash tools/run_all_checks.sh` must be green end to end. Steps 3, 4, and 5 land as one pull request,
    merged on green.
-6. Tag. The release tag is `vX.Y.Z`, where `X.Y.Z` is the release's `changelog.toml` version (for the
-   1.0.0 release, `v1.0.0`); the tag-monotonicity gate requires exactly this `v` + version form. Apply
+6. Tag. The release tag is `vX.Y.Z`, where `X.Y.Z` is the release's `changelog.toml` version (for a
+   release at version 1.0.5, the tag is `v1.0.5`); the tag-monotonicity gate requires exactly this `v` + version form. Apply
    the annotated tag to the step 5 merge commit and push it, then record `tag = "vX.Y.Z"` in that
    release's `changelog.toml` entry through a second pull request, merged on green before step 7. The
    tag-monotonicity check arms from the recorded changelog `tag` key, not from the git tag alone, so
