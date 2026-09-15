@@ -484,7 +484,7 @@ def _load_inputs(resolution, product_root):
 
     # The manifest must validate in FULL against the release-triad manifest schema (spec 4.5/9), not only
     # its [vendors]: an invalid manifest is a fail-closed cannot-evaluate, never a silent partial pass.
-    # validate_manifest returns CANNOT-EVALUATE for a non-table / non-devprocess manifest and INVALID for a
+    # validate_manifest returns CANNOT-EVALUATE for a non-table / non-opf manifest and INVALID for a
     # schema violation; either is fail-closed here.
     mv = _opf_store.validate_manifest(manifest_data)
     if mv.status != VALID:
@@ -952,8 +952,8 @@ def self_test():
     check("abspath-unresolvable-root-cannot-eval", abs_ok)
 
     # --- end-to-end store resolution over synthetic on-disk stores -----------------------------------
-    manifest = ("[devprocess]\n"
-                'standard = "devprocess"\n'
+    manifest = ("[opf]\n"
+                'standard = "opf"\n'
                 'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
                 'layout = "inline"\n'
                 'posture = "required"\n'
@@ -1118,8 +1118,8 @@ def self_test():
 
         # F5: a manifest that omits the required [types] section must fail the FULL manifest validator and
         # come back CANNOT-EVALUATE. Pre-fix only [vendors] was checked, so this clean-passed.
-        manifest_no_types = ("[devprocess]\n"
-                             'standard = "devprocess"\n'
+        manifest_no_types = ("[opf]\n"
+                             'standard = "opf"\n'
                              'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
                              'layout = "inline"\n'
                              'posture = "required"\n'

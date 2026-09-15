@@ -1564,8 +1564,8 @@ def plan_views(store_root_fd, machine_rel):
     # U4 renders the `inline` layout only. A `per-record` store is a CLEAR cannot-evaluate (deferred),
     # detected here from the manifest rather than mis-reported as a downstream malformed-record error and
     # never silently rendered as if inline.
-    devprocess = manifest.get("devprocess")
-    layout = devprocess.get("layout") if isinstance(devprocess, dict) else None
+    opf = manifest.get("opf")
+    layout = opf.get("layout") if isinstance(opf, dict) else None
     if layout == "per-record":
         raise ViewsError("per-record layout not yet supported by U4 views; deferred")
 
@@ -2063,8 +2063,8 @@ def self_test():
 
     # Every view and two mirrors, declared with the kind/sources this generator renders.
     manifest = "\n".join([
-        "[devprocess]",
-        'standard = "devprocess"',
+        "[opf]",
+        'standard = "opf"',
         'spec_version = "1.1.0"',
         'layout = "inline"',
         'posture = "required"',
@@ -3409,8 +3409,8 @@ def self_test():
         nu_machine = os.fsencode(str(nuworking)) + b"/bad-\xff-dir"   # non-UTF-8 machine-dir name (bytes)
         os.mkdir(nu_machine)
         version_only_manifest = "\n".join([
-            "[devprocess]",
-            'standard = "devprocess"',
+            "[opf]",
+            'standard = "opf"',
             'spec_version = "1.1.0"',
             'layout = "inline"',
             'posture = "required"',
@@ -3770,7 +3770,7 @@ def self_test():
                 ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
                 ("autonomous_decision", "AD"), ("block", "BL"),
                 ("contribution", "CN"), ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
-            man = {"devprocess": {"standard": "devprocess", "spec_version": "1.1.0", "layout": "inline",
+            man = {"opf": {"standard": "opf", "spec_version": "1.1.0", "layout": "inline",
                                   "posture": "required", "import_status": "none"},
                    "store": {"sync_target": ""}, "types": types, "vendors": {"registered": []},
                    "archive": {"period": "year"}, "views": views}

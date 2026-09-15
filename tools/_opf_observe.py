@@ -242,8 +242,14 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
                          _MANIFEST_NAME, notes)
     if manifest is None:
         return None
-    devprocess = manifest.get("devprocess")
-    layout = devprocess.get("layout") if isinstance(devprocess, dict) else None
+    # The prior committed snapshot may predate the OPFiles base-table rename: during `opf upgrade` the
+    # working tree is already [opf] while HEAD is still the legacy [devprocess] store. Read the base under
+    # the current token, falling back to the retired one, so an across-time comparison against a legacy
+    # prior reconstructs (spec 9.2) instead of falsely omitting the whole prior.
+    base = manifest.get(_opf_store.STANDARD_TOKEN)
+    if not isinstance(base, dict):
+        base = manifest.get(_opf_store.PRIOR_STANDARD_TOKEN)
+    layout = base.get("layout") if isinstance(base, dict) else None
     if layout not in _LAYOUTS:
         notes.append("prior: HEAD manifest declares layout {!r}, which is not a recognized store layout; "
                      "the prior committed snapshot is omitted".format(layout))
@@ -456,8 +462,8 @@ def self_test():
     def _write_store(root):
         base = "{}/".format(machine_rel)
         _write(root, base + _MANIFEST_NAME,
-               '[devprocess]\n'
-               'standard = "devprocess"\n'
+               '[opf]\n'
+               'standard = "opf"\n'
                'spec_version = "1.0.0"\n'
                'layout = "inline"\n'
                'posture = "required"\n'

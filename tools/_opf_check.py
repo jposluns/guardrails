@@ -2123,7 +2123,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         for f in mv.findings:
             rep.finding("manifest: {}".format(f))
 
-    dp = manifest_data.get("devprocess") if isinstance(manifest_data, dict) else None
+    dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
     import_status = dp.get("import_status") if isinstance(dp, dict) else None
     types_tbl = manifest_data.get("types") if isinstance(manifest_data, dict) else None
@@ -2723,7 +2723,7 @@ def self_test():
                 ("autonomous_decision", "AD"), ("block", "BL"), ("contribution", "CN"),
                 ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
         m = {
-            "devprocess": {"standard": "devprocess", "spec_version": SUPPORTED_SPEC_VERSION, "layout": layout,
+            "opf": {"standard": "opf", "spec_version": SUPPORTED_SPEC_VERSION, "layout": layout,
                            "posture": "required", "import_status": "none"},
             "store": {"sync_target": ""},
             "types": types,
@@ -3155,7 +3155,7 @@ def self_test():
         # run-id-named dir WITHOUT plan.toml does not substantiate, so a stray is graded, not triaged.
         _c5 = clean_machine()
         _c5["manifest.toml"] = base_manifest()
-        _c5["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _c5["manifest.toml"]["opf"]["import_status"] = "partial"
         _c5r = run(_c5, working={"stray.md": "x",
                                  "imports/imp-20260601T000000Z-0123456789abcdef/junk.txt": "x"})
         check("c5-partial-no-plan-not-substantiated",
@@ -3241,7 +3241,7 @@ def self_test():
         RUNID = "imp-20260601T000000Z-0123456789abcdef"
         pm = clean_machine()
         pm["manifest.toml"] = base_manifest()
-        pm["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        pm["manifest.toml"]["opf"]["import_status"] = "partial"
         partial = run(pm, working={"junk.md": "x", "imports/{}/plan.toml".format(RUNID): "schema = 1"})
         check("partial-import-triage-not-finding",
               partial.status == VALID and any("junk.md" in t for t in partial.triage))
@@ -3249,7 +3249,7 @@ def self_test():
         # and the unsubstantiated declaration is itself flagged -> INVALID.
         stale = clean_machine()
         stale["manifest.toml"] = base_manifest()
-        stale["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        stale["manifest.toml"]["opf"]["import_status"] = "partial"
         sr = run(stale, working=dict([("junk.md", "x")]))
         check("partial-no-active-run-invalid", sr.status == INVALID)
         check("partial-no-active-run-named",
@@ -3348,7 +3348,7 @@ def self_test():
         # finding fires (imports is read at the NEW root, which is empty) AND the legacy cant dominates.
         _lgp = clean_machine()
         _lgp["manifest.toml"] = base_manifest()
-        _lgp["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _lgp["manifest.toml"]["opf"]["import_status"] = "partial"
         _lgp["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
         _lgpr = run(_lgp)
         check("legacy-imports-partial-not-substantiated",
@@ -4217,7 +4217,7 @@ def self_test():
         # triages (VALID), never a finding, exactly as files under imports already do.
         _f1c = clean_machine()
         _f1c["manifest.toml"] = base_manifest()
-        _f1c["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _f1c["manifest.toml"]["opf"]["import_status"] = "partial"
         _f1croot = build(_f1c, working={"imports/{}/plan.toml".format(RUNID16): "schema = 1"})
         os.makedirs(str(_f1croot / ".working" / "imports" / "empty-under-partial"),
                     exist_ok=False)
@@ -4239,7 +4239,7 @@ def self_test():
               _f2r is not None and _f2r.status == INVALID
               and any("C-ARCHIVE-ENUM" in f and "strayfile.txt" in f for f in _f2r.findings))
         _f2p = clean_machine()
-        _f2p["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _f2p["manifest.toml"]["opf"]["import_status"] = "partial"
         _f2p["archive/2026/strayfile.txt"] = "x\n"
         _f2pr = run(_f2p, working={"imports/{}/plan.toml".format(RUNID16): "schema = 1"})
         check("archive-bucket-stray-file-partial-triaged",

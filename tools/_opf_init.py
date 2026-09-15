@@ -66,7 +66,7 @@ def _manifest_model():
             "target": "{}/{}".format(_opf_store.WORKING_DIRNAME, name),
         }
     return {
-        "devprocess": {
+        "opf": {
             "standard": _opf_store.STANDARD_TOKEN,
             "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
             "layout": _choice("inline", _opf_store.LAYOUTS),
@@ -184,7 +184,7 @@ def self_test():
         check("manifest reversed insertion order",
               manifest_text == _opf_emit.emit_checked(dict(reversed(list(model.items())))))
         check("manifest top tables", set(manifest) == _opf_store.TOP_LEVEL_TABLES - {"profiles"})
-        check("devprocess defaults", manifest["devprocess"] == {
+        check("opf defaults", manifest["opf"] == {
             "standard": _opf_store.STANDARD_TOKEN, "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
             "layout": "inline", "posture": "required", "import_status": "none",
         })
@@ -227,7 +227,7 @@ def self_test():
             for name, (kind, sources) in expected_views.items()
         })
         for table, keys in (
-                ("devprocess", _opf_store.DEVPROCESS_KEYS), ("store", _opf_store.STORE_KEYS),
+                ("opf", _opf_store.OPF_KEYS), ("store", _opf_store.STORE_KEYS),
                 ("unmanaged", _opf_store.UNMANAGED_KEYS), ("vendors", _opf_store.VENDORS_KEYS),
                 ("archive", _opf_store.ARCHIVE_KEYS)):
             check(table + " keys", set(manifest[table]) == keys)
@@ -290,13 +290,13 @@ def self_test():
             check("missing counter " + namespace, bool(findings))
         for label, table, key, value in (
                 ("non-bool module", "modules", "governance", "false"),
-                ("invalid posture", "devprocess", "posture", "unknown")):
+                ("invalid posture", "opf", "posture", "unknown")):
             bad = deepcopy(manifest)
             bad[table][key] = value
             result = _opf_store.validate_manifest(bad)
             check(label, result.status == _opf_store.INVALID and bool(result.findings))
         bad = deepcopy(manifest)
-        del bad["devprocess"]["layout"]
+        del bad["opf"]["layout"]
         result = _opf_store.validate_manifest(bad)
         check("missing layout", result.status == _opf_store.INVALID and bool(result.findings))
         for name, validator in ((VERSION_NAME, validate_version), (WORKLOG_NAME, validate_worklog)):
@@ -309,7 +309,7 @@ def self_test():
         _high, findings = validate_counters(bad, known_namespaces=namespaces)
         check("counters wrong schema", bool(findings))
         check("validated emission refuses corruption", rejects(lambda: _emit_validated(
-            {"devprocess": {"standard": _opf_store.STANDARD_TOKEN}},
+            {"opf": {"standard": _opf_store.STANDARD_TOKEN}},
             _opf_store.MANIFEST_NAME, _opf_store.validate_manifest)))
     except Exception as exc:
         print("OPF-INIT SELF-TEST ERROR: {}; fail-closed".format(exc), file=sys.stderr)

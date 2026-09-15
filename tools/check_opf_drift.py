@@ -161,8 +161,8 @@ def _self_test():
             _opf_views._view(name, kind, list(sources))
             for name, (kind, sources, _renderer) in _opf_views.NAMED_VIEWS.items())
         manifest = (
-            "[devprocess]\n"
-            'standard = "devprocess"\n'
+            "[opf]\n"
+            'standard = "opf"\n'
             'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
             'layout = "inline"\n'
             'posture = "required"\n'

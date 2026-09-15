@@ -1,7 +1,7 @@
 # DevProcess: the operational-files standard
 
 Formal name: AIQT Development Operational Standard. Public brand: DevProcess
-(devprocess.ai). Base discovery token: `devprocess`. Status: draft (specification only;
+(devprocess.ai). Base discovery token: `opf`. Status: draft (specification only;
 schemas and the reference tooling, the scaffolder `opf init`, the importer `opf import`, the
 validator `opf doctor`, the renderer `opf render`, the relocator `opf migrate`, the
 synchronizer `opf sync`, and the schema-upgrader `opf upgrade`, ship in later releases).
@@ -187,7 +187,7 @@ used as a machine subdirectory name; discovery fails closed on a machine store s
 
 Within the resolved store repository, tooling locates the machine store by finding exactly one
 immediate subdirectory of `.working/` containing a `manifest.toml` that declares
-`standard = "devprocess"` in its `[devprocess]` base table, trying `toml` first. Zero matches, or more than one,
+`standard = "opf"` in its `[opf]` base table, trying `toml` first. Zero matches, or more than one,
 is a cannot-evaluate outcome: the tool reports it and stops; it never guesses, and never treats it
 as an empty or absent store. The pointer names which repository carries the store; the manifest
 discovery observes where, within it, the machine store sits. Because the machine subdirectory is
@@ -779,8 +779,8 @@ shape (the schema release that follows this specification is normative):
 # .working/toml/manifest.toml
 # DevProcess (AIQT Development Operational Standard) store manifest and discovery marker.
 
-[devprocess]
-standard = "devprocess"        # discovery token; exact value required
+[opf]
+standard = "opf"               # discovery token; exact value required
 spec_version = "1.1.0"         # DevProcess base spec version this store conforms to
 layout = "inline"              # storage layout: "inline" or "per-record" (was layout_profile)
 posture = "required"           # "off", "warn", or "required" (section 11)
@@ -888,7 +888,7 @@ store lock (allocation of WL IDs still goes through `counters.toml` atomically).
 
 The manifest declares one **base** standard and zero or more **profiles**.
 
-The base is the `[devprocess]` table: `standard = "devprocess"` (the discovery token, exact value
+The base is the `[opf]` table: `standard = "opf"` (the discovery token, exact value
 required), `spec_version` (the base SemVer this store conforms to), and the base storage and posture
 fields. Base-only tooling reads the base, validates it, and operates on it alone.
 
@@ -932,7 +932,9 @@ The manifest and counters rewrite is a model regeneration through the canonical 
 never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED
 parsed model reproduces the on-disk bytes exactly (proving the file is canonical and comment-free, so
 nothing can be lost), failing closed otherwise; and a postcondition that the model diff equals exactly
-the allowed delta, failing closed otherwise. For the 1.0.0 to 1.1.0 upgrade the allowed delta is: bump
+the allowed delta, failing closed otherwise. For the 1.0.0 to 1.1.0 upgrade the allowed delta is: rename
+the base table `[devprocess]` to `[opf]` and its `standard` discovery token from `devprocess` to `opf`
+(the OPFiles rebrand), carrying every other base field over unchanged; bump
 `spec_version` to 1.1.0; remove the retired `decision_support` module key; add the `[types]` rows for
 `contribution`, `maintainer_decision`, and `preference_pattern`; add the two new view rows; extend
 `counters.toml` with the `CN`/`MD`/`PP` zeros while preserving every existing high-water; and create
@@ -1236,10 +1238,13 @@ The gates in this standard are strong where they are strong and say so where the
   and a base tool is out of their scope), and it is the reason a conformance report always names
   which profiles it did and did not evaluate. Fail-safe-for-unknown-profiles is scoped to a tool
   that does not cover the profile; a profile-aware tool fails closed on its own profile.
-- The base discovery token `devprocess` is a single exact string carried in every adopter manifest.
+- The base discovery token `opf` is a single exact string carried in every adopter manifest.
   A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate
-  (fail-closed), never to a silent empty store. The token is frozen at launch and is not changed
-  thereafter, because changing it would strand every existing adopter's manifest.
+  (fail-closed), never to a silent empty store. The token is stable within a base-schema major line;
+  a store-breaking rename ships only with the tested `opf upgrade` migration (section 9.2), which
+  rewrites the base table and token in place so no existing adopter's manifest is stranded. The
+  retired 1.0.0 token `devprocess` is recognized by `opf upgrade` alone, purely to carry a legacy
+  store forward.
 
 ## Appendix A: record envelope example
 

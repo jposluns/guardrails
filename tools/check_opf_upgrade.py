@@ -299,7 +299,15 @@ def _suite():
                   "staged, NOT committed" in out and '"event": "upgraded"' in out)
             mach1 = s1 / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
             man1 = tomllib.loads((mach1 / _opf_store.MANIFEST_NAME).read_text(encoding="utf-8"))
-            check("spec_version bumped to 1.1.0", man1["devprocess"]["spec_version"] == "1.1.0")
+            # OPFiles rebrand: the migration renames the base table [devprocess] -> [opf] and its discovery
+            # token, as part of the same 1.0.0 -> 1.1.0 delta (spec 9.2).
+            check("base table renamed to [opf]",
+                  "opf" in man1 and "devprocess" not in man1)
+            check("discovery token renamed to opf", man1["opf"].get("standard") == "opf")
+            check("spec_version bumped to 1.1.0", man1["opf"]["spec_version"] == "1.1.0")
+            check("base table body otherwise carried over", all(
+                man1["opf"].get(k) == v for k, v in (
+                    ("layout", "inline"), ("posture", "required"), ("import_status", "none"))))
             check("decision_support module retired", "decision_support" not in man1["modules"])
             check("three baseline type rows added", all(
                 man1["types"].get(t) == {"namespace": _opf_store.BASELINE_TYPES[t]}

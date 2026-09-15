@@ -149,7 +149,7 @@ def _self_test():
             ("autonomous_decision", "AD"), ("block", "BL"),
             ("contribution", "CN"), ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
         return {
-            "devprocess": {"standard": "devprocess", "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
+            "opf": {"standard": "opf", "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
                            "layout": "inline",
                            "posture": "required", "import_status": "none"},
             "store": {"sync_target": ""},

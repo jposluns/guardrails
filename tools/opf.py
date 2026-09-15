@@ -1126,12 +1126,21 @@ def _upgrade_plan(manifest_model, counters_model):
     input that is not a clean 1.0.0 baseline the delta applies to, and asserts as a POSTCONDITION that the
     manifest model diff touches only the allowed locations, so a stray mutation can never slip through."""
     import copy
-    for table in ("devprocess", "modules", "types", "views"):
+    # The 1.0.0 input carries the RETIRED base table [devprocess] (PRIOR_STANDARD_TOKEN); the OPFiles
+    # rebrand (1.1.0) renames it to [opf] (STANDARD_TOKEN) as part of this same allowed delta (spec 9.2).
+    _prior_base = _opf_store.PRIOR_STANDARD_TOKEN
+    for table in (_prior_base, "modules", "types", "views"):
         if not isinstance(manifest_model.get(table), dict):
             raise _UpgradeError("manifest [{}] table is missing or malformed; not a store this "
                                 "upgrade can migrate (fail-closed)".format(table))
-    if manifest_model["devprocess"].get("spec_version") != _UPGRADE_FROM:
+    if _opf_store.STANDARD_TOKEN in manifest_model:
+        raise _UpgradeError("manifest already carries the renamed base table [{}]; store is not a clean "
+                            "1.0.0 baseline (fail-closed)".format(_opf_store.STANDARD_TOKEN))
+    if manifest_model[_prior_base].get("spec_version") != _UPGRADE_FROM:
         raise _UpgradeError("manifest spec_version is not {!r}; no known upgrade path".format(_UPGRADE_FROM))
+    if manifest_model[_prior_base].get("standard") != _prior_base:
+        raise _UpgradeError("manifest [{}].standard is not {!r}; not a store this upgrade migrates "
+                            "(fail-closed)".format(_prior_base, _prior_base))
     if _UPGRADE_RETIRED_MODULE not in manifest_model["modules"]:
         raise _UpgradeError("manifest [modules] carries no {!r} key; not a 1.0.0 baseline this upgrade "
                             "recognizes (fail-closed)".format(_UPGRADE_RETIRED_MODULE))
@@ -1147,7 +1156,12 @@ def _upgrade_plan(manifest_model, counters_model):
         raise _UpgradeError("counters.toml [counters] table is missing or malformed (fail-closed)")
 
     new_manifest = copy.deepcopy(manifest_model)
-    new_manifest["devprocess"]["spec_version"] = _UPGRADE_TO
+    # Rename the base table [devprocess] -> [opf] and its discovery token, and bump spec_version, all in
+    # the one allowed delta (spec 9.2). The table body is otherwise carried over unchanged.
+    _base = new_manifest.pop(_prior_base)
+    _base["standard"] = _opf_store.STANDARD_TOKEN
+    _base["spec_version"] = _UPGRADE_TO
+    new_manifest[_opf_store.STANDARD_TOKEN] = _base
     del new_manifest["modules"][_UPGRADE_RETIRED_MODULE]
     for tname in _UPGRADE_NEW_TYPES:
         new_manifest["types"][tname] = {"namespace": _opf_store.BASELINE_TYPES[tname]}
@@ -1160,10 +1174,12 @@ def _upgrade_plan(manifest_model, counters_model):
         }
 
     # Postcondition (spec 9.2): the manifest model diff equals EXACTLY the allowed delta. Every top-level
-    # table other than modules/types/views is byte-identical; modules loses ONLY the retired key; types and
-    # views gain ONLY the enumerated names; devprocess changes ONLY spec_version.
+    # table other than modules/types/views and the renamed base is byte-identical; modules loses ONLY the
+    # retired key; types and views gain ONLY the enumerated names; the base table is renamed
+    # [devprocess] -> [opf] changing ONLY its standard token and spec_version.
+    _base_names = {_prior_base, _opf_store.STANDARD_TOKEN}
     for table in set(manifest_model) | set(new_manifest):
-        if table in ("modules", "types", "views", "devprocess"):
+        if table in ("modules", "types", "views") or table in _base_names:
             continue
         if manifest_model.get(table) != new_manifest.get(table):
             raise _UpgradeError("upgrade postcondition failed: table [{}] changed but is not in the allowed "
@@ -1174,10 +1190,20 @@ def _upgrade_plan(manifest_model, counters_model):
         raise _UpgradeError("upgrade postcondition failed: [types] delta is not exactly the new baseline types")
     if set(new_manifest["views"]) != set(manifest_model["views"]) | set(_UPGRADE_NEW_VIEWS):
         raise _UpgradeError("upgrade postcondition failed: [views] delta is not exactly the new view rows")
-    dp_old, dp_new = manifest_model["devprocess"], new_manifest["devprocess"]
+    # The base table must be renamed EXACTLY: [devprocess] removed, [opf] present, standard token flipped
+    # devprocess -> opf and spec_version bumped, with every other base key carried over unchanged.
+    if _prior_base in new_manifest or _opf_store.STANDARD_TOKEN not in new_manifest:
+        raise _UpgradeError("upgrade postcondition failed: base table not renamed [{}] -> [{}]".format(
+            _prior_base, _opf_store.STANDARD_TOKEN))
+    dp_old, dp_new = manifest_model[_prior_base], new_manifest[_opf_store.STANDARD_TOKEN]
+    if dp_new.get("standard") != _opf_store.STANDARD_TOKEN or dp_new.get("spec_version") != _UPGRADE_TO:
+        raise _UpgradeError("upgrade postcondition failed: base standard/spec_version not set to the "
+                            "renamed values")
+    _base_mutable = {"standard", "spec_version"}
     if (set(dp_old) != set(dp_new)
-            or any(dp_old[k] != dp_new[k] for k in dp_old if k != "spec_version")):
-        raise _UpgradeError("upgrade postcondition failed: [devprocess] changed beyond spec_version")
+            or any(dp_old[k] != dp_new[k] for k in dp_old if k not in _base_mutable)):
+        raise _UpgradeError("upgrade postcondition failed: base table changed beyond the standard-token "
+                            "rename and spec_version bump")
 
     new_counters = copy.deepcopy(counters_model)
     added = []
@@ -1243,7 +1269,12 @@ def _upgrade_run(root):
                             "run a stale upgrade path (fail-closed)".format(
                                 _UPGRADE_TO, _opf_store.SUPPORTED_SPEC_VERSION))
     try:
-        res = _opf_store.resolve_store(Path(os.path.abspath(root)))
+        # `opf upgrade` is the ONE caller that also accepts the retired 1.0.0 discovery token, so a legacy
+        # [devprocess] store still resolves for migration (spec 9.2); every other tool keeps the sole
+        # current-token discovery.
+        res = _opf_store.resolve_store(
+            Path(os.path.abspath(root)),
+            accept_tokens=(_opf_store.STANDARD_TOKEN, _opf_store.PRIOR_STANDARD_TOKEN))
     except Exception as exc:  # noqa: BLE001  a resolver escape is cannot-evaluate, never a mutation
         raise _UpgradeError("unexpected error resolving the store at {!r} ({!r})".format(root, exc))
     if res.status == _opf_store.NOT_ADOPTED:
@@ -1269,9 +1300,12 @@ def _upgrade_run(root):
             raise _UpgradeError("store manifest or counters does not parse as TOML ({})".format(exc))
 
         # spec_version triage: current is an idempotent byte no-op; above-tooling fails closed; only the
-        # single known 1.0.0 origin proceeds.
-        sv = manifest_model.get("devprocess", {}).get("spec_version") if isinstance(
-            manifest_model.get("devprocess"), dict) else None
+        # single known 1.0.0 origin proceeds. The base table is [opf] on an already-migrated store and the
+        # retired [devprocess] on a legacy 1.0.0 store, so read whichever the manifest carries.
+        _base_model = manifest_model.get(_opf_store.STANDARD_TOKEN)
+        if not isinstance(_base_model, dict):
+            _base_model = manifest_model.get(_opf_store.PRIOR_STANDARD_TOKEN)
+        sv = _base_model.get("spec_version") if isinstance(_base_model, dict) else None
         if sv == _UPGRADE_TO:
             print("opf upgrade: store is already at spec_version {}; nothing to upgrade (no-op).".format(
                 _UPGRADE_TO))

@@ -14,10 +14,10 @@ Two things live here, both from OPF-SPEC.md sections 4, 5, and 9:
      `.git` walk, because this repo is not itself a DevProcess adopter and an adopter store need not sit
      at a repo root the walk would find. Within the resolved STORE REPOSITORY ROOT the machine store is
      DISCOVERED as the single immediate subdirectory of `.working/` whose `manifest.toml` declares
-     `standard = "devprocess"` in its `[devprocess]` base table (the standard name is `toml`, tried
+     `standard = "opf"` in its `[opf]` base table (the standard name is `toml`, tried
      first, but the subdirectory is OBSERVED at each use, never hardcoded, spec 4.4/4.5).
 
-  2. MANIFEST BASE/PROFILE SCHEMA + VALIDATOR (spec 9, 9.1). The base is the `[devprocess]` table plus
+  2. MANIFEST BASE/PROFILE SCHEMA + VALIDATOR (spec 9, 9.1). The base is the `[opf]` table plus
      the store, module, type, provider, view, deliverable, archive, unmanaged, and vendor sections. A
      profile is a `[profiles.<name>]` sub-table that may only ADD requirements: a base-only tool reads
      and validates the base alone and records each profile as present-but-unevaluated (fail-SAFE for an
@@ -52,8 +52,8 @@ fail-closed way and names it so the choice is reviewable, per disclose-guard-res
     [archive], [unmanaged], [vendors]) are treated as CLOSED keysets (unknown key is a finding), matching
     the house closed-schema discipline; the spec's manifest is "illustrative (the schema release ... is
     normative)", so a later unit that needs a new manifest key extends the allowed set here in one place.
-  - A mistyped `devprocess` token resolves to CANNOT-EVALUATE at BOTH a POINTER target and the default
-    location (residual 17): a PRESENT `.working/` that carries no valid [devprocess] manifest is a
+  - A mistyped `opf` token resolves to CANNOT-EVALUATE at BOTH a POINTER target and the default
+    location (residual 17): a PRESENT `.working/` that carries no valid [opf] manifest is a
     present-but-invalid store, distinguishable from a fresh un-adopted repo (which has NO `.working/` at
     all) and never treated as absent, so `opf init` cannot overwrite it. Only a genuinely absent
     `.working/` with no pointer is NOT-ADOPTED (the `opf init` remedy).
@@ -87,7 +87,13 @@ LOCAL_POINTER_REL = ".opf.local.toml"  # uncommitted machine-local override, res
 WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root (spec 4.4)
 DEFAULT_MACHINE_SUBDIR = "toml"        # standard machine-store subdir name, tried first (spec 4.4)
 MANIFEST_NAME = "manifest.toml"        # discovery marker filename (spec 4.5)
-STANDARD_TOKEN = "devprocess"          # exact discovery token in [devprocess].standard (spec 4.5)
+STANDARD_TOKEN = "opf"          # exact discovery token in [opf].standard (spec 4.5)
+PRIOR_STANDARD_TOKEN = "devprocess"    # the RETIRED 1.0.0 discovery token (base table [devprocess]); the
+                                       # OPFiles rebrand (1.1.0) renamed it to STANDARD_TOKEN. It is
+                                       # recognized ONLY by `opf upgrade`, which passes it via accept_tokens
+                                       # so a legacy 1.0.0 store can still be located and migrated (spec 9.2).
+                                       # No other tool accepts it; the base table name always equals the
+                                       # token the base declares, so acceptance is expressed as a token set.
 MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (manifest/pointer); a larger
                                        # store input is refused rather than read unboundedly (SECA)
 SUPPORTED_SPEC_VERSION = "1.1.0"       # the DevProcess base spec_version this tooling implements; a store
@@ -99,7 +105,7 @@ RESOLVED = "RESOLVED"                  # a machine store was resolved and locate
 NOT_ADOPTED = "NOT-ADOPTED"           # no pointer and no default store: nothing to operate on (opf init)
 # Validation outcomes.
 VALID = "VALID"
-INVALID = "INVALID"                    # a devprocess store whose schema is violated (a fail-closed finding)
+INVALID = "INVALID"                    # an opf store whose schema is violated (a fail-closed finding)
 # Shared fail-closed outcome.
 CANNOT_EVALUATE = "CANNOT-EVALUATE"    # unreadable/unresolvable/ambiguous: stop, never a silent pass
 
@@ -155,7 +161,7 @@ RESERVED_EXCLUDED_TYPES = {
 }
 
 # Section shapes (closed keysets; see the ambiguity note in the module docstring).
-DEVPROCESS_KEYS = frozenset({"standard", "spec_version", "layout", "posture", "import_status"})
+OPF_KEYS = frozenset({"standard", "spec_version", "layout", "posture", "import_status"})
 STORE_KEYS = frozenset({"sync_target"})
 PROFILE_KEYS = frozenset({"version", "base_compat", "posture_floor", "required_modules",
                           "extension_namespace"})
@@ -171,7 +177,7 @@ ARCHIVE_KEYS = frozenset({"period"})
 ARCHIVE_PERIODS = ("year",)
 UNMANAGED_KEYS = frozenset({"paths"})
 VENDORS_KEYS = frozenset({"registered"})
-TOP_LEVEL_TABLES = frozenset({"devprocess", "store", "modules", "profiles", "types", "providers",
+TOP_LEVEL_TABLES = frozenset({"opf", "store", "modules", "profiles", "types", "providers",
                               "views", "deliverables", "archive", "unmanaged", "vendors"})
 
 _NAMESPACE_OK = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -428,17 +434,24 @@ def _immediate_subdirs(store_root_fd, working_rel):
 
 # --- discovery (spec 4.5) ----------------------------------------------------------------------------
 
-def discover_machine_store(store_root_fd, store_root):
+def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
     """Locate the single machine store under `.working/`. Returns (status, machine_dir, detail):
-      "one"      exactly one immediate `.working/` subdir carries a devprocess manifest (machine_dir set)
+      "one"      exactly one immediate `.working/` subdir carries an opf manifest (machine_dir set)
       "absent"   `.working/` is absent (no store tree here at all: a genuinely un-adopted location)
-      "present"  `.working/` EXISTS but no immediate subdir carries a valid devprocess manifest (a
+      "present"  `.working/` EXISTS but no immediate subdir carries a valid opf manifest (a
                  present-but-invalid store, never treated as absent, spec residual 17)
       "multiple" more than one does (ambiguous: cannot choose)
     Raises StoreError (cannot-evaluate) on any read error, a non-directory `.working/`, or a refused
     symlink. The scan is EXHAUSTIVE and strict-unique: `toml` is the expected name (its match, when the
     result is otherwise unique, is reported as the machine_dir), but a second stray store is NOT masked
-    (spec 4.5, residual 17)."""
+    (spec 4.5, residual 17).
+
+    `accept_tokens` is the set of discovery tokens accepted here; None means the sole current
+    STANDARD_TOKEN (the frozen general contract, spec 4.5). `opf upgrade` passes the legacy
+    PRIOR_STANDARD_TOKEN alongside it so a 1.0.0 store carrying the retired `[devprocess]` base can be
+    located for migration (spec 9.2). Because the base table name always equals the token the base
+    declares, a candidate matches when, for some accepted token, `[<token>].standard == <token>`."""
+    accept = (STANDARD_TOKEN,) if accept_tokens is None else tuple(accept_tokens)
     subdirs = _immediate_subdirs(store_root_fd, WORKING_DIRNAME)
     if subdirs is None:
         return "absent", None, "{}/ is absent".format(WORKING_DIRNAME)
@@ -448,14 +461,16 @@ def discover_machine_store(store_root_fd, store_root):
         data = _read_toml_contained(store_root_fd, manifest_rel)   # StoreError propagates (fail-closed)
         if data is None:
             continue
-        base = data.get("devprocess")
-        if isinstance(base, dict) and base.get("standard") == STANDARD_TOKEN:
-            matches.append(name)
+        for token in accept:
+            base = data.get(token)
+            if isinstance(base, dict) and base.get("standard") == token:
+                matches.append(name)
+                break
     if not matches:
         return "present", None, "{}/ is present but no {}/*/{} declares standard = {!r}".format(
             WORKING_DIRNAME, WORKING_DIRNAME, MANIFEST_NAME, STANDARD_TOKEN)
     if len(matches) > 1:
-        return "multiple", None, "{} machine stores declare the devprocess token: {}".format(
+        return "multiple", None, "{} machine stores declare the opf token: {}".format(
             len(matches), ", ".join(sorted(matches)))
     # OPF-IMPORTS-RELOCATE: `imports` is reserved at the store level for the fixed import-run staging root
     # `.working/imports/` (spec 4.4/14.1). Since the relocation, a machine store so named would EQUAL that
@@ -545,9 +560,14 @@ def _read_pointer_target(product_root_fd, relpath):
 
 # --- resolution (spec 4.3) ---------------------------------------------------------------------------
 
-def resolve_store(product_root):
+def resolve_store(product_root, accept_tokens=None):
     """Resolve the machine store from a product repository root (spec 4.3). Never raises for an expected
     outcome; returns a Resolution whose status is RESOLVED, NOT_ADOPTED, or CANNOT_EVALUATE.
+
+    `accept_tokens` selects the discovery tokens accepted during machine-store discovery; None is the
+    frozen general contract (the sole current STANDARD_TOKEN, spec 4.5). Only `opf upgrade` widens it,
+    passing (STANDARD_TOKEN, PRIOR_STANDARD_TOKEN) so a legacy 1.0.0 `[devprocess]` store resolves for
+    migration (spec 9.2); every other caller keeps the default single-token discovery.
 
     Order (spec 4.3): the local override first, then the committed pointer; where NEITHER pointer file
     exists, the default location (`.working/` at the product root) is tried. A pointer that exists but
@@ -608,17 +628,17 @@ def resolve_store(product_root):
         except StoreError as exc:
             return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
                               product_root=product_root)
-        res = _resolve_at(store_root, source, target, pointer=True)
+        res = _resolve_at(store_root, source, target, pointer=True, accept_tokens=accept_tokens)
         res.product_root = product_root
         return res
 
     # Neither pointer file exists: try the default in-repo location.
-    res = _resolve_at(product_root, "default", None, pointer=False)
+    res = _resolve_at(product_root, "default", None, pointer=False, accept_tokens=accept_tokens)
     res.product_root = product_root
     return res
 
 
-def _resolve_at(store_root, source, target, pointer):
+def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
     """Open the store root and run discovery there. `pointer` selects the fail-closed policy: a pointer
     that resolves to a root with no (or multiple) machine store is CANNOT-EVALUATE, while the default
     fallback reports NOT-ADOPTED for a genuinely empty location (spec 4.3/4.5)."""
@@ -648,7 +668,8 @@ def _resolve_at(store_root, source, target, pointer):
                           target=target, pointer_source=source)
     try:
         try:
-            status, machine_dir, detail = discover_machine_store(store_root_fd, store_root)
+            status, machine_dir, detail = discover_machine_store(
+                store_root_fd, store_root, accept_tokens=accept_tokens)
         except StoreError as exc:
             return Resolution(CANNOT_EVALUATE, str(exc), store_root=store_root, target=target,
                               pointer_source=source)
@@ -665,7 +686,7 @@ def _resolve_at(store_root, source, target, pointer):
     # No single machine store. A POINTER promised a store, so either shape (absent or present-invalid) is
     # cannot-evaluate. At the DEFAULT location we distinguish (BLOCKER 2, spec residual 17): an absent
     # `.working/` is a genuinely un-adopted repo (NOT-ADOPTED, opf init is the remedy), while a PRESENT
-    # `.working/` carrying no valid [devprocess] manifest is a present-but-invalid store that must never
+    # `.working/` carrying no valid [opf] manifest is a present-but-invalid store that must never
     # read as absent (CANNOT-EVALUATE), or opf init could overwrite it.
     if pointer:
         return Resolution(CANNOT_EVALUATE,
@@ -898,9 +919,9 @@ def validate_manifest(data, supported_profiles=None):
     CLOSED (a finding) on an unreadable, base-incompatible, weakening, or mis-registered instance
     (spec 9.1).
 
-    Outcome: CANNOT-EVALUATE when the manifest is not a table or its `[devprocess]` base is absent or
-    does not declare the devprocess token (it is not identifiably a devprocess store); INVALID when it
-    is a devprocess store that violates the schema; VALID otherwise."""
+    Outcome: CANNOT-EVALUATE when the manifest is not a table or its `[opf]` base is absent or
+    does not declare the opf token (it is not identifiably an opf store); INVALID when it
+    is an opf store that violates the schema; VALID otherwise."""
     # supported_profiles is the caller's profile-enforcement control: a mapping {profile_name(str) ->
     # iterable of supported MAJOR ints}. None means BASE-ONLY (fail-safe). Any OTHER malformed shape (a
     # string, a bare list, a non-mapping, a non-string profile name, or a majors value that is not a
@@ -935,11 +956,11 @@ def validate_manifest(data, supported_profiles=None):
     supported_profiles = materialized_profiles
     if not isinstance(data, dict):
         return ManifestValidation(CANNOT_EVALUATE, ["manifest is not a table"])
-    base = data.get("devprocess")
+    base = data.get("opf")
     if not isinstance(base, dict) or base.get("standard") != STANDARD_TOKEN:
         return ManifestValidation(CANNOT_EVALUATE,
-                                  ["[devprocess].standard is absent or is not {!r} (not identifiably a "
-                                   "devprocess store)".format(STANDARD_TOKEN)])
+                                  ["[opf].standard is absent or is not {!r} (not identifiably a "
+                                   "opf store)".format(STANDARD_TOKEN)])
 
     findings = []
     _validate_top_level(data, findings)
@@ -1014,33 +1035,33 @@ def _check_enum(table, key, allowed, where, findings):
 
 
 def _validate_base(base, findings):
-    """Validate the [devprocess] base table; returns the parsed spec_version tuple or None."""
-    extra = set(base) - DEVPROCESS_KEYS
+    """Validate the [opf] base table; returns the parsed spec_version tuple or None."""
+    extra = set(base) - OPF_KEYS
     if extra:
-        findings.append("[devprocess] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
-    missing = [k for k in DEVPROCESS_KEYS if k not in base]
+        findings.append("[opf] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
+    missing = [k for k in OPF_KEYS if k not in base]
     if missing:
-        findings.append("[devprocess] missing required key(s): {}".format(", ".join(sorted(missing))))
+        findings.append("[opf] missing required key(s): {}".format(", ".join(sorted(missing))))
     spec_tuple = None
     sv = base.get("spec_version")
     if "spec_version" in base:
         spec_tuple = _parse(sv) if isinstance(sv, str) else None
         if spec_tuple is None:
-            findings.append("[devprocess].spec_version {} is not a bare SemVer".format(_safe_display(sv)))
+            findings.append("[opf].spec_version {} is not a bare SemVer".format(_safe_display(sv)))
         elif spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
             # A store declaring an OLDER base spec_version than this tooling implements is fail-closed with
             # its OWN named, remedy-carrying finding, rather than cascading into the confusing C-ROSTER /
             # missing-type findings a newer roster would otherwise raise against the older store (spec 9.x).
-            findings.append("[devprocess].spec_version {} is older than the {} this tooling implements; "
+            findings.append("[opf].spec_version {} is older than the {} this tooling implements; "
                             "run the store schema upgrade (`opf upgrade`) to migrate this store to {} "
                             "(spec 9.x; fail-closed)".format(
                                 _safe_display(sv), SUPPORTED_SPEC_VERSION, SUPPORTED_SPEC_VERSION))
     # Each closed-vocabulary field is type-checked BEFORE its membership test (MAJOR 3), so a wrong-typed
     # value (e.g. posture as a list) is a fail-closed finding here rather than an unhashable-value crash
     # in a later rank/membership test.
-    _check_enum(base, "layout", LAYOUTS, "[devprocess]", findings)
-    _check_enum(base, "posture", POSTURES, "[devprocess]", findings)
-    _check_enum(base, "import_status", IMPORT_STATES, "[devprocess]", findings)
+    _check_enum(base, "layout", LAYOUTS, "[opf]", findings)
+    _check_enum(base, "posture", POSTURES, "[opf]", findings)
+    _check_enum(base, "import_status", IMPORT_STATES, "[opf]", findings)
     return spec_tuple
 
 
@@ -1447,7 +1468,7 @@ def self_test():
                       aiqt_version="1.0.0", register_xaiqt=True, ops_enabled=True, with_acme=False,
                       extra_top=""):
         lines = [
-            "[devprocess]",
+            "[opf]",
             'standard = "{}"'.format(standard),
             'spec_version = "{}"'.format(spec_version),
             'layout = "inline"',
@@ -1672,12 +1693,12 @@ def self_test():
         mv = load_manifest(res)
         check("bad-base-invalid", mv.status == INVALID and any("posture" in f for f in mv.findings))
 
-        # 8b: validate() on a non-devprocess / not-a-table input -> CANNOT-EVALUATE.
+        # 8b: validate() on a non-opf / not-a-table input -> CANNOT-EVALUATE.
         check("not-a-table-cannot-eval", validate_manifest([]).status == CANNOT_EVALUATE)
         check("no-base-cannot-eval", validate_manifest({"store": {}}).status == CANNOT_EVALUATE)
 
-        # 8c: an unknown top-level table AND an unknown [devprocess] key are each findings. The input adds
-        # BOTH a top-level [bogus] table and an unknown key UNDER [devprocess], so the comment matches what
+        # 8c: an unknown top-level table AND an unknown [opf] key are each findings. The input adds
+        # BOTH a top-level [bogus] table and an unknown key UNDER [opf], so the comment matches what
         # is actually exercised.
         import tomllib as _t
         m_extra = _t.loads(manifest_text(extra_top="[bogus]\nx = 1").replace(
@@ -1685,7 +1706,7 @@ def self_test():
         mv_extra = validate_manifest(m_extra)
         check("unknown-top-table-invalid", mv_extra.status == INVALID)
         check("unknown-top-table-named", any("bogus" in f for f in mv_extra.findings))
-        check("unknown-devprocess-key-named", any("mystery_key" in f for f in mv_extra.findings))
+        check("unknown-opf-key-named", any("mystery_key" in f for f in mv_extra.findings))
 
         # 9: a profile is IGNORED by a base-only validator but ENFORCED by a profile-aware one.
         m_aiqt = _t.loads(manifest_text(with_aiqt=True))
@@ -2078,7 +2099,7 @@ def self_test():
         # NEW-1: a hostile store file with an oversized BASE-10 integer literal makes tomllib raise a bare
         # ValueError (not TOMLDecodeError); it maps to a fail-closed StoreError -> CANNOT-EVALUATE, never an
         # uncaught crash out of resolve_store.
-        n1_root = build_store(manifest="[devprocess]\nbig = " + "9" * 5000 + "\n")
+        n1_root = build_store(manifest="[opf]\nbig = " + "9" * 5000 + "\n")
         # MINOR-3: run the probe INSIDE _guard so a reverted fix (resolve_store no longer mapping the bare
         # ValueError from tomllib's int() to CANNOT-EVALUATE) yields a NAMED counted failure, not an uncaught
         # traceback that aborts the suite. Still passes only on CANNOT-EVALUATE (no weakened detection).
