@@ -2262,32 +2262,38 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                 failures.append("(#2) a tampered branch-integrity artifact on the attestation "
                                                 "commit must be REJECTED by the recompute (exit 1)")
 
-                            # CHRONOLOGY FORGING end-to-end on a full pack tree (round-2 finding 6): a QA object
-                            # whose retrieved timestamps POSTDATE the tag while the row lists an early timestamp.
-                            # The armed gate compares the RETRIEVED epochs against the tag and requires the row
-                            # list to equal them, so it fails exit 1 on a branch-integrity-recomputed tree.
-                            forge_qa_body = ('candidate-sha = "{}"\n\n'.format(a_csha) + "".join(
-                                '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
-                                'unresolved-blockers = 0\ntimestamps-utc = [{}]\n\n'.format(n, a_tagger + 500)
-                                for n in FAMILIES))
-                            forge_qa = tmp / "attestation-forge-qa.toml"
-                            forge_qa.write_text(forge_qa_body, encoding="utf-8")
-                            forge_qa_sha = hashlib.sha256(forge_qa_body.encode("utf-8")).hexdigest()
-                            (ac / RELEASES_REL).write_text(
-                                'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
-                                'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
-                                'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
-                                    a_tobj, a_csha, forge_qa_sha, a_tagger - 100), encoding="utf-8")
-                            forge_ok = _regen_fixture_manifest(ac, "forge-chronology commit", failures, ge)
-                            subprocess.run(["git", "-C", str(ac), "add", "-A"], capture_output=True, env=ge)
-                            subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", "forge chronology",
-                                            "--no-verify"], capture_output=True, env=ge)
-                            forge_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                       capture_output=True, text=True).stdout.strip()
-                            if forge_ok and _run_post_tag_quiet(ac, forge_oid, str(forge_qa)) != 1:
-                                failures.append("(post-tag) a QA object whose retrieved timestamps postdate the "
-                                                "tag while the row lists an early timestamp must exit 1 (#6)")
+                        # CHRONOLOGY FORGING is BASE-INDEPENDENT so it runs OUTSIDE base_ok (it builds its own
+                        # QA object, rewrites the release row, regenerates its OWN manifest via forge_ok and
+                        # asserts on forge_oid; it needs the tagged candidate from ok6 but not the base
+                        # attestation regeneration or a_oid/a_tree/a_qa). Gating it under base_ok would need-
+                        # lessly drop its coverage when only the base setup fails.
+                        # CHRONOLOGY FORGING end-to-end on a full pack tree (round-2 finding 6): a QA object
+                        # whose retrieved timestamps POSTDATE the tag while the row lists an early timestamp.
+                        # The armed gate compares the RETRIEVED epochs against the tag and requires the row
+                        # list to equal them, so it fails exit 1 on a branch-integrity-recomputed tree.
+                        forge_qa_body = ('candidate-sha = "{}"\n\n'.format(a_csha) + "".join(
+                            '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
+                            'unresolved-blockers = 0\ntimestamps-utc = [{}]\n\n'.format(n, a_tagger + 500)
+                            for n in FAMILIES))
+                        forge_qa = tmp / "attestation-forge-qa.toml"
+                        forge_qa.write_text(forge_qa_body, encoding="utf-8")
+                        forge_qa_sha = hashlib.sha256(forge_qa_body.encode("utf-8")).hexdigest()
+                        (ac / RELEASES_REL).write_text(
+                            'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
+                            'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
+                            'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
+                                a_tobj, a_csha, forge_qa_sha, a_tagger - 100), encoding="utf-8")
+                        forge_ok = _regen_fixture_manifest(ac, "forge-chronology commit", failures, ge)
+                        subprocess.run(["git", "-C", str(ac), "add", "-A"], capture_output=True, env=ge)
+                        subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", "forge chronology",
+                                        "--no-verify"], capture_output=True, env=ge)
+                        forge_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
+                                                   capture_output=True, text=True).stdout.strip()
+                        if forge_ok and _run_post_tag_quiet(ac, forge_oid, str(forge_qa)) != 1:
+                            failures.append("(post-tag) a QA object whose retrieved timestamps postdate the "
+                                            "tag while the row lists an early timestamp must exit 1 (#6)")
 
+                        if base_ok:
                             # (round-9 finding 3) EXECUTABLE-BIT / MODE SMUGGLE: an attestation commit that
                             # chmods releases.toml to 0o755 rides the ALLOWED releases.toml path under a
                             # name-only delta, but the raw mode/type delta check flags mode 100755 -> exit 1.
