@@ -18,6 +18,10 @@ read from the working tree via _gen_common.load_toml. Invariants:
      finding that names the decrease, not only a prefix mismatch.
   M3 (well-formedness): both sides parse as bare SemVer via the imported helpers; a malformed version on
      either side is fail-closed (exit 2), since the comparison cannot answer its question on bad input.
+Pre-release genesis exemption: when the base snapshot carries no changelog release tag AND its releases.toml
+is present with zero rows, Layer A reports NOT APPLICABLE and suspends M1/M2 (drafts may be relabeled),
+reactivating fully once the first release is recorded (a tag key or a ledger row). The tag-created-but-
+unrecorded first-release window is a disclosed residual documented at _base_is_genesis.
 Soundness: the protected branch forbids force-push and every change to main passes through this gate at its
 merge, so base-vs-head prefix checking composes inductively into monotonicity across all of main's history;
 no full-history walk is needed.
@@ -39,12 +43,14 @@ Baseline resolution (Layer A), in precedence order:
   1. an explicit --base REF flag (what CI passes);
   2. with no flag, `git merge-base HEAD origin/main`;
   3. if no baseline resolves, exit 2 with a remediation message (never a silent "nothing to compare, pass").
-Two distinguishable NON-error states are each printed explicitly and contribute exit 0:
+Three distinguishable NON-error states are each printed explicitly and contribute exit 0:
   - the baseline ref resolves but changelog.toml is absent there (introduced since base);
   - HEAD is the root commit (no parent) AND no explicit --base was given. An explicit --base is always
     resolved and compared, even on a root HEAD, so an unresolvable explicit base fails closed (exit 2);
     a HEAD^ that fails for any reason other than a genuine root (a shallow clone, a broken-parent history)
     is a fail-closed error, never a silent root.
+  - the base snapshot is pre-release genesis (no changelog release tag AND a releases.toml present with zero
+    rows): Layer A reports NOT APPLICABLE and suspends M1/M2, per the genesis exemption above.
 Everything else that prevents the comparison (an unresolvable ref, a git failure, unparseable TOML on either
 side) is exit 2; every git return code is checked and a nonzero exit is never treated as an empty result.
 
@@ -273,8 +279,10 @@ def _parse_base_releases(text):
 def _base_is_genesis(root, base_commit, base_releases):
     """True when no shipment SIGNAL is recorded in the base files: no changelog release carries a tag AND
     a present releases.toml has zero rows. Reads the BASE snapshot only. An absent base releases.toml is
-    NOT genesis (guard-input-soundness). A present-but-unparseable or schema-invalid ledger is fail-closed
-    (GateError, exit 2), mirroring layer_c's base-parse handling."""
+    NOT genesis (guard-input-soundness). A present-but-unparseable ledger, or one whose TOP-LEVEL keys or
+    format-version are invalid, is fail-closed (GateError, exit 2), mirroring layer_c's base-parse handling;
+    a ledger with rows (even malformed rows) is simply non-genesis (protection retained), with per-row
+    validation left to layer_c and the manifest gate."""
     # DISCLOSED RESIDUAL: the gate decides shipment from single-source files (the changelog tag key and
     # releases.toml rows), not by probing git tags, whose absence is ambiguous under a shallow fetch
     # (matching Layer B's stated design). A TRANSIENT first-release window therefore exists where a git
