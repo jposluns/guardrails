@@ -16,7 +16,15 @@ CANNOT-EVALUATE store with exit 2 and writing nothing. `doctor` HAS landed (PR-B
 [--root DIR]` RESOLVES the store, gathers the inert git-derived observations (_opf_observe.gather: tracked,
 actual_remote, prior), and runs the U6 `validate_store` store-integrity engine over them, returning that
 engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0). Doctor is read-only; its
-observation gather is the caller-side git seam validate_store itself never touches.
+observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
+(spec 9.2): `opf upgrade [--root DIR]` is the in-place, additive, idempotent 1.0.0 -> 1.1.0 store-schema
+upgrade. It refuses fail-closed on a store above the tooling spec or on a non-canonical manifest/counters,
+applies exactly the allowed delta as a canonical model regeneration (bump spec_version; retire the
+decision_support module; add the contribution/maintainer_decision/preference_pattern type rows and the two
+new view rows; extend counters with CN/MD/PP preserving existing high-waters; create the three missing empty
+indexes, skipping any that already exist), renders the declared views, and requires a full doctor VALID
+before offering the staged change; it never commits (the adopter reviews and merges). A store already at the
+tooling spec_version is a byte no-op; a NOT-ADOPTED root reports NOT APPLICABLE and exits 0.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -1027,6 +1035,319 @@ def _cmd_init(rest):
             _opf_store._journal._close_fd_quietly(root_fd)
 
 
+# --- opf upgrade: the 1.0.0 -> 1.1.0 store-schema upgrade (spec 9.2) ---------------------------------
+
+# The single 1.0.0 -> 1.1.0 upgrade this build implements. maintainer_decision and preference_pattern
+# baseline (they were module-tier in 1.0.0); contribution is net-new; the decision_support module is
+# retired (spec 8.1 note, spec 9.2). The delta is enumerated so the postcondition can assert the model
+# diff equals EXACTLY it and nothing else (fail-closed on any stray change).
+# _UPGRADE_TO is the literal the tooling implements; _cmd_upgrade asserts it equals the live
+# _opf_store.SUPPORTED_SPEC_VERSION (bound only after _bootstrap), so a future spec bump cannot let this
+# constant silently drift from the roster.
+_UPGRADE_FROM = "1.0.0"
+_UPGRADE_TO = "1.1.0"
+_UPGRADE_NEW_TYPES = ("contribution", "maintainer_decision", "preference_pattern")
+_UPGRADE_RETIRED_MODULE = "decision_support"
+_UPGRADE_NEW_VIEWS = ("CONTRIBUTIONS.md", "DECISIONS.toml")
+
+
+class _UpgradeError(Exception):
+    """A fail-closed upgrade refusal carrying the operator-facing reason (mapped to exit 2)."""
+
+
+def _upgrade_read_bytes(root_fd, relpath, control=False):
+    """Read a contained store file's raw bytes no-follow; None when the path is absent. A control file
+    (the manifest) is read singly-linked (a hardlink to an out-of-tree victim is refused)."""
+    journal = _opf_store._journal
+    try:
+        data, _st = journal._read_contained(root_fd, relpath, require_single_link=control)
+    except journal.JournalError as exc:
+        text = str(exc)
+        if "cannot read contained file" in text and ("No such file" in text or "FileNotFound" in text):
+            return None
+        raise _UpgradeError("cannot read {!r} ({})".format(relpath, exc))
+    return data
+
+
+def _upgrade_replace(root_fd, relpath, data):
+    """Atomically replace an EXISTING contained regular file with `data` (bytes), no-follow, preserving
+    the destination's mode: a fresh O_EXCL temp beneath the same parent fd is written and atomically
+    renamed over the entry (never an O_TRUNC of the name), the same reopen-TOCTOU-safe idiom as the U4
+    view writer, minus its render write-gate flag (this is the schema-upgrade writer, not a render)."""
+    journal = _opf_store._journal
+    pfd, name = journal._open_parent(root_fd, relpath)
+    try:
+        st = journal._lstat_at(pfd, name)
+        if st is None or not stat.S_ISREG(st.st_mode):
+            raise _UpgradeError("refusing to rewrite {!r}: destination is not an existing regular file "
+                                "(a symlink or special file is never followed; fail-closed)".format(relpath))
+        tmpname = ".{}.opf-upgrade.{}.{}".format(name, os.getpid(), os.urandom(8).hex())
+        fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=pfd)
+        renamed = False
+        try:
+            try:
+                os.fchmod(fd, stat.S_IMODE(st.st_mode))
+                journal._write_all(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)
+            renamed = True
+            os.fsync(pfd)
+        finally:
+            if not renamed:
+                try:
+                    os.unlink(tmpname, dir_fd=pfd)
+                except OSError:
+                    pass
+    finally:
+        os.close(pfd)
+
+
+def _upgrade_create_index(root_fd, relpath, data):
+    """Create a missing empty index file create-only (O_EXCL, no-follow); an already-present index is
+    LEFT untouched (governance-enabled MD/PP whose records are preserved byte-for-byte, spec 9.2).
+    Returns True when this call created the file, False when it already existed."""
+    journal = _opf_store._journal
+    pfd, name = journal._open_parent(root_fd, relpath)
+    try:
+        if journal._lstat_at(pfd, name) is not None:
+            return False
+        journal._recreate_file(pfd, name, data, 0o644)
+        os.fsync(pfd)
+        return True
+    finally:
+        os.close(pfd)
+
+
+def _upgrade_plan(manifest_model, counters_model):
+    """Apply EXACTLY the spec-9.2 1.0.0 -> 1.1.0 allowed delta to the parsed manifest and counters models,
+    returning (new_manifest, new_counters, added_namespaces). Refuses (a _UpgradeError, fail-closed) any
+    input that is not a clean 1.0.0 baseline the delta applies to, and asserts as a POSTCONDITION that the
+    manifest model diff touches only the allowed locations, so a stray mutation can never slip through."""
+    import copy
+    for table in ("devprocess", "modules", "types", "views"):
+        if not isinstance(manifest_model.get(table), dict):
+            raise _UpgradeError("manifest [{}] table is missing or malformed; not a store this "
+                                "upgrade can migrate (fail-closed)".format(table))
+    if manifest_model["devprocess"].get("spec_version") != _UPGRADE_FROM:
+        raise _UpgradeError("manifest spec_version is not {!r}; no known upgrade path".format(_UPGRADE_FROM))
+    if _UPGRADE_RETIRED_MODULE not in manifest_model["modules"]:
+        raise _UpgradeError("manifest [modules] carries no {!r} key; not a 1.0.0 baseline this upgrade "
+                            "recognizes (fail-closed)".format(_UPGRADE_RETIRED_MODULE))
+    for tname in _UPGRADE_NEW_TYPES:
+        if tname in manifest_model["types"]:
+            raise _UpgradeError("manifest already declares baseline type {!r}; store is not a clean 1.0.0 "
+                                "baseline (fail-closed)".format(tname))
+    for vname in _UPGRADE_NEW_VIEWS:
+        if vname in manifest_model["views"]:
+            raise _UpgradeError("manifest already declares view {!r}; store is not a clean 1.0.0 "
+                                "baseline (fail-closed)".format(vname))
+    if not isinstance(counters_model.get("counters"), dict):
+        raise _UpgradeError("counters.toml [counters] table is missing or malformed (fail-closed)")
+
+    new_manifest = copy.deepcopy(manifest_model)
+    new_manifest["devprocess"]["spec_version"] = _UPGRADE_TO
+    del new_manifest["modules"][_UPGRADE_RETIRED_MODULE]
+    for tname in _UPGRADE_NEW_TYPES:
+        new_manifest["types"][tname] = {"namespace": _opf_store.BASELINE_TYPES[tname]}
+    for vname in _UPGRADE_NEW_VIEWS:
+        kind, sources, _renderer = _opf_views.NAMED_VIEWS[vname]
+        new_manifest["views"][vname] = {
+            "kind": kind,
+            "sources": list(sources),
+            "target": "{}/{}".format(_opf_store.WORKING_DIRNAME, vname),
+        }
+
+    # Postcondition (spec 9.2): the manifest model diff equals EXACTLY the allowed delta. Every top-level
+    # table other than modules/types/views is byte-identical; modules loses ONLY the retired key; types and
+    # views gain ONLY the enumerated names; devprocess changes ONLY spec_version.
+    for table in set(manifest_model) | set(new_manifest):
+        if table in ("modules", "types", "views", "devprocess"):
+            continue
+        if manifest_model.get(table) != new_manifest.get(table):
+            raise _UpgradeError("upgrade postcondition failed: table [{}] changed but is not in the allowed "
+                                "delta (fail-closed)".format(table))
+    if set(new_manifest["modules"]) != set(manifest_model["modules"]) - {_UPGRADE_RETIRED_MODULE}:
+        raise _UpgradeError("upgrade postcondition failed: [modules] delta is not exactly the retired key")
+    if set(new_manifest["types"]) != set(manifest_model["types"]) | set(_UPGRADE_NEW_TYPES):
+        raise _UpgradeError("upgrade postcondition failed: [types] delta is not exactly the new baseline types")
+    if set(new_manifest["views"]) != set(manifest_model["views"]) | set(_UPGRADE_NEW_VIEWS):
+        raise _UpgradeError("upgrade postcondition failed: [views] delta is not exactly the new view rows")
+    dp_old, dp_new = manifest_model["devprocess"], new_manifest["devprocess"]
+    if (set(dp_old) != set(dp_new)
+            or any(dp_old[k] != dp_new[k] for k in dp_old if k != "spec_version")):
+        raise _UpgradeError("upgrade postcondition failed: [devprocess] changed beyond spec_version")
+
+    new_counters = copy.deepcopy(counters_model)
+    added = []
+    for tname in _UPGRADE_NEW_TYPES:
+        ns = _opf_store.BASELINE_TYPES[tname]
+        if ns not in new_counters["counters"]:
+            new_counters["counters"][ns] = 0
+            added.append(ns)
+    return new_manifest, new_counters, added
+
+
+def _cmd_upgrade(rest):
+    """`opf upgrade [--root DIR]`: the in-place, additive, idempotent 1.0.0 -> 1.1.0 store-schema upgrade
+    (spec 9.2). It RESOLVES the store at --root, refuses fail-closed on a store above the tooling spec or on
+    a non-canonical (hand-edited/comment-bearing) manifest or counters, applies EXACTLY the allowed delta as
+    a model regeneration through the canonical new-document emitter (bump spec_version; drop the retired
+    decision_support module; add the contribution/maintainer_decision/preference_pattern type rows and the
+    two new view rows; extend counters with the CN/MD/PP zeros preserving existing high-waters; create the
+    three missing empty indexes, skipping any that already exist), RENDERS the declared views, and requires a
+    full doctor VALID before offering the staged change. It NEVER commits: the adopter reviews and merges. A
+    store already at {to} is a byte no-op (idempotent); a NOT-ADOPTED root is NOT APPLICABLE (exit 0), any
+    other non-resolved status a located cannot-evaluate (exit 2). Residual: the single-writer lease / store
+    consistency lock (spec 5.7) has no runtime in this build, so like `opf init` and `render --write` the
+    upgrade does not itself hold one; run it on a quiescent store.""".format(to=_UPGRADE_TO)
+    root = None
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "--root":
+            if i + 1 >= len(rest):
+                print("opf upgrade: --root requires a directory argument", file=sys.stderr)
+                return EXIT_MALFORMED
+            if root is not None:
+                print("opf upgrade: --root given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            val = rest[i + 1]
+            if val == "" or val.startswith("-"):
+                print("opf upgrade: --root requires a non-empty directory argument, not {!r}".format(val),
+                      file=sys.stderr)
+                return EXIT_MALFORMED
+            root = val
+            i += 2
+        else:
+            print("opf upgrade: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            return EXIT_MALFORMED
+    root = root if root is not None else "."
+    try:
+        return _upgrade_run(root)
+    except _UpgradeError as exc:
+        print("opf upgrade: refused: {}; exit 2".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false success
+        print("opf upgrade: cannot evaluate: unexpected error ({!r}); failing closed to exit 2".format(exc),
+              file=sys.stderr)
+        return EXIT_MALFORMED
+
+
+def _upgrade_run(root):
+    import shlex
+    import tomllib
+    if _UPGRADE_TO != _opf_store.SUPPORTED_SPEC_VERSION:
+        raise _UpgradeError("upgrade target {!r} does not match the tooling spec_version {!r}; refusing to "
+                            "run a stale upgrade path (fail-closed)".format(
+                                _UPGRADE_TO, _opf_store.SUPPORTED_SPEC_VERSION))
+    try:
+        res = _opf_store.resolve_store(Path(os.path.abspath(root)))
+    except Exception as exc:  # noqa: BLE001  a resolver escape is cannot-evaluate, never a mutation
+        raise _UpgradeError("unexpected error resolving the store at {!r} ({!r})".format(root, exc))
+    if res.status == _opf_store.NOT_ADOPTED:
+        print("opf upgrade: NOT APPLICABLE ({})".format(res.detail))
+        return EXIT_OK
+    if res.status != _opf_store.RESOLVED:
+        print("opf upgrade: cannot evaluate: {}".format(res.detail), file=sys.stderr)
+        return EXIT_MALFORMED
+
+    machine_rel = res.machine_rel
+    manifest_rel = "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)
+    counters_rel = "{}/{}".format(machine_rel, _opf_check.COUNTERS_NAME)
+    root_fd = _opf_store._open_dir_nofollow(res.store_root)
+    try:
+        manifest_bytes = _upgrade_read_bytes(root_fd, manifest_rel, control=True)
+        counters_bytes = _upgrade_read_bytes(root_fd, counters_rel)
+        if manifest_bytes is None or counters_bytes is None:
+            raise _UpgradeError("store manifest or counters is absent; not a resolvable store to upgrade")
+        try:
+            manifest_model = tomllib.loads(manifest_bytes.decode("utf-8"))
+            counters_model = tomllib.loads(counters_bytes.decode("utf-8"))
+        except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+            raise _UpgradeError("store manifest or counters does not parse as TOML ({})".format(exc))
+
+        # spec_version triage: current is an idempotent byte no-op; above-tooling fails closed; only the
+        # single known 1.0.0 origin proceeds.
+        sv = manifest_model.get("devprocess", {}).get("spec_version") if isinstance(
+            manifest_model.get("devprocess"), dict) else None
+        if sv == _UPGRADE_TO:
+            print("opf upgrade: store is already at spec_version {}; nothing to upgrade (no-op).".format(
+                _UPGRADE_TO))
+            return EXIT_OK
+        try:
+            sv_tuple = tuple(int(p) for p in sv.split(".")) if isinstance(sv, str) else None
+        except ValueError:
+            sv_tuple = None
+        if sv_tuple is not None and sv_tuple > tuple(int(p) for p in _UPGRADE_TO.split(".")):
+            raise _UpgradeError("store declares spec_version {!r} ABOVE the {} this tooling implements; "
+                                "a newer store is never downgraded (fail-closed)".format(sv, _UPGRADE_TO))
+
+        # PRECONDITION (spec 9.2): re-emitting the UNCHANGED parsed model reproduces the on-disk bytes
+        # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing.
+        if _opf_emit.emit_checked(manifest_model).encode("utf-8") != manifest_bytes:
+            raise _UpgradeError("manifest is not in canonical new-document form (hand-edited or comment-"
+                                "bearing); refusing a model rewrite that could lose content (fail-closed)")
+        if _opf_emit.emit_checked(counters_model).encode("utf-8") != counters_bytes:
+            raise _UpgradeError("counters.toml is not in canonical new-document form; refusing (fail-closed)")
+
+        new_manifest, new_counters, added_ns = _upgrade_plan(manifest_model, counters_model)
+        new_manifest_bytes = _opf_emit.emit_checked(new_manifest).encode("utf-8")
+        new_counters_bytes = _opf_emit.emit_checked(new_counters).encode("utf-8")
+
+        # Apply: rewrite manifest + counters (canonical bytes), create the missing empty indexes.
+        _upgrade_replace(root_fd, manifest_rel, new_manifest_bytes)
+        _upgrade_replace(root_fd, counters_rel, new_counters_bytes)
+        empty_index = _opf_emit.emit_checked(
+            {"schema": _opf_schema.SUPPORTED_SCHEMA, "record": []}).encode("utf-8")
+        created_indexes = []
+        for tname in _UPGRADE_NEW_TYPES:
+            idx_rel = "{}/{}{}".format(machine_rel, tname, _opf_check.INDEX_SUFFIX)
+            if _upgrade_create_index(root_fd, idx_rel, empty_index):
+                created_indexes.append(tname)
+    finally:
+        os.close(root_fd)
+
+    # Render the declared views (materializes the two new views and re-renders DECISIONS.md), then require a
+    # full doctor VALID before offering the staged change. Both run over the mutated (uncommitted) tree.
+    render_argv = ["--root", root, "--write"]
+    try:
+        rres = _opf_store.resolve_store(Path(os.path.abspath(root)))
+        robs, _notes = _opf_observe.gather(rres) if rres.status == _opf_store.RESOLVED else (None, [])
+        rc = _opf_views.render(render_argv, observations=robs)
+    except Exception as exc:  # noqa: BLE001  a render escape must not read as a clean upgrade; fail closed
+        raise _UpgradeError("view render after the schema delta failed ({!r}); the staged change is left "
+                            "for review".format(exc))
+    if rc != EXIT_OK:
+        print("opf upgrade: cannot evaluate: view render after the schema delta did not complete cleanly "
+              "(rc={}); the staged change is left for review, exit 2".format(rc), file=sys.stderr)
+        return EXIT_MALFORMED
+
+    dres = _opf_store.resolve_store(Path(os.path.abspath(root)))
+    if dres.status != _opf_store.RESOLVED:
+        raise _UpgradeError("the upgraded store no longer resolves ({}); fail-closed".format(dres.detail))
+    dobs, _dnotes = _opf_observe.gather(dres)
+    result = _opf_check.validate_store(dres, observations=dobs)
+    if result.status != _opf_store.VALID:
+        print("opf upgrade: the upgraded store is NOT doctor-VALID; refusing to offer the change "
+              "(fail-closed, spec 9.2). Run `opf doctor --root {}` for the findings, exit 2.".format(root),
+              file=sys.stderr)
+        _doctor_report(result)
+        return EXIT_MALFORMED
+
+    print("opf upgrade: store schema upgraded {} -> {} and doctor-VALID (staged, NOT committed).".format(
+        _UPGRADE_FROM, _UPGRADE_TO))
+    print(json.dumps({"event": "upgraded", "root": str(root), "from": _UPGRADE_FROM, "to": _UPGRADE_TO,
+                      "created_indexes": sorted(created_indexes), "added_counters": sorted(added_ns)},
+                     sort_keys=True))
+    print("opf upgrade: review the staged changes, then stage and commit them:")
+    print("  git -C {} --literal-pathspecs add -A".format(shlex.quote(str(root))))
+    print("opf upgrade: exit 0 means the store is valid at {}; committing is the adopter's own step.".format(
+        _UPGRADE_TO))
+    return EXIT_OK
+
+
 def _cli_self_test():
     """Guard the dispatcher's render, doctor, and source-only init routes.
     Render/doctor cases below judge return codes; init also checks payload validation, refusal reasons,
@@ -1073,7 +1394,7 @@ def _cli_self_test():
         expect([], EXIT_MALFORMED)
         expect(["frobnicate"], EXIT_MALFORMED)
         for verb in KNOWN_VERBS:
-            if verb not in ("init", "render", "doctor"):
+            if verb not in ("init", "render", "doctor", "upgrade"):
                 expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
         expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
         expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
@@ -1132,6 +1453,14 @@ def _cli_self_test():
                 # observation), mirroring how the render clean/drift 0/1 rides check_opf_drift.py --self-test.
                 expect(["doctor", "--root", not_adopted], EXIT_OK)
                 expect(["doctor", "--root", broken], EXIT_MALFORMED)
+                # upgrade over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and
+                # returns 0 -- the wiring discriminator (reverting the upgrade route sends `upgrade` to the
+                # fail-closed KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store
+                # fails closed (exit 2). The full 1.0.0 -> 1.1.0 migration discrimination (schema delta,
+                # canonical-bytes precondition, doctor-VALID gate, idempotence, and the above-tooling refusal)
+                # rides check_opf_upgrade.py --self-test end to end over a byte-pinned committed 1.0.0 store.
+                expect(["upgrade", "--root", not_adopted], EXIT_OK)
+                expect(["upgrade", "--root", broken], EXIT_MALFORMED)
             finally:
                 shutil.rmtree(base, ignore_errors=True)
             return None
@@ -1213,7 +1542,7 @@ def _self_tests():
 )
 
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
-KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync")
+KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync", "upgrade")
 
 
 # Helper self-tests that pin sys.set_int_max_str_digits(4300) inside a fixture and MUST restore the ambient
@@ -1295,6 +1624,8 @@ def main(argv=None):
         return _cmd_doctor(rest)
     if verb == "init":
         return _cmd_init(rest)
+    if verb == "upgrade":
+        return _cmd_upgrade(rest)
     if verb in KNOWN_VERBS:
         # A recognized verb whose unit has not landed: fail closed (exit 2), never a silent success, so
         # a stub is never mistaken for a completed operation.
