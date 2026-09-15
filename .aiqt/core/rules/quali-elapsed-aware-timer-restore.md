@@ -10,11 +10,15 @@ slug: elapsed-aware-timer-restore
 
 # A borrowed process timer is restored elapsed-aware
 
-Code that borrows a caller's process-global deadline facility for a bounded window, a signal handler,
-an interval timer, or a pending single-shot alarm, restores the caller's state elapsed-aware, never
-verbatim. A monotonic timestamp is recorded when the borrow opens; on restore the saved remaining
-interval of an active caller timer is reduced by the elapsed time the window consumed. A caller
-deadline that would have expired during the window is made immediately deliverable at the platform's
+Code that borrows a caller's process-global deadline facility for a bounded window, a signal
+handler, an interval timer, or a pending single-shot alarm, restores the caller's state
+elapsed-aware, never verbatim. The consumption is measured in the borrowed timer's own clock domain
+(wall or monotonic time for a real-time timer, the relevant process or thread CPU time for a
+CPU-time timer), read when the borrow opens, so a CPU-time timer is reduced by the CPU time it
+actually consumed and never by wall-clock elapsed, which would over-reduce it by time the window
+spent blocked or sleeping. On restore the saved remaining interval of an active caller timer is
+reduced by the amount that timer's own clock advanced during the window. A caller deadline whose
+remaining interval that reduction would exhaust is made immediately deliverable at the platform's
 minimal positive delay, never dropped and never re-armed at its full original value. An inactive
 caller timer remains inactive rather than being armed by the expiry clamp. A pending notification or
 single-shot alarm is preserved, not consumed or discarded. A periodic timer's repeat interval, and

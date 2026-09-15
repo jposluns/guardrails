@@ -5171,80 +5171,80 @@ corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
 start-line = 13
 end-line = 15
-canonical-text = "Code that borrows a caller's process-global deadline facility for a bounded window, a signal handler,\nan interval timer, or a pending single-shot alarm, restores the caller's state elapsed-aware, never\nverbatim."
-source-digest = "2f5357e5a0729cb225581740a5471775b56ed1f31f239e2085154ffda0176c02"
+canonical-text = "Code that borrows a caller's process-global deadline facility for a bounded window, a signal\nhandler, an interval timer, or a pending single-shot alarm, restores the caller's state\nelapsed-aware, never verbatim."
+source-digest = "8667ba30c72be9fd22e19b9707c1611fe08c074a62dcff2ca626015734837d21"
 
 [[clause]]
 clause-id = "tmrrst.2"
 corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
 start-line = 15
-end-line = 16
-canonical-text = "A monotonic timestamp is recorded when the borrow opens; on restore the saved remaining\ninterval of an active caller timer is reduced by the elapsed time the window consumed."
-source-digest = "2f5357e5a0729cb225581740a5471775b56ed1f31f239e2085154ffda0176c02"
+end-line = 20
+canonical-text = "The consumption is measured in the borrowed timer's own clock domain\n(wall or monotonic time for a real-time timer, the relevant process or thread CPU time for a\nCPU-time timer), read when the borrow opens, so a CPU-time timer is reduced by the CPU time it\nactually consumed and never by wall-clock elapsed, which would over-reduce it by time the window\nspent blocked or sleeping. On restore the saved remaining interval of an active caller timer is\nreduced by the amount that timer's own clock advanced during the window."
+source-digest = "8667ba30c72be9fd22e19b9707c1611fe08c074a62dcff2ca626015734837d21"
 
 [[clause]]
 clause-id = "tmrrst.3"
 corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
-start-line = 16
-end-line = 18
-canonical-text = "A caller\ndeadline that would have expired during the window is made immediately deliverable at the platform's\nminimal positive delay, never dropped and never re-armed at its full original value."
-source-digest = "2f5357e5a0729cb225581740a5471775b56ed1f31f239e2085154ffda0176c02"
+start-line = 20
+end-line = 22
+canonical-text = "A caller deadline whose\nremaining interval that reduction would exhaust is made immediately deliverable at the platform's\nminimal positive delay, never dropped and never re-armed at its full original value."
+source-digest = "8667ba30c72be9fd22e19b9707c1611fe08c074a62dcff2ca626015734837d21"
 
 [[clause]]
 clause-id = "tmrrst.4"
 corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
-start-line = 18
-end-line = 19
+start-line = 22
+end-line = 23
 canonical-text = "An inactive\ncaller timer remains inactive rather than being armed by the expiry clamp."
-source-digest = "2f5357e5a0729cb225581740a5471775b56ed1f31f239e2085154ffda0176c02"
+source-digest = "8667ba30c72be9fd22e19b9707c1611fe08c074a62dcff2ca626015734837d21"
 
 [[clause]]
 clause-id = "tmrrst.5"
 corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
-start-line = 19
-end-line = 20
+start-line = 23
+end-line = 24
 canonical-text = "A pending notification or\nsingle-shot alarm is preserved, not consumed or discarded."
-source-digest = "2f5357e5a0729cb225581740a5471775b56ed1f31f239e2085154ffda0176c02"
+source-digest = "8667ba30c72be9fd22e19b9707c1611fe08c074a62dcff2ca626015734837d21"
 
 [[clause]]
 clause-id = "tmrrst.6"
 corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
-start-line = 20
-end-line = 21
+start-line = 24
+end-line = 25
 canonical-text = "A periodic timer's repeat interval, and\nits phase to the extent the platform can express it, are preserved."
-source-digest = "2f5357e5a0729cb225581740a5471775b56ed1f31f239e2085154ffda0176c02"
+source-digest = "8667ba30c72be9fd22e19b9707c1611fe08c074a62dcff2ca626015734837d21"
 
 [[clause]]
 clause-id = "tmrrst.7"
 corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
-start-line = 21
-end-line = 22
+start-line = 25
+end-line = 26
 canonical-text = "The original handler is\nreinstalled through exception-safe cleanup."
-source-digest = "2f5357e5a0729cb225581740a5471775b56ed1f31f239e2085154ffda0176c02"
+source-digest = "8667ba30c72be9fd22e19b9707c1611fe08c074a62dcff2ca626015734837d21"
 
 [[clause]]
 clause-id = "tmrrst.8"
 corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
-start-line = 22
-end-line = 24
+start-line = 26
+end-line = 28
 canonical-text = "The save and the elapsed-aware restore live once, in a\nsingle shared, nesting-safe helper, so no call site can hand-roll a variant that reintroduces the\nverbatim restore, and the helper itself remains subject to the same inspection as any call site."
-source-digest = "2f5357e5a0729cb225581740a5471775b56ed1f31f239e2085154ffda0176c02"
+source-digest = "8667ba30c72be9fd22e19b9707c1611fe08c074a62dcff2ca626015734837d21"
 
 [[clause]]
 clause-id = "tmrrst.9"
 corpus-id = "tmrrst"
 source-path = ".aiqt/core/rules/quali-elapsed-aware-timer-restore.md"
-start-line = 25
-end-line = 27
+start-line = 29
+end-line = 31
 canonical-text = "Where the platform cannot preserve the caller's state reliably, the code uses a timeout mechanism\nthat is not process-global, or refuses the borrow, rather than corrupting the caller's deadline,\nmost dangerously a watchdog's."
-source-digest = "2f5357e5a0729cb225581740a5471775b56ed1f31f239e2085154ffda0176c02"
+source-digest = "8667ba30c72be9fd22e19b9707c1611fe08c074a62dcff2ca626015734837d21"
 
 [[clause]]
 clause-id = "secspr.9"
