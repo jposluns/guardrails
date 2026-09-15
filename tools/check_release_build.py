@@ -421,6 +421,21 @@ def _pin_fixture_version(repo, failures, env, version="1.0.0"):
     return True
 
 
+def _regen_fixture_manifest(root, case, failures, env):
+    """Regenerate a fixture's manifest via gen_manifest --root as SELF-TEST SETUP, failing CLOSED on a
+    nonzero gen exactly as _pin_fixture_version does. A setup gen-failure is a real fixture-setup failure:
+    it appends a DISTINCT "fixture setup ... gen_manifest --root failed" entry to `failures` and returns
+    False, so the affected fixture does NOT proceed to its verdict assertion, where a coincidental exit
+    could otherwise be misread (or misattributed to the behaviour under test) as the intended gate verdict.
+    Returns True only when the manifest was actually regenerated."""
+    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(root)],
+                      capture_output=True, env=env).returncode != 0:
+        failures.append("fixture setup ({}): gen_manifest --root failed; a fixture-setup gen failure FAILS "
+                        "the self-test rather than silently passing as the intended assertion".format(case))
+        return False
+    return True
+
+
 def _materialized_check(root, sha, commands_fn, what):
     """Raw-materialize `sha` into a throwaway FRESH git repo and run each check command `commands_fn(co)`
     returns inside it. The tree is materialized from RAW blob bytes (git ls-tree + cat-file, round-4 finding
@@ -2189,25 +2204,28 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
                             'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
                                 a_tobj, a_csha, a_qa_sha, a_tagger - 100), encoding="utf-8")
-                        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(ac)],
-                                       capture_output=True, env=ge)
+                        base_ok = _regen_fixture_manifest(ac, "attestation base commit", failures, ge)
                         subprocess.run(["git", "-C", str(ac), "add", "-A"], capture_output=True, env=ge)
                         subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m",
                                         "attestation commit: append row 1", "--no-verify"],
                                        capture_output=True, env=ge)
                         a_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
                                                capture_output=True, text=True).stdout.strip()
-                        gmc = subprocess.run(["python3", "tools/gen_manifest.py", "--check", "--root",
-                                              str(ac)], capture_output=True)
-                        cmc = subprocess.run(["python3", "tools/check_manifest.py"], cwd=str(ac),
-                                             capture_output=True)
-                        if gmc.returncode != 0 or cmc.returncode != 0:
-                            failures.append("attestation commit is not green under the wired manifest gates "
-                                            "(gen_manifest --check rc={}, check_manifest rc={}); round-7 "
-                                            "finding 6".format(gmc.returncode, cmc.returncode))
-                        if _run_post_tag_quiet(ac, a_oid, str(a_qa)) != 0:
-                            failures.append("post-tag must validate the regenerated attestation-commit "
-                                            "artifacts, exit 0 (round-7 finding 6)")
+                        # The attestation-green verdict (finding 6) is meaningful only when the base manifest
+                        # was actually regenerated; a setup gen-failure is recorded DISTINCTLY above and must
+                        # NOT be misattributed here as a finding-6 non-green result.
+                        if base_ok:
+                            gmc = subprocess.run(["python3", "tools/gen_manifest.py", "--check", "--root",
+                                                  str(ac)], capture_output=True)
+                            cmc = subprocess.run(["python3", "tools/check_manifest.py"], cwd=str(ac),
+                                                 capture_output=True)
+                            if gmc.returncode != 0 or cmc.returncode != 0:
+                                failures.append("attestation commit is not green under the wired manifest "
+                                                "gates (gen_manifest --check rc={}, check_manifest rc={}); "
+                                                "round-7 finding 6".format(gmc.returncode, cmc.returncode))
+                            if _run_post_tag_quiet(ac, a_oid, str(a_qa)) != 0:
+                                failures.append("post-tag must validate the regenerated attestation-commit "
+                                                "artifacts, exit 0 (round-7 finding 6)")
 
                         # === ROUND-8 archive-based post-tag cases (need a full pack tree for the #2
                         # branch-integrity recompute) ================================================
@@ -2260,14 +2278,13 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             'tag_object_sha = "{}"\ncommit_sha = "{}"\nqa-sha256 = "{}"\n'
                             'qa-store-path = "qa/1.0.0.toml"\nattestation-timestamps = [{}]\n'.format(
                                 a_tobj, a_csha, forge_qa_sha, a_tagger - 100), encoding="utf-8")
-                        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(ac)],
-                                       capture_output=True, env=ge)
+                        forge_ok = _regen_fixture_manifest(ac, "forge-chronology commit", failures, ge)
                         subprocess.run(["git", "-C", str(ac), "add", "-A"], capture_output=True, env=ge)
                         subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", "forge chronology",
                                         "--no-verify"], capture_output=True, env=ge)
                         forge_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
                                                    capture_output=True, text=True).stdout.strip()
-                        if _run_post_tag_quiet(ac, forge_oid, str(forge_qa)) != 1:
+                        if forge_ok and _run_post_tag_quiet(ac, forge_oid, str(forge_qa)) != 1:
                             failures.append("(post-tag) a QA object whose retrieved timestamps postdate the "
                                             "tag while the row lists an early timestamp must exit 1 (#6)")
 

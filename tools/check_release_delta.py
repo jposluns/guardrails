@@ -1075,6 +1075,22 @@ def _pin_fixture_version(repo, failures, version="1.0.0"):
     return True
 
 
+def _regen_fixture_manifest(root, case, failures, env):
+    """Regenerate a fixture's manifest via gen_manifest --root as SELF-TEST SETUP, failing CLOSED on a
+    nonzero gen exactly as _pin_fixture_version does. A setup gen-failure is a real fixture-setup failure:
+    it appends a DISTINCT "fixture setup ... gen_manifest --root failed" entry to `failures` (which makes
+    self_test_main return nonzero) and returns False, so the affected fixture does NOT proceed to its
+    verdict assertion, where a coincidental exit (a stale/broken manifest ALSO drives exit 2) could
+    otherwise be misread as the intended gate verdict and pass by luck. Returns True only when the manifest
+    was actually regenerated."""
+    if subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(root)],
+                      capture_output=True, env=env).returncode != 0:
+        failures.append("fixture setup ({}): gen_manifest --root failed; a fixture-setup gen failure FAILS "
+                        "the self-test rather than silently passing as the intended assertion".format(case))
+        return False
+    return True
+
+
 def _edit_clause_consistently(repo):
     """Edit ONE clause's canonical-text CONSISTENTLY: pick a clause that is the sole coverer of every line
     in its span (so no sibling window breaks), rewrite those source lines, and recompute the whole-file
@@ -1179,16 +1195,14 @@ def _real_pack_e2e(tmp, failures):
         # release-version equals the changelog version (round-7 finding 2 binds the two).
         (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
         (repo / CHANGELOG_REL).write_text('[[release]]\nversion = "{}"\n'.format(version), encoding="utf-8")
-        return subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)],
-                              capture_output=True, env=env).returncode == 0
+        return _regen_fixture_manifest(repo, "real full-pack head @ {}".format(version), failures, env)
 
     def _regen_manifest():
         # Regenerate the HEAD manifest so it is FRESH after later writes to source records (dispositions,
         # releases): the HEAD manifest freshness check (this round's #1) now runs on it, so a case meant to
         # PROCEED past the manifest stage must present a fresh manifest. The records are already tracked, so
         # gen_manifest (which reads content from disk) sees the new bytes without a restage.
-        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo)], capture_output=True,
-                       env=env)
+        return _regen_fixture_manifest(repo, "real full-pack head regen", failures, env)
 
     def _disp(release):
         (repo / DISPOSITIONS_REL).write_text(
@@ -1203,12 +1217,12 @@ def _real_pack_e2e(tmp, failures):
                     fmtver, t=tobj, c=commit1, h="a" * 64))
 
     if not _set_head_version("1.0.1"):
-        print("SELF-TEST NOTE: could not regenerate the head manifest; real full-pack case SKIPPED",
-              file=sys.stderr)
-        return False
+        return False   # the helper recorded a DISTINCT fixture-setup failure; do NOT skip past it silently
     _disp("1.0.1")
     (repo / RELEASES_REL).write_text(_releases(1), encoding="utf-8")
-    _regen_manifest()   # FRESH head manifest after the disposition + release-row writes (this round's #1)
+    # FRESH head manifest after the disposition + release-row writes (this round's #1)
+    if not _regen_manifest():
+        return False
     # (finding 2) a CONSISTENTLY-edited id-keyed PATCH change, fully dispositioned, with an ANCHORED
     # predecessor and a VERSION-BOUND head: clean exit 0.
     if _run_quiet_root(repo) != 0:
@@ -1360,7 +1374,9 @@ def _real_pack_e2e(tmp, failures):
     if _set_head_version("2.0.0"):
         _disp("1.0.1")   # mis-dated for the 2.0.0 change
         (repo / RELEASES_REL).write_text(_releases(1), encoding="utf-8")
-        _regen_manifest()   # FRESH head manifest after the disposition + release-row writes (this round's #1)
+        # FRESH head manifest after the disposition + release-row writes (this round's #1)
+        if not _regen_manifest():
+            return False
         if _run_quiet_root(repo) != 1:
             failures.append("real full-pack run(): a wrong-version disposition for the detected change must "
                             "be flagged exit 1 (round-3 finding 3)")
@@ -1421,9 +1437,8 @@ def _real_pack_e2e(tmp, failures):
         (repo2 / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
         # Regenerate the head manifest so its release-version (1.0.1) binds to the changelog (round-7
         # finding 2); the predecessor closure edit is caught later, at the raw predecessor materialization.
-        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo2)],
-                       capture_output=True, env=env)
-        if _run_quiet_root(repo2) != 2:
+        if _regen_fixture_manifest(repo2, "real-pack-smudge head", failures, env) \
+                and _run_quiet_root(repo2) != 2:
             failures.append("real full-pack run(): a smudge-filter-hidden predecessor renderer-closure edit "
                             "must be caught by the raw materialization, exit 2 (round-4 findings 1/4)")
 
@@ -1475,9 +1490,8 @@ def _real_pack_e2e(tmp, failures):
             # thing supplying exit 2 is the predecessor manifest guard under test. Regenerating before the
             # releases write left HEAD stale, and that stale HEAD independently gave exit 2 and MASKED the
             # predecessor guard (neutering it still left the fixture passing).
-            subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(repo3)],
-                           capture_output=True, env=env)
-            if _run_quiet_root(repo3) != 2:
+            if _regen_fixture_manifest(repo3, "real-pack-omit head", failures, env) \
+                    and _run_quiet_root(repo3) != 2:
                 failures.append("real full-pack run(): a predecessor manifest that under-claims a covered "
                                 "pack path (NOTICE) must be caught by gen_manifest --check/check_manifest on "
                                 "the raw predecessor, exit 2 (round-8 finding 1)")
@@ -1520,7 +1534,8 @@ def _real_pack_e2e(tmp, failures):
         (rp / "VERSION").write_text("1.0.1\n", encoding="utf-8")
         (rp / CHANGELOG_REL).write_text('[[release]]\nversion = "1.0.1"\n', encoding="utf-8")
         (rp / DISPOSITIONS_REL).write_text("format-version = 1\n", encoding="utf-8")
-        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(rp)], capture_output=True, env=env)
+        if not _regen_fixture_manifest(rp, "pred fixture ({}) head base".format(dirname), failures, env):
+            return
         (rp / RELEASES_REL).write_text(
             'format-version = 1\n\n[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
             'tag_object_sha = "{t}"\ncommit_sha = "{c}"\nqa-sha256 = "{h}"\n'
@@ -1530,7 +1545,8 @@ def _real_pack_e2e(tmp, failures):
         # manifest freshness check (this round's #1) must PASS, so the committed PREDECESSOR record under
         # test is the sole failure. Without this the stale head manifest would fail #1's check and mask the
         # predecessor check each fixture targets.
-        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(rp)], capture_output=True, env=env)
+        if not _regen_fixture_manifest(rp, "pred fixture ({}) head fresh".format(dirname), failures, env):
+            return
         if _run_quiet_root(rp) != 2:
             failures.append(want_msg)
 
@@ -1845,9 +1861,9 @@ def _real_pack_e2e(tmp, failures):
     def _genesis_regen(dest):
         genv = _selftest_env()
         subprocess.run(["git", "-C", str(dest), "add", "-A"], capture_output=True, env=genv)
-        subprocess.run(["python3", "tools/gen_manifest.py", "--root", str(dest)], capture_output=True,
-                       env=genv)
+        ok = _regen_fixture_manifest(dest, "genesis regen ({})".format(dest.name), failures, genv)
         subprocess.run(["git", "-C", str(dest), "add", "-A"], capture_output=True, env=genv)
+        return ok
 
     # (round-5 finding 1) a HEAD clause whose source-path is NON-CANONICAL ('rules/../rules/...') but RESOLVES
     # to the real file: check_clauses resolves and PASSES it (the finding's escape, clean PATCH exit 0);
@@ -1863,8 +1879,7 @@ def _real_pack_e2e(tmp, failures):
             noncanon = "/".join(parts[:-1] + ["..", parts[-2], parts[-1]])   # dir/sub/../sub/file (same file)
             cp.write_text(text.replace('source-path = "{}"'.format(m.group(1)),
                                        'source-path = "{}"'.format(noncanon), 1), encoding="utf-8")
-            _genesis_regen(g1)
-            if _run_quiet_root(g1) != 2:
+            if _genesis_regen(g1) and _run_quiet_root(g1) != 2:
                 failures.append("real genesis full-pack run(): a non-canonical HEAD clause source-path that "
                                 "resolves to the real file must fail closed exit 2 (round-5 finding 1)")
 
@@ -1880,8 +1895,7 @@ def _real_pack_e2e(tmp, failures):
             'captured-source = "https://exa mple.com/s"\ncapture-date = "2026-08-24"\n'
             'observed-measurement = "1 byte"\nobserved-date = "2026-08-24"\n'
             'prefix-superset-reference = "qa/prefix.toml"\n', encoding="utf-8")
-        _genesis_regen(g3)
-        if _run_quiet_root(g3) != 2:
+        if _genesis_regen(g3) and _run_quiet_root(g3) != 2:
             failures.append("real genesis full-pack run(): a default-correction captured-source with a "
                             "spaced host must fail closed exit 2 (round-5 finding 3)")
 
@@ -1896,8 +1910,7 @@ def _real_pack_e2e(tmp, failures):
             'captured-source = "https://example.com/%zz"\ncapture-date = "2026-08-24"\n'
             'observed-measurement = "1 byte"\nobserved-date = "2026-08-24"\n'
             'prefix-superset-reference = "qa/prefix.toml"\n', encoding="utf-8")
-        _genesis_regen(g2)
-        if _run_quiet_root(g2) != 2:
+        if _genesis_regen(g2) and _run_quiet_root(g2) != 2:
             failures.append("real genesis full-pack run(): a default-correction captured-source with a "
                             "malformed percent escape must fail closed exit 2 (round-6 finding 2)")
 
