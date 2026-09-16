@@ -34,6 +34,7 @@ Stdlib only (`subprocess`, `tomllib`, `shutil`); imports `_opf_check` (for the p
 """
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from collections import namedtuple
@@ -224,21 +225,35 @@ def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S):
 
 
 def indexed_ignore_availability(git, store_root, gitignore_relpaths):
-    """Repo-relative candidate .gitignore paths whose ignore rule git would read from the INDEX (no
-    readable regular working-tree file at the path) but whose blob is NOT available locally without a
-    promisor fetch. The config-discovery ignore probe forces GIT_NO_LAZY_FETCH, so it reads such a blob as
-    no-rule (destination not-ignored), while the adopter's own `git add` fetches it and can then silently
-    ignore the store: a cannot-evaluate the caller must fail closed on, not pass (guard-input-soundness,
-    check-fails-closed-on-unreadable). A blob that IS available is read identically by this probe and by
-    `git add` (parity, confirmed empirically), and a .gitignore with a readable regular working-tree file is
-    read from disk by both, so neither is returned. Returns a sorted list of the unavailable repo-relative
-    .gitignore paths; an empty list means every applicable ignore input is answerable without a fetch.
-    Raises RuntimeError when the index listing or an availability probe cannot be read (itself a
-    cannot-evaluate)."""
+    """Repo-relative candidate .gitignore paths whose ignore rule the adopter's own `git add` would read
+    from the INDEX but whose blob is NOT available locally without a promisor fetch. The config-discovery
+    ignore probe forces GIT_NO_LAZY_FETCH, so it reads such a blob as no-rule (destination not-ignored),
+    while `git add` fetches it and can then silently ignore the store: a cannot-evaluate the caller must
+    fail closed on, not pass (guard-input-soundness, check-fails-closed-on-unreadable). A blob that IS
+    available is read identically by this probe and by `git add` (parity, confirmed empirically), and a
+    .gitignore with a readable regular working-tree file is read from disk by both, so neither is returned.
+
+    git index-reads a .gitignore ONLY for a stage-0 skip-worktree entry whose worktree path its own
+    O_NOFOLLOW open cannot use (add_patterns -> read_skip_worktree_file_from_index): confirmed against git
+    2.53.0. So an entry is returned only when ALL hold -- a regular-file blob, stage 0, the skip-worktree
+    flag set (`ls-files -t`/`-v` tags it "S"), a worktree path that is neither a readable regular file (git
+    reads it from disk, parity) nor a directory (git opens it, the read fails, and it never index-reads) so
+    that git's open falls back to the index, and an unavailable blob. Any other entry -- not stage 0, not
+    skip-worktree, materialized, or a directory at the path -- is one git never index-reads, so an absent
+    blob for it cannot change what `git add` ignores and it is not returned (no over-refusal). Candidate
+    paths are matched as LITERAL pathspecs (--literal-pathspecs) so a pathspec-magic sigil (a leading colon)
+    is not read as magic (an empty listing that would MISS the ignoring blob) and a glob metacharacter (a
+    bracketed class) is not expanded onto an unrelated indexed path (a false refusal); this mirrors the
+    literal-"./"-prefix trick the sibling check-ignore call in opf.py uses for the same reason.
+
+    Returns a sorted list of the unavailable repo-relative .gitignore paths; an empty list means every
+    applicable ignore input is answerable without a fetch. Raises RuntimeError when the index listing or an
+    availability probe cannot be read (itself a cannot-evaluate)."""
     if not gitignore_relpaths:
         return []
     listing = _run_git_config_discovery(
-        git, store_root, ["ls-files", "-s", "-z", "--"] + list(gitignore_relpaths))
+        git, store_root,
+        ["--literal-pathspecs", "ls-files", "-s", "-t", "-z", "--"] + list(gitignore_relpaths))
     if not listing.completed:
         raise RuntimeError("could not list indexed ignore files ({})".format(listing.err))
     if listing.rc != 0:
@@ -249,17 +264,27 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
             continue
         meta, tab, path = entry.partition("\t")
         fields = meta.split()
-        if not tab or len(fields) != 3:
+        if not tab or len(fields) != 4:
             raise RuntimeError("unparseable ls-files entry: {!r}".format(entry))
-        mode, blob, _stage = fields
+        tag, mode, blob, stage = fields
         if mode not in ("100644", "100755"):
             continue  # only a regular-file blob is a .gitignore source
+        if stage != "0" or tag != "S":
+            continue  # git index-reads only a stage-0 skip-worktree entry; nothing else can fall back
         worktree = store_root / path
         try:
-            if worktree.is_file() and os.access(str(worktree), os.R_OK):
-                continue  # git reads the materialized file from disk; the probe read it too (parity)
+            st = os.lstat(str(worktree))
+        except FileNotFoundError:
+            st = None  # truly absent: git's O_NOFOLLOW open fails and it falls back to the index blob
         except OSError:
-            pass  # an unstattable worktree path falls through to the blob-availability probe
+            st = None  # unclassifiable worktree path: fail closed to the blob-availability probe
+        if st is not None and stat.S_ISDIR(st.st_mode):
+            continue  # git opens the directory, the read fails, and it never falls back to the index
+        if (st is not None and stat.S_ISREG(st.st_mode)
+                and os.access(str(worktree), os.R_OK)):
+            continue  # git reads the materialized regular file from disk; the probe read it too (parity)
+        # Absent, a symlink, an unreadable regular file, or another type: git's open falls back to the
+        # index blob, so an unavailable blob is a cannot-evaluate the caller must refuse.
         avail = _run_git_config_discovery(git, store_root, ["cat-file", "-e", blob])
         if not avail.completed:
             raise RuntimeError("could not probe ignore-blob availability ({})".format(avail.err))

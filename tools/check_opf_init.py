@@ -159,6 +159,17 @@ def _suite(invoke):
                 raise OSError("fixture git failed at {!r}: {}".format(str(root), result.err))
             return result.out
 
+        def git_input(root, args, data):
+            # A stdin-fed fixture git call (git update-index --index-info reads the index entry from
+            # stdin); _run_git has no stdin channel. Runs under the already-isolated os.environ (HOME
+            # redirected, every GIT_* scrubbed above), so it stays hermetic like the other fixture calls.
+            proc = subprocess.run([git, "-C", str(root)] + list(args), input=data,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=os.environ.copy())
+            if proc.returncode != 0:
+                raise OSError("fixture git (stdin) failed at {!r}: {}".format(
+                    str(root), proc.stderr.decode("utf-8", "replace")))
+            return proc.stdout
+
         with tempfile.TemporaryDirectory(prefix="opf-init-gate-") as temporary:
             base = Path(temporary).resolve()
             outside = _opf_observe._run_git(git, base, ["rev-parse", "--show-toplevel"])
@@ -509,6 +520,127 @@ def _suite(invoke):
                       rc == EXIT_ERROR and "git-ignored" in output)
                 check("available skip-worktree ignore-blob preserved",
                       _snapshot(avail_blob) == ab_before)
+
+                # OPF-D2B round 7 / FINDING 2: the materialized-file skip must NOT follow symlinks. A
+                # skip-worktree .gitignore whose blob is absent and whose worktree path is a SYMLINK to a
+                # readable regular file is opened by git with O_NOFOLLOW: the open fails and git falls back
+                # to the index blob, which `git add` fetches and then ignores the store. is_file() followed
+                # the link and wrongly skipped it as materialized (false PASS); the no-follow lstat classifies
+                # the symlink as not-materialized and REFUSES. DISCRIMINATOR: init returns rc 0 (creates a
+                # store git add would skip) against the is_file() version.
+                symlink_blob = base / "d2b-symlink-gitignore"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", src_url, str(symlink_blob)])
+                git_call(symlink_blob, ["read-tree", "HEAD"])
+                git_call(symlink_blob, ["update-index", "--skip-worktree", ".gitignore"])
+                (base / "d2b-symlink-target").write_bytes(b"readable regular file\n")
+                (symlink_blob / ".gitignore").symlink_to(base / "d2b-symlink-target")
+                sb_before = _snapshot(symlink_blob)
+                rc, output = run(symlink_blob)
+                check("symlink .gitignore over absent blob refused",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("symlink .gitignore fixture preserved", _snapshot(symlink_blob) == sb_before)
+
+                # OPF-D2B round 7 / FINDING 3a: an ordinary stage-0 entry WITHOUT skip-worktree is one git
+                # never index-reads (read_skip_worktree_file_from_index requires the flag), so an absent blob
+                # for it cannot make `git add` ignore the store. The round-6 check refused ANY unmaterialized
+                # entry with an absent blob (over-refusal); init must now PROCEED. DISCRIMINATOR: rc 2 against
+                # the mode-only version.
+                nonswt = base / "d2b-nonskipworktree"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", src_url, str(nonswt)])
+                git_call(nonswt, ["read-tree", "HEAD"])
+                rc, output = run(nonswt)
+                check("non-skip-worktree absent ignore-blob proceeds",
+                      rc == EXIT_OK and valid_sources(nonswt))
+
+                # OPF-D2B round 7 / FINDING 3b: a DIRECTORY at the worktree .gitignore path is opened by git
+                # successfully (its read then fails) and never index-read, so an absent blob cannot change what
+                # `git add` ignores. is_file() was false and the round-6 check refused (over-refusal); the
+                # no-follow classification treats a directory as not-a-fallback and PROCEEDS. DISCRIMINATOR:
+                # rc 2 against the mode-only version.
+                dir_at_path = base / "d2b-dir-at-gitignore"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", src_url, str(dir_at_path)])
+                git_call(dir_at_path, ["read-tree", "HEAD"])
+                git_call(dir_at_path, ["update-index", "--skip-worktree", ".gitignore"])
+                (dir_at_path / ".gitignore").mkdir()
+                rc, output = run(dir_at_path)
+                check("directory at .gitignore path proceeds",
+                      rc == EXIT_OK and valid_sources(dir_at_path))
+
+                # OPF-D2B round 7 / FINDING 3c: an unmerged (stage-2-only) entry has no stage-0 entry, so
+                # git's index-read lookup (index_name_pos, which searches stage 0) finds nothing and never
+                # reads it; an absent stage-2 blob cannot make `git add` ignore the store. The round-6 check
+                # keyed on mode alone and refused (over-refusal); init must now PROCEED. DISCRIMINATOR: rc 2
+                # against the stage-blind version.
+                unmerged = base / "d2b-unmerged-gitignore"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", src_url, str(unmerged)])
+                git_call(unmerged, ["read-tree", "HEAD"])
+                orig_blob = git_call(
+                    promisor_src, ["rev-parse", "HEAD:.gitignore"]).decode("ascii").strip()
+                git_call(unmerged, ["rm", "--cached", "-q", ".gitignore"])
+                git_input(unmerged, ["update-index", "--index-info"],
+                          ("100644 " + orig_blob + " 2\t.gitignore\n").encode("ascii"))
+                rc, output = run(unmerged)
+                check("stage-2-only unmerged .gitignore proceeds",
+                      rc == EXIT_OK and valid_sources(unmerged))
+
+                # OPF-D2B round 7 / FINDING 1b: candidate .gitignore paths must be matched as LITERAL
+                # pathspecs. A store rooted at a directory literally named "[x]" yields the candidate
+                # "[x]/.gitignore"; without --literal-pathspecs git expanded the bracket character-class and
+                # matched an UNRELATED indexed "x/.gitignore" (a skip-worktree absent blob), a false refusal.
+                # As a literal pathspec it matches nothing and init PROCEEDS. DISCRIMINATOR: rc 2 against the
+                # non-literal version.
+                bracket_src = make_git("d2b-bracket-src")
+                (bracket_src / "x").mkdir()
+                (bracket_src / "x" / ".gitignore").write_bytes(b"unrelated-only/\n")
+                git_call(bracket_src, ["--literal-pathspecs", "add", "-A"])
+                git_call(bracket_src, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                       "commit", "-m", "seed"])
+                git_call(bracket_src, ["config", "uploadpack.allowFilter", "true"])
+                git_call(bracket_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
+                bracket = base / "d2b-bracket"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", "file://" + str(bracket_src), str(bracket)])
+                git_call(bracket, ["read-tree", "HEAD"])
+                git_call(bracket, ["--literal-pathspecs", "update-index", "--skip-worktree",
+                                   "x/.gitignore"])
+                bracket_root = bracket / "[x]"
+                bracket_root.mkdir()
+                rc, output = run(bracket_root)
+                check("bracket-named store root proceeds (literal-pathspec candidate)",
+                      rc == EXIT_OK and valid_sources(bracket_root))
+
+                # OPF-D2B round 7 / FINDING 1a: a candidate whose repo-relative prefix begins with a pathspec
+                # magic sigil (a leading colon) must be a LITERAL pathspec. A store rooted at ":magic" yields
+                # the candidate ":magic/.gitignore"; without --literal-pathspecs the leading colon is read as
+                # an empty magic signature, the listing is empty, and the ignoring skip-worktree absent blob
+                # is MISSED (false PASS: a store `git add` would fetch-and-ignore is created). As a literal
+                # pathspec the entry is found and init REFUSES. DISCRIMINATOR: rc 0 against the non-literal
+                # version.
+                colon_src = make_git("d2b-colon-src")
+                (colon_src / ":magic").mkdir()
+                (colon_src / ":magic" / ".gitignore").write_bytes(working.encode("ascii") + b"/\n")
+                git_call(colon_src, ["--literal-pathspecs", "add", "-A"])
+                git_call(colon_src, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                     "commit", "-m", "seed"])
+                git_call(colon_src, ["config", "uploadpack.allowFilter", "true"])
+                git_call(colon_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
+                colon = base / "d2b-colon"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", "file://" + str(colon_src), str(colon)])
+                git_call(colon, ["read-tree", "HEAD"])
+                git_call(colon, ["--literal-pathspecs", "update-index", "--skip-worktree",
+                                 ":magic/.gitignore"])
+                colon_root = colon / ":magic"
+                colon_root.mkdir()
+                cr_before = _snapshot(colon_root)
+                rc, output = run(colon_root)
+                check("colon-magic candidate refused (literal-pathspec finds ignoring blob)",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("colon-magic store fixture preserved", _snapshot(colon_root) == cr_before)
             finally:
                 for name, value in saved_env.items():
                     if value is None:
