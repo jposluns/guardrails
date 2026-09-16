@@ -19,8 +19,9 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
   - mapping-totality     : per source, the mapping spans tile [0, size) exactly (sorted, gap-free,
                            overlap-free, ending at the recorded byte length): nothing is dropped.
   - mapping-state-vocab  : every mapping row's state is one of the eight spec-14.1 mapping states.
-  - lf-bijection         : the number of quarantine-state mappings equals the number of legacy_fragment
-                           records (every quarantined fragment is preserved, exactly once).
+  - lf-bijection         : the quarantine-state mappings correspond one-to-one to the legacy_fragment
+                           records BY (source_path, span), not a bare count, so every quarantined
+                           fragment is preserved exactly once and a count-preserving swap is caught.
   - lf-quad-completeness : every legacy_fragment carries the full provenance quad (source_path,
                            source_digest, span, run_id) plus the preserved body.
   - source-preservation  : every source's preserved bytes (sources/<sha256>) hash to the recorded digest,
@@ -29,6 +30,10 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
                            payload (determinism / integrity anchor).
   - scan-determinism     : scan_import over the same inputs in reversed declaration order yields an equal
                            inventory digest, and an unreadable/absent declared source fails closed (exit 2).
+
+The --self-test also DELEGATES to the operation-layer module suite (_opf_import.self_test()) and requires
+it green, so the module's scan/plan/apply unit invariants (including apply-deferred-cannot-evaluate and
+plan-leaves-the-active-store-unchanged) run wherever this CI-registered gate runs.
 
 Disclosed coverage limits (part of the gate, not a footnote): apply-promotion (live-store mutation) is
 deferred to the OPF-IMPORT-APPLY unit, so its transaction/journal/restore/idempotency invariants are NOT
@@ -52,6 +57,15 @@ EXIT_FINDING = 1
 EXIT_ERROR = 2
 
 _RUN_ID_RE_TEXT = r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$"
+
+# The authoritative registry of staged-run checks. check_staged_run() reconciles its emitted result set
+# against this (fail-closed: a declared check that did not run is recorded as a FINDING, never a silent
+# omission a caller could read as a pass), and the self-test asserts the clean-run keyset equals it.
+EXPECTED_CHECKS = (
+    "staged-run-structure", "report-schema", "artifact-digest-integrity", "mapping-totality",
+    "mapping-state-vocab", "lf-bijection", "lf-quad-completeness", "source-preservation",
+    "inventory-digest",
+)
 
 
 def _sha256_hex(data):
@@ -103,6 +117,8 @@ def check_staged_run(run_dir):
     # dependent check (an unreadable input is never nothing-to-check).
     try:
         run = _load_toml(run_dir / "run.toml")
+        # plan.toml is parsed for validity here (fail-closed on unparseable); not otherwise consumed at PR1.
+        _load_toml(run_dir / "plan.toml")
         mappings = _load_toml(run_dir / "mappings.toml")
         report = _load_toml(run_dir / "report.toml")
         inventory = _load_toml(run_dir / "inventory.toml")
@@ -145,7 +161,7 @@ def check_staged_run(run_dir):
     rows = mappings.get("mapping")
     sources = run.get("source")
     if not isinstance(rows, list) or not isinstance(sources, list):
-        for cid in ("mapping-totality", "mapping-state-vocab", "lf-bijection"):
+        for cid in ("mapping-totality", "mapping-state-vocab", "lf-bijection", "lf-quad-completeness"):
             record(cid, False, "mappings.toml `mapping` or run.toml `source` is not an array")
     else:
         # mapping-state-vocab
@@ -202,10 +218,24 @@ def check_staged_run(run_dir):
                 lf_read_ok = False
                 record("lf-bijection", False, str(exc))
         if lf_read_ok:
-            bij_ok = isinstance(lf_records, list) and len(lf_records) == len(quarantine_rows)
-            record("lf-bijection", bij_ok,
-                   "" if bij_ok else "quarantine rows ({}) != legacy_fragment records ({})".format(
-                       len(quarantine_rows), len(lf_records) if isinstance(lf_records, list) else "?"))
+            if not isinstance(lf_records, list):
+                record("lf-bijection", False, "legacy_fragment index is not an array")
+            else:
+                # A true one-to-one correspondence by (source_path, span), not a bare count: a
+                # count-preserving swap (one record duplicated over another) must still FINDING, because a
+                # quarantined fragment would then have no matching record (the no-drop invariant).
+                def _lf_keys(recs):
+                    keys = []
+                    for r in recs:
+                        d = r if isinstance(r, dict) else {}
+                        sp = d.get("span")
+                        keys.append((d.get("source_path"), tuple(sp) if isinstance(sp, list) else None))
+                    return sorted(keys, key=lambda k: (str(k[0]), str(k[1])))
+                bij_ok = _lf_keys(quarantine_rows) == _lf_keys(lf_records)
+                record("lf-bijection", bij_ok,
+                       "" if bij_ok else "quarantine mappings do not correspond one-to-one to "
+                       "legacy_fragment records by (source_path, span): {} quarantine vs {} lf".format(
+                           len(quarantine_rows), len(lf_records)))
 
         # lf-quad-completeness: every LF carries the full provenance quad + body.
         quad = ("source_path", "source_digest", "span", "run_id", "body")
@@ -248,6 +278,12 @@ def check_staged_run(run_dir):
     except imp._StageError as exc:
         inv_detail = "inventory payload not canonically emittable: {}".format(exc.message)
     record("inventory-digest", inv_ok, inv_detail)
+
+    # Registry reconciliation (guard-input-soundness): every declared check MUST have produced a result;
+    # one that did not run is recorded as a FINDING, never a silent omission a caller could read as pass.
+    for cid in EXPECTED_CHECKS:
+        if cid not in results:
+            record(cid, False, "check did not run (registry reconciliation: fail-closed)")
 
     return results
 
@@ -306,7 +342,12 @@ def _self_test():
         return machine.parent / "imports" / pr.run_id
 
     def copy_run(run_dir):
-        dest = base / "mut-{:03d}".format(counter[0] * 100 + len(list(base.glob("mut-*"))))
+        # Preserve the original imp-... run-id BASENAME (under a unique parent) so a clean copy still
+        # passes staged-run-structure (run-id grammar) and report-schema (report.run_id == dir name);
+        # otherwise every copy would fail those on the rename alone and no discriminator would isolate.
+        parent = base / "mut-{:03d}".format(counter[0] * 100 + len(list(base.glob("mut-*"))))
+        parent.mkdir()
+        dest = parent / run_dir.name
         shutil.copytree(str(run_dir), str(dest))
         return dest
 
@@ -327,12 +368,20 @@ def _self_test():
         clean_results = check_staged_run(clean)
         for cid, (ok, detail) in clean_results.items():
             expect("clean:{}:{}".format(cid, detail), ok)
+        # The emitted check-set must be EXACTLY the declared registry (no omission, no stray): an omitted
+        # check can never read as a clean pass.
+        expect("clean-registry-complete", set(clean_results) == set(EXPECTED_CHECKS))
 
         # --- one discriminator per check: a single mutation flips its TARGET check to FINDING ---------
         # structure: remove plan.toml.
         m = copy_run(clean)
         (m / "plan.toml").unlink()
         expect("disc-structure", check_staged_run(m)["staged-run-structure"][0] is False)
+
+        # structure (parse): a present-but-UNPARSEABLE plan.toml fails closed (not merely is_file()).
+        m = copy_run(clean)
+        (m / "plan.toml").write_bytes(b"not valid toml [")
+        expect("disc-structure-malformed-plan", check_staged_run(m)["staged-run-structure"][0] is False)
 
         # report-schema: flip verdict to 1 (report.toml is not in its own artefact list, so the digest
         # check stays green).
@@ -374,6 +423,17 @@ def _self_test():
         rewrite_report_digest(m, "fragments/legacy_fragment.index.toml")
         expect("disc-lf-bijection", check_staged_run(m)["lf-bijection"][0] is False)
 
+        # lf-bijection (count-preserving): duplicate one record over another so the COUNT is unchanged but
+        # a quarantined source loses its correspondence; the keyed check must still FINDING.
+        m = copy_run(clean)
+        lf = _load_toml(m / "fragments" / "legacy_fragment.index.toml")
+        if len(lf["record"]) >= 2:
+            lf["record"][1] = dict(lf["record"][0])
+            (m / "fragments" / "legacy_fragment.index.toml").write_text(
+                _opf_emit.emit(lf), encoding="utf-8")
+            rewrite_report_digest(m, "fragments/legacy_fragment.index.toml")
+            expect("disc-lf-bijection-swap", check_staged_run(m)["lf-bijection"][0] is False)
+
         # lf-quad-completeness: drop the `span` field from one legacy_fragment; refresh the digest.
         m = copy_run(clean)
         lf = _load_toml(m / "fragments" / "legacy_fragment.index.toml")
@@ -412,6 +472,11 @@ def _self_test():
         expect("scan-determinism",
                s1.verdict == 0 and s2.verdict == 0 and s1.inventory_digest == s2.inventory_digest)
         expect("scan-fail-closed-absent", imp.scan_import(sroot, ["a.txt", "missing.txt"]).verdict == 2)
+
+        # The operation-layer module's own unit suite (scan/plan/apply internals, including the
+        # apply-deferred-cannot-evaluate and plan-leaves-the-active-store-unchanged invariants) is part of
+        # this gate's assurance and must run in CI: delegate to it and require it green.
+        expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
         print("check_opf_import self-test: harness error: {}".format(exc), file=sys.stderr)
         shutil.rmtree(str(base), ignore_errors=True)
