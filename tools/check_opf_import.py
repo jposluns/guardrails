@@ -160,11 +160,14 @@ def check_staged_run(run_dir):
         return results
 
     # --- report-schema ------------------------------------------------------------------------------
-    # report.verdict must be a Python INT equal to 0, not merely == 0: Python's `False == 0` is True, so a
-    # `verdict = false` (bool) run would slip past a bare `== 0` and pass every gate check on a not-promotion-
-    # ready run. Require the integer type (`type(x) is int` excludes bool), mirroring the review-side strict-
+    # report.verdict AND report.schema must each be a Python INT, not merely == their literal: Python's
+    # `False == 0` and `True == 1` are True, so a `verdict = false` (bool) or `schema = true` (bool) run would
+    # slip past a bare `== 0` / `== 1` and pass every gate check on a not-promotion-ready or schema-malformed
+    # run. Require the integer type on both (`type(x) is int` excludes bool), mirroring the review-side strict-
     # int guard in _opf_import._load_staged_run_for_review; promotion_ready stays a strict `is True` bool.
-    schema_ok = (report.get("schema") == 1 and report.get("run_id") == run_dir.name
+    # (R5-F2: schema is the class sibling of the verdict strict-int guard, over the same untrusted staged field.)
+    schema_ok = (type(report.get("schema")) is int and report.get("schema") == 1
+                 and report.get("run_id") == run_dir.name
                  and type(report.get("verdict")) is int and report.get("verdict") == 0
                  and report.get("promotion_ready") is True
                  and isinstance(report.get("artifact"), list))
@@ -172,23 +175,31 @@ def check_staged_run(run_dir):
            "" if schema_ok else "report.toml schema/run_id/verdict/promotion_ready/artifact malformed")
 
     # --- artifact-digest-integrity ------------------------------------------------------------------
+    # report.get("artifact") is UNTRUSTED staged data: a non-list (int, bool, ...) would make the
+    # `for entry in ...` loop raise TypeError ("'int' object is not iterable"). Guard the shape FIRST so a
+    # malformed artifact is a located FINDING for ALL callers (the gate CLI AND the review delegation),
+    # never an uncaught raise (guard-input-soundness / check-fails-closed-on-unreadable).
     art_ok = True
     art_detail = ""
-    for entry in report.get("artifact", []):
-        if not (isinstance(entry, dict) and isinstance(entry.get("path"), str)
-                and isinstance(entry.get("sha256"), str)):
-            art_ok, art_detail = False, "malformed artifact entry {!r}".format(entry)
-            break
-        p = run_dir / entry["path"]
-        try:
-            data = p.read_bytes()
-        except OSError as exc:
-            art_ok, art_detail = False, "enumerated artefact unreadable: {} ({})".format(p, exc)
-            break
-        if _sha256_hex(data) != entry["sha256"]:
-            art_ok, art_detail = False, "artefact {} bytes do not match recorded digest".format(
-                entry["path"])
-            break
+    artifact = report.get("artifact")
+    if not isinstance(artifact, list):
+        art_ok, art_detail = False, "report.toml artifact is not a list"
+    else:
+        for entry in artifact:
+            if not (isinstance(entry, dict) and isinstance(entry.get("path"), str)
+                    and isinstance(entry.get("sha256"), str)):
+                art_ok, art_detail = False, "malformed artifact entry {!r}".format(entry)
+                break
+            p = run_dir / entry["path"]
+            try:
+                data = p.read_bytes()
+            except OSError as exc:
+                art_ok, art_detail = False, "enumerated artefact unreadable: {} ({})".format(p, exc)
+                break
+            if _sha256_hex(data) != entry["sha256"]:
+                art_ok, art_detail = False, "artefact {} bytes do not match recorded digest".format(
+                    entry["path"])
+                break
     record("artifact-digest-integrity", art_ok, art_detail)
 
     # --- mapping rows, source records ---------------------------------------------------------------
@@ -358,8 +369,11 @@ def check_staged_run(run_dir):
         pa_ok, pa_detail = False, str(exc)
     if pa_ok:
         prows = proposals.get("proposal")
-        if not (proposals.get("schema") == 1 and proposals.get("run_id") == run_dir.name
-                and isinstance(prows, list)):
+        # proposals.schema is strict-int (`type(x) is int`, bool excluded) for the same bool-slip reason as
+        # report-schema: a `schema = true` proposals.toml would satisfy `True == 1` and slip a bare `== 1`
+        # (R5-F2, the class sibling over the untrusted proposals field).
+        if not (type(proposals.get("schema")) is int and proposals.get("schema") == 1
+                and proposals.get("run_id") == run_dir.name and isinstance(prows, list)):
             pa_ok, pa_detail = False, "proposals.toml schema/run_id/proposal array malformed"
         else:
             for pr in prows:
@@ -715,12 +729,41 @@ def _self_test():
         (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
         expect("disc-report-schema-bool-verdict", check_staged_run(m)["report-schema"][0] is False)
 
+        # report-schema (strict-int schema, R5-F2): a report.toml schema of `true` (a bool) must NOT pass via
+        # Python's `True == 1`. The `type(...) is int` guard (bool excluded) makes it a FINDING, the class
+        # sibling of the bool-verdict discriminator above. report.toml is not in its own artefact list, so the
+        # digest check stays green and only report-schema fires.
+        m = copy_run(clean)
+        rep = _load_toml(m / "report.toml")
+        rep["schema"] = True
+        (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
+        expect("disc-report-schema-bool-schema", check_staged_run(m)["report-schema"][0] is False)
+
         # artifact-digest-integrity: append an inert TOML comment to run.toml WITHOUT refreshing its
         # recorded digest (run.toml still parses identically, so only the digest check fires).
         m = copy_run(clean)
         with open(m / "run.toml", "ab") as fh:
             fh.write(b"\n# tampered\n")
         expect("disc-artifact-digest", check_staged_run(m)["artifact-digest-integrity"][0] is False)
+
+        # artifact-digest-integrity (non-list shape, R5-F1): a report.toml `artifact` of a NON-LIST type
+        # (int or bool) must be a located FINDING, never an uncaught TypeError from iterating a
+        # non-iterable. The gate must fail closed for ALL callers so the review->check_staged_run
+        # delegation cannot crash instead of returning verdict 2. report.toml is the marker, so
+        # report-schema ALSO fires (its artifact must be a list) - that is fine; the target here is that
+        # artifact-digest-integrity is False AND that check_staged_run itself did not raise.
+        for bad_artifact in (1, False):
+            m = copy_run(clean)
+            rep = _load_toml(m / "report.toml")
+            rep["artifact"] = bad_artifact
+            (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
+            try:
+                res = check_staged_run(m)
+            except Exception as exc:  # the guard makes this unreachable; without it the loop raises
+                expect("disc-artifact-non-list-noraise:{!r}:{!r}".format(bad_artifact, exc), False)
+            else:
+                expect("disc-artifact-non-list:{!r}".format(bad_artifact),
+                       res["artifact-digest-integrity"][0] is False)
 
         # mapping-totality: truncate one span's end so its source is no longer tiled (row count and states
         # unchanged, so bijection and vocab stay coherent); refresh the mappings.toml digest.
@@ -832,6 +875,16 @@ def _self_test():
         props["run_id"] = "imp-20260101T000000Z-0000000000000000"
         (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
         expect("disc-proposals-artifact", check_staged_run(m)["proposals-artifact"][0] is False)
+
+        # proposals-artifact (strict-int schema, R5-F2): a proposals.toml schema of `true` (a bool) must NOT
+        # pass via Python's `True == 1`. The `type(...) is int` guard (bool excluded) makes it a FINDING, the
+        # class sibling of the report-schema bool-schema discriminator. proposals.toml is not in report's
+        # artefact list, so only the proposals-artifact check fires.
+        m = copy_run(clean)
+        props = _load_toml(m / "proposals.toml")
+        props["schema"] = True
+        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        expect("disc-proposals-artifact-bool-schema", check_staged_run(m)["proposals-artifact"][0] is False)
 
         # proposals-artifact (byte reproducibility): rewrite IMPORT-REPORT.md line endings LF->CRLF. The
         # rendered surface is LF, so a byte compare (not a universal-newline read) must FINDING; refresh the

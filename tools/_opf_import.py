@@ -2210,11 +2210,15 @@ def _load_staged_run_for_review(store_root_fd, run_rel):
     # non-empty check let an unrelated table (e.g. `unrelated = true`) pass as a coherent run. _write_run
     # stamps the run identity as run.toml's `run_id` alongside `schema` and the `source` array, so validate
     # that identity and shape here (F3): run_id must name THIS run dir, schema must be SCHEMA, and source
-    # must be an array.
+    # must be an array. schema is compared strict-int (`type(x) is int`, bool excluded) for the same bool-slip
+    # reason as verdict above: SCHEMA is 1, so a `schema = true` run would satisfy `True == 1` and slip a bare
+    # `!= SCHEMA` compare, binding acceptance on an incoherent run descriptor (R5-F2, the class sibling of the
+    # verdict guard).
     if run_tbl.get("run_id") != run_id:
         raise _cannot("staged run run.toml run_id does not name this run dir (not a coherent run "
                       "descriptor; cannot review)")
-    if run_tbl.get("schema") != SCHEMA or not isinstance(run_tbl.get("source"), list):
+    if not (type(run_tbl.get("schema")) is int and run_tbl.get("schema") == SCHEMA) \
+            or not isinstance(run_tbl.get("source"), list):
         raise _cannot("staged run run.toml is not a coherent run descriptor (schema/source shape; cannot "
                       "review)")
     # proposals.toml must BIND this run too: its run_id was previously unchecked here, so a proposals.toml
@@ -2593,7 +2597,15 @@ def review_import(product_root, run_id, *, actor, decisions, now):
         # FINDING is a CANNOT-EVALUATE naming the failing check(s), and NO acceptance is written.
         import check_opf_import   # lazy: avoids a module-top circular import (see _gather_review_context)
         run_dir_path = os.path.join(resolution.store_root, run_rel)
-        gate_results = check_opf_import.check_staged_run(run_dir_path)
+        # Defence-in-depth (R5-F1): the gate is fail-closed for a malformed staged run, but should it ever
+        # RAISE (a shape the gate does not yet guard), review must return CANNOT-EVALUATE (verdict 2)
+        # rather than propagate the exception. Catch Exception only, so KeyboardInterrupt/SystemExit stay
+        # uncaught; the resulting _cannot is handled by the outer _StageError branch.
+        try:
+            gate_results = check_opf_import.check_staged_run(run_dir_path)
+        except Exception as exc:
+            raise _cannot("the import-operation gate raised evaluating the staged run ({!r}); "
+                          "cannot review".format(exc))
         gate_findings = sorted(cid for cid, (ok, _detail) in gate_results.items() if not ok)
         if gate_findings:
             raise _cannot("staged run fails the import-operation gate; not reviewable until it is a coherent, "
@@ -4634,6 +4646,24 @@ def self_test():
         check("N1-bool-verdict-cannot-eval",
               review_import(rootN1g, prn1g.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
         check("N1-bool-verdict-no-acceptance", not (n1g_dir / "acceptance.json").is_file())
+        # (h) R5-F2: a run.toml `schema` of `true` (a bool) must NOT pass as SCHEMA via Python's `True == 1`
+        #     (SCHEMA is 1). This is the COHERENT-tamper case: the report.toml run.toml digest is refreshed so
+        #     the pre-check gate's artifact-digest-integrity stays green and the loader's strict-int schema
+        #     guard is the check under test (an attacker with staging write access can update the digest too).
+        #     FULL decisions are supplied, so a passing loader would CAPTURE acceptance (verdict 0); the strict-
+        #     int guard (`type(x) is int` excludes bool) is what keeps the incoherent run cannot-evaluate with
+        #     NO acceptance. Sibling of the (g) verdict bool-slip; the class-width miss R4->R5 re-found.
+        rootN1h, mN1h = build_store(sources={"a.txt": "aaaa"})
+        prn1h = plan_import(rootN1h, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n1h_dir = mN1h.parent / "imports" / (prn1h.run_id or "MISSING")
+        n1h_decs = all_decisions(n1h_dir)
+        run_n1h = tomllib.loads((n1h_dir / "run.toml").read_text())
+        run_n1h["schema"] = True
+        (n1h_dir / "run.toml").write_text(_opf_emit.emit(run_n1h), encoding="utf-8")
+        rewrite_report_digest(n1h_dir, "run.toml")
+        check("N1-bool-schema-cannot-eval",
+              review_import(rootN1h, prn1h.run_id, actor="R", decisions=n1h_decs, now=NOW).verdict == 2)
+        check("N1-bool-schema-no-acceptance", not (n1h_dir / "acceptance.json").is_file())
 
         # F4 (module): a nested-unhashable span ([[], []]) in a staged mapping row or inventory fragment is a
         # located CANNOT-EVALUATE at the review loader, never an uncaught TypeError at the (source_path,
@@ -4762,6 +4792,28 @@ def self_test():
         g4_dir = mG4.parent / "imports" / (prg4.run_id or "MISSING")
         rrg4 = review_import(rootG4, prg4.run_id, actor="R", decisions=all_decisions(g4_dir), now=NOW)
         check("G4-gate-coherent-run-clean", rrg4.verdict == 0 and (g4_dir / "acceptance.json").is_file())
+        # (e) R5-F1 defence-in-depth: if check_staged_run itself RAISES (a shape the gate does not guard),
+        #     review must return CANNOT-EVALUATE (verdict 2) with NO acceptance and no propagated
+        #     exception, never crash. Monkeypatch the lazily-imported gate to raise, review a COHERENT run,
+        #     then restore the original in a finally so the patch cannot leak to later checks.
+        rootG5, mG5 = build_store(sources={"a.txt": "aaaa"})
+        prg5 = plan_import(rootG5, ["a.txt"], now=NOW, run_nonce=NONCE)
+        g5_dir = mG5.parent / "imports" / (prg5.run_id or "MISSING")
+        g5_decs = all_decisions(g5_dir)
+        import check_opf_import as _chk_g5
+        _orig_g5 = _chk_g5.check_staged_run
+
+        def _raise_g5(_run_dir):
+            raise RuntimeError("G5: injected gate crash")
+
+        _chk_g5.check_staged_run = _raise_g5
+        try:
+            rrg5 = review_import(rootG5, prg5.run_id, actor="R", decisions=g5_decs, now=NOW)
+        finally:
+            _chk_g5.check_staged_run = _orig_g5
+        check("G5-gate-raise-cannot-eval", rrg5.verdict == 2)
+        check("G5-gate-raise-no-acceptance", not (g5_dir / "acceptance.json").is_file())
+        check("G5-gate-restored", _chk_g5.check_staged_run is _orig_g5)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
