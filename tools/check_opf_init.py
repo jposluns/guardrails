@@ -392,6 +392,50 @@ def _suite(invoke):
                       rc == EXIT_ERROR and "git-ignored" in output)
                 check("magic-named ignored root preserved", _snapshot(magic_sub) == before)
 
+                # OPF-D2B: a destination ignored ONLY by the adopter's GLOBAL core.excludesFile (no repo-local
+                # rule) must be refused. The pre-D2B check pinned GIT_CONFIG_GLOBAL to os.devnull and could not
+                # see it, so init wrongly succeeded; the config-discovery probe now consults it. DISCRIMINATOR:
+                # this vector FAILS (init succeeds, no "git-ignored") against the pre-D2B check.
+                global_ignored = make_git("global-excludes-target")
+                gexcludes = base / "d2b-global-excludes"
+                gexcludes.write_bytes(working.encode("ascii") + b"/\n")
+                gconfig = base / "d2b-global-gitconfig"
+                gconfig.write_bytes(
+                    b"[core]\n\texcludesFile = " + str(gexcludes).encode("ascii") + b"\n")
+                gi_before = _snapshot(global_ignored)
+                saved_gcg = os.environ.get("GIT_CONFIG_GLOBAL")
+                os.environ["GIT_CONFIG_GLOBAL"] = str(gconfig)
+                try:
+                    rc, output = run(global_ignored)
+                finally:
+                    if saved_gcg is None:
+                        os.environ.pop("GIT_CONFIG_GLOBAL", None)
+                    else:
+                        os.environ["GIT_CONFIG_GLOBAL"] = saved_gcg
+                check("global-excludesFile ignored destination refused",
+                      rc == EXIT_ERROR and "git-ignored" in output)
+                check("global-excludesFile ignored destination preserved",
+                      _snapshot(global_ignored) == gi_before)
+
+                # OPF-D2B: an unsupported / malformed inherited runtime-config context fails CLOSED (the probe
+                # refuses rather than silently drop a consequential override). A non-numeric GIT_CONFIG_COUNT is
+                # such a context; init must refuse (exit 2), never create the store. (The precise refusal locus
+                # can be the ignore probe or an earlier git call, both fail-closed; the assertion checks refusal
+                # and preservation, not the exact message.)
+                badconfig = make_git("d2b-badconfig-target")
+                bc_before = _snapshot(badconfig)
+                saved_count = os.environ.get("GIT_CONFIG_COUNT")
+                os.environ["GIT_CONFIG_COUNT"] = "not-a-number"
+                try:
+                    rc, output = run(badconfig)
+                finally:
+                    if saved_count is None:
+                        os.environ.pop("GIT_CONFIG_COUNT", None)
+                    else:
+                        os.environ["GIT_CONFIG_COUNT"] = saved_count
+                check("D2B malformed runtime-config refused", rc == EXIT_ERROR)
+                check("D2B malformed runtime-config preserved", _snapshot(badconfig) == bc_before)
+
                 # Defence in depth: after a successful init, the staged-and-committed store resolves
                 # end to end, at the standard machine subdir. resolve_store reads the working tree, so
                 # the commit is not required for resolution; it is included to exercise the realistic
