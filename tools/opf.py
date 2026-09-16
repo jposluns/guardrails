@@ -753,39 +753,86 @@ def _init_untracked(git, repo, root, paths):
             os.fsdecode(tracked)))
 
 
+def _ignore_file_candidates(prefix, paths):
+    """Repo-relative .gitignore paths git consults when deciding whether the planned destinations are
+    ignored: one per ancestor directory from the repository root down to each destination's own directory.
+    A .gitignore in directory D governs paths under D, so every ancestor directory of a planned path is a
+    candidate ignore source (git add reads them all)."""
+    dirs = set()
+    for path in paths:
+        for parent in (prefix / path).parents:
+            dirs.add(parent)
+    candidates = set()
+    for directory in dirs:
+        posix = directory.as_posix()
+        candidates.add(".gitignore" if posix == "." else posix + "/.gitignore")
+    return sorted(candidates)
+
+
 def _init_unignored(git, repo, root, paths):
     """Refuse a planned destination git would ignore: an ignored store cannot be staged or discovered.
 
     check-ignore reports at least one ignored path with rc 0, none ignored with rc 1, and an error
     with rc >= 128. The rc drives the three-way decision; the output is only for the diagnostic. Paths
-    are passed as arguments (git check-ignore accepts neither -z without --stdin, which _run_git has no
-    channel for, nor --literal-pathspecs, which it rejects as unsupported magic). Each scoped path is
+    are passed as arguments (git check-ignore accepts neither -z without --stdin, which the run helper has
+    no channel for, nor --literal-pathspecs, which it rejects as unsupported magic). Each scoped path is
     given a literal "./" prefix so a leading colon or other pathspec-magic sigil in an adopter-supplied
     --root prefix is read as a path, not as magic: without it a ":name/..." prefix has its colon consumed
     as an empty magic signature and the check silently bypasses (rc 1, the store looks unignored), while a
     recognized short-magic letter over-refuses (rc >= 128). The prefix is a plain string because Path
     would normalize "./x" back to "x". The output is then one path per line over the controlled,
-    newline-free internal destinations. Residual: the check runs under _opf_observe._run_git's scrubbed
-    observer environment, which pins GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM to os.devnull and so does NOT
-    consult a global or system core.excludesFile; a store ignored ONLY by the adopter's global git config
-    is therefore not caught here. This is a best-effort repo-local plus repo-config check; the
-    global-config-aware refusal is deferred to D2b, and the completion output warns the adopter that a
-    silently ignored store may still leave `git add` staging nothing. Called directly (not via _init_git,
-    which raises on rc != 0) because rc 1 is the success case here; a timeout, launch failure, or
-    unexpected rc fails closed and refuses.
+    newline-free internal destinations.
+
+    OPF-D2B: the probe runs under _opf_observe._run_git_config_discovery, which lets git DISCOVER the
+    adopter's real global and system configuration through its default locations (unlike the default scrubbed
+    observer environment, which neutralizes it), so a store ignored ONLY by the adopter's global or system
+    core.excludesFile is caught here, matching what the adopter's own `git add` would honour
+    (guard-input-soundness). Env-based config overrides are dropped and trace/fsmonitor are forced off, so no
+    reachable configuration can turn the read-only probe into a write or a launched process. Lazy fetching is
+    forced off so a missing indexed ignore blob cannot trigger a promisor fetch that would reach
+    core.sshCommand. DISCLOSED RESIDUAL (disclose-guard-residuals): this rc-only check reads ignore rules
+    exactly as git add does when git add can read them too. For an ignore input git cannot READ (a
+    permission-denied core.excludesFile, ~/.config/git/ignore, or .git/info/exclude), git add is equally unable
+    to read it and stages the destination, so reading not-ignored here matches git add and the store is never
+    silently ignored. The one input where that parity BREAKS is a skip-worktree (or otherwise unmaterialized)
+    .gitignore whose blob is absent in a partial clone: this probe forces lazy fetch off and reads no-rule, but
+    the adopter's own git add fetches the blob and can then ignore the store. That case is NOT left as a
+    residual: after an rc-1 result the availability of every applicable indexed .gitignore blob is checked
+    (_opf_observe.indexed_ignore_availability), and an unavailable one is a cannot-evaluate that REFUSES rather
+    than passing (guard-input-soundness). A fail-closed treatment of the unreadable-FILE arms above is
+    deliberately not attempted, because git and the caller resolve config paths differently and refusing there
+    would over-refuse a case git add itself skips. Called directly
+    (not via _init_git, which raises on rc != 0) because rc 1 is the success case here; a timeout, launch
+    failure, or unexpected rc fails closed and refuses. Matching `git add`, a benign git diagnostic on an
+    rc-1 (not-ignored) result is not itself a refusal.
     """
     prefix = root.relative_to(repo)
     scoped = sorted("./" + str(prefix / path) for path in paths)
-    result = _opf_observe._run_git(
+    result = _opf_observe._run_git_config_discovery(
         git, repo, ["check-ignore", "--"] + scoped)
     if not result.completed:
-        raise RuntimeError("git preflight: could not evaluate ignore status for planned destinations")
+        raise RuntimeError(
+            "git preflight: could not evaluate ignore status for planned destinations ({})".format(
+                result.err))
     if result.rc == 0:
         ignored = [p for p in os.fsdecode(result.out).splitlines() if p]
         raise RuntimeError("planned destination is git-ignored: {!r}".format(ignored))
     if result.rc != 1:
         raise RuntimeError("git preflight: check-ignore failed (rc={}): {}".format(
             result.rc, result.err))
+    # rc 1 (not ignored) is sound only when every applicable .gitignore is answerable WITHOUT a promisor
+    # fetch. In a partial clone a skip-worktree (or otherwise unmaterialized) .gitignore whose blob is absent
+    # reads as no-rule here (lazy fetch is forced off), yet the adopter's own `git add` fetches that blob and
+    # can then silently ignore the store; an available blob is read identically by both (parity) and a
+    # checked-out .gitignore is read from disk by both. So a missing indexed ignore blob is a cannot-evaluate
+    # we refuse, not a clean pass (guard-input-soundness).
+    unavailable = _opf_observe.indexed_ignore_availability(
+        git, repo, _ignore_file_candidates(root.relative_to(repo), paths))
+    if unavailable:
+        raise RuntimeError(
+            "git preflight: an indexed .gitignore blob is unavailable in this partial clone, so ignore "
+            "status cannot be determined; `git add` would fetch it and could silently ignore the store "
+            "({}). Check out or fetch the blob and retry.".format(sorted(unavailable)))
 
 
 def _init_same_root(root, root_fd):
@@ -1003,8 +1050,8 @@ def _cmd_init(rest):
         print("Review the created files, then stage the reviewed paths:")
         print("  git -C {} --literal-pathspecs add -- {}".format(
             shlex.quote(str(root)), " ".join(shlex.quote(path) for path in payloads)))
-        print("opf init: if that git add stages nothing, the paths may be git-ignored (including via a")
-        print("  global core.excludesFile, which this preflight cannot see); adjust .gitignore or git add -f.")
+        print("opf init: ignore eligibility, including the global and system core.excludesFile, was checked")
+        print("  before creation; a later ignore or config change can still affect staging (git add -f).")
         print("Commit the reviewed init paths, then materialize the Markdown views:")
         print("  opf render --write --root {}".format(shlex.quote(str(root))))
         print("opf init: exit 0 means valid sources were created; tracking and rendering are pending.")
