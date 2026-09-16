@@ -2539,9 +2539,12 @@ def review_import(product_root, run_id, *, actor, decisions, now):
     Fail-closed: the staged run is loaded fail-closed (missing/malformed run, or a run without report.toml,
     is CANNOT-EVALUATE); the run_id is validated against the run-id grammar as an identifier BEFORE any path
     use; a required, self-asserted `actor` string is required (its authenticity is out of scope, spec 14.1).
-    Decisions are validated for completeness (one per fragment) and echo cross-checked against the staged
-    mappings/inventory, and every model_proposal resting mapping requires an explicit accept; any such
-    problem is a FINDING (verdict 1) that writes nothing. Returns a ReviewResult."""
+    The run's coherence is judged by ONE authoritative source: after the fast fail-closed pre-checks above,
+    review REQUIRES the staged-run gate (check_opf_import.check_staged_run) to pass EVERY check before it
+    captures acceptance; any gate FINDING is CANNOT-EVALUATE (verdict 2) naming the failing check(s) and
+    writes nothing (R4-F1). Decisions are then validated for completeness (one per fragment) and echo
+    cross-checked against the staged mappings/inventory, and every model_proposal resting mapping requires an
+    explicit accept; any such problem is a FINDING (verdict 1) that writes nothing. Returns a ReviewResult."""
     try:
         _journal.require_containment()
     except _journal.JournalError as exc:
@@ -2574,6 +2577,27 @@ def review_import(product_root, run_id, *, actor, decisions, now):
                 _load_staged_run_for_review(store_root_fd, run_rel)
         finally:
             os.close(store_root_fd)
+
+        # Single authoritative coherence source (R4-F1): the staged-run gate owns the run's structural and
+        # invariant coherence, so review REQUIRES every gate check to PASS before it captures acceptance,
+        # rather than hand-extending a subset of those checks here (which kept leaving gaps: a malformed
+        # run.toml source record, a source path with no covering mapping, or a bad proposals schema each
+        # cleared the loader's fast pre-checks yet check_staged_run diagnoses each). The fast fail-closed
+        # pre-checks in _load_staged_run_for_review above run FIRST as an early defence-in-depth layer; this
+        # delegation then inherits the gate's full coherence findings. check_opf_import is imported LAZILY
+        # inside the function: a module-top import would form a circular import (check_opf_import imports
+        # _opf_import), the same reason _gather_review_context imports _opf_observe lazily. No recursion:
+        # check_staged_run runs the 16 structural checks over one run dir and never calls a module self-test.
+        # States: on a first review acceptance.json is absent, so the gate's acceptance-* checks pass "not yet
+        # reviewed"; on a re-review a prior valid acceptance is present and its acceptance-* checks pass. Any
+        # FINDING is a CANNOT-EVALUATE naming the failing check(s), and NO acceptance is written.
+        import check_opf_import   # lazy: avoids a module-top circular import (see _gather_review_context)
+        run_dir_path = os.path.join(resolution.store_root, run_rel)
+        gate_results = check_opf_import.check_staged_run(run_dir_path)
+        gate_findings = sorted(cid for cid, (ok, _detail) in gate_results.items() if not ok)
+        if gate_findings:
+            raise _cannot("staged run fails the import-operation gate; not reviewable until it is a coherent, "
+                          "promotion-ready run (failing gate checks: {})".format(", ".join(gate_findings)))
 
         findings, normalized = _validate_review_decisions(decisions, frag_by_id, key_meta)
         if findings:
@@ -4290,6 +4314,18 @@ def self_test():
                             "origin": row["origin"], "proposed_state": row["state"]})
             return out
 
+        def rewrite_report_digest(run_dir, rel_path):
+            """After mutating an enumerated artefact, refresh its digest in report.toml so the staged-run
+            gate's artifact-digest-integrity check stays coherent and the TARGET coherence check is the one
+            that fires (the keep-other-fields-coherent discriminator discipline; report.toml is not in its
+            own artefact list, so refreshing it never disturbs the digest checks)."""
+            rep = tomllib.loads((run_dir / "report.toml").read_text())
+            new_sha = _sha256_hex((run_dir / rel_path).read_bytes())
+            for entry in rep.get("artifact", []):
+                if entry.get("path") == rel_path:
+                    entry["sha256"] = new_sha
+            (run_dir / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
+
         rootR1, mR1 = build_store(sources={"a.txt": "aaaa", "b.txt": "bbbbbb"})
         pr = plan_import(rootR1, ["a.txt", "b.txt"], now=NOW, run_nonce=NONCE)
         r1_dir = mR1.parent / "imports" / (pr.run_id or "MISSING")
@@ -4653,7 +4689,9 @@ def self_test():
 
         # model_proposal acceptance gate: a mapping resting in a resting state with origin=model_proposal
         # requires an explicit accept. Hand-edit one mapping row to model_proposal/ignored (a quarantine AND
-        # resting state), then accept -> clean, reject -> finding.
+        # resting state, so lf-bijection stays coherent), then accept -> clean, reject -> finding. Since
+        # review now delegates to the staged-run gate (R4-F1), refresh the mappings.toml report digest so the
+        # gate's artifact-digest-integrity stays green and this run remains a coherent, reviewable run.
         rootRM, mRM = build_store(sources={"a.txt": "aaaa"})
         prm = plan_import(rootRM, ["a.txt"], now=NOW, run_nonce=NONCE)
         rm_dir = mRM.parent / "imports" / (prm.run_id or "MISSING")
@@ -4661,12 +4699,69 @@ def self_test():
         mp_rm["mapping"][0]["origin"] = "model_proposal"
         mp_rm["mapping"][0]["state"] = "ignored"
         (rm_dir / "mappings.toml").write_text(_opf_emit.emit(mp_rm), encoding="utf-8")
+        rewrite_report_digest(rm_dir, "mappings.toml")
         check("RM-model-proposal-accept-clean",
               review_import(rootRM, prm.run_id, actor="R", decisions=all_decisions(rm_dir, "accept"),
                             now=NOW).verdict == 0)
         check("RM-model-proposal-reject-finding",
               review_import(rootRM, prm.run_id, actor="R", decisions=all_decisions(rm_dir, "reject"),
                             now=NOW).verdict == 1)
+
+        # R4-F1: review REQUIRES the staged-run gate to pass before capturing acceptance, so a run that clears
+        # the loader's fast pre-checks but is diagnosed by check_staged_run is now CANNOT-EVALUATE (verdict 2)
+        # with NO acceptance written, rather than capturing acceptance on an incoherent run. Each discriminator
+        # is a single mutation reviewed with otherwise-VALID decisions: before the fix each captured acceptance
+        # (verdict 0); after it, the inherited gate finding makes review cannot-evaluate. A COHERENT control run
+        # still reviews cleanly.
+        # (a) run.toml source records malformed (source = ["invalid"]): the loader accepts source-is-a-list,
+        #     but the gate's mapping-totality/source-preservation checks diagnose the malformed record. Refresh
+        #     run.toml's report digest so a coherence check, not artifact-digest-integrity, is what fires.
+        rootG1, mG1 = build_store(sources={"a.txt": "aaaa"})
+        prg1 = plan_import(rootG1, ["a.txt"], now=NOW, run_nonce=NONCE)
+        g1_dir = mG1.parent / "imports" / (prg1.run_id or "MISSING")
+        g1_decs = all_decisions(g1_dir)
+        run_g1 = tomllib.loads((g1_dir / "run.toml").read_text())
+        run_g1["source"] = ["invalid"]
+        (g1_dir / "run.toml").write_text(_opf_emit.emit(run_g1), encoding="utf-8")
+        rewrite_report_digest(g1_dir, "run.toml")
+        check("G1-gate-malformed-source-cannot-eval",
+              review_import(rootG1, prg1.run_id, actor="R", decisions=g1_decs, now=NOW).verdict == 2)
+        check("G1-gate-malformed-source-no-acceptance", not (g1_dir / "acceptance.json").is_file())
+        # (b) a run.toml source path with no covering mapping (its declared size exceeds the tiled spans): the
+        #     loader does not cross-check run.toml sizes against mappings, but the gate's mapping-totality does.
+        #     Its sha256 is unchanged, so source-preservation stays green and only mapping-totality fires.
+        rootG2, mG2 = build_store(sources={"a.txt": "aaaa"})
+        prg2 = plan_import(rootG2, ["a.txt"], now=NOW, run_nonce=NONCE)
+        g2_dir = mG2.parent / "imports" / (prg2.run_id or "MISSING")
+        g2_decs = all_decisions(g2_dir)
+        run_g2 = tomllib.loads((g2_dir / "run.toml").read_text())
+        run_g2["source"][0]["size"] = run_g2["source"][0]["size"] + 1
+        (g2_dir / "run.toml").write_text(_opf_emit.emit(run_g2), encoding="utf-8")
+        rewrite_report_digest(g2_dir, "run.toml")
+        check("G2-gate-uncovered-source-cannot-eval",
+              review_import(rootG2, prg2.run_id, actor="R", decisions=g2_decs, now=NOW).verdict == 2)
+        check("G2-gate-uncovered-source-no-acceptance", not (g2_dir / "acceptance.json").is_file())
+        # (c) proposals.toml schema = 999: the loader checks only the proposals run_id binding, but the gate's
+        #     proposals-artifact check rejects a wrong schema. proposals.toml is not in report's artefact list,
+        #     so no digest refresh is needed and only proposals-artifact fires.
+        rootG3, mG3 = build_store(sources={"a.txt": "aaaa"})
+        prg3 = plan_import(rootG3, ["a.txt"], now=NOW, run_nonce=NONCE)
+        g3_dir = mG3.parent / "imports" / (prg3.run_id or "MISSING")
+        g3_decs = all_decisions(g3_dir)
+        props_g3 = tomllib.loads((g3_dir / "proposals.toml").read_text())
+        props_g3["schema"] = 999
+        (g3_dir / "proposals.toml").write_text(_opf_emit.emit(props_g3), encoding="utf-8")
+        check("G3-gate-bad-proposals-schema-cannot-eval",
+              review_import(rootG3, prg3.run_id, actor="R", decisions=g3_decs, now=NOW).verdict == 2)
+        check("G3-gate-bad-proposals-schema-no-acceptance", not (g3_dir / "acceptance.json").is_file())
+        # (d) control: a COHERENT run (no mutation) still reviews cleanly, gate-pass then decisions-valid, so
+        #     acceptance is written (verdict 0). This anchors the flip: the mutations above, not the delegation
+        #     itself, are what turn review cannot-evaluate.
+        rootG4, mG4 = build_store(sources={"a.txt": "aaaa"})
+        prg4 = plan_import(rootG4, ["a.txt"], now=NOW, run_nonce=NONCE)
+        g4_dir = mG4.parent / "imports" / (prg4.run_id or "MISSING")
+        rrg4 = review_import(rootG4, prg4.run_id, actor="R", decisions=all_decisions(g4_dir), now=NOW)
+        check("G4-gate-coherent-run-clean", rrg4.verdict == 0 and (g4_dir / "acceptance.json").is_file())
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

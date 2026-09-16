@@ -160,8 +160,13 @@ def check_staged_run(run_dir):
         return results
 
     # --- report-schema ------------------------------------------------------------------------------
+    # report.verdict must be a Python INT equal to 0, not merely == 0: Python's `False == 0` is True, so a
+    # `verdict = false` (bool) run would slip past a bare `== 0` and pass every gate check on a not-promotion-
+    # ready run. Require the integer type (`type(x) is int` excludes bool), mirroring the review-side strict-
+    # int guard in _opf_import._load_staged_run_for_review; promotion_ready stays a strict `is True` bool.
     schema_ok = (report.get("schema") == 1 and report.get("run_id") == run_dir.name
-                 and report.get("verdict") == 0 and report.get("promotion_ready") is True
+                 and type(report.get("verdict")) is int and report.get("verdict") == 0
+                 and report.get("promotion_ready") is True
                  and isinstance(report.get("artifact"), list))
     record("report-schema", schema_ok,
            "" if schema_ok else "report.toml schema/run_id/verdict/promotion_ready/artifact malformed")
@@ -699,6 +704,16 @@ def _self_test():
         rep["verdict"] = 1
         (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
         expect("disc-report-schema", check_staged_run(m)["report-schema"][0] is False)
+
+        # report-schema (strict-int verdict): a report.toml verdict of `false` (a bool) must NOT pass via
+        # Python's `False == 0`. The `type(...) is int` guard (bool excluded) makes it a FINDING, so a
+        # not-promotion-ready run cannot clear all 16 checks. report.toml is not in its own artefact list, so
+        # the digest check stays green and only report-schema fires.
+        m = copy_run(clean)
+        rep = _load_toml(m / "report.toml")
+        rep["verdict"] = False
+        (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
+        expect("disc-report-schema-bool-verdict", check_staged_run(m)["report-schema"][0] is False)
 
         # artifact-digest-integrity: append an inert TOML comment to run.toml WITHOUT refreshing its
         # recorded digest (run.toml still parses identically, so only the digest check fires).
