@@ -156,6 +156,7 @@ class _LegacyFragmentSpec(_opf_schema.TypeSpec):
         self.terminal = frozenset({"resolved", "ignored"})
         self.transitions = {"quarantined": frozenset({"resolved", "ignored"})}
         self.proposable = frozenset({"resolved", "ignored"})
+        self.gated = frozenset()   # legacy_fragment has no gated states: its proposable states are terminal
         self.extra_keys = frozenset({"source_path", "source_digest", "span", "run_id", "body"})
         self.reduced = False
         self.states = frozenset({"quarantined", "resolved", "ignored"})
@@ -685,16 +686,16 @@ def _require_inline_layout(store_root_fd, machine_rel):
     inline readers do not enumerate: reading them blind would MISS every per-record id from the R6 union (a
     minted id could silently collide) and mis-resolve a duplicate/link target against an id whose record
     file this reader never confirmed (a phantom target). The store's declared layout is therefore read from
-    the AUTHORITATIVE manifest [devprocess].layout (guard-input-soundness); any layout other than `inline`,
-    or an absent/malformed devprocess table, is CANNOT-EVALUATE, fail-closed, never a partial inline read of
+    the AUTHORITATIVE manifest [opf].layout (guard-input-soundness); any layout other than `inline`,
+    or an absent/malformed opf table, is CANNOT-EVALUATE, fail-closed, never a partial inline read of
     a non-inline store. (per-record support is a disclosed follow-on.)"""
     manifest_rel = "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)
     data = _read_toml(store_root_fd, manifest_rel)
     if data is None:
         raise _cannot("{}: the store manifest is absent; the storage layout cannot be determined "
                       "(spec 9)".format(manifest_rel))
-    devprocess = data.get("devprocess")
-    layout = devprocess.get("layout") if isinstance(devprocess, dict) else None
+    opf = data.get("opf")
+    layout = opf.get("layout") if isinstance(opf, dict) else None
     if layout != "inline":
         raise _cannot("{}: storage layout {!r} is unsupported; U7's inline active-store readers stage only "
                       "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
@@ -1569,7 +1570,8 @@ def self_test():
 
     def manifest_text():
         return "\n".join([
-            "[devprocess]", 'standard = "devprocess"', 'spec_version = "1.0.0"',
+            "[opf]", 'standard = "opf"',
+            'spec_version = "{}"'.format(_opf_store.SUPPORTED_SPEC_VERSION),
             'layout = "inline"', 'posture = "required"', 'import_status = "none"',
             "", "[store]", 'sync_target = ""',
             "", "[modules]", "governance = true",

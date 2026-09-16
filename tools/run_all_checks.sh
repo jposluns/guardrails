@@ -80,6 +80,8 @@ run_gate "opf-doctor-selftest" python3 -I -B tools/check_opf_doctor.py --self-te
 run_gate "opf-doctor" python3 -I -B tools/check_opf_doctor.py
 run_gate "opf-init-selftest" python3 -I -B tools/check_opf_init.py --self-test
 run_gate "opf-init" python3 -I -B tools/check_opf_init.py
+run_gate "opf-upgrade-selftest" python3 -I -B tools/check_opf_upgrade.py --self-test
+run_gate "opf-upgrade" python3 -I -B tools/check_opf_upgrade.py
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check

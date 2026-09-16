@@ -137,7 +137,8 @@ def _self_test():
         return {"schema": 1, "record": records}
 
     def counters(**over):
-        c = {"BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0, "BL": 0, "HO": 1, "RF": 0}
+        c = {"BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0, "BL": 0, "HO": 1, "RF": 0,
+             "CN": 0, "MD": 0, "PP": 0}
         c.update(over)
         return {"schema": 1, "counters": c}
 
@@ -145,9 +146,11 @@ def _self_test():
         types = {t: {"namespace": ns} for t, ns in (
             ("backlog_item", "BI"), ("done", "DN"), ("worklog", "WL"), ("finding", "FN"),
             ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
-            ("autonomous_decision", "AD"), ("block", "BL"))}
+            ("autonomous_decision", "AD"), ("block", "BL"),
+            ("contribution", "CN"), ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
         return {
-            "devprocess": {"standard": "devprocess", "spec_version": "1.0.0", "layout": "inline",
+            "opf": {"standard": "opf", "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
+                           "layout": "inline",
                            "posture": "required", "import_status": "none"},
             "store": {"sync_target": ""},
             "types": types,
@@ -197,6 +200,9 @@ def _self_test():
             "reference.index.toml": idx([]),
             "autonomous_decision.index.toml": idx([]),
             "block.index.toml": idx([]),
+            "contribution.index.toml": idx([]),
+            "maintainer_decision.index.toml": idx([]),
+            "preference_pattern.index.toml": idx([]),
             "worklog.toml": {"schema": 1, "entry": [wl(3), wl(4)]},
             "version.toml": clean_version,
             "archive/2026/archive.toml": {"schema": 1, "moved": [],

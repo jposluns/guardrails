@@ -64,7 +64,7 @@ from _opf_store import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, RESOLVED, MANIFEST_NAME, WORKING_DIRNAME, StoreError,
     _read_toml_contained, _open_store_root_fd, _open_root_fd, validate_manifest, classify_target,
     _sorted_key_names, _safe_display, _is_contained_relpath,
-    BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES, KNOWN_MODULES,
+    BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES, KNOWN_MODULES, SUPPORTED_SPEC_VERSION,
     snapshot_caller_alarm,  # round-17 F-R16-1: capture caller ITIMER+pending before a fixture borrows SIGALRM
     restore_caller_alarm,   # round-15 F2 + round-17 F-R16-1: shared elapsed-aware caller-alarm save/restore
 )
@@ -2123,7 +2123,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         for f in mv.findings:
             rep.finding("manifest: {}".format(f))
 
-    dp = manifest_data.get("devprocess") if isinstance(manifest_data, dict) else None
+    dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
     import_status = dp.get("import_status") if isinstance(dp, dict) else None
     types_tbl = manifest_data.get("types") if isinstance(manifest_data, dict) else None
@@ -2611,7 +2611,7 @@ def _enabled_modules(manifest_data):
 
 
 def _authoritative_types(enabled_modules, declared_types):
-    """The type -> NORMATIVE-namespace roster the store must carry: the nine baseline types, each
+    """The type -> NORMATIVE-namespace roster the store must carry: the twelve baseline types, each
     module-tier type whose module is enabled, and any importer-only type (legacy_fragment) the manifest
     actually declares (present only after an import). Namespaces are U1's normative ones, never the
     manifest's declared values (validate_manifest already graded those; guard-input-soundness)."""
@@ -2699,14 +2699,31 @@ def self_test():
     def fn(n):
         return envelope("FN-{}".format(n), "finding", "open")
 
+    def cn(n, status="proposed", **over):
+        r = envelope("CN-{}".format(n), "contribution", status,
+                     recipient="peer", dedup_class="rule-fix", content_digest="sha256:x")
+        r.update(over)
+        return r
+
+    def md(n, **over):
+        r = envelope("MD-{}".format(n), "maintainer_decision", "recorded", decision="x")
+        r.update(over)
+        return r
+
+    def pp(n, status="active", **over):
+        r = envelope("PP-{}".format(n), "preference_pattern", status, context="c", rationale="r")
+        r.update(over)
+        return r
+
     def base_manifest(layout="inline", types=None, views=None):
         if types is None:
             types = {t: {"namespace": ns} for t, ns in (
                 ("backlog_item", "BI"), ("done", "DN"), ("worklog", "WL"), ("finding", "FN"),
                 ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
-                ("autonomous_decision", "AD"), ("block", "BL"))}
+                ("autonomous_decision", "AD"), ("block", "BL"), ("contribution", "CN"),
+                ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
         m = {
-            "devprocess": {"standard": "devprocess", "spec_version": "1.0.0", "layout": layout,
+            "opf": {"standard": "opf", "spec_version": SUPPORTED_SPEC_VERSION, "layout": layout,
                            "posture": "required", "import_status": "none"},
             "store": {"sync_target": ""},
             "types": types,
@@ -2721,7 +2738,8 @@ def self_test():
         return {"schema": 1, "record": records}
 
     def counters(**over):
-        c = {"BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0, "BL": 0, "HO": 1, "RF": 0}
+        c = {"BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0, "BL": 0, "HO": 1, "RF": 0,
+             "CN": 0, "MD": 0, "PP": 0}
         c.update(over)
         return {"schema": 1, "counters": c}
 
@@ -2774,6 +2792,9 @@ def self_test():
             "reference.index.toml": idx([]),
             "autonomous_decision.index.toml": idx([]),
             "block.index.toml": idx([]),
+            "contribution.index.toml": idx([]),
+            "maintainer_decision.index.toml": idx([]),
+            "preference_pattern.index.toml": idx([]),
             "worklog.toml": {"schema": 1, "entry": [wl(3), wl(4)]},
             "version.toml": copy.deepcopy(clean_version),
             "archive/2026/archive.toml": {"schema": 1, "moved": [],
@@ -2967,6 +2988,36 @@ def self_test():
         check("legacy-fragment-deferred-cannot-eval", _lfr is not None and _lfr.status == CANNOT_EVALUATE)
         check("legacy-fragment-deferred-named",
               _lfr is not None and any("legacy_fragment" in m and "deferred" in m for m in _lfr.cannot_evaluate))
+        # STEP 5 (checks group): the three 1.1.0 baseline types (contribution/CN, maintainer_decision/MD,
+        # preference_pattern/PP) now carry shipped BASELINE_SPECS schemas, so C-RECORDS GRADES their records
+        # rather than deferring them (contrast the module-tier / legacy_fragment deferral above). A clean
+        # populated store validates VALID; a one-dimension mutation of each named per-record invariant
+        # (the maintainer_decision exemplifies-target and the contribution delivery bundle) flips INVALID,
+        # proving the baseline validator is wired for these types through the doctor.
+        _md = clean_machine()
+        _md["counters.toml"] = counters(MD=1, PP=1)
+        _md["preference_pattern.index.toml"] = idx([pp(1)])
+        _md["maintainer_decision.index.toml"] = idx([md(1, links=[{"rel": "exemplifies", "id": "PP-1"}])])
+        check("baseline-md-pp-graded-valid", run(_md).status == VALID)
+        _mdx = clean_machine()
+        _mdx["counters.toml"] = counters(MD=1, PP=1)
+        _mdx["preference_pattern.index.toml"] = idx([pp(1)])
+        _mdx["maintainer_decision.index.toml"] = idx([md(1, links=[{"rel": "exemplifies", "id": "BI-1"}])])
+        _mdxr = run(_mdx)
+        check("baseline-md-exemplifies-nonpp-invalid", _mdxr is not None and _mdxr.status == INVALID)
+        check("baseline-md-exemplifies-nonpp-named",
+              _mdxr is not None and any("exemplifies" in f for f in _mdxr.findings))
+        _cn = clean_machine()
+        _cn["counters.toml"] = counters(CN=1)
+        _cn["contribution.index.toml"] = idx([cn(1)])
+        check("baseline-contribution-graded-valid", run(_cn).status == VALID)
+        _cnx = clean_machine()
+        _cnx["counters.toml"] = counters(CN=1)
+        _cnx["contribution.index.toml"] = idx([cn(1, status="sent")])
+        _cnxr = run(_cnx)
+        check("baseline-contribution-delivery-bundle-invalid", _cnxr is not None and _cnxr.status == INVALID)
+        check("baseline-contribution-delivery-bundle-named",
+              _cnxr is not None and any("delivery" in f for f in _cnxr.findings))
         # F-3: a remote spelling the scheme DEFAULT port names the same endpoint as the port-less shorthand
         # (VALID); a NON-default port stays distinct (INVALID).
         _dpf = clean_machine()
@@ -3104,7 +3155,7 @@ def self_test():
         # run-id-named dir WITHOUT plan.toml does not substantiate, so a stray is graded, not triaged.
         _c5 = clean_machine()
         _c5["manifest.toml"] = base_manifest()
-        _c5["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _c5["manifest.toml"]["opf"]["import_status"] = "partial"
         _c5r = run(_c5, working={"stray.md": "x",
                                  "imports/imp-20260601T000000Z-0123456789abcdef/junk.txt": "x"})
         check("c5-partial-no-plan-not-substantiated",
@@ -3190,7 +3241,7 @@ def self_test():
         RUNID = "imp-20260601T000000Z-0123456789abcdef"
         pm = clean_machine()
         pm["manifest.toml"] = base_manifest()
-        pm["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        pm["manifest.toml"]["opf"]["import_status"] = "partial"
         partial = run(pm, working={"junk.md": "x", "imports/{}/plan.toml".format(RUNID): "schema = 1"})
         check("partial-import-triage-not-finding",
               partial.status == VALID and any("junk.md" in t for t in partial.triage))
@@ -3198,7 +3249,7 @@ def self_test():
         # and the unsubstantiated declaration is itself flagged -> INVALID.
         stale = clean_machine()
         stale["manifest.toml"] = base_manifest()
-        stale["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        stale["manifest.toml"]["opf"]["import_status"] = "partial"
         sr = run(stale, working=dict([("junk.md", "x")]))
         check("partial-no-active-run-invalid", sr.status == INVALID)
         check("partial-no-active-run-named",
@@ -3297,7 +3348,7 @@ def self_test():
         # finding fires (imports is read at the NEW root, which is empty) AND the legacy cant dominates.
         _lgp = clean_machine()
         _lgp["manifest.toml"] = base_manifest()
-        _lgp["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _lgp["manifest.toml"]["opf"]["import_status"] = "partial"
         _lgp["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
         _lgpr = run(_lgp)
         check("legacy-imports-partial-not-substantiated",
@@ -4166,7 +4217,7 @@ def self_test():
         # triages (VALID), never a finding, exactly as files under imports already do.
         _f1c = clean_machine()
         _f1c["manifest.toml"] = base_manifest()
-        _f1c["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _f1c["manifest.toml"]["opf"]["import_status"] = "partial"
         _f1croot = build(_f1c, working={"imports/{}/plan.toml".format(RUNID16): "schema = 1"})
         os.makedirs(str(_f1croot / ".working" / "imports" / "empty-under-partial"),
                     exist_ok=False)
@@ -4188,7 +4239,7 @@ def self_test():
               _f2r is not None and _f2r.status == INVALID
               and any("C-ARCHIVE-ENUM" in f and "strayfile.txt" in f for f in _f2r.findings))
         _f2p = clean_machine()
-        _f2p["manifest.toml"]["devprocess"]["import_status"] = "partial"
+        _f2p["manifest.toml"]["opf"]["import_status"] = "partial"
         _f2p["archive/2026/strayfile.txt"] = "x\n"
         _f2pr = run(_f2p, working={"imports/{}/plan.toml".format(RUNID16): "schema = 1"})
         check("archive-bucket-stray-file-partial-triaged",

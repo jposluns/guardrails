@@ -35,7 +35,8 @@ except ModuleNotFoundError:
 
 _INITIAL_VIEW_NAMES = (
     "TODO.md", "BACKLOG.md", "PIPELINE.md", "DONE.md", "FINDINGS.md", "DECISIONS.md",
-    "BLOCKS.md", "HANDOFF.md", "REFERENCES.md", "WORKLOG.md", "VERSION.md",
+    "BLOCKS.md", "HANDOFF.md", "REFERENCES.md", "CONTRIBUTIONS.md", "WORKLOG.md",
+    "VERSION.md", "DECISIONS.toml",
 )
 INDEX_TYPES = tuple(sorted(set(_opf_store.BASELINE_TYPES) - {"worklog"}))
 
@@ -65,9 +66,9 @@ def _manifest_model():
             "target": "{}/{}".format(_opf_store.WORKING_DIRNAME, name),
         }
     return {
-        "devprocess": {
+        "opf": {
             "standard": _opf_store.STANDARD_TOKEN,
-            "spec_version": "1.0.0",
+            "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
             "layout": _choice("inline", _opf_store.LAYOUTS),
             "posture": _choice("required", _opf_store.POSTURES),
             "import_status": _choice("none", _opf_store.IMPORT_STATES),
@@ -183,8 +184,8 @@ def self_test():
         check("manifest reversed insertion order",
               manifest_text == _opf_emit.emit_checked(dict(reversed(list(model.items())))))
         check("manifest top tables", set(manifest) == _opf_store.TOP_LEVEL_TABLES - {"profiles"})
-        check("devprocess defaults", manifest["devprocess"] == {
-            "standard": _opf_store.STANDARD_TOKEN, "spec_version": "1.0.0",
+        check("opf defaults", manifest["opf"] == {
+            "standard": _opf_store.STANDARD_TOKEN, "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
             "layout": "inline", "posture": "required", "import_status": "none",
         })
         check("store default", manifest["store"] == {"sync_target": ""})
@@ -210,19 +211,23 @@ def self_test():
             "PIPELINE.md": ("composed", ["backlog_item", "block"]),
             "DONE.md": ("composed", ["done"]),
             "FINDINGS.md": ("composed", ["finding"]),
-            "DECISIONS.md": ("composed", ["pending_decision", "autonomous_decision"]),
+            "DECISIONS.md": ("composed", ["pending_decision", "autonomous_decision",
+                                          "maintainer_decision", "preference_pattern"]),
             "BLOCKS.md": ("composed", ["block"]),
             "HANDOFF.md": ("composed", ["handoff"]),
             "REFERENCES.md": ("composed", ["reference"]),
+            "CONTRIBUTIONS.md": ("composed", ["contribution"]),
             "WORKLOG.md": ("deterministic", ["worklog"]),
             "VERSION.md": ("deterministic", ["version"]),
+            "DECISIONS.toml": ("projection", ["pending_decision", "autonomous_decision",
+                                              "maintainer_decision", "preference_pattern"]),
         }
         check("pinned view inventory and destinations", manifest["views"] == {
             name: {"kind": kind, "sources": sources, "target": ".working/" + name}
             for name, (kind, sources) in expected_views.items()
         })
         for table, keys in (
-                ("devprocess", _opf_store.DEVPROCESS_KEYS), ("store", _opf_store.STORE_KEYS),
+                ("opf", _opf_store.OPF_KEYS), ("store", _opf_store.STORE_KEYS),
                 ("unmanaged", _opf_store.UNMANAGED_KEYS), ("vendors", _opf_store.VENDORS_KEYS),
                 ("archive", _opf_store.ARCHIVE_KEYS)):
             check(table + " keys", set(manifest[table]) == keys)
@@ -236,7 +241,8 @@ def self_test():
         schema_line = "schema = {}\n".format(SUPPORTED_SCHEMA)
         expected_counters = (
             schema_line + "\n[counters]\n"
-            "AD = 0\nBI = 0\nBL = 0\nDN = 0\nFN = 0\nHO = 0\nPD = 0\nRF = 0\nWL = 0\n"
+            "AD = 0\nBI = 0\nBL = 0\nCN = 0\nDN = 0\nFN = 0\nHO = 0\nMD = 0\nPD = 0\n"
+            "PP = 0\nRF = 0\nWL = 0\n"
         )
         expected_version = "release = []\n" + schema_line + "summary = []\n"
         expected_worklog = "entry = []\n" + schema_line
@@ -284,13 +290,13 @@ def self_test():
             check("missing counter " + namespace, bool(findings))
         for label, table, key, value in (
                 ("non-bool module", "modules", "governance", "false"),
-                ("invalid posture", "devprocess", "posture", "unknown")):
+                ("invalid posture", "opf", "posture", "unknown")):
             bad = deepcopy(manifest)
             bad[table][key] = value
             result = _opf_store.validate_manifest(bad)
             check(label, result.status == _opf_store.INVALID and bool(result.findings))
         bad = deepcopy(manifest)
-        del bad["devprocess"]["layout"]
+        del bad["opf"]["layout"]
         result = _opf_store.validate_manifest(bad)
         check("missing layout", result.status == _opf_store.INVALID and bool(result.findings))
         for name, validator in ((VERSION_NAME, validate_version), (WORKLOG_NAME, validate_worklog)):
@@ -303,7 +309,7 @@ def self_test():
         _high, findings = validate_counters(bad, known_namespaces=namespaces)
         check("counters wrong schema", bool(findings))
         check("validated emission refuses corruption", rejects(lambda: _emit_validated(
-            {"devprocess": {"standard": _opf_store.STANDARD_TOKEN}},
+            {"opf": {"standard": _opf_store.STANDARD_TOKEN}},
             _opf_store.MANIFEST_NAME, _opf_store.validate_manifest)))
     except Exception as exc:
         print("OPF-INIT SELF-TEST ERROR: {}; fail-closed".format(exc), file=sys.stderr)

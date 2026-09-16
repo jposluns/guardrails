@@ -61,8 +61,8 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 ## Getting started
 
 1. Run `opf init` (until the tooling ships: create `.working/toml/` by hand with `manifest.toml`
-   declaring `standard = "devprocess"` in its `[devprocess]` table, plus `counters.toml`,
-   `version.toml`, `worklog.toml`, and the eight baseline `<type>.index.toml` files (worklog is the
+   declaring `standard = "opf"` in its `[opf]` table, plus `counters.toml`,
+   `version.toml`, `worklog.toml`, and the eleven baseline `<type>.index.toml` files (worklog is the
    exempt ledger listed above, not an index); specification
    sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` is detected and you choose, per file: keep it, import it
@@ -126,8 +126,9 @@ Additions the decisions imply but do not literally specify, flagged for ratifica
 
 Superseded by the DevProcess identity fold (this revision):
 
-- The base discovery token `aiqt-opf` is superseded by `devprocess`, and the `[opf]` manifest table
-  by the `[devprocess]` base table.
+- The base discovery token is `opf`, carried in the `[opf]` base manifest table. This supersedes the
+  earlier `aiqt-opf` token; the interim `devprocess` token and `[devprocess]` table are retired by the
+  OPFiles rebrand, and a legacy store still carrying them is migrated forward by `opf upgrade`.
 - The base storage field `layout_profile` is renamed to `layout`, reserving the word "profile" for
   the base/profile mechanism (`[profiles.<name>]`).
 

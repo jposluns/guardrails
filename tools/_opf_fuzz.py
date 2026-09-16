@@ -293,7 +293,7 @@ def _worklog_entry(n, **over):
 
 
 VALID_MANIFEST = {
-    "devprocess": {"standard": "devprocess", "spec_version": "1.0.0", "layout": "inline",
+    "opf": {"standard": "opf", "spec_version": "1.1.0", "layout": "inline",
                    "posture": "required", "import_status": "none"},
     "store": {"sync_target": ""},
     "modules": {"governance": True, "operational_policy": True, "concurrent_operation": True},
@@ -305,7 +305,7 @@ VALID_MANIFEST = {
 # profile is ENFORCED (supported_profiles={"aiqt":[1]}), used to prove a malformed supported_profiles
 # never turns that INVALID into VALID.
 WEAKENING_MANIFEST = {
-    "devprocess": {"standard": "devprocess", "spec_version": "1.0.0", "layout": "inline",
+    "opf": {"standard": "opf", "spec_version": "1.1.0", "layout": "inline",
                    "posture": "required", "import_status": "none"},
     "store": {"sync_target": ""},
     "modules": {"governance": True, "operational_policy": True, "concurrent_operation": True},
@@ -475,7 +475,7 @@ def run():
         ("validate_record.refs", _opf_schema.validate_record, "status", lambda a: _mrec(refs=a)),
         ("validate_record.refs[0]", _opf_schema.validate_record, "status", lambda a: _mrec(refs=[a])),
         # validate_manifest's sub-table validators, each reached because VALID_MANIFEST is identifiably a
-        # devprocess store (its [devprocess] carries the standard token), so every sub-validator runs. A
+        # opf store (its [opf] carries the standard token), so every sub-validator runs. A
         # mixed-type-key dict injected as a sub-table reaches that validator's sorted(extra) over the
         # table's surplus keys.
         ("validate_manifest.store", _opf_store.validate_manifest, "status", lambda a: _mman(store=a)),
@@ -529,21 +529,21 @@ def run():
                     fail("{}: findings-mode result is not a list (got {!r})".format(where, result))
             # mode == "op": any non-exception return is a well-formed outcome.
 
-    # A dedicated [devprocess] case: _validate_base's sorted(extra) is reached only when the base table
-    # KEEPS its standard discovery token (a bare replacement of [devprocess] loses the token and short-
+    # A dedicated [opf] case: _validate_base's sorted(extra) is reached only when the base table
+    # KEEPS its standard discovery token (a bare replacement of [opf] loses the token and short-
     # circuits to CANNOT-EVALUATE before _validate_base runs). So inject a NON-STRING surplus key into an
     # otherwise-valid base: on the un-round-6 code its sorted(extra) over {1, str} crashes; after the fix
     # it is a clean status object (the surplus key becomes an ordinary unknown-key finding).
     cases += 1
     assertions += 1
-    _dp_mixed = {**VALID_MANIFEST["devprocess"], 1: "surplus"}
+    _dp_mixed = {**VALID_MANIFEST["opf"], 1: "surplus"}
     try:
-        _r = _opf_store.validate_manifest({**VALID_MANIFEST, "devprocess": _dp_mixed})
+        _r = _opf_store.validate_manifest({**VALID_MANIFEST, "opf": _dp_mixed})
         if not (hasattr(_r, "status") and _r.status in STATUSES):
-            fail("nested validate_manifest.devprocess[mixed-extra-key]: not a status object (got {!r})"
+            fail("nested validate_manifest.opf[mixed-extra-key]: not a status object (got {!r})"
                  .format(_r))
     except Exception as exc:  # noqa: BLE001
-        fail("nested validate_manifest.devprocess[mixed-extra-key]: UNCONTROLLED {} raised ({}) -- a "
+        fail("nested validate_manifest.opf[mixed-extra-key]: UNCONTROLLED {} raised ({}) -- a "
              "nested membership/type-guard crash".format(type(exc).__name__, exc))
 
     # --- the CHILD-DEPTH key-injection sweep (round 7: the round-6 parent-replacement blind spot) ------
@@ -695,6 +695,18 @@ def run():
     for mal in ("", 7, [1, 2], "backlog_item"):
         probe("specs-malformed({!r})-not-VALID".format(mal),
               _opf_schema.validate_record(_full_record(), specs=mal).status != VALID)
+
+    # FO8a contribution.delivery unknown-key (spec 8.5): a surplus delivery key surfaces an INVALID
+    # unknown-key finding and is never tolerated silently. Exercises the _safe_key_names render at the
+    # contribution delivery site (one key-name-render coverage class with the actor/links/refs sites).
+    contrib_bad_delivery = {
+        "id": "CN-1", "type": "contribution", "status": "proposed", "title": "t",
+        "created_at": TS, "updated_at": TS, "actor": {"kind": "maintainer"},
+        "recipient": "r", "dedup_class": "d", "content_digest": "x",
+        "delivery": {"channel": "c", "ref": "r", "zzz": 1}}
+    probe("contribution-delivery-unknown-key-INVALID",
+          _opf_schema.validate_record(contrib_bad_delivery, expected_type="contribution").status
+          == INVALID)
 
     # FO9 next_id.known_complete: known_complete is a genuine-bool PROOF flag, not a truthiness test. Its
     # empty/false/omitted baseline REFUSES allocating from a namespace with no recorded high-water (an
@@ -899,9 +911,9 @@ def run():
     status_findings_cases = [
         # _opf_store.validate_manifest sub-tables (bare int AND container).
         ("manifest.spec_version-int", "status", lambda: _opf_store.validate_manifest(
-            {**VALID_MANIFEST, "devprocess": {**VALID_MANIFEST["devprocess"], "spec_version": MSG_INT}})),
+            {**VALID_MANIFEST, "opf": {**VALID_MANIFEST["opf"], "spec_version": MSG_INT}})),
         ("manifest.spec_version-list", "status", lambda: _opf_store.validate_manifest(
-            {**VALID_MANIFEST, "devprocess": {**VALID_MANIFEST["devprocess"], "spec_version": MSG_LIST}})),
+            {**VALID_MANIFEST, "opf": {**VALID_MANIFEST["opf"], "spec_version": MSG_LIST}})),
         ("manifest.types.namespace-int", "status", lambda: _opf_store.validate_manifest(
             {**VALID_MANIFEST, "types": {"backlog_item": {"namespace": MSG_INT}}})),
         ("manifest.views.kind-int", "status", lambda: _opf_store.validate_manifest(
@@ -987,7 +999,7 @@ def run():
     # validator to a structured outcome (the two confirmed round-9 sites, driven from parsed bytes).
     _hx = "0x" + "f" * 4000
     _msg_ok("e2e.manifest-hex-spec_version", "status", lambda: _opf_store.validate_manifest(
-        tomllib.loads('[devprocess]\nstandard = "devprocess"\nspec_version = ' + _hx + "\n")))
+        tomllib.loads('[opf]\nstandard = "opf"\nspec_version = ' + _hx + "\n")))
     _msg_ok("e2e.check_monotonic-hex-highwater", "findings", lambda: _opf_schema.check_monotonic(
         tomllib.loads("BI = " + _hx + "\n"), {"BI": 0}))
 
