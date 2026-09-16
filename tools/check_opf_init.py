@@ -16,6 +16,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -154,7 +155,12 @@ def _suite(invoke):
             raise OSError("git not found on PATH")
 
         def git_call(root, args):
-            result = _opf_observe._run_git(git, root, args)
+            # Fixture SETUP reproduces the adopter's REAL repository, so it permits lazy fetch
+            # (allow_lazy_fetch=True): a partial-clone checkout, or a real `git add` that fetches an absent
+            # blob through the promisor, is legitimate fixture behaviour. Production OBSERVATIONS keep
+            # _run_git's default (lazy fetch suppressed), which the object-reading probes under test exercise
+            # directly (e.g. _opf_observe._show_toml / _run_git below, without this flag).
+            result = _opf_observe._run_git(git, root, args, allow_lazy_fetch=True)
             if not result.completed or result.rc != 0:
                 raise OSError("fixture git failed at {!r}: {}".format(str(root), result.err))
             return result.out
@@ -981,6 +987,72 @@ def _suite(invoke):
                         os.environ["GIT_INDEX_FILE"] = saved_index_file
                 check("git_input ignores an inherited GIT_INDEX_FILE (external index byte-unchanged)",
                       external_index.read_bytes() == external_before)
+
+                # OPF-FSMONITOR (F-OPF-INIT-FSMONITOR-EXEC): _run_git must suppress a repository-configured
+                # core.fsmonitor, so an untrusted repo cannot obtain CODE EXECUTION when the adopter runs
+                # `opf init`. init's non-probe git calls route through _init_git -> _opf_observe._run_git;
+                # before the fix _run_git omitted `-c core.fsmonitor=false`, so git LAUNCHED the repo's
+                # configured fsmonitor program during an index refresh in the init path. The D2B ignore probe
+                # already suppressed fsmonitor via _run_git_config_discovery; this closes the parallel
+                # _run_git path. We commit a seed, configure a marker-touching fsmonitor, run init, and assert
+                # the marker was NOT created (the monitor process never ran). DISCRIMINATOR: against the
+                # pre-fix _run_git the marker IS created (fsmonitor executed) even though init still exits 0.
+                fsmon = make_git("fsmonitor-exec")
+                (fsmon / "seed.txt").write_bytes(b"seed\n")
+                git_call(fsmon, ["--literal-pathspecs", "add", "--", "seed.txt"])
+                git_call(fsmon, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "seed"])
+                fsmon_marker = base / "fsmonitor-marker"
+                fsmon_hook = base / "fsmonitor-evil.sh"
+                fsmon_hook.write_text(
+                    "#!/bin/sh\ntouch {}\nexit 0\n".format(shlex.quote(str(fsmon_marker))),
+                    encoding="utf-8")
+                os.chmod(str(fsmon_hook), 0o755)
+                git_call(fsmon, ["config", "core.fsmonitor", str(fsmon_hook)])
+                rc, output = run(fsmon)
+                check("init suppresses a repo-configured core.fsmonitor (no process launched)",
+                      not fsmon_marker.exists())
+                check("init still succeeds with core.fsmonitor configured",
+                      rc == EXIT_OK and valid_sources(fsmon))
+
+                # OPF-OBSERVE-LAZYFETCH-EXEC (F-OPF-OBSERVE-LAZYFETCH-EXEC): an object-reading OPF
+                # observation must never trigger a partial-clone LAZY FETCH, because the fetch EXECUTES the
+                # repository-configured core.sshCommand -- the same code-execution class as the fsmonitor
+                # vector above, reached instead through git's promisor machinery. _show_toml reads a committed
+                # TOML via `git show HEAD:<path>` under _opf_observe._run_git; before the fix _scrubbed_env
+                # neither set GIT_NO_LAZY_FETCH nor kept an ambient one (the allowlist scrub STRIPS it), so a
+                # `show` of an ABSENT blob in a blobless clone lazy-fetched through origin and RAN
+                # core.sshCommand. We commit seed.toml, make a blobless partial clone (blob absent, promisor
+                # registered by the clone), repoint origin at ssh with a marker-touching core.sshCommand, then
+                # call _show_toml and assert the marker was NOT created (no fetch/exec) and the read reports
+                # the object unavailable via the existing omit-plus-note path (unchanged for a PRESENT
+                # object). Hermetic and offline: ssh://example.invalid never connects -- git spawns
+                # core.sshCommand before any network I/O, and the marker script exits without connecting.
+                # DISCRIMINATOR: against the round-1 _run_git env the marker IS created (the ssh command ran).
+                lazy_src = make_git("lazyfetch-src")
+                (lazy_src / "seed.toml").write_bytes(b'name = "x"\n')
+                git_call(lazy_src, ["--literal-pathspecs", "add", "--", "seed.toml"])
+                git_call(lazy_src, ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "seed"])
+                git_call(lazy_src, ["config", "uploadpack.allowFilter", "true"])
+                git_call(lazy_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
+                lazy_clone = base / "lazyfetch-clone"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", "file://" + str(lazy_src), str(lazy_clone)])
+                lazy_marker = base / "lazyfetch-marker"
+                lazy_hook = base / "lazyfetch-ssh.sh"
+                lazy_hook.write_text(
+                    "#!/bin/sh\ntouch {}\nexit 0\n".format(shlex.quote(str(lazy_marker))),
+                    encoding="utf-8")
+                os.chmod(str(lazy_hook), 0o755)
+                git_call(lazy_clone, ["remote", "set-url", "origin", "ssh://example.invalid/repo"])
+                git_call(lazy_clone, ["config", "ssh.variant", "ssh"])
+                git_call(lazy_clone, ["config", "core.sshCommand", str(lazy_hook)])
+                lazy_notes = []
+                lazy_data = _opf_observe._show_toml(git, lazy_clone, "", "seed.toml", "seed", lazy_notes)
+                check("observe _show_toml on an absent blob does not lazy-fetch/exec core.sshCommand",
+                      not lazy_marker.exists())
+                check("observe _show_toml on an absent blob omits the prior with a note",
+                      lazy_data is None and any("seed" in n and ("absent" in n or "unreadable" in n)
+                                                for n in lazy_notes))
             finally:
                 for name, value in saved_env.items():
                     if value is None:

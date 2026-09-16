@@ -95,7 +95,9 @@ def _scrubbed_env():
     and HOME are carried over. The few variables git genuinely needs to run non-interactively and free of
     ambient configuration are then RE-APPLIED: global and system config neutralized to os.devnull, the
     system config search disabled, the terminal prompt disabled, optional locks turned off (read-only), and
-    the locale pinned so output is deterministic."""
+    the locale pinned so output is deterministic. Lazy-fetch suppression is NOT applied here: it is a
+    property of a read-only OBSERVATION, not of the scrubbed env itself (fixture setup builds real partial
+    clones and legitimately lazy-fetches), so _run_git applies GIT_NO_LAZY_FETCH per call instead."""
     env = {}
     for name in ("PATH", "HOME"):
         val = os.environ.get(name)
@@ -111,17 +113,37 @@ def _scrubbed_env():
     return env
 
 
-def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S):
-    """Run `git --no-replace-objects -C <store_root> <args>` under the scrubbed environment, bounded by a
+def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S, allow_lazy_fetch=False):
+    """Run `git --no-pager --no-replace-objects -c core.fsmonitor=false -C <store_root> <args>` under the
+    scrubbed environment, bounded by a
     timeout. Returns a _GitOutcome: `completed` is True only when the process ran to completion (then `rc`,
     `out` (bytes), and `err` (text) are meaningful); it is False on a timeout or an OS launch failure, with
     `err` naming the reason -- the fail-safe omit-plus-note signal. `--no-replace-objects` is passed so a
     replacement ref cannot substitute the bytes a read returns; `-C` binds the call explicitly to the store
-    root rather than inheriting a cwd (explicit-binding-over-ambient-context)."""
-    cmd = [git, "--no-replace-objects", "-C", str(store_root)] + list(args)
+    root rather than inheriting a cwd (explicit-binding-over-ambient-context). core.fsmonitor is forced off
+    by a command-scope `-c` (which overrides file and runtime config for fsmonitor) so an fsmonitor program
+    configured in the observed repository cannot LAUNCH A PROCESS during any of these read-only observations
+    (the scrubbed env already neutralizes global/system config, but the repository's OWN .git/config is read
+    by design; every caller here is an observation -- rev-parse, ls-files, remote, show, status, check --
+    that never wants to start the monitor, so suppressing it changes no observed result). GIT_NO_LAZY_FETCH
+    is forced on for every observation (allow_lazy_fetch defaults False), so a read of an object ABSENT
+    locally in a partial clone fails closed to the omit-plus-note path (a `git show` of an absent blob
+    returns rc != 0, handled exactly as any other absent object) rather than triggering a promisor fetch,
+    which would EXECUTE the repository-configured core.sshCommand -- the same code-execution class as the
+    fsmonitor vector, reached through git's promisor machinery. This changes no result for a PRESENT object,
+    and (being an allowlist scrub) the env drops any ambient GIT_NO_LAZY_FETCH, so it is applied here rather
+    than relied on from the environment. allow_lazy_fetch=True is passed ONLY by self-test FIXTURE SETUP that
+    must reproduce the adopter's real git (a partial-clone checkout or a real `git add` that legitimately
+    lazy-fetches); no production observation passes it. --no-pager is
+    passed for parity with _run_git_config_discovery and defence in depth: the captured, non-TTY stdout
+    already suppresses the pager, so a pager configured for a subcommand cannot launch a process."""
+    cmd = [git, "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(store_root)] + list(args)
+    env = _scrubbed_env()
+    if not allow_lazy_fetch:
+        env["GIT_NO_LAZY_FETCH"] = "1"   # no promisor fetch on a missing object (a fetch can reach core.sshCommand)
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              env=_scrubbed_env(), timeout=timeout)
+                              env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
         return _GitOutcome(False, None, b"", "git timed out after {}s".format(timeout))
     except OSError as exc:
