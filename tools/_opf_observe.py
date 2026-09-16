@@ -157,7 +157,9 @@ def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S):
 # read-only check-ignore into a file write or a launched process.
 
 # The ambient names carried over so git can discover the adopter's real config through its default paths.
-_CONFIG_DISCOVERY_KEEP = ("PATH", "HOME", "XDG_CONFIG_HOME")
+# GIT_CONFIG_NOSYSTEM is a SAFE toggle (it only enables/disables the system config, it cannot set a key), so
+# carrying it lets an adopter (or the self-test) opt out of /etc/gitconfig without any injection surface.
+_CONFIG_DISCOVERY_KEEP = ("PATH", "HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_NOSYSTEM")
 
 # Trace toggles FORCED to a disabling value in the probe environment. The GIT_TRACE2* settings take
 # precedence over trace2.* CONFIG (a command-line `-c` cannot, since trace2 reads its config early); the
@@ -196,8 +198,10 @@ def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S):
     off by a command-scope `-c` so an adopter fsmonitor config cannot launch a monitor process during the
     read-only probe (a command-line `-c` overrides file and runtime config for fsmonitor; trace2 is instead
     forced off through the environment in _config_discovery_env, since its early config read ignores `-c`).
+    The probe also passes --no-pager, so a pager configured for check-ignore cannot launch a process (defence
+    in depth: the captured, non-TTY stdout already suppresses the pager).
     Returns a _GitOutcome shaped exactly as _run_git's."""
-    cmd = [git, "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(store_root)] + list(args)
+    cmd = [git, "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(store_root)] + list(args)
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               env=_config_discovery_env(), timeout=timeout)

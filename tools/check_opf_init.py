@@ -185,7 +185,7 @@ def _suite(invoke):
                          for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS",
                                       "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
                                       "GIT_CONFIG_COUNT", "GIT_CONFIG",
-                                      "GIT_CONFIG_PARAMETERS")}
+                                      "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_NOSYSTEM")}
             # Even a broken parser that ignores --root defaults into this isolated, non-git directory.
             # Restore the caller's cwd before TemporaryDirectory removes the fixture.
             saved_cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
@@ -198,6 +198,7 @@ def _suite(invoke):
                 os.environ.pop("GIT_CONFIG_COUNT", None)
                 os.environ.pop("GIT_CONFIG", None)
                 os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+                os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
                 os.chdir(base)
                 parser_root = base / "parser"
                 parser_root.mkdir()
