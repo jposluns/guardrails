@@ -63,10 +63,12 @@ unit is that schema release for the record model and DEFINES the following where
     (`decision`, `decided_at`, `decided_by`) are enforced all-or-none: all present on `decided`, none on
     `open` or `withdrawn` (spec 8.5 names open and decided; `withdrawn` is a terminal-without-decision,
     so it carries none, defined here).
-  - A single RECORD's status is validated only for WELL-FORMEDNESS against its type (a legal state, a
-    `/proposed` only on a proposable state). The actor-vs-`/proposed` creation rule is a TRANSITION
-    rule (validate_transition), not asserted from a lone record snapshot, because a record's `actor`
-    need not name the actor of its last transition.
+  - A single RECORD's status is validated for WELL-FORMEDNESS against its type (a legal state, a
+    `/proposed` only on a proposable state) always, and for the actor-vs-`/proposed` snapshot rule only
+    while the record is at its CREATION SNAPSHOT (created_at == updated_at as instants). Past that
+    snapshot the rule does not fire, because a record's `actor` need not name the actor of its last
+    transition (a maintainer ratification leaves the creator's `actor` in place); the write boundary
+    (validate_transition) enforces gated entry and maintainer-only ratification there.
   - `counters.toml` shape is DEFINED HERE as an optional top-level `schema` int plus a `[counters]`
     table of `<NS> = <non-negative int>` (mirroring version.toml's `schema = 1` marker); the spec fixes
     the semantics (one monotonic high-water per namespace) but not the file layout.
@@ -592,10 +594,31 @@ def _validate_gated_snapshot(record, spec, findings, standing_auth=None):
     the ONE mechanism block/contribution/preference_pattern all share, folded out of the former block-only
     special case, so it never weakens block's behaviour or the terminal-`/proposed` rule.
 
+    SCOPED TO THE CREATION SNAPSHOT (spec 8.3/8.4). The rule is a creation-time observation, so it fires
+    ONLY while the record is provably still at its creation snapshot: `created_at` and `updated_at` both
+    present, both valid, and equal as instants (via `_instant_key`, never string equality). Spec 8.3
+    makes `updated_at` the time of the last transition, so `created_at == updated_at` means no transition
+    has occurred and the record's `actor` (its creator) IS the actor of its current status. When
+    `updated_at` is later, the current status may be the product of a maintainer ratification whose actor
+    the envelope does not carry (spec 8.4; the record's `actor` remains its creator): a legitimately
+    ratified assistant-created record then rests at the bare gated grant, and the at-rest doctor must not
+    flag it. Missing or invalid timestamps do not fire the rule either; those records are already INVALID
+    from the required-field / timestamp findings (see validate_record), so no false-clean can result. The
+    write/transition boundary (validate_transition) is the guard that catches a fresh proposer entering a
+    gated state without `/proposed` and a non-maintainer ratification.
+
     Contribution `sent` additionally honours a valid STANDING AUTHORIZATION for the record's declared
     recipient: a well-formed declaration deactivates per-send gating for that recipient, letting an
     assistant/automation land the bare `sent` grant; a malformed or absent declaration fails closed to
-    gated (spec 8.4)."""
+    gated (spec 8.4).
+
+    RESIDUALS (disclose-guard-residuals). (1) A nonconforming writer can evade the creation-snapshot rule
+    by forging `updated_at > created_at`, exactly as it could already forge `actor.kind`; the at-rest
+    doctor never claimed to catch a forging writer, and the write/transition boundary plus the prior-
+    snapshot history check (C-HISTORY-RESURRECTION) are the guards for conforming toolchains. (2) A
+    ratification recorded with `updated_at` equal to `created_at` to the timestamp's precision would
+    false-positive; the remedy is a strictly later `updated_at` (fractional seconds are accepted), which
+    spec 8.3's updated-at-is-last-transition-time semantics already implies."""
     if not spec.gated:
         return
     parsed, _ = parse_status(record.get("status"), spec)
@@ -603,6 +626,13 @@ def _validate_gated_snapshot(record, spec, findings, standing_auth=None):
         return                                 # a malformed status is surfaced by parse_status elsewhere
     state, qual = parsed
     if state not in spec.gated:
+        return
+    # Creation-snapshot scoping: fire only while the record proves it is still at its creation snapshot
+    # (both timestamps present, valid, and one instant). A later updated_at means a transition has
+    # occurred and this snapshot rule no longer applies (see docstring; spec 8.3/8.4).
+    created, updated = record.get("created_at"), record.get("updated_at")
+    if not (_valid_timestamp(created) and _valid_timestamp(updated)
+            and _instant_key(created) == _instant_key(updated)):
         return
     actor = record.get("actor")
     akind = actor.get("kind") if isinstance(actor, dict) else None
@@ -1663,6 +1693,55 @@ def self_test():
                                    scopes=["BI-1"])).status == VALID)
     check("maintainer-block-bare-active-ok",
           validate_record(envelope("block", 7, "active", scopes=["BI-1"])).status == VALID)
+
+    # 13b (M5): the gated actor-vs-`/proposed` rule is a CREATION-SNAPSHOT rule (created_at == updated_at
+    # as instants), not an at-rest rule. Over block/preference_pattern/contribution, the six-way matrix per
+    # type: at the creation snapshot the four actor x qualifier combinations grade exactly as before; PAST
+    # the snapshot (updated_at > created_at, a transition has occurred) the rule does not fire, so a
+    # legitimately ratified assistant-created record at a bare gated grant is VALID and a maintainer-created
+    # record left at gated `/proposed` after an assistant transition is VALID. The two post-transition
+    # vectors FAIL without the fix (old code flagged them from the lone snapshot). Extra per-type fields are
+    # supplied so the qualifier/timestamp is the sole variable; TS is the creation instant, TS2 is later.
+    TS2 = "2026-08-13T09:14:02Z"
+    check("m5-instant-key-sanity", _instant_key(TS) < _instant_key(TS2))
+    # gated-type -> the extra fields that otherwise make each state VALID (block: scopes; PP: context +
+    # rationale; contribution `sent`: the identity trio plus a full delivery bundle).
+    _DLV = {"channel": "email", "ref": "peer-inbox/msg-1", "sent_at": TS}
+    gated_extras = {
+        "block": ({"scopes": ["BI-1"]}, "active"),
+        "preference_pattern": ({"context": "a synthetic context", "rationale": "a synthetic rationale"},
+                               "active"),
+        "contribution": ({"recipient": "peer-project", "dedup_class": "cls-1",
+                          "content_digest": "sha256:00", "delivery": _DLV}, "sent"),
+    }
+    n = 30
+    for tname, (extra, gstate) in gated_extras.items():
+        n += 1
+        # (a) creation snapshot: assistant bare grant -> INVALID (must propose).
+        check("m5-{}-snap-assistant-bare-invalid".format(tname),
+              validate_record(envelope(tname, n, gstate, actor={"kind": "assistant"}, **extra))
+              .status == INVALID)
+        # (b) creation snapshot: assistant `/proposed` -> VALID.
+        check("m5-{}-snap-assistant-proposed-ok".format(tname),
+              validate_record(envelope(tname, n, gstate + "/proposed", actor={"kind": "assistant"},
+                                       **extra)).status == VALID)
+        # (c) creation snapshot: maintainer bare grant -> VALID.
+        check("m5-{}-snap-maintainer-bare-ok".format(tname),
+              validate_record(envelope(tname, n, gstate, actor={"kind": "maintainer"}, **extra))
+              .status == VALID)
+        # (d) creation snapshot: maintainer `/proposed` -> INVALID (only proposers carry the qualifier).
+        check("m5-{}-snap-maintainer-proposed-invalid".format(tname),
+              validate_record(envelope(tname, n, gstate + "/proposed", actor={"kind": "maintainer"},
+                                       **extra)).status == INVALID)
+        # (e) POST-TRANSITION: assistant-creator at the bare gated grant -> VALID (ratified). FAILS without
+        # the fix (old at-rest rule flagged it INVALID regardless of the transition).
+        check("m5-{}-posttx-assistant-bare-ok".format(tname),
+              validate_record(envelope(tname, n, gstate, actor={"kind": "assistant"}, updated_at=TS2,
+                                       **extra)).status == VALID)
+        # (f) POST-TRANSITION: maintainer-creator left at gated `/proposed` -> VALID. FAILS without the fix.
+        check("m5-{}-posttx-maintainer-proposed-ok".format(tname),
+              validate_record(envelope(tname, n, gstate + "/proposed", actor={"kind": "maintainer"},
+                                       updated_at=TS2, **extra)).status == VALID)
 
     # 14 (M5): a done receipt MUST link receipt_of (import history exempt); an autonomous_decision MUST
     # carry classification AND action.
