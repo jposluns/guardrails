@@ -1632,7 +1632,24 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl):
         if prefix_b and pbytes.startswith(prefix_b):
             pbytes = pbytes[len(prefix_b):]
         if lease_b is not None and pbytes == lease_b:
-            continue
+            # The lease path. ONLY a well-formed UNTRACKED ("??") lease is the legitimate held-lease case
+            # that step 4 handles as its never-seize refusal, so it is EXCLUDED here. Any OTHER (tracked)
+            # status on the lease path -- " D", "D ", " M", "MM", ... -- means the lease is COMMITTED or
+            # otherwise version-controlled, which VIOLATES spec 5.7 (a lease is present only while held): the
+            # store is anomalous. That is REFUSED fail-closed and NAMED DISTINCTLY here, never silently
+            # excluded. A silent drop of a " D" (a committed lease deleted in the worktree) would let step 4's
+            # O_EXCL acquire succeed on the now-absent file and sweep the tracked lease's DELETION into the
+            # upgrade's staged change set (outside the spec-9.2 delta), while a post-mutation failure's
+            # recovery text (git restore --staged --worktree -- .working) would RESURRECT the committed lease
+            # from HEAD, which the next run then refuses on EEXIST until manual reconciliation.
+            if rec[:2] == b"??":
+                continue
+            raise _UpgradeError(
+                "the single-writer lease {!r} is TRACKED in git (porcelain status {!r}, not untracked "
+                "'??'); a committed or otherwise version-controlled lease violates spec 5.7 (a lease is "
+                "present only while held) and leaves the store in an anomalous state. Reconcile the store "
+                "(remove the lease from version control) before re-running opf upgrade (fail-closed)".format(
+                    lease_excl, rec[:2].decode("ascii", "replace")))
         dirty.append(pbytes.decode("utf-8", "replace"))
     return dirty
 
@@ -1678,15 +1695,21 @@ def _upgrade_check_clean(res, manifest_model):
     BEFORE lease acquisition and the first write. Prove over EXACTLY the paths this upgrade can write (the
     `.working` subtree at the store root, plus any declared product-scope render target) that the git index
     and working tree equal HEAD, so the committed HEAD is a verified restore path for the precise destruction
-    surface (SECA-verified-restore-path). The lease path is EXCLUDED (byte-literal): a held lease is step 4's
-    own specific refusal, not generic dirt. Refuses fail-closed (exit 2) on any dirt, naming up to 10 paths
-    plus the total, advising commit-your-changes and NEVER a restore (the dirt is the owner's own work,
-    preserve-uncommitted-work).
+    surface (SECA-verified-restore-path). Only the UNTRACKED lease path is EXCLUDED (byte-literal): a held
+    (untracked "??") lease is step 4's own specific never-seize refusal, not generic dirt; a TRACKED lease on
+    that path is instead refused DISTINCTLY as a spec-5.7 violation (in _upgrade_parse_porcelain), never
+    excluded. Refuses fail-closed (exit 2) on any dirt, naming up to 10 paths plus the total, advising
+    commit-your-changes and NEVER a restore (the dirt is the owner's own work, preserve-uncommitted-work).
 
     Residual (disclose-guard-residuals): the probe uses --untracked-files=all, which does NOT surface a
     git-IGNORED file under the scope; a conforming store has no ignored render targets, so an ignored file
     there would neither block the run nor be restorable from HEAD. The alternative (--ignored) would over-
-    fire on ordinary build detritus, so this build accepts and discloses the narrower scope."""
+    fire on ordinary build detritus, so this build accepts and discloses the narrower scope. A committed or
+    otherwise TRACKED lease.toml (itself a spec-5.7 violation: the lease should be present only while held) is
+    NOT part of that residual and is NOT silently excluded like the legitimate untracked held lease: it
+    surfaces on the lease path as a tracked porcelain status (e.g. " D" for a committed lease deleted in the
+    worktree) and is REFUSED fail-closed by _upgrade_parse_porcelain, naming the spec-5.7 tracked-lease
+    violation, so that corner is handled here rather than slipping past the lease exclusion into step 4."""
     git = _opf_observe._git_path()
     if git is None:
         raise _UpgradeError("cannot locate git to verify the store is clean before the upgrade; without a "

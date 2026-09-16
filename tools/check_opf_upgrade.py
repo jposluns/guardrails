@@ -958,10 +958,19 @@ def _suite():
                 _vres, _verr = _grammar_ok(_vp + b" .working/toml/x\x00", prefix="", lease=None)
                 check("U18/R6 valid pair {!r} parses (no over-refusal)".format(_vp),
                       _vres == [".working/toml/x"] and _verr is None)
-            # a WELL-FORMED record is unaffected: a dirty lease record is still EXCLUDED (well-formed only),
-            # a dirty non-lease record is still surfaced as dirt, and a clean tree still passes.
-            _exok, _ = _grammar_ok(b" M " + _lease_rel.encode("utf-8") + b"\x00", prefix="", lease=_lease_rel)
-            check("U18/R6 well-formed dirty lease record still excluded", _exok == [])
+            # A well-formed record: ONLY a well-formed UNTRACKED ("??") lease is EXCLUDED (step 4's
+            # never-seize case). A TRACKED (non-"??") lease record on the lease path is a spec-5.7
+            # committed/tracked-lease anomaly and is REFUSED fail-closed here, never silently excluded (a
+            # silent drop of a " D" committed-then-deleted lease is exactly the M3 fail-open this closes: it
+            # would let step 4's O_EXCL acquire succeed on the now-absent file and sweep the deletion into the
+            # staged change set). Every emittable tracked status on the lease path must refuse.
+            _exok, _ = _grammar_ok(b"?? " + _lease_rel.encode("utf-8") + b"\x00", prefix="", lease=_lease_rel)
+            check("U18/R6 well-formed UNTRACKED lease record still excluded (step-4 never-seize)", _exok == [])
+            for _tp in (b" D", b"D ", b" M", b"MM", b"M ", b"MD", b"A ", b"AD", b"DD", b"AU", b"UU"):
+                _tres, _terr = _grammar_ok(_tp + b" " + _lease_rel.encode("utf-8") + b"\x00",
+                                           prefix="", lease=_lease_rel)
+                check("U18/R6 TRACKED lease status ({!r}) refuses spec-5.7, never a silent drop".format(_tp),
+                      _tres is None and _terr is not None and "5.7" in _terr)
             _dnl, _ = _grammar_ok(b" M .working/toml/x\x00", prefix="", lease=_lease_rel)
             check("U18/R6 well-formed dirty non-lease record still surfaced", _dnl == [".working/toml/x"])
             check("U18/R6 clean tree (empty payload) still passes", _grammar_ok(b"")[0] == [])
@@ -969,7 +978,8 @@ def _suite():
             # R1b: the show-prefix normalization must strip ONLY the trailing newline, never LEADING
             # whitespace, so a store dir whose name begins with a space keeps its prefix and its lease is
             # correctly excluded. Drive _upgrade_probe_dirty with a stubbed git that reports a " leading/\n"
-            # prefix and a modified-lease record under it. With the .strip() bug the leading space is lost,
+            # prefix and an UNTRACKED ("??") lease record under it (the legitimate held-lease exclusion; a
+            # tracked lease record is refused, not excluded). With the .strip() bug the leading space is lost,
             # the prefix no longer matches, and the lease surfaces as (spurious) dirt.
             import _opf_observe as _obs_r1b
             _GO = _obs_r1b._GitOutcome
@@ -978,7 +988,7 @@ def _suite():
                 def _fake_run_git(_git, _root, args, timeout=None):
                     if "rev-parse" in args:
                         return _GO(True, 0, b" leading/\n", b"")
-                    return _GO(True, 0, b" M  leading/.working/toml/lease.toml\x00", b"")
+                    return _GO(True, 0, b"??  leading/.working/toml/lease.toml\x00", b"")
                 _obs_r1b._run_git = _fake_run_git
                 _r1b_dirty = opf._upgrade_probe_dirty("git", base, [".working"],
                                                       ".working/toml/lease.toml")
@@ -1387,6 +1397,39 @@ def _suite():
             check("U30/FIX5 the pin still equals the live KNOWN_MODULES + retired-module derivation",
                   opf._VALID_1_0_0_MODULES
                   == (frozenset(_opf_store.KNOWN_MODULES) | {opf._UPGRADE_RETIRED_MODULE}))
+
+            # U31) R6 committed/tracked-lease corner: a lease.toml COMMITTED at HEAD (itself a spec-5.7
+            # violation: a lease is present only while held) and DELETED in the worktree emits a " D" TRACKED
+            # porcelain record on the lease path. The old lease EXCLUSION dropped it silently, so step 4's
+            # O_EXCL acquire then succeeded on the now-absent file and the upgrade MUTATED (exit 0). It now
+            # REFUSES at step 3, naming the tracked/committed-lease spec-5.7 violation, before any mutation.
+            # (This fixture FAILS under the old code: the " D" lease is silently excluded and the run proceeds.)
+            _lease_payload = ('acquired_at = "2026-01-01T00:00:00Z"\nholder = "peer-runner"\n'
+                              'operation = "upgrade"\nschema = 1\n')
+            s31 = base / "u31-lease-committed-deleted"
+            s31.mkdir()
+            mach31 = build_store(s31, extra_files={_opf_check.LEASE_NAME: _lease_payload})  # committed via add -A
+            (mach31 / _opf_check.LEASE_NAME).unlink()        # deleted in the worktree -> " D" tracked record
+            before31 = _snapshot(s31)
+            rc31, out31 = upgrade(s31)
+            check("U31 committed-then-deleted lease refuses at step 3 (exit 2)", rc31 == EXIT_ERROR)
+            check("U31 refusal names the tracked/committed lease and spec 5.7",
+                  "TRACKED" in out31 and "5.7" in out31 and "lease" in out31.lower())
+            check("U31 no mutation (still 1.0.0 [devprocess]) and tree unchanged",
+                  man_of(mach31).get("devprocess", {}).get("spec_version") == "1.0.0"
+                  and "opf" not in man_of(mach31) and _snapshot(s31) == before31)
+            # Re-confirm NO regression of the held-lease never-seize path: an ordinary UNTRACKED foreign lease
+            # still reaches step 4's never-seize refusal (as U12), distinct from the tracked-lease step-3 refusal.
+            s31b = base / "u31b-lease-untracked-noregress"
+            s31b.mkdir()
+            mach31b = build_store(s31b)
+            (mach31b / _opf_check.LEASE_NAME).write_text(_lease_payload, encoding="utf-8")   # untracked (never added)
+            before31b = _snapshot(s31b)
+            rc31b, out31b = upgrade(s31b)
+            check("U31b untracked foreign lease still reaches step-4 never-seize (exit 2, names holder)",
+                  rc31b == EXIT_ERROR and "peer-runner" in out31b and "seized" in out31b.lower())
+            check("U31b untracked lease NOT deleted and tree unchanged",
+                  (mach31b / _opf_check.LEASE_NAME).is_file() and _snapshot(s31b) == before31b)
 
             # P1) seeded migration property test: 12 generated genuine-VALID 1.0.0 variants all migrate.
             _NS = {"maintainer_action": "MA", "maintainer_decision": "MD", "preference_pattern": "PP",

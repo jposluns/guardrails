@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "ba840248ec31ecde3df74e294e3cd454c9073591bf2e918f9ee94376035433a4"
+tree-sha256 = "19ce7e0062379c9e83560c3315194a383f6caac9d98c00ca78176ba5f496fc96"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2916,8 +2916,8 @@ sha256 = "d72756efb18dad69fec3115ae67a744afc35d1686b8773cf9921087f82ac7d4d"
 
 [[sources]]
 path = "tools/check_opf_upgrade.py"
-bytes = 85394
-sha256 = "58fc58b655948e1654547be706da0d30ce7b39503a413e9f2a494b5fbd84a195"
+bytes = 89039
+sha256 = "2e3194da09e31ee6b989037867c3f68597e48a6773f15f68ef790bfb10432e2a"
 
 [[sources]]
 path = "tools/check_overclaim.py"
@@ -3151,8 +3151,8 @@ sha256 = "81e8f42168b5ee11a450c4d8da7f883cc3c50b50eea088430d22f10f3099a7b4"
 
 [[sources]]
 path = "tools/opf.py"
-bytes = 150812
-sha256 = "788c7364776ed295088d3f22c1feb4095abe36754c5b16490de9e985cc53c83a"
+bytes = 153165
+sha256 = "0be86fd683e331c860330750c64038599696de80aee1c549340b875f2f7c2873"
 
 [[sources]]
 path = "tools/opf_render.py"
