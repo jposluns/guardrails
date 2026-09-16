@@ -123,11 +123,11 @@ def check_staged_run(run_dir):
         report = _load_toml(run_dir / "report.toml")
         inventory = _load_toml(run_dir / "inventory.toml")
     except _GateError as exc:
-        for cid in ("report-schema", "artifact-digest-integrity", "mapping-totality",
-                    "mapping-state-vocab", "lf-bijection", "lf-quad-completeness",
-                    "source-preservation", "inventory-digest"):
+        # A malformed/unreadable required artefact fails the whole run closed. Derive the recorded set
+        # from the single-source registry (not a hand-maintained tuple) so this early-return path can
+        # never drift from EXPECTED_CHECKS and silently omit a future check.
+        for cid in EXPECTED_CHECKS:
             record(cid, False, str(exc))
-        results["staged-run-structure"] = (False, str(exc))
         return results
 
     # --- report-schema ------------------------------------------------------------------------------
