@@ -454,6 +454,61 @@ def _suite(invoke):
                 check("resolve-store resolves committed store",
                       resolution.status == _opf_store.RESOLVED
                       and resolution.machine_rel == working + "/" + machine_name)
+
+                # OPF-D2B round 6: in a PARTIAL clone a skip-worktree .gitignore whose blob is ABSENT locally
+                # reads as no-rule under the no-lazy-fetch probe, but the adopter's own `git add` fetches that
+                # blob and can then silently ignore the store. That divergence is a cannot-evaluate init must
+                # REFUSE (guard-input-soundness), not pass. DISCRIMINATOR: without the availability check init
+                # returns rc 0 and creates a store git add would skip.
+                promisor_src = make_git("d2b-promisor-src")
+                (promisor_src / ".gitignore").write_bytes(working.encode("ascii") + b"/\n")
+                git_call(promisor_src, ["--literal-pathspecs", "add", ".gitignore"])
+                git_call(promisor_src, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                        "commit", "-m", "seed"])
+                git_call(promisor_src, ["config", "uploadpack.allowFilter", "true"])
+                git_call(promisor_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
+                src_url = "file://" + str(promisor_src)
+
+                missing_blob = base / "d2b-missing-blob"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", src_url, str(missing_blob)])
+                git_call(missing_blob, ["read-tree", "HEAD"])
+                git_call(missing_blob, ["update-index", "--skip-worktree", ".gitignore"])
+                mb_before = _snapshot(missing_blob)
+                rc, output = run(missing_blob)
+                check("partial-clone missing ignore-blob refused",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("partial-clone missing ignore-blob preserved",
+                      _snapshot(missing_blob) == mb_before)
+
+                # No over-refusal: a partial clone whose .gitignore is CHECKED OUT (blob materialized) and
+                # does not match the store is read from disk like any full clone; init proceeds normally.
+                unrelated_src = make_git("d2b-unrelated-src")
+                (unrelated_src / ".gitignore").write_bytes(b"unrelated-only/\n")
+                git_call(unrelated_src, ["--literal-pathspecs", "add", ".gitignore"])
+                git_call(unrelated_src, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                         "commit", "-m", "seed"])
+                git_call(unrelated_src, ["config", "uploadpack.allowFilter", "true"])
+                materialized = base / "d2b-materialized"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "file://" + str(unrelated_src), str(materialized)])
+                rc, output = run(materialized)
+                check("partial-clone materialized .gitignore init proceeds",
+                      rc == EXIT_OK and valid_sources(materialized))
+
+                # No regression: when the (skip-worktree) .gitignore blob IS available locally, the probe reads
+                # it from the index exactly as git add, so a store it ignores is still refused as git-ignored --
+                # the available-blob parity the round-6 check preserves.
+                avail_blob = base / "d2b-available-blob"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", src_url, str(avail_blob)])
+                git_call(avail_blob, ["update-index", "--skip-worktree", ".gitignore"])
+                (avail_blob / ".gitignore").unlink()
+                ab_before = _snapshot(avail_blob)
+                rc, output = run(avail_blob)
+                check("available skip-worktree ignore-blob still refused as git-ignored",
+                      rc == EXIT_ERROR and "git-ignored" in output)
+                check("available skip-worktree ignore-blob preserved",
+                      _snapshot(avail_blob) == ab_before)
             finally:
                 for name, value in saved_env.items():
                     if value is None:

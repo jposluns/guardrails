@@ -753,6 +753,22 @@ def _init_untracked(git, repo, root, paths):
             os.fsdecode(tracked)))
 
 
+def _ignore_file_candidates(prefix, paths):
+    """Repo-relative .gitignore paths git consults when deciding whether the planned destinations are
+    ignored: one per ancestor directory from the repository root down to each destination's own directory.
+    A .gitignore in directory D governs paths under D, so every ancestor directory of a planned path is a
+    candidate ignore source (git add reads them all)."""
+    dirs = set()
+    for path in paths:
+        for parent in (prefix / path).parents:
+            dirs.add(parent)
+    candidates = set()
+    for directory in dirs:
+        posix = directory.as_posix()
+        candidates.add(".gitignore" if posix == "." else posix + "/.gitignore")
+    return sorted(candidates)
+
+
 def _init_unignored(git, repo, root, paths):
     """Refuse a planned destination git would ignore: an ignored store cannot be staged or discovered.
 
@@ -774,14 +790,18 @@ def _init_unignored(git, repo, root, paths):
     (guard-input-soundness). Env-based config overrides are dropped and trace/fsmonitor are forced off, so no
     reachable configuration can turn the read-only probe into a write or a launched process. Lazy fetching is
     forced off so a missing indexed ignore blob cannot trigger a promisor fetch that would reach
-    core.sshCommand. DISCLOSED RESIDUAL (disclose-guard-residuals): this check is rc-only, exactly as git add
-    reads ignore rules, so an ignore input that git cannot READ or that is UNAVAILABLE (a permission-denied
-    core.excludesFile or default ~/.config/git/ignore or .git/info/exclude, or a skip-worktree .gitignore
-    whose blob is absent) is skipped and the destination reads as not-ignored, the same result the adopter's
-    own git add would produce; the store is therefore never silently ignored, but a
-    fail-closed-on-unreadable-input treatment is deliberately NOT attempted here because it over-refuses (git
-    and the caller resolve config paths differently) and cannot cover the silent missing-blob case. Whether to
-    pursue a stronger fail-closed treatment is a maintainer decision. Called directly
+    core.sshCommand. DISCLOSED RESIDUAL (disclose-guard-residuals): this rc-only check reads ignore rules
+    exactly as git add does when git add can read them too. For an ignore input git cannot READ (a
+    permission-denied core.excludesFile, ~/.config/git/ignore, or .git/info/exclude), git add is equally unable
+    to read it and stages the destination, so reading not-ignored here matches git add and the store is never
+    silently ignored. The one input where that parity BREAKS is a skip-worktree (or otherwise unmaterialized)
+    .gitignore whose blob is absent in a partial clone: this probe forces lazy fetch off and reads no-rule, but
+    the adopter's own git add fetches the blob and can then ignore the store. That case is NOT left as a
+    residual: after an rc-1 result the availability of every applicable indexed .gitignore blob is checked
+    (_opf_observe.indexed_ignore_availability), and an unavailable one is a cannot-evaluate that REFUSES rather
+    than passing (guard-input-soundness). A fail-closed treatment of the unreadable-FILE arms above is
+    deliberately not attempted, because git and the caller resolve config paths differently and refusing there
+    would over-refuse a case git add itself skips. Called directly
     (not via _init_git, which raises on rc != 0) because rc 1 is the success case here; a timeout, launch
     failure, or unexpected rc fails closed and refuses. Matching `git add`, a benign git diagnostic on an
     rc-1 (not-ignored) result is not itself a refusal.
@@ -800,6 +820,19 @@ def _init_unignored(git, repo, root, paths):
     if result.rc != 1:
         raise RuntimeError("git preflight: check-ignore failed (rc={}): {}".format(
             result.rc, result.err))
+    # rc 1 (not ignored) is sound only when every applicable .gitignore is answerable WITHOUT a promisor
+    # fetch. In a partial clone a skip-worktree (or otherwise unmaterialized) .gitignore whose blob is absent
+    # reads as no-rule here (lazy fetch is forced off), yet the adopter's own `git add` fetches that blob and
+    # can then silently ignore the store; an available blob is read identically by both (parity) and a
+    # checked-out .gitignore is read from disk by both. So a missing indexed ignore blob is a cannot-evaluate
+    # we refuse, not a clean pass (guard-input-soundness).
+    unavailable = _opf_observe.indexed_ignore_availability(
+        git, repo, _ignore_file_candidates(root.relative_to(repo), paths))
+    if unavailable:
+        raise RuntimeError(
+            "git preflight: an indexed .gitignore blob is unavailable in this partial clone, so ignore "
+            "status cannot be determined; `git add` would fetch it and could silently ignore the store "
+            "({}). Check out or fetch the blob and retry.".format(sorted(unavailable)))
 
 
 def _init_same_root(root, root_fd):
