@@ -79,7 +79,10 @@ EXIT_OK = 0
 EXIT_FINDING = 1
 EXIT_ERROR = 2
 
-_RUN_ID_RE_TEXT = r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$"
+# The run-id grammar for the staged run DIR name. The tail anchor is \Z (end of string), NOT $ (which also
+# matches just before a trailing newline): a run dir renamed with a trailing "\n" must fail staged-run-
+# structure, never pass the id grammar (guard-input-soundness over an untrusted filesystem name).
+_RUN_ID_RE_TEXT = r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\Z"
 
 # The authoritative registry of staged-run checks. check_staged_run() reconciles its emitted result set
 # against this (fail-closed: a declared check that did not run is recorded as a FINDING, never a silent
@@ -191,15 +194,18 @@ def check_staged_run(run_dir):
                     "lf-quad-completeness"):
             record(cid, False, "mappings.toml `mapping` or run.toml `source` is not an array")
     else:
-        # mapping-state-vocab
-        vocab_ok = all(isinstance(r, dict) and r.get("state") in imp.MAPPING_STATES for r in rows)
+        # mapping-state-vocab. The isinstance(str) guard precedes the membership test: rows are UNTRUSTED
+        # staged data, so an unhashable state ([] or {}) is a located FINDING, never a TypeError.
+        vocab_ok = all(isinstance(r, dict) and isinstance(r.get("state"), str)
+                       and r.get("state") in imp.MAPPING_STATES for r in rows)
         record("mapping-state-vocab", vocab_ok,
                "" if vocab_ok else "a mapping row carries a state outside the 8-state vocabulary")
 
         # mapping-origin-vocab: every row carries a valid provenance origin (imp._ORIGIN_SET). A deleted or
         # out-of-vocabulary origin would let a staged run bypass the acceptance gate (the acceptance layer
         # keys the model_proposal-requires-accept rule off origin), so it is a FINDING here.
-        origin_ok = all(isinstance(r, dict) and r.get("origin") in imp._ORIGIN_SET for r in rows)
+        origin_ok = all(isinstance(r, dict) and isinstance(r.get("origin"), str)
+                        and r.get("origin") in imp._ORIGIN_SET for r in rows)
         record("mapping-origin-vocab", origin_ok,
                "" if origin_ok else "a mapping row carries an origin outside the provenance vocabulary")
 
@@ -241,7 +247,8 @@ def check_staged_run(run_dir):
         record("mapping-totality", tot_ok, tot_detail)
 
         # lf-bijection: quarantine-state mappings <-> legacy_fragment records, one to one.
-        quarantine_rows = [r for r in rows if isinstance(r, dict) and r.get("state") in imp._QUARANTINE_STATES]
+        quarantine_rows = [r for r in rows if isinstance(r, dict) and isinstance(r.get("state"), str)
+                           and r.get("state") in imp._QUARANTINE_STATES]
         lf_path = run_dir / "fragments" / "legacy_fragment.index.toml"
         lf_records = []
         lf_read_ok = True
@@ -353,6 +360,7 @@ def check_staged_run(run_dir):
             for pr in prows:
                 if not (isinstance(pr, dict) and pr.get("origin") == imp._MODEL_PROPOSAL_ORIGIN
                         and isinstance(pr.get("source_path"), str) and isinstance(pr.get("span"), list)
+                        and isinstance(pr.get("suggested_state"), str)
                         and pr.get("suggested_state") in imp.MAPPING_STATES):
                     pa_ok, pa_detail = False, "a proposals.toml row is malformed or not origin=model_proposal"
                     break
@@ -467,6 +475,12 @@ def check_staged_run(run_dir):
                             bind_ok, bind_detail = False, "a decision is not an object"
                             break
                         fid = d.get("fragment_id")
+                        # A non-str (e.g. unhashable []/{}) fragment_id cannot key the `in frag_by_id` dict
+                        # membership (it would raise TypeError); a malformed decision fragment_id over this
+                        # UNTRUSTED acceptance.json is a binding FINDING, fail-closed, never a crash.
+                        if not isinstance(fid, str):
+                            bind_ok, bind_detail = False, "a decision fragment_id is not a string"
+                            break
                         if fid in frag_by_id:
                             meta = key_meta.get(frag_by_id[fid], {})
                             if (d.get("origin") != meta.get("origin")
@@ -484,6 +498,10 @@ def check_staged_run(run_dir):
                 ids = [d.get("fragment_id") for d in decisions if isinstance(d, dict)]
                 if len(ids) != len(decisions):
                     comp_ok, comp_detail = False, "a decision is not an object"
+                elif not all(isinstance(i, str) for i in ids):
+                    # An unhashable ([] or {}) fragment_id would raise TypeError at the set() below; a
+                    # malformed decision fragment_id is a located FINDING, fail-closed, never a crash.
+                    comp_ok, comp_detail = False, "a decision fragment_id is not a string"
                 elif len(set(ids)) != len(ids):
                     comp_ok, comp_detail = False, "a fragment carries more than one decision"
                 elif set(ids) != set(frag_by_id):
@@ -494,7 +512,12 @@ def check_staged_run(run_dir):
                                 if isinstance(d, dict) and d.get("decision") == "accept"}
                     for fid, key in frag_by_id.items():
                         meta = key_meta.get(key, {})
+                        # isinstance(str) guard before the membership test: key_meta.state comes from an
+                        # UNVALIDATED mapping row (the correlation above checks only source_path/span), so an
+                        # unhashable state ([] or {}) would otherwise raise TypeError at the _RESTING_STATES
+                        # frozenset membership; a non-str state simply is not a resting state here.
                         if (meta.get("origin") == imp._MODEL_PROPOSAL_ORIGIN
+                                and isinstance(meta.get("state"), str)
                                 and meta.get("state") in imp._RESTING_STATES and fid not in accepted):
                             comp_ok, comp_detail = False, ("a model_proposal resting mapping lacks an "
                                                            "explicit accept")
@@ -653,6 +676,15 @@ def _self_test():
         (m / "plan.toml").write_bytes(b"not valid toml [")
         expect("disc-structure-malformed-plan", check_staged_run(m)["staged-run-structure"][0] is False)
 
+        # N6: a run dir renamed with a TRAILING NEWLINE must fail staged-run-structure. The run-id grammar
+        # is \Z-anchored, not $ (which also matches just before a final "\n"), so "imp-...\n" is not a run
+        # id. (report-schema also fires on the changed dir name; the target here is staged-run-structure.)
+        m = copy_run(clean)
+        nl_dir = m.parent / (m.name + "\n")
+        m.rename(nl_dir)
+        expect("disc-structure-trailing-newline",
+               check_staged_run(nl_dir)["staged-run-structure"][0] is False)
+
         # report-schema: flip verdict to 1 (report.toml is not in its own artefact list, so the digest
         # check stays green).
         m = copy_run(clean)
@@ -701,6 +733,23 @@ def _self_test():
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
         expect("disc-origin-vocab-bad", check_staged_run(m)["mapping-origin-vocab"][0] is False)
+
+        # N4: an UNHASHABLE mapping origin/state ([]) is a located FINDING, never a TypeError at the
+        # membership test. origin=[] is the real crash flip (imp._ORIGIN_SET is a frozenset); state=[] is
+        # the defensive sibling (imp.MAPPING_STATES is a tuple). Refresh the digest so the vocab check fires.
+        m = copy_run(clean)
+        mp = _load_toml(m / "mappings.toml")
+        mp["mapping"][0]["origin"] = []
+        (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
+        rewrite_report_digest(m, "mappings.toml")
+        expect("disc-origin-vocab-unhashable", check_staged_run(m)["mapping-origin-vocab"][0] is False)
+
+        m = copy_run(clean)
+        mp = _load_toml(m / "mappings.toml")
+        mp["mapping"][0]["state"] = []
+        (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
+        rewrite_report_digest(m, "mappings.toml")
+        expect("disc-state-vocab-unhashable", check_staged_run(m)["mapping-state-vocab"][0] is False)
 
         # lf-bijection: delete one legacy_fragment record; refresh the digest.
         m = copy_run(clean)
@@ -831,6 +880,31 @@ def _self_test():
         acc["decisions"] = acc["decisions"][:-1]
         (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
         expect("disc-acceptance-completeness", check_staged_run(m)["acceptance-completeness"][0] is False)
+
+        # N4: an UNHASHABLE decision fragment_id ([]) is a located FINDING at BOTH the schema and binding
+        # checks (and completeness), never a TypeError at the `in frag_by_id` dict membership or the
+        # set(ids) build. Fail-closed across the acceptance layer.
+        m = copy_run(reviewed)
+        acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
+        acc["decisions"][0]["fragment_id"] = []
+        (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
+        macc = check_staged_run(m)
+        expect("disc-acceptance-fragment-id-unhashable-schema", macc["acceptance-schema"][0] is False)
+        expect("disc-acceptance-fragment-id-unhashable-binding", macc["acceptance-binding"][0] is False)
+        expect("disc-acceptance-fragment-id-unhashable-completeness",
+               macc["acceptance-completeness"][0] is False)
+
+        # N4: an UNHASHABLE mapping state ([]) with origin=model_proposal must not crash acceptance-
+        # completeness at the _RESTING_STATES membership (key_meta.state comes from an unvalidated mapping
+        # row); check_staged_run returns a full result set and mapping-state-vocab FINDINGs the bad state.
+        m = copy_run(review_model_proposal())
+        mp = _load_toml(m / "mappings.toml")
+        mp["mapping"][0]["state"] = []
+        (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
+        rewrite_report_digest(m, "mappings.toml")
+        mstate = check_staged_run(m)
+        expect("disc-acceptance-completeness-unhashable-state-nocrash",
+               set(mstate) == set(EXPECTED_CHECKS) and mstate["mapping-state-vocab"][0] is False)
 
         # acceptance-completeness (model_proposal): a model_proposal resting mapping whose decision is a
         # reject (not an accept) is an incomplete acceptance, even with full coverage.

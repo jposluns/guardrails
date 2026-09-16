@@ -147,10 +147,10 @@ _RUN_DESCRIPTOR_FORMAT = "opf-import-run-v1"
 
 # An archive-year directory name is a 4-digit year (spec 12 rotates by year; ARCHIVE_PERIODS = ("year",)).
 # A name outside this grammar is a phantom partition, refused rather than silently enumerated (CLASS 3(c)).
-_ARCHIVE_YEAR_RE = re.compile(r"^[0-9]{4}$")
+_ARCHIVE_YEAR_RE = re.compile(r"^[0-9]{4}\Z")
 
 LF_TYPE = "legacy_fragment"
-_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 # Closed plan keyset and closed fragment-row keyset.
 _PLAN_KEYS = frozenset({"fragments", "worklog", "version"})
@@ -205,6 +205,10 @@ PROPOSALS_NAME = "proposals.toml"
 ACCEPTANCE_NAME = "acceptance.json"
 ACCEPTANCE_FORMAT = "opf.import.acceptance/v1"
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}\Z")
+# The reviewed_at contract is the producer's fixed-width RFC-3339 UTC form YYYY-MM-DDThh:mm:ssZ. strptime
+# alone accepts non-zero-padded fields ("2026-9-9T1:2:3Z"), so a strict fixed-width regex (anchored
+# \A...\Z, no trailing-newline slack) gates the shape and a value-validity strptime parse gates the values.
+_RFC3339_UTC_RE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 _DECISION_VERBS = frozenset({"accept", "reject"})
 
 # The closed keyset of an inert model proposal (spec 14.1 untrusted plan data). A proposal is a SUGGESTED
@@ -2085,12 +2089,19 @@ def _validate_acceptance(model, where="acceptance.json"):
         f.append("{}: reviewed_at must be a non-empty RFC-3339 UTC string".format(where))
     else:
         # A well-formed RFC-3339 UTC timestamp in the producer's emitted form (YYYY-MM-DDThh:mm:ssZ): a
-        # non-empty but malformed value (e.g. "garbage") is a finding, not merely a non-empty check.
-        try:
-            datetime.datetime.strptime(ra, "%Y-%m-%dT%H:%M:%SZ")
-        except ValueError:
+        # non-empty but malformed value (e.g. "garbage") is a finding, not merely a non-empty check. The
+        # strict fixed-width regex (anchored \A...\Z) gates the SHAPE, rejecting non-zero-padded or oddly-
+        # shaped fields ("2026-9-9T1:2:3Z") that strptime would otherwise accept; the strptime parse then
+        # gates the VALUES (an impossible month/day/time). Both must hold.
+        if not _RFC3339_UTC_RE.match(ra):
             f.append("{}: reviewed_at is not a well-formed RFC-3339 UTC timestamp "
                      "(YYYY-MM-DDThh:mm:ssZ)".format(where))
+        else:
+            try:
+                datetime.datetime.strptime(ra, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                f.append("{}: reviewed_at is not a well-formed RFC-3339 UTC timestamp "
+                         "(YYYY-MM-DDThh:mm:ssZ)".format(where))
     if "signature" in model and model["signature"] is not None:
         f.append("{}: signature is reserved and unused in v1 (must be absent or null)".format(where))
     decisions = model.get("decisions")
@@ -2138,10 +2149,13 @@ def _resolve_store_for_review(product_root):
 def _load_staged_run_for_review(store_root_fd, run_rel):
     """Load a staged run's machine artefacts for review, fail-closed. A run with no report.toml is
     not-promotion-ready (CANNOT-EVALUATE); a missing or malformed run.toml/mappings.toml/inventory.toml/
-    proposals.toml is a malformed run (CANNOT-EVALUATE). Confirms the acceptance BINDING at source: run.toml
-    and plan.toml must be present, report.toml's plan_digest must recompute over the staged plan.toml bytes,
-    and its inventory_digest must recompute over inventory.toml's canonical payload, so acceptance can never
-    bind a digest that does not match the staged artefacts. Builds the fragment correspondence: each inventory
+    proposals.toml is a malformed run (CANNOT-EVALUATE). Confirms the run is COHERENT and promotion-ready
+    before capture: report.run_id must name this run dir, report.verdict must be 0 (CLEAN) and
+    report.promotion_ready True, run.toml and plan.toml must PARSE (not merely hash), and run.toml must be a
+    non-empty table. Confirms the acceptance BINDING at source: report.toml's plan_digest must recompute over
+    the staged plan.toml bytes, and its inventory_digest must recompute over inventory.toml's canonical
+    payload, so acceptance can never bind a digest that does not match the staged artefacts. Builds the
+    fragment correspondence: each inventory
     fragment (keyed by its content-inclusive fragment_id) must correspond one-to-one, by (source_path,
     span), to exactly one mapping row (the whole-file baseline plan_import produces); a run whose inventory
     fragments and mapping rows are not in 1:1 correspondence is not reviewable in v1 (CANNOT-EVALUATE, a
@@ -2166,15 +2180,35 @@ def _load_staged_run_for_review(store_root_fd, run_rel):
     if not (isinstance(inventory_digest, str) and _DIGEST_RE.match(inventory_digest)):
         raise _cannot("report.toml inventory_digest is missing or malformed (cannot bind acceptance)")
 
+    # Coherent, promotion-ready run (guard-input-soundness): review captures an acceptance that BINDS a
+    # decision record to a run, so it refuses unless the run is a COHERENT, promotion-ready run matching its
+    # own dir. A digest that recomputes over garbage bytes (an unparseable plan.toml whose plan_digest was
+    # recomputed to match) still fails this coherence gate. report.run_id must name THIS run dir;
+    # report.verdict must be 0 (CLEAN) and report.promotion_ready must be True (the promotion-ready marker);
+    # the required run.toml and plan.toml must PARSE (they are parsed here, not only hashed), and run.toml
+    # must be a non-empty table. Any failure is CANNOT-EVALUATE and NO acceptance is captured.
+    run_id = run_rel.rsplit("/", 1)[-1]
+    if report.get("run_id") != run_id:
+        raise _cannot("report.toml run_id does not name this run dir (not a coherent run; cannot review)")
+    if report.get("verdict") != CLEAN or report.get("promotion_ready") is not True:
+        raise _cannot("staged run is not promotion-ready (report.toml verdict/promotion_ready; cannot "
+                      "review)")
+    run_tbl = _read_toml(store_root_fd, run_rel + "/run.toml")
+    if run_tbl is None:
+        raise _cannot("staged run is missing run.toml (malformed or not a plan run; cannot review)")
+    if not isinstance(run_tbl, dict) or not run_tbl:
+        raise _cannot("staged run run.toml is not a non-empty table (malformed run; cannot review)")
+    # plan.toml must PARSE as TOML (parse it, not only hash it): _read_toml raises CANNOT-EVALUATE on an
+    # unparseable plan.toml and returns None when absent.
+    if _read_toml(store_root_fd, run_rel + "/plan.toml") is None:
+        raise _cannot("staged run is missing plan.toml (malformed or not a plan run; cannot review)")
+
     # Recompute-and-confirm the two binding digests over the STAGED bytes (guard-input-soundness): the
     # syntax check above proves only that report.toml's digests are well-formed, not that they bind THIS
-    # run. run.toml AND plan.toml must be present (a missing one is a malformed run, like the other required
-    # artefacts); report.toml's plan_digest must recompute over the staged plan.toml bytes, and its
+    # run. report.toml's plan_digest must recompute over the staged plan.toml bytes, and its
     # inventory_digest must recompute over inventory.toml's canonical payload (the same emission
     # _build_inventory / the inventory-digest gate use, excluding the inventory_digest field itself). Only
     # after both recomputes agree may review bind acceptance to these digests.
-    if _read_toml(store_root_fd, run_rel + "/run.toml") is None:
-        raise _cannot("staged run is missing run.toml (malformed or not a plan run; cannot review)")
     try:
         plan_bytes, _pst = _journal._read_contained(store_root_fd, run_rel + "/plan.toml")
     except _journal.JournalError as exc:
@@ -2212,10 +2246,15 @@ def _load_staged_run_for_review(store_root_fd, run_rel):
 
     key_meta = {}
     for i, row in enumerate(map_rows):
+        # isinstance(str) guards BEFORE each membership test: these rows are UNTRUSTED staged data, and an
+        # unhashable value ([] or {}) for `state`/`origin` would otherwise raise an uncaught TypeError at the
+        # frozenset membership test (`_ORIGIN_SET` is a frozenset); a malformed row is a located CANNOT-
+        # EVALUATE, never a crash routed to a top-level backstop.
         if not (isinstance(row, dict) and isinstance(row.get("source_path"), str)
                 and isinstance(row.get("span"), list) and len(row["span"]) == 2
                 and all(type(x) is int for x in row["span"])
-                and row.get("state") in MAPPING_STATES and row.get("origin") in _ORIGIN_SET):
+                and isinstance(row.get("state"), str) and row.get("state") in MAPPING_STATES
+                and isinstance(row.get("origin"), str) and row.get("origin") in _ORIGIN_SET):
             raise _cannot("mappings row[{}] is malformed (cannot correlate for review)".format(i))
         key = _key(row["source_path"], row["span"])
         if key in key_meta:
@@ -2339,8 +2378,13 @@ def _stage_acceptance(resolution, run_rel, acceptance_bytes):
     prior acceptance.json (with a parent-dir fsync for durability). rename(2) is atomic, so a re-review's
     prior acceptance survives BYTE-INTACT through any failure before the rename (the earlier
     [remove, create] destroy-then-recreate window, where an injected mid-write failure left a 0-byte or
-    absent record, is gone). A prior entry that is not a regular file is fail-closed. Never mutates the
-    active store; keeps the staging model's DIRECT apply_ops posture (no store lock, no run_transaction)."""
+    absent record, is gone). A prior entry that is not a regular file is fail-closed. The temp PATHNAME the
+    rename consumes is re-lstat'd NO-FOLLOW through the run-dir dir_fd immediately before the rename and
+    confirmed to still be the SAME regular file just created (st_ino + st_size), so a same-store writer that
+    swaps it for a dangling symlink between create and rename cannot install the symlink as acceptance.json
+    (N2 TOCTOU). A PRE-rename failure leaves the prior byte-intact; a POST-rename parent-dir fsync failure
+    leaves the NEW record installed with uncertain durability (it does NOT claim the prior is intact, N3).
+    Never mutates the active store; keeps the staging model's DIRECT apply_ops posture (no store lock)."""
     acc_rel = run_rel + "/" + ACCEPTANCE_NAME
     # A unique sibling temp so the create's O_EXCL never collides and a stale temp from a prior crash cannot
     # be adopted; it lives in the run dir (a sibling of acceptance.json), so the rename is same-directory.
@@ -2385,6 +2429,14 @@ def _stage_acceptance(resolution, run_rel, acceptance_bytes):
         except _journal.JournalError as exc:
             _remove_temp()
             raise _cannot("acceptance write failed ({}); the prior acceptance is intact".format(exc))
+        # Capture the just-created temp's identity (a regular file, its st_ino and st_size) so the pre-rename
+        # re-check can confirm the temp PATHNAME still names THAT file and was not swapped (N2).
+        created = _journal._lstat_contained(store_root_fd, tmp_rel)
+        if created is None or not stat.S_ISREG(created.st_mode):
+            _remove_temp()
+            raise _cannot("the acceptance temp is missing or not a regular file after staging; the prior "
+                          "acceptance is intact")
+        created_ino, created_size = created.st_ino, created.st_size
         # Atomic cutover: a single rename installs the staged temp over any prior acceptance.json, contained
         # beneath the run dir's pre-opened no-follow parent handle, then fsync that directory for durability.
         try:
@@ -2393,11 +2445,41 @@ def _stage_acceptance(resolution, run_rel, acceptance_bytes):
             _remove_temp()
             raise _cannot("cannot open the run dir to install the acceptance ({})".format(exc))
         try:
-            os.rename(tmp_name, acc_final, src_dir_fd=pfd, dst_dir_fd=pfd)
-            os.fsync(pfd)
-        except OSError as exc:
-            _remove_temp()
-            raise _cannot("acceptance install (rename) failed ({}); the prior acceptance is intact".format(exc))
+            # Close the TOCTOU swap window (N2): O_EXCL/O_NOFOLLOW protected the temp CREATE, but os.rename
+            # consumes the temp PATHNAME, which a same-store writer could swap for a dangling symlink between
+            # create and rename, so the rename would install the SYMLINK as acceptance.json. Immediately
+            # before the rename, re-lstat the temp NO-FOLLOW through the run-dir dir_fd (fstatat) and confirm
+            # it is still the SAME regular file just created (matching st_ino and st_size); any symlink,
+            # non-regular entry, or identity mismatch is fail-closed (best-effort temp cleanup, prior intact).
+            try:
+                pre = os.lstat(tmp_name, dir_fd=pfd)
+            except OSError as exc:
+                _remove_temp()
+                raise _cannot("cannot re-stat the acceptance temp before install ({}); the prior "
+                              "acceptance is intact".format(exc))
+            if not (stat.S_ISREG(pre.st_mode) and pre.st_ino == created_ino
+                    and pre.st_size == created_size):
+                _remove_temp()
+                raise _cannot("the acceptance temp was swapped before install (not the staged regular "
+                              "file); the prior acceptance is intact")
+            # The rename is its own step so the parent-dir fsync failure below is NOT folded into the
+            # rename-failure handler (N3): a PRE-rename failure leaves the prior byte-intact.
+            try:
+                os.rename(tmp_name, acc_final, src_dir_fd=pfd, dst_dir_fd=pfd)
+            except OSError as exc:
+                _remove_temp()
+                raise _cannot("acceptance install (rename) failed ({}); the prior acceptance is "
+                              "intact".format(exc))
+            # POST-rename (N3): the new record is ALREADY installed and the prior is already replaced, so a
+            # parent-dir fsync failure here leaves the NEW record in place with uncertain durability. It must
+            # NOT claim the prior is intact, and it must NOT remove the temp (the temp pathname is now the
+            # installed record).
+            try:
+                os.fsync(pfd)
+            except OSError as exc:
+                raise _cannot("acceptance installed but its directory fsync failed ({}); the new record is "
+                              "in place, its durability uncertain (the prior record is already "
+                              "replaced)".format(exc))
         finally:
             os.close(pfd)
     finally:
@@ -4199,6 +4281,12 @@ def self_test():
                     a[k] = v
                 return _validate_acceptance(a)
             check("R1-acc-reviewed-at-garbage-finding", _acc_findings(reviewed_at="garbage") != [])
+            # N5: an unpadded/oddly-shaped reviewed_at ("2026-9-9T1:2:3Z") that strptime alone accepts is a
+            # FINDING under the strict fixed-width \A...\Z regex; a well-formed padded value stays clean.
+            check("R1-acc-reviewed-at-unpadded-finding",
+                  _acc_findings(reviewed_at="2026-9-9T1:2:3Z") != [])
+            check("R1-acc-reviewed-at-wellformed-clean",
+                  _acc_findings(reviewed_at="2026-09-09T01:02:03Z") == [])
             check("R1-acc-run-id-trailing-newline-finding",
                   _acc_findings(run_id=acc["run_id"] + "\n") != [])
             check("R1-acc-plan-digest-trailing-newline-finding",
@@ -4238,6 +4326,71 @@ def self_test():
             check("R1-replace-failure-prior-intact",
                   (r1_dir / "acceptance.json").is_file()
                   and (r1_dir / "acceptance.json").read_bytes() == prior_acc_bytes)
+
+        # N2: a same-store writer swaps the staged temp for a DANGLING SYMLINK after the O_EXCL create but
+        # before the rename. The pre-rename no-follow identity re-check (regular file + st_ino/st_size)
+        # catches it: verdict 2, acceptance.json is NOT the symlink, and the prior record is byte-intact.
+        # Without the re-check the rename would install the symlink AS acceptance.json.
+        if (r1_dir / "acceptance.json").is_file():
+            prior_swap_bytes = (r1_dir / "acceptance.json").read_bytes()
+            _saved_apply_ops_n2 = _journal.apply_ops
+
+            def _swap_temp_apply_ops(root_fd, ops, reader, *_a, **_k):
+                _saved_apply_ops_n2(root_fd, ops, reader)   # the real O_EXCL create of the temp
+                for tmp in r1_dir.glob(ACCEPTANCE_NAME + ".tmp-*"):
+                    tmp.unlink()
+                    tmp.symlink_to("acceptance-swap-target-does-not-exist")
+
+            _journal.apply_ops = _swap_temp_apply_ops
+            try:
+                rr_swap = review_import(rootR1, pr.run_id, actor="Swapper",
+                                        decisions=all_decisions(r1_dir, "accept"), now=NOW)
+            finally:
+                _journal.apply_ops = _saved_apply_ops_n2
+            check("N2-temp-swap-cannot-eval", rr_swap.verdict == 2)
+            check("N2-acceptance-not-symlink",
+                  (r1_dir / "acceptance.json").is_file()
+                  and not (r1_dir / "acceptance.json").is_symlink())
+            check("N2-temp-swap-prior-intact",
+                  (r1_dir / "acceptance.json").read_bytes() == prior_swap_bytes)
+
+        # N3: a POST-rename parent-dir fsync failure leaves the NEW record installed with uncertain
+        # durability; it must NOT be reported as a pre-rename failure ("the prior acceptance is intact").
+        # Inject a directory-fsync failure that fires ONLY once the cutover rename has consumed the temp (the
+        # sibling temp is gone), isolating the post-rename dir-fsync path from the apply_ops pre-rename dir
+        # fsync (which runs while the temp still exists). Patch only os.fsync (os.rename must keep its
+        # identity, or the dir-fd containment probe fails closed): verdict 2, the new record IS installed,
+        # and the message says the new record is in place / durability uncertain, never the prior is intact.
+        if (r1_dir / "acceptance.json").is_file():
+            _saved_fsync_n3 = os.fsync
+            _n3 = {"armed": False}
+
+            def _fsync_after_cutover(fd):
+                if _n3["armed"]:
+                    try:
+                        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+                    except OSError:
+                        is_dir = False
+                    if is_dir and not list(r1_dir.glob(ACCEPTANCE_NAME + ".tmp-*")):
+                        raise OSError("injected post-rename dir fsync failure")
+                return _saved_fsync_n3(fd)
+
+            os.fsync = _fsync_after_cutover
+            _n3["armed"] = True
+            try:
+                rr_n3 = review_import(rootR1, pr.run_id, actor="N3fsync",
+                                      decisions=all_decisions(r1_dir, "accept"), now=NOW)
+            finally:
+                os.fsync = _saved_fsync_n3
+            check("N3-post-rename-fsync-cannot-eval", rr_n3.verdict == 2)
+            if (r1_dir / "acceptance.json").is_file():
+                acc_n3 = json.loads((r1_dir / "acceptance.json").read_text())
+                check("N3-post-rename-new-record-installed",
+                      acc_n3["actor"]["declared"] == "N3fsync"
+                      and all(d["decision"] == "accept" for d in acc_n3["decisions"]))
+            check("N3-post-rename-message-not-prior-intact",
+                  bool(rr_n3.findings) and "durability uncertain" in rr_n3.findings[0]
+                  and "the prior acceptance is intact" not in rr_n3.findings[0])
 
         # findings (verdict 1): incomplete coverage, an unknown fragment, a duplicate, an echo mismatch.
         check("R-review-incomplete-finding",
@@ -4295,6 +4448,72 @@ def self_test():
         check("R-review-plan-digest-mismatch-cannot-eval",
               review_import(rootF2b, prf2b.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
         check("R-review-plan-digest-mismatch-no-acceptance", not (f2b_dir / "acceptance.json").is_file())
+
+        # N1: review captures acceptance ONLY over a COHERENT, promotion-ready run matching its dir. Four
+        # single-mutation discriminators, each verdict 2 with NO acceptance written.
+        # (a) an UNPARSEABLE plan.toml whose report.plan_digest is recomputed to match the garbage bytes: the
+        #     bytes-hash still agrees, but plan.toml no longer PARSES, so review is cannot-evaluate.
+        rootN1a, mN1a = build_store(sources={"a.txt": "aaaa"})
+        prn1a = plan_import(rootN1a, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n1a_dir = mN1a.parent / "imports" / (prn1a.run_id or "MISSING")
+        garbage = b"not valid TOML!"
+        (n1a_dir / "plan.toml").write_bytes(garbage)
+        rep_n1a = tomllib.loads((n1a_dir / "report.toml").read_text())
+        rep_n1a["plan_digest"] = "sha256:" + _sha256_hex(garbage)
+        (n1a_dir / "report.toml").write_text(_opf_emit.emit(rep_n1a), encoding="utf-8")
+        check("N1-plan-unparseable-cannot-eval",
+              review_import(rootN1a, prn1a.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("N1-plan-unparseable-no-acceptance", not (n1a_dir / "acceptance.json").is_file())
+        # (b) an EMPTY run.toml (parses as an empty table, so not a coherent run).
+        rootN1b, mN1b = build_store(sources={"a.txt": "aaaa"})
+        prn1b = plan_import(rootN1b, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n1b_dir = mN1b.parent / "imports" / (prn1b.run_id or "MISSING")
+        (n1b_dir / "run.toml").write_text("", encoding="utf-8")
+        check("N1-empty-run-toml-cannot-eval",
+              review_import(rootN1b, prn1b.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("N1-empty-run-toml-no-acceptance", not (n1b_dir / "acceptance.json").is_file())
+        # (c) a report.run_id naming a DIFFERENT (valid) run-id, not this run dir.
+        rootN1c, mN1c = build_store(sources={"a.txt": "aaaa"})
+        prn1c = plan_import(rootN1c, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n1c_dir = mN1c.parent / "imports" / (prn1c.run_id or "MISSING")
+        rep_n1c = tomllib.loads((n1c_dir / "report.toml").read_text())
+        rep_n1c["run_id"] = "imp-20260101T000000Z-0000000000000000"
+        (n1c_dir / "report.toml").write_text(_opf_emit.emit(rep_n1c), encoding="utf-8")
+        check("N1-report-run-id-mismatch-cannot-eval",
+              review_import(rootN1c, prn1c.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("N1-report-run-id-mismatch-no-acceptance", not (n1c_dir / "acceptance.json").is_file())
+        # (d) a report.verdict/promotion_ready that is not the promotion-ready marker (verdict 2, False).
+        rootN1d, mN1d = build_store(sources={"a.txt": "aaaa"})
+        prn1d = plan_import(rootN1d, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n1d_dir = mN1d.parent / "imports" / (prn1d.run_id or "MISSING")
+        rep_n1d = tomllib.loads((n1d_dir / "report.toml").read_text())
+        rep_n1d["verdict"] = 2
+        rep_n1d["promotion_ready"] = False
+        (n1d_dir / "report.toml").write_text(_opf_emit.emit(rep_n1d), encoding="utf-8")
+        check("N1-not-promotion-ready-cannot-eval",
+              review_import(rootN1d, prn1d.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("N1-not-promotion-ready-no-acceptance", not (n1d_dir / "acceptance.json").is_file())
+
+        # N4 (module): an UNHASHABLE mapping origin/state ([] or {}) in a staged run is a located CANNOT-
+        # EVALUATE at the review mapping-row validation, never an uncaught TypeError at the (frozenset)
+        # membership test. The origin case is the real crash flip (_ORIGIN_SET is a frozenset); the state
+        # case is the defensive sibling (MAPPING_STATES is a tuple, so already a finding, now guarded too).
+        rootN4a, mN4a = build_store(sources={"a.txt": "aaaa"})
+        prn4a = plan_import(rootN4a, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n4a_dir = mN4a.parent / "imports" / (prn4a.run_id or "MISSING")
+        mp_n4a = tomllib.loads((n4a_dir / "mappings.toml").read_text())
+        mp_n4a["mapping"][0]["origin"] = []
+        (n4a_dir / "mappings.toml").write_text(_opf_emit.emit(mp_n4a), encoding="utf-8")
+        check("N4-mapping-origin-unhashable-cannot-eval",
+              review_import(rootN4a, prn4a.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        rootN4b, mN4b = build_store(sources={"a.txt": "aaaa"})
+        prn4b = plan_import(rootN4b, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n4b_dir = mN4b.parent / "imports" / (prn4b.run_id or "MISSING")
+        mp_n4b = tomllib.loads((n4b_dir / "mappings.toml").read_text())
+        mp_n4b["mapping"][0]["state"] = []
+        (n4b_dir / "mappings.toml").write_text(_opf_emit.emit(mp_n4b), encoding="utf-8")
+        check("N4-mapping-state-unhashable-cannot-eval",
+              review_import(rootN4b, prn4b.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
 
         # model_proposal acceptance gate: a mapping resting in a resting state with origin=model_proposal
         # requires an explicit accept. Hand-edit one mapping row to model_proposal/ignored (a quarantine AND
