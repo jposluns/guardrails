@@ -2150,9 +2150,12 @@ def _load_staged_run_for_review(store_root_fd, run_rel):
     """Load a staged run's machine artefacts for review, fail-closed. A run with no report.toml is
     not-promotion-ready (CANNOT-EVALUATE); a missing or malformed run.toml/mappings.toml/inventory.toml/
     proposals.toml is a malformed run (CANNOT-EVALUATE). Confirms the run is COHERENT and promotion-ready
-    before capture: report.run_id must name this run dir, report.verdict must be 0 (CLEAN) and
-    report.promotion_ready True, run.toml and plan.toml must PARSE (not merely hash), and run.toml must be a
-    non-empty table. Confirms the acceptance BINDING at source: report.toml's plan_digest must recompute over
+    before capture: report.run_id must name this run dir, report.verdict must be a Python int equal to 0
+    (CLEAN, so a bool verdict cannot slip past `False == 0`) and report.promotion_ready True, run.toml and
+    plan.toml must PARSE (not merely hash), run.toml must be a COHERENT run descriptor binding this dir (its
+    run_id names this run, schema is SCHEMA, source is an array; not merely a non-empty table), and
+    proposals.toml must bind this run (its run_id names this dir). Confirms the acceptance BINDING at source:
+    report.toml's plan_digest must recompute over
     the staged plan.toml bytes, and its inventory_digest must recompute over inventory.toml's canonical
     payload, so acceptance can never bind a digest that does not match the staged artefacts. Builds the
     fragment correspondence: each inventory
@@ -2190,7 +2193,12 @@ def _load_staged_run_for_review(store_root_fd, run_rel):
     run_id = run_rel.rsplit("/", 1)[-1]
     if report.get("run_id") != run_id:
         raise _cannot("report.toml run_id does not name this run dir (not a coherent run; cannot review)")
-    if report.get("verdict") != CLEAN or report.get("promotion_ready") is not True:
+    # report.verdict must be a Python INT equal to CLEAN, not merely == CLEAN: Python's `False == 0` is
+    # True, so a bool verdict would slip a `report.verdict = false` run past a bare `!= CLEAN` compare.
+    # Require the integer type (`type(x) is int` excludes bool) so an incoherent non-int verdict cannot
+    # read as promotion-ready (F3).
+    if type(report.get("verdict")) is not int or report.get("verdict") != CLEAN \
+            or report.get("promotion_ready") is not True:
         raise _cannot("staged run is not promotion-ready (report.toml verdict/promotion_ready; cannot "
                       "review)")
     run_tbl = _read_toml(store_root_fd, run_rel + "/run.toml")
@@ -2198,6 +2206,22 @@ def _load_staged_run_for_review(store_root_fd, run_rel):
         raise _cannot("staged run is missing run.toml (malformed or not a plan run; cannot review)")
     if not isinstance(run_tbl, dict) or not run_tbl:
         raise _cannot("staged run run.toml is not a non-empty table (malformed run; cannot review)")
+    # run.toml must be a COHERENT run descriptor that BINDS this dir, not merely a non-empty table: a bare
+    # non-empty check let an unrelated table (e.g. `unrelated = true`) pass as a coherent run. _write_run
+    # stamps the run identity as run.toml's `run_id` alongside `schema` and the `source` array, so validate
+    # that identity and shape here (F3): run_id must name THIS run dir, schema must be SCHEMA, and source
+    # must be an array.
+    if run_tbl.get("run_id") != run_id:
+        raise _cannot("staged run run.toml run_id does not name this run dir (not a coherent run "
+                      "descriptor; cannot review)")
+    if run_tbl.get("schema") != SCHEMA or not isinstance(run_tbl.get("source"), list):
+        raise _cannot("staged run run.toml is not a coherent run descriptor (schema/source shape; cannot "
+                      "review)")
+    # proposals.toml must BIND this run too: its run_id was previously unchecked here, so a proposals.toml
+    # carrying another run's id (a foreign proposal set) bound acceptance to the wrong run (F3).
+    if proposals.get("run_id") != run_id:
+        raise _cannot("staged run proposals.toml run_id does not name this run dir (run binding unchecked; "
+                      "cannot review)")
     # plan.toml must PARSE as TOML (parse it, not only hash it): _read_toml raises CANNOT-EVALUATE on an
     # unparseable plan.toml and returns None when absent.
     if _read_toml(store_root_fd, run_rel + "/plan.toml") is None:
@@ -2378,13 +2402,21 @@ def _stage_acceptance(resolution, run_rel, acceptance_bytes):
     prior acceptance.json (with a parent-dir fsync for durability). rename(2) is atomic, so a re-review's
     prior acceptance survives BYTE-INTACT through any failure before the rename (the earlier
     [remove, create] destroy-then-recreate window, where an injected mid-write failure left a 0-byte or
-    absent record, is gone). A prior entry that is not a regular file is fail-closed. The temp PATHNAME the
-    rename consumes is re-lstat'd NO-FOLLOW through the run-dir dir_fd immediately before the rename and
-    confirmed to still be the SAME regular file just created (st_ino + st_size), so a same-store writer that
-    swaps it for a dangling symlink between create and rename cannot install the symlink as acceptance.json
-    (N2 TOCTOU). A PRE-rename failure leaves the prior byte-intact; a POST-rename parent-dir fsync failure
-    leaves the NEW record installed with uncertain durability (it does NOT claim the prior is intact, N3).
-    Never mutates the active store; keeps the staging model's DIRECT apply_ops posture (no store lock)."""
+    absent record, is gone). A prior entry that is not a regular file is fail-closed. The temp is
+    CONTENT-verified, not merely identity-checked: immediately after apply_ops its bytes are re-read
+    NO-FOLLOW through the contained store handle and confirmed to hash to the intended acceptance digest (a
+    regular file), and the temp PATHNAME the rename consumes is re-read NO-FOLLOW through the run-dir dir_fd
+    immediately before the rename and re-confirmed to hash to that same intended digest. So a swap for a
+    DIFFERENT regular file during or after apply_ops (a same-size substitution a bare st_ino/st_size check
+    could miss), and a symlink or non-regular swap, are both caught fail-closed rather than installed as
+    acceptance.json (F1/F2/N2). This NARROWS the substitution window to the irreducible content-verify ->
+    rename gap; it does not close it. The residual same-store-staging-writer rename race is a DISCLOSED
+    residual SUBSUMED by the acceptance-authenticity residual (OPF-SPEC 14.1: fabrication by any principal
+    with write access to the staging area is out of gate scope; such a principal can forge acceptance.json
+    directly), backstopped by apply's own independent re-validation of the promoted record. A PRE-rename
+    failure leaves the prior byte-intact; a POST-rename parent-dir fsync failure leaves the NEW record
+    installed with uncertain durability (it does NOT claim the prior is intact, N3). Never mutates the active
+    store; keeps the staging model's DIRECT apply_ops posture (no store lock)."""
     acc_rel = run_rel + "/" + ACCEPTANCE_NAME
     # A unique sibling temp so the create's O_EXCL never collides and a stale temp from a prior crash cannot
     # be adopted; it lives in the run dir (a sibling of acceptance.json), so the rename is same-directory.
@@ -2424,19 +2456,27 @@ def _stage_acceptance(resolution, run_rel, acceptance_bytes):
         def staged_reader(op):
             return content[op["path"]]
 
+        intended_digest = _sha256_hex(acceptance_bytes)
         try:
             _journal.apply_ops(store_root_fd, ops, staged_reader)
         except _journal.JournalError as exc:
             _remove_temp()
             raise _cannot("acceptance write failed ({}); the prior acceptance is intact".format(exc))
-        # Capture the just-created temp's identity (a regular file, its st_ino and st_size) so the pre-rename
-        # re-check can confirm the temp PATHNAME still names THAT file and was not swapped (N2).
-        created = _journal._lstat_contained(store_root_fd, tmp_rel)
-        if created is None or not stat.S_ISREG(created.st_mode):
+        # Content-verify the just-created temp (F1): re-read its bytes NO-FOLLOW through the contained store
+        # handle (_read_contained confirms a regular file on the OPENED fd, fail-closed on a symlink/
+        # non-regular swap) and confirm they hash to the intended acceptance digest. This catches a swap for
+        # a DIFFERENT regular file during or after apply_ops that a bare st_ino/st_size identity check could
+        # miss (a same-size substitution), never adopting the substituted bytes as acceptance.json.
+        try:
+            created_bytes, _created_st = _journal._read_contained(store_root_fd, tmp_rel)
+        except _journal.JournalError as exc:
             _remove_temp()
-            raise _cannot("the acceptance temp is missing or not a regular file after staging; the prior "
-                          "acceptance is intact")
-        created_ino, created_size = created.st_ino, created.st_size
+            raise _cannot("the acceptance temp is missing or not a regular file after staging ({}); the "
+                          "prior acceptance is intact".format(exc))
+        if _sha256_hex(created_bytes) != intended_digest:
+            _remove_temp()
+            raise _cannot("the acceptance temp content does not match the intended acceptance bytes after "
+                          "staging (a different-content substitution); the prior acceptance is intact")
         # Atomic cutover: a single rename installs the staged temp over any prior acceptance.json, contained
         # beneath the run dir's pre-opened no-follow parent handle, then fsync that directory for durability.
         try:
@@ -2445,23 +2485,24 @@ def _stage_acceptance(resolution, run_rel, acceptance_bytes):
             _remove_temp()
             raise _cannot("cannot open the run dir to install the acceptance ({})".format(exc))
         try:
-            # Close the TOCTOU swap window (N2): O_EXCL/O_NOFOLLOW protected the temp CREATE, but os.rename
-            # consumes the temp PATHNAME, which a same-store writer could swap for a dangling symlink between
-            # create and rename, so the rename would install the SYMLINK as acceptance.json. Immediately
-            # before the rename, re-lstat the temp NO-FOLLOW through the run-dir dir_fd (fstatat) and confirm
-            # it is still the SAME regular file just created (matching st_ino and st_size); any symlink,
-            # non-regular entry, or identity mismatch is fail-closed (best-effort temp cleanup, prior intact).
+            # NARROW the TOCTOU swap window (N2/F2): O_EXCL/O_NOFOLLOW protected the temp CREATE, but
+            # os.rename consumes the temp PATHNAME, which a same-store writer could swap for a symlink or a
+            # different regular file between create and rename, so the rename would install the wrong object
+            # as acceptance.json. Immediately before the rename, re-read the temp NO-FOLLOW through the SAME
+            # run-dir dir_fd the rename uses (_read_at confirms a regular file on the OPENED fd, fail-closed
+            # on a symlink/non-regular swap) and re-confirm its bytes hash to the intended acceptance digest.
+            # This does not CLOSE the window: the residual content-verify -> rename race is the disclosed
+            # residual documented above, subsumed by the acceptance-authenticity out-of-scope residual.
             try:
-                pre = os.lstat(tmp_name, dir_fd=pfd)
-            except OSError as exc:
+                pre_bytes, _pre_st = _journal._read_at(pfd, tmp_name, tmp_rel)
+            except _journal.JournalError as exc:
                 _remove_temp()
-                raise _cannot("cannot re-stat the acceptance temp before install ({}); the prior "
+                raise _cannot("cannot re-read the acceptance temp before install ({}); the prior "
                               "acceptance is intact".format(exc))
-            if not (stat.S_ISREG(pre.st_mode) and pre.st_ino == created_ino
-                    and pre.st_size == created_size):
+            if _sha256_hex(pre_bytes) != intended_digest:
                 _remove_temp()
-                raise _cannot("the acceptance temp was swapped before install (not the staged regular "
-                              "file); the prior acceptance is intact")
+                raise _cannot("the acceptance temp was swapped before install (content does not match the "
+                              "staged acceptance bytes); the prior acceptance is intact")
             # The rename is its own step so the parent-dir fsync failure below is NOT folded into the
             # rename-failure handler (N3): a PRE-rename failure leaves the prior byte-intact.
             try:
@@ -4328,9 +4369,10 @@ def self_test():
                   and (r1_dir / "acceptance.json").read_bytes() == prior_acc_bytes)
 
         # N2: a same-store writer swaps the staged temp for a DANGLING SYMLINK after the O_EXCL create but
-        # before the rename. The pre-rename no-follow identity re-check (regular file + st_ino/st_size)
-        # catches it: verdict 2, acceptance.json is NOT the symlink, and the prior record is byte-intact.
-        # Without the re-check the rename would install the symlink AS acceptance.json.
+        # before the rename. The pre-rename no-follow content re-verify (a regular file on the OPENED fd via
+        # _read_at, hash == intended digest) catches it: verdict 2, acceptance.json is NOT the symlink, and
+        # the prior record is byte-intact. Without the re-verify the rename would install the symlink AS
+        # acceptance.json.
         if (r1_dir / "acceptance.json").is_file():
             prior_swap_bytes = (r1_dir / "acceptance.json").read_bytes()
             _saved_apply_ops_n2 = _journal.apply_ops
@@ -4353,6 +4395,35 @@ def self_test():
                   and not (r1_dir / "acceptance.json").is_symlink())
             check("N2-temp-swap-prior-intact",
                   (r1_dir / "acceptance.json").read_bytes() == prior_swap_bytes)
+
+        # F1/F2: a same-store writer swaps the staged temp for a DIFFERENT-CONTENT REGULAR FILE after the
+        # O_EXCL create (during or after apply_ops, before capture). The content-verify (re-read no-follow,
+        # confirm the bytes hash to the intended acceptance digest) catches it where a bare st_ino/st_size
+        # identity check could miss a same-size substitution: verdict 2 (content-digest mismatch), the prior
+        # record byte-intact, and acceptance.json is NOT the substituted bytes. This is defence-in-depth; the
+        # residual content-verify -> rename race is a disclosed residual subsumed by the acceptance-
+        # authenticity out-of-scope residual (a staging-write principal can forge acceptance.json directly).
+        if (r1_dir / "acceptance.json").is_file():
+            prior_sub_bytes = (r1_dir / "acceptance.json").read_bytes()
+            substitute_bytes = b"substituted-different-content-regular-file"
+            _saved_apply_ops_f1 = _journal.apply_ops
+
+            def _swap_content_apply_ops(root_fd, ops, reader, *_a, **_k):
+                _saved_apply_ops_f1(root_fd, ops, reader)   # the real O_EXCL create of the temp
+                for tmp in r1_dir.glob(ACCEPTANCE_NAME + ".tmp-*"):
+                    tmp.write_bytes(substitute_bytes)       # swap for a DIFFERENT-content regular file
+
+            _journal.apply_ops = _swap_content_apply_ops
+            try:
+                rr_sub = review_import(rootR1, pr.run_id, actor="Substituter",
+                                       decisions=all_decisions(r1_dir, "accept"), now=NOW)
+            finally:
+                _journal.apply_ops = _saved_apply_ops_f1
+            check("F1-content-swap-cannot-eval", rr_sub.verdict == 2)
+            check("F1-content-swap-prior-intact",
+                  (r1_dir / "acceptance.json").read_bytes() == prior_sub_bytes)
+            check("F1-content-swap-not-substituted",
+                  (r1_dir / "acceptance.json").read_bytes() != substitute_bytes)
 
         # N3: a POST-rename parent-dir fsync failure leaves the NEW record installed with uncertain
         # durability; it must NOT be reported as a pre-rename failure ("the prior acceptance is intact").
@@ -4493,6 +4564,71 @@ def self_test():
         check("N1-not-promotion-ready-cannot-eval",
               review_import(rootN1d, prn1d.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
         check("N1-not-promotion-ready-no-acceptance", not (n1d_dir / "acceptance.json").is_file())
+
+        # F3: N1's coherence gate is run-descriptor IDENTITY, not a bare non-empty table / `!= CLEAN`
+        # compare. Three further single-mutation discriminators, each verdict 2 with NO acceptance written.
+        # (e) an UNRELATED run.toml (a non-empty table that is not this run's descriptor) is not coherent:
+        #     it carries no run_id naming this dir.
+        rootN1e, mN1e = build_store(sources={"a.txt": "aaaa"})
+        prn1e = plan_import(rootN1e, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n1e_dir = mN1e.parent / "imports" / (prn1e.run_id or "MISSING")
+        (n1e_dir / "run.toml").write_text("unrelated = true\n", encoding="utf-8")
+        check("N1-unrelated-run-toml-cannot-eval",
+              review_import(rootN1e, prn1e.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("N1-unrelated-run-toml-no-acceptance", not (n1e_dir / "acceptance.json").is_file())
+        # (f) a proposals.toml whose run_id names a DIFFERENT (valid) run: the run binding is unmet, so a
+        #     foreign proposal set can no longer bind acceptance to this run.
+        rootN1f, mN1f = build_store(sources={"a.txt": "aaaa"})
+        prn1f = plan_import(rootN1f, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n1f_dir = mN1f.parent / "imports" / (prn1f.run_id or "MISSING")
+        props_n1f = tomllib.loads((n1f_dir / "proposals.toml").read_text())
+        props_n1f["run_id"] = "imp-20260101T000000Z-0000000000000000"
+        (n1f_dir / "proposals.toml").write_text(_opf_emit.emit(props_n1f), encoding="utf-8")
+        check("N1-proposals-run-id-mismatch-cannot-eval",
+              review_import(rootN1f, prn1f.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("N1-proposals-run-id-mismatch-no-acceptance", not (n1f_dir / "acceptance.json").is_file())
+        # (g) a report.verdict of `false` (a bool) must NOT pass as CLEAN via Python's `False == 0`: the
+        #     integer-type check (`type(x) is int` excludes bool) makes it cannot-evaluate.
+        rootN1g, mN1g = build_store(sources={"a.txt": "aaaa"})
+        prn1g = plan_import(rootN1g, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n1g_dir = mN1g.parent / "imports" / (prn1g.run_id or "MISSING")
+        rep_n1g = tomllib.loads((n1g_dir / "report.toml").read_text())
+        rep_n1g["verdict"] = False
+        (n1g_dir / "report.toml").write_text(_opf_emit.emit(rep_n1g), encoding="utf-8")
+        check("N1-bool-verdict-cannot-eval",
+              review_import(rootN1g, prn1g.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("N1-bool-verdict-no-acceptance", not (n1g_dir / "acceptance.json").is_file())
+
+        # F4 (module): a nested-unhashable span ([[], []]) in a staged mapping row or inventory fragment is a
+        # located CANNOT-EVALUATE at the review loader, never an uncaught TypeError at the (source_path,
+        # tuple(span)) key. The U8 emitter refuses a nested array, so it is injected as raw text (only
+        # corruption or a staging-write attacker produces such a span). The mapping-row case is caught by the
+        # loader's int-element span guard; the inventory-fragment case is caught fail-closed at the
+        # inventory-digest recompute (the emitter refuses the nested-array payload) ahead of the guard.
+        def inject_nested_span_text(path, span):
+            old = "span = [{}, {}]".format(span[0], span[1])
+            txt = path.read_text()
+            if old not in txt:
+                raise OSError("harness: could not locate {!r} to inject a nested span".format(old))
+            path.write_text(txt.replace(old, "span = [[], []]", 1), encoding="utf-8")
+
+        rootN4c, mN4c = build_store(sources={"a.txt": "aaaa"})
+        prn4c = plan_import(rootN4c, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n4c_dir = mN4c.parent / "imports" / (prn4c.run_id or "MISSING")
+        mp_n4c = tomllib.loads((n4c_dir / "mappings.toml").read_text())
+        inject_nested_span_text(n4c_dir / "mappings.toml", mp_n4c["mapping"][0]["span"])
+        check("N4-mapping-nested-span-cannot-eval",
+              review_import(rootN4c, prn4c.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("N4-mapping-nested-span-no-acceptance", not (n4c_dir / "acceptance.json").is_file())
+
+        rootN4d, mN4d = build_store(sources={"a.txt": "aaaa"})
+        prn4d = plan_import(rootN4d, ["a.txt"], now=NOW, run_nonce=NONCE)
+        n4d_dir = mN4d.parent / "imports" / (prn4d.run_id or "MISSING")
+        inv_n4d = tomllib.loads((n4d_dir / "inventory.toml").read_text())
+        inject_nested_span_text(n4d_dir / "inventory.toml", inv_n4d["fragment"][0]["span"])
+        check("N4-fragment-nested-span-cannot-eval",
+              review_import(rootN4d, prn4d.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("N4-fragment-nested-span-no-acceptance", not (n4d_dir / "acceptance.json").is_file())
 
         # N4 (module): an UNHASHABLE mapping origin/state ([] or {}) in a staged run is a located CANNOT-
         # EVALUATE at the review mapping-row validation, never an uncaught TypeError at the (frozenset)

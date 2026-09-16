@@ -443,15 +443,22 @@ def check_staged_run(run_dir):
                 corr_ok = False
             else:
                 for fr in inv_frags:
+                    # The span elements are validated as ints BEFORE constructing the (source_path,
+                    # tuple(span)) key: a nested-unhashable span ([[], []]) is length-2 but tuple(span) is
+                    # then unhashable, so an int-element guard keeps the key hashable and a malformed span a
+                    # located FINDING (corr_ok False), never an uncaught TypeError at the dict membership.
                     if not (isinstance(fr, dict) and isinstance(fr.get("fragment_id"), str)
                             and isinstance(fr.get("source_path"), str) and isinstance(fr.get("span"), list)
-                            and len(fr["span"]) == 2):
+                            and len(fr["span"]) == 2 and all(type(x) is int for x in fr["span"])):
                         corr_ok = False
                         break
                     frag_by_id[fr["fragment_id"]] = (fr["source_path"], tuple(fr["span"]))
                 for row in (map_rows if corr_ok else []):
+                    # Same int-element span guard before the (source_path, tuple(span)) key_meta key: an
+                    # unhashable nested span would otherwise raise a TypeError at the key assignment.
                     if not (isinstance(row, dict) and isinstance(row.get("source_path"), str)
-                            and isinstance(row.get("span"), list) and len(row["span"]) == 2):
+                            and isinstance(row.get("span"), list) and len(row["span"]) == 2
+                            and all(type(x) is int for x in row["span"])):
                         corr_ok = False
                         break
                     key_meta[(row["source_path"], tuple(row["span"]))] = {
@@ -905,6 +912,31 @@ def _self_test():
         mstate = check_staged_run(m)
         expect("disc-acceptance-completeness-unhashable-state-nocrash",
                set(mstate) == set(EXPECTED_CHECKS) and mstate["mapping-state-vocab"][0] is False)
+
+        # F4: a nested-unhashable span ([[], []]) in a mapping row or an inventory fragment makes the
+        # (source_path, tuple(span)) key unhashable. The int-element span guard keeps check_staged_run
+        # returning a FULL result set with the acceptance correlation a located FINDING, never an uncaught
+        # TypeError at the key membership. The U8 emitter refuses a nested array, so the span is injected as
+        # raw text (only corruption or an attacker with staging write access produces such a span).
+        def inject_nested_span(path, span):
+            old = "span = [{}, {}]".format(span[0], span[1])
+            txt = path.read_text(encoding="utf-8")
+            if old not in txt:
+                raise OSError("harness: could not locate {!r} to inject a nested span".format(old))
+            path.write_text(txt.replace(old, "span = [[], []]", 1), encoding="utf-8")
+
+        m = copy_run(reviewed)
+        inject_nested_span(m / "mappings.toml", _load_toml(m / "mappings.toml")["mapping"][0]["span"])
+        rewrite_report_digest(m, "mappings.toml")
+        mnest_map = check_staged_run(m)
+        expect("disc-acceptance-span-unhashable-mapping-nocrash",
+               set(mnest_map) == set(EXPECTED_CHECKS) and mnest_map["acceptance-binding"][0] is False)
+
+        m = copy_run(reviewed)
+        inject_nested_span(m / "inventory.toml", _load_toml(m / "inventory.toml")["fragment"][0]["span"])
+        mnest_inv = check_staged_run(m)
+        expect("disc-acceptance-span-unhashable-fragment-nocrash",
+               set(mnest_inv) == set(EXPECTED_CHECKS) and mnest_inv["acceptance-binding"][0] is False)
 
         # acceptance-completeness (model_proposal): a model_proposal resting mapping whose decision is a
         # reject (not an accept) is an incomplete acceptance, even with full coverage.
