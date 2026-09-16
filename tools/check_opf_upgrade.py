@@ -53,7 +53,10 @@ VECTOR ROSTER (U1-U25, P1):
       mutation refuses and the genuine planner output passes (the check that fails without the m1 fix). Also
       the R6 porcelain-grammar refusal vectors: opf._upgrade_parse_porcelain refuses a lone NUL, a non-NUL-
       terminated payload, and a mis-framed record (never a clean-empty result), and excludes a nested-store
-      lease after the prefix strip.
+      lease after the prefix strip; PLUS the R6 fail-open vectors (a MALFORMED status -- ZZ, a blank pair, a
+      rename R, a copy C -- for the lease path refuses rather than being silently dropped by the exclusion,
+      while a well-formed dirty lease record is still excluded) and the R1b leading-space prefix test
+      (_upgrade_probe_dirty keeps a " leading/"-prefixed lease excluded; fails under the old .strip()).
   U19 R1 recovery-text root-binding: opf._upgrade_recovery_text called directly with DISTINCT store/product
       roots; the `.working` restore + created-file removal name the store root, the product target the product
       root (fails without the distinct-roots fix).
@@ -66,10 +69,18 @@ VECTOR ROSTER (U1-U25, P1):
       4's never-seize message, not step 3's dirty-store remedy (the lease_excl prefix-normalization fix).
   U23 R3 FIFO lease: a FIFO at lease.toml refuses PROMPTLY (bounded, no blocking hang) naming a present non-
       regular lease; the FIFO is untouched.
-  U24 R4 orphan lease: a mid-acquisition failure (payload write fails after the O_EXCL create) raises and
-      leaves NO orphan lease (journal._write_all monkeypatched to fail; _upgrade_acquire_lease called direct).
+  U24 R4 never-seize on a mid-acquisition failure: with journal._write_all monkeypatched to fail after the
+      O_EXCL create, _upgrade_acquire_lease (called direct) LEAVES the lease as a reconcilable leftover rather
+      than an ownership-blind by-name unlink -- surfacing a reconcilable _UpgradeError -- and when the write
+      first REPLACES the lease with a peer holder's bytes, that replacement is NOT removed (the never-seize
+      guarantee; the old by-name unlink deleted the replacement).
   U25 R5 release-before-success: with _upgrade_release_lease monkeypatched to fail, a valid store exits 2 and
       emits NO success line (success is never reported over a still-held / failed-to-release lease).
+  U26 R8 non-boolean module: the planner precondition refuses a non-boolean value on ANY module (governance,
+      operational_policy, decision_support), matching the merge-base _validate_modules, while a fully-boolean
+      module set still plans; end-to-end, a stored governance="x" refuses exit 2 before any mutation.
+  U27 R1a relocated partial-recovery: a RELOCATED store (store_root != product_root) at spec_version 1.1.0 but
+      not doctor-VALID names the STORE root (not the CLI product root) for the F2 .working restore advice.
   P1  a seeded migration property test: 12 generated genuine-VALID 1.0.0 variants (module subset with the
       G2 coupling, 0-2 records per migrated type with matching high-waters, DECISIONS.md declared/omitted,
       the decision_support key present/absent) each upgrade to a doctor-VALID 1.1.0 store with every index
@@ -890,6 +901,45 @@ def _suite():
             _lx, _ = _grammar_ok(b"?? sub/.working/toml/lease.toml\x00", prefix="sub/",
                                  lease=".working/toml/lease.toml")
             check("U18/R6 nested-store lease excluded after prefix strip", _lx == [])
+            # R6 (fail-open guard): a MALFORMED status for the LEASE PATH must RAISE fail-closed, never be
+            # read as a normal record that matches the lease exclusion and is SILENTLY DROPPED (which would
+            # make the M3 cleanliness guard return CLEAN over dirt). Feed ZZ, a blank pair, a rename R, and a
+            # copy C (the last two impossible under --no-renames) for the lease path; each must refuse.
+            _lease_rel = ".working/toml/lease.toml"
+            for _bad, _lbl in ((b"ZZ", "out-of-vocabulary ZZ"), (b"  ", "blank status"),
+                               (b"R ", "rename R"), (b"C ", "copy C")):
+                _rawb = _bad + b" " + _lease_rel.encode("utf-8") + b"\x00"
+                _mres, _merr = _grammar_ok(_rawb, prefix="", lease=_lease_rel)
+                check("U18/R6 malformed lease status ({}) refuses, never a silent drop".format(_lbl),
+                      _mres is None and _merr is not None)
+            # a WELL-FORMED record is unaffected: a dirty lease record is still EXCLUDED (well-formed only),
+            # a dirty non-lease record is still surfaced as dirt, and a clean tree still passes.
+            _exok, _ = _grammar_ok(b" M " + _lease_rel.encode("utf-8") + b"\x00", prefix="", lease=_lease_rel)
+            check("U18/R6 well-formed dirty lease record still excluded", _exok == [])
+            _dnl, _ = _grammar_ok(b" M .working/toml/x\x00", prefix="", lease=_lease_rel)
+            check("U18/R6 well-formed dirty non-lease record still surfaced", _dnl == [".working/toml/x"])
+            check("U18/R6 clean tree (empty payload) still passes", _grammar_ok(b"")[0] == [])
+
+            # R1b: the show-prefix normalization must strip ONLY the trailing newline, never LEADING
+            # whitespace, so a store dir whose name begins with a space keeps its prefix and its lease is
+            # correctly excluded. Drive _upgrade_probe_dirty with a stubbed git that reports a " leading/\n"
+            # prefix and a modified-lease record under it. With the .strip() bug the leading space is lost,
+            # the prefix no longer matches, and the lease surfaces as (spurious) dirt.
+            import _opf_observe as _obs_r1b
+            _GO = _obs_r1b._GitOutcome
+            _orig_run_git = _obs_r1b._run_git
+            try:
+                def _fake_run_git(_git, _root, args, timeout=None):
+                    if "rev-parse" in args:
+                        return _GO(True, 0, b" leading/\n", b"")
+                    return _GO(True, 0, b" M  leading/.working/toml/lease.toml\x00", b"")
+                _obs_r1b._run_git = _fake_run_git
+                _r1b_dirty = opf._upgrade_probe_dirty("git", base, [".working"],
+                                                      ".working/toml/lease.toml")
+            finally:
+                _obs_r1b._run_git = _orig_run_git
+            check("U18/R1b leading-space store prefix keeps the lease excluded (rstrip newline only)",
+                  _r1b_dirty == [])
 
             # U19) R1: the post-mutation recovery text threads DISTINCT roots. Called directly (like U18):
             # `.working` restore + created-file removal name the STORE root; a product target names the
@@ -1000,29 +1050,62 @@ def _suite():
                       stat.S_ISFIFO((mach23 / _opf_check.LEASE_NAME).lstat().st_mode)
                       and _snapshot(s23) == before23)
 
-            # U24) R4: a mid-acquisition failure (the payload write fails AFTER the O_EXCL create) must NOT
-            # orphan the lease. Monkeypatch journal._write_all to fail, call _upgrade_acquire_lease directly,
-            # and assert it raises AND leaves no lease file (without the fix the O_EXCL-created file lingers).
-            s24 = base / "u24-orphan-lease"
-            s24.mkdir()
-            mach24 = build_store(s24)
+            # U24) R4 never-seize: a mid-acquisition failure (the payload write fails AFTER the O_EXCL create)
+            # must NOT perform an ownership-blind by-name unlink. It LEAVES the lease as a reconcilable
+            # leftover (leave-and-reconcile, spec 5.7). Monkeypatch journal._write_all to fail, call
+            # _upgrade_acquire_lease directly, and assert it raises a reconcilable _UpgradeError AND leaves the
+            # lease in place. (a) ordinary failure.
             mrel24 = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
-            fd24 = _opf_store._open_dir_nofollow(str(s24.resolve()))
+            s24a = base / "u24a-leave-and-reconcile"
+            s24a.mkdir()
+            mach24a = build_store(s24a)
+            fd24a = _opf_store._open_dir_nofollow(str(s24a.resolve()))
             _orig_wa = _opf_store._journal._write_all
-            _r4_raised = False
+            _r4_exc = None
             try:
                 _opf_store._journal._write_all = lambda *a, **k: (_ for _ in ()).throw(
                     OSError("synthetic payload-write failure"))
                 try:
-                    opf._upgrade_acquire_lease(fd24, mrel24)
-                except BaseException:
-                    _r4_raised = True
+                    opf._upgrade_acquire_lease(fd24a, mrel24)
+                except BaseException as _e24:
+                    _r4_exc = _e24
             finally:
                 _opf_store._journal._write_all = _orig_wa
-                os.close(fd24)
-            check("U24 mid-acquisition failure raises", _r4_raised)
-            check("U24 failed acquisition leaves NO orphan lease",
-                  not (mach24 / _opf_check.LEASE_NAME).exists())
+                os.close(fd24a)
+            check("U24 ordinary mid-acquisition failure raises a reconcilable _UpgradeError",
+                  isinstance(_r4_exc, opf._UpgradeError) and "never seized" in str(_r4_exc))
+            check("U24 ordinary failure LEAVES the lease in place (leftover, never a racy unlink)",
+                  (mach24a / _opf_check.LEASE_NAME).is_file())
+            # (b) never-seize under an external replacement: the write REPLACES the lease with a peer holder's
+            # bytes in the failure window, then fails. The replacement must SURVIVE (the old by-name unlink
+            # would have deleted the peer's lease, a spec-5.7 never-seize violation).
+            s24b = base / "u24b-never-seize-replace"
+            s24b.mkdir()
+            mach24b = build_store(s24b)
+            _peer24 = (b'acquired_at = "2026-02-02T00:00:00Z"\nholder = "peer-runner"\n'
+                       b'operation = "upgrade"\nschema = 1\n')
+            fd24b = _opf_store._open_dir_nofollow(str(s24b.resolve()))
+            _ns_raised = False
+
+            def _replace_then_fail(*a, **k):
+                _lp = mach24b / _opf_check.LEASE_NAME
+                _lp.unlink()                       # external actor unlinks our just-created lease
+                _lp.write_bytes(_peer24)           # ... and installs its OWN lease at the same name
+                raise OSError("synthetic write failure after external lease replace")
+
+            try:
+                _opf_store._journal._write_all = _replace_then_fail
+                try:
+                    opf._upgrade_acquire_lease(fd24b, mrel24)
+                except BaseException:
+                    _ns_raised = True
+            finally:
+                _opf_store._journal._write_all = _orig_wa
+                os.close(fd24b)
+            check("U24 never-seize: acquisition still raises", _ns_raised)
+            check("U24 never-seize: the REPLACEMENT holder's lease is NOT removed",
+                  (mach24b / _opf_check.LEASE_NAME).is_file()
+                  and (mach24b / _opf_check.LEASE_NAME).read_bytes() == _peer24)
 
             # U25) R5: the lease is released BEFORE success is reported. Monkeypatch _upgrade_release_lease to
             # fail; a valid store must exit 2 with NO success line emitted (without the fix, success prints
@@ -1045,6 +1128,79 @@ def _suite():
             check("U25 a release failure surfaces exit 2", rc25 == EXIT_ERROR)
             check("U25 no success is reported when release fails (released-before-success)",
                   "staged, NOT committed" not in out25 and '"event": "upgraded"' not in out25)
+
+            # U26) R8: a non-boolean value on ANY module (not only the retired decision_support) is refused by
+            # the planner precondition, matching the merge-base _validate_modules (a non-boolean module value
+            # is 1.0.0-INVALID). Without the fix only decision_support was checked, so e.g. governance="x"
+            # slipped through the planner (caught only later, post-mutation, by the final doctor).
+            def _plan_refuses(mut):
+                m = tomllib.loads(_FIX_MANIFEST)
+                mut(m["modules"])
+                try:
+                    opf._upgrade_plan(m, tomllib.loads(_FIX_COUNTERS))
+                    return False
+                except opf._UpgradeError:
+                    return True
+            check("U26/R8 non-boolean governance module refuses",
+                  _plan_refuses(lambda mods: mods.__setitem__("governance", "x")))
+            check("U26/R8 non-boolean operational_policy module refuses",
+                  _plan_refuses(lambda mods: mods.__setitem__("operational_policy", 3)))
+            check("U26/R8 non-boolean decision_support module still refuses",
+                  _plan_refuses(lambda mods: mods.__setitem__("decision_support", "x")))
+            _r8_ok = True
+            try:
+                opf._upgrade_plan(tomllib.loads(_FIX_MANIFEST), tomllib.loads(_FIX_COUNTERS))
+            except opf._UpgradeError:
+                _r8_ok = False
+            check("U26/R8 fully-boolean module set still plans (no false refusal)", _r8_ok)
+            # end-to-end: a stored governance="x" refuses BEFORE any mutation (exit 2), tree unchanged.
+            s26 = base / "u26-nonbool-module"
+            s26.mkdir()
+            _man26 = _FIX_MANIFEST.replace("governance = false\n", 'governance = "x"\n', 1)
+            mach26 = build_store(s26, manifest=_man26)
+            before26 = _snapshot(s26)
+            rc26, out26 = upgrade(s26)
+            check("U26/R8 stored non-boolean module refuses (exit 2)", rc26 == EXIT_ERROR)
+            check("U26/R8 refusal names the module and boolean requirement",
+                  "governance" in out26 and "boolean" in out26)
+            check("U26/R8 tree unchanged (refused before mutation)", _snapshot(s26) == before26)
+
+            # U27) R1a: a RELOCATED store (store_root != product_root) whose F2 partial-recovery advice must
+            # name the STORE root for the .working restore, not the CLI product root. Build a product repo, a
+            # store in a subdir with the pointer at the product root, migrate to VALID 1.1.0 and commit, then
+            # break the store so the F2 partial-recovery branch fires. With the R1a fix the .working restore
+            # is `git -C <store-subdir>`; without it (CLI product root) it names the product root.
+            import shlex as _shlex_r1a
+            prod27 = base / "u27-relocated"
+            store27 = prod27 / "sub-store"
+            mach27 = store27 / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
+            mach27.mkdir(parents=True)
+            git_call(prod27, ["init"])
+            (mach27 / _opf_store.MANIFEST_NAME).write_text(_FIX_MANIFEST, encoding="utf-8")
+            (mach27 / _opf_check.COUNTERS_NAME).write_text(_FIX_COUNTERS, encoding="utf-8")
+            (mach27 / _opf_check.VERSION_NAME).write_text(_FIX_VERSION, encoding="utf-8")
+            (mach27 / _opf_check.WORKLOG_NAME).write_text(_FIX_WORKLOG, encoding="utf-8")
+            for _t27 in _FIX_INDEX_TYPES:
+                (mach27 / (_t27 + _opf_check.INDEX_SUFFIX)).write_text(_FIX_INDEX, encoding="utf-8")
+            (prod27 / _opf_store.POINTER_REL).write_text('[store]\ntarget = "dir:sub-store"\n',
+                                                         encoding="utf-8")
+            (prod27 / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+            git_call(prod27, ["--literal-pathspecs", "add", "-A"])
+            git_call(prod27, ["commit", "-m", "seed relocated 1.0.0 store"])
+            rc27a, out27a = upgrade(prod27)
+            check("U27 relocated store migrates to 1.1.0 (exit 0)", rc27a == EXIT_OK)
+            git_call(prod27, ["--literal-pathspecs", "add", "-A"])
+            git_call(prod27, ["commit", "-m", "commit staged migration"])
+            (mach27 / idx("maintainer_decision")).unlink()
+            rc27b, out27b = upgrade(prod27)
+            check("U27 relocated partial store fails closed (exit 2)", rc27b == EXIT_ERROR)
+            check("U27 relocated partial store names not-doctor-VALID", "NOT doctor-VALID" in out27b)
+            _want27 = ("git -C {} --literal-pathspecs restore --staged --worktree -- .working"
+                       .format(_shlex_r1a.quote(str(store27))))
+            _bad27 = ("git -C {} --literal-pathspecs restore --staged --worktree -- .working"
+                      .format(_shlex_r1a.quote(str(prod27))))
+            check("U27 relocated .working restore names the STORE root, not the product root (R1a)",
+                  _want27 in out27b and _bad27 not in out27b)
 
             # P1) seeded migration property test: 12 generated genuine-VALID 1.0.0 variants all migrate.
             _NS = {"maintainer_action": "MA", "maintainer_decision": "MD", "preference_pattern": "PP",

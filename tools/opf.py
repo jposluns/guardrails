@@ -1178,12 +1178,17 @@ def _upgrade_plan(manifest_model, counters_model):
               "decisions_declared": decisions_declared}
 
     # --- PRECONDITIONS: refuse only a genuinely INVALID 1.0.0 input, fail-closed. --------------------
-    # [modules] keys are OPTIONAL at 1.0.0 (default off, G3), so decision_support MAY be absent; when
-    # present its value must be a boolean (a non-boolean was 1.0.0-INVALID, _validate_modules). Every
-    # other module key rides through untouched (the postcondition asserts value-exact).
-    if ds_key_present and not isinstance(modules[_UPGRADE_RETIRED_MODULE], bool):
-        raise _UpgradeError("manifest [modules].{} is not a boolean; not a valid 1.0.0 store "
-                            "(fail-closed)".format(_UPGRADE_RETIRED_MODULE))
+    # [modules] keys are OPTIONAL at 1.0.0 (default off, G3), so decision_support MAY be absent. Every
+    # PRESENT module value must be a boolean: the merge-base doctor's _validate_modules grades a non-boolean
+    # module value 1.0.0-INVALID, so a non-boolean on ANY module (not only the retired decision_support --
+    # e.g. governance = "x") is refused upfront, fail-closed, keeping the docstring's "refuses any input that
+    # is not a doctor-VALID 1.0.0 store" true rather than silently carrying it through to a post-mutation
+    # doctor failure. A doctor-VALID 1.0.0 store has only boolean module values, so this never rejects valid
+    # input; every module key otherwise rides through untouched (the postcondition asserts value-exact).
+    for _mname in sorted(modules):
+        if not isinstance(modules[_mname], bool):
+            raise _UpgradeError("manifest [modules].{} is not a boolean; not a valid 1.0.0 store "
+                                "(fail-closed)".format(_mname))
     # A now-baseline type PRE-DECLARED by a 1.0.0 module tier (G1/G2). contribution: no 1.0.0 tier
     # introduced it, so its presence is an impossible 1.0.0 shape -> always refuse. maintainer_decision:
     # only a governance-enabled store carried it; preference_pattern: only a decision_support-enabled
@@ -1447,13 +1452,16 @@ _UPGRADE_NO_WHOLE_TREE = ("Never run a whole-tree restore (git restore . / git r
                           "destroy unrelated uncommitted work. Scope every recovery to the store subtree.")
 
 
-def _upgrade_partial_recovery_text(root):
+def _upgrade_partial_recovery_text(store_root):
     """Recovery advice for the read-only F2 triage (a store declares the target spec_version but is NOT
     doctor-VALID: a previously interrupted run). This path cannot know what that run touched, so the advice
     stays SUBTREE-SCOPED and review-first: inspect, then restore tracked store paths and remove upgrade-
-    created untracked files, all under `.working`, never a whole-tree restore (preserve-uncommitted-work)."""
+    created untracked files, all under `.working`, never a whole-tree restore (preserve-uncommitted-work).
+    The advice names the resolved STORE root (where `.working` lives), NOT the CLI product root: for a
+    RELOCATED store the two differ, and the CLI root would aim the `.working` restore at the wrong
+    repository (explicit-binding-over-ambient-context)."""
     import shlex
-    r = shlex.quote(str(root))
+    r = shlex.quote(str(store_root))
     w = shlex.quote(_opf_store.WORKING_DIRNAME)
     return ("Inspect the store subtree (git -C {r} --literal-pathspecs status -- {w}); restore ONLY its "
             "tracked paths (git -C {r} --literal-pathspecs restore --staged --worktree -- {w}) and remove "
@@ -1507,6 +1515,12 @@ def _upgrade_product_render_targets(manifest_model):
     return targets
 
 
+# porcelain v1 ordinary-change status letters (index status X and worktree status Y). Under --no-renames a
+# rename R and a copy C cannot appear, so they are deliberately EXCLUDED and treated as malformed; the two
+# special two-char codes ?? (untracked) and !! (ignored) are handled separately. Bytes (ints under iteration).
+_PORCELAIN_STATUS = frozenset(b" MTADU")
+
+
 def _upgrade_parse_porcelain(raw, prefix, lease_excl):
     """Parse a `git status --porcelain=v1 -z --untracked-files=all --no-renames` payload into the list of
     dirty paths, each normalized `root`-relative (the `prefix`, the store's repo-root-relative path with a
@@ -1514,10 +1528,12 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl):
     (a byte-literal store-relative path, when given). Factored PURE so the grammar refusal is directly unit-
     testable. The -z grammar is VALIDATED (guard-input-soundness): a non-empty payload is a run of
     NUL-TERMINATED records, each `XY<space>PATH` (two status chars, a space, then >=1 path byte); --no-renames
-    means there is no second NUL-separated origin-path field. A payload that is not NUL-terminated, or that
-    carries a record shorter than `XY PATH` or lacking the status/space framing, is MALFORMED and refuses
-    fail-closed -- never a clean empty result on an unparseable payload (e.g. a lone NUL, which a naive split
-    would read as clean; check-fails-closed-on-unreadable)."""
+    means there is no second NUL-separated origin-path field. A payload that is not NUL-terminated, that
+    carries a record shorter than `XY PATH` or lacking the status/space framing, or whose XY status is
+    outside the porcelain v1 vocabulary (a bogus pair, a blank pair, or a rename/copy the --no-renames probe
+    cannot emit), is MALFORMED and refuses fail-closed -- never a clean empty result on an unparseable
+    payload (e.g. a lone NUL, which a naive split would read as clean), and never a silent lease-exclusion
+    drop of a malformed-status record (check-fails-closed-on-unreadable)."""
     if not raw:
         return []
     parts = raw.split(b"\x00")
@@ -1532,6 +1548,20 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl):
         if len(rec) < 4 or rec[2:3] != b" ":
             raise _UpgradeError("git status returned a malformed porcelain record ({!r}); the store "
                                 "cleanliness cannot be verified (fail-closed)".format(rec[:16]))
+        # Validate the XY status against the porcelain v1 vocabulary BEFORE the lease exclusion below
+        # (guard-input-soundness): the framing check alone accepts a bogus status (ZZ, a blank pair, a
+        # rename R, a copy C) that, for the lease path, would match the exclusion and be SILENTLY DROPPED,
+        # a fail-open in the M3 cleanliness guard. The two special codes are ?? (untracked) and !! (ignored);
+        # otherwise each of X and Y is an ordinary-change letter, R and C excluded (--no-renames), and the
+        # all-space pair is not a real record. Anything else is MALFORMED -> fail-closed, never a drop.
+        if rec[:2] not in (b"??", b"!!"):
+            if rec[0] not in _PORCELAIN_STATUS or rec[1] not in _PORCELAIN_STATUS:
+                raise _UpgradeError("git status returned a porcelain record with an out-of-vocabulary "
+                                    "status ({!r}); the store cleanliness cannot be verified "
+                                    "(fail-closed)".format(rec[:16]))
+            if rec[0] == 0x20 and rec[1] == 0x20:
+                raise _UpgradeError("git status returned a porcelain record with a blank status ({!r}); "
+                                    "the store cleanliness cannot be verified (fail-closed)".format(rec[:16]))
         pbytes = rec[3:]
         if prefix_b and pbytes.startswith(prefix_b):
             pbytes = pbytes[len(prefix_b):]
@@ -1570,7 +1600,10 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
         raise _UpgradeError("could not determine the store's path within its git repository; without it a "
                             "nested store's clean probe cannot be trusted, so the rewrite is refused "
                             "(fail-closed)")
-    prefix = pfx.out.decode("utf-8", "replace").strip()   # "" at the repo toplevel, else "<dir>/" (trailing /)
+    # Strip ONLY the trailing newline git appends, NEVER leading whitespace: a store dir whose name begins
+    # with a space (" leading/") would lose that space under .strip(), breaking the prefix match and the
+    # lease exclusion. "" at the repo toplevel, else "<dir>/" (trailing /).
+    prefix = pfx.out.decode("utf-8", "replace").rstrip("\n")
     return _upgrade_parse_porcelain(out.out, prefix, lease_excl)
 
 
@@ -1673,16 +1706,23 @@ def _upgrade_acquire_lease(root_fd, machine_rel):
             finally:
                 os.close(fd)
             os.fsync(pfd)
-        except BaseException:
+        except BaseException as exc:
             # Any failure AFTER the O_EXCL create but BEFORE successful acquisition (a failed payload write,
-            # fsync, or the durability fsync of the parent) must not ORPHAN the just-created lease: unlink it
-            # no-follow via the parent fd before re-raising, so a mid-acquisition failure never leaves a
-            # leftover lease the next run would read as held.
-            try:
-                os.unlink(name, dir_fd=pfd)
-            except OSError:
-                pass
-            raise
+            # fsync, or the durability fsync of the parent) LEAVES the lease in place: it is a leftover from
+            # THIS failed upgrade, released through operator reconciliation exactly like a lease from a dead
+            # run (spec 5.7), never removed here. A by-name unlink would be OWNERSHIP-BLIND: if a peer replaced
+            # the lease in the failure window (A-create / B-replace / A-fail), the unlink would delete the
+            # REPLACEMENT holder's lease, a never-seize violation (spec 5.7). This code never removes a lease
+            # it cannot prove is still the one it created, so it leaves-and-reconciles rather than racing an
+            # unlink. A KeyboardInterrupt/SystemExit propagates untouched (the lease is still left); an
+            # ordinary failure is surfaced as a reconcilable _UpgradeError so the operator gets clear advice.
+            if isinstance(exc, _UpgradeError) or not isinstance(exc, Exception):
+                raise
+            raise _UpgradeError(
+                "upgrade lease acquisition failed after the lease {} was created ({}); the lease is LEFT in "
+                "place as a leftover from this failed upgrade and is never seized (spec 5.7). If you have "
+                "confirmed NO opf run is live, release the leftover lease as your own reconciliation step "
+                "(the tool never removes it), then re-run opf upgrade.".format(lease_rel, exc)) from exc
     finally:
         os.close(pfd)
 
@@ -1764,7 +1804,7 @@ def _upgrade_run(root):
             print("opf upgrade: store declares spec_version {} but is NOT doctor-VALID: a partial or "
                   "interrupted migration is never reported complete (fail-closed, spec 9.2). {} Run "
                   "`opf doctor --root {}` for the findings, exit 2.".format(
-                      _UPGRADE_TO, _upgrade_partial_recovery_text(root), root), file=sys.stderr)
+                      _UPGRADE_TO, _upgrade_partial_recovery_text(res.store_root), root), file=sys.stderr)
             _doctor_report(result)
             return EXIT_MALFORMED
         try:
