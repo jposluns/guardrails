@@ -925,27 +925,36 @@ A base-schema version bump ships a tested, in-place store-schema upgrade (`opf u
 is additive, idempotent, and runs under the store consistency contract and the single-writer lease
 (section 5.7). It fails closed on an unresolvable store, a declared `spec_version` ABOVE the tooling,
 a divergence, a held lease, or any populated state that contradicts its preconditions; it never
-lowers the fail-closed floor. It never commits: it stages the change and requires a full doctor VALID
-before the change is offered for the adopter's own branch-and-merge.
+lowers the fail-closed floor. Before any write it enforces two fail-closed preconditions: it claims
+the single-writer lease (section 5.7) and holds it across the whole mutation, and it verifies the
+store working tree is clean over exactly the paths it will write, so the committed HEAD is a verified
+restore path for that blast radius; a held lease or a dirty store refuses, and a dirty store is asked
+to commit its own changes, never restored by the tool. It never commits: it stages the change and
+requires a full doctor VALID before the change is offered for the adopter's own branch-and-merge.
 
 The manifest and counters rewrite is a model regeneration through the canonical new-document emitter,
 never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED
 parsed model reproduces the on-disk bytes exactly (proving the file is canonical and comment-free, so
 nothing can be lost), failing closed otherwise; and a postcondition that the model diff equals exactly
-the allowed delta, failing closed otherwise. For the 1.0.0 to 1.1.0 upgrade the allowed delta is: rename
-the base table `[devprocess]` to `[opf]` and its `standard` discovery token from `devprocess` to `opf`
-(the OPFiles rebrand), carrying every other base field over unchanged; bump
-`spec_version` to 1.1.0; remove the retired `decision_support` module key; add the `[types]` rows for
-`contribution`, `maintainer_decision`, and `preference_pattern`; add the two new view rows
+the allowed delta, failing closed otherwise. The allowed delta is expressed as ensure-present and
+ensure-absent over the whole 1.0.0 origin family, so a governance-enabled, a decision_support-enabled,
+a bare, and a view-omitting 1.0.0 store all migrate under one rule and the normative text cannot diverge
+from the tooling. For the 1.0.0 to 1.1.0 upgrade the allowed delta is: rename the base table
+`[devprocess]` to `[opf]` and its `standard` discovery token from `devprocess` to `opf` (the OPFiles
+rebrand), carrying every other base field over unchanged; bump `spec_version` to 1.1.0; remove the
+retired `decision_support` module key where present; add each of the `[types]` rows for `contribution`,
+`maintainer_decision`, and `preference_pattern` not already declared by an enabled 1.0.0 module (a
+governance-enabled store already declares `maintainer_decision` and a decision_support-enabled store
+`preference_pattern`; the row moves from module tier to baseline unchanged); add the two new view rows
 (`CONTRIBUTIONS.md` and the `DECISIONS.toml` projection); widen the existing `DECISIONS.md` composed
 view's `sources` from the two 1.0.0 decision sources (`pending_decision`, `autonomous_decision`) to the
-four required at 1.1.0 by adding `maintainer_decision` and `preference_pattern`, so the migrated view
-matches the 1.1.0 required source set; extend
-`counters.toml` with the `CN`/`MD`/`PP` zeros while preserving every existing high-water; and create
-the three missing empty `*.index.toml` files (skipping any that already exist, such as a
-`maintainer_decision.index.toml` where governance was enabled, whose records are preserved
-byte-for-byte). The upgrade weakens nothing: `preference_pattern` simply moves to always-on, so a
-populated decision-support index is kept as is.
+four required at 1.1.0 by adding `maintainer_decision` and `preference_pattern` where that view is
+declared (a 1.0.0 store that declares no `DECISIONS.md` gains none and stays valid, since no composed
+view is required); extend `counters.toml` with the `CN`/`MD`/`PP` zeros while preserving every existing
+high-water; and create each missing empty `*.index.toml` file for the three baseline types, skipping any
+that already exist (such as a `maintainer_decision.index.toml` where governance was enabled, whose
+records are preserved byte-for-byte). The upgrade weakens nothing: `preference_pattern` simply moves to
+always-on, so a populated decision-support index is kept as is.
 
 ## 10. Views and deliverables
 
