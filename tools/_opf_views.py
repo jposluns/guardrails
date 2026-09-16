@@ -962,20 +962,27 @@ _PROJECTION_EXTRA = {
 
 
 def _projection_row(record, extra):
-    """Project one record to a projection row (spec 10.5): the base envelope fields, the actor kind/id, the
-    type's declared extra fields (`extra`), and `links`/`refs` as NESTED arrays of tables (the emitter
-    excludes inline tables, so a link/ref set is projected as an array of tables, not the record files'
-    inline-table form). A field the record does not carry is omitted (a stable declared shape)."""
+    """Project one record to a projection row (spec 10.5: "the full base record"): the base envelope fields
+    (including `type`, a self-describing row), a nested `actor` sub-table carrying the string-valued
+    kind/id, the type's declared extra fields (`extra`), and `links`/`refs` as NESTED arrays of tables (the
+    emitter excludes inline tables, so a link/ref set is projected as an array of tables, not the record
+    files' inline-table form). The canonical emitter binds a per-row `actor` sub-table to its own element of
+    an array of tables (verified by the views self-test), so the faithful nested envelope shape is projected
+    rather than a flattened actor_kind/actor_id pair. A field the record does not carry is omitted (a stable
+    declared shape)."""
     row = {}
-    for k in ("id", "status", "title", "created_at", "updated_at"):
+    for k in ("id", "type", "status", "title", "created_at", "updated_at"):
         if k in record:
             row[k] = record[k]
     actor = record.get("actor")
     if isinstance(actor, dict):
+        sub = {}
         if isinstance(actor.get("kind"), str):
-            row["actor_kind"] = actor["kind"]
+            sub["kind"] = actor["kind"]
         if isinstance(actor.get("id"), str):
-            row["actor_id"] = actor["id"]
+            sub["id"] = actor["id"]
+        if sub:
+            row["actor"] = sub
     if "summary" in record:
         row["summary"] = record["summary"]
     for k in extra:
@@ -2477,13 +2484,27 @@ def self_test():
         check("projection-empty-arrays", _ep["pending_decision"] == [] and _ep["maintainer_decision"] == [])
         check("projection-empty-derived", _ep["derived"] == {"effective": [], "superseded": []})
         _xrow = render_decisions_toml({"maintainer_decision": [{
-            "id": "MD-9", "status": "recorded", "title": "t", "decision": "d",
-            "x-aiqt": {"rule": 5}, "actor": {"kind": "maintainer", "id": "jp"}}]})
+            "id": "MD-9", "type": "maintainer_decision", "status": "recorded", "title": "t",
+            "decision": "d", "x-aiqt": {"rule": 5}, "actor": {"kind": "maintainer", "id": "jp"}}]})
         _xp = tomllib.loads(_xrow)
         check("projection-excludes-x-vendor", "x-aiqt" not in _xp["maintainer_decision"][0])
-        check("projection-includes-actor-kind-id",
-              _xp["maintainer_decision"][0].get("actor_kind") == "maintainer"
-              and _xp["maintainer_decision"][0].get("actor_id") == "jp")
+        # m3: the row is self-describing (`type`) and the actor is projected as a NESTED sub-table (the
+        # faithful full-envelope shape, spec 10.5), not a flattened actor_kind/actor_id pair.
+        check("projection-includes-type",
+              _xp["maintainer_decision"][0].get("type") == "maintainer_decision")
+        check("projection-includes-actor-subtable",
+              _xp["maintainer_decision"][0].get("actor") == {"kind": "maintainer", "id": "jp"})
+        # m3 binding verification: a TWO-row projection with a DISTINCT actor per row reparses with each
+        # actor bound to its OWN row (the canonical emitter's per-element array-of-tables sub-table binding).
+        _tworow = render_decisions_toml({"maintainer_decision": [
+            {"id": "MD-1", "type": "maintainer_decision", "status": "recorded", "title": "t",
+             "decision": "d", "actor": {"kind": "maintainer", "id": "a"}},
+            {"id": "MD-2", "type": "maintainer_decision", "status": "recorded", "title": "t",
+             "decision": "d", "actor": {"kind": "importer", "id": "b"}}]})
+        _tw = tomllib.loads(_tworow)["maintainer_decision"]
+        check("projection-actor-binds-per-row",
+              _tw[0].get("actor") == {"kind": "maintainer", "id": "a"}
+              and _tw[1].get("actor") == {"kind": "importer", "id": "b"})
         # A source name outside the projection's declared set is impossible (the sources tuple is fixed), but a
         # `/proposed` pending decision is EXCLUDED from the derived resolution join (settled-only, spec 8.4).
         _projd = render_decisions_toml({"pending_decision": [

@@ -456,19 +456,35 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
     if subdirs is None:
         return "absent", None, "{}/ is absent".format(WORKING_DIRNAME)
     matches = []
+    legacy = []
     for name in subdirs:
         manifest_rel = "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)
         data = _read_toml_contained(store_root_fd, manifest_rel)   # StoreError propagates (fail-closed)
         if data is None:
             continue
+        matched = False
         for token in accept:
             base = data.get(token)
             if isinstance(base, dict) and base.get("standard") == token:
                 matches.append(name)
+                matched = True
                 break
+        # m2: when the CURRENT discovery accepts no legacy token but a candidate carries the RETIRED
+        # [devprocess] 1.0.0 base, collect it so the operator-facing detail can name the `opf upgrade`
+        # remedy (spec 9.2), mirroring the older-spec finding _validate_base already surfaces. This only
+        # ENRICHES the detail; the status stays "present", so resolution stays CANNOT-EVALUATE (fail-closed).
+        if not matched and PRIOR_STANDARD_TOKEN not in accept:
+            legacy_base = data.get(PRIOR_STANDARD_TOKEN)
+            if isinstance(legacy_base, dict) and legacy_base.get("standard") == PRIOR_STANDARD_TOKEN:
+                legacy.append(name)
     if not matches:
-        return "present", None, "{}/ is present but no {}/*/{} declares standard = {!r}".format(
+        base_detail = "{}/ is present but no {}/*/{} declares standard = {!r}".format(
             WORKING_DIRNAME, WORKING_DIRNAME, MANIFEST_NAME, STANDARD_TOKEN)
+        if legacy:
+            locs = ", ".join("{}/{}".format(WORKING_DIRNAME, n) for n in sorted(legacy))
+            base_detail += ("; a retired [{}] 1.0.0 store is present at {} (run `opf upgrade` to migrate "
+                            "it, spec 9.2)".format(PRIOR_STANDARD_TOKEN, locs))
+        return "present", None, base_detail
     if len(matches) > 1:
         return "multiple", None, "{} machine stores declare the opf token: {}".format(
             len(matches), ", ".join(sorted(matches)))
@@ -1640,6 +1656,17 @@ def self_test():
         # opf init cannot overwrite it.
         root = build_store(manifest=manifest_text(standard="dev-process"))
         check("typo-token-default-cannot-eval", resolve_store(root).status == CANNOT_EVALUATE)
+
+        # 6c (m2): a RETIRED [devprocess] 1.0.0 store discovered with the DEFAULT tokens is present-but-
+        # legacy: resolution is CANNOT-EVALUATE (fail-closed, never resolved on the retired token) and the
+        # operator-facing detail names the `opf upgrade` migration remedy (spec 9.2), mirroring the older-
+        # spec finding _validate_base surfaces on an already-[opf] store.
+        legacy_manifest = ('[devprocess]\nstandard = "devprocess"\nspec_version = "1.0.0"\n'
+                           'layout = "inline"\nposture = "required"\nimport_status = "none"\n')
+        legacy_res = resolve_store(build_store(manifest=legacy_manifest))
+        check("legacy-devprocess-default-cannot-eval", legacy_res.status == CANNOT_EVALUATE)
+        check("legacy-devprocess-names-upgrade-remedy",
+              "devprocess" in legacy_res.detail and "opf upgrade" in legacy_res.detail)
 
         # 7: an unresolvable pointer (target dir absent) -> CANNOT-EVALUATE, no default fallback.
         root = build_store(manifest=manifest_text(),      # a valid default store IS present...
