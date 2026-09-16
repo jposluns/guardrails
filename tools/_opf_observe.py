@@ -142,10 +142,12 @@ def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S):
 #
 # The env-based CONFIG OVERRIDES (GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM, the runtime
 # GIT_CONFIG_COUNT + its indexed GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> pairs, and the legacy GIT_CONFIG /
-# GIT_CONFIG_PARAMETERS) are deliberately DROPPED, not honoured: they can set ANY config key (core.worktree
-# to rebind the tree, trace2.* to make the read-only probe write or append an outside file, core.fsmonitor to
-# launch a process), so carrying them would re-open exactly the redirect/trace surface the scrub exists to
-# close (SECI-threat-model-boundaries, prefer-removing-a-path). GIT_CONFIG_NOSYSTEM is NOT among the dropped
+# GIT_CONFIG_PARAMETERS) are deliberately DROPPED, not honoured: they can set ANY config key (trace2.* to
+# make the read-only probe write or append an outside file, core.fsmonitor to launch a process; a file-based
+# core.worktree does NOT rebind a -C-bound check-ignore, only --work-tree does and it is never passed, so
+# core.worktree is not among the reasons these are dropped), so carrying them would re-open exactly the
+# redirect/trace surface the scrub exists to close (SECI-threat-model-boundaries, prefer-removing-a-path).
+# GIT_CONFIG_NOSYSTEM is NOT among the dropped
 # overrides: it is instead CARRIED as a safe on/off toggle (it only enables/disables the system config and
 # cannot set a key). DISCLOSED RESIDUAL: because the env-based
 # overrides are dropped, an adopter who runs `opf init` with GIT_CONFIG_GLOBAL or GIT_CONFIG_* set (a wrapper,
@@ -156,7 +158,10 @@ def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S):
 # through the GIT_TRACE2* / GIT_TRACE* environment (which git honours ahead of any config; a command-line
 # `-c trace2.*` cannot, because trace2 reads its config before `-c` is applied) and disables core.fsmonitor
 # through a command-scope `-c` at the call site. So no configuration reachable by the probe can turn a
-# read-only check-ignore into a file write or a launched process.
+# read-only check-ignore into a file write or a launched process. (One benign exception: reading a SPLIT
+# INDEX refreshes the shared index file's mtime, a pre-existing git metadata touch on the adopter's own .git
+# that GIT_OPTIONAL_LOCKS does not suppress; this is not a content write, an outside write, or command
+# execution.)
 
 # The ambient names carried over so git can discover the adopter's real config through its default paths.
 # GIT_CONFIG_NOSYSTEM is a SAFE toggle (it only enables/disables the system config, it cannot set a key), so
