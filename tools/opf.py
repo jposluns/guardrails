@@ -1129,8 +1129,14 @@ def _upgrade_create_index(root_fd, relpath, data):
 
 def _upgrade_plan(manifest_model, counters_model):
     """Apply EXACTLY the spec-9.2 1.0.0 -> 1.1.0 allowed delta to the parsed manifest and counters models,
-    returning (new_manifest, new_counters, added_namespaces, origin). Refuses (a _UpgradeError, fail-closed)
-    any input that is not a doctor-VALID 1.0.0 store the delta applies to. It is ORIGIN-AWARE: a governance-
+    returning (new_manifest, new_counters, added_namespaces, origin). It validates UP FRONT the 1.0.0-shape
+    preconditions it can cheaply check on the PARSED models -- the required/optional table shapes, the base
+    table token and spec_version, KNOWN module keys with boolean values, the module<->baseline-type coupling,
+    and the pre-declared type/view rows -- and REFUSES any that fail (a _UpgradeError, fail-closed). It is NOT
+    a complete 1.0.0 doctor: a 1.0.0 store invalid in a way these preconditions do not inspect (e.g. a missing
+    type row, or a type carrying a wrong or non-normative namespace) is caught AFTER mutation by the render /
+    final-doctor gate, recovering through the step-3 subtree-scoped restore -- the no-complete-pre-doctor
+    residual disclosed on _cmd_upgrade. It is ORIGIN-AWARE: a governance-
     or decision_support-enabled 1.0.0 store already declares maintainer_decision / preference_pattern as a
     module-tier row (G1/G2), so the delta ADDS only the now-baseline types not already present and preserves
     a pre-declared row untouched; DECISIONS.md and the decision_support [modules] key are both OPTIONAL at
@@ -1181,11 +1187,23 @@ def _upgrade_plan(manifest_model, counters_model):
     # [modules] keys are OPTIONAL at 1.0.0 (default off, G3), so decision_support MAY be absent. Every
     # PRESENT module value must be a boolean: the merge-base doctor's _validate_modules grades a non-boolean
     # module value 1.0.0-INVALID, so a non-boolean on ANY module (not only the retired decision_support --
-    # e.g. governance = "x") is refused upfront, fail-closed, keeping the docstring's "refuses any input that
-    # is not a doctor-VALID 1.0.0 store" true rather than silently carrying it through to a post-mutation
+    # e.g. governance = "x") is refused upfront, fail-closed, keeping the docstring's up-front-validation
+    # claim honest rather than silently carrying it through to a post-mutation
     # doctor failure. A doctor-VALID 1.0.0 store has only boolean module values, so this never rejects valid
     # input; every module key otherwise rides through untouched (the postcondition asserts value-exact).
+    # Every [modules] KEY must be a KNOWN 1.0.0 module name (matching the merge-base _validate_modules, which
+    # grades an unknown module key 1.0.0-INVALID). The 1.0.0-valid module vocabulary is the CURRENT baseline
+    # module set PLUS the one module this delta RETIRES (decision_support), whose union is exactly the merge-
+    # base KNOWN_MODULES; derived from the authoritative KNOWN_MODULES (guard-input-soundness), never a hard-
+    # coded list. An unknown key (e.g. [modules].unknown_present) is refused UPFRONT, fail-closed, rather than
+    # carried through to a post-mutation doctor failure -- keeping the docstring's up-front-validation claim
+    # honest (a MISSING type row or WRONG namespace stays the render/doctor gate's job, disclosed on _cmd_upgrade).
+    _valid_1_0_0_modules = set(_opf_store.KNOWN_MODULES) | {_UPGRADE_RETIRED_MODULE}
     for _mname in sorted(modules):
+        if _mname not in _valid_1_0_0_modules:
+            raise _UpgradeError("manifest [modules].{} is not a known 1.0.0 module (known: {}); not a valid "
+                                "1.0.0 store (fail-closed)".format(
+                                    _mname, ", ".join(sorted(_valid_1_0_0_modules))))
         if not isinstance(modules[_mname], bool):
             raise _UpgradeError("manifest [modules].{} is not a boolean; not a valid 1.0.0 store "
                                 "(fail-closed)".format(_mname))
@@ -1214,8 +1232,9 @@ def _upgrade_plan(manifest_model, counters_model):
     # CONVERSE -- a 1.0.0 module that gates a now-baseline type (maintainer_decision<-governance,
     # preference_pattern<-decision_support) is ENABLED while that type's [types] row is ABSENT. Such an
     # origin is module-inconsistent, so the merge-base 1.0.0 doctor grades it NOT-VALID; without this the
-    # delta would SILENTLY CURE it by adding the now-baseline row and exit 0, making the docstring's
-    # "refuses any input that is not a doctor-VALID 1.0.0 store" claim false. Refuse it upfront, unmutated.
+    # delta would SILENTLY CURE it by adding the now-baseline row and exit 0, contradicting the docstring's
+    # up-front-validation claim (this coupling IS one of the cheap parsed-model checks it promises). Refuse
+    # it upfront, unmutated.
     for tname, gate in sorted(_pre_gate.items()):
         if gate is not None and modules.get(gate) is True and tname not in pre_declared:
             raise _UpgradeError("manifest enables 1.0.0 module {!r} but omits its required type {!r}; a "
@@ -1515,10 +1534,26 @@ def _upgrade_product_render_targets(manifest_model):
     return targets
 
 
-# porcelain v1 ordinary-change status letters (index status X and worktree status Y). Under --no-renames a
-# rename R and a copy C cannot appear, so they are deliberately EXCLUDED and treated as malformed; the two
-# special two-char codes ?? (untracked) and !! (ignored) are handled separately. Bytes (ints under iteration).
-_PORCELAIN_STATUS = frozenset(b" MTADU")
+# The EXACT set of valid `git status --porcelain=v1 -z --untracked-files=all --no-renames` XY status PAIRS,
+# enumerated correct-by-construction from git-status(1) "Short Format". Validating the whole PAIR (not each
+# char independently) closes the fail-open where an IMPOSSIBLE pair whose two chars each sit in a per-char
+# set (e.g. UT, or U paired with an ordinary letter) passes the char check and, for the lease path, matches
+# the exclusion and is SILENTLY DROPPED -- the M3 cleanliness guard then reads dirt as clean. Composition:
+#   - "??" untracked (--untracked-files=all is passed).
+#   - ORDINARY changed entries: X (index/staged) and Y (worktree) each an ordinary letter, and NOT both
+#     space. Rename R and copy C are EXCLUDED (--no-renames guarantees git emits neither), and the unmerged
+#     code U is NOT an ordinary letter (it appears only in the enumerated unmerged pairs below).
+#   - the seven UNMERGED pairs, verbatim from git-status(1): DD AU UD UA DU AA UU.
+# "!!" (ignored) is deliberately ABSENT: --ignored is not passed, so it cannot appear and is treated as an
+# unexpected/malformed pair -> fail-closed. The ordinary letters are derived here, not the whole valid set
+# hardcoded, so the enumeration is auditable against the man page. Bytes throughout (2-byte pair keys).
+_PORCELAIN_ORDINARY_LETTERS = frozenset(b" MTAD")   # index/worktree letters; R, C, U deliberately absent
+_PORCELAIN_UNMERGED_PAIRS = (b"DD", b"AU", b"UD", b"UA", b"DU", b"AA", b"UU")
+_PORCELAIN_VALID_PAIRS = frozenset(
+    [b"??"]
+    + [bytes((x, y)) for x in sorted(_PORCELAIN_ORDINARY_LETTERS)
+       for y in sorted(_PORCELAIN_ORDINARY_LETTERS) if not (x == 0x20 and y == 0x20)]
+    + list(_PORCELAIN_UNMERGED_PAIRS))
 
 
 def _upgrade_parse_porcelain(raw, prefix, lease_excl):
@@ -1548,20 +1583,17 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl):
         if len(rec) < 4 or rec[2:3] != b" ":
             raise _UpgradeError("git status returned a malformed porcelain record ({!r}); the store "
                                 "cleanliness cannot be verified (fail-closed)".format(rec[:16]))
-        # Validate the XY status against the porcelain v1 vocabulary BEFORE the lease exclusion below
-        # (guard-input-soundness): the framing check alone accepts a bogus status (ZZ, a blank pair, a
-        # rename R, a copy C) that, for the lease path, would match the exclusion and be SILENTLY DROPPED,
-        # a fail-open in the M3 cleanliness guard. The two special codes are ?? (untracked) and !! (ignored);
-        # otherwise each of X and Y is an ordinary-change letter, R and C excluded (--no-renames), and the
-        # all-space pair is not a real record. Anything else is MALFORMED -> fail-closed, never a drop.
-        if rec[:2] not in (b"??", b"!!"):
-            if rec[0] not in _PORCELAIN_STATUS or rec[1] not in _PORCELAIN_STATUS:
-                raise _UpgradeError("git status returned a porcelain record with an out-of-vocabulary "
-                                    "status ({!r}); the store cleanliness cannot be verified "
-                                    "(fail-closed)".format(rec[:16]))
-            if rec[0] == 0x20 and rec[1] == 0x20:
-                raise _UpgradeError("git status returned a porcelain record with a blank status ({!r}); "
-                                    "the store cleanliness cannot be verified (fail-closed)".format(rec[:16]))
+        # Validate the whole XY status PAIR against the enumerated valid-pair set BEFORE the lease exclusion
+        # below (guard-input-soundness): a per-CHAR check accepts an IMPOSSIBLE pair (UT, ZZ, a blank pair, a
+        # rename R, a copy C) whose chars each sit in a per-char set, and for the lease path that bogus record
+        # would match the exclusion and be SILENTLY DROPPED -- a fail-open in the M3 cleanliness guard. The
+        # pair is validated whole against _PORCELAIN_VALID_PAIRS (?? plus the ordinary cartesian minus blank,
+        # plus the seven unmerged pairs; !!, rename, copy, and any U in a non-unmerged position all excluded).
+        # Anything outside that set is MALFORMED -> fail-closed, never a drop.
+        if rec[:2] not in _PORCELAIN_VALID_PAIRS:
+            raise _UpgradeError("git status returned a porcelain record with an out-of-vocabulary "
+                                "status pair ({!r}); the store cleanliness cannot be verified "
+                                "(fail-closed)".format(rec[:16]))
         pbytes = rec[3:]
         if prefix_b and pbytes.startswith(prefix_b):
             pbytes = pbytes[len(prefix_b):]
@@ -1677,19 +1709,29 @@ def _upgrade_lease_held_message(pfd, name, lease_rel):
             "step (the tool never removes a foreign lease), then re-run opf upgrade.".format(lease_rel, detail))
 
 
+def _upgrade_lease_holder():
+    """The holder identity THIS run stamps on the lease it creates: "opf-upgrade:<host>:<pid>". Single-
+    sourced so the acquire WRITE and the release OWNERSHIP-CHECK reason about the same identity (the release
+    proves ownership by a full-payload byte compare, which subsumes this holder, and names a foreign holder
+    only in its diagnostic)."""
+    import socket
+    return "opf-upgrade:{}:{}".format(socket.gethostname(), os.getpid())
+
+
 def _upgrade_acquire_lease(root_fd, machine_rel):
     """STEP 4 (M4): claim the single-writer lease ATOMICALLY (atomic-claim-from-pool). The claim IS the
     create: open machine_rel/lease.toml O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW beneath the parent fd (the
     _upgrade_replace idiom), so there is no check-then-create gap and EEXIST IS the held-lease refusal. The
     closed payload (schema/holder/operation/acquired_at read from the clock, G5) satisfies C-LEASE exactly,
-    so the mid-run doctor stays VALID with the lease held (containment-clean, spec 5.7/11)."""
+    so the mid-run doctor stays VALID with the lease held (containment-clean, spec 5.7/11). RETURNS the exact
+    payload bytes written, so the ownership-verified release can prove the lease it removes is still THIS
+    run's own (never-seize, spec 5.7)."""
     import datetime
-    import socket
     journal = _opf_store._journal
     lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
     payload = _opf_emit.emit_checked({
         "schema": _opf_schema.SUPPORTED_SCHEMA,
-        "holder": "opf-upgrade:{}:{}".format(socket.gethostname(), os.getpid()),
+        "holder": _upgrade_lease_holder(),
         "operation": "upgrade",
         "acquired_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }).encode("utf-8")
@@ -1725,22 +1767,83 @@ def _upgrade_acquire_lease(root_fd, machine_rel):
                 "(the tool never removes it), then re-run opf upgrade.".format(lease_rel, exc)) from exc
     finally:
         os.close(pfd)
+    return payload
 
 
-def _upgrade_release_lease(root_fd, machine_rel):
-    """Release the lease created by _upgrade_acquire_lease: unlink machine_rel/lease.toml no-follow via the
-    parent fd and fsync the parent. A failed unlink is SURFACED (exit 2), never swallowed
-    (no-concealed-failure). A killed run leaves the lease, which is spec-conformant (present only while held;
-    a leftover is released through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers."""
+def _upgrade_read_lease_payload(pfd, name):
+    """Read the lease at (pfd, name) SAFELY for an ownership compare, reusing the round-2 R3 pattern:
+    O_RDONLY|O_NOFOLLOW|O_NONBLOCK (a planted FIFO or other special file cannot BLOCK the open), then fstat
+    the opened fd and, for any NON-REGULAR file, return None WITHOUT reading. Returns the file's raw bytes,
+    or None when it is absent, non-regular, or unreadable. Bounded read (never trusts the on-disk size)."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, 65536)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _upgrade_lease_holder_of(raw):
+    """Best-effort holder identity from raw lease bytes, for a DIAGNOSTIC message only (never raises, never
+    load-bearing: the ownership decision is the full-payload byte compare in _upgrade_unlink_owned_lease)."""
+    if raw is None:
+        return "absent or a non-regular entry"
+    import tomllib
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+        if isinstance(data, dict) and data.get("holder") is not None:
+            return "holder {!r}".format(data.get("holder"))
+    except Exception:  # noqa: BLE001  diagnostic only; an unreadable replacement still refuses above
+        pass
+    return "an unreadable or malformed replacement lease"
+
+
+def _upgrade_unlink_owned_lease(pfd, name, lease_rel, expected_payload):
+    """The SINGLE ownership-verified lease-removal site (class-width never-seize, spec 5.7, OPF-SPEC.md:376
+    "never seized from a live holder"). Unlink the lease at (pfd, name) ONLY when the file still there is
+    byte-for-byte the exact lease THIS run created (`expected_payload`, the bytes _upgrade_acquire_lease
+    returned; a full-payload proof that subsumes a holder-only compare). If it does NOT match -- a peer
+    replaced the lease in the interval -- it is NEVER unlinked (never-seize) and the replacement is LEFT in
+    place for operator reconciliation, surfaced as a fail-closed _UpgradeError naming the replacement's
+    holder where legible. A failed unlink is likewise SURFACED, never swallowed (no-concealed-failure). No
+    lease this run cannot prove is its own is ever removed here.
+
+    DISCLOSED RESIDUAL (disclose-guard-residuals): a tiny TOCTOU window remains between the ownership read and
+    the unlink -- a swap in exactly that window could still unlink a replacement. This is inherent to unlink-
+    by-name (there is no unlink-this-exact-inode primitive available here); it is vastly smaller than the
+    prior ownership-blind unlink and never-seizes under any non-adversarial-mid-window sequence."""
+    on_disk = _upgrade_read_lease_payload(pfd, name)
+    if on_disk != expected_payload:
+        raise _UpgradeError(
+            "the upgrade lease {} was replaced by another holder ({}) before release; it is NEVER seized "
+            "(spec 5.7) and is LEFT in place for operator reconciliation. This run's own lease is gone, so "
+            "no lease is removed here (fail-closed).".format(lease_rel, _upgrade_lease_holder_of(on_disk)))
+    try:
+        os.unlink(name, dir_fd=pfd)
+    except OSError as exc:
+        raise _UpgradeError("could not release the upgrade lease {} ({}); surfaced, never swallowed "
+                            "(fail-closed)".format(lease_rel, exc))
+
+
+def _upgrade_release_lease(root_fd, machine_rel, expected_payload):
+    """Release the lease created by _upgrade_acquire_lease: OWNERSHIP-VERIFIED unlink of machine_rel/
+    lease.toml no-follow via the parent fd, then fsync the parent. The removal routes through the SINGLE
+    ownership-verified site (_upgrade_unlink_owned_lease): the lease is removed ONLY when it is still THIS
+    run's own (`expected_payload`), never seized from a peer that replaced it (spec 5.7); a replaced lease is
+    LEFT and surfaced (exit 2). A failed unlink is SURFACED (exit 2), never swallowed (no-concealed-failure).
+    A killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
+    through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers."""
     journal = _opf_store._journal
     lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
     pfd, name = journal._open_parent(root_fd, lease_rel)
     try:
-        try:
-            os.unlink(name, dir_fd=pfd)
-        except OSError as exc:
-            raise _UpgradeError("could not release the upgrade lease {} ({}); surfaced, never swallowed "
-                                "(fail-closed)".format(lease_rel, exc))
+        _upgrade_unlink_owned_lease(pfd, name, lease_rel, expected_payload)
         os.fsync(pfd)
     finally:
         os.close(pfd)
@@ -1841,7 +1944,7 @@ def _upgrade_run(root):
         # the final doctor; release it in the finally covering every exit after acquisition, EXCEPT the
         # success path releases FIRST (R5) so no success is reported over a still-held / failed-to-release
         # lease. `released` records that the success path already released, so the finally does not re-release.
-        _upgrade_acquire_lease(root_fd, machine_rel)
+        lease_payload = _upgrade_acquire_lease(root_fd, machine_rel)
         released = False
         try:
             # Apply: rewrite manifest + counters (canonical bytes), create the missing empty indexes.
@@ -1897,7 +2000,7 @@ def _upgrade_run(root):
             # `released` is set FIRST so the finally never double-releases (a failed release legitimately
             # leaves the lease as a spec-conformant leftover for operator reconciliation).
             released = True
-            _upgrade_release_lease(root_fd, machine_rel)
+            _upgrade_release_lease(root_fd, machine_rel, lease_payload)
             print("opf upgrade: store schema upgraded {} -> {} and doctor-VALID (staged, NOT committed)."
                   .format(_UPGRADE_FROM, _UPGRADE_TO))
             print(json.dumps({
@@ -1918,7 +2021,7 @@ def _upgrade_run(root):
             return EXIT_OK
         finally:
             if not released:
-                _upgrade_release_lease(root_fd, machine_rel)
+                _upgrade_release_lease(root_fd, machine_rel, lease_payload)
     finally:
         os.close(root_fd)
 

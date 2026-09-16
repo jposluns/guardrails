@@ -55,8 +55,12 @@ VECTOR ROSTER (U1-U25, P1):
       terminated payload, and a mis-framed record (never a clean-empty result), and excludes a nested-store
       lease after the prefix strip; PLUS the R6 fail-open vectors (a MALFORMED status -- ZZ, a blank pair, a
       rename R, a copy C -- for the lease path refuses rather than being silently dropped by the exclusion,
-      while a well-formed dirty lease record is still excluded) and the R1b leading-space prefix test
-      (_upgrade_probe_dirty keeps a " leading/"-prefixed lease excluded; fails under the old .strip()).
+      while a well-formed dirty lease record is still excluded); PLUS the status-PAIR vectors (FIX2: an
+      IMPOSSIBLE pair -- UT/TU with U only legal in an unmerged pair, and ignored !! which --ignored-less
+      status cannot emit -- refuses whole-pair, not per-char, for the lease AND a non-lease path, while a
+      positive sweep of every genuinely-valid pair still parses; fails under the old per-char check); and the
+      R1b leading-space prefix test (_upgrade_probe_dirty keeps a " leading/"-prefixed lease excluded; fails
+      under the old .strip()).
   U19 R1 recovery-text root-binding: opf._upgrade_recovery_text called directly with DISTINCT store/product
       roots; the `.working` restore + created-file removal name the store root, the product target the product
       root (fails without the distinct-roots fix).
@@ -75,10 +79,16 @@ VECTOR ROSTER (U1-U25, P1):
       first REPLACES the lease with a peer holder's bytes, that replacement is NOT removed (the never-seize
       guarantee; the old by-name unlink deleted the replacement).
   U25 R5 release-before-success: with _upgrade_release_lease monkeypatched to fail, a valid store exits 2 and
-      emits NO success line (success is never reported over a still-held / failed-to-release lease).
+      emits NO success line (success is never reported over a still-held / failed-to-release lease). U25b
+      (FIX1 release never-seize, class-width): _upgrade_acquire_lease returns the on-disk payload; after a
+      peer REPLACES the lease with its own well-formed bytes, _upgrade_release_lease refuses (never-seize) and
+      LEAVES the replacement, yet an ordinary release of this run's OWN lease still removes it (fails under the
+      old ownership-blind unlink, which deleted the peer's lease).
   U26 R8 non-boolean module: the planner precondition refuses a non-boolean value on ANY module (governance,
       operational_policy, decision_support), matching the merge-base _validate_modules, while a fully-boolean
-      module set still plans; end-to-end, a stored governance="x" refuses exit 2 before any mutation.
+      module set still plans; end-to-end, a stored governance="x" refuses exit 2 before any mutation. FIX3: an
+      UNKNOWN [modules] key refuses UPFRONT (merge-base _validate_modules parity), while the known-but-retired
+      decision_support key still plans; fails without the upfront unknown-key check.
   U27 R1a relocated partial-recovery: a RELOCATED store (store_root != product_root) at spec_version 1.1.0 but
       not doctor-VALID names the STORE root (not the CLI product root) for the F2 .working restore advice.
   P1  a seeded migration property test: 12 generated genuine-VALID 1.0.0 variants (module subset with the
@@ -907,11 +917,27 @@ def _suite():
             # copy C (the last two impossible under --no-renames) for the lease path; each must refuse.
             _lease_rel = ".working/toml/lease.toml"
             for _bad, _lbl in ((b"ZZ", "out-of-vocabulary ZZ"), (b"  ", "blank status"),
-                               (b"R ", "rename R"), (b"C ", "copy C")):
+                               (b"R ", "rename R"), (b"C ", "copy C"),
+                               (b"UT", "impossible pair UT (U only in unmerged pairs)"),
+                               (b"TU", "impossible pair TU (U only in unmerged pairs)"),
+                               (b"!!", "ignored !! (--ignored not passed)")):
                 _rawb = _bad + b" " + _lease_rel.encode("utf-8") + b"\x00"
                 _mres, _merr = _grammar_ok(_rawb, prefix="", lease=_lease_rel)
                 check("U18/R6 malformed lease status ({}) refuses, never a silent drop".format(_lbl),
                       _mres is None and _merr is not None)
+            # R6 status-PAIR (FIX2): the fail-open closed by validating the whole XY pair, not each char.
+            # UT/TU each have both chars in a per-char set (U valid in unmerged pairs, T an ordinary letter)
+            # yet are IMPOSSIBLE porcelain codes; for the lease path a per-char check would drop them SILENTLY
+            # (reading dirt as clean). A non-lease impossible pair must also refuse, never surface as dirt.
+            _ut_nonlease, _ = _grammar_ok(b"UT .working/toml/x\x00", prefix="", lease=_lease_rel)
+            check("U18/R6 impossible pair UT (non-lease) refuses fail-closed", _ut_nonlease is None)
+            # Positive sweep: EVERY genuinely-valid porcelain v1 pair for this command parses correctly (?? plus
+            # the ordinary changes plus the seven unmerged pairs), so the tightened check never over-refuses.
+            for _vp in (b"??", b" M", b"M ", b"MM", b"A ", b" D", b"AA", b"UU", b"DD", b"AU", b"UD",
+                        b"UA", b"DU", b"MD", b"AM", b"TM", b" T", b"T "):
+                _vres, _verr = _grammar_ok(_vp + b" .working/toml/x\x00", prefix="", lease=None)
+                check("U18/R6 valid pair {!r} parses (no over-refusal)".format(_vp),
+                      _vres == [".working/toml/x"] and _verr is None)
             # a WELL-FORMED record is unaffected: a dirty lease record is still EXCLUDED (well-formed only),
             # a dirty non-lease record is still surfaced as dirt, and a clean tree still passes.
             _exok, _ = _grammar_ok(b" M " + _lease_rel.encode("utf-8") + b"\x00", prefix="", lease=_lease_rel)
@@ -1129,6 +1155,43 @@ def _suite():
             check("U25 no success is reported when release fails (released-before-success)",
                   "staged, NOT committed" not in out25 and '"event": "upgraded"' not in out25)
 
+            # U25b) FIX1 release never-seize (class-width): the RELEASE path (not only the acquisition path)
+            # is ownership-verified. Acquire a lease, capture the payload, then have a peer REPLACE the lease
+            # with its own well-formed bytes; releasing MUST NOT unlink the peer's replacement (the old
+            # ownership-blind os.unlink deleted it -- a spec-5.7 never-seize violation). It raises a
+            # reconcilable _UpgradeError and LEAVES the replacement in place, and a valid ordinary release of
+            # this run's OWN lease still removes it. Driven directly (like U24).
+            s25b = base / "u25b-release-never-seize"
+            s25b.mkdir()
+            mach25b = build_store(s25b)
+            _lp25 = mach25b / _opf_check.LEASE_NAME
+            fd25b = _opf_store._open_dir_nofollow(str(s25b.resolve()))
+            _pay25 = opf._upgrade_acquire_lease(fd25b, mrel24)
+            check("U25b acquire returns the exact on-disk lease payload (ownership token)",
+                  _pay25 == _lp25.read_bytes())
+            _peer25 = (b'acquired_at = "2026-03-03T00:00:00Z"\nholder = "peer-runner"\n'
+                       b'operation = "upgrade"\nschema = 1\n')
+            _lp25.unlink()
+            _lp25.write_bytes(_peer25)              # peer replaces our lease with its own well-formed lease
+            _seize_raised = False
+            try:
+                opf._upgrade_release_lease(fd25b, mrel24, _pay25)
+            except opf._UpgradeError as _e25:
+                _seize_raised = ("never seized" in str(_e25) or "NEVER seized" in str(_e25)) \
+                    and "peer-runner" in str(_e25)
+            check("U25b release of a REPLACED lease raises never-seize (no false success)", _seize_raised)
+            check("U25b the peer REPLACEMENT survives release (never seized)",
+                  _lp25.is_file() and _lp25.read_bytes() == _peer25)
+            # ordinary release of THIS run's own lease still removes it (no over-refusal). Tolerant restore so
+            # a REGRESSION (a seizing release that already deleted the peer) fails these checks cleanly rather
+            # than crashing the suite on a missing file.
+            if _lp25.exists():
+                _lp25.unlink()
+            _lp25.write_bytes(_pay25)               # restore this run's own lease
+            opf._upgrade_release_lease(fd25b, mrel24, _pay25)
+            os.close(fd25b)
+            check("U25b ordinary release removes this run's OWN lease", not _lp25.exists())
+
             # U26) R8: a non-boolean value on ANY module (not only the retired decision_support) is refused by
             # the planner precondition, matching the merge-base _validate_modules (a non-boolean module value
             # is 1.0.0-INVALID). Without the fix only decision_support was checked, so e.g. governance="x"
@@ -1147,6 +1210,14 @@ def _suite():
                   _plan_refuses(lambda mods: mods.__setitem__("operational_policy", 3)))
             check("U26/R8 non-boolean decision_support module still refuses",
                   _plan_refuses(lambda mods: mods.__setitem__("decision_support", "x")))
+            # FIX3: an UNKNOWN [modules] key is refused UPFRONT (matching the merge-base _validate_modules),
+            # not carried through to a post-mutation doctor failure. The retired decision_support key stays a
+            # KNOWN 1.0.0 module (union of current KNOWN_MODULES + the retired module), so a bare boolean
+            # decision_support does NOT trip this check.
+            check("U26/FIX3 unknown module key refuses upfront",
+                  _plan_refuses(lambda mods: mods.__setitem__("unknown_present", True)))
+            check("U26/FIX3 a known-but-retired decision_support key still plans (no false refusal)",
+                  not _plan_refuses(lambda mods: mods.__setitem__("decision_support", False)))
             _r8_ok = True
             try:
                 opf._upgrade_plan(tomllib.loads(_FIX_MANIFEST), tomllib.loads(_FIX_COUNTERS))
