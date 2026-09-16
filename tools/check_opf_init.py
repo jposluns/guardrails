@@ -161,10 +161,14 @@ def _suite(invoke):
 
         def git_input(root, args, data):
             # A stdin-fed fixture git call (git update-index --index-info reads the index entry from
-            # stdin); _run_git has no stdin channel. Runs under the already-isolated os.environ (HOME
-            # redirected, every GIT_* scrubbed above), so it stays hermetic like the other fixture calls.
+            # stdin); _run_git has no stdin channel. Runs under _opf_observe._scrubbed_env (PATH and the
+            # isolated HOME carried over, global/system config neutralized, and EVERY ambient GIT_* variable
+            # dropped), so an inherited GIT_INDEX_FILE / GIT_DIR / GIT_WORK_TREE / GIT_OBJECT_DIRECTORY /
+            # GIT_COMMON_DIR cannot redirect this write to a caller's external index or repository; it stays
+            # hermetic like the other fixture calls, which all route through the same scrub (test-hermeticity).
             proc = subprocess.run([git, "-C", str(root)] + list(args), input=data,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=os.environ.copy())
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  env=_opf_observe._scrubbed_env())
             if proc.returncode != 0:
                 raise OSError("fixture git (stdin) failed at {!r}: {}".format(
                     str(root), proc.stderr.decode("utf-8", "replace")))
@@ -196,7 +200,9 @@ def _suite(invoke):
                          for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS",
                                       "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
                                       "GIT_CONFIG_COUNT", "GIT_CONFIG",
-                                      "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_NOSYSTEM")}
+                                      "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_NOSYSTEM",
+                                      "GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE",
+                                      "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")}
             # Even a broken parser that ignores --root defaults into this isolated, non-git directory.
             # Restore the caller's cwd before TemporaryDirectory removes the fixture.
             saved_cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
@@ -210,6 +216,14 @@ def _suite(invoke):
                 os.environ.pop("GIT_CONFIG", None)
                 os.environ.pop("GIT_CONFIG_PARAMETERS", None)
                 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+                # Drop any inherited index/dir/object redirection so no fixture git call (the subprocess
+                # init, and git_input's stdin-fed writes above all) inherits a caller's GIT_INDEX_FILE and
+                # mutates an external index (test-hermeticity); saved above, restored in the finally below.
+                os.environ.pop("GIT_INDEX_FILE", None)
+                os.environ.pop("GIT_DIR", None)
+                os.environ.pop("GIT_WORK_TREE", None)
+                os.environ.pop("GIT_OBJECT_DIRECTORY", None)
+                os.environ.pop("GIT_COMMON_DIR", None)
                 os.chdir(base)
                 parser_root = base / "parser"
                 parser_root.mkdir()
@@ -641,6 +655,111 @@ def _suite(invoke):
                 check("colon-magic candidate refused (literal-pathspec finds ignoring blob)",
                       rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
                 check("colon-magic store fixture preserved", _snapshot(colon_root) == cr_before)
+
+                # OPF-D2B / D1 (BLOCKER): an UNREADABLE directory at the worktree .gitignore path. git's
+                # own O_RDONLY|O_NOFOLLOW open of a chmod-000 directory FAILS (EACCES), so git falls back to
+                # the index blob and the adopter's `git add` fetches it and then ignores the store. The
+                # round-7 check exempted EVERY directory (false PASS); the git-faithful worktree open
+                # classifies an unreadable directory as a fallback and REFUSES. DISCRIMINATOR: rc 0 (creates
+                # a store git add would skip) against the exempt-all-directories version. (The readable
+                # directory -> PROCEED direction is the "directory at .gitignore path" fixture above.)
+                unread_dir = base / "d2b-unreadable-dir"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", src_url, str(unread_dir)])
+                git_call(unread_dir, ["read-tree", "HEAD"])
+                git_call(unread_dir, ["update-index", "--skip-worktree", ".gitignore"])
+                ud_gi = unread_dir / ".gitignore"
+                ud_gi.mkdir()
+                os.chmod(str(ud_gi), 0o000)
+                try:
+                    rc, output = run(unread_dir)
+                finally:
+                    os.chmod(str(ud_gi), 0o755)   # restore so cleanup can traverse the fixture
+                check("unreadable directory at .gitignore path refused",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("unreadable directory at .gitignore path preserved",
+                      not (unread_dir / working).exists()
+                      and not (unread_dir / _opf_store.POINTER_REL).exists()
+                      and list(ud_gi.iterdir()) == [])
+
+                # OPF-D2B / D2 (BLOCKER): a SYMLINK-mode (120000) index .gitignore. git reads the symlink
+                # blob's target text as ignore patterns, so a committed symlink ".gitignore" -> ".working/"
+                # in a partial clone (worktree path absent, skip-worktree) makes the adopter's `git add`
+                # fetch the symlink blob and ignore the store. The round-7 check skipped mode 120000 (false
+                # PASS); the fix reads a symlink-mode blob as an ignore source and REFUSES. DISCRIMINATOR:
+                # rc 0 against the regular-file-mode-only version.
+                symmode_src = make_git("d2b-symlink-mode-src")
+                os.symlink(working + "/", str(symmode_src / ".gitignore"))   # committed as mode 120000
+                git_call(symmode_src, ["--literal-pathspecs", "add", "--", ".gitignore"])
+                git_call(symmode_src, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                       "commit", "-m", "seed"])
+                git_call(symmode_src, ["config", "uploadpack.allowFilter", "true"])
+                git_call(symmode_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
+                symmode = base / "d2b-symlink-mode"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", "file://" + str(symmode_src), str(symmode)])
+                git_call(symmode, ["read-tree", "HEAD"])
+                git_call(symmode, ["update-index", "--skip-worktree", ".gitignore"])
+                sm_before = _snapshot(symmode)
+                rc, output = run(symmode)
+                check("symlink-mode index .gitignore refused",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("symlink-mode index .gitignore preserved", _snapshot(symmode) == sm_before)
+
+                # OPF-D2B / D4 (MAJOR): a --literal-pathspecs ls-files still matches DESCENDANTS of a
+                # candidate. A store whose candidate is ".gitignore" matches an unrelated indexed
+                # ".gitignore/data" (here ".gitignore" is a committed DIRECTORY holding "data"), which the
+                # round-7 check treated as an ignore source and REFUSED. A descendant is not a file git ever
+                # reads as ignore patterns; the exact-membership filter drops it and init PROCEEDS
+                # (git add stages the store, the ".gitignore/data" blob being irrelevant to ignore
+                # evaluation). DISCRIMINATOR: rc 2 (false refusal) against the descendant-matching version.
+                descendant_src = make_git("d2b-descendant-src")
+                (descendant_src / ".gitignore").mkdir()
+                (descendant_src / ".gitignore" / "data").write_bytes(working.encode("ascii") + b"/\n")
+                git_call(descendant_src, ["--literal-pathspecs", "add", "-A"])
+                git_call(descendant_src, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                          "commit", "-m", "seed"])
+                git_call(descendant_src, ["config", "uploadpack.allowFilter", "true"])
+                git_call(descendant_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
+                descendant = base / "d2b-descendant"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", "file://" + str(descendant_src), str(descendant)])
+                git_call(descendant, ["read-tree", "HEAD"])
+                git_call(descendant, ["--literal-pathspecs", "update-index", "--skip-worktree",
+                                      ".gitignore/data"])
+                rc, output = run(descendant)
+                check("descendant .gitignore/data proceeds (exact-membership candidate)",
+                      rc == EXIT_OK and valid_sources(descendant))
+
+                # OPF-D2B / D3 (fixture hermeticity): the stdin-fed fixture git helper must build its OWN
+                # scrubbed environment, so an inherited GIT_INDEX_FILE (or GIT_DIR / GIT_WORK_TREE /
+                # GIT_OBJECT_DIRECTORY / GIT_COMMON_DIR) cannot redirect its write to a caller's external
+                # index. We create a genuine external repo index, point GIT_INDEX_FILE at it, run an
+                # index-info write through git_input, and assert the external index is BYTE-UNCHANGED.
+                # DISCRIMINATOR: against the os.environ.copy() helper the update-index below lands in the
+                # external index and its bytes change (the suite would silently mutate caller state, and a
+                # stage-2 fixture could report PASS while writing an inherited external index).
+                guard_repo = make_git("d3-index-guard")
+                (guard_repo / "seed").write_bytes(b"seed\n")
+                git_call(guard_repo, ["--literal-pathspecs", "add", "--", "seed"])
+                guard_blob = git_call(guard_repo, ["rev-parse", ":seed"]).decode("ascii").strip()
+                external_repo = make_git("d3-external-repo")
+                (external_repo / "ext").write_bytes(b"external\n")
+                git_call(external_repo, ["--literal-pathspecs", "add", "--", "ext"])
+                external_index = external_repo / ".git" / "index"
+                external_before = external_index.read_bytes()
+                saved_index_file = os.environ.get("GIT_INDEX_FILE")
+                os.environ["GIT_INDEX_FILE"] = str(external_index)
+                try:
+                    git_input(guard_repo, ["update-index", "--index-info"],
+                              ("100644 " + guard_blob + " 0\tseed2\n").encode("ascii"))
+                finally:
+                    if saved_index_file is None:
+                        os.environ.pop("GIT_INDEX_FILE", None)
+                    else:
+                        os.environ["GIT_INDEX_FILE"] = saved_index_file
+                check("git_input ignores an inherited GIT_INDEX_FILE (external index byte-unchanged)",
+                      external_index.read_bytes() == external_before)
             finally:
                 for name, value in saved_env.items():
                     if value is None:

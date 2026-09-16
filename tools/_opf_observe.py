@@ -34,7 +34,6 @@ Stdlib only (`subprocess`, `tomllib`, `shutil`); imports `_opf_check` (for the p
 """
 import os
 import shutil
-import stat
 import subprocess
 import sys
 from collections import namedtuple
@@ -224,6 +223,32 @@ def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S):
     return _GitOutcome(True, proc.returncode, proc.stdout or b"", err)
 
 
+def _worktree_open_succeeds(worktree_path):
+    """Replicate git's own worktree-file open for a skip-worktree ignore entry (dir.c add_patterns ->
+    read_skip_worktree_file_from_index, git 2.53.0): git opens the worktree path with O_RDONLY | O_NOFOLLOW
+    and falls back to reading the INDEX BLOB ONLY when that open, or the fstat that follows it, is
+    UNSUCCESSFUL. This returns True exactly when git's open+fstat would succeed -- so git reads from the
+    descriptor and NEVER index-reads (a readable regular file is read from disk, matching the probe; a
+    readable directory opens but its read then fails with no index fallback), meaning an unavailable blob
+    cannot change what `git add` ignores. It returns False when git's open fails (an absent path, a symlink
+    under O_NOFOLLOW, an unreadable regular file, or an UNREADABLE directory whose O_RDONLY open is denied),
+    the cases where git falls back to the index blob. O_NONBLOCK is added purely so a worktree path that is
+    a FIFO or device cannot BLOCK this read-only probe (git would itself block on such a path, which is not
+    a fetch-and-ignore case); it does not change the open outcome for a regular file, directory, symlink, or
+    absent path, the arrangements git's fallback decision actually turns on."""
+    try:
+        fd = os.open(str(worktree_path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False   # git's O_NOFOLLOW open fails -> it falls back to the index blob
+    try:
+        os.fstat(fd)   # git falls back too if the post-open fstat fails (near-impossible on a live fd)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
 def indexed_ignore_availability(git, store_root, gitignore_relpaths):
     """Repo-relative candidate .gitignore paths whose ignore rule the adopter's own `git add` would read
     from the INDEX but whose blob is NOT available locally without a promisor fetch. The config-discovery
@@ -235,11 +260,18 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
 
     git index-reads a .gitignore ONLY for a stage-0 skip-worktree entry whose worktree path its own
     O_NOFOLLOW open cannot use (add_patterns -> read_skip_worktree_file_from_index): confirmed against git
-    2.53.0. So an entry is returned only when ALL hold -- a regular-file blob, stage 0, the skip-worktree
-    flag set (`ls-files -t`/`-v` tags it "S"), a worktree path that is neither a readable regular file (git
-    reads it from disk, parity) nor a directory (git opens it, the read fails, and it never index-reads) so
-    that git's open falls back to the index, and an unavailable blob. Any other entry -- not stage 0, not
-    skip-worktree, materialized, or a directory at the path -- is one git never index-reads, so an absent
+    2.53.0. So an entry is returned only when ALL hold -- (1) its returned path is EXACTLY one of the
+    requested candidate paths (a --literal-pathspecs listing still matches DESCENDANTS of a candidate that
+    is a directory, e.g. ".gitignore/data" under a candidate ".gitignore"; a descendant is not a file git
+    ever reads as ignore patterns, so it is dropped); (2) a blob mode git reads as ignore patterns, which is
+    a regular file (100644/100755) OR a symlink (120000, whose target text git reads as patterns), never a
+    gitlink (160000) or tree (040000); (3) stage 0 with the skip-worktree flag set (`ls-files -t`/`-v` tags
+    it "S"); (4) a worktree path where git's own O_RDONLY|O_NOFOLLOW open is UNSUCCESSFUL, so git falls back
+    to the index blob (see _worktree_open_succeeds: this covers an absent path, a symlink, an unreadable
+    regular file, and an UNREADABLE directory, while a readable regular file -- read from disk, parity with
+    the probe -- and a readable directory -- opened, its read then fails with no fallback -- both PROCEED);
+    and (5) an unavailable blob. Any other entry -- not an exact candidate, not a blob mode, not stage 0,
+    not skip-worktree, or one whose worktree open succeeds -- is one git never index-reads, so an absent
     blob for it cannot change what `git add` ignores and it is not returned (no over-refusal). Candidate
     paths are matched as LITERAL pathspecs (--literal-pathspecs) so a pathspec-magic sigil (a leading colon)
     is not read as magic (an empty listing that would MISS the ignoring blob) and a glob metacharacter (a
@@ -258,6 +290,7 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
         raise RuntimeError("could not list indexed ignore files ({})".format(listing.err))
     if listing.rc != 0:
         raise RuntimeError("git ls-files failed (rc={}): {}".format(listing.rc, listing.err))
+    requested = set(gitignore_relpaths)
     unavailable = []
     for entry in os.fsdecode(listing.out).split("\0"):
         if not entry:
@@ -267,24 +300,22 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
         if not tab or len(fields) != 4:
             raise RuntimeError("unparseable ls-files entry: {!r}".format(entry))
         tag, mode, blob, stage = fields
-        if mode not in ("100644", "100755"):
-            continue  # only a regular-file blob is a .gitignore source
+        if path not in requested:
+            continue  # a --literal-pathspecs listing still matches DESCENDANTS of a candidate directory
+                      # (e.g. ".gitignore/data" under candidate ".gitignore"); only an entry whose path IS
+                      # a requested candidate is a .gitignore git reads, so a descendant is not an ignore
+                      # source and is dropped (no false refusal)
+        if mode not in ("100644", "100755", "120000"):
+            continue  # git reads a regular-file (100644/100755) or a symlink (120000, its target text)
+                      # blob as ignore patterns; a gitlink (160000) or tree (040000) is not one it reads
         if stage != "0" or tag != "S":
             continue  # git index-reads only a stage-0 skip-worktree entry; nothing else can fall back
-        worktree = store_root / path
-        try:
-            st = os.lstat(str(worktree))
-        except FileNotFoundError:
-            st = None  # truly absent: git's O_NOFOLLOW open fails and it falls back to the index blob
-        except OSError:
-            st = None  # unclassifiable worktree path: fail closed to the blob-availability probe
-        if st is not None and stat.S_ISDIR(st.st_mode):
-            continue  # git opens the directory, the read fails, and it never falls back to the index
-        if (st is not None and stat.S_ISREG(st.st_mode)
-                and os.access(str(worktree), os.R_OK)):
-            continue  # git reads the materialized regular file from disk; the probe read it too (parity)
-        # Absent, a symlink, an unreadable regular file, or another type: git's open falls back to the
-        # index blob, so an unavailable blob is a cannot-evaluate the caller must refuse.
+        if _worktree_open_succeeds(store_root / path):
+            continue  # git's O_RDONLY|O_NOFOLLOW open succeeds, so git reads from the descriptor (or its
+                      # read fails, for a directory) and never index-reads: an absent blob cannot change
+                      # what `git add` ignores (a readable regular file is parity with the probe)
+        # git's open is unsuccessful (absent, symlink, unreadable regular file, or unreadable directory),
+        # so git falls back to the index blob; an unavailable blob is a cannot-evaluate the caller refuses.
         avail = _run_git_config_discovery(git, store_root, ["cat-file", "-e", blob])
         if not avail.completed:
             raise RuntimeError("could not probe ignore-blob availability ({})".format(avail.err))
