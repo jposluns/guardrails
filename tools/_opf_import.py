@@ -7,12 +7,18 @@ it (spec 14.1, Fable-synthesized plan):
   - `scan_import(product_root, import_set) -> ScanResult`: a deterministic, digest-stamped, READ-ONLY
     enumeration of the declared import set (one whole-file fragment per source; the baseline extractor).
   - `plan_import(product_root, import_set, *, proposals=None, now, run_nonce) -> PlanResult`: scans, applies
-    the deterministic whole-file baseline classification (every fragment `unmapped` -> preserved as a
-    legacy_fragment; model proposals stay INERT), stages the candidate via `stage_import`, and writes the
-    inventory + IMPORT-REPORT.md review surface (spec 4.2).
+    the deterministic whole-file baseline classification (every fragment `unmapped`, `origin = "baseline"`,
+    preserved as a legacy_fragment; model proposals stay INERT), stages the candidate via `stage_import`,
+    and writes the inventory + proposals.toml + IMPORT-REPORT.md review surface (spec 4.2).
+  - `review_import(product_root, run_id, *, actor, decisions, now) -> ReviewResult`: the `--review`
+    acceptance-capture core (spec 14.1). It records an attributed, per-fragment accept/reject decision set
+    into a canonical-JSON `acceptance.json` bound to the exact run (run id + plan digest + inventory digest),
+    validating completeness + the origin/proposed_state echo and requiring an explicit accept for every
+    model_proposal resting mapping. It NEVER mutates the active store and NEVER re-plans (a reject makes a
+    later apply refuse). `review_import_interactive` is a thin TTY front-end funnelling into the same core.
   - `apply_import(...) -> ApplyResult`: promotion is DEFERRED to the OPF-IMPORT-APPLY unit (fail-closed
-    CANNOT-EVALUATE that mutates nothing; see its docstring for the acceptance-model + candidate-context
-    prerequisites). `check_opf_import.py` is the accompanying gate over a staged run and the scan layer.
+    CANNOT-EVALUATE that mutates nothing; see its docstring for the candidate-context prerequisite).
+    `check_opf_import.py` is the accompanying gate over a staged run and the scan layer.
 
 Offline, stdlib only, fail-closed. This module takes an operator-enumerated set of legacy SOURCE files
 and an untrusted MAPPING PLAN, validates both, mints record ids from the store's counters, and STAGES a
@@ -63,6 +69,7 @@ is disclosed for the finalizer, per disclose-guard-residuals):
 The untrusted PLAN (spec 14.1, inert data staged verbatim as plan.toml):
   {
     "fragments": { <source-path>: [ {"span": [start, end], "state": <one of MAPPING_STATES>,
+                                     "origin": <one of _ORIGIN_VALUES>,     # REQUIRED provenance (spec 14.1)
                                      "record": <candidate model, NO id>,   # mapped / split
                                      "target": <existing id>,              # duplicate
                                      "note": <str>}, ... ] },
@@ -86,6 +93,7 @@ Exit convention (the repo's gates and the sibling OPF units): 0 clean, 1 a findi
 import copy
 import datetime
 import hashlib
+import json
 import os
 import re
 import stat
@@ -98,6 +106,9 @@ import _opf_store      # noqa: E402  U1: resolution, manifest, containment helpe
 import _opf_schema     # noqa: E402  U2: record envelope + counters + id allocation/uniqueness helpers
 import _opf_release    # noqa: E402  U3: the worklog release-boundary gate
 import _opf_emit       # noqa: E402  U8: the constrained-subset canonical emitter (byte-canon-clean)
+# _opf_observe is imported LAZILY inside _gather_review_context (its hardened git-subprocess idiom is used
+# only for opportunistic review context): a module-top import would form a circular import through
+# _opf_check, and the context gather runs long after every module has loaded.
 
 try:
     import tomllib
@@ -143,7 +154,24 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # Closed plan keyset and closed fragment-row keyset.
 _PLAN_KEYS = frozenset({"fragments", "worklog", "version"})
-_FRAGMENT_ROW_KEYS = frozenset({"span", "state", "record", "target", "note"})
+_FRAGMENT_ROW_KEYS = frozenset({"span", "state", "record", "target", "note", "origin"})
+
+# The closed provenance vocabulary (spec 14.1): who a mapping came from. `baseline` is the deterministic
+# whole-file classifier; `model_proposal` is an inert AI suggestion accepted into a resting state; and
+# `human_revision` is an operator-supplied mapping on a re-plan. Every plan fragment row and every
+# mappings.toml row carries a required `origin`, so the acceptance/apply layer can enforce that a
+# model-proposed resting mapping was explicitly accepted (spec 14.1); a missing or out-of-vocabulary origin
+# is refused as a finding, never defaulted (an omitted origin would silently bypass that acceptance gate).
+_ORIGIN_VALUES = ("baseline", "model_proposal", "human_revision")
+_ORIGIN_SET = frozenset(_ORIGIN_VALUES)
+_BASELINE_ORIGIN = "baseline"
+_MODEL_PROPOSAL_ORIGIN = "model_proposal"
+
+# The resting states a promoted mapping comes to rest in (spec 14.1): a `mapped`/`split` candidate, a
+# `duplicate` naming an existing record, or an `ignored` fragment. A model_proposal-origin mapping resting
+# in any of these requires an explicit accepting decision (no blanket accept); the remaining quarantine
+# states are not "at rest" in that sense.
+_RESTING_STATES = frozenset(_CANDIDATE_STATES | {_DUPLICATE_STATE, "ignored"})
 
 # --- operation-layer (scan / plan) fixed names and vocabularies (OPF-IMPORT-OPS) --------------------
 # The deterministic SCAN inventory format and the whole-file baseline EXTRACTOR (spec 14.1). The
@@ -163,6 +191,21 @@ _FRAGMENT_DESCRIPTOR_FORMAT = "opf-import-fragment-v1"
 # build reconciles to the house TOML convention and flags the choice for the finalizer).
 INVENTORY_NAME = "inventory.toml"
 REPORT_MD_NAME = "IMPORT-REPORT.md"
+
+# The machine-readable model-proposal register staged beside the inventory (spec 14.1). Canonical _opf_emit
+# TOML (the store's native form), so IMPORT-REPORT.md is byte-reproducible from inventory.toml +
+# proposals.toml + run id and the review path reads machine data only, never the human-readable report.
+PROPOSALS_NAME = "proposals.toml"
+
+# The attributed acceptance record (spec 14.1), captured by `--review` and bound to the exact run. It is the
+# one CANONICAL-JSON artefact in an otherwise-TOML run dir (the approved acceptance design names JSON; the
+# canonical-JSON idiom is already in-repo, so no second canonicalizer enters). Producer discipline mirrors
+# the TOML _emit_bytes: sorted keys, compact separators, ensure_ascii, exactly one trailing newline, a size
+# ceiling, and a round-trip check. Digests are recorded as "sha256:"+lowercase-hex, matching the store.
+ACCEPTANCE_NAME = "acceptance.json"
+ACCEPTANCE_FORMAT = "opf.import.acceptance/v1"
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_DECISION_VERBS = frozenset({"accept", "reject"})
 
 # The closed keyset of an inert model proposal (spec 14.1 untrusted plan data). A proposal is a SUGGESTED
 # mapping recorded verbatim in the review surface; it is NEVER fed to the staging classifier as a resting
@@ -277,6 +320,26 @@ class ApplyResult:
         self.promoted = promoted
         self.outcome = outcome                    # promoted / aborted / rejected / noop_already_complete
         self.restore_ref = restore_ref
+
+
+class ReviewResult:
+    """The inert result of a `--review` acceptance-capture attempt. Judged by its verdict, never by grepping
+    output. On a clean review the attributed `acceptance.json` is staged into the run dir (`acceptance_rel`
+    is its store-relative path, `reviewed_at` the captured RFC-3339 instant, `decisions_count` the number of
+    per-fragment decisions recorded); a validation finding (incomplete coverage, an unknown/duplicate
+    fragment, an echo mismatch, or a model_proposal resting mapping without an explicit accept) is verdict 1
+    and writes nothing; an unresolved store, a missing/malformed/not-promotion-ready run, or a write failure
+    is verdict 2 (fail-closed). No live-store write ever occurs (review captures a decision record only)."""
+    __slots__ = ("verdict", "findings", "run_id", "acceptance_rel", "reviewed_at", "decisions_count")
+
+    def __init__(self, verdict, findings=None, run_id=None, acceptance_rel=None, reviewed_at=None,
+                 decisions_count=0):
+        self.verdict = verdict                    # CLEAN / FINDING / CANNOT_EVALUATE
+        self.findings = findings or []
+        self.run_id = run_id
+        self.acceptance_rel = acceptance_rel      # store-relative path to the staged acceptance.json
+        self.reviewed_at = reviewed_at
+        self.decisions_count = decisions_count
 
 
 class _StageError(Exception):
@@ -1219,7 +1282,7 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
             # `record` on a duplicate) is untrusted plan data that would otherwise stage clean while
             # contradicting the state, so it is a finding, never silently dropped (spec 14.1). This
             # subsumes the earlier F9 target-on-mapped/split check.
-            allowed_keys = {"span", "state", "note"}
+            allowed_keys = {"span", "state", "note", "origin"}
             if state in _CANDIDATE_STATES:
                 allowed_keys.add("record")
             elif state == _DUPLICATE_STATE:
@@ -1239,9 +1302,18 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
             if "note" in row and not isinstance(row.get("note"), str):
                 raise _finding("{}: fragment row `note` must be a string when present (spec 14.1)".format(
                     where))
+            # Provenance (spec 14.1): every fragment row carries a required `origin` from the closed
+            # vocabulary. A missing or out-of-vocabulary origin is a finding, never defaulted: an omitted
+            # origin would silently bypass the acceptance gate a model_proposal-origin resting mapping owes.
+            origin = row.get("origin")
+            if not isinstance(origin, str) or origin not in _ORIGIN_SET:
+                raise _finding("{}: fragment row `origin` must be one of {} (spec 14.1 provenance; a "
+                               "missing or out-of-vocabulary origin is refused)".format(
+                                   where, ", ".join(_ORIGIN_VALUES)))
             state_counts[state] += 1
             target = row.get("target")
-            mapping_states[sp].append({"span": [start, end], "state": state, "target": target})
+            mapping_states[sp].append({"span": [start, end], "state": state, "target": target,
+                                       "origin": origin})
 
             if state in _CANDIDATE_STATES:
                 # A mapped/split row mints its OWN id (B6 already refused a contradictory `target`). CLASS 5:
@@ -1507,7 +1579,8 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
     mapping_rows = []
     for sp in sorted(mapping_states):
         for m in mapping_states[sp]:
-            row = {"source_path": sp, "span": list(m["span"]), "state": m["state"]}
+            row = {"source_path": sp, "span": list(m["span"]), "state": m["state"],
+                   "origin": m["origin"]}
             if _opf_schema._valid_id_shape(m.get("target")) is not None:
                 row["target"] = m["target"]
             mapping_rows.append(row)
@@ -1549,9 +1622,18 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
     all_body = dict(files)
     all_body.update(source_bodies)
 
+    # The promotion-ready binding surface (spec 14.1): the plan digest over the staged plan.toml bytes and
+    # the inventory digest over the deterministic enumeration of these sources. Both are echoed here as
+    # top-level keys so the acceptance record binds {run_id, plan_digest, inventory_digest} against one
+    # authoritative marker, and a regenerated plan (a new run, hence new bytes) invalidates a prior
+    # acceptance by construction. inventory_digest is a pure function of the sources (the same value
+    # plan_import's scan computes), so report.toml carries it for every stage path.
+    plan_digest = "sha256:" + _sha256_hex(plan_bytes)
+    _, inventory_digest, _, _ = _build_inventory(sources)
     report = {
         "schema": SCHEMA, "run_id": run_id, "verdict": CLEAN, "promotion_ready": True,
         "migration_incomplete": bool(lf_records),
+        "plan_digest": plan_digest, "inventory_digest": inventory_digest,
         "counts": {k: v for k, v in state_counts.items() if v},
         "artifact": [{"path": suffix, "sha256": _sha256_hex(data)}
                      for suffix, data in sorted(all_body.items())],
@@ -1814,14 +1896,16 @@ def _render_report_md(inventory_digest, fragments, proposals, run_id):
     return "\n".join(lines) + "\n"
 
 
-def _write_plan_artifacts(product_root, run_rel, run_id, inventory, report_md_bytes):
-    """Stage the two plan REVIEW artefacts (inventory.toml + IMPORT-REPORT.md) into the run dir a clean
-    `stage_import` just created, as an additive create-only pass through the same contained, no-follow,
-    fsync'd, digest-verified `_journal.apply_ops` primitive staging uses. These are review inputs, not the
-    promotion candidate (report.toml, written last by stage_import, remains the promotion-ready marker and
-    enumerates only the candidate set); they never mutate the active store. inventory.toml is byte-canonical
-    store TOML held under the contained store-read cap; IMPORT-REPORT.md is markdown (never read by the TOML
-    reader). Fail-closed on any write error (CANNOT-EVALUATE)."""
+def _write_plan_artifacts(product_root, run_rel, run_id, inventory, report_md_bytes, proposal_rows):
+    """Stage the plan REVIEW artefacts (inventory.toml + proposals.toml + IMPORT-REPORT.md) into the run dir
+    a clean `stage_import` just created, as an additive create-only pass through the same contained,
+    no-follow, fsync'd, digest-verified `_journal.apply_ops` primitive staging uses. These are review inputs,
+    not the promotion candidate (report.toml, written last by stage_import, remains the promotion-ready
+    marker and enumerates only the candidate set); they never mutate the active store. inventory.toml and
+    proposals.toml are byte-canonical store TOML held under the contained store-read cap; IMPORT-REPORT.md is
+    markdown (never read by the TOML reader). proposals.toml records the validated model proposals verbatim,
+    each stamped `origin = "model_proposal"`, so the review path reads machine data and the report is
+    byte-reproducible from inventory.toml + proposals.toml + run id. Fail-closed on any write error."""
     resolution = _opf_store.resolve_store(product_root)
     if resolution.status != _opf_store.RESOLVED:
         raise _cannot("store did not resolve for the plan review-artefact write ({}: {})".format(
@@ -1831,12 +1915,26 @@ def _write_plan_artifacts(product_root, run_rel, run_id, inventory, report_md_by
         raise _cannot("{} is {} bytes, over the {}-byte contained store-read cap; the staged inventory "
                       "would be unreadable (rejected at the producer boundary)".format(
                           INVENTORY_NAME, len(inv_bytes), _opf_store.MAX_STORE_READ_BYTES))
+    # proposals.toml: the validated proposal rows exactly as _validate_proposals normalizes them, each
+    # stamped origin = "model_proposal" (their machine-readable resting provenance).
+    proposals_model = {
+        "schema": SCHEMA, "run_id": run_id,
+        "proposal": [dict(p, origin=_MODEL_PROPOSAL_ORIGIN) for p in proposal_rows],
+    }
+    prop_bytes = _emit_bytes(proposals_model, PROPOSALS_NAME)
+    if len(prop_bytes) > _opf_store.MAX_STORE_READ_BYTES:
+        raise _cannot("{} is {} bytes, over the {}-byte contained store-read cap; the staged proposals "
+                      "would be unreadable (rejected at the producer boundary)".format(
+                          PROPOSALS_NAME, len(prop_bytes), _opf_store.MAX_STORE_READ_BYTES))
     inv_rel = run_rel + "/" + INVENTORY_NAME
+    prop_rel = run_rel + "/" + PROPOSALS_NAME
     md_rel = run_rel + "/" + REPORT_MD_NAME
-    content = {inv_rel: inv_bytes, md_rel: report_md_bytes}
+    content = {inv_rel: inv_bytes, prop_rel: prop_bytes, md_rel: report_md_bytes}
     ops = [
         {"op": "create", "path": inv_rel,
          "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(inv_bytes)}},
+        {"op": "create", "path": prop_rel,
+         "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(prop_bytes)}},
         {"op": "create", "path": md_rel,
          "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(report_md_bytes)}},
     ]
@@ -1895,7 +1993,8 @@ def plan_import(product_root, import_set, *, proposals=None, now, run_nonce):
         # Deterministic baseline plan: one whole-file fragment per source, classified `unmapped` (nothing
         # mechanically mapped). Handed to the settled staging classifier, which mints a legacy_fragment
         # quarantine record per fragment and stages the byte-canonical candidate run dir.
-        plan = {"fragments": {s["path"]: [{"span": [0, s["size"]], "state": "unmapped"}]
+        plan = {"fragments": {s["path"]: [{"span": [0, s["size"]], "state": "unmapped",
+                                           "origin": _BASELINE_ORIGIN}]
                               for s in scan.sources}}
         result = stage_import(product_root, import_set, plan, now=now, run_nonce=run_nonce)
         if result.verdict != CLEAN:
@@ -1904,7 +2003,7 @@ def plan_import(product_root, import_set, *, proposals=None, now, run_nonce):
 
         report_md = _render_report_md(scan.inventory_digest, scan.fragments, proposal_rows, result.run_id)
         _write_plan_artifacts(product_root, result.run_rel, result.run_id, scan.inventory,
-                              report_md.encode("utf-8"))
+                              report_md.encode("utf-8"), proposal_rows)
         return PlanResult(CLEAN, run_id=result.run_id, run_rel=result.run_rel,
                           inventory_digest=scan.inventory_digest,
                           report_rel=result.run_rel + "/" + REPORT_MD_NAME,
@@ -1917,6 +2016,462 @@ def plan_import(product_root, import_set, *, proposals=None, now, run_nonce):
         return PlanResult(CANNOT_EVALUATE, ["fail-closed on a filesystem read error: {}".format(exc)])
     except RecursionError as exc:
         return PlanResult(CANNOT_EVALUATE, ["fail-closed on excessive input nesting: {}".format(exc)])
+
+
+# --- acceptance capture (`--review`): the attributed decision record (spec 14.1) -----------------------
+
+def _emit_acceptance_bytes(model, where="acceptance.json"):
+    """Emit an acceptance model to canonical JSON bytes: UTF-8, sorted keys, compact separators,
+    ensure_ascii, plus exactly one trailing newline. Mirrors the _emit_bytes producer-boundary discipline:
+    an un-serializable model or a failed round trip is CANNOT-EVALUATE, and the emitted bytes are held under
+    the same contained store-read cap so nothing is staged that a reader would later refuse (fail at the
+    producer, never hand a consumer an input it cannot read; guard-input-soundness)."""
+    try:
+        text = json.dumps(model, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    except (TypeError, ValueError) as exc:
+        raise _cannot("{}: not canonical-JSON emittable ({})".format(where, exc))
+    data = (text + "\n").encode("utf-8")
+    if len(data) > _opf_store.MAX_STORE_READ_BYTES:
+        raise _cannot("{} is {} bytes, over the {}-byte contained store-read cap; the staged acceptance "
+                      "would be unreadable (rejected at the producer boundary)".format(
+                          where, len(data), _opf_store.MAX_STORE_READ_BYTES))
+    try:
+        if json.loads(text) != model:
+            raise _cannot("{}: canonical JSON did not round-trip".format(where))
+    except ValueError as exc:
+        raise _cannot("{}: canonical JSON did not round-trip ({})".format(where, exc))
+    return data
+
+
+def _validate_acceptance(model, where="acceptance.json"):
+    """Validate a parsed acceptance model against the `opf.import.acceptance/v1` schema, fail-closed. Returns
+    a findings list (empty when valid); the caller routes a non-empty list per its own verdict. Structural
+    only: it proves the record is well-formed and internally typed, NOT that its digests bind the run (that
+    is the binding check) nor that the named actor is authentic (out of scope by design, spec 14.1)."""
+    f = []
+    if not isinstance(model, dict):
+        return ["{}: acceptance record is not an object".format(where)]
+    allowed = {"format", "run_id", "plan_digest", "inventory_digest", "actor", "reviewed_at",
+               "decisions", "signature"}
+    extra = set(model) - allowed
+    if extra:
+        f.append("{}: unknown top-level key(s): {}".format(where, ", ".join(sorted(extra))))
+    if model.get("format") != ACCEPTANCE_FORMAT:
+        f.append("{}: format must be {!r}".format(where, ACCEPTANCE_FORMAT))
+    if not (isinstance(model.get("run_id"), str) and _RUN_ID_RE.match(model["run_id"])):
+        f.append("{}: run_id is missing or not a valid run-id".format(where))
+    for dk in ("plan_digest", "inventory_digest"):
+        if not (isinstance(model.get(dk), str) and _DIGEST_RE.match(model[dk])):
+            f.append("{}: {} must be a 'sha256:'+64-hex digest".format(where, dk))
+    actor = model.get("actor")
+    if not isinstance(actor, dict):
+        f.append("{}: actor must be an object".format(where))
+    else:
+        if set(actor) - {"declared", "context"}:
+            f.append("{}: actor carries unknown key(s)".format(where))
+        if not (isinstance(actor.get("declared"), str) and actor["declared"].strip()):
+            f.append("{}: actor.declared must be a non-empty string (the required, self-asserted "
+                     "reviewer)".format(where))
+        ctx = actor.get("context")
+        if not isinstance(ctx, dict) or set(ctx) - {"os_user", "git_identity", "hostname"}:
+            f.append("{}: actor.context must be an object of os_user/git_identity/hostname".format(where))
+        elif not all(isinstance(ctx.get(k), str) for k in ("os_user", "git_identity", "hostname")):
+            f.append("{}: actor.context fields must be strings (opportunistic, may be empty)".format(where))
+    if not (isinstance(model.get("reviewed_at"), str) and model["reviewed_at"]):
+        f.append("{}: reviewed_at must be a non-empty RFC-3339 UTC string".format(where))
+    if "signature" in model and model["signature"] is not None:
+        f.append("{}: signature is reserved and unused in v1 (must be absent or null)".format(where))
+    decisions = model.get("decisions")
+    if not isinstance(decisions, list):
+        f.append("{}: decisions must be an array".format(where))
+    else:
+        for i, d in enumerate(decisions):
+            dw = "{} decision[{}]".format(where, i)
+            if not isinstance(d, dict):
+                f.append("{}: not an object".format(dw)); continue
+            if set(d) - {"fragment_id", "decision", "origin", "proposed_state", "note"}:
+                f.append("{}: unknown key(s)".format(dw))
+            if not (isinstance(d.get("fragment_id"), str) and d["fragment_id"]):
+                f.append("{}: fragment_id must be a non-empty string".format(dw))
+            if d.get("decision") not in _DECISION_VERBS:
+                f.append("{}: decision must be 'accept' or 'reject'".format(dw))
+            if d.get("origin") not in _ORIGIN_SET:
+                f.append("{}: origin is not a mapping origin".format(dw))
+            if d.get("proposed_state") not in MAPPING_STATES:
+                f.append("{}: proposed_state is not a mapping state".format(dw))
+            if "note" in d and not isinstance(d["note"], str):
+                f.append("{}: note must be a string when present".format(dw))
+    return f
+
+
+def _resolve_store_for_review(product_root):
+    """Resolve and manifest-validate the store for a review, fail-closed (an unresolved or invalid store is
+    CANNOT-EVALUATE with the init-first message; a manifest parse error likewise). Returns the resolution."""
+    try:
+        resolution = _opf_store.resolve_store(product_root)
+        if resolution.status != _opf_store.RESOLVED:
+            raise _cannot("store did not resolve ({}: {}); run `opf init` first".format(
+                resolution.status, resolution.detail))
+        mv = _opf_store.load_manifest(resolution)
+    except ValueError as exc:
+        raise _cannot("cannot parse store manifest for {!r} ({})".format(product_root, exc))
+    if mv.status != _opf_store.VALID:
+        raise _cannot("store manifest is not VALID ({}: {})".format(mv.status, "; ".join(mv.findings)))
+    return resolution
+
+
+def _load_staged_run_for_review(store_root_fd, run_rel):
+    """Load a staged run's machine artefacts for review, fail-closed. A run with no report.toml is
+    not-promotion-ready (CANNOT-EVALUATE); a missing or malformed run.toml/mappings.toml/inventory.toml/
+    proposals.toml is a malformed run (CANNOT-EVALUATE). Builds the fragment correspondence: each inventory
+    fragment (keyed by its content-inclusive fragment_id) must correspond one-to-one, by (source_path,
+    span), to exactly one mapping row (the whole-file baseline plan_import produces); a run whose inventory
+    fragments and mapping rows are not in 1:1 correspondence is not reviewable in v1 (CANNOT-EVALUATE, a
+    disclosed residual). Returns (plan_digest, inventory_digest, frag_by_id, key_meta, ordered_fragments)
+    where key_meta maps (source_path, span) -> {origin, state} and ordered_fragments is a fragment_id-sorted
+    list of {fragment_id, source_path, span, origin, proposed_state}."""
+    report = _read_toml(store_root_fd, run_rel + "/report.toml")
+    if report is None:
+        raise _cannot("staged run has no report.toml (not promotion-ready; cannot review)")
+    mappings = _read_toml(store_root_fd, run_rel + "/mappings.toml")
+    inventory = _read_toml(store_root_fd, run_rel + "/inventory.toml")
+    proposals = _read_toml(store_root_fd, run_rel + "/proposals.toml")
+    for name, val in (("mappings.toml", mappings), ("inventory.toml", inventory),
+                      ("proposals.toml", proposals)):
+        if val is None:
+            raise _cannot("staged run is missing {} (malformed or not a plan run; cannot review)".format(
+                name))
+    plan_digest = report.get("plan_digest")
+    inventory_digest = report.get("inventory_digest")
+    if not (isinstance(plan_digest, str) and _DIGEST_RE.match(plan_digest)):
+        raise _cannot("report.toml plan_digest is missing or malformed (cannot bind acceptance)")
+    if not (isinstance(inventory_digest, str) and _DIGEST_RE.match(inventory_digest)):
+        raise _cannot("report.toml inventory_digest is missing or malformed (cannot bind acceptance)")
+
+    inv_frags = inventory.get("fragment")
+    map_rows = mappings.get("mapping")
+    if not isinstance(inv_frags, list) or not isinstance(map_rows, list):
+        raise _cannot("staged run inventory.fragment or mappings.mapping is not an array (malformed run)")
+
+    def _key(sp, span):
+        return (sp, (span[0], span[1]))
+
+    frag_by_id = {}
+    inv_keys = set()
+    for i, fr in enumerate(inv_frags):
+        if not (isinstance(fr, dict) and isinstance(fr.get("fragment_id"), str) and fr["fragment_id"]
+                and isinstance(fr.get("source_path"), str)
+                and isinstance(fr.get("span"), list) and len(fr["span"]) == 2
+                and all(type(x) is int for x in fr["span"])):
+            raise _cannot("inventory fragment[{}] is malformed (cannot correlate for review)".format(i))
+        fid = fr["fragment_id"]
+        if fid in frag_by_id:
+            raise _cannot("inventory carries a duplicate fragment_id {!r} (malformed run)".format(fid))
+        key = _key(fr["source_path"], fr["span"])
+        if key in inv_keys:
+            raise _cannot("inventory carries a duplicate (source_path, span) (malformed run)")
+        inv_keys.add(key)
+        frag_by_id[fid] = key
+
+    key_meta = {}
+    for i, row in enumerate(map_rows):
+        if not (isinstance(row, dict) and isinstance(row.get("source_path"), str)
+                and isinstance(row.get("span"), list) and len(row["span"]) == 2
+                and all(type(x) is int for x in row["span"])
+                and row.get("state") in MAPPING_STATES and row.get("origin") in _ORIGIN_SET):
+            raise _cannot("mappings row[{}] is malformed (cannot correlate for review)".format(i))
+        key = _key(row["source_path"], row["span"])
+        if key in key_meta:
+            raise _cannot("mappings carries a duplicate (source_path, span) row (malformed run)")
+        key_meta[key] = {"origin": row["origin"], "state": row["state"]}
+
+    if inv_keys != set(key_meta):
+        raise _cannot("inventory fragments and mapping rows are not in 1:1 (source_path, span) "
+                      "correspondence; this run shape is not reviewable in v1 (fail-closed residual)")
+
+    ordered = []
+    for fid in sorted(frag_by_id):
+        sp, span = frag_by_id[fid]
+        meta = key_meta[(sp, span)]
+        ordered.append({"fragment_id": fid, "source_path": sp, "span": [span[0], span[1]],
+                        "origin": meta["origin"], "proposed_state": meta["state"]})
+    return plan_digest, inventory_digest, frag_by_id, key_meta, ordered
+
+
+def _gather_review_context(resolution):
+    """Opportunistic, unauthenticated context enrichment for an acceptance record: the OS user, a
+    best-effort git identity read through the hardened `_opf_observe` config-discovery idiom, and the
+    hostname. Every field is best-effort and NEVER required: any failure records an empty string. This is
+    corroborating detail, not an authentication claim (spec 14.1: the actor is self-asserted and the tooling
+    does not authenticate it). Values are stripped of control characters and length-capped so exotic bytes
+    never enter the canonical-JSON record."""
+    import getpass
+    import socket
+    import _opf_observe   # lazy: avoids a module-top circular import through _opf_check (see the import block)
+    ctx = {"os_user": "", "git_identity": "", "hostname": ""}
+    try:
+        ctx["os_user"] = getpass.getuser()
+    except Exception:  # noqa: BLE001  opportunistic: any failure degrades to the empty string
+        pass
+    try:
+        ctx["hostname"] = socket.gethostname()
+    except Exception:  # noqa: BLE001  opportunistic
+        pass
+    try:
+        git = _opf_observe._git_path()
+        if git:
+            name = _opf_observe._run_git_config_discovery(git, resolution.store_root,
+                                                          ["config", "user.name"])
+            email = _opf_observe._run_git_config_discovery(git, resolution.store_root,
+                                                           ["config", "user.email"])
+            n = name.out.decode("utf-8", "replace").strip() if (name.completed and name.rc == 0) else ""
+            e = email.out.decode("utf-8", "replace").strip() if (email.completed and email.rc == 0) else ""
+            if e:
+                ctx["git_identity"] = "{} <{}>".format(n, e).strip()
+            elif n:
+                ctx["git_identity"] = n
+    except Exception:  # noqa: BLE001  opportunistic: a git read never blocks or fails a review
+        pass
+    for k in list(ctx):
+        v = ctx[k] if isinstance(ctx[k], str) else ""
+        ctx[k] = "".join(ch for ch in v if ord(ch) >= 0x20 and ord(ch) != 0x7f)[:256]
+    return ctx
+
+
+def _validate_review_decisions(decisions, frag_by_id, key_meta):
+    """Validate the operator decision list against the run's fragments (findings = verdict 1). Each decision
+    is a well-formed {fragment_id, decision, origin, proposed_state[, note]} table; exactly one decision per
+    inventory fragment (a missing, unknown, or duplicate fragment_id is a finding); each decision's echoed
+    origin/proposed_state must match the staged mapping row (an echo mismatch is a finding); and every
+    model_proposal-origin mapping resting in a resting state requires an explicit `accept` (no blanket
+    accept). Returns (findings, normalized_decisions) where the normalized decisions echo the AUTHORITATIVE
+    staged origin/proposed_state (never the caller's self-report) and are sorted by fragment_id."""
+    findings = []
+    seen = set()
+    normalized = []
+    for i, d in enumerate(decisions):
+        dw = "decision[{}]".format(i)
+        if not isinstance(d, dict):
+            findings.append("{}: not a table".format(dw)); continue
+        if set(d) - {"fragment_id", "decision", "origin", "proposed_state", "note"}:
+            findings.append("{}: carries an unknown key".format(dw))
+        fid = d.get("fragment_id")
+        if not isinstance(fid, str) or fid not in frag_by_id:
+            findings.append("{}: fragment_id {!r} names no inventory fragment".format(dw, fid)); continue
+        if fid in seen:
+            findings.append("{}: duplicate decision for fragment {!r}".format(dw, fid)); continue
+        seen.add(fid)
+        verb = d.get("decision")
+        if verb not in _DECISION_VERBS:
+            findings.append("{}: decision must be 'accept' or 'reject'".format(dw)); continue
+        meta = key_meta[frag_by_id[fid]]
+        if d.get("origin") != meta["origin"]:
+            findings.append("{}: echoed origin {!r} does not match the staged mapping origin {!r}".format(
+                dw, d.get("origin"), meta["origin"]))
+        if d.get("proposed_state") != meta["state"]:
+            findings.append("{}: echoed proposed_state {!r} does not match the staged mapping state "
+                            "{!r}".format(dw, d.get("proposed_state"), meta["state"]))
+        note = d.get("note", "")
+        if not isinstance(note, str):
+            findings.append("{}: note must be a string when present".format(dw)); note = ""
+        normalized.append({"fragment_id": fid, "decision": verb, "origin": meta["origin"],
+                           "proposed_state": meta["state"], "note": note})
+    for fid, key in frag_by_id.items():
+        if fid not in seen:
+            findings.append("fragment {!r} has no decision (every plan fragment needs an explicit "
+                            "accept or reject)".format(fid))
+    # Model-proposal acceptance gate (spec 14.1): a model_proposal-origin mapping resting in a resting state
+    # must be explicitly accepted; a reject or an omission of it is a finding (no blanket accept).
+    accepted = {n["fragment_id"] for n in normalized if n["decision"] == "accept"}
+    for fid, key in frag_by_id.items():
+        meta = key_meta[key]
+        if meta["origin"] == _MODEL_PROPOSAL_ORIGIN and meta["state"] in _RESTING_STATES \
+                and fid not in accepted:
+            findings.append("fragment {!r} is a model_proposal resting in {!r} and requires an explicit "
+                            "accept (no blanket acceptance of model proposals)".format(fid, meta["state"]))
+    normalized.sort(key=lambda n: n["fragment_id"])
+    return findings, normalized
+
+
+def _stage_acceptance(resolution, run_rel, acceptance_bytes):
+    """Stage acceptance.json into the run dir through journaled contained ops (the _write_plan_artifacts
+    pattern: fsync, staged-digest verify, containment). A re-review REPLACES a prior acceptance.json via an
+    explicit remove+create in one apply, never an in-place edit; a prior entry that is not a regular file is
+    fail-closed. Never mutates the active store."""
+    acc_rel = run_rel + "/" + ACCEPTANCE_NAME
+    try:
+        store_root_fd = _opf_store._open_store_root_fd(
+            resolution.store_root, resolution.pointer_source != "default")
+    except OSError as exc:
+        raise _cannot("cannot open store root {!r} for the acceptance write ({})".format(
+            resolution.store_root, exc))
+    try:
+        prior = _journal._lstat_contained(store_root_fd, acc_rel)
+        ops = []
+        if prior is not None:
+            if not stat.S_ISREG(prior.st_mode):
+                raise _cannot("a prior {} is not a regular file; refusing to replace it".format(ACCEPTANCE_NAME))
+            try:
+                prior_bytes, _fst = _journal._read_contained(store_root_fd, acc_rel)
+            except _journal.JournalError as exc:
+                raise _cannot("cannot read the prior {} to replace it ({})".format(ACCEPTANCE_NAME, exc))
+            ops.append({"op": "remove", "path": acc_rel,
+                        "prestate": {"kind": "file", "mode": stat.S_IMODE(prior.st_mode),
+                                     "size": len(prior_bytes), "sha256": _sha256_hex(prior_bytes)}})
+        ops.append({"op": "create", "path": acc_rel,
+                    "poststate": {"kind": "file", "mode": FILE_MODE,
+                                  "content-sha256": _sha256_hex(acceptance_bytes)}})
+        content = {acc_rel: acceptance_bytes}
+
+        def staged_reader(op):
+            return content[op["path"]]
+
+        try:
+            _journal.apply_ops(store_root_fd, ops, staged_reader)
+        except _journal.JournalError as exc:
+            raise _cannot("acceptance write failed ({}); the staged candidate is intact".format(exc))
+    finally:
+        os.close(store_root_fd)
+    return acc_rel
+
+
+def review_import(product_root, run_id, *, actor, decisions, now):
+    """Capture an attributed acceptance record over a staged import run (spec 14.1), writing
+    `acceptance.json` into the run dir. This is the batch (decisions-list) contract surface; the interactive
+    front-end funnels into it. It NEVER mutates the active store and NEVER re-plans: it records accept/reject
+    decisions and binds them to the exact run (run id + plan digest + inventory digest), so a regenerated
+    plan (a new run) invalidates a prior acceptance by construction. A recorded reject makes a later apply
+    refuse (resolution is a fresh plan carrying a human_revision mapping, never a silent re-label here).
+
+    Fail-closed: the staged run is loaded fail-closed (missing/malformed run, or a run without report.toml,
+    is CANNOT-EVALUATE); the run_id is validated against the run-id grammar as an identifier BEFORE any path
+    use; a required, self-asserted `actor` string is required (its authenticity is out of scope, spec 14.1).
+    Decisions are validated for completeness (one per fragment) and echo cross-checked against the staged
+    mappings/inventory, and every model_proposal resting mapping requires an explicit accept; any such
+    problem is a FINDING (verdict 1) that writes nothing. Returns a ReviewResult."""
+    try:
+        _journal.require_containment()
+    except _journal.JournalError as exc:
+        return ReviewResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)])
+    try:
+        _require_utc(now)
+        if not isinstance(product_root, (str, os.PathLike)):
+            raise _cannot("product_root must be a path string or os.PathLike, got {}".format(
+                type(product_root).__name__))
+        if not (isinstance(actor, str) and actor.strip()):
+            raise _cannot("--actor is required: a non-empty, self-asserted reviewer identity (spec 14.1)")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in actor):
+            raise _cannot("--actor carries a control character")
+        if not isinstance(decisions, (list, tuple)):
+            raise _cannot("decisions must be a list of decision tables")
+        # Validate the run_id as an identifier BEFORE it is ever used as a path fragment (guard-input-
+        # soundness): a value outside the grammar is CANNOT-EVALUATE, never a path traversal.
+        if not (isinstance(run_id, str) and _RUN_ID_RE.match(run_id)):
+            raise _cannot("run-id {!r} does not match the run-id grammar (fail-closed)".format(run_id))
+
+        resolution = _resolve_store_for_review(product_root)
+        run_rel = "{}/{}".format(IMPORTS_REL, run_id)
+        try:
+            store_root_fd = _opf_store._open_store_root_fd(
+                resolution.store_root, resolution.pointer_source != "default")
+        except OSError as exc:
+            raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
+        try:
+            plan_digest, inventory_digest, frag_by_id, key_meta, _ordered = \
+                _load_staged_run_for_review(store_root_fd, run_rel)
+        finally:
+            os.close(store_root_fd)
+
+        findings, normalized = _validate_review_decisions(decisions, frag_by_id, key_meta)
+        if findings:
+            return ReviewResult(FINDING, findings, run_id=run_id)
+
+        reviewed_at = _rfc3339(now)
+        model = {
+            "format": ACCEPTANCE_FORMAT, "run_id": run_id,
+            "plan_digest": plan_digest, "inventory_digest": inventory_digest,
+            "actor": {"declared": actor, "context": _gather_review_context(resolution)},
+            "reviewed_at": reviewed_at, "decisions": normalized,
+        }
+        schema_findings = _validate_acceptance(model)
+        if schema_findings:
+            raise _cannot("internal: composed acceptance record is invalid ({})".format(
+                "; ".join(schema_findings)))
+        acceptance_bytes = _emit_acceptance_bytes(model)
+        acc_rel = _stage_acceptance(resolution, run_rel, acceptance_bytes)
+        return ReviewResult(CLEAN, run_id=run_id, acceptance_rel=acc_rel, reviewed_at=reviewed_at,
+                            decisions_count=len(normalized))
+    except _StageError as exc:
+        return ReviewResult(exc.verdict, [exc.message], run_id=run_id if isinstance(run_id, str) else None)
+    except _journal.JournalError as exc:
+        return ReviewResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)])
+    except OSError as exc:
+        return ReviewResult(CANNOT_EVALUATE, ["fail-closed on a filesystem error: {}".format(exc)])
+    except RecursionError as exc:
+        return ReviewResult(CANNOT_EVALUATE, ["fail-closed on excessive input nesting: {}".format(exc)])
+
+
+def review_import_interactive(product_root, run_id, *, actor, now, in_stream=None, out_stream=None):
+    """A minimal interactive review front-end: prompt accept/reject (and an optional note) per fragment over
+    a TTY, then funnel the collected decisions into review_import (the batch path is the contract surface,
+    so this loop is kept deliberately thin). It REFUSES to start when stdin is not a TTY (CANNOT-EVALUATE):
+    an unattended or piped invocation must use the batch --decisions path, so a review is never captured
+    from an ambient, non-interactive stream by accident. All validation and the write live in review_import;
+    this only gathers the per-fragment verbs."""
+    stdin = in_stream if in_stream is not None else sys.stdin
+    stdout = out_stream if out_stream is not None else sys.stdout
+    if not (hasattr(stdin, "isatty") and stdin.isatty()):
+        return ReviewResult(CANNOT_EVALUATE,
+                            ["--interactive requires a TTY on stdin; use --decisions <file> for a "
+                             "non-interactive (batch) review (fail-closed)"],
+                            run_id=run_id if isinstance(run_id, str) else None)
+    try:
+        _journal.require_containment()
+        if not (isinstance(run_id, str) and _RUN_ID_RE.match(run_id)):
+            return ReviewResult(CANNOT_EVALUATE,
+                                ["run-id does not match the run-id grammar (fail-closed)"])
+        resolution = _resolve_store_for_review(product_root)
+        run_rel = "{}/{}".format(IMPORTS_REL, run_id)
+        store_root_fd = _opf_store._open_store_root_fd(
+            resolution.store_root, resolution.pointer_source != "default")
+        try:
+            _pd, _id, _frag_by_id, _km, ordered = _load_staged_run_for_review(store_root_fd, run_rel)
+        finally:
+            os.close(store_root_fd)
+    except _StageError as exc:
+        return ReviewResult(exc.verdict, [exc.message])
+    except _journal.JournalError as exc:
+        return ReviewResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)])
+    except OSError as exc:
+        return ReviewResult(CANNOT_EVALUATE, ["fail-closed on a filesystem error: {}".format(exc)])
+
+    decisions = []
+    stdout.write("Reviewing import run {} ({} fragment(s)).\n".format(run_id, len(ordered)))
+    for frag in ordered:
+        prompt = "  {} [{}:{}] origin={} state={}: accept/reject? ".format(
+            frag["source_path"], frag["span"][0], frag["span"][1], frag["origin"],
+            frag["proposed_state"])
+        stdout.write(prompt)
+        stdout.flush()
+        line = stdin.readline()
+        if not line:
+            return ReviewResult(CANNOT_EVALUATE, ["interactive input ended before every fragment was "
+                                                  "decided (fail-closed; nothing captured)"], run_id=run_id)
+        verb = line.strip().lower()
+        if verb in ("a", "accept"):
+            verb = "accept"
+        elif verb in ("r", "reject"):
+            verb = "reject"
+        else:
+            return ReviewResult(CANNOT_EVALUATE, ["unrecognized decision {!r} (expected accept/reject); "
+                                                  "nothing captured".format(line.strip())], run_id=run_id)
+        stdout.write("  note (optional, blank to skip): ")
+        stdout.flush()
+        note = (stdin.readline() or "").strip()
+        decisions.append({"fragment_id": frag["fragment_id"], "decision": verb,
+                          "origin": frag["origin"], "proposed_state": frag["proposed_state"],
+                          "note": note})
+    return review_import(product_root, run_id, actor=actor, decisions=decisions, now=now)
 
 
 def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
@@ -2061,7 +2616,7 @@ def self_test():
 
     def plan_mapped(source_len):
         return {"fragments": {"a.txt": [
-            {"span": [0, source_len], "state": "mapped", "record": bi_candidate()}]}}
+            {"span": [0, source_len], "state": "mapped", "origin": "baseline", "record": bi_candidate()}]}}
 
     def snapshot(machine):
         """A byte snapshot of the machine tree (`.working/toml/`) for a before/after comparison. Since the
@@ -2083,8 +2638,8 @@ def self_test():
         src = "hello world body"
         root, machine = build_store(sources={"a.txt": src})
         before = snapshot(machine)
-        rows = [{"span": [0, 5], "state": "mapped", "record": bi_candidate()},
-                {"span": [5, len(src)], "state": "unmapped"}]
+        rows = [{"span": [0, 5], "state": "mapped", "origin": "baseline", "record": bi_candidate()},
+                {"span": [5, len(src)], "state": "unmapped", "origin": "baseline"}]
         res = stage_import(root, ["a.txt"], {"fragments": {"a.txt": rows}}, now=NOW, run_nonce=NONCE)
         check("1-positive-clean", res.verdict == 0)
         check("1-run-id-grammar", bool(res.run_id and INDEP_RUN_ID_RE.match(res.run_id)))
@@ -2136,7 +2691,7 @@ def self_test():
         big_root, _big_machine = build_store(sources={"a.txt": src})
         _big_cand = dict(bi_candidate(), title="x" * (2 * 1024 * 1024))
         _big_plan = {"fragments": {"a.txt": [
-            {"span": [0, len(src)], "state": "mapped", "record": _big_cand}]}}
+            {"span": [0, len(src)], "state": "mapped", "origin": "baseline", "record": _big_cand}]}}
         _big_res = stage_import(big_root, ["a.txt"], _big_plan, now=NOW, run_nonce=NONCE)
         check("producer-ceiling-oversized-candidate-cannot-evaluate", _big_res.verdict == 2)
         check("producer-ceiling-names-store-read-cap",
@@ -2208,7 +2763,7 @@ def self_test():
         bad = bi_candidate(); bad["id"] = "BI-9"
         root11, machine11 = build_store(sources={"a.txt": src})
         res11 = stage_import(root11, ["a.txt"],
-                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline",
                                                        "record": bad}]}}, now=NOW, run_nonce=NONCE)
         check("8-plan-supplied-id-finding", res11.verdict == 1)
 
@@ -2216,26 +2771,26 @@ def self_test():
         badstat = bi_candidate(); badstat["status"] = "not-a-state"
         root12, machine12 = build_store(sources={"a.txt": src})
         res12 = stage_import(root12, ["a.txt"],
-                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline",
                                                        "record": badstat}]}}, now=NOW, run_nonce=NONCE)
         check("9-invalid-candidate-finding", res12.verdict == 1)
 
         # 10: tiling violations each -> verdict 1 (gap, beyond EOF, reversed); an empty source needs one
         # explicit [0, 0] row.
         root13, machine13 = build_store(sources={"a.txt": src})
-        gap = [{"span": [0, 3], "state": "unmapped"}, {"span": [5, len(src)], "state": "unmapped"}]
+        gap = [{"span": [0, 3], "state": "unmapped", "origin": "baseline"}, {"span": [5, len(src)], "state": "unmapped", "origin": "baseline"}]
         check("10-gap-finding",
               stage_import(root13, ["a.txt"], {"fragments": {"a.txt": gap}}, now=NOW, run_nonce=NONCE).verdict == 1)
-        beyond = [{"span": [0, len(src) + 5], "state": "unmapped"}]
+        beyond = [{"span": [0, len(src) + 5], "state": "unmapped", "origin": "baseline"}]
         root14, machine14 = build_store(sources={"a.txt": src})
         check("10-beyond-eof-finding",
               stage_import(root14, ["a.txt"], {"fragments": {"a.txt": beyond}}, now=NOW, run_nonce=NONCE).verdict == 1)
-        rev = [{"span": [5, 2], "state": "unmapped"}]
+        rev = [{"span": [5, 2], "state": "unmapped", "origin": "baseline"}]
         root15, machine15 = build_store(sources={"a.txt": src})
         check("10-reversed-finding",
               stage_import(root15, ["a.txt"], {"fragments": {"a.txt": rev}}, now=NOW, run_nonce=NONCE).verdict == 1)
         root16, machine16 = build_store(sources={"empty.txt": ""})
-        ok_empty = {"fragments": {"empty.txt": [{"span": [0, 0], "state": "unmapped"}]}}
+        ok_empty = {"fragments": {"empty.txt": [{"span": [0, 0], "state": "unmapped", "origin": "baseline"}]}}
         check("10-empty-source-clean",
               stage_import(root16, ["empty.txt"], ok_empty, now=NOW, run_nonce=NONCE).verdict == 0)
 
@@ -2266,7 +2821,7 @@ def self_test():
         # 13: emitter boundary: a plan value outside the U8 subset (a nested array) -> verdict 2, nothing
         # staged.
         root21, machine21 = build_store(sources={"a.txt": src})
-        badplan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped",
+        badplan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped", "origin": "baseline",
                                             "note": [[1, 2]]}]}}
         res21 = stage_import(root21, ["a.txt"], badplan, now=NOW, run_nonce=NONCE)
         check("13-emitter-boundary-cannot-eval", res21.verdict == 2)
@@ -2294,7 +2849,7 @@ def self_test():
 
         # 16: a version-ledger candidate in the plan -> verdict 2 (deferral).
         root24, machine24 = build_store(sources={"a.txt": src})
-        vplan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped"}]},
+        vplan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped", "origin": "baseline"}]},
                  "version": {"schema": 1}}
         check("16-version-deferral-cannot-eval",
               stage_import(root24, ["a.txt"], vplan, now=NOW, run_nonce=NONCE).verdict == 2)
@@ -2308,11 +2863,11 @@ def self_test():
             specs=_roster()).status == _opf_store.VALID)
         root25, machine25 = build_store(sources={"a.txt": src}, counters="BI=1,LF=0,WL=0",
                                         extra={"backlog_item.index.toml": valid_bi_index})
-        dup_bad = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate",
+        dup_bad = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate", "origin": "baseline",
                                             "target": "BI-999"}]}}
         check("17-duplicate-dangling-finding",
               stage_import(root25, ["a.txt"], dup_bad, now=NOW, run_nonce=NONCE).verdict == 1)
-        dup_ok = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate",
+        dup_ok = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate", "origin": "baseline",
                                            "target": "BI-1"}]}}
         check("17-duplicate-resolves-clean",
               stage_import(root25, ["a.txt"], dup_ok, now=NOW, run_nonce=NONCE).verdict == 0)
@@ -2326,7 +2881,7 @@ def self_test():
                         'coverage_digest = "sha256:' + ("0" * 64) + '"\n')
         check("18-ledger-valid", _opf_release.validate_version(
             tomllib.loads(version_text)).status == _opf_release.VALID)
-        wl_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped"}]},
+        wl_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped", "origin": "baseline"}]},
                    "worklog": [{"date": "2026-02-01T00:00:00Z", "kind": "added",
                                 "summary": "imported note", "actor": {"kind": "importer"}}]}
         root26, machine26 = build_store(counters="BI=0,LF=0,WL=0", sources={"a.txt": src},
@@ -2405,8 +2960,8 @@ def self_test():
         eX = "éX"   # 3 UTF-8 bytes
         rootF6, mF6 = build_store(sources={"a.txt": eX})
         f6_plan = {"fragments": {"a.txt": [
-            {"span": [0, 2], "state": "mapped", "record": bi_candidate()},
-            {"span": [2, 3], "state": "unmapped"}]}}
+            {"span": [0, 2], "state": "mapped", "origin": "baseline", "record": bi_candidate()},
+            {"span": [2, 3], "state": "unmapped", "origin": "baseline"}]}}
         resF6 = stage_import(rootF6, ["a.txt"], f6_plan, now=NOW, run_nonce=NONCE)
         check("F6-byte-span-clean", resF6.verdict == 0)
         if resF6.run_id:
@@ -2416,7 +2971,7 @@ def self_test():
         # a span splitting the multi-byte é ([0,1]) is refused fail-closed (not silently emptied).
         rootF6b, mF6b = build_store(sources={"a.txt": eX})
         f6b_plan = {"fragments": {"a.txt": [
-            {"span": [0, 1], "state": "unmapped"}, {"span": [1, 3], "state": "unmapped"}]}}
+            {"span": [0, 1], "state": "unmapped", "origin": "baseline"}, {"span": [1, 3], "state": "unmapped", "origin": "baseline"}]}}
         check("F6-split-multibyte-finding",
               stage_import(rootF6b, ["a.txt"], f6b_plan, now=NOW, run_nonce=NONCE).verdict == 1)
 
@@ -2444,7 +2999,7 @@ def self_test():
               stage_import(rootF8, ["a.txt"], wl_plan, now=NOW, run_nonce=NONCE).verdict == 2)
 
         # F9: a `target` on a mapped/split row is contradictory -> a finding, nothing staged.
-        f9_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+        f9_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline",
                                             "record": bi_candidate(), "target": "BI-999"}]}}
         rootF9, mF9 = build_store(sources={"a.txt": src})
         resF9 = stage_import(rootF9, ["a.txt"], f9_plan, now=NOW, run_nonce=NONCE)
@@ -2503,7 +3058,7 @@ def self_test():
                      'kind = "added"\nsummary = "seed"\nactor = { kind = "maintainer" }\n')
         rootWL, mWL = build_store(counters="BI=0,LF=0,WL=1", sources={"a.txt": src},
                                   extra={"worklog.toml": wl_active})
-        dup_wl = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate", "target": "WL-1"}]}}
+        dup_wl = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate", "origin": "baseline", "target": "WL-1"}]}}
         check("minor-worklog-duplicate-resolves-clean",
               stage_import(rootWL, ["a.txt"], dup_wl, now=NOW, run_nonce=NONCE).verdict == 0)
 
@@ -2543,12 +3098,12 @@ def self_test():
 
         # B6: a plan row carrying a field its state does not use is a finding (untrusted plan fully
         # validated, spec 14.1): a `target` on an unmapped row, a `record` on a duplicate.
-        b6a = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped", "target": "BI-1"}]}}
+        b6a = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped", "origin": "baseline", "target": "BI-1"}]}}
         rootB6, mB6 = build_store(sources={"a.txt": src})
         resB6 = stage_import(rootB6, ["a.txt"], b6a, now=NOW, run_nonce=NONCE)
         check("B6-unmapped-with-target-finding", resB6.verdict == 1)
         check("B6-unmapped-with-target-no-run", not (mB6.parent / "imports").exists())
-        b6b = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate",
+        b6b = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate", "origin": "baseline",
                                         "record": bi_candidate(), "target": "BI-1"}]}}
         rootB6b, mB6b = build_store(sources={"a.txt": src})
         check("B6-duplicate-with-record-finding",
@@ -2559,7 +3114,7 @@ def self_test():
         link_bad = bi_candidate(); link_bad["links"] = [{"rel": "relates", "id": "BI-999"}]
         rootB7, mB7 = build_store(sources={"a.txt": src})
         resB7 = stage_import(rootB7, ["a.txt"],
-                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline",
                                                        "record": link_bad}]}}, now=NOW, run_nonce=NONCE)
         check("B7-dangling-candidate-link-finding", resB7.verdict == 1)
         check("B7-dangling-candidate-link-no-run", not (mB7.parent / "imports").exists())
@@ -2569,7 +3124,7 @@ def self_test():
                                     extra={"backlog_item.index.toml": bi_index_text()})
         check("B7-existing-link-clean",
               stage_import(rootB7b, ["a.txt"],
-                           {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                           {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline",
                                                      "record": link_ok}]}},
                            now=NOW, run_nonce=NONCE).verdict == 0)
 
@@ -2596,7 +3151,7 @@ def self_test():
         # MINOR: an explicitly-empty worklog candidate list mints no worklog entry, so the version ledger
         # is NOT required (the release-boundary gate has no new WL number to check); the run stages clean.
         rootWLE, mWLE = build_store(sources={"a.txt": src})   # no version.toml
-        wle_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped"}]}, "worklog": []}
+        wle_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped", "origin": "baseline"}]}, "worklog": []}
         check("empty-worklog-no-ledger-clean",
               stage_import(rootWLE, ["a.txt"], wle_plan, now=NOW, run_nonce=NONCE).verdict == 0)
 
@@ -2639,7 +3194,7 @@ def self_test():
         # staging clock. Reverting the setdefault("date", stamp) fabrication would stage it clean.
         rootC2, mC2 = build_store(counters="BI=0,LF=0,WL=5", sources={"a.txt": src},
                                   extra={"version.toml": version_text})
-        wl_nodate = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped"}]},
+        wl_nodate = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped", "origin": "baseline"}]},
                      "worklog": [{"kind": "added", "summary": "imported note",
                                   "actor": {"kind": "importer"}}]}
         check("C2-worklog-no-date-finding",
@@ -2652,7 +3207,7 @@ def self_test():
         rootC2b, mC2b = build_store(sources={"a.txt": src})
         check("C2-candidate-no-updated-at-finding",
               stage_import(rootC2b, ["a.txt"],
-                           {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                           {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline",
                                                      "record": cand_no_upd}]}},
                            now=NOW, run_nonce=NONCE).verdict == 1)
 
@@ -2664,7 +3219,7 @@ def self_test():
                       'updated_at = "2026-01-01T00:00:00Z"\nactor = { kind = "maintainer" }\n')
         rootC3b, mC3b = build_store(sources={"a.txt": src}, counters="BI=1,LF=0,WL=0",
                                     extra={"backlog_item.index.toml": bad_active})
-        dup_bad_active = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate",
+        dup_bad_active = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate", "origin": "baseline",
                                                    "target": "BI-1"}]}}
         check("C3-malformed-active-target-cannot-eval",
               stage_import(rootC3b, ["a.txt"], dup_bad_active, now=NOW, run_nonce=NONCE).verdict == 2)
@@ -2683,7 +3238,7 @@ def self_test():
 
         # CLASS 4: a wrong-typed but EMITTABLE note (an int) is a finding, never staged as promotion-ready.
         # Reverting the note type check stages it clean (the int emits fine, unlike test 13's nested array).
-        c4_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped", "note": 5}]}}
+        c4_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped", "origin": "baseline", "note": 5}]}}
         rootC4, mC4 = build_store(sources={"a.txt": src})
         resC4 = stage_import(rootC4, ["a.txt"], c4_plan, now=NOW, run_nonce=NONCE)
         check("C4-wrong-typed-note-finding", resC4.verdict == 1)
@@ -2699,7 +3254,7 @@ def self_test():
         c5_rec = {"type": "backlog_item", "status": "open", "title": "Imported item",
                   "actor": {"kind": "importer"}, "updated_at": "2026-01-01T00:00:00Z",
                   "refs": [{"kind": "url", "locator": "https://example.invalid/x", "note": "orig"}]}
-        c5_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "record": c5_rec}]}}
+        c5_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline", "record": c5_rec}]}}
         c5_before = copy.deepcopy(c5_plan)
         rootC5, mC5 = build_store(sources={"a.txt": src})
         resC5 = stage_import(rootC5, ["a.txt"], c5_plan, now=NOW, run_nonce=NONCE)
@@ -2816,7 +3371,7 @@ def self_test():
                                     extra={"archive/2026/archive.toml":
                                            'moved = [{ id = "ZZ-1", destination = '
                                            '"archive/2026/x/ZZ-1.toml" }]\n'})
-        dup_phantom = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate",
+        dup_phantom = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "duplicate", "origin": "baseline",
                                                 "target": "ZZ-1"}]}}
         check("C3-phantom-archive-target-cannot-eval",
               stage_import(rootC3p, ["a.txt"], dup_phantom, now=NOW, run_nonce=NONCE).verdict == 2)
@@ -2830,7 +3385,7 @@ def self_test():
                      "updated_at": "2026-01-02T00:00:00Z"}
         rootC6, mC6 = build_store(sources={"a.txt": src})
         resC6 = stage_import(rootC6, ["a.txt"],
-                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline",
                                                        "record": cand_full}]}}, now=NOW, run_nonce=NONCE)
         check("C6-fully-timestamped-clean", resC6.verdict == 0)
         if resC6.run_id:
@@ -2850,7 +3405,7 @@ def self_test():
         cand_vendor = {"type": "backlog_item", "status": "open", "title": "Imported item",
                        "actor": {"kind": "importer"}, "updated_at": "2026-01-01T00:00:00Z",
                        "x-acme": {"ticket": "ACME-1"}}
-        cand_vendor_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+        cand_vendor_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline",
                                                      "record": cand_vendor}]}}
         rootMV, mMV = build_store(sources={"a.txt": src})
         (mMV / "manifest.toml").write_text(
@@ -3078,7 +3633,7 @@ def self_test():
                        "actor": {"kind": "importer"}, "created_at": "2026-01-01T00:00:00Z",
                        "updated_at": "2026-01-02T00:00:00Z"}
         resMa = stage_import(rootMa, ["a.txt"],
-                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline",
                                                        "record": cand_full_a}]}}, now=NOW, run_nonce=NONCE)
         check("M-a-clean", resMa.verdict == 0)
         if resMa.run_id:
@@ -3099,7 +3654,7 @@ def self_test():
         # false-reject the registered case (verdict 1), failing M-b-worklog-registered-vendor-accepted.
         wl_vendor = {"date": "2026-02-01T00:00:00Z", "kind": "added", "summary": "imported note",
                      "actor": {"kind": "importer"}, "x-acme": {"ticket": "ACME-1"}}
-        wl_vendor_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped"}]},
+        wl_vendor_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped", "origin": "baseline"}]},
                           "worklog": [wl_vendor]}
         rootMbR, mMbR = build_store(counters="BI=0,LF=0,WL=5", sources={"a.txt": src},
                                     extra={"version.toml": version_text})
@@ -3121,7 +3676,7 @@ def self_test():
                  "actor": {"kind": "importer"}}
         mc_plan = {
             "fragments": {
-                "a.txt": [{"span": [0, len(src)], "state": "mapped", "record": mc_cand}]
+                "a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline", "record": mc_cand}]
             },
             "worklog": [mc_wl],
         }
@@ -3276,7 +3831,7 @@ def self_test():
             g3_cur = g3_cur["deep"]
         g3_cand = bi_candidate()
         g3_cand["title"] = g3_deep
-        g3_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped",
+        g3_plan = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "mapped", "origin": "baseline",
                                             "record": g3_cand}]}}
         rootG3, mG3 = build_store(sources={"a.txt": src})
         try:
@@ -3342,7 +3897,7 @@ def self_test():
         # staged. Pre-fix the gate inspected only namespaces present in high_water, so the untracked
         # namespace slipped through as verdict 0 promotion_ready with BI omitted from new_high_water.
         lf_only = dict(fragments=dict())
-        lf_only["fragments"]["a.txt"] = [dict(span=[0, len(src)], state="unmapped")]
+        lf_only["fragments"]["a.txt"] = [dict(span=[0, len(src)], state="unmapped", origin="baseline")]
         rootG6, mG6 = build_store(counters="LF=0,WL=0", sources=dict([("a.txt", src)]),
                                   extra=dict([("backlog_item.index.toml", bi_index_text("BI-5"))]))
         resG6 = stage_import(rootG6, ["a.txt"], lf_only, now=NOW, run_nonce=NONCE)
@@ -3480,6 +4035,142 @@ def self_test():
         appl = apply_import(rootA1, prA.run_id or "imp-x", accepted_plan_digest="sha256:0", now=NOW)
         check("A1-apply-deferred-cannot-eval", appl.verdict == 2 and appl.promoted is False)
         check("A1-apply-mutates-nothing", snapshot(mA1) == a1_before)
+
+        # --- OPF-IMPORT-VERB PR-A: origin provenance schema ------------------------------------------
+        # A plan fragment row missing `origin`, or carrying an out-of-vocabulary origin, is a finding (the
+        # required spec-14.1 provenance key); a valid baseline plan stages and its mappings.toml rows and
+        # report.toml carry origin and the plan/inventory binding digests. Reverting the origin requirement
+        # would stage the missing-origin plan clean (verdict 0), flipping O-missing-origin-finding.
+        rootO, mO = build_store(sources={"a.txt": src})
+        no_origin = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped"}]}}
+        check("O-missing-origin-finding",
+              stage_import(rootO, ["a.txt"], no_origin, now=NOW, run_nonce=NONCE).verdict == 1)
+        rootOb, mOb = build_store(sources={"a.txt": src})
+        bad_origin = {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped",
+                                               "origin": "guessed"}]}}
+        check("O-bad-origin-finding",
+              stage_import(rootOb, ["a.txt"], bad_origin, now=NOW, run_nonce=NONCE).verdict == 1)
+        rootOc, mOc = build_store(sources={"a.txt": src})
+        resOc = stage_import(rootOc, ["a.txt"],
+                             {"fragments": {"a.txt": [{"span": [0, len(src)], "state": "unmapped",
+                                                       "origin": "baseline"}]}}, now=NOW, run_nonce=NONCE)
+        check("O-valid-origin-clean", resOc.verdict == 0)
+        if resOc.run_id:
+            o_dir = mOc.parent / "imports" / resOc.run_id
+            mrows = tomllib.loads((o_dir / "mappings.toml").read_text())["mapping"]
+            check("O-mappings-carry-origin", bool(mrows) and all(r.get("origin") in _ORIGIN_SET
+                                                                 for r in mrows))
+            rep = tomllib.loads((o_dir / "report.toml").read_text())
+            check("O-report-binding-digests",
+                  bool(_DIGEST_RE.match(rep.get("plan_digest", "")))
+                  and bool(_DIGEST_RE.match(rep.get("inventory_digest", ""))))
+
+        # --- proposals.toml: machine-readable model proposals staged beside the inventory --------------
+        pp_prop = [{"source_path": "a.txt", "span": [0, 4], "suggested_state": "mapped", "note": "n"}]
+        rootPP, mPP = build_store(sources={"a.txt": "aaaa"})
+        ppr = plan_import(rootPP, ["a.txt"], proposals=pp_prop, now=NOW, run_nonce=NONCE)
+        pp_dir = mPP.parent / "imports" / (ppr.run_id or "MISSING")
+        check("PP-proposals-staged", ppr.verdict == 0 and (pp_dir / "proposals.toml").is_file())
+        if (pp_dir / "proposals.toml").is_file():
+            props = tomllib.loads((pp_dir / "proposals.toml").read_text())
+            check("PP-proposals-origin-stamped",
+                  props.get("run_id") == ppr.run_id
+                  and [p.get("origin") for p in props.get("proposal", [])] == ["model_proposal"])
+        # a plan with NO proposals still stages an (empty) proposals.toml, so the review path always reads
+        # machine data.
+        rootPPe, mPPe = build_store(sources={"a.txt": "aaaa"})
+        ppe = plan_import(rootPPe, ["a.txt"], now=NOW, run_nonce=NONCE)
+        ppe_dir = mPPe.parent / "imports" / (ppe.run_id or "MISSING")
+        check("PP-empty-proposals-staged", (ppe_dir / "proposals.toml").is_file())
+
+        # --- review_import (--review acceptance capture): the attributed decision record ---------------
+        import io
+
+        def all_decisions(run_dir, verb="accept"):
+            inv = tomllib.loads((run_dir / "inventory.toml").read_text())
+            mp = tomllib.loads((run_dir / "mappings.toml").read_text())
+            by_key = {(r["source_path"], tuple(r["span"])): r for r in mp["mapping"]}
+            out = []
+            for fr in inv["fragment"]:
+                row = by_key[(fr["source_path"], tuple(fr["span"]))]
+                out.append({"fragment_id": fr["fragment_id"], "decision": verb,
+                            "origin": row["origin"], "proposed_state": row["state"]})
+            return out
+
+        rootR1, mR1 = build_store(sources={"a.txt": "aaaa", "b.txt": "bbbbbb"})
+        pr = plan_import(rootR1, ["a.txt", "b.txt"], now=NOW, run_nonce=NONCE)
+        r1_dir = mR1.parent / "imports" / (pr.run_id or "MISSING")
+        r1_before = snapshot(mR1)
+        decs = all_decisions(r1_dir)
+        rr = review_import(rootR1, pr.run_id, actor="Reviewer", decisions=decs, now=NOW)
+        check("R1-review-clean", rr.verdict == 0 and rr.decisions_count == 2)
+        check("R1-acceptance-present", (r1_dir / "acceptance.json").is_file())
+        # Review captures a decision record only; the ACTIVE store (machine subdir) is byte-untouched.
+        check("R1-active-store-unchanged", snapshot(mR1) == r1_before)
+        if (r1_dir / "acceptance.json").is_file():
+            acc_bytes = (r1_dir / "acceptance.json").read_bytes()
+            acc = json.loads(acc_bytes.decode("utf-8"))
+            report_r1 = tomllib.loads((r1_dir / "report.toml").read_text())
+            check("R1-acceptance-schema-valid", _validate_acceptance(acc) == [])
+            check("R1-acceptance-binds-run",
+                  acc["run_id"] == pr.run_id and acc["plan_digest"] == report_r1["plan_digest"]
+                  and acc["inventory_digest"] == pr.inventory_digest)
+            check("R1-actor-recorded",
+                  acc["actor"]["declared"] == "Reviewer"
+                  and set(acc["actor"]["context"]) == {"os_user", "git_identity", "hostname"})
+            check("R1-canonical-json-bytes", acc_bytes == _emit_acceptance_bytes(acc))
+        # re-review REPLACES the acceptance record (a new actor, reject decisions) in place.
+        rr2 = review_import(rootR1, pr.run_id, actor="Second", decisions=all_decisions(r1_dir, "reject"),
+                            now=NOW)
+        check("R1-re-review-replaces", rr2.verdict == 0)
+        if (r1_dir / "acceptance.json").is_file():
+            acc2 = json.loads((r1_dir / "acceptance.json").read_text())
+            check("R1-re-review-new-record",
+                  acc2["actor"]["declared"] == "Second"
+                  and all(d["decision"] == "reject" for d in acc2["decisions"]))
+
+        # findings (verdict 1): incomplete coverage, an unknown fragment, a duplicate, an echo mismatch.
+        check("R-review-incomplete-finding",
+              review_import(rootR1, pr.run_id, actor="R", decisions=decs[:-1], now=NOW).verdict == 1)
+        unknown = decs + [dict(decs[0], fragment_id="frag-" + ("0" * 16))]
+        check("R-review-unknown-fragment-finding",
+              review_import(rootR1, pr.run_id, actor="R", decisions=unknown, now=NOW).verdict == 1)
+        dup = decs + [dict(decs[0])]
+        check("R-review-duplicate-fragment-finding",
+              review_import(rootR1, pr.run_id, actor="R", decisions=dup, now=NOW).verdict == 1)
+        wrong_echo = [dict(decs[0], proposed_state="mapped")] + decs[1:]
+        check("R-review-echo-mismatch-finding",
+              review_import(rootR1, pr.run_id, actor="R", decisions=wrong_echo, now=NOW).verdict == 1)
+
+        # cannot-evaluate (verdict 2): a missing actor, a malformed run-id, a not-staged run, and a non-TTY
+        # interactive invocation.
+        check("R-review-missing-actor-cannot-eval",
+              review_import(rootR1, pr.run_id, actor="", decisions=decs, now=NOW).verdict == 2)
+        check("R-review-bad-runid-cannot-eval",
+              review_import(rootR1, "not-a-run-id", actor="R", decisions=[], now=NOW).verdict == 2)
+        check("R-review-no-run-cannot-eval",
+              review_import(rootR1, "imp-20260101T000000Z-0000000000000000", actor="R",
+                            decisions=[], now=NOW).verdict == 2)
+        check("R-interactive-non-tty-cannot-eval",
+              review_import_interactive(rootR1, pr.run_id, actor="R", now=NOW,
+                                        in_stream=io.StringIO(""), out_stream=io.StringIO()).verdict == 2)
+
+        # model_proposal acceptance gate: a mapping resting in a resting state with origin=model_proposal
+        # requires an explicit accept. Hand-edit one mapping row to model_proposal/ignored (a quarantine AND
+        # resting state), then accept -> clean, reject -> finding.
+        rootRM, mRM = build_store(sources={"a.txt": "aaaa"})
+        prm = plan_import(rootRM, ["a.txt"], now=NOW, run_nonce=NONCE)
+        rm_dir = mRM.parent / "imports" / (prm.run_id or "MISSING")
+        mp_rm = tomllib.loads((rm_dir / "mappings.toml").read_text())
+        mp_rm["mapping"][0]["origin"] = "model_proposal"
+        mp_rm["mapping"][0]["state"] = "ignored"
+        (rm_dir / "mappings.toml").write_text(_opf_emit.emit(mp_rm), encoding="utf-8")
+        check("RM-model-proposal-accept-clean",
+              review_import(rootRM, prm.run_id, actor="R", decisions=all_decisions(rm_dir, "accept"),
+                            now=NOW).verdict == 0)
+        check("RM-model-proposal-reject-finding",
+              review_import(rootRM, prm.run_id, actor="R", decisions=all_decisions(rm_dir, "reject"),
+                            now=NOW).verdict == 1)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

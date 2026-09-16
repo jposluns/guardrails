@@ -28,17 +28,37 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
                            so an import never rewrote or lost an original.
   - inventory-digest     : the staged inventory's recorded inventory_digest recomputes over its canonical
                            payload (determinism / integrity anchor).
+  - report-binding-digests : report.toml's plan_digest recomputes over the staged plan.toml bytes and its
+                           inventory_digest matches inventory.toml (the promotion-ready binding surface).
+  - proposals-artifact   : proposals.toml is present, schema/run-id correct, every row stamped
+                           origin=model_proposal, and IMPORT-REPORT.md is byte-reproducible from
+                           inventory.toml + proposals.toml + run id.
+  - acceptance-schema    : the conditionally-present acceptance.json (opf.import.acceptance/v1) is valid.
+  - acceptance-binding   : acceptance.json binds the run (run id + plan_digest + inventory_digest) and
+                           every decision echoes its staged mapping origin/proposed_state.
+  - acceptance-attribution : acceptance.json carries a non-empty, self-asserted actor.declared.
+  - acceptance-completeness : exactly one decision per plan fragment, and every model_proposal-origin
+                           mapping resting in a resting state carries an explicit accept.
   - scan-determinism     : scan_import over the same inputs in reversed declaration order yields an equal
                            inventory digest, and an unreadable/absent declared source fails closed (exit 2).
 
+acceptance.json is CONDITIONALLY PRESENT: absent until a run is reviewed, so an absent acceptance.json is a
+legitimate pre-review state recorded as a PASS ("not yet reviewed") for the four acceptance checks; a
+present-but-unparseable/malformed acceptance.json is a FINDING (check-fails-closed); a present-and-valid one
+runs the binding, attribution, and completeness recompute independently over the staged bytes (a
+defence-in-depth re-derivation, not a re-run of the review tool: the acceptance record is unauthenticated).
+
 The --self-test also DELEGATES to the operation-layer module suite (_opf_import.self_test()) and requires
-it green, so the module's scan/plan/apply unit invariants (including apply-deferred-cannot-evaluate and
-plan-leaves-the-active-store-unchanged) run wherever this CI-registered gate runs.
+it green, so the module's scan/plan/review/apply unit invariants (including apply-deferred-cannot-evaluate,
+the review acceptance-capture invariants, and plan-leaves-the-active-store-unchanged) run wherever this
+CI-registered gate runs.
 
 Disclosed coverage limits (part of the gate, not a footnote): apply-promotion (live-store mutation) is
 deferred to the OPF-IMPORT-APPLY unit, so its transaction/journal/restore/idempotency invariants are NOT
-exercised here; the semantic correctness of a mapping, and actor attribution of an acceptance, are
-gate-blind. A passing gate proves nothing about those.
+exercised here; the semantic correctness of a mapping, and the AUTHENTICITY of a named acceptance actor
+(actor impersonation, review-time backdating, or fabrication by any principal with write access to the run
+dir) are gate-blind: the gate guards the review-to-promotion BINDING, not identity authenticity (the
+reserved signature seam is the upgrade path). A passing gate proves nothing about those.
 
 This repository is not a DevProcess adopter and the `opf import` verb is unwired, so the live leg prints
 NOT APPLICABLE and exits 0, spec-honest like the doctor/drift legs in run_all_checks.sh; the assurance
@@ -64,7 +84,8 @@ _RUN_ID_RE_TEXT = r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$"
 EXPECTED_CHECKS = (
     "staged-run-structure", "report-schema", "artifact-digest-integrity", "mapping-totality",
     "mapping-state-vocab", "lf-bijection", "lf-quad-completeness", "source-preservation",
-    "inventory-digest",
+    "inventory-digest", "report-binding-digests", "proposals-artifact",
+    "acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness",
 )
 
 
@@ -95,6 +116,7 @@ def check_staged_run(run_dir):
     """Run the explicit check registry over one staged run directory. Returns an ordered dict
     check-id -> (ok: bool, detail: str). Each check fails closed on an artefact it cannot read: an
     unreadable required input is that check's FINDING, never a silent pass."""
+    import json
     import re
     import _opf_import as imp
 
@@ -117,7 +139,8 @@ def check_staged_run(run_dir):
     # dependent check (an unreadable input is never nothing-to-check).
     try:
         run = _load_toml(run_dir / "run.toml")
-        # plan.toml is parsed for validity here (fail-closed on unparseable); not otherwise consumed at PR1.
+        # plan.toml is parsed for validity here (fail-closed on unparseable); its raw bytes are re-read by
+        # report-binding-digests to recompute the plan_digest.
         _load_toml(run_dir / "plan.toml")
         mappings = _load_toml(run_dir / "mappings.toml")
         report = _load_toml(run_dir / "report.toml")
@@ -279,6 +302,175 @@ def check_staged_run(run_dir):
         inv_detail = "inventory payload not canonically emittable: {}".format(exc.message)
     record("inventory-digest", inv_ok, inv_detail)
 
+    # --- report-binding-digests ---------------------------------------------------------------------
+    # report.toml carries the promotion-ready binding: plan_digest recomputes over the staged plan.toml
+    # bytes, and inventory_digest matches inventory.toml's own recorded digest (which inventory-digest
+    # already recomputes), so the two anchors an acceptance record binds cannot silently drift.
+    rb_ok = True
+    rb_detail = ""
+    try:
+        plan_bytes = (run_dir / "plan.toml").read_bytes()
+    except OSError as exc:
+        rb_ok, rb_detail = False, "plan.toml unreadable ({})".format(exc)
+    if rb_ok:
+        exp_plan = "sha256:" + _sha256_hex(plan_bytes)
+        rec_plan = report.get("plan_digest")
+        rec_inv = report.get("inventory_digest")
+        if not (isinstance(rec_plan, str) and rec_plan == exp_plan):
+            rb_ok, rb_detail = False, "report.toml plan_digest does not recompute over plan.toml bytes"
+        elif not (isinstance(rec_inv, str) and rec_inv == inventory.get("inventory_digest")):
+            rb_ok, rb_detail = False, "report.toml inventory_digest does not match inventory.toml"
+    record("report-binding-digests", rb_ok, rb_detail)
+
+    # --- proposals-artifact -------------------------------------------------------------------------
+    # proposals.toml is present, schema/run-id correct, every row stamped origin=model_proposal, and the
+    # human-readable IMPORT-REPORT.md is byte-reproducible from inventory.toml + proposals.toml + run id
+    # (the report is a derivative, never independently authored).
+    pa_ok = True
+    pa_detail = ""
+    proposals = None
+    try:
+        proposals = _load_toml(run_dir / "proposals.toml")
+    except _GateError as exc:
+        pa_ok, pa_detail = False, str(exc)
+    if pa_ok:
+        prows = proposals.get("proposal")
+        if not (proposals.get("schema") == 1 and proposals.get("run_id") == run_dir.name
+                and isinstance(prows, list)):
+            pa_ok, pa_detail = False, "proposals.toml schema/run_id/proposal array malformed"
+        else:
+            for pr in prows:
+                if not (isinstance(pr, dict) and pr.get("origin") == imp._MODEL_PROPOSAL_ORIGIN
+                        and isinstance(pr.get("source_path"), str) and isinstance(pr.get("span"), list)
+                        and pr.get("suggested_state") in imp.MAPPING_STATES):
+                    pa_ok, pa_detail = False, "a proposals.toml row is malformed or not origin=model_proposal"
+                    break
+    if pa_ok:
+        try:
+            norm = [{"source_path": pr["source_path"], "span": list(pr["span"]),
+                     "suggested_state": pr["suggested_state"], "note": pr.get("note", "")}
+                    for pr in proposals.get("proposal", [])]
+            expected_md = imp._render_report_md(inventory.get("inventory_digest"),
+                                                inventory.get("fragment"), norm, run_dir.name)
+            actual_md = (run_dir / "IMPORT-REPORT.md").read_text(encoding="utf-8")
+            if expected_md != actual_md:
+                pa_ok, pa_detail = False, ("IMPORT-REPORT.md is not byte-reproducible from inventory.toml "
+                                           "+ proposals.toml + run id")
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            pa_ok, pa_detail = False, "cannot reproduce IMPORT-REPORT.md ({})".format(exc)
+    record("proposals-artifact", pa_ok, pa_detail)
+
+    # --- acceptance.json (conditionally present) ----------------------------------------------------
+    # ABSENT is a legitimate pre-review state, recorded as a PASS ("not yet reviewed"). Present-but-
+    # unparseable is fail-closed (every acceptance check FINDINGs). Present-and-parseable runs the
+    # independent recompute: schema validity, the {run_id, plan_digest, inventory_digest} binding plus a
+    # per-decision echo cross-check, actor attribution, and one-decision-per-fragment completeness with the
+    # model_proposal-resting-requires-accept rule. This is a defence-in-depth recompute over the staged
+    # bytes, not a re-run of the review tool (the acceptance record is unauthenticated; the gate re-derives).
+    acc_checks = ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
+                  "acceptance-completeness")
+    acc_path = run_dir / imp.ACCEPTANCE_NAME
+    if not acc_path.exists():
+        for cid in acc_checks:
+            record(cid, True, "not yet reviewed")
+    else:
+        acc = None
+        acc_err = ""
+        try:
+            acc = json.loads(acc_path.read_bytes().decode("utf-8"))
+        except (OSError, ValueError) as exc:
+            acc_err = "acceptance.json present but unreadable/unparseable ({})".format(exc)
+        if acc is None or not isinstance(acc, dict):
+            for cid in acc_checks:
+                record(cid, False, acc_err or "acceptance.json is not a JSON object")
+        else:
+            # acceptance-schema: structural v1 validity (an independent field-and-type recompute).
+            sch = imp._validate_acceptance(acc)
+            record("acceptance-schema", not sch, "" if not sch else "; ".join(sch))
+
+            # acceptance-attribution: a non-empty, self-asserted actor.declared.
+            actor = acc.get("actor")
+            attr_ok = (isinstance(actor, dict) and isinstance(actor.get("declared"), str)
+                       and bool(actor["declared"].strip()))
+            record("acceptance-attribution", attr_ok,
+                   "" if attr_ok else "acceptance.json actor.declared is missing or empty")
+
+            # Correlate inventory fragments <-> mapping rows for the binding/completeness recompute.
+            frag_by_id = {}
+            key_meta = {}
+            corr_ok = True
+            inv_frags = inventory.get("fragment")
+            map_rows = mappings.get("mapping") if isinstance(mappings, dict) else None
+            if not (isinstance(inv_frags, list) and isinstance(map_rows, list)):
+                corr_ok = False
+            else:
+                for fr in inv_frags:
+                    if not (isinstance(fr, dict) and isinstance(fr.get("fragment_id"), str)
+                            and isinstance(fr.get("source_path"), str) and isinstance(fr.get("span"), list)
+                            and len(fr["span"]) == 2):
+                        corr_ok = False
+                        break
+                    frag_by_id[fr["fragment_id"]] = (fr["source_path"], tuple(fr["span"]))
+                for row in (map_rows if corr_ok else []):
+                    if not (isinstance(row, dict) and isinstance(row.get("source_path"), str)
+                            and isinstance(row.get("span"), list) and len(row["span"]) == 2):
+                        corr_ok = False
+                        break
+                    key_meta[(row["source_path"], tuple(row["span"]))] = {
+                        "origin": row.get("origin"), "state": row.get("state")}
+
+            decisions = acc.get("decisions")
+            decisions = decisions if isinstance(decisions, list) else []
+
+            # acceptance-binding: run id + both digests match the run, and every decision echoes the staged
+            # mapping origin/proposed_state.
+            bind_ok = corr_ok
+            bind_detail = "" if corr_ok else "inventory/mappings correlation malformed (cannot bind)"
+            if corr_ok:
+                if not (acc.get("run_id") == run_dir.name
+                        and acc.get("plan_digest") == report.get("plan_digest")
+                        and acc.get("inventory_digest") == report.get("inventory_digest")):
+                    bind_ok, bind_detail = False, "acceptance run_id/plan_digest/inventory_digest do not bind the run"
+                else:
+                    for d in decisions:
+                        if not isinstance(d, dict):
+                            bind_ok, bind_detail = False, "a decision is not an object"
+                            break
+                        fid = d.get("fragment_id")
+                        if fid in frag_by_id:
+                            meta = key_meta.get(frag_by_id[fid], {})
+                            if (d.get("origin") != meta.get("origin")
+                                    or d.get("proposed_state") != meta.get("state")):
+                                bind_ok, bind_detail = False, ("a decision echoes an origin/proposed_state "
+                                                               "that does not match its staged mapping")
+                                break
+            record("acceptance-binding", bind_ok, bind_detail)
+
+            # acceptance-completeness: exactly one decision per fragment (no missing, unknown, or duplicate)
+            # and every model_proposal-origin mapping resting in a resting state carries an explicit accept.
+            comp_ok = corr_ok
+            comp_detail = "" if corr_ok else "inventory/mappings correlation malformed (cannot check)"
+            if corr_ok:
+                ids = [d.get("fragment_id") for d in decisions if isinstance(d, dict)]
+                if len(ids) != len(decisions):
+                    comp_ok, comp_detail = False, "a decision is not an object"
+                elif len(set(ids)) != len(ids):
+                    comp_ok, comp_detail = False, "a fragment carries more than one decision"
+                elif set(ids) != set(frag_by_id):
+                    comp_ok, comp_detail = False, ("decisions do not cover exactly the inventory fragments "
+                                                   "(a missing or unknown fragment)")
+                else:
+                    accepted = {d.get("fragment_id") for d in decisions
+                                if isinstance(d, dict) and d.get("decision") == "accept"}
+                    for fid, key in frag_by_id.items():
+                        meta = key_meta.get(key, {})
+                        if (meta.get("origin") == imp._MODEL_PROPOSAL_ORIGIN
+                                and meta.get("state") in imp._RESTING_STATES and fid not in accepted):
+                            comp_ok, comp_detail = False, ("a model_proposal resting mapping lacks an "
+                                                           "explicit accept")
+                            break
+            record("acceptance-completeness", comp_ok, comp_detail)
+
     # Registry reconciliation (guard-input-soundness): every declared check MUST have produced a result;
     # one that did not run is recorded as a FINDING, never a silent omission a caller could read as pass.
     for cid in EXPECTED_CHECKS:
@@ -295,6 +487,7 @@ def _self_test():
     import contextlib
     import datetime
     import io
+    import json
     import shutil
     import tempfile
 
@@ -340,6 +533,53 @@ def _self_test():
         if pr.verdict != 0 or not pr.run_id:
             raise OSError("harness: could not stage a clean run ({}: {})".format(pr.verdict, pr.findings))
         return machine.parent / "imports" / pr.run_id
+
+    def accept_all_decisions(run_dir, verb="accept"):
+        inv = _load_toml(run_dir / "inventory.toml")
+        mp = _load_toml(run_dir / "mappings.toml")
+        by_key = {(r["source_path"], tuple(r["span"])): r for r in mp["mapping"]}
+        out = []
+        for fr in inv["fragment"]:
+            row = by_key[(fr["source_path"], tuple(fr["span"]))]
+            out.append({"fragment_id": fr["fragment_id"], "decision": verb,
+                        "origin": row["origin"], "proposed_state": row["state"]})
+        return out
+
+    def review_clean():
+        """A clean staged run that has been reviewed: acceptance.json present, schema-valid, binding."""
+        root, machine = build_store({"a.txt": "hello", "b.txt": "worldww"})
+        pr = imp.plan_import(root, ["a.txt", "b.txt"], now=NOW, run_nonce="gate-nonce")
+        if pr.verdict != 0 or not pr.run_id:
+            raise OSError("harness: could not stage a clean run for review ({}: {})".format(
+                pr.verdict, pr.findings))
+        run_dir = machine.parent / "imports" / pr.run_id
+        rr = imp.review_import(root, pr.run_id, actor="Gate Reviewer",
+                               decisions=accept_all_decisions(run_dir), now=NOW)
+        if rr.verdict != 0:
+            raise OSError("harness: could not review a clean run ({}: {})".format(rr.verdict, rr.findings))
+        return run_dir
+
+    def review_model_proposal():
+        """A reviewed run whose single mapping is a model_proposal resting in `ignored` (a quarantine AND
+        resting state, so lf-bijection stays coherent), accepted. The report digest for the edited
+        mappings.toml is refreshed so only the acceptance layer is under test."""
+        root, machine = build_store({"a.txt": "hello"})
+        pr = imp.plan_import(root, ["a.txt"], now=NOW, run_nonce="gate-nonce")
+        if pr.verdict != 0 or not pr.run_id:
+            raise OSError("harness: could not stage a model-proposal run ({}: {})".format(
+                pr.verdict, pr.findings))
+        run_dir = machine.parent / "imports" / pr.run_id
+        mp = _load_toml(run_dir / "mappings.toml")
+        mp["mapping"][0]["origin"] = imp._MODEL_PROPOSAL_ORIGIN
+        mp["mapping"][0]["state"] = "ignored"
+        (run_dir / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
+        rewrite_report_digest(run_dir, "mappings.toml")
+        rr = imp.review_import(root, pr.run_id, actor="Gate Reviewer",
+                               decisions=accept_all_decisions(run_dir), now=NOW)
+        if rr.verdict != 0:
+            raise OSError("harness: could not review a model-proposal run ({}: {})".format(
+                rr.verdict, rr.findings))
+        return run_dir
 
     def copy_run(run_dir):
         # Preserve the original imp-... run-id BASENAME (under a unique parent) so a clean copy still
@@ -459,6 +699,83 @@ def _self_test():
         (m / "inventory.toml").write_text(_opf_emit.emit(inv), encoding="utf-8")
         expect("disc-inventory-digest", check_staged_run(m)["inventory-digest"][0] is False)
 
+        # report-binding-digests: corrupt report.toml's plan_digest (report.toml is not in its own artefact
+        # list, so the digest-integrity check stays green and only the binding-digest check fires).
+        m = copy_run(clean)
+        rep = _load_toml(m / "report.toml")
+        rep["plan_digest"] = "sha256:" + ("0" * 64)
+        (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
+        expect("disc-report-binding-digests", check_staged_run(m)["report-binding-digests"][0] is False)
+
+        # proposals-artifact: tamper proposals.toml (proposals.toml is not in report's artefact list, so
+        # only the proposals-artifact check fires).
+        m = copy_run(clean)
+        props = _load_toml(m / "proposals.toml")
+        props["run_id"] = "imp-20260101T000000Z-0000000000000000"
+        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        expect("disc-proposals-artifact", check_staged_run(m)["proposals-artifact"][0] is False)
+
+        # --- acceptance.json (conditionally present): absent PASSes, present-and-valid PASSes, and each
+        #     new acceptance check FINDINGs on its single mutation (acceptance.json is not in report's
+        #     artefact list, so a mutation trips only the acceptance layer). ------------------------------
+        # absent: recorded PASS "not yet reviewed" on the (unreviewed) clean run.
+        expect("acceptance-absent-pass",
+               all(check_staged_run(clean)[cid][0] for cid in
+                   ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
+                    "acceptance-completeness")))
+        # present-and-valid: a reviewed run passes every acceptance check.
+        reviewed = review_clean()
+        rres = check_staged_run(reviewed)
+        expect("acceptance-present-valid",
+               all(rres[cid][0] for cid in ("acceptance-schema", "acceptance-binding",
+                                            "acceptance-attribution", "acceptance-completeness")))
+
+        # present-but-unparseable: every acceptance check FINDINGs (fail-closed), never a clean pass.
+        m = copy_run(reviewed)
+        (m / imp.ACCEPTANCE_NAME).write_bytes(b"{ not valid json")
+        munp = check_staged_run(m)
+        expect("acceptance-unparseable-all-finding",
+               all(munp[cid][0] is False for cid in ("acceptance-schema", "acceptance-binding",
+                                                     "acceptance-attribution", "acceptance-completeness")))
+
+        # acceptance-schema: a wrong `format` keeps every other field intact, so only the schema check fires.
+        m = copy_run(reviewed)
+        acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
+        acc["format"] = "opf.import.acceptance/v2"
+        (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
+        expect("disc-acceptance-schema", check_staged_run(m)["acceptance-schema"][0] is False)
+
+        # acceptance-attribution: blank the self-asserted actor.declared.
+        m = copy_run(reviewed)
+        acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
+        acc["actor"]["declared"] = ""
+        (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
+        expect("disc-acceptance-attribution", check_staged_run(m)["acceptance-attribution"][0] is False)
+
+        # acceptance-binding: a stale plan_digest breaks the {run_id, plan_digest, inventory_digest} binding.
+        m = copy_run(reviewed)
+        acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
+        acc["plan_digest"] = "sha256:" + ("0" * 64)
+        (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
+        expect("disc-acceptance-binding", check_staged_run(m)["acceptance-binding"][0] is False)
+
+        # acceptance-completeness: drop one decision so a fragment is left with no decision.
+        m = copy_run(reviewed)
+        acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
+        acc["decisions"] = acc["decisions"][:-1]
+        (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
+        expect("disc-acceptance-completeness", check_staged_run(m)["acceptance-completeness"][0] is False)
+
+        # acceptance-completeness (model_proposal): a model_proposal resting mapping whose decision is a
+        # reject (not an accept) is an incomplete acceptance, even with full coverage.
+        m = copy_run(review_model_proposal())
+        acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
+        for d in acc["decisions"]:
+            d["decision"] = "reject"
+        (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
+        expect("disc-acceptance-model-proposal-omission",
+               check_staged_run(m)["acceptance-completeness"][0] is False)
+
         # fail-closed read: a run dir missing every artefact is all-FINDING, never a clean pass.
         empty = base / "empty-run"
         empty.mkdir()
@@ -489,8 +806,11 @@ def _self_test():
             print("check_opf_import self-test: FAIL: {}".format(f), file=sys.stderr)
         return EXIT_FINDING
     print("check_opf_import self-test: PASS (staged-run structure/report/artifact-digest/mapping-totality/"
-          "state-vocab/lf-bijection/lf-quad/source-preservation/inventory-digest each PASS on a clean run "
-          "and FINDING on its discriminator; scan determinism + fail-closed; empty run all-FINDING)")
+          "state-vocab/lf-bijection/lf-quad/source-preservation/inventory-digest/report-binding-digests/"
+          "proposals-artifact each PASS on a clean run and FINDING on its discriminator; acceptance-schema/"
+          "binding/attribution/completeness PASS absent (not yet reviewed) and present-and-valid, FINDING "
+          "on each single mutation and all-FINDING when unparseable; scan determinism + fail-closed; empty "
+          "run all-FINDING)")
     return EXIT_OK
 
 
