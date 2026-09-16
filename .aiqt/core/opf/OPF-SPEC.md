@@ -936,7 +936,11 @@ the allowed delta, failing closed otherwise. For the 1.0.0 to 1.1.0 upgrade the 
 the base table `[devprocess]` to `[opf]` and its `standard` discovery token from `devprocess` to `opf`
 (the OPFiles rebrand), carrying every other base field over unchanged; bump
 `spec_version` to 1.1.0; remove the retired `decision_support` module key; add the `[types]` rows for
-`contribution`, `maintainer_decision`, and `preference_pattern`; add the two new view rows; extend
+`contribution`, `maintainer_decision`, and `preference_pattern`; add the two new view rows
+(`CONTRIBUTIONS.md` and the `DECISIONS.toml` projection); widen the existing `DECISIONS.md` composed
+view's `sources` from the two 1.0.0 decision sources (`pending_decision`, `autonomous_decision`) to the
+four required at 1.1.0 by adding `maintainer_decision` and `preference_pattern`, so the migrated view
+matches the 1.1.0 required source set; extend
 `counters.toml` with the `CN`/`MD`/`PP` zeros while preserving every existing high-water; and create
 the three missing empty `*.index.toml` files (skipping any that already exist, such as a
 `maintainer_decision.index.toml` where governance was enabled, whose records are preserved

@@ -36,8 +36,12 @@ EXIT_ERROR = 2
 
 # --- the FROZEN 1.0.0 store fixture (byte-pinned; NOT regenerated from the current builders) ----------
 # maintainer_decision and preference_pattern were module-tier and contribution did not exist; the store
-# declares the retired decision_support module. DECISIONS.md already lists the four decision sources, so the
-# spec-9.2 allowed delta (which does not touch DECISIONS.md) upgrades it without a view-source change.
+# declares the retired decision_support module and its [types] table carries ONLY the 1.0.0 baseline types
+# (no maintainer_decision / preference_pattern / contribution). This is what a real 1.0.0 adopter actually
+# has: DECISIONS.md is a 2-SOURCE composed view (pending_decision, autonomous_decision), since the other two
+# decision types did not yet exist. The spec-9.2 allowed delta WIDENS DECISIONS.md to the four 1.1.0 sources;
+# without that widening (F1) the migrated view stays 2-source and fails the render/doctor gate, so this
+# fixture is the regression test for F1 (it FAILED before the widening landed).
 _FIX_MANIFEST = ("""\
 [archive]
 period = "year"
@@ -124,7 +128,7 @@ target = ".working/BLOCKS.md"
 
 [views."DECISIONS.md"]
 kind = "composed"
-sources = ["pending_decision", "autonomous_decision", "maintainer_decision", "preference_pattern"]
+sources = ["pending_decision", "autonomous_decision"]
 target = ".working/DECISIONS.md"
 
 [views."DONE.md"]
@@ -245,6 +249,15 @@ def _suite():
               _opf_emit.emit_checked(tomllib.loads(_FIX_COUNTERS)) == _FIX_COUNTERS)
         check("frozen fixture declares spec_version 1.0.0",
               tomllib.loads(_FIX_MANIFEST)["devprocess"]["spec_version"] == "1.0.0")
+        # F3: the fixture is a GENUINE 1.0.0 store -- a 2-source DECISIONS.md and a [types] table with only
+        # the 1.0.0 baseline types. This is the regression test for F1: it fails the migration unless the
+        # allowed delta widens DECISIONS.md's source set.
+        check("frozen fixture DECISIONS.md is a 2-source 1.0.0 view",
+              tomllib.loads(_FIX_MANIFEST)["views"]["DECISIONS.md"]["sources"]
+              == ["pending_decision", "autonomous_decision"])
+        check("frozen fixture [types] carries only 1.0.0 baseline types (no MD/PP/CN)",
+              all(t not in tomllib.loads(_FIX_MANIFEST)["types"]
+                  for t in ("maintainer_decision", "preference_pattern", "contribution")))
 
         def git_call(store, args):
             proc = subprocess.run(
@@ -314,6 +327,12 @@ def _suite():
                 for t in ("contribution", "maintainer_decision", "preference_pattern")))
             check("two new view rows added",
                   "CONTRIBUTIONS.md" in man1["views"] and "DECISIONS.toml" in man1["views"])
+            # F1: the existing DECISIONS.md composed view is widened from the two 1.0.0 sources to the four
+            # required at 1.1.0 (adding maintainer_decision and preference_pattern), so it renders and
+            # doctor-validates. This assertion FAILS on the 2-source fixture unless the widening delta lands.
+            check("DECISIONS.md view widened to the four 1.1.0 sources",
+                  man1["views"]["DECISIONS.md"]["sources"]
+                  == ["pending_decision", "autonomous_decision", "maintainer_decision", "preference_pattern"])
             cnt1 = tomllib.loads((mach1 / _opf_check.COUNTERS_NAME).read_text(encoding="utf-8"))["counters"]
             check("counters extended CN/MD/PP = 0",
                   cnt1.get("CN") == 0 and cnt1.get("MD") == 0 and cnt1.get("PP") == 0)
@@ -371,6 +390,18 @@ def _suite():
             rc7, out7 = upgrade(s7)
             check("not-adopted root is NOT APPLICABLE (exit 0)",
                   rc7 == EXIT_OK and "NOT APPLICABLE" in out7)
+
+            # 8) F2: a store at spec_version 1.1.0 that is NOT doctor-VALID (a partial or interrupted
+            # migration) must fail closed, never report "already upgraded, no-op". The version marker alone
+            # would say no-op; the doctor-VALID triage returns exit 2 instead. Take the VALID 1.1.0 store from
+            # vector (1), break it by removing a required index, and re-run `opf upgrade`.
+            broken_idx = mach1 / ("maintainer_decision" + _opf_check.INDEX_SUFFIX)
+            broken_idx.unlink()
+            rc8, out8 = upgrade(s1)
+            check("partial 1.1.0 store is not a false rc-0 no-op (fail-closed exit 2)", rc8 == EXIT_ERROR)
+            check("partial 1.1.0 store fail-closed names not-doctor-VALID", "NOT doctor-VALID" in out8)
+            drc8, dout8 = doctor(s1)
+            check("partial 1.1.0 store doctor is not VALID (exit 2)", drc8 == EXIT_ERROR)
 
         if failures:
             for label in failures:

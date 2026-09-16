@@ -1049,6 +1049,14 @@ _UPGRADE_TO = "1.1.0"
 _UPGRADE_NEW_TYPES = ("contribution", "maintainer_decision", "preference_pattern")
 _UPGRADE_RETIRED_MODULE = "decision_support"
 _UPGRADE_NEW_VIEWS = ("CONTRIBUTIONS.md", "DECISIONS.toml")
+# The 1.0.0 -> 1.1.0 delta also WIDENS the existing DECISIONS.md composed view's source set: the two new
+# baseline decision types join the two 1.0.0 sources, so the migrated view matches the 1.1.0 required set
+# (spec 9.2). Without this, a genuine 1.0.0 store's 2-source DECISIONS.md stays 2-source after the delta and
+# fails the render/doctor gate. DECISIONS.toml is a NET-NEW view (in _UPGRADE_NEW_VIEWS) and already carries
+# the full four-source set from NAMED_VIEWS.
+_UPGRADE_WIDENED_VIEW = "DECISIONS.md"
+_UPGRADE_VIEW_FROM_SOURCES = ("pending_decision", "autonomous_decision")
+_UPGRADE_VIEW_ADDED_SOURCES = ("maintainer_decision", "preference_pattern")
 
 
 class _UpgradeError(Exception):
@@ -1152,6 +1160,15 @@ def _upgrade_plan(manifest_model, counters_model):
         if vname in manifest_model["views"]:
             raise _UpgradeError("manifest already declares view {!r}; store is not a clean 1.0.0 "
                                 "baseline (fail-closed)".format(vname))
+    _dv_old = manifest_model["views"].get(_UPGRADE_WIDENED_VIEW)
+    if not isinstance(_dv_old, dict) or not isinstance(_dv_old.get("sources"), list):
+        raise _UpgradeError("manifest declares no valid [views.{!r}] to widen; not a 1.0.0 baseline this "
+                            "upgrade recognizes (fail-closed)".format(_UPGRADE_WIDENED_VIEW))
+    if set(_dv_old["sources"]) != set(_UPGRADE_VIEW_FROM_SOURCES):
+        raise _UpgradeError("manifest [views.{!r}] sources {} are not the 1.0.0 baseline set {}; not a "
+                            "clean 1.0.0 baseline (fail-closed)".format(
+                                _UPGRADE_WIDENED_VIEW, sorted(_dv_old["sources"]),
+                                sorted(_UPGRADE_VIEW_FROM_SOURCES)))
     if not isinstance(counters_model.get("counters"), dict):
         raise _UpgradeError("counters.toml [counters] table is missing or malformed (fail-closed)")
 
@@ -1172,6 +1189,11 @@ def _upgrade_plan(manifest_model, counters_model):
             "sources": list(sources),
             "target": "{}/{}".format(_opf_store.WORKING_DIRNAME, vname),
         }
+    # Widen the existing DECISIONS.md composed view to the 1.1.0 required source set (spec 9.2), leaving its
+    # kind and target unchanged. Set `sources` to the canonical ordered required set from NAMED_VIEWS so the
+    # migrated row is byte-identical to a freshly initialized 1.1.0 store's row.
+    new_manifest["views"][_UPGRADE_WIDENED_VIEW]["sources"] = list(
+        _opf_views.NAMED_VIEWS[_UPGRADE_WIDENED_VIEW][1])
 
     # Postcondition (spec 9.2): the manifest model diff equals EXACTLY the allowed delta. Every top-level
     # table other than modules/types/views and the renamed base is byte-identical; modules loses ONLY the
@@ -1190,6 +1212,25 @@ def _upgrade_plan(manifest_model, counters_model):
         raise _UpgradeError("upgrade postcondition failed: [types] delta is not exactly the new baseline types")
     if set(new_manifest["views"]) != set(manifest_model["views"]) | set(_UPGRADE_NEW_VIEWS):
         raise _UpgradeError("upgrade postcondition failed: [views] delta is not exactly the new view rows")
+    # The DECISIONS.md view is widened by EXACTLY the two new decision sources, changing nothing else in its
+    # row; every OTHER pre-existing view row is byte-identical (only the enumerated new-view rows and this
+    # one source-set widening change, nothing else; spec 9.2).
+    _dv_old2 = manifest_model["views"].get(_UPGRADE_WIDENED_VIEW, {})
+    _dv_new2 = new_manifest["views"].get(_UPGRADE_WIDENED_VIEW, {})
+    if (set(_dv_new2.get("sources", []))
+            != set(_dv_old2.get("sources", [])) | set(_UPGRADE_VIEW_ADDED_SOURCES)):
+        raise _UpgradeError("upgrade postcondition failed: [views.{!r}] source-set delta is not exactly the "
+                            "two new decision sources".format(_UPGRADE_WIDENED_VIEW))
+    if ({k: v for k, v in _dv_new2.items() if k != "sources"}
+            != {k: v for k, v in _dv_old2.items() if k != "sources"}):
+        raise _UpgradeError("upgrade postcondition failed: [views.{!r}] changed beyond its source "
+                            "set".format(_UPGRADE_WIDENED_VIEW))
+    for _vn, _orow in manifest_model["views"].items():
+        if _vn == _UPGRADE_WIDENED_VIEW:
+            continue
+        if new_manifest["views"].get(_vn) != _orow:
+            raise _UpgradeError("upgrade postcondition failed: pre-existing view [views.{!r}] changed but "
+                                "is not in the allowed delta".format(_vn))
     # The base table must be renamed EXACTLY: [devprocess] removed, [opf] present, standard token flipped
     # devprocess -> opf and spec_version bumped, with every other base key carried over unchanged.
     if _prior_base in new_manifest or _opf_store.STANDARD_TOKEN not in new_manifest:
@@ -1261,6 +1302,17 @@ def _cmd_upgrade(rest):
         return EXIT_MALFORMED
 
 
+def _upgrade_doctor(root):
+    """Resolve the store at `root`, gather its git-derived observations, and run the full offline doctor
+    (`validate_store`). Returns the _opf_check validate result (its `.status` is `_opf_store.VALID` on a
+    clean store). Raises _UpgradeError, fail-closed, when the store no longer resolves."""
+    dres = _opf_store.resolve_store(Path(os.path.abspath(root)))
+    if dres.status != _opf_store.RESOLVED:
+        raise _UpgradeError("the store at {!r} no longer resolves ({}); fail-closed".format(root, dres.detail))
+    dobs, _dnotes = _opf_observe.gather(dres)
+    return _opf_check.validate_store(dres, observations=dobs)
+
+
 def _upgrade_run(root):
     import shlex
     import tomllib
@@ -1307,9 +1359,21 @@ def _upgrade_run(root):
             _base_model = manifest_model.get(_opf_store.PRIOR_STANDARD_TOKEN)
         sv = _base_model.get("spec_version") if isinstance(_base_model, dict) else None
         if sv == _UPGRADE_TO:
-            print("opf upgrade: store is already at spec_version {}; nothing to upgrade (no-op).".format(
-                _UPGRADE_TO))
-            return EXIT_OK
+            # F2: a store already at the target is a no-op ONLY when it is genuinely doctor-VALID at 1.1.0.
+            # A partial or interrupted migration leaves spec_version == 1.1.0 with an incomplete delta;
+            # trusting the version marker alone would report false success over a broken store. Re-validate
+            # and fail closed on anything short of VALID, so a partial migration is never reported complete.
+            result = _upgrade_doctor(root)
+            if result.status == _opf_store.VALID:
+                print("opf upgrade: store is already at spec_version {} and doctor-VALID; nothing to "
+                      "upgrade (no-op).".format(_UPGRADE_TO))
+                return EXIT_OK
+            print("opf upgrade: store declares spec_version {} but is NOT doctor-VALID: a partial or "
+                  "interrupted migration is never reported complete (fail-closed, spec 9.2). Restore the "
+                  "store (e.g. `git -C {} restore .`) and re-run; run `opf doctor --root {}` for the "
+                  "findings, exit 2.".format(_UPGRADE_TO, root, root), file=sys.stderr)
+            _doctor_report(result)
+            return EXIT_MALFORMED
         try:
             sv_tuple = tuple(int(p) for p in sv.split(".")) if isinstance(sv, str) else None
         except ValueError:
@@ -1358,11 +1422,7 @@ def _upgrade_run(root):
               "(rc={}); the staged change is left for review, exit 2".format(rc), file=sys.stderr)
         return EXIT_MALFORMED
 
-    dres = _opf_store.resolve_store(Path(os.path.abspath(root)))
-    if dres.status != _opf_store.RESOLVED:
-        raise _UpgradeError("the upgraded store no longer resolves ({}); fail-closed".format(dres.detail))
-    dobs, _dnotes = _opf_observe.gather(dres)
-    result = _opf_check.validate_store(dres, observations=dobs)
+    result = _upgrade_doctor(root)
     if result.status != _opf_store.VALID:
         print("opf upgrade: the upgraded store is NOT doctor-VALID; refusing to offer the change "
               "(fail-closed, spec 9.2). Run `opf doctor --root {}` for the findings, exit 2.".format(root),
