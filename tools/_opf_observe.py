@@ -134,66 +134,57 @@ def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S):
 # The default _scrubbed_env above NEUTRALIZES global/system git configuration so an observation reads only
 # the repository. The `opf init` ignore preflight (opf.py:_init_unignored) needs the OPPOSITE for one
 # read-only question: whether the adopter's REAL `git add` would ignore the planned store, which depends on
-# the adopter's global/system core.excludesFile. This variant PRESERVES git's configuration DISCOVERY for
-# that single check while still dropping every REDIRECT / OBJECT / TRACE / pathspec variable, so config is
-# honoured but the repository cannot be rebound, object lookup redirected, or a trace file written
-# (SECI-threat-model-boundaries: the relaxation is scoped to config discovery, nothing else).
+# the adopter's global and system core.excludesFile. This variant lets git DISCOVER that real configuration
+# through its DEFAULT locations (HOME and XDG_CONFIG_HOME reach ~/.gitconfig and ~/.config/git/{config,ignore},
+# and the system config is read normally), while every other ambient GIT_* variable is dropped by
+# construction (allowlist), so an inherited GIT_DIR / GIT_WORK_TREE / GIT_OBJECT_DIRECTORY / GIT_INDEX_FILE /
+# pathspec variable cannot rebind the repository or redirect object lookup.
+#
+# The env-based CONFIG OVERRIDES (GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM / GIT_CONFIG_NOSYSTEM, the runtime
+# GIT_CONFIG_COUNT + its indexed GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> pairs, and the legacy GIT_CONFIG /
+# GIT_CONFIG_PARAMETERS) are deliberately DROPPED, not honoured: they can set ANY config key (core.worktree
+# to rebind the tree, trace2.* to make the read-only probe write or append an outside file, core.fsmonitor to
+# launch a process), so carrying them would re-open exactly the redirect/trace surface the scrub exists to
+# close (SECI-threat-model-boundaries, prefer-removing-a-path). DISCLOSED RESIDUAL: because the env-based
+# overrides are dropped, an adopter who runs `opf init` with GIT_CONFIG_GLOBAL or GIT_CONFIG_* set (a wrapper,
+# or an explicit `git -c ...`) may see this check diverge from what that same environment's `git add` would
+# do; the common case (a real ~/.gitconfig, no env override) is honoured exactly.
+#
+# Even the adopter's REAL config files can carry trace2 or fsmonitor settings, so the probe FORCES trace off
+# through the GIT_TRACE2* / GIT_TRACE* environment (which git honours ahead of any config; a command-line
+# `-c trace2.*` cannot, because trace2 reads its config before `-c` is applied) and disables core.fsmonitor
+# through a command-scope `-c` at the call site. So no configuration reachable by the probe can turn a
+# read-only check-ignore into a file write or a launched process.
 
-# The ambient names PRESERVED so git can DISCOVER and apply the adopter's real configuration. Everything
-# else GIT_*-prefixed is dropped by construction (allowlist), so no redirect/object/trace variable survives.
-_CONFIG_DISCOVERY_KEEP = ("PATH", "HOME", "XDG_CONFIG_HOME",
-                          "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM")
+# The ambient names carried over so git can discover the adopter's real config through its default paths.
+_CONFIG_DISCOVERY_KEEP = ("PATH", "HOME", "XDG_CONFIG_HOME")
 
-
-class _ConfigContextError(Exception):
-    """An inherited git runtime-configuration context the ignore probe cannot faithfully carry, so the probe
-    REFUSES (fail-closed) rather than silently drop a consequential override and answer a different question
-    (guard-input-soundness)."""
+# Trace toggles FORCED to a disabling value in the probe environment. The GIT_TRACE2* settings take
+# precedence over trace2.* CONFIG (a command-line `-c` cannot, since trace2 reads its config early); the
+# legacy GIT_TRACE* have no config form and are dropped by the allowlist anyway, but are pinned off too.
+_TRACE_OFF = {
+    "GIT_TRACE": "0", "GIT_TRACE_PACKET": "0", "GIT_TRACE_PERFORMANCE": "0", "GIT_TRACE_SETUP": "0",
+    "GIT_TRACE2": "0", "GIT_TRACE2_EVENT": "0", "GIT_TRACE2_PERF": "0",
+}
 
 
 def _config_discovery_env():
-    """Build the environment for the config-discovery ignore probe (OPF-D2B). Preserve exactly the variables
-    git needs to DISCOVER the adopter's global/system configuration (so `git check-ignore` honours a global
-    or system core.excludesFile), plus the runtime `-c`-equivalent config (GIT_CONFIG_COUNT and its indexed
-    GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs, which can THEMSELVES set core.excludesFile). Every OTHER
-    ambient GIT_* variable is dropped by construction (allowlist), so an inherited GIT_DIR, GIT_WORK_TREE,
-    GIT_OBJECT_DIRECTORY, GIT_INDEX_FILE, GIT_TRACE*, or pathspec-control variable cannot rebind the
-    repository, redirect object lookup, or make the read-only call write a trace file. The legacy GIT_CONFIG /
-    GIT_CONFIG_PARAMETERS runtime forms are unsupported here: a non-empty one REFUSES rather than being
-    silently discarded. A malformed GIT_CONFIG_COUNT or a missing indexed pair likewise REFUSES. The call is
-    forced non-interactive and deterministic; core.fsmonitor is disabled by command-scope config at the call
-    site (_run_git_config_discovery), not here. Raises _ConfigContextError on an unsupported or malformed
-    inherited runtime-config context."""
+    """Build the environment for the config-discovery ignore probe (OPF-D2B). Carry only PATH, HOME, and
+    XDG_CONFIG_HOME, so git DISCOVERS the adopter's real global and system configuration through its default
+    locations (honouring a global or system core.excludesFile the same way `git add` would), and DROP every
+    other ambient GIT_* variable by construction (allowlist), so no inherited redirect, object, pathspec, or
+    config-override variable survives. The env-based config overrides (GIT_CONFIG_GLOBAL/SYSTEM, the runtime
+    GIT_CONFIG_COUNT/KEY/VALUE pairs, GIT_CONFIG, GIT_CONFIG_PARAMETERS) are dropped, not honoured, because
+    they can set any key (core.worktree, trace2.*, core.fsmonitor) and would re-open the redirect/trace
+    surface. Trace is FORCED off through the GIT_TRACE2* / GIT_TRACE* env (which outranks trace2.* config),
+    and the call is forced non-interactive and deterministic; core.fsmonitor is disabled by command-scope
+    config at the call site."""
     env = {}
     for name in _CONFIG_DISCOVERY_KEEP:
         val = os.environ.get(name)
         if val is not None:
             env[name] = val
-    for legacy in ("GIT_CONFIG", "GIT_CONFIG_PARAMETERS"):
-        if os.environ.get(legacy):
-            raise _ConfigContextError(
-                "unsupported git runtime-config variable {} is set; the ignore probe refuses rather than "
-                "silently ignore a consequential override".format(legacy))
-    count_raw = os.environ.get("GIT_CONFIG_COUNT")
-    if count_raw is not None:
-        try:
-            count = int(count_raw, 10)
-        except ValueError:
-            raise _ConfigContextError(
-                "GIT_CONFIG_COUNT={!r} is not a base-10 integer; the ignore probe refuses".format(count_raw))
-        if count < 0:
-            raise _ConfigContextError(
-                "GIT_CONFIG_COUNT={!r} is negative; the ignore probe refuses".format(count_raw))
-        env["GIT_CONFIG_COUNT"] = count_raw
-        for i in range(count):
-            for kind in ("KEY", "VALUE"):
-                name = "GIT_CONFIG_{}_{}".format(kind, i)
-                val = os.environ.get(name)
-                if val is None:
-                    raise _ConfigContextError(
-                        "GIT_CONFIG_COUNT={} but {} is unset; the ignore probe refuses an incomplete "
-                        "runtime-config set".format(count_raw, name))
-                env[name] = val
+    env.update(_TRACE_OFF)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["LC_ALL"] = "C"
@@ -201,20 +192,15 @@ def _config_discovery_env():
 
 
 def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S):
-    """Like _run_git, but under the config-discovery environment (OPF-D2B), with core.fsmonitor forced off by
-    a command-scope `-c` so an adopter fsmonitor config cannot launch a monitor process during the read-only
-    probe. Returns a _GitOutcome; a _ConfigContextError (an unsupported / malformed inherited runtime-config
-    context) is mapped to a NOT-completed outcome naming the reason, so the caller fails closed exactly as it
-    does for a timeout or launch failure. (QA-NOTE: the `-c core.fsmonitor=false` overrides file-level config;
-    its precedence versus a core.fsmonitor set through a GIT_CONFIG_* runtime pair is a residual for review.)"""
-    try:
-        env = _config_discovery_env()
-    except _ConfigContextError as exc:
-        return _GitOutcome(False, None, b"", str(exc))
+    """Like _run_git, but under the config-discovery environment (OPF-D2B), and with core.fsmonitor forced
+    off by a command-scope `-c` so an adopter fsmonitor config cannot launch a monitor process during the
+    read-only probe (a command-line `-c` overrides file and runtime config for fsmonitor; trace2 is instead
+    forced off through the environment in _config_discovery_env, since its early config read ignores `-c`).
+    Returns a _GitOutcome shaped exactly as _run_git's."""
     cmd = [git, "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(store_root)] + list(args)
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              env=env, timeout=timeout)
+                              env=_config_discovery_env(), timeout=timeout)
     except subprocess.TimeoutExpired:
         return _GitOutcome(False, None, b"", "git timed out after {}s".format(timeout))
     except OSError as exc:

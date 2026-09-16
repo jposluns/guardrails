@@ -182,7 +182,10 @@ def _suite(invoke):
             home = base / "home"
             home.mkdir()
             saved_env = {name: os.environ.get(name)
-                         for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS")}
+                         for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS",
+                                      "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+                                      "GIT_CONFIG_COUNT", "GIT_CONFIG",
+                                      "GIT_CONFIG_PARAMETERS")}
             # Even a broken parser that ignores --root defaults into this isolated, non-git directory.
             # Restore the caller's cwd before TemporaryDirectory removes the fixture.
             saved_cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
@@ -190,6 +193,11 @@ def _suite(invoke):
                 os.environ["HOME"] = str(home)
                 os.environ.pop("XDG_CONFIG_HOME", None)
                 os.environ.pop("XDG_CONFIG_DIRS", None)
+                os.environ.pop("GIT_CONFIG_GLOBAL", None)
+                os.environ.pop("GIT_CONFIG_SYSTEM", None)
+                os.environ.pop("GIT_CONFIG_COUNT", None)
+                os.environ.pop("GIT_CONFIG", None)
+                os.environ.pop("GIT_CONFIG_PARAMETERS", None)
                 os.chdir(base)
                 parser_root = base / "parser"
                 parser_root.mkdir()
@@ -393,48 +401,43 @@ def _suite(invoke):
                 check("magic-named ignored root preserved", _snapshot(magic_sub) == before)
 
                 # OPF-D2B: a destination ignored ONLY by the adopter's GLOBAL core.excludesFile (no repo-local
-                # rule) must be refused. The pre-D2B check pinned GIT_CONFIG_GLOBAL to os.devnull and could not
-                # see it, so init wrongly succeeded; the config-discovery probe now consults it. DISCRIMINATOR:
-                # this vector FAILS (init succeeds, no "git-ignored") against the pre-D2B check.
+                # rule) must be refused. The pre-D2B check neutralized the global config, so init wrongly
+                # succeeded; the config-discovery probe now reads the adopter's ~/.gitconfig through HOME.
+                # DISCRIMINATOR: this fails (init succeeds, no "git-ignored") against the pre-D2B check. The
+                # global config is written into the isolated HOME only for THIS vector and removed after, so
+                # it cannot ignore .working/ for the positive vectors that follow.
                 global_ignored = make_git("global-excludes-target")
                 gexcludes = base / "d2b-global-excludes"
                 gexcludes.write_bytes(working.encode("ascii") + b"/\n")
-                gconfig = base / "d2b-global-gitconfig"
-                gconfig.write_bytes(
+                gitconfig = home / ".gitconfig"
+                gitconfig.write_bytes(
                     b"[core]\n\texcludesFile = " + str(gexcludes).encode("ascii") + b"\n")
                 gi_before = _snapshot(global_ignored)
-                saved_gcg = os.environ.get("GIT_CONFIG_GLOBAL")
-                os.environ["GIT_CONFIG_GLOBAL"] = str(gconfig)
                 try:
                     rc, output = run(global_ignored)
                 finally:
-                    if saved_gcg is None:
-                        os.environ.pop("GIT_CONFIG_GLOBAL", None)
-                    else:
-                        os.environ["GIT_CONFIG_GLOBAL"] = saved_gcg
+                    gitconfig.unlink()
                 check("global-excludesFile ignored destination refused",
                       rc == EXIT_ERROR and "git-ignored" in output)
                 check("global-excludesFile ignored destination preserved",
                       _snapshot(global_ignored) == gi_before)
 
-                # OPF-D2B: an unsupported / malformed inherited runtime-config context fails CLOSED (the probe
-                # refuses rather than silently drop a consequential override). A non-numeric GIT_CONFIG_COUNT is
-                # such a context; init must refuse (exit 2), never create the store. (The precise refusal locus
-                # can be the ignore probe or an earlier git call, both fail-closed; the assertion checks refusal
-                # and preservation, not the exact message.)
-                badconfig = make_git("d2b-badconfig-target")
-                bc_before = _snapshot(badconfig)
-                saved_count = os.environ.get("GIT_CONFIG_COUNT")
-                os.environ["GIT_CONFIG_COUNT"] = "not-a-number"
+                # OPF-D2B: a config that would make the read-only probe WRITE a trace file (trace2.eventTarget
+                # in the adopter's ~/.gitconfig) must produce NO write: the probe forces GIT_TRACE2* off in
+                # its environment (a command-line -c cannot, since trace2 reads its config before -c). Init
+                # proceeds normally and the trace target is never created. DISCRIMINATOR for the trace-off fix.
+                trace_target = make_git("trace2-target")
+                tracefile = base / "d2b-trace2-out.json"
+                tconfig = home / ".gitconfig"
+                tconfig.write_bytes(
+                    b"[trace2]\n\teventTarget = " + str(tracefile).encode("ascii") + b"\n")
                 try:
-                    rc, output = run(badconfig)
+                    rc, output = run(trace_target)
                 finally:
-                    if saved_count is None:
-                        os.environ.pop("GIT_CONFIG_COUNT", None)
-                    else:
-                        os.environ["GIT_CONFIG_COUNT"] = saved_count
-                check("D2B malformed runtime-config refused", rc == EXIT_ERROR)
-                check("D2B malformed runtime-config preserved", _snapshot(badconfig) == bc_before)
+                    tconfig.unlink()
+                check("trace2 config does not make the probe write a file", not tracefile.exists())
+                check("trace2 config does not break a clean init",
+                      rc == EXIT_OK and valid_sources(trace_target))
 
                 # Defence in depth: after a successful init, the staged-and-committed store resolves
                 # end to end, at the standard machine subdir. resolve_store reads the working tree, so

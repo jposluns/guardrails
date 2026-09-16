@@ -767,15 +767,15 @@ def _init_unignored(git, repo, root, paths):
     would normalize "./x" back to "x". The output is then one path per line over the controlled,
     newline-free internal destinations.
 
-    OPF-D2B: the probe runs under _opf_observe._run_git_config_discovery, which PRESERVES git's global and
-    system configuration DISCOVERY (unlike the default scrubbed observer environment that pins
-    GIT_CONFIG_GLOBAL/SYSTEM to os.devnull), so a store ignored ONLY by the adopter's global or system
-    core.excludesFile is now caught here, matching what the adopter's own `git add` would honour
-    (guard-input-soundness). The environment still drops every redirect / object / trace variable, and an
-    unsupported inherited runtime-config context fails closed. Called directly (not via _init_git, which
-    raises on rc != 0) because rc 1 is the success case here; a timeout, launch failure, unexpected rc, OR a
-    not-ignored (rc 1) result accompanied by any git diagnostic (an unverifiable "unignored" verdict) fails
-    closed and refuses.
+    OPF-D2B: the probe runs under _opf_observe._run_git_config_discovery, which lets git DISCOVER the
+    adopter's real global and system configuration through its default locations (unlike the default scrubbed
+    observer environment, which neutralizes it), so a store ignored ONLY by the adopter's global or system
+    core.excludesFile is caught here, matching what the adopter's own `git add` would honour
+    (guard-input-soundness). Env-based config overrides are dropped and trace/fsmonitor are forced off, so no
+    reachable configuration can turn the read-only probe into a write or a launched process. Called directly
+    (not via _init_git, which raises on rc != 0) because rc 1 is the success case here; a timeout, launch
+    failure, or unexpected rc fails closed and refuses. Matching `git add`, a benign git diagnostic on an
+    rc-1 (not-ignored) result is not itself a refusal.
     """
     prefix = root.relative_to(repo)
     scoped = sorted("./" + str(prefix / path) for path in paths)
@@ -788,10 +788,6 @@ def _init_unignored(git, repo, root, paths):
     if result.rc == 0:
         ignored = [p for p in os.fsdecode(result.out).splitlines() if p]
         raise RuntimeError("planned destination is git-ignored: {!r}".format(ignored))
-    if result.rc == 1 and result.err:
-        raise RuntimeError(
-            "git preflight: check-ignore reported not-ignored but emitted a diagnostic, so the ignore "
-            "status is unverifiable ({})".format(result.err))
     if result.rc != 1:
         raise RuntimeError("git preflight: check-ignore failed (rc={}): {}".format(
             result.rc, result.err))
