@@ -1535,24 +1535,37 @@ def _upgrade_product_render_targets(manifest_model):
 
 
 # The EXACT set of valid `git status --porcelain=v1 -z --untracked-files=all --no-renames` XY status PAIRS,
-# enumerated correct-by-construction from git-status(1) "Short Format". Validating the whole PAIR (not each
-# char independently) closes the fail-open where an IMPOSSIBLE pair whose two chars each sit in a per-char
-# set (e.g. UT, or U paired with an ordinary letter) passes the char check and, for the lease path, matches
-# the exclusion and is SILENTLY DROPPED -- the M3 cleanliness guard then reads dirt as clean. Composition:
+# enumerated precisely from the git-status(1) "Short Format" table for the installed git (git 2.53.0 in this
+# env; the table is stable across modern git) and EMPIRICALLY cross-checked by driving real index/worktree
+# states and observing the emitted XY. Validating the whole PAIR (not each char independently) closes the
+# fail-open where an IMPOSSIBLE pair whose two chars each sit in a per-char set passes a char check and, for
+# the lease path, matches the exclusion and is SILENTLY DROPPED -- the M3 cleanliness guard then reads dirt
+# as clean. This is the EXACT man-page enumeration, NOT the {space,M,T,A,D} cartesian, which is a strict
+# SUPERSET that would admit impossible ordinary pairs: git emits X=D ONLY with a space Y, and Y=A ONLY with a
+# space X, so DM DT DA (and MA TA) are unemittable and MUST be refused, not silently accepted as dirt.
+# Composition:
 #   - "??" untracked (--untracked-files=all is passed).
-#   - ORDINARY changed entries: X (index/staged) and Y (worktree) each an ordinary letter, and NOT both
-#     space. Rename R and copy C are EXCLUDED (--no-renames guarantees git emits neither), and the unmerged
-#     code U is NOT an ordinary letter (it appears only in the enumerated unmerged pairs below).
+#   - ORDINARY (non-unmerged) changed entries, per the first table section with rename R and copy C EXCLUDED
+#     (--no-renames guarantees git emits neither) and U reserved to the unmerged tier. For each index letter X
+#     the EXACT set of worktree letters Y git can pair it with, straight off the man-page rows:
+#         X=' ' (index clean):        Y in {A, M, T, D}   (' A' intent-to-add is VALID and accepted)
+#         X in {M, T, A}:             Y in {' ', M, T, D}  (staged change, worktree clean/modified/typechg/del)
+#         X='D' (deleted from index): Y in {' '}           (a deleted-in-index path pairs ONLY with space)
 #   - the seven UNMERGED pairs, verbatim from git-status(1): DD AU UD UA DU AA UU.
 # "!!" (ignored) is deliberately ABSENT: --ignored is not passed, so it cannot appear and is treated as an
-# unexpected/malformed pair -> fail-closed. The ordinary letters are derived here, not the whole valid set
-# hardcoded, so the enumeration is auditable against the man page. Bytes throughout (2-byte pair keys).
-_PORCELAIN_ORDINARY_LETTERS = frozenset(b" MTAD")   # index/worktree letters; R, C, U deliberately absent
+# unexpected/malformed pair -> fail-closed. The per-X worktree sets are enumerated here, not the whole valid
+# set hardcoded flat, so each line stays auditable against the man-page table. Bytes throughout (2-byte keys).
+_PORCELAIN_ORDINARY_YSET = {
+    0x20:     b"AMTD",   # X=' ': worktree added(intent-to-add)/modified/type-changed/deleted
+    ord("M"): b" MTD",   # X='M' (updated in index): worktree unmodified/modified/type-changed/deleted
+    ord("T"): b" MTD",   # X='T' (type changed in index): worktree unmodified/modified/type-changed/deleted
+    ord("A"): b" MTD",   # X='A' (added to index): worktree unmodified/modified/type-changed/deleted
+    ord("D"): b" ",      # X='D' (deleted from index): worktree unmodified only
+}
 _PORCELAIN_UNMERGED_PAIRS = (b"DD", b"AU", b"UD", b"UA", b"DU", b"AA", b"UU")
 _PORCELAIN_VALID_PAIRS = frozenset(
     [b"??"]
-    + [bytes((x, y)) for x in sorted(_PORCELAIN_ORDINARY_LETTERS)
-       for y in sorted(_PORCELAIN_ORDINARY_LETTERS) if not (x == 0x20 and y == 0x20)]
+    + [bytes((x, y)) for x, ys in _PORCELAIN_ORDINARY_YSET.items() for y in ys]
     + list(_PORCELAIN_UNMERGED_PAIRS))
 
 
@@ -1587,8 +1600,9 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl):
         # below (guard-input-soundness): a per-CHAR check accepts an IMPOSSIBLE pair (UT, ZZ, a blank pair, a
         # rename R, a copy C) whose chars each sit in a per-char set, and for the lease path that bogus record
         # would match the exclusion and be SILENTLY DROPPED -- a fail-open in the M3 cleanliness guard. The
-        # pair is validated whole against _PORCELAIN_VALID_PAIRS (?? plus the ordinary cartesian minus blank,
-        # plus the seven unmerged pairs; !!, rename, copy, and any U in a non-unmerged position all excluded).
+        # pair is validated whole against _PORCELAIN_VALID_PAIRS (?? plus the EXACT man-page ordinary
+        # enumeration, plus the seven unmerged pairs; !!, rename, copy, an impossible ordinary pair such as DM
+        # or MA, and any U in a non-unmerged position all excluded).
         # Anything outside that set is MALFORMED -> fail-closed, never a drop.
         if rec[:2] not in _PORCELAIN_VALID_PAIRS:
             raise _UpgradeError("git status returned a porcelain record with an out-of-vocabulary "

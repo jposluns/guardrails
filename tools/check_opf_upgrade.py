@@ -55,10 +55,13 @@ VECTOR ROSTER (U1-U25, P1):
       terminated payload, and a mis-framed record (never a clean-empty result), and excludes a nested-store
       lease after the prefix strip; PLUS the R6 fail-open vectors (a MALFORMED status -- ZZ, a blank pair, a
       rename R, a copy C -- for the lease path refuses rather than being silently dropped by the exclusion,
-      while a well-formed dirty lease record is still excluded); PLUS the status-PAIR vectors (FIX2: an
-      IMPOSSIBLE pair -- UT/TU with U only legal in an unmerged pair, and ignored !! which --ignored-less
-      status cannot emit -- refuses whole-pair, not per-char, for the lease AND a non-lease path, while a
-      positive sweep of every genuinely-valid pair still parses; fails under the old per-char check); and the
+      while a well-formed dirty lease record is still excluded); PLUS the status-PAIR vectors (FIX2/FIX3: an
+      IMPOSSIBLE pair -- UT/TU with U only legal in an unmerged pair, ignored !! which --ignored-less status
+      cannot emit, AND the impossible ORDINARY pairs a {space,M,T,A,D} cartesian would wrongly admit, DM/DT/DA
+      (X=D pairs only with space) and MA/TA (Y=A pairs only with space X) -- each refuses whole-pair, not
+      per-char, for the lease AND a non-lease path, while a positive sweep of every emittable pair (all 17
+      ordinary pairs including ' A' intent-to-add and 'D ', plus ?? and the 7 unmerged) still parses; fails
+      under the old per-char check or a cartesian superset); and the
       R1b leading-space prefix test (_upgrade_probe_dirty keeps a " leading/"-prefixed lease excluded; fails
       under the old .strip()).
   U19 R1 recovery-text root-binding: opf._upgrade_recovery_text called directly with DISTINCT store/product
@@ -911,30 +914,47 @@ def _suite():
             _lx, _ = _grammar_ok(b"?? sub/.working/toml/lease.toml\x00", prefix="sub/",
                                  lease=".working/toml/lease.toml")
             check("U18/R6 nested-store lease excluded after prefix strip", _lx == [])
-            # R6 (fail-open guard): a MALFORMED status for the LEASE PATH must RAISE fail-closed, never be
-            # read as a normal record that matches the lease exclusion and is SILENTLY DROPPED (which would
-            # make the M3 cleanliness guard return CLEAN over dirt). Feed ZZ, a blank pair, a rename R, and a
-            # copy C (the last two impossible under --no-renames) for the lease path; each must refuse.
+            # R6 (fail-open guard): a MALFORMED or IMPOSSIBLE status must RAISE fail-closed, never be read as a
+            # normal record. For the LEASE PATH the danger is acute: a bogus pair a per-char (or cartesian)
+            # check accepts would match the lease exclusion and be SILENTLY DROPPED, making the M3 cleanliness
+            # guard return CLEAN over dirt. The vectors cover out-of-vocabulary (ZZ), a blank pair, rename R and
+            # copy C (impossible under --no-renames), ignored !! (--ignored not passed), U in a non-unmerged
+            # position (UT/TU), AND the impossible ORDINARY pairs a {space,M,T,A,D} cartesian would wrongly
+            # admit -- DM/DT/DA (git emits X=D only with a space Y) and MA/TA (git emits Y=A only with a space
+            # X). Each must refuse on BOTH the lease path and a non-lease path; validating the whole XY pair
+            # (FIX2), against the EXACT man-page enumeration not the cartesian (FIX3), is what closes it.
             _lease_rel = ".working/toml/lease.toml"
-            for _bad, _lbl in ((b"ZZ", "out-of-vocabulary ZZ"), (b"  ", "blank status"),
-                               (b"R ", "rename R"), (b"C ", "copy C"),
-                               (b"UT", "impossible pair UT (U only in unmerged pairs)"),
-                               (b"TU", "impossible pair TU (U only in unmerged pairs)"),
-                               (b"!!", "ignored !! (--ignored not passed)")):
-                _rawb = _bad + b" " + _lease_rel.encode("utf-8") + b"\x00"
-                _mres, _merr = _grammar_ok(_rawb, prefix="", lease=_lease_rel)
-                check("U18/R6 malformed lease status ({}) refuses, never a silent drop".format(_lbl),
+            _neg_pairs = ((b"ZZ", "out-of-vocabulary ZZ"), (b"  ", "blank status"),
+                          (b"R ", "rename R"), (b"C ", "copy C"),
+                          (b"UT", "impossible pair UT (U only in unmerged pairs)"),
+                          (b"TU", "impossible pair TU (U only in unmerged pairs)"),
+                          (b"!!", "ignored !! (--ignored not passed)"),
+                          (b"DM", "impossible ordinary DM (X=D pairs only with space)"),
+                          (b"DT", "impossible ordinary DT (X=D pairs only with space)"),
+                          (b"DA", "impossible ordinary DA (X=D pairs only with space)"),
+                          (b"MA", "impossible ordinary MA (Y=A pairs only with space X)"),
+                          (b"TA", "impossible ordinary TA (Y=A pairs only with space X)"))
+            for _bad, _lbl in _neg_pairs:
+                _rawl = _bad + b" " + _lease_rel.encode("utf-8") + b"\x00"
+                _mres, _merr = _grammar_ok(_rawl, prefix="", lease=_lease_rel)
+                check("U18/R6 impossible/malformed lease status ({}) refuses, never a silent drop".format(_lbl),
                       _mres is None and _merr is not None)
-            # R6 status-PAIR (FIX2): the fail-open closed by validating the whole XY pair, not each char.
-            # UT/TU each have both chars in a per-char set (U valid in unmerged pairs, T an ordinary letter)
-            # yet are IMPOSSIBLE porcelain codes; for the lease path a per-char check would drop them SILENTLY
-            # (reading dirt as clean). A non-lease impossible pair must also refuse, never surface as dirt.
-            _ut_nonlease, _ = _grammar_ok(b"UT .working/toml/x\x00", prefix="", lease=_lease_rel)
-            check("U18/R6 impossible pair UT (non-lease) refuses fail-closed", _ut_nonlease is None)
-            # Positive sweep: EVERY genuinely-valid porcelain v1 pair for this command parses correctly (?? plus
-            # the ordinary changes plus the seven unmerged pairs), so the tightened check never over-refuses.
-            for _vp in (b"??", b" M", b"M ", b"MM", b"A ", b" D", b"AA", b"UU", b"DD", b"AU", b"UD",
-                        b"UA", b"DU", b"MD", b"AM", b"TM", b" T", b"T "):
+                _rawn = _bad + b" .working/toml/x\x00"
+                _nres, _nerr = _grammar_ok(_rawn, prefix="", lease=_lease_rel)
+                check("U18/R6 impossible/malformed non-lease status ({}) refuses fail-closed".format(_lbl),
+                      _nres is None and _nerr is not None)
+            # Positive sweep: EVERY genuinely-emittable porcelain v1 pair for this command parses correctly, so
+            # the tightened check never OVER-refuses. Enumerated independently of the parser's own table (an
+            # independent oracle) as the full emittable set: ?? untracked; the 17 ordinary pairs -- INCLUDING
+            # ' A' (intent-to-add) and 'D ', whose silent omission by a future over-tightening a dropped vector
+            # here would catch; and the seven unmerged pairs.
+            for _vp in (b"??",
+                        b" A", b" M", b" T", b" D",
+                        b"M ", b"MM", b"MT", b"MD",
+                        b"T ", b"TM", b"TT", b"TD",
+                        b"A ", b"AM", b"AT", b"AD",
+                        b"D ",
+                        b"DD", b"AU", b"UD", b"UA", b"DU", b"AA", b"UU"):
                 _vres, _verr = _grammar_ok(_vp + b" .working/toml/x\x00", prefix="", lease=None)
                 check("U18/R6 valid pair {!r} parses (no over-refusal)".format(_vp),
                       _vres == [".working/toml/x"] and _verr is None)
