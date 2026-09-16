@@ -776,6 +776,59 @@ def _suite(invoke):
                 check("gitlink-mode with directory at worktree path proceeds (no over-refusal)",
                       rc == EXIT_OK and valid_sources(gitlink_dir))
 
+                # OPF-D2B round 9 / R9-1 (MAJOR over-refusal): the availability check must engage ONLY in a
+                # PARTIAL clone. In a FULL clone git CANNOT lazy-fetch, so an absent indexed OID never causes a
+                # silent fetch-and-ignore: `git add` stages the store (an absent submodule COMMIT is not a
+                # blob, so do_read_blob stages nothing to ignore) rather than ignoring it. Here a REAL
+                # submodule named ".gitignore" is sparse-omitted in a FULL clone (Codex's exact repro): its
+                # gitlink entry is stage-0 skip-worktree ("S"), its worktree path is absent, and its commit OID
+                # is absent from the superproject's object DB -- yet there is NO promisor remote. The round-9
+                # HEAD reached cat-file on the absent commit OID and REFUSED (rc 2, a pure over-refusal); the
+                # partial-clone gate returns [] for a full clone and init PROCEEDS, matching `git add`
+                # (confirmed ground truth: `git add -- .working` stages, rc 0, check-ignore rc 1).
+                # DISCRIMINATOR: rc 2 (false refusal) against the ungated round-9 HEAD.
+                r9_submod_src = make_git("d2b-r9-submodule-src")
+                (r9_submod_src / "keep").write_bytes(b"submodule content\n")
+                git_call(r9_submod_src, ["--literal-pathspecs", "add", "-A"])
+                git_call(r9_submod_src, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                         "commit", "-m", "subseed"])
+                r9_super_src = make_git("d2b-r9-super-src")
+                git_call(r9_super_src, ["-c", "protocol.file.allow=always", "submodule", "add",
+                                        "file://" + str(r9_submod_src), ".gitignore"])
+                git_call(r9_super_src, ["-c", "user.email=t@t", "-c", "user.name=t",
+                                        "commit", "-m", "add sub as .gitignore"])
+                r9_full = base / "d2b-r9-fullclone-omitted"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone",
+                                "file://" + str(r9_super_src), str(r9_full)])
+                # A FULL clone has no promisor remote; sparse-checkout omits the .gitignore submodule so its
+                # worktree path is absent and skip-worktree is set, leaving the absent commit OID as what the
+                # per-entry check would reach were it not gated on partial-clone-ness.
+                git_input(r9_full, ["sparse-checkout", "set", "--no-cone", "--stdin"],
+                          b"/*\n!/.gitignore\n")
+                rc, output = run(r9_full)
+                check("full-clone sparse-omitted submodule .gitignore proceeds (partial-clone gate)",
+                      rc == EXIT_OK and valid_sources(r9_full))
+
+                # OPF-D2B round 9 / R9-1 companion: an INITIALIZED submodule at ".gitignore" in a FULL
+                # RECURSIVE clone, its directory chmod 000. git's O_RDONLY|O_NOFOLLOW open of the unreadable
+                # directory FAILS, so the per-entry check would fall back to the gitlink commit OID -- which is
+                # absent from the superproject's object DB (the submodule's objects live under .git/modules) --
+                # and the round-9 HEAD REFUSED. But it is a FULL clone (no promisor), so `git add` cannot
+                # lazy-fetch and stages the store (do_read_blob rejects the non-blob commit); the partial-clone
+                # gate returns [] and init PROCEEDS. DISCRIMINATOR: rc 2 against the ungated round-9 HEAD.
+                r9_rec = base / "d2b-r9-recursive-chmod000"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--recurse-submodules",
+                                "file://" + str(r9_super_src), str(r9_rec)])
+                git_call(r9_rec, ["update-index", "--skip-worktree", ".gitignore"])
+                r9_rec_gi = r9_rec / ".gitignore"
+                os.chmod(str(r9_rec_gi), 0o000)
+                try:
+                    rc, output = run(r9_rec)
+                finally:
+                    os.chmod(str(r9_rec_gi), 0o755)   # restore so cleanup can traverse the fixture
+                check("full-clone chmod-000 initialized submodule .gitignore proceeds (partial-clone gate)",
+                      rc == EXIT_OK and valid_sources(r9_rec))
+
                 # OPF-D2B / D3 (fixture hermeticity): the stdin-fed fixture git helper must build its OWN
                 # scrubbed environment, so an inherited GIT_INDEX_FILE (or GIT_DIR / GIT_WORK_TREE /
                 # GIT_OBJECT_DIRECTORY / GIT_COMMON_DIR) cannot redirect its write to a caller's external

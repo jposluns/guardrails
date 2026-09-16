@@ -249,6 +249,39 @@ def _worktree_open_succeeds(worktree_path):
     return True
 
 
+def _is_partial_clone(git, store_root):
+    """True when the repository at store_root is a PARTIAL clone -- one with a promisor remote git can
+    lazy-fetch from -- OR when partial-clone-ness cannot be determined. Returns False ONLY when both probes
+    complete cleanly and find neither a promisor remote nor the partialClone extension, i.e. a definite full
+    (or otherwise non-promisor) clone.
+
+    This gates the whole indexed-ignore availability check: the silent-fetch-and-ignore hazard that check
+    guards against can arise ONLY in a partial clone, because only there can `git add` lazy-fetch an absent
+    indexed .gitignore blob and then ignore the store. In a FULL clone an absent OID never causes a silent
+    fetch-and-ignore -- git either stages (an absent submodule COMMIT is not a blob, so do_read_blob rejects
+    it and nothing is ignored) or fails LOUDLY (a genuinely-needed absent object aborts `git add`) -- so a
+    full-clone availability refusal would be a pure over-refusal (see indexed_ignore_availability's docstring).
+
+    A partial clone is marked by a promisor remote (remote.<name>.promisor=true) and/or the
+    extensions.partialClone config key; git 2.53.0 writes the promisor remote but NOT the extension on a
+    `clone --filter` (confirmed empirically), so BOTH are probed and EITHER suffices. Any promisor-remote
+    config line is treated as partial (git never writes promisor=false, so its mere presence is the marker),
+    the conservative direction. The probe runs under _run_git_config_discovery (same allowlist/GIT_NO_LAZY_FETCH
+    env the availability probe uses). A probe that cannot RUN, or returns an rc other than 0 (found) or 1 (not
+    found), is a cannot-determine that resolves to partial = keep checking -- the safe, fail-closed direction
+    (guard-input-soundness, check-fails-closed-on-unreadable)."""
+    ext = _run_git_config_discovery(git, store_root, ["config", "--get", "extensions.partialClone"])
+    if not ext.completed or ext.rc not in (0, 1):
+        return True    # cannot determine -> partial (fail-closed: keep the availability check engaged)
+    if ext.rc == 0:
+        return True    # the partialClone extension is declared: a partial clone
+    prom = _run_git_config_discovery(
+        git, store_root, ["config", "--get-regexp", r"^remote\..*\.promisor$"])
+    if not prom.completed or prom.rc not in (0, 1):
+        return True    # cannot determine -> partial (fail-closed)
+    return prom.rc == 0   # rc 0: at least one promisor remote -> partial; rc 1: none -> a full clone
+
+
 def indexed_ignore_availability(git, store_root, gitignore_relpaths):
     """Repo-relative candidate .gitignore paths whose ignore rule the adopter's own `git add` would read
     from the INDEX but whose blob is NOT available locally without a promisor fetch. The config-discovery
@@ -257,6 +290,13 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
     fail closed on, not pass (guard-input-soundness, check-fails-closed-on-unreadable). A blob that IS
     available is read identically by this probe and by `git add` (parity, confirmed empirically), and a
     .gitignore with a readable regular working-tree file is read from disk by both, so neither is returned.
+
+    The whole check is GATED on partial-clone-ness (_is_partial_clone): the silent-fetch-and-ignore hazard
+    exists ONLY in a partial clone, because only a promisor remote lets `git add` lazy-fetch an absent OID. In
+    a full (non-promisor) clone git CANNOT lazy-fetch, so an absent OID never causes a silent ignore -- `git
+    add` either stages (an absent submodule COMMIT is not a blob) or aborts LOUDLY on a genuinely-needed absent
+    object -- and this function returns [] immediately (no availability refusal), the only git-faithful answer.
+    Only in a partial clone is the per-entry logic below reached.
 
     git index-reads a .gitignore ONLY for a stage-0 skip-worktree entry whose worktree path its own
     O_NOFOLLOW open cannot use (add_patterns -> read_skip_worktree_file_from_index -> do_read_blob):
@@ -284,12 +324,17 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
     in opf.py reads it mode-blind, and with the object present that probe itself refuses a matching store, so
     this availability check is reached only for an unavailable OID. A VALID submodule (gitlink 160000) has a
     directory at its worktree path, so its worktree open SUCCEEDS and it proceeds (no over-refusal).
-    DISCLOSED CONSERVATIVE RESIDUAL (disclose-guard-residuals): an uninitialized submodule whose commit OID
-    is genuinely unavailable in a partial clone becomes a conservative cannot-evaluate REFUSAL here, even
-    though `git add` would stage it (do_read_blob rejects a non-blob object and stages nothing to ignore);
-    this is a rare fail-closed over-refusal (commit objects are usually present, since a blob:none filter
-    omits only blobs) and it is the safe direction, where the discarded mode allowlist was instead a false
-    pass of the guarded class. A second conservative residual, unchanged: an unavailable applicable ignore
+    DISCLOSED CONSERVATIVE RESIDUAL (disclose-guard-residuals): the per-entry check above engages ONLY inside
+    a partial clone (the _is_partial_clone gate). In a FULL clone an absent indexed OID -- a real submodule
+    whose commit is sparse-omitted or lives at a `.gitignore` worktree path git's open cannot use (absent,
+    unreadable directory, symlink) -- PROCEEDS, matching `git add`, which stages the store there because git
+    cannot lazy-fetch and do_read_blob rejects the non-blob commit. WITHIN a partial clone the one remaining
+    conservative residual is an absent submodule COMMIT OID: it is refused here even though `git add` would
+    stage it (do_read_blob rejects the non-blob object) and even though the fetch it would attempt fails
+    LOUDLY (exit 128) rather than silently ignoring -- a rare fail-closed over-refusal confined to the
+    partial-clone case (commit objects are usually present, since a blob:none filter omits only blobs) and the
+    safe direction, where the discarded mode allowlist was instead a false pass of the guarded class. A second
+    conservative residual, unchanged: an unavailable applicable ignore
     OID is refused even though its (unfetchable) rules might not in fact match the store. Candidate
     paths are matched as LITERAL pathspecs (--literal-pathspecs) so a pathspec-magic sigil (a leading colon)
     is not read as magic (an empty listing that would MISS the ignoring blob) and a glob metacharacter (a
@@ -304,6 +349,10 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
     (appended to the returned list). Both paths are fail-closed."""
     if not gitignore_relpaths:
         return []
+    if not _is_partial_clone(git, store_root):
+        return []   # a full (non-promisor) clone: git cannot lazy-fetch, so an absent indexed OID can never
+                    # cause a silent fetch-and-ignore -- `git add` either stages or fails loudly -- and a
+                    # refusal here would be a pure over-refusal. The hazard exists only in a partial clone.
     listing = _run_git_config_discovery(
         git, store_root,
         ["--literal-pathspecs", "ls-files", "-s", "-t", "-z", "--"] + list(gitignore_relpaths))
