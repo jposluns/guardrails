@@ -584,6 +584,7 @@ tools/check_newtab.py text eol=lf
 tools/check_no_dashes.py text eol=lf
 tools/check_opf_doctor.py text eol=lf
 tools/check_opf_drift.py text eol=lf
+tools/check_opf_import.py text eol=lf
 tools/check_opf_init.py text eol=lf
 tools/check_opf_upgrade.py text eol=lf
 tools/check_overclaim.py text eol=lf
