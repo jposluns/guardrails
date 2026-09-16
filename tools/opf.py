@@ -1367,7 +1367,11 @@ def _cmd_upgrade(rest):
     killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
     through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers; and the lease is not
     made observable at a sync target before writes (spec 5.7) because this build has no sync runtime, so the
-    guarantee is single-host single-writer.""".format(to=_UPGRADE_TO)
+    guarantee is single-host single-writer. A third disclosed residual: this build has no 1.0.0 pre-doctor,
+    so a 1.0.0 store invalid in a way the origin preconditions do not inspect fails only AFTER mutation (at
+    the render or the final doctor), recovering through the step-3 subtree-scoped restore; the committed HEAD
+    stays a verified restore path for the whole blast radius, so no owner work is lost.""".format(
+        to=_UPGRADE_TO)
     root = None
     i = 0
     while i < len(rest):
@@ -1515,7 +1519,12 @@ def _upgrade_check_clean(res, manifest_model):
     surface (SECA-verified-restore-path). The lease path is EXCLUDED (byte-literal): a held lease is step 4's
     own specific refusal, not generic dirt. Refuses fail-closed (exit 2) on any dirt, naming up to 10 paths
     plus the total, advising commit-your-changes and NEVER a restore (the dirt is the owner's own work,
-    preserve-uncommitted-work)."""
+    preserve-uncommitted-work).
+
+    Residual (disclose-guard-residuals): the probe uses --untracked-files=all, which does NOT surface a
+    git-IGNORED file under the scope; a conforming store has no ignored render targets, so an ignored file
+    there would neither block the run nor be restorable from HEAD. The alternative (--ignored) would over-
+    fire on ordinary build detritus, so this build accepts and discloses the narrower scope."""
     git = _opf_observe._git_path()
     if git is None:
         raise _UpgradeError("cannot locate git to verify the store is clean before the upgrade; without a "
