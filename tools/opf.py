@@ -1056,7 +1056,6 @@ _UPGRADE_NEW_VIEWS = ("CONTRIBUTIONS.md", "DECISIONS.toml")
 # the full four-source set from NAMED_VIEWS.
 _UPGRADE_WIDENED_VIEW = "DECISIONS.md"
 _UPGRADE_VIEW_FROM_SOURCES = ("pending_decision", "autonomous_decision")
-_UPGRADE_VIEW_ADDED_SOURCES = ("maintainer_decision", "preference_pattern")
 
 
 class _UpgradeError(Exception):
