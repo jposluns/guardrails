@@ -142,7 +142,7 @@ _QUARANTINE_STATES = frozenset(MAPPING_STATES) - _CANDIDATE_STATES - {_DUPLICATE
 
 # The run-id grammar (U7-defined; a spec follow-on is proposed). No separator, dot segment, or control
 # character, so the id is a safe single path component.
-_RUN_ID_RE = re.compile(r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$")
+_RUN_ID_RE = re.compile(r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\Z")
 _RUN_DESCRIPTOR_FORMAT = "opf-import-run-v1"
 
 # An archive-year directory name is a 4-digit year (spec 12 rotates by year; ARCHIVE_PERIODS = ("year",)).
@@ -204,7 +204,7 @@ PROPOSALS_NAME = "proposals.toml"
 # ceiling, and a round-trip check. Digests are recorded as "sha256:"+lowercase-hex, matching the store.
 ACCEPTANCE_NAME = "acceptance.json"
 ACCEPTANCE_FORMAT = "opf.import.acceptance/v1"
-_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 _DECISION_VERBS = frozenset({"accept", "reject"})
 
 # The closed keyset of an inert model proposal (spec 14.1 untrusted plan data). A proposal is a SUGGESTED
@@ -2069,16 +2069,28 @@ def _validate_acceptance(model, where="acceptance.json"):
     else:
         if set(actor) - {"declared", "context"}:
             f.append("{}: actor carries unknown key(s)".format(where))
-        if not (isinstance(actor.get("declared"), str) and actor["declared"].strip()):
+        decl = actor.get("declared")
+        if not (isinstance(decl, str) and decl.strip()):
             f.append("{}: actor.declared must be a non-empty string (the required, self-asserted "
                      "reviewer)".format(where))
+        elif any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in decl):
+            f.append("{}: actor.declared carries a control character".format(where))
         ctx = actor.get("context")
         if not isinstance(ctx, dict) or set(ctx) - {"os_user", "git_identity", "hostname"}:
             f.append("{}: actor.context must be an object of os_user/git_identity/hostname".format(where))
         elif not all(isinstance(ctx.get(k), str) for k in ("os_user", "git_identity", "hostname")):
             f.append("{}: actor.context fields must be strings (opportunistic, may be empty)".format(where))
-    if not (isinstance(model.get("reviewed_at"), str) and model["reviewed_at"]):
+    ra = model.get("reviewed_at")
+    if not (isinstance(ra, str) and ra):
         f.append("{}: reviewed_at must be a non-empty RFC-3339 UTC string".format(where))
+    else:
+        # A well-formed RFC-3339 UTC timestamp in the producer's emitted form (YYYY-MM-DDThh:mm:ssZ): a
+        # non-empty but malformed value (e.g. "garbage") is a finding, not merely a non-empty check.
+        try:
+            datetime.datetime.strptime(ra, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            f.append("{}: reviewed_at is not a well-formed RFC-3339 UTC timestamp "
+                     "(YYYY-MM-DDThh:mm:ssZ)".format(where))
     if "signature" in model and model["signature"] is not None:
         f.append("{}: signature is reserved and unused in v1 (must be absent or null)".format(where))
     decisions = model.get("decisions")
@@ -2093,11 +2105,14 @@ def _validate_acceptance(model, where="acceptance.json"):
                 f.append("{}: unknown key(s)".format(dw))
             if not (isinstance(d.get("fragment_id"), str) and d["fragment_id"]):
                 f.append("{}: fragment_id must be a non-empty string".format(dw))
-            if d.get("decision") not in _DECISION_VERBS:
+            # isinstance guards BEFORE each membership test: this validator runs over an UNTRUSTED parsed
+            # acceptance.json (the gate calls it on staged bytes), so an unhashable value ([] or {}) for any
+            # of these fields would otherwise raise an uncaught TypeError; a malformed value is a finding.
+            if not (isinstance(d.get("decision"), str) and d["decision"] in _DECISION_VERBS):
                 f.append("{}: decision must be 'accept' or 'reject'".format(dw))
-            if d.get("origin") not in _ORIGIN_SET:
+            if not (isinstance(d.get("origin"), str) and d["origin"] in _ORIGIN_SET):
                 f.append("{}: origin is not a mapping origin".format(dw))
-            if d.get("proposed_state") not in MAPPING_STATES:
+            if not (isinstance(d.get("proposed_state"), str) and d["proposed_state"] in MAPPING_STATES):
                 f.append("{}: proposed_state is not a mapping state".format(dw))
             if "note" in d and not isinstance(d["note"], str):
                 f.append("{}: note must be a string when present".format(dw))
@@ -2123,7 +2138,10 @@ def _resolve_store_for_review(product_root):
 def _load_staged_run_for_review(store_root_fd, run_rel):
     """Load a staged run's machine artefacts for review, fail-closed. A run with no report.toml is
     not-promotion-ready (CANNOT-EVALUATE); a missing or malformed run.toml/mappings.toml/inventory.toml/
-    proposals.toml is a malformed run (CANNOT-EVALUATE). Builds the fragment correspondence: each inventory
+    proposals.toml is a malformed run (CANNOT-EVALUATE). Confirms the acceptance BINDING at source: run.toml
+    and plan.toml must be present, report.toml's plan_digest must recompute over the staged plan.toml bytes,
+    and its inventory_digest must recompute over inventory.toml's canonical payload, so acceptance can never
+    bind a digest that does not match the staged artefacts. Builds the fragment correspondence: each inventory
     fragment (keyed by its content-inclusive fragment_id) must correspond one-to-one, by (source_path,
     span), to exactly one mapping row (the whole-file baseline plan_import produces); a run whose inventory
     fragments and mapping rows are not in 1:1 correspondence is not reviewable in v1 (CANNOT-EVALUATE, a
@@ -2147,6 +2165,25 @@ def _load_staged_run_for_review(store_root_fd, run_rel):
         raise _cannot("report.toml plan_digest is missing or malformed (cannot bind acceptance)")
     if not (isinstance(inventory_digest, str) and _DIGEST_RE.match(inventory_digest)):
         raise _cannot("report.toml inventory_digest is missing or malformed (cannot bind acceptance)")
+
+    # Recompute-and-confirm the two binding digests over the STAGED bytes (guard-input-soundness): the
+    # syntax check above proves only that report.toml's digests are well-formed, not that they bind THIS
+    # run. run.toml AND plan.toml must be present (a missing one is a malformed run, like the other required
+    # artefacts); report.toml's plan_digest must recompute over the staged plan.toml bytes, and its
+    # inventory_digest must recompute over inventory.toml's canonical payload (the same emission
+    # _build_inventory / the inventory-digest gate use, excluding the inventory_digest field itself). Only
+    # after both recomputes agree may review bind acceptance to these digests.
+    if _read_toml(store_root_fd, run_rel + "/run.toml") is None:
+        raise _cannot("staged run is missing run.toml (malformed or not a plan run; cannot review)")
+    try:
+        plan_bytes, _pst = _journal._read_contained(store_root_fd, run_rel + "/plan.toml")
+    except _journal.JournalError as exc:
+        raise _cannot("staged run plan.toml is missing or unreadable ({}); cannot review".format(exc))
+    if "sha256:" + _sha256_hex(plan_bytes) != plan_digest:
+        raise _cannot("report plan_digest does not match the staged plan.toml")
+    inv_payload = {k: v for k, v in inventory.items() if k != "inventory_digest"}
+    if "sha256:" + _sha256_hex(_emit_bytes(inv_payload, "inventory")) != inventory_digest:
+        raise _cannot("report inventory_digest does not match the staged inventory.toml")
 
     inv_frags = inventory.get("fragment")
     map_rows = mappings.get("mapping")
@@ -2262,7 +2299,9 @@ def _validate_review_decisions(decisions, frag_by_id, key_meta):
             findings.append("{}: duplicate decision for fragment {!r}".format(dw, fid)); continue
         seen.add(fid)
         verb = d.get("decision")
-        if verb not in _DECISION_VERBS:
+        # isinstance guard BEFORE the membership test: an unhashable verb ([] or {}) would otherwise raise
+        # an uncaught TypeError at `verb not in _DECISION_VERBS`; a malformed verb is a finding, not a crash.
+        if not isinstance(verb, str) or verb not in _DECISION_VERBS:
             findings.append("{}: decision must be 'accept' or 'reject'".format(dw)); continue
         meta = key_meta[frag_by_id[fid]]
         if d.get("origin") != meta["origin"]:
@@ -2294,34 +2333,49 @@ def _validate_review_decisions(decisions, frag_by_id, key_meta):
 
 
 def _stage_acceptance(resolution, run_rel, acceptance_bytes):
-    """Stage acceptance.json into the run dir through journaled contained ops (the _write_plan_artifacts
-    pattern: fsync, staged-digest verify, containment). A re-review REPLACES a prior acceptance.json via an
-    explicit remove+create in one apply, never an in-place edit; a prior entry that is not a regular file is
-    fail-closed. Never mutates the active store."""
+    """Stage acceptance.json into the run dir RECOVERABLY. The new bytes are written to a FRESH sibling temp
+    file through a journaled contained create (the _write_plan_artifacts pattern: O_EXCL, no-follow,
+    staged-digest verify, fsync, umask-independent mode), then a SINGLE atomic rename installs them over any
+    prior acceptance.json (with a parent-dir fsync for durability). rename(2) is atomic, so a re-review's
+    prior acceptance survives BYTE-INTACT through any failure before the rename (the earlier
+    [remove, create] destroy-then-recreate window, where an injected mid-write failure left a 0-byte or
+    absent record, is gone). A prior entry that is not a regular file is fail-closed. Never mutates the
+    active store; keeps the staging model's DIRECT apply_ops posture (no store lock, no run_transaction)."""
     acc_rel = run_rel + "/" + ACCEPTANCE_NAME
+    # A unique sibling temp so the create's O_EXCL never collides and a stale temp from a prior crash cannot
+    # be adopted; it lives in the run dir (a sibling of acceptance.json), so the rename is same-directory.
+    tmp_name = "{}.tmp-{}-{}".format(ACCEPTANCE_NAME, os.getpid(), _sha256_hex(os.urandom(16))[:16])
+    tmp_rel = run_rel + "/" + tmp_name
     try:
         store_root_fd = _opf_store._open_store_root_fd(
             resolution.store_root, resolution.pointer_source != "default")
     except OSError as exc:
         raise _cannot("cannot open store root {!r} for the acceptance write ({})".format(
             resolution.store_root, exc))
+
+    def _remove_temp():
+        # Best-effort contained cleanup of the staged temp on a failure path; never touches acceptance.json.
+        try:
+            pfd2, name2 = _journal._open_parent(store_root_fd, tmp_rel)
+        except OSError:
+            return
+        try:
+            os.unlink(name2, dir_fd=pfd2)
+        except OSError:
+            pass
+        finally:
+            os.close(pfd2)
+
     try:
         prior = _journal._lstat_contained(store_root_fd, acc_rel)
-        ops = []
-        if prior is not None:
-            if not stat.S_ISREG(prior.st_mode):
-                raise _cannot("a prior {} is not a regular file; refusing to replace it".format(ACCEPTANCE_NAME))
-            try:
-                prior_bytes, _fst = _journal._read_contained(store_root_fd, acc_rel)
-            except _journal.JournalError as exc:
-                raise _cannot("cannot read the prior {} to replace it ({})".format(ACCEPTANCE_NAME, exc))
-            ops.append({"op": "remove", "path": acc_rel,
-                        "prestate": {"kind": "file", "mode": stat.S_IMODE(prior.st_mode),
-                                     "size": len(prior_bytes), "sha256": _sha256_hex(prior_bytes)}})
-        ops.append({"op": "create", "path": acc_rel,
-                    "poststate": {"kind": "file", "mode": FILE_MODE,
-                                  "content-sha256": _sha256_hex(acceptance_bytes)}})
-        content = {acc_rel: acceptance_bytes}
+        if prior is not None and not stat.S_ISREG(prior.st_mode):
+            raise _cannot("a prior {} is not a regular file; refusing to replace it".format(ACCEPTANCE_NAME))
+        # Stage the new bytes into the temp file. The prior acceptance.json is untouched at this step, so a
+        # failure here (a hostile tree, an I/O error) leaves it byte-intact.
+        ops = [{"op": "create", "path": tmp_rel,
+                "poststate": {"kind": "file", "mode": FILE_MODE,
+                              "content-sha256": _sha256_hex(acceptance_bytes)}}]
+        content = {tmp_rel: acceptance_bytes}
 
         def staged_reader(op):
             return content[op["path"]]
@@ -2329,7 +2383,23 @@ def _stage_acceptance(resolution, run_rel, acceptance_bytes):
         try:
             _journal.apply_ops(store_root_fd, ops, staged_reader)
         except _journal.JournalError as exc:
-            raise _cannot("acceptance write failed ({}); the staged candidate is intact".format(exc))
+            _remove_temp()
+            raise _cannot("acceptance write failed ({}); the prior acceptance is intact".format(exc))
+        # Atomic cutover: a single rename installs the staged temp over any prior acceptance.json, contained
+        # beneath the run dir's pre-opened no-follow parent handle, then fsync that directory for durability.
+        try:
+            pfd, acc_final = _journal._open_parent(store_root_fd, acc_rel)
+        except OSError as exc:
+            _remove_temp()
+            raise _cannot("cannot open the run dir to install the acceptance ({})".format(exc))
+        try:
+            os.rename(tmp_name, acc_final, src_dir_fd=pfd, dst_dir_fd=pfd)
+            os.fsync(pfd)
+        except OSError as exc:
+            _remove_temp()
+            raise _cannot("acceptance install (rename) failed ({}); the prior acceptance is intact".format(exc))
+        finally:
+            os.close(pfd)
     finally:
         os.close(store_root_fd)
     return acc_rel
@@ -2541,7 +2611,7 @@ def self_test():
     # builds the id from a fixed format string (a strftime stamp plus a 16-hex digest) that always conforms,
     # so the production regex is a belt-and-suspenders guard the public API cannot drive to reject. The
     # oracle pins the id SHAPE the finalizer will parse, nothing more.
-    INDEP_RUN_ID_RE = re.compile(r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$")
+    INDEP_RUN_ID_RE = re.compile(r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\Z")
 
     def manifest_text():
         return "\n".join([
@@ -4119,6 +4189,25 @@ def self_test():
                   acc["actor"]["declared"] == "Reviewer"
                   and set(acc["actor"]["context"]) == {"os_user", "git_identity", "hostname"})
             check("R1-canonical-json-bytes", acc_bytes == _emit_acceptance_bytes(acc))
+
+            # _validate_acceptance strengthening: reviewed_at must be a well-formed RFC-3339 UTC timestamp
+            # (a non-empty "garbage" now FINDINGs); a trailing newline in the run_id or either digest is
+            # rejected (the \Z-anchored regexes, not $); and a control char in actor.declared FINDINGs.
+            def _acc_findings(**overrides):
+                a = copy.deepcopy(acc)
+                for k, v in overrides.items():
+                    a[k] = v
+                return _validate_acceptance(a)
+            check("R1-acc-reviewed-at-garbage-finding", _acc_findings(reviewed_at="garbage") != [])
+            check("R1-acc-run-id-trailing-newline-finding",
+                  _acc_findings(run_id=acc["run_id"] + "\n") != [])
+            check("R1-acc-plan-digest-trailing-newline-finding",
+                  _acc_findings(plan_digest=acc["plan_digest"] + "\n") != [])
+            check("R1-acc-inv-digest-trailing-newline-finding",
+                  _acc_findings(inventory_digest=acc["inventory_digest"] + "\n") != [])
+            acc_decl = copy.deepcopy(acc)
+            acc_decl["actor"]["declared"] = "bad\x01name"
+            check("R1-acc-declared-control-char-finding", _validate_acceptance(acc_decl) != [])
         # re-review REPLACES the acceptance record (a new actor, reject decisions) in place.
         rr2 = review_import(rootR1, pr.run_id, actor="Second", decisions=all_decisions(r1_dir, "reject"),
                             now=NOW)
@@ -4128,6 +4217,27 @@ def self_test():
             check("R1-re-review-new-record",
                   acc2["actor"]["declared"] == "Second"
                   and all(d["decision"] == "reject" for d in acc2["decisions"]))
+
+        # F3: a mid-replace failure leaves the PRIOR acceptance.json BYTE-INTACT (recoverable temp+rename,
+        # not the old destroy-then-recreate). Patch the journaled write to raise; the verdict is
+        # cannot-evaluate and the prior record survives unchanged (never 0-byte or absent).
+        if (r1_dir / "acceptance.json").is_file():
+            prior_acc_bytes = (r1_dir / "acceptance.json").read_bytes()
+            _saved_apply_ops = _journal.apply_ops
+
+            def _boom_apply_ops(*_a, **_k):
+                raise _journal.JournalError("injected mid-replace failure")
+
+            _journal.apply_ops = _boom_apply_ops
+            try:
+                rr_fail = review_import(rootR1, pr.run_id, actor="Third",
+                                        decisions=all_decisions(r1_dir, "accept"), now=NOW)
+            finally:
+                _journal.apply_ops = _saved_apply_ops
+            check("R1-replace-failure-cannot-eval", rr_fail.verdict == 2)
+            check("R1-replace-failure-prior-intact",
+                  (r1_dir / "acceptance.json").is_file()
+                  and (r1_dir / "acceptance.json").read_bytes() == prior_acc_bytes)
 
         # findings (verdict 1): incomplete coverage, an unknown fragment, a duplicate, an echo mismatch.
         check("R-review-incomplete-finding",
@@ -4141,6 +4251,14 @@ def self_test():
         wrong_echo = [dict(decs[0], proposed_state="mapped")] + decs[1:]
         check("R-review-echo-mismatch-finding",
               review_import(rootR1, pr.run_id, actor="R", decisions=wrong_echo, now=NOW).verdict == 1)
+        # an unhashable decision verb ([] or {}) is a FINDING, not an uncaught TypeError at the membership
+        # test (F5): without the isinstance guard this review would raise and crash the self-test.
+        unhashable_verb = [dict(decs[0], decision=[])] + [dict(d) for d in decs[1:]]
+        check("R-review-unhashable-verb-finding",
+              review_import(rootR1, pr.run_id, actor="R", decisions=unhashable_verb, now=NOW).verdict == 1)
+        unhashable_verb2 = [dict(decs[0], decision={})] + [dict(d) for d in decs[1:]]
+        check("R-review-unhashable-verb-dict-finding",
+              review_import(rootR1, pr.run_id, actor="R", decisions=unhashable_verb2, now=NOW).verdict == 1)
 
         # cannot-evaluate (verdict 2): a missing actor, a malformed run-id, a not-staged run, and a non-TTY
         # interactive invocation.
@@ -4154,6 +4272,29 @@ def self_test():
         check("R-interactive-non-tty-cannot-eval",
               review_import_interactive(rootR1, pr.run_id, actor="R", now=NOW,
                                         in_stream=io.StringIO(""), out_stream=io.StringIO()).verdict == 2)
+
+        # F2: review recomputes the binding digests over the staged bytes. A run with plan.toml removed is
+        # cannot-evaluate (a required artefact is absent); a run whose report.toml plan_digest is replaced
+        # with a well-formed but wrong digest is cannot-evaluate (the recompute over plan.toml disagrees),
+        # and NO acceptance is written. Without the recompute the second would bind a digest that names no
+        # staged plan.toml.
+        rootF2a, mF2a = build_store(sources={"a.txt": "aaaa"})
+        prf2a = plan_import(rootF2a, ["a.txt"], now=NOW, run_nonce=NONCE)
+        f2a_dir = mF2a.parent / "imports" / (prf2a.run_id or "MISSING")
+        (f2a_dir / "plan.toml").unlink()
+        check("R-review-plan-toml-removed-cannot-eval",
+              review_import(rootF2a, prf2a.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("R-review-plan-toml-removed-no-acceptance", not (f2a_dir / "acceptance.json").is_file())
+
+        rootF2b, mF2b = build_store(sources={"a.txt": "aaaa"})
+        prf2b = plan_import(rootF2b, ["a.txt"], now=NOW, run_nonce=NONCE)
+        f2b_dir = mF2b.parent / "imports" / (prf2b.run_id or "MISSING")
+        rep_f2b = tomllib.loads((f2b_dir / "report.toml").read_text())
+        rep_f2b["plan_digest"] = "sha256:" + ("0" * 64)
+        (f2b_dir / "report.toml").write_text(_opf_emit.emit(rep_f2b), encoding="utf-8")
+        check("R-review-plan-digest-mismatch-cannot-eval",
+              review_import(rootF2b, prf2b.run_id, actor="R", decisions=[], now=NOW).verdict == 2)
+        check("R-review-plan-digest-mismatch-no-acceptance", not (f2b_dir / "acceptance.json").is_file())
 
         # model_proposal acceptance gate: a mapping resting in a resting state with origin=model_proposal
         # requires an explicit accept. Hand-edit one mapping row to model_proposal/ignored (a quarantine AND

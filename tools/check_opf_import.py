@@ -19,6 +19,8 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
   - mapping-totality     : per source, the mapping spans tile [0, size) exactly (sorted, gap-free,
                            overlap-free, ending at the recorded byte length): nothing is dropped.
   - mapping-state-vocab  : every mapping row's state is one of the eight spec-14.1 mapping states.
+  - mapping-origin-vocab : every mapping row's origin is one of the spec-14.1 provenance origins (a
+                           deleted or out-of-vocabulary origin would silently bypass the acceptance gate).
   - lf-bijection         : the quarantine-state mappings correspond one-to-one to the legacy_fragment
                            records BY (source_path, span), not a bare count, so every quarantined
                            fragment is preserved exactly once and a count-preserving swap is caught.
@@ -67,6 +69,7 @@ rides the --self-test leg over synthetic staged runs. Offline, stdlib only, fail
 """
 import hashlib
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -83,7 +86,7 @@ _RUN_ID_RE_TEXT = r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$"
 # omission a caller could read as a pass), and the self-test asserts the clean-run keyset equals it.
 EXPECTED_CHECKS = (
     "staged-run-structure", "report-schema", "artifact-digest-integrity", "mapping-totality",
-    "mapping-state-vocab", "lf-bijection", "lf-quad-completeness", "source-preservation",
+    "mapping-state-vocab", "mapping-origin-vocab", "lf-bijection", "lf-quad-completeness", "source-preservation",
     "inventory-digest", "report-binding-digests", "proposals-artifact",
     "acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness",
 )
@@ -184,13 +187,21 @@ def check_staged_run(run_dir):
     rows = mappings.get("mapping")
     sources = run.get("source")
     if not isinstance(rows, list) or not isinstance(sources, list):
-        for cid in ("mapping-totality", "mapping-state-vocab", "lf-bijection", "lf-quad-completeness"):
+        for cid in ("mapping-totality", "mapping-state-vocab", "mapping-origin-vocab", "lf-bijection",
+                    "lf-quad-completeness"):
             record(cid, False, "mappings.toml `mapping` or run.toml `source` is not an array")
     else:
         # mapping-state-vocab
         vocab_ok = all(isinstance(r, dict) and r.get("state") in imp.MAPPING_STATES for r in rows)
         record("mapping-state-vocab", vocab_ok,
                "" if vocab_ok else "a mapping row carries a state outside the 8-state vocabulary")
+
+        # mapping-origin-vocab: every row carries a valid provenance origin (imp._ORIGIN_SET). A deleted or
+        # out-of-vocabulary origin would let a staged run bypass the acceptance gate (the acceptance layer
+        # keys the model_proposal-requires-accept rule off origin), so it is a FINDING here.
+        origin_ok = all(isinstance(r, dict) and r.get("origin") in imp._ORIGIN_SET for r in rows)
+        record("mapping-origin-vocab", origin_ok,
+               "" if origin_ok else "a mapping row carries an origin outside the provenance vocabulary")
 
         # mapping-totality: per source, spans tile [0, size) exactly.
         by_source = {}
@@ -352,8 +363,11 @@ def check_staged_run(run_dir):
                     for pr in proposals.get("proposal", [])]
             expected_md = imp._render_report_md(inventory.get("inventory_digest"),
                                                 inventory.get("fragment"), norm, run_dir.name)
-            actual_md = (run_dir / "IMPORT-REPORT.md").read_text(encoding="utf-8")
-            if expected_md != actual_md:
+            # Compare BYTES, not universal-newline-normalized text: read_text() would silently fold a CRLF
+            # IMPORT-REPORT.md into an LF match, so a byte-non-reproducible report (e.g. CRLF line endings)
+            # would pass. The rendered surface is LF (utf-8), so an exact byte compare catches it.
+            actual_md = (run_dir / "IMPORT-REPORT.md").read_bytes()
+            if expected_md.encode("utf-8") != actual_md:
                 pa_ok, pa_detail = False, ("IMPORT-REPORT.md is not byte-reproducible from inventory.toml "
                                            "+ proposals.toml + run id")
         except (OSError, KeyError, TypeError, ValueError) as exc:
@@ -370,9 +384,25 @@ def check_staged_run(run_dir):
     acc_checks = ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
                   "acceptance-completeness")
     acc_path = run_dir / imp.ACCEPTANCE_NAME
-    if not acc_path.exists():
+    # Classify with a no-follow lstat three-way (SECI-symlink-resolution), never Path.exists(): a DANGLING
+    # symlink would answer exists() False and be misread as "not yet reviewed" (a false PASS). Genuine
+    # absence (no dentry) is the pre-review PASS; a regular file is evaluated; a symlink or any other
+    # non-regular entry is a FINDING (fail-closed), never pass-as-absent.
+    try:
+        acc_st = os.lstat(acc_path)
+    except FileNotFoundError:
+        acc_st = None
+    except OSError as exc:
+        acc_st = exc
+    if acc_st is None:
         for cid in acc_checks:
             record(cid, True, "not yet reviewed")
+    elif isinstance(acc_st, OSError):
+        for cid in acc_checks:
+            record(cid, False, "acceptance.json cannot be classified ({})".format(acc_st))
+    elif not stat.S_ISREG(acc_st.st_mode):
+        for cid in acc_checks:
+            record(cid, False, "acceptance.json is present but not a regular file")
     else:
         acc = None
         acc_err = ""
@@ -655,6 +685,23 @@ def _self_test():
         rewrite_report_digest(m, "mappings.toml")
         expect("disc-state-vocab", check_staged_run(m)["mapping-state-vocab"][0] is False)
 
+        # mapping-origin-vocab: delete one row's origin (state/spans unchanged, so state-vocab, totality and
+        # bijection stay coherent); refresh the digest so only the origin-vocab check fires.
+        m = copy_run(clean)
+        mp = _load_toml(m / "mappings.toml")
+        del mp["mapping"][0]["origin"]
+        (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
+        rewrite_report_digest(m, "mappings.toml")
+        expect("disc-origin-vocab-deleted", check_staged_run(m)["mapping-origin-vocab"][0] is False)
+
+        # mapping-origin-vocab: set a row's origin outside the provenance vocabulary; refresh the digest.
+        m = copy_run(clean)
+        mp = _load_toml(m / "mappings.toml")
+        mp["mapping"][0]["origin"] = "guessed"
+        (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
+        rewrite_report_digest(m, "mappings.toml")
+        expect("disc-origin-vocab-bad", check_staged_run(m)["mapping-origin-vocab"][0] is False)
+
         # lf-bijection: delete one legacy_fragment record; refresh the digest.
         m = copy_run(clean)
         lf = _load_toml(m / "fragments" / "legacy_fragment.index.toml")
@@ -715,6 +762,15 @@ def _self_test():
         (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
         expect("disc-proposals-artifact", check_staged_run(m)["proposals-artifact"][0] is False)
 
+        # proposals-artifact (byte reproducibility): rewrite IMPORT-REPORT.md line endings LF->CRLF. The
+        # rendered surface is LF, so a byte compare (not a universal-newline read) must FINDING; refresh the
+        # report digest for IMPORT-REPORT.md so artifact-digest-integrity stays green and only this check fires.
+        m = copy_run(clean)
+        crlf = (m / "IMPORT-REPORT.md").read_bytes().replace(b"\n", b"\r\n")
+        (m / "IMPORT-REPORT.md").write_bytes(crlf)
+        rewrite_report_digest(m, "IMPORT-REPORT.md")
+        expect("disc-proposals-artifact-crlf", check_staged_run(m)["proposals-artifact"][0] is False)
+
         # --- acceptance.json (conditionally present): absent PASSes, present-and-valid PASSes, and each
         #     new acceptance check FINDINGs on its single mutation (acceptance.json is not in report's
         #     artefact list, so a mutation trips only the acceptance layer). ------------------------------
@@ -737,6 +793,16 @@ def _self_test():
         expect("acceptance-unparseable-all-finding",
                all(munp[cid][0] is False for cid in ("acceptance-schema", "acceptance-binding",
                                                      "acceptance-attribution", "acceptance-completeness")))
+
+        # present-but-not-a-regular-file: a DANGLING acceptance.json symlink must be a FINDING (fail-closed),
+        # never pass-as-absent "not yet reviewed" (Path.exists() would answer False and mis-pass it).
+        m = copy_run(reviewed)
+        (m / imp.ACCEPTANCE_NAME).unlink()
+        (m / imp.ACCEPTANCE_NAME).symlink_to("acceptance-target-does-not-exist")
+        mdang = check_staged_run(m)
+        expect("acceptance-dangling-symlink-all-finding",
+               all(mdang[cid][0] is False for cid in ("acceptance-schema", "acceptance-binding",
+                                                      "acceptance-attribution", "acceptance-completeness")))
 
         # acceptance-schema: a wrong `format` keeps every other field intact, so only the schema check fires.
         m = copy_run(reviewed)
@@ -806,7 +872,7 @@ def _self_test():
             print("check_opf_import self-test: FAIL: {}".format(f), file=sys.stderr)
         return EXIT_FINDING
     print("check_opf_import self-test: PASS (staged-run structure/report/artifact-digest/mapping-totality/"
-          "state-vocab/lf-bijection/lf-quad/source-preservation/inventory-digest/report-binding-digests/"
+          "state-vocab/origin-vocab/lf-bijection/lf-quad/source-preservation/inventory-digest/report-binding-digests/"
           "proposals-artifact each PASS on a clean run and FINDING on its discriminator; acceptance-schema/"
           "binding/attribution/completeness PASS absent (not yet reviewed) and present-and-valid, FINDING "
           "on each single mutation and all-FINDING when unparseable; scan determinism + fail-closed; empty "
