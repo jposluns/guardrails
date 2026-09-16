@@ -251,9 +251,9 @@ def _worktree_open_succeeds(worktree_path):
 
 def _is_partial_clone(git, store_root):
     """True when the repository at store_root is a PARTIAL clone -- one with a promisor remote git can
-    lazy-fetch from -- OR when partial-clone-ness cannot be determined. Returns False ONLY when both probes
-    complete cleanly and find neither a promisor remote nor the partialClone extension, i.e. a definite full
-    (or otherwise non-promisor) clone.
+    lazy-fetch from -- OR when partial-clone-ness cannot be determined. Returns False ONLY when all three
+    probes complete cleanly and find no promisor filter, no boolean-true promisor remote, and no
+    partialClone extension, i.e. a definite full (or otherwise non-promisor) clone.
 
     This gates the whole indexed-ignore availability check: the silent-fetch-and-ignore hazard that check
     guards against can arise ONLY in a partial clone, because only there can `git add` lazy-fetch an absent
@@ -262,24 +262,69 @@ def _is_partial_clone(git, store_root):
     it and nothing is ignored) or fails LOUDLY (a genuinely-needed absent object aborts `git add`) -- so a
     full-clone availability refusal would be a pure over-refusal (see indexed_ignore_availability's docstring).
 
-    A partial clone is marked by a promisor remote (remote.<name>.promisor=true) and/or the
-    extensions.partialClone config key; git 2.53.0 writes the promisor remote but NOT the extension on a
-    `clone --filter` (confirmed empirically), so BOTH are probed and EITHER suffices. Any promisor-remote
-    config line is treated as partial (git never writes promisor=false, so its mere presence is the marker),
-    the conservative direction. The probe runs under _run_git_config_discovery (same allowlist/GIT_NO_LAZY_FETCH
-    env the availability probe uses). A probe that cannot RUN, or returns an rc other than 0 (found) or 1 (not
+    The predicate is git 2.53.0's OWN registration test, repo_has_promisor_remote (promisor-remote.c
+    promisor_remote_config / promisor_remote_init, reached by odb.c's missing-object fallback): git will
+    lazy-fetch a missing object iff its promisor-remote list is non-empty, which any ONE of these populates
+    (each empirically confirmed against a real `git add` on a blobless clone with an absent skip-worktree
+    .gitignore blob, git 2.53.0):
+      (a) any `remote.<name>.partialclonefilter` is PRESENT with ANY value -- including the empty string and
+          the literal `false`. Presence alone unconditionally registers the promisor and OVERRIDES a
+          sibling `remote.<name>.promisor=false`, so this is tested by PRESENCE, never by value.
+      (b) any `remote.<name>.promisor` that evaluates BOOLEAN-TRUE under git's own bool parser
+          (true/yes/on/1/nonzero-int; false/no/off/empty/0 do NOT register). A `promisor=false` does NOT
+          remove a registration made by (a) or (c). Because value semantics decide this, each occurrence is
+          re-evaluated with git's own `--type=bool` rather than hand-parsed, and a garbage/unparseable bool
+          (a git error) fails closed to partial.
+      (c) `extensions.partialClone` is PRESENT (its value names the default promisor remote, so it is tested
+          by presence, and a `false` value merely names a remote called "false"). The stated predicate
+          gated this on `core.repositoryformatversion >= 1`; that gate is DROPPED. Empirically (isolated
+          /dev/shm repro, git 2.53.0: extension-only + format 0 vs an identical control without the
+          extension), git HONOURS the extension at format version 0 -- the format-0 control staged the store
+          while the extension case lazy-fetched and ignored it -- matching git's handle_extension_v0
+          historical-compatibility handling for `partialclone`. Reading the extension by presence with NO
+          format gate is therefore both the git-faithful direction AND the fail-closed one (a stray format
+          version can never turn a real extension into a false pass), so no format read is needed.
+
+    Round 10's promisor-only probe missed (a) (a filter with promisor unset read as a FULL clone: a false
+    pass) and over-refused on (b) (a `promisor=false` LINE read as present-therefore-partial: an
+    over-refusal); both are corrected here. The probes run under _run_git_config_discovery (same
+    allowlist / GIT_NO_LAZY_FETCH env the availability probe uses). ALTERNATES do not share promisor config,
+    so reading this LOCAL repository's config is correct (a repo whose only promisor config lives in an
+    alternate does not lazy-fetch). A probe that cannot RUN, or returns an rc other than 0 (found) or 1 (not
     found), is a cannot-determine that resolves to partial = keep checking -- the safe, fail-closed direction
     (guard-input-soundness, check-fails-closed-on-unreadable)."""
+    # (a) A partialclonefilter on ANY remote registers the promisor by presence (value-blind), overriding a
+    # sibling promisor=false; --get-regexp rc 0 means at least one such key exists.
+    filt = _run_git_config_discovery(
+        git, store_root, ["config", "--get-regexp", r"^remote\..*\.partialclonefilter$"])
+    if not filt.completed or filt.rc not in (0, 1):
+        return True    # cannot determine -> partial (fail-closed)
+    if filt.rc == 0:
+        return True    # a partialclonefilter is present: a promisor is registered
+    # (c) The partialClone extension registers the named default promisor remote by presence (no format gate,
+    # per the empirical resolution above).
     ext = _run_git_config_discovery(git, store_root, ["config", "--get", "extensions.partialClone"])
     if not ext.completed or ext.rc not in (0, 1):
-        return True    # cannot determine -> partial (fail-closed: keep the availability check engaged)
+        return True    # cannot determine -> partial (fail-closed)
     if ext.rc == 0:
         return True    # the partialClone extension is declared: a partial clone
+    # (b) A promisor remote registers only when its value is boolean-TRUE. Enumerate the promisor keys, then
+    # re-evaluate EACH with git's own bool parser (--type=bool), so promisor=false does not register and a
+    # garbage bool (a git error) fails closed to partial.
     prom = _run_git_config_discovery(
-        git, store_root, ["config", "--get-regexp", r"^remote\..*\.promisor$"])
+        git, store_root, ["config", "-z", "--name-only", "--get-regexp", r"^remote\..*\.promisor$"])
     if not prom.completed or prom.rc not in (0, 1):
         return True    # cannot determine -> partial (fail-closed)
-    return prom.rc == 0   # rc 0: at least one promisor remote -> partial; rc 1: none -> a full clone
+    if prom.rc == 1:
+        return False   # no promisor filter, no extension, and no promisor key at all: a full clone
+    keys = [k for k in prom.out.decode("utf-8", "replace").split("\0") if k]
+    for key in keys:
+        val = _run_git_config_discovery(git, store_root, ["config", "--type=bool", "--get-all", key])
+        if not val.completed or val.rc not in (0, 1):
+            return True    # unreadable, or a garbage/unparseable bool (git error): fail-closed to partial
+        if any(line.strip() == "true" for line in val.out.decode("utf-8", "replace").splitlines()):
+            return True    # a boolean-true promisor remote: a partial clone
+    return False   # every promisor key evaluated boolean-false, and no filter or extension: a full clone
 
 
 def indexed_ignore_availability(git, store_root, gitignore_relpaths):

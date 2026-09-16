@@ -829,6 +829,94 @@ def _suite(invoke):
                 check("full-clone chmod-000 initialized submodule .gitignore proceeds (partial-clone gate)",
                       rc == EXIT_OK and valid_sources(r9_rec))
 
+                # OPF-D2B round 11 / R10-1 + R10-2: _is_partial_clone must match git 2.53.0's OWN promisor
+                # registration (repo_has_promisor_remote): git lazy-fetches a missing object iff ANY of
+                # (a) a remote.*.partialclonefilter is PRESENT (value-blind, overrides promisor=false),
+                # (b) a remote.*.promisor is boolean-TRUE, or (c) extensions.partialClone is present (no
+                # format gate: git honours it at core.repositoryformatversion=0 too, confirmed empirically).
+                # Each fixture below builds a blobless clone with an ABSENT skip-worktree .gitignore blob
+                # (the store-ignoring src), strips the promisor config the clone wrote, then sets exactly the
+                # keys under test; the availability check must REFUSE only when git add would fetch-and-ignore.
+                def d2b_stripped_partial(name):
+                    """A blobless partial clone (absent skip-worktree .gitignore blob) with ALL promisor
+                    config stripped, so each scenario sets exactly the registration keys under test."""
+                    dest = base / name
+                    git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                    "--no-checkout", src_url, str(dest)])
+                    git_call(dest, ["read-tree", "HEAD"])
+                    git_call(dest, ["update-index", "--skip-worktree", ".gitignore"])
+                    for key in ("remote.origin.promisor", "remote.origin.partialclonefilter",
+                                "extensions.partialClone"):
+                        rr = _opf_observe._run_git(git, dest, ["config", "--unset-all", key])
+                        if not rr.completed or rr.rc not in (0, 5):  # rc 5 = key already absent, tolerable
+                            raise OSError("fixture --unset-all {} failed at {!r}: {}".format(
+                                key, str(dest), rr.err))
+                    return dest
+
+                # R10-1 (BLOCKER): partialclonefilter PRESENT, promisor unset, no extension. The filter
+                # registers the promisor by presence, so `git add` lazy-fetches the absent blob and ignores
+                # the store (ground truth PARTIAL); init must REFUSE. The round-10 promisor-only probe read
+                # this as a FULL clone (no promisor line) and PROCEEDED. DISCRIMINATOR: rc 0 (creates a store
+                # git add would skip) against the round-10 HEAD.
+                filt_only = d2b_stripped_partial("d2b-filter-only")
+                git_call(filt_only, ["config", "remote.origin.partialclonefilter", "blob:none"])
+                fo_before = _snapshot(filt_only)
+                rc, output = run(filt_only)
+                check("partialclonefilter-only partial clone refused (R10-1)",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("partialclonefilter-only fixture preserved", _snapshot(filt_only) == fo_before)
+
+                # R10-2 (MAJOR over-refusal): promisor=false alone, no filter, no extension. A false promisor
+                # does NOT register, so git CANNOT lazy-fetch: `git add` stages the store (ground truth FULL);
+                # init must PROCEED. The round-10 probe matched the promisor=false LINE by presence and
+                # REFUSED. DISCRIMINATOR: rc 2 (false refusal) against the round-10 HEAD.
+                prom_false = d2b_stripped_partial("d2b-promisor-false")
+                git_call(prom_false, ["config", "remote.origin.promisor", "false"])
+                rc, output = run(prom_false)
+                check("promisor=false-only clone proceeds (R10-2 no over-refusal)",
+                      rc == EXIT_OK and valid_sources(prom_false))
+
+                # filter OVERRIDES promisor=false: the filter's presence registers the promisor even with a
+                # sibling promisor=false, so `git add` lazy-fetches (ground truth PARTIAL); init must REFUSE.
+                # (Locks the value-blind filter semantics: it would break if the filter check became
+                # value-sensitive or a promisor=false were read as de-registering.)
+                filt_pf = d2b_stripped_partial("d2b-filter-promfalse")
+                git_call(filt_pf, ["config", "remote.origin.partialclonefilter", "blob:none"])
+                git_call(filt_pf, ["config", "remote.origin.promisor", "false"])
+                fpf_before = _snapshot(filt_pf)
+                rc, output = run(filt_pf)
+                check("partialclonefilter overrides promisor=false: refused",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("filter-over-promfalse fixture preserved", _snapshot(filt_pf) == fpf_before)
+
+                # extensions.partialClone OVERRIDES promisor=false (format 1): the extension registers the
+                # named default promisor after the config parse, so `git add` lazy-fetches (ground truth
+                # PARTIAL); init must REFUSE.
+                ext_pf = d2b_stripped_partial("d2b-ext-promfalse")
+                git_call(ext_pf, ["config", "core.repositoryformatversion", "1"])
+                git_call(ext_pf, ["config", "extensions.partialClone", "origin"])
+                git_call(ext_pf, ["config", "remote.origin.promisor", "false"])
+                epf_before = _snapshot(ext_pf)
+                rc, output = run(ext_pf)
+                check("extensions.partialClone overrides promisor=false (format 1): refused",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("ext-over-promfalse fixture preserved", _snapshot(ext_pf) == epf_before)
+
+                # extensions.partialClone at core.repositoryformatversion=0: the empirically-settled case.
+                # git 2.53.0 HONOURS the extension at format 0 (handle_extension_v0 historical compat),
+                # confirmed by isolated repro: `git add` lazy-fetches the absent blob and ignores the store
+                # (ground truth PARTIAL), so init must REFUSE. Asserting REFUSE both matches git and is the
+                # fail-closed direction; this fixture would fail against a (rejected) format>=1-gated
+                # implementation, which would wrongly PROCEED.
+                ext_v0 = d2b_stripped_partial("d2b-ext-format0")
+                git_call(ext_v0, ["config", "extensions.partialClone", "origin"])
+                git_call(ext_v0, ["config", "core.repositoryformatversion", "0"])
+                ev0_before = _snapshot(ext_v0)
+                rc, output = run(ext_v0)
+                check("extensions.partialClone at format 0 refused (git honours the extension at v0)",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("ext-format0 fixture preserved", _snapshot(ext_v0) == ev0_before)
+
                 # OPF-D2B / D3 (fixture hermeticity): the stdin-fed fixture git helper must build its OWN
                 # scrubbed environment, so an inherited GIT_INDEX_FILE (or GIT_DIR / GIT_WORK_TREE /
                 # GIT_OBJECT_DIRECTORY / GIT_COMMON_DIR) cannot redirect its write to a caller's external
