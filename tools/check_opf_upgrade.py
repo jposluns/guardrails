@@ -21,7 +21,7 @@ only at 1.1.0, so a POPULATED module-tier fixture's records are validated at run
 upgrade -> 1.1.0 doctor leg here rather than by the 1.0.0 baseline. In-gate re-verification is canonicity-only;
 1.0.0-doctor fidelity is authoring-time evidence.
 
-VECTOR ROSTER (U1-U18, P1):
+VECTOR ROSTER (U1-U25, P1):
   U1  pristine baseline: full delta, doctor VALID.
   U2  idempotence: a second run is a byte no-op reporting already-current.
   U3  governance=true, MA+MD rows + empty indexes + counters: contribution+preference_pattern indexes
@@ -50,7 +50,26 @@ VECTOR ROSTER (U1-U18, P1):
   U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.1.0 triage refusals (with the scoped
       recovery text).
   U18 postcondition unit vectors: call opf._upgrade_postcondition directly with hand-mutated new models; each
-      mutation refuses and the genuine planner output passes (the check that fails without the m1 fix).
+      mutation refuses and the genuine planner output passes (the check that fails without the m1 fix). Also
+      the R6 porcelain-grammar refusal vectors: opf._upgrade_parse_porcelain refuses a lone NUL, a non-NUL-
+      terminated payload, and a mis-framed record (never a clean-empty result), and excludes a nested-store
+      lease after the prefix strip.
+  U19 R1 recovery-text root-binding: opf._upgrade_recovery_text called directly with DISTINCT store/product
+      roots; the `.working` restore + created-file removal name the store root, the product target the product
+      root (fails without the distinct-roots fix).
+  U20 R8 module-coupling refusal: governance=true with maintainer_action but maintainer_decision ABSENT (a
+      module-inconsistent 1.0.0 shape the delta would silently cure) refuses exit 2 before mutation; unchanged.
+  U21 R2 absent-table migration: the missing [modules], missing [views], and both-missing origins (each oracle-
+      graded doctor-VALID at merge-base 1c90fbb) migrate to a doctor-VALID 1.1.0 store; an absent table is
+      never invented as an empty table beyond the two new views [views] must carry.
+  U22 R1 nested-store held lease: a store root BELOW the git repo root with a foreign held lease reaches step
+      4's never-seize message, not step 3's dirty-store remedy (the lease_excl prefix-normalization fix).
+  U23 R3 FIFO lease: a FIFO at lease.toml refuses PROMPTLY (bounded, no blocking hang) naming a present non-
+      regular lease; the FIFO is untouched.
+  U24 R4 orphan lease: a mid-acquisition failure (payload write fails after the O_EXCL create) raises and
+      leaves NO orphan lease (journal._write_all monkeypatched to fail; _upgrade_acquire_lease called direct).
+  U25 R5 release-before-success: with _upgrade_release_lease monkeypatched to fail, a valid store exits 2 and
+      emits NO success line (success is never reported over a still-held / failed-to-release lease).
   P1  a seeded migration property test: 12 generated genuine-VALID 1.0.0 variants (module subset with the
       G2 coupling, 0-2 records per migrated type with matching high-waters, DECISIONS.md declared/omitted,
       the decision_support key present/absent) each upgrade to a doctor-VALID 1.1.0 store with every index
@@ -329,6 +348,33 @@ def _man_add_md(m=_FIX_MANIFEST):
                      '[types.maintainer_decision]\nnamespace = "MD"\n\n[types.pending_decision]', 1)
 
 
+def _man_gov_no_md(m=_FIX_MANIFEST):
+    """governance=true with maintainer_action declared but maintainer_decision ABSENT: a module-inconsistent
+    (1.0.0-INVALID, C-ROSTER) origin the delta would silently CURE by adding the now-baseline MD row. The R8
+    symmetric precondition refuses it upfront."""
+    m = m.replace("governance = false\n", "governance = true\n", 1)
+    return m.replace('[types.pending_decision]',
+                     '[types.maintainer_action]\nnamespace = "MA"\n\n[types.pending_decision]', 1)
+
+
+def _cnt_gov_ma_only(c=_FIX_COUNTERS):
+    return c.replace("PD = 0\n", "MA = 0\nPD = 0\n", 1)
+
+
+def _man_drop_modules_table(m=_FIX_MANIFEST):
+    """Remove the WHOLE [modules] table (R2): an ABSENT table is 1.0.0-valid-empty (oracle-graded VALID at
+    1c90fbb), distinct from U8 which drops only the optional decision_support KEY."""
+    return m.replace("[modules]\nconcurrent_operation = false\ndecision_support = false\n"
+                     "delivery_assurance = false\ngovernance = false\noperational_policy = false\n\n", "", 1)
+
+
+def _man_drop_views_table(m=_FIX_MANIFEST):
+    """Remove the WHOLE [views] table (R2): an ABSENT table is 1.0.0-valid-empty (oracle-graded VALID at
+    1c90fbb), distinct from U9 which drops only the DECISIONS.md view ROW. [views] is the last table, so the
+    canonical form is the manifest truncated at its header."""
+    return m[:m.index("[views]\n")].rstrip("\n") + "\n"
+
+
 def _cnt(c=_FIX_COUNTERS):
     return c
 
@@ -420,6 +466,10 @@ def _suite():
         canon_man("drop-both", _man_drop_decisions(_man_drop_dskey()))
         canon_man("add-contribution", _man_add_contribution())
         canon_man("add-md", _man_add_md())
+        canon_man("gov-no-md", _man_gov_no_md())
+        canon_man("drop-modules-table", _man_drop_modules_table())
+        canon_man("drop-views-table", _man_drop_views_table())
+        canon_man("drop-both-tables", _man_drop_views_table(_man_drop_modules_table()))
         canon_cnt("baseline", _FIX_COUNTERS)
         canon_cnt("governance", _cnt_gov())
         canon_cnt("gov-md1", _cnt_gov(md=1))
@@ -427,6 +477,7 @@ def _suite():
         canon_cnt("ds-pp2", _cnt_ds(pp=2))
         canon_cnt("gov+ds", _cnt_govds())
         canon_cnt("delivery_assurance", _cnt_da())
+        canon_cnt("gov-ma-only", _cnt_gov_ma_only())
         for label, text in (("md-index", _FIX_MD_INDEX), ("pp-index", _FIX_PP_INDEX)):
             check("canonical index: " + label,
                   _opf_emit.emit_checked(tomllib.loads(text)) == text)
@@ -818,6 +869,182 @@ def _suite():
             _src = _m["views"]["DECISIONS.md"]["sources"]
             _m["views"]["DECISIONS.md"]["sources"] = _src + [_src[0]]
             check("U18 duplicated DECISIONS.md source refuses", not post_passes(_m, new_c))
+            # R6: the porcelain -z grammar is validated in a PURE parser; a malformed payload is a fail-
+            # closed refusal, never a clean-empty result. (Directly unit-tested, like the U18 postcondition
+            # vectors.) A lone NUL that a naive split would read as clean must refuse.
+            def _grammar_ok(raw, prefix="", lease=None):
+                try:
+                    return opf._upgrade_parse_porcelain(raw, prefix, lease), None
+                except opf._UpgradeError as exc:
+                    return None, str(exc)
+            _clean, _ = _grammar_ok(b"")
+            check("U18/R6 empty payload is clean (no dirt)", _clean == [])
+            _d, _ = _grammar_ok(b"?? .working/toml/x\x00")
+            check("U18/R6 well-formed untracked record parses", _d == [".working/toml/x"])
+            _n, _err = _grammar_ok(b"\x00")
+            check("U18/R6 lone NUL refuses (never clean-empty)", _n is None and _err is not None)
+            _n2, _ = _grammar_ok(b"?? .working/toml/x")     # no trailing NUL terminator
+            check("U18/R6 non-NUL-terminated payload refuses", _n2 is None)
+            _n3, _ = _grammar_ok(b"XYZno-space\x00")        # no status/space framing at byte 2
+            check("U18/R6 malformed record framing refuses", _n3 is None)
+            _lx, _ = _grammar_ok(b"?? sub/.working/toml/lease.toml\x00", prefix="sub/",
+                                 lease=".working/toml/lease.toml")
+            check("U18/R6 nested-store lease excluded after prefix strip", _lx == [])
+
+            # U19) R1: the post-mutation recovery text threads DISTINCT roots. Called directly (like U18):
+            # `.working` restore + created-file removal name the STORE root; a product target names the
+            # PRODUCT root. Without the fix (one root for both) the product line names the store root.
+            _rt = opf._upgrade_recovery_text("/store/root", "/product/root",
+                                             ["toml/contribution.index.toml"], ["VERSION"])
+            check("U19 .working restore names the store root",
+                  "git -C /store/root --literal-pathspecs restore --staged --worktree -- .working" in _rt)
+            check("U19 created-file removal is under the store root",
+                  "/store/root/toml/contribution.index.toml" in _rt and "/product/root/toml" not in _rt)
+            check("U19 product target restore names the product root",
+                  "git -C /product/root --literal-pathspecs restore --staged --worktree -- VERSION" in _rt)
+            check("U19 inspect line names the store root",
+                  "inspect first: git -C /store/root --literal-pathspecs status -- .working" in _rt)
+
+            # U20) R8: governance=true with maintainer_action but maintainer_decision ABSENT (a module-
+            # inconsistent 1.0.0 shape the delta would silently cure) now REFUSES unchanged, before mutation.
+            s20 = base / "u20-gov-no-md"
+            s20.mkdir()
+            mach20 = build_store(s20, manifest=_man_gov_no_md(), counters=_cnt_gov_ma_only(),
+                                 extra_files={idx("maintainer_action"): _FIX_INDEX})
+            before20 = _snapshot(s20)
+            rc20, out20 = upgrade(s20)
+            check("U20 gov-with-MD-absent refuses (exit 2)", rc20 == EXIT_ERROR)
+            check("U20 refusal names the module coupling",
+                  "governance" in out20 and "maintainer_decision" in out20 and "silently cure" in out20)
+            check("U20 tree unchanged (refused before mutation)", _snapshot(s20) == before20)
+
+            # U21) R2: a 1.0.0 origin that OMITS the WHOLE [modules] / [views] table (each oracle-graded
+            # doctor-VALID at merge-base 1c90fbb) migrates to a doctor-VALID 1.1.0 store.
+            for _lbl, _man in (("modules", _man_drop_modules_table()),
+                               ("views", _man_drop_views_table()),
+                               ("both", _man_drop_views_table(_man_drop_modules_table()))):
+                s21 = base / ("u21-absent-" + _lbl)
+                s21.mkdir()
+                mach21 = build_store(s21, manifest=_man)
+                rc21, out21 = upgrade(s21)
+                check("U21 absent-{} migrates (exit 0)".format(_lbl), rc21 == EXIT_OK)
+                man21 = man_of(mach21)
+                check("U21 absent-{} gains the two new views".format(_lbl),
+                      "CONTRIBUTIONS.md" in man21.get("views", {})
+                      and "DECISIONS.toml" in man21.get("views", {}))
+                if _lbl in ("modules", "both"):
+                    check("U21 absent-{} keeps [modules] absent (no empty table invented)".format(_lbl),
+                          "modules" not in man21)
+                if _lbl in ("views", "both"):
+                    check("U21 absent-{} DECISIONS.md not invented".format(_lbl),
+                          "DECISIONS.md" not in man21.get("views", {}))
+                drc21, dout21 = doctor(s21)
+                check("U21 absent-{} upgraded store is doctor-VALID".format(_lbl),
+                      drc21 == EXIT_OK and "integrity: VALID" in dout21)
+
+            # U22) R1: a NESTED store (store root BELOW the git repo root) with a foreign held lease reaches
+            # step 4's never-seize message, not step 3's dirty-store remedy (the un-normalized lease_excl
+            # missed under the repo-root-relative porcelain path). Build the repo at a PARENT, the store in a
+            # subdir, commit through the parent, then plant an untracked foreign lease.
+            repo22 = base / "u22-nested-repo"
+            sub22 = repo22 / "product" / "store"
+            sub22.mkdir(parents=True)
+            mach22 = sub22 / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
+            mach22.mkdir(parents=True)
+            git_call(repo22, ["init"])
+            (mach22 / _opf_store.MANIFEST_NAME).write_text(_FIX_MANIFEST, encoding="utf-8")
+            (mach22 / _opf_check.COUNTERS_NAME).write_text(_FIX_COUNTERS, encoding="utf-8")
+            (mach22 / _opf_check.VERSION_NAME).write_text(_FIX_VERSION, encoding="utf-8")
+            (mach22 / _opf_check.WORKLOG_NAME).write_text(_FIX_WORKLOG, encoding="utf-8")
+            for _t in _FIX_INDEX_TYPES:
+                (mach22 / (_t + _opf_check.INDEX_SUFFIX)).write_text(_FIX_INDEX, encoding="utf-8")
+            (sub22 / _opf_store.POINTER_REL).write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
+            (sub22 / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+            git_call(repo22, ["--literal-pathspecs", "add", "-A"])
+            git_call(repo22, ["commit", "-m", "seed nested 1.0.0 store"])
+            check("U22 store root is BELOW the repo root (nested)",
+                  git_call(sub22, ["rev-parse", "--show-prefix"]).strip().rstrip("/") == "product/store")
+            (mach22 / _opf_check.LEASE_NAME).write_text(
+                'acquired_at = "2026-01-01T00:00:00Z"\nholder = "peer-runner"\n'
+                'operation = "upgrade"\nschema = 1\n', encoding="utf-8")   # untracked foreign lease
+            before22 = _snapshot(repo22)
+            rc22, out22 = upgrade(sub22)
+            check("U22 nested held-lease refuses (exit 2)", rc22 == EXIT_ERROR)
+            check("U22 reaches the step-4 never-seize message (not the step-3 dirty remedy)",
+                  "never seized" in out22 and "peer-runner" in out22
+                  and "the store working tree is not clean" not in out22)
+            check("U22 lease NOT deleted and tree unchanged",
+                  (mach22 / _opf_check.LEASE_NAME).is_file() and _snapshot(repo22) == before22)
+
+            # U23) R3: a FIFO planted at lease.toml refuses PROMPTLY (bounded, never a blocking hang) and the
+            # FIFO is untouched. Bounded call so a regression (blocking open) fails fast instead of hanging.
+            if hasattr(os, "mkfifo"):
+                s23 = base / "u23-fifo-lease"
+                s23.mkdir()
+                mach23 = build_store(s23)
+                os.mkfifo(str(mach23 / _opf_check.LEASE_NAME))
+                before23 = _snapshot(s23)
+                try:
+                    proc23 = subprocess.run(
+                        [sys.executable, "-I", "-B", str(Path(__file__).resolve().parent / "opf.py"),
+                         "upgrade", "--root", str(s23)],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+                        env=env_holder["env"])
+                    rc23, out23 = proc23.returncode, proc23.stdout + proc23.stderr
+                except subprocess.TimeoutExpired:
+                    rc23, out23 = None, "TIMEOUT (blocking FIFO open, R3 regression)"
+                check("U23 FIFO lease refuses promptly (exit 2, no hang)", rc23 == EXIT_ERROR)
+                check("U23 refusal names a present non-regular lease",
+                      "non-regular" in out23 and "never seized" in out23)
+                check("U23 FIFO untouched and tree unchanged",
+                      stat.S_ISFIFO((mach23 / _opf_check.LEASE_NAME).lstat().st_mode)
+                      and _snapshot(s23) == before23)
+
+            # U24) R4: a mid-acquisition failure (the payload write fails AFTER the O_EXCL create) must NOT
+            # orphan the lease. Monkeypatch journal._write_all to fail, call _upgrade_acquire_lease directly,
+            # and assert it raises AND leaves no lease file (without the fix the O_EXCL-created file lingers).
+            s24 = base / "u24-orphan-lease"
+            s24.mkdir()
+            mach24 = build_store(s24)
+            mrel24 = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+            fd24 = _opf_store._open_dir_nofollow(str(s24.resolve()))
+            _orig_wa = _opf_store._journal._write_all
+            _r4_raised = False
+            try:
+                _opf_store._journal._write_all = lambda *a, **k: (_ for _ in ()).throw(
+                    OSError("synthetic payload-write failure"))
+                try:
+                    opf._upgrade_acquire_lease(fd24, mrel24)
+                except BaseException:
+                    _r4_raised = True
+            finally:
+                _opf_store._journal._write_all = _orig_wa
+                os.close(fd24)
+            check("U24 mid-acquisition failure raises", _r4_raised)
+            check("U24 failed acquisition leaves NO orphan lease",
+                  not (mach24 / _opf_check.LEASE_NAME).exists())
+
+            # U25) R5: the lease is released BEFORE success is reported. Monkeypatch _upgrade_release_lease to
+            # fail; a valid store must exit 2 with NO success line emitted (without the fix, success prints
+            # first and only then does the finally's release fail). Driven in-process (like U18).
+            import contextlib as _ctx
+            import io as _io
+            s25 = base / "u25-release-first"
+            s25.mkdir()
+            build_store(s25)
+            _orig_rel = opf._upgrade_release_lease
+            try:
+                opf._upgrade_release_lease = lambda *a, **k: (_ for _ in ()).throw(
+                    opf._UpgradeError("synthetic release failure"))
+                _buf25 = _io.StringIO()
+                with _ctx.redirect_stdout(_buf25), _ctx.redirect_stderr(_buf25):
+                    rc25 = opf._cmd_upgrade(["--root", str(s25)])
+                out25 = _buf25.getvalue()
+            finally:
+                opf._upgrade_release_lease = _orig_rel
+            check("U25 a release failure surfaces exit 2", rc25 == EXIT_ERROR)
+            check("U25 no success is reported when release fails (released-before-success)",
+                  "staged, NOT committed" not in out25 and '"event": "upgraded"' not in out25)
 
             # P1) seeded migration property test: 12 generated genuine-VALID 1.0.0 variants all migrate.
             _NS = {"maintainer_action": "MA", "maintainer_decision": "MD", "preference_pattern": "PP",

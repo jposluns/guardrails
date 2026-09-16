@@ -1142,10 +1142,19 @@ def _upgrade_plan(manifest_model, counters_model):
     # The 1.0.0 input carries the RETIRED base table [devprocess] (PRIOR_STANDARD_TOKEN); the OPFiles
     # rebrand (1.1.0) renames it to [opf] (STANDARD_TOKEN) as part of this same allowed delta (spec 9.2).
     _prior_base = _opf_store.PRIOR_STANDARD_TOKEN
-    for table in (_prior_base, "modules", "types", "views"):
+    # [devprocess] and [types] are REQUIRED for a migratable 1.0.0 store. [modules] and [views] are
+    # OPTIONAL at 1.0.0: the merge-base doctor grades an ABSENT table valid-empty (_validate_modules(None)
+    # / _validate_views(None) return CLEAN), so an origin that omits either migrates AS IF EMPTY rather
+    # than being refused; a PRESENT-but-not-a-dict table stays a malformed refusal.
+    for table in (_prior_base, "types"):
         if not isinstance(manifest_model.get(table), dict):
             raise _UpgradeError("manifest [{}] table is missing or malformed; not a store this "
                                 "upgrade can migrate (fail-closed)".format(table))
+    for table in ("modules", "views"):
+        present = manifest_model.get(table)
+        if present is not None and not isinstance(present, dict):
+            raise _UpgradeError("manifest [{}] table is present but malformed (not a table); not a store "
+                                "this upgrade can migrate (fail-closed)".format(table))
     if _opf_store.STANDARD_TOKEN in manifest_model:
         raise _UpgradeError("manifest already carries the renamed base table [{}]; store is not a clean "
                             "1.0.0 baseline (fail-closed)".format(_opf_store.STANDARD_TOKEN))
@@ -1157,9 +1166,9 @@ def _upgrade_plan(manifest_model, counters_model):
     if not isinstance(counters_model.get("counters"), dict):
         raise _UpgradeError("counters.toml [counters] table is missing or malformed (fail-closed)")
 
-    modules = manifest_model["modules"]
+    modules = manifest_model.get("modules") or {}
     types = manifest_model["types"]
-    views = manifest_model["views"]
+    views = manifest_model.get("views") or {}
 
     # --- ORIGIN FACTS (G1-G4): what this specific 1.0.0 origin family already carries. ---------------
     pre_declared = frozenset(t for t in _UPGRADE_NEW_TYPES if t in types)
@@ -1195,6 +1204,18 @@ def _upgrade_plan(manifest_model, counters_model):
             raise _UpgradeError("manifest [types.{}] is not the exact 1.0.0 baseline row (namespace = "
                                 "{!r}); not a clean 1.0.0 shape (fail-closed)".format(
                                     tname, _opf_store.BASELINE_TYPES[tname]))
+    # SYMMETRIC module-coupling precondition (C-ROSTER, mirroring the merge-base 1.0.0 doctor). The loop
+    # above refuses a DECLARED now-baseline type whose gating 1.0.0 module is not enabled; this refuses the
+    # CONVERSE -- a 1.0.0 module that gates a now-baseline type (maintainer_decision<-governance,
+    # preference_pattern<-decision_support) is ENABLED while that type's [types] row is ABSENT. Such an
+    # origin is module-inconsistent, so the merge-base 1.0.0 doctor grades it NOT-VALID; without this the
+    # delta would SILENTLY CURE it by adding the now-baseline row and exit 0, making the docstring's
+    # "refuses any input that is not a doctor-VALID 1.0.0 store" claim false. Refuse it upfront, unmutated.
+    for tname, gate in sorted(_pre_gate.items()):
+        if gate is not None and modules.get(gate) is True and tname not in pre_declared:
+            raise _UpgradeError("manifest enables 1.0.0 module {!r} but omits its required type {!r}; a "
+                                "module-inconsistent 1.0.0 shape the delta must not silently cure "
+                                "(fail-closed)".format(gate, tname))
     # The two NET-NEW 1.1.0 views could not exist at 1.0.0 (no 1.0.0 view renderer), so a store
     # pre-declaring either is 1.0.0-INVALID; refuse.
     for vname in _UPGRADE_NEW_VIEWS:
@@ -1230,6 +1251,10 @@ def _upgrade_plan(manifest_model, counters_model):
     for tname in _UPGRADE_NEW_TYPES:
         if tname not in pre_declared:
             new_manifest["types"][tname] = {"namespace": _opf_store.BASELINE_TYPES[tname]}
+    # An origin that OMITTED [views] entirely (R2) migrates AS IF EMPTY: the table is created here to
+    # carry the two net-new 1.1.0 views (an absent [modules] stays absent -- the delta only ever REMOVES a
+    # modules key, so migrate-as-empty is a no-op there and no empty table is invented).
+    new_manifest.setdefault("views", {})
     for vname in _UPGRADE_NEW_VIEWS:
         kind, sources, _renderer = _opf_views.NAMED_VIEWS[vname]
         new_manifest["views"][vname] = {
@@ -1287,9 +1312,9 @@ def _upgrade_postcondition(old_manifest, new_manifest, old_counters, new_counter
 
     # [modules]: exactly the retired decision_support key removed when it was present, every other key
     # (name AND boolean value) carried over value-exact -- so a flipped retained boolean now refuses.
-    expected_modules = {k: v for k, v in old_manifest["modules"].items()
+    expected_modules = {k: v for k, v in (old_manifest.get("modules") or {}).items()
                         if not (ds_key_present and k == _UPGRADE_RETIRED_MODULE)}
-    if new_manifest["modules"] != expected_modules:
+    if new_manifest.get("modules", {}) != expected_modules:
         raise _UpgradeError("upgrade postcondition failed: [modules] is not exactly the origin table with "
                             "the retired {!r} key removed".format(_UPGRADE_RETIRED_MODULE))
 
@@ -1307,7 +1332,7 @@ def _upgrade_postcondition(old_manifest, new_manifest, old_counters, new_counter
     # [views]: origin rows, plus the two constructed new rows, plus (when declared) DECISIONS.md with its
     # sources replaced by the exact canonical ordered required list; value-exact, so the sources assertion
     # is order- AND duplicate-exact.
-    expected_views = copy.deepcopy(old_manifest["views"])
+    expected_views = copy.deepcopy(old_manifest.get("views") or {})
     for vname in _UPGRADE_NEW_VIEWS:
         kind, sources, _renderer = _opf_views.NAMED_VIEWS[vname]
         expected_views[vname] = {
@@ -1436,15 +1461,18 @@ def _upgrade_partial_recovery_text(root):
                                                                                      no=_UPGRADE_NO_WHOLE_TREE))
 
 
-def _upgrade_recovery_text(root, created_relpaths, product_relpaths):
+def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_relpaths):
     """Recovery advice for a post-mutation failure (render or doctor): the touched set is KNOWN, and with the
     step-3 cleanliness precondition in force everything dirty under the probe scope after a failed run is
     upgrade-written by construction, so this enumerated, subtree-scoped remedy is COMPLETE for the run that
-    printed it. Tracked store paths under `.working` are restored; the upgrade-created untracked files are
-    removed; a declared product-scope target rendered this run is recovered at the product root; never a
-    whole-tree restore."""
+    printed it. The DISTINCT roots are threaded (explicit-binding-over-ambient-context): tracked store paths
+    under `.working`, and the upgrade-created untracked files, are recovered under the STORE root (where
+    `.working` lives); a declared product-scope target rendered this run is recovered under the PRODUCT root.
+    The two roots differ for a RELOCATED store (the pointer resolves `.working` to a store separate from the
+    product tree), where using one root for both would aim the `.working` restore at the wrong repository.
+    Never a whole-tree restore."""
     import shlex
-    r = shlex.quote(str(root))
+    r = shlex.quote(str(store_root))
     w = shlex.quote(_opf_store.WORKING_DIRNAME)
     lines = ["opf upgrade: the staged change is left for review; recover it scoped to the paths this run "
              "wrote (the cleanliness precondition proved nothing else is in the blast radius):",
@@ -1452,10 +1480,11 @@ def _upgrade_recovery_text(root, created_relpaths, product_relpaths):
              "-- {}".format(r, w)]
     if created_relpaths:
         lines.append("  remove upgrade-created files: rm -- " + " ".join(
-            shlex.quote(os.path.join(str(root), p)) for p in sorted(created_relpaths)))
+            shlex.quote(os.path.join(str(store_root), p)) for p in sorted(created_relpaths)))
+    pr = shlex.quote(str(product_root))
     for p in sorted(product_relpaths):
         lines.append("  product target rendered: git -C {} --literal-pathspecs restore --staged --worktree "
-                     "-- {} (or remove it if this run created it)".format(r, shlex.quote(p)))
+                     "-- {} (or remove it if this run created it)".format(pr, shlex.quote(p)))
     lines.append("  inspect first: git -C {} --literal-pathspecs status -- {}".format(r, w))
     lines.append("  " + _UPGRADE_NO_WHOLE_TREE)
     return "\n".join(lines)
@@ -1478,12 +1507,51 @@ def _upgrade_product_render_targets(manifest_model):
     return targets
 
 
+def _upgrade_parse_porcelain(raw, prefix, lease_excl):
+    """Parse a `git status --porcelain=v1 -z --untracked-files=all --no-renames` payload into the list of
+    dirty paths, each normalized `root`-relative (the `prefix`, the store's repo-root-relative path with a
+    trailing '/', is stripped from every repository-root-relative porcelain path) and EXCLUDING `lease_excl`
+    (a byte-literal store-relative path, when given). Factored PURE so the grammar refusal is directly unit-
+    testable. The -z grammar is VALIDATED (guard-input-soundness): a non-empty payload is a run of
+    NUL-TERMINATED records, each `XY<space>PATH` (two status chars, a space, then >=1 path byte); --no-renames
+    means there is no second NUL-separated origin-path field. A payload that is not NUL-terminated, or that
+    carries a record shorter than `XY PATH` or lacking the status/space framing, is MALFORMED and refuses
+    fail-closed -- never a clean empty result on an unparseable payload (e.g. a lone NUL, which a naive split
+    would read as clean; check-fails-closed-on-unreadable)."""
+    if not raw:
+        return []
+    parts = raw.split(b"\x00")
+    if parts[-1] != b"":
+        raise _UpgradeError("git status returned a porcelain payload that is not NUL-terminated; the store "
+                            "cleanliness cannot be verified (fail-closed)")
+    prefix_b = prefix.encode("utf-8")
+    lease_b = lease_excl.encode("utf-8") if lease_excl is not None else None
+    dirty = []
+    for rec in parts[:-1]:
+        # porcelain v1 -z: two status chars, a space, then the path bytes (verbatim under -z, no quoting).
+        if len(rec) < 4 or rec[2:3] != b" ":
+            raise _UpgradeError("git status returned a malformed porcelain record ({!r}); the store "
+                                "cleanliness cannot be verified (fail-closed)".format(rec[:16]))
+        pbytes = rec[3:]
+        if prefix_b and pbytes.startswith(prefix_b):
+            pbytes = pbytes[len(prefix_b):]
+        if lease_b is not None and pbytes == lease_b:
+            continue
+        dirty.append(pbytes.decode("utf-8", "replace"))
+    return dirty
+
+
 def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
     """Run ONE hardened `git status --porcelain=v1 -z --untracked-files=all --no-renames` over `pathspecs`
-    beneath `root`, returning the list of dirty paths (excluding `lease_excl`, a byte-literal store-relative
-    path, when given). Reuses _opf_observe's scrubbed-env, --no-replace-objects, -C-bound, timeout-bounded
-    boundary (G6). Fail-closed: a non-completed probe, a not-a-repository, or a nonzero exit refuses; never a
-    clean pass on an unreadable probe (check-fails-closed-on-unreadable, SECA-verified-restore-path)."""
+    beneath `root`, returning the list of dirty paths, each normalized to `root`-relative (excluding
+    `lease_excl`, a byte-literal store-relative path, when given). The porcelain paths are REPOSITORY-root-
+    relative, so the store's path within the repository (git rev-parse --show-prefix) is stripped, which is
+    what lets `lease_excl` be excluded even when the store root lies BELOW the git repository root (a NESTED
+    store, where the un-normalized compare missed and drew the step-3 dirty-store refusal in place of step
+    4's held-lease message). Reuses _opf_observe's scrubbed-env, --no-replace-objects, -C-bound, timeout-
+    bounded boundary (G6). Fail-closed: a non-completed probe, a not-a-repository, a nonzero exit, an
+    undeterminable store prefix, or a malformed payload refuses; never a clean pass on an unreadable probe
+    (check-fails-closed-on-unreadable, SECA-verified-restore-path)."""
     args = (["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
              "--no-renames", "--"] + list(pathspecs))
     out = _opf_observe._run_git(git, root, args)
@@ -1497,18 +1565,13 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
                                 "(fail-closed)".format(str(root)))
         raise _UpgradeError("git could not verify the store is clean (rc {}); refusing the destructive "
                             "rewrite (fail-closed)".format(out.rc))
-    lease_b = lease_excl.encode("utf-8") if lease_excl is not None else None
-    dirty = []
-    for rec in out.out.split(b"\x00"):
-        if not rec:
-            continue
-        # porcelain v1 -z: two status chars, a space, then the path bytes (verbatim under -z, no quoting);
-        # --no-renames means no second NUL-separated original-path field to skip.
-        pbytes = rec[3:]
-        if lease_b is not None and pbytes == lease_b:
-            continue
-        dirty.append(pbytes.decode("utf-8", "replace"))
-    return dirty
+    pfx = _opf_observe._run_git(git, root, ["rev-parse", "--show-prefix"])
+    if not pfx.completed or pfx.rc != 0:
+        raise _UpgradeError("could not determine the store's path within its git repository; without it a "
+                            "nested store's clean probe cannot be trusted, so the rewrite is refused "
+                            "(fail-closed)")
+    prefix = pfx.out.decode("utf-8", "replace").strip()   # "" at the repo toplevel, else "<dir>/" (trailing /)
+    return _upgrade_parse_porcelain(out.out, prefix, lease_excl)
 
 
 def _upgrade_check_clean(res, manifest_model):
@@ -1559,15 +1622,21 @@ def _upgrade_lease_held_message(pfd, name, lease_rel):
     import tomllib
     detail = "a present lease with an unreadable payload"
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=pfd)
+        # O_NONBLOCK so a FIFO (or other special file) planted at lease.toml cannot BLOCK the open (an
+        # O_RDONLY open of a writer-less FIFO would hang indefinitely); fstat the opened fd and, for any
+        # NON-REGULAR file, refuse WITHOUT reading (presence is refusal, matching C-LEASE; never block).
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
         try:
-            raw = os.read(fd, 65536)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                detail = "a present non-regular lease (held)"
+            else:
+                raw = os.read(fd, 65536)
+                data = tomllib.loads(raw.decode("utf-8"))
+                if isinstance(data, dict):
+                    detail = "held by {!r} (operation {!r}, acquired_at {!r})".format(
+                        data.get("holder"), data.get("operation"), data.get("acquired_at"))
         finally:
             os.close(fd)
-        data = tomllib.loads(raw.decode("utf-8"))
-        if isinstance(data, dict):
-            detail = "held by {!r} (operation {!r}, acquired_at {!r})".format(
-                data.get("holder"), data.get("operation"), data.get("acquired_at"))
     except Exception:  # noqa: BLE001  a present-but-unreadable lease still refuses (present is held)
         pass
     return ("another opf run holds the single-writer lease {}: {}. The lease is never seized (spec 5.7). "
@@ -1598,11 +1667,22 @@ def _upgrade_acquire_lease(root_fd, machine_rel):
         except FileExistsError:
             raise _UpgradeError(_upgrade_lease_held_message(pfd, name, lease_rel))
         try:
-            journal._write_all(fd, payload)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.fsync(pfd)
+            try:
+                journal._write_all(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.fsync(pfd)
+        except BaseException:
+            # Any failure AFTER the O_EXCL create but BEFORE successful acquisition (a failed payload write,
+            # fsync, or the durability fsync of the parent) must not ORPHAN the just-created lease: unlink it
+            # no-follow via the parent fd before re-raising, so a mid-acquisition failure never leaves a
+            # leftover lease the next run would read as held.
+            try:
+                os.unlink(name, dir_fd=pfd)
+            except OSError:
+                pass
+            raise
     finally:
         os.close(pfd)
 
@@ -1713,9 +1793,16 @@ def _upgrade_run(root):
         _upgrade_check_clean(res, manifest_model)
 
         product_targets = _upgrade_product_render_targets(manifest_model)
+        # DISTINCT roots for the recovery/staging advice (R1): `.working` lives under the STORE root, product-
+        # scope targets under the PRODUCT root; the two differ for a RELOCATED store.
+        recovery_store_root = res.store_root
+        recovery_product_root = res.product_root if res.product_root is not None else res.store_root
         # STEP 4 (M4): claim the single-writer lease atomically, then hold it across mutation, render, and
-        # the final doctor; release it in the finally covering every exit after acquisition.
+        # the final doctor; release it in the finally covering every exit after acquisition, EXCEPT the
+        # success path releases FIRST (R5) so no success is reported over a still-held / failed-to-release
+        # lease. `released` records that the success path already released, so the finally does not re-release.
         _upgrade_acquire_lease(root_fd, machine_rel)
+        released = False
         try:
             # Apply: rewrite manifest + counters (canonical bytes), create the missing empty indexes.
             _upgrade_replace(root_fd, manifest_rel, new_manifest_bytes)
@@ -1751,7 +1838,8 @@ def _upgrade_run(root):
             if rc != EXIT_OK:
                 print("opf upgrade: cannot evaluate: view render after the schema delta did not complete "
                       "cleanly (rc={}); exit 2.".format(rc), file=sys.stderr)
-                print(_upgrade_recovery_text(root, created_relpaths, product_targets), file=sys.stderr)
+                print(_upgrade_recovery_text(recovery_store_root, recovery_product_root, created_relpaths,
+                                             product_targets), file=sys.stderr)
                 return EXIT_MALFORMED
 
             result = _upgrade_doctor(root)
@@ -1759,10 +1847,17 @@ def _upgrade_run(root):
                 print("opf upgrade: the upgraded store is NOT doctor-VALID; refusing to offer the change "
                       "(fail-closed, spec 9.2). Run `opf doctor --root {}` for the findings, exit 2.".format(
                           root), file=sys.stderr)
-                print(_upgrade_recovery_text(root, created_relpaths, product_targets), file=sys.stderr)
+                print(_upgrade_recovery_text(recovery_store_root, recovery_product_root, created_relpaths,
+                                             product_targets), file=sys.stderr)
                 _doctor_report(result)
                 return EXIT_MALFORMED
 
+            # R5: release the single-writer lease BEFORE emitting the success report. A release failure
+            # surfaces as exit 2 (never swallowed), and success is never printed over a still-held lease.
+            # `released` is set FIRST so the finally never double-releases (a failed release legitimately
+            # leaves the lease as a spec-conformant leftover for operator reconciliation).
+            released = True
+            _upgrade_release_lease(root_fd, machine_rel)
             print("opf upgrade: store schema upgraded {} -> {} and doctor-VALID (staged, NOT committed)."
                   .format(_UPGRADE_FROM, _UPGRADE_TO))
             print(json.dumps({
@@ -1774,15 +1869,16 @@ def _upgrade_run(root):
             print("opf upgrade: review the staged changes, then stage and commit them (scope the add to the "
                   "store subtree, never `add -A`, which would sweep in unrelated product work):")
             print("  git -C {} --literal-pathspecs add -- {}".format(
-                shlex.quote(str(root)), shlex.quote(_opf_store.WORKING_DIRNAME)))
+                shlex.quote(str(recovery_store_root)), shlex.quote(_opf_store.WORKING_DIRNAME)))
             for _pt in product_targets:
                 print("  git -C {} --literal-pathspecs add -- {}".format(
-                    shlex.quote(str(root)), shlex.quote(_pt)))
+                    shlex.quote(str(recovery_product_root)), shlex.quote(_pt)))
             print("opf upgrade: exit 0 means the store is valid at {}; committing is the adopter's own "
                   "step.".format(_UPGRADE_TO))
             return EXIT_OK
         finally:
-            _upgrade_release_lease(root_fd, machine_rel)
+            if not released:
+                _upgrade_release_lease(root_fd, machine_rel)
     finally:
         os.close(root_fd)
 
