@@ -2,26 +2,65 @@
 """OPF store-schema upgrade gate (spec 9.2), exercised exclusively through isolated temporary fixtures.
 
 Both the default entry and --self-test run the fixture suite. There is no live-adopter mutation leg and
-no root option: the gate drives `opf upgrade` (isolated, -I -B) over a BYTE-PINNED 1.0.0 store built beneath
-a fresh temporary git repository, and asserts the full 1.0.0 -> 1.1.0 contract end to end.
+no root option: the gate drives `opf upgrade` (isolated, -I -B) over BYTE-PINNED 1.0.0 stores built beneath
+fresh temporary git repositories, and asserts the 1.0.0 -> 1.1.0 contract over an enumerated adopter-shape
+matrix, a set of refusal fixtures, direct postcondition unit vectors, and a seeded migration property test.
 
-The 1.0.0 fixture bytes are FROZEN literals below, not regenerated from the current builders, so the fixture
-cannot silently drift into some other schema as the tooling evolves: it is the store an already-shipped 1.0.0
-tool would have written. The gate re-asserts the fixture's own canonicity (the manifest and counters
-round-trip through the canonical emitter), which is exactly the precondition `opf upgrade` enforces, so a
-future emitter change that would invalidate the frozen fixture is caught here rather than in the field.
+FIXTURE FIDELITY. The 1.0.0 fixture bytes are FROZEN, anchored on the frozen `_FIX_MANIFEST` /
+`_FIX_COUNTERS` baseline (not regenerated from the current builders), so the fixture cannot silently drift
+into some other schema as the tooling evolves: it is the store an already-shipped 1.0.0 tool would have
+written. Module-enabled and view-omitting variants are the frozen baseline PLUS exactly the rows a valid
+1.0.0 store of that shape must carry (a module boolean, `[types]` rows with normative namespaces, counters,
+index files), derived by explicit canonical string operations and RE-VERIFIED canonical in-gate through the
+canonical emitter (the same precondition `opf upgrade` enforces), so an emitter change that would invalidate
+any frozen fixture is caught HERE rather than in the field. The genuine-1.0.0-store shape of each module-
+enabled variant was additionally graded doctor-VALID at authoring time by the actual merge-base 1.0.0 tooling
+(commit 1c90fbb, `tools/opf.py doctor`); at 1.0.0 the module-tier records (maintainer_decision /
+preference_pattern) are schema-DEFERRED by the baseline validator and become fully-validated baseline records
+only at 1.1.0, so a POPULATED module-tier fixture's records are validated at run time by the actual
+upgrade -> 1.1.0 doctor leg here rather than by the 1.0.0 baseline. In-gate re-verification is canonicity-only;
+1.0.0-doctor fidelity is authoring-time evidence.
 
-Vectors: the happy 1.0.0 -> 1.1.0 upgrade lands doctor-VALID with spec_version bumped, decision_support
-retired, the three baseline type rows and two view rows added, counters extended CN/MD/PP, and the three
-empty indexes created; a second run is a byte no-op (idempotence); a pre-existing empty maintainer_decision
-index is SKIPPED and preserved byte-for-byte (create-only, no data loss); a store already at 1.1.0 is a
-no-op; an above-tooling (2.0.0) store is refused; a hand-edited (comment-bearing, non-canonical) manifest is
-refused; a NOT-ADOPTED root is NOT APPLICABLE. Missing git or unusable temporary storage returns 2, never a
-clean skip.
+VECTOR ROSTER (U1-U18, P1):
+  U1  pristine baseline: full delta, doctor VALID.
+  U2  idempotence: a second run is a byte no-op reporting already-current.
+  U3  governance=true, MA+MD rows + empty indexes + counters: contribution+preference_pattern indexes
+      created; MA stays module-tier; governance stays true; MD/MA rows and indexes preserved; doctor VALID.
+  U4  governance=true, POPULATED maintainer_decision index (one frozen ruling), MD=1: index bytes and the
+      MD counter preserved byte-for-byte; doctor VALID.
+  U5  decision_support=true, PP row + empty index + counter: contribution+maintainer_decision indexes
+      created; the decision_support module key removed; PP row preserved; doctor VALID.
+  U6  decision_support=true, POPULATED preference_pattern index carrying a maintainer bare-active PP and an
+      assistant-created RATIFIED PP (active, updated_at > created_at): bytes and high-water preserved;
+      doctor VALID. This vector FAILS without the M5 creation-snapshot fix (its pipeline regression).
+  U7  governance AND decision_support, both populated: only the contribution index created; both preserved.
+  U8  baseline with the optional decision_support module key ABSENT: [modules] unchanged; doctor VALID.
+  U9  baseline with DECISIONS.md omitted from [views]: it is neither widened nor created; the two new views
+      are added and rendered; doctor VALID.
+  U10 U8 and U9 combined.
+  U11 delivery_assurance=true with its four type rows/indexes/counters (a representative non-migrated
+      module): every delivery_assurance row/index/counter preserved value-exact; doctor VALID.
+  U12 baseline plus an untracked well-formed foreign lease.toml: exit 2, the refusal names the holder, the
+      lease is NOT deleted, the tree is unchanged.
+  U13 baseline plus a malformed lease.toml: exit 2 (present is held, never absent); not deleted; unchanged.
+  U14 baseline plus an uncommitted worklog.toml edit: exit 2 BEFORE any mutation; the refusal names the
+      dirty path and advises commit-your-changes, never a whole-tree restore; the owner edit intact.
+  U15 [types.contribution] pre-declared: exit 2 naming contribution as an impossible 1.0.0 shape; unchanged.
+  U16 governance=false plus [types.maintainer_decision]: exit 2 naming the module inconsistency; unchanged.
+  U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.1.0 triage refusals (with the scoped
+      recovery text).
+  U18 postcondition unit vectors: call opf._upgrade_postcondition directly with hand-mutated new models; each
+      mutation refuses and the genuine planner output passes (the check that fails without the m1 fix).
+  P1  a seeded migration property test: 12 generated genuine-VALID 1.0.0 variants (module subset with the
+      G2 coupling, 0-2 records per migrated type with matching high-waters, DECISIONS.md declared/omitted,
+      the decision_support key present/absent) each upgrade to a doctor-VALID 1.1.0 store with every index
+      byte-identical, every pre-existing counter preserved, and worklog/version byte-identical.
 
 Exit convention: 0 observed assertions pass; 1 an assertion fails; 2 cannot evaluate the harness.
 """
+import copy
 import os
+import random
 import stat
 import subprocess
 import sys
@@ -39,9 +78,7 @@ EXIT_ERROR = 2
 # declares the retired decision_support module and its [types] table carries ONLY the 1.0.0 baseline types
 # (no maintainer_decision / preference_pattern / contribution). This is what a real 1.0.0 adopter actually
 # has: DECISIONS.md is a 2-SOURCE composed view (pending_decision, autonomous_decision), since the other two
-# decision types did not yet exist. The spec-9.2 allowed delta WIDENS DECISIONS.md to the four 1.1.0 sources;
-# without that widening (F1) the migrated view stays 2-source and fails the render/doctor gate, so this
-# fixture is the regression test for F1 (it FAILED before the widening landed).
+# decision types did not yet exist. The spec-9.2 allowed delta WIDENS DECISIONS.md to the four 1.1.0 sources.
 _FIX_MANIFEST = ("""\
 [archive]
 period = "year"
@@ -193,6 +230,128 @@ _FIX_INDEX = "record = []\nschema = 1\n"
 _FIX_INDEX_TYPES = ("autonomous_decision", "backlog_item", "block", "done", "finding", "handoff",
                     "pending_decision", "reference")
 
+# --- FROZEN populated module-tier indexes (synthetic data only; SECP-synthetic-fixture-data) ----------
+# Authored 1.0.0 module-tier records: at 1.0.0 they are schema-deferred by the baseline validator and
+# become fully-validated baseline records at 1.1.0. The preference_pattern index carries a maintainer
+# bare-active PP AND an assistant-created RATIFIED PP (active, updated_at > created_at), the record shape
+# the M5 creation-snapshot fix admits at rest and the old at-rest rule wrongly flagged (U6's regression).
+_FIX_MD_INDEX = ("""\
+schema = 1
+
+[[record]]
+created_at = "2026-07-01T00:00:00Z"
+decision = "Do the synthetic thing"
+id = "MD-1"
+status = "recorded"
+title = "A synthetic ruling"
+type = "maintainer_decision"
+updated_at = "2026-07-01T00:00:00Z"
+
+[record.actor]
+kind = "maintainer"
+""")
+_FIX_PP_INDEX = ("""\
+schema = 1
+
+[[record]]
+context = "ctx"
+created_at = "2026-07-01T00:00:00Z"
+id = "PP-1"
+rationale = "why"
+status = "active"
+title = "Synthetic pattern one"
+type = "preference_pattern"
+updated_at = "2026-07-01T00:00:00Z"
+
+[record.actor]
+kind = "maintainer"
+
+[[record]]
+context = "ctx2"
+created_at = "2026-07-01T00:00:00Z"
+id = "PP-2"
+rationale = "why2"
+status = "active"
+title = "Synthetic pattern two"
+type = "preference_pattern"
+updated_at = "2026-07-02T00:00:00Z"
+
+[record.actor]
+kind = "assistant"
+""")
+
+# --- module-enabled / view-omitting manifest and counter derivations (frozen baseline + exactly the rows a
+# valid 1.0.0 store of that shape carries, canonicalized). Each is RE-VERIFIED canonical in-gate. The type
+# rows and counter entries are inserted at their canonical (alphabetical) positions, so the derived bytes
+# are byte-identical to the canonical emitter's output for that model (asserted below). --------------------
+def _man_gov(m=_FIX_MANIFEST):
+    m = m.replace("governance = false\n", "governance = true\n", 1)
+    return m.replace('[types.pending_decision]',
+                     '[types.maintainer_action]\nnamespace = "MA"\n\n'
+                     '[types.maintainer_decision]\nnamespace = "MD"\n\n[types.pending_decision]', 1)
+
+
+def _man_ds(m=_FIX_MANIFEST):
+    m = m.replace("decision_support = false\n", "decision_support = true\n", 1)
+    return m.replace('[types.reference]',
+                     '[types.preference_pattern]\nnamespace = "PP"\n\n[types.reference]', 1)
+
+
+def _man_da(m=_FIX_MANIFEST):
+    m = m.replace("delivery_assurance = false\n", "delivery_assurance = true\n", 1)
+    m = m.replace('[types.autonomous_decision]',
+                  '[types.artifact]\nnamespace = "AR"\n\n[types.autonomous_decision]', 1)
+    m = m.replace('[types.handoff]', '[types.gate_run]\nnamespace = "GR"\n\n[types.handoff]', 1)
+    return m.replace('[types.worklog]',
+                     '[types.release]\nnamespace = "RL"\n\n[types.waiver]\nnamespace = "WV"\n\n'
+                     '[types.worklog]', 1)
+
+
+_DECISIONS_MD_BLOCK = ('[views."DECISIONS.md"]\nkind = "composed"\n'
+                       'sources = ["pending_decision", "autonomous_decision"]\n'
+                       'target = ".working/DECISIONS.md"\n\n')
+
+
+def _man_drop_dskey(m=_FIX_MANIFEST):
+    return m.replace("decision_support = false\n", "", 1)
+
+
+def _man_drop_decisions(m=_FIX_MANIFEST):
+    return m.replace(_DECISIONS_MD_BLOCK, "", 1)
+
+
+def _man_add_contribution(m=_FIX_MANIFEST):
+    return m.replace('[types.done]', '[types.contribution]\nnamespace = "CN"\n\n[types.done]', 1)
+
+
+def _man_add_md(m=_FIX_MANIFEST):
+    return m.replace('[types.pending_decision]',
+                     '[types.maintainer_decision]\nnamespace = "MD"\n\n[types.pending_decision]', 1)
+
+
+def _cnt(c=_FIX_COUNTERS):
+    return c
+
+
+def _cnt_gov(md=0):
+    c = _FIX_COUNTERS.replace("PD = 0\n", "MA = 0\nMD = {}\nPD = 0\n".format(md), 1)
+    return c
+
+
+def _cnt_ds(pp=0):
+    return _FIX_COUNTERS.replace("RF = 0\n", "PP = {}\nRF = 0\n".format(pp), 1)
+
+
+def _cnt_govds(md=1, pp=2):
+    c = _cnt_gov(md=md)
+    return c.replace("RF = 0\n", "PP = {}\nRF = 0\n".format(pp), 1)
+
+
+def _cnt_da():
+    c = _FIX_COUNTERS.replace("BI = 0\n", "AR = 0\nBI = 0\n", 1)
+    c = c.replace("HO = 0\n", "GR = 0\nHO = 0\n", 1)
+    return c.replace("WL = 0\n", "RL = 0\nWL = 0\nWV = 0\n", 1)
+
 
 def _run_opf(argv, env):
     """Run the real dispatcher isolated (-I -B); preserve its output for discriminating assertions."""
@@ -229,6 +388,8 @@ def _suite():
         import _opf_check
         import _opf_emit
         import _opf_store
+        import opf
+        opf._bootstrap()
 
         failures = []
         checked = []
@@ -238,20 +399,39 @@ def _suite():
             if not condition:
                 failures.append(label)
 
-        machine = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+        # --- fixture canonicity (the upgrade's own precondition), extended to every frozen / derived fixture:
+        # each manifest and counters literal must round-trip through the canonical emitter, so an emitter
+        # change that would break the field precondition (or a mis-authored derivation) fails HERE.
+        def canon_man(label, text):
+            check("canonical manifest: " + label,
+                  _opf_emit.emit_checked(tomllib.loads(text)) == text)
 
-        # Fixture canonicity (the upgrade's own precondition): the frozen manifest and counters round-trip
-        # through the canonical emitter, so this frozen fixture is a store the tool would accept, and an
-        # emitter change that would break the field precondition fails HERE.
-        check("frozen manifest is canonical",
-              _opf_emit.emit_checked(tomllib.loads(_FIX_MANIFEST)) == _FIX_MANIFEST)
-        check("frozen counters is canonical",
-              _opf_emit.emit_checked(tomllib.loads(_FIX_COUNTERS)) == _FIX_COUNTERS)
+        def canon_cnt(label, text):
+            check("canonical counters: " + label,
+                  _opf_emit.emit_checked(tomllib.loads(text)) == text)
+
+        canon_man("baseline", _FIX_MANIFEST)
+        canon_man("governance", _man_gov())
+        canon_man("decision_support", _man_ds())
+        canon_man("gov+ds", _man_ds(_man_gov()))
+        canon_man("delivery_assurance", _man_da())
+        canon_man("drop-ds-key", _man_drop_dskey())
+        canon_man("drop-decisions", _man_drop_decisions())
+        canon_man("drop-both", _man_drop_decisions(_man_drop_dskey()))
+        canon_man("add-contribution", _man_add_contribution())
+        canon_man("add-md", _man_add_md())
+        canon_cnt("baseline", _FIX_COUNTERS)
+        canon_cnt("governance", _cnt_gov())
+        canon_cnt("gov-md1", _cnt_gov(md=1))
+        canon_cnt("decision_support", _cnt_ds())
+        canon_cnt("ds-pp2", _cnt_ds(pp=2))
+        canon_cnt("gov+ds", _cnt_govds())
+        canon_cnt("delivery_assurance", _cnt_da())
+        for label, text in (("md-index", _FIX_MD_INDEX), ("pp-index", _FIX_PP_INDEX)):
+            check("canonical index: " + label,
+                  _opf_emit.emit_checked(tomllib.loads(text)) == text)
         check("frozen fixture declares spec_version 1.0.0",
               tomllib.loads(_FIX_MANIFEST)["devprocess"]["spec_version"] == "1.0.0")
-        # F3: the fixture is a GENUINE 1.0.0 store -- a 2-source DECISIONS.md and a [types] table with only
-        # the 1.0.0 baseline types. This is the regression test for F1: it fails the migration unless the
-        # allowed delta widens DECISIONS.md's source set.
         check("frozen fixture DECISIONS.md is a 2-source 1.0.0 view",
               tomllib.loads(_FIX_MANIFEST)["views"]["DECISIONS.md"]["sources"]
               == ["pending_decision", "autonomous_decision"])
@@ -270,9 +450,15 @@ def _suite():
 
         env_holder = {}
 
-        def build_store(store, manifest=_FIX_MANIFEST, counters=_FIX_COUNTERS, extra_files=None):
-            """Write a frozen 1.0.0 store beneath `store` and commit it (doctor needs a committed HEAD)."""
-            mach = store / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
+        def machdir(store):
+            return store / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
+
+        def build_store(store, manifest=_FIX_MANIFEST, counters=_FIX_COUNTERS, extra_files=None,
+                        commit=True):
+            """Write a frozen 1.0.0 store beneath `store` and commit it (doctor needs a committed HEAD).
+            `extra_files` (relpath -> text) adds or overrides machine-store files (extra index types, a
+            populated index, a lease). Returns the machine-store dir."""
+            mach = machdir(store)
             mach.mkdir(parents=True)
             git_call(store, ["init"])
             (mach / _opf_store.MANIFEST_NAME).write_text(manifest, encoding="utf-8")
@@ -285,14 +471,25 @@ def _suite():
                 (mach / rel).write_text(data, encoding="utf-8")
             (store / _opf_store.POINTER_REL).write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
             (store / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
-            git_call(store, ["--literal-pathspecs", "add", "-A"])
-            git_call(store, ["commit", "-m", "seed 1.0.0 store"])
+            if commit:
+                git_call(store, ["--literal-pathspecs", "add", "-A"])
+                git_call(store, ["commit", "-m", "seed 1.0.0 store"])
+            return mach
+
+        def idx(t):
+            return t + _opf_check.INDEX_SUFFIX
 
         def upgrade(store):
             return _run_opf(["upgrade", "--root", str(store)], env_holder["env"])
 
         def doctor(store):
             return _run_opf(["doctor", "--root", str(store)], env_holder["env"])
+
+        def man_of(mach):
+            return tomllib.loads((mach / _opf_store.MANIFEST_NAME).read_text(encoding="utf-8"))
+
+        def cnt_of(mach):
+            return tomllib.loads((mach / _opf_check.COUNTERS_NAME).read_text(encoding="utf-8"))["counters"]
 
         with tempfile.TemporaryDirectory(prefix="opf-upgrade-gate-") as temporary:
             base = Path(temporary).resolve()
@@ -302,106 +499,402 @@ def _suite():
             env_holder["env"].pop("XDG_CONFIG_HOME", None)
             env_holder["env"].pop("XDG_CONFIG_DIRS", None)
 
-            # 1) Happy path: 1.0.0 -> 1.1.0, doctor VALID, exact delta applied.
-            s1 = base / "happy"
+            # U1) Happy path: 1.0.0 -> 1.1.0, doctor VALID, exact delta applied.
+            s1 = base / "u1-happy"
             s1.mkdir()
-            build_store(s1)
+            mach1 = build_store(s1)
             rc, out = upgrade(s1)
-            check("happy upgrade exits 0", rc == EXIT_OK)
-            check("happy upgrade reports staged not committed",
+            check("U1 upgrade exits 0", rc == EXIT_OK)
+            check("U1 reports staged not committed",
                   "staged, NOT committed" in out and '"event": "upgraded"' in out)
-            mach1 = s1 / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
-            man1 = tomllib.loads((mach1 / _opf_store.MANIFEST_NAME).read_text(encoding="utf-8"))
-            # OPFiles rebrand: the migration renames the base table [devprocess] -> [opf] and its discovery
-            # token, as part of the same 1.0.0 -> 1.1.0 delta (spec 9.2).
-            check("base table renamed to [opf]",
-                  "opf" in man1 and "devprocess" not in man1)
-            check("discovery token renamed to opf", man1["opf"].get("standard") == "opf")
-            check("spec_version bumped to 1.1.0", man1["opf"]["spec_version"] == "1.1.0")
-            check("base table body otherwise carried over", all(
+            man1 = man_of(mach1)
+            check("U1 base table renamed to [opf]", "opf" in man1 and "devprocess" not in man1)
+            check("U1 discovery token renamed to opf", man1["opf"].get("standard") == "opf")
+            check("U1 spec_version bumped to 1.1.0", man1["opf"]["spec_version"] == "1.1.0")
+            check("U1 base table body otherwise carried over", all(
                 man1["opf"].get(k) == v for k, v in (
                     ("layout", "inline"), ("posture", "required"), ("import_status", "none"))))
-            check("decision_support module retired", "decision_support" not in man1["modules"])
-            check("three baseline type rows added", all(
+            check("U1 decision_support module retired", "decision_support" not in man1["modules"])
+            check("U1 three baseline type rows added", all(
                 man1["types"].get(t) == {"namespace": _opf_store.BASELINE_TYPES[t]}
                 for t in ("contribution", "maintainer_decision", "preference_pattern")))
-            check("two new view rows added",
+            check("U1 two new view rows added",
                   "CONTRIBUTIONS.md" in man1["views"] and "DECISIONS.toml" in man1["views"])
-            # F1: the existing DECISIONS.md composed view is widened from the two 1.0.0 sources to the four
-            # required at 1.1.0 (adding maintainer_decision and preference_pattern), so it renders and
-            # doctor-validates. This assertion FAILS on the 2-source fixture unless the widening delta lands.
-            check("DECISIONS.md view widened to the four 1.1.0 sources",
+            check("U1 DECISIONS.md view widened to the four 1.1.0 sources",
                   man1["views"]["DECISIONS.md"]["sources"]
                   == ["pending_decision", "autonomous_decision", "maintainer_decision", "preference_pattern"])
-            cnt1 = tomllib.loads((mach1 / _opf_check.COUNTERS_NAME).read_text(encoding="utf-8"))["counters"]
-            check("counters extended CN/MD/PP = 0",
+            check("U1 decisions_view widened", '"decisions_view": "widened"' in out)
+            check("U1 pre_declared_types empty", '"pre_declared_types": []' in out)
+            cnt1 = cnt_of(mach1)
+            check("U1 counters extended CN/MD/PP = 0",
                   cnt1.get("CN") == 0 and cnt1.get("MD") == 0 and cnt1.get("PP") == 0)
-            check("three empty indexes created", all(
-                (mach1 / (t + _opf_check.INDEX_SUFFIX)).is_file()
+            check("U1 three empty indexes created", all(
+                (mach1 / idx(t)).is_file()
                 for t in ("contribution", "maintainer_decision", "preference_pattern")))
             drc, dout = doctor(s1)
-            check("happy upgraded store is doctor-VALID", drc == EXIT_OK and "integrity: VALID" in dout)
+            check("U1 upgraded store is doctor-VALID", drc == EXIT_OK and "integrity: VALID" in dout)
 
-            # 2) Idempotence: a second run is a byte no-op reporting already-current.
+            # U2) Idempotence: a second run is a byte no-op reporting already-current.
             before = _snapshot(s1)
             rc2, out2 = upgrade(s1)
-            check("idempotent second run exits 0", rc2 == EXIT_OK)
-            check("idempotent second run reports no-op", "already at spec_version 1.1.0" in out2)
-            check("idempotent second run is a byte no-op", _snapshot(s1) == before)
+            check("U2 idempotent second run exits 0", rc2 == EXIT_OK)
+            check("U2 idempotent second run reports no-op", "already at spec_version 1.1.0" in out2)
+            check("U2 idempotent second run is a byte no-op", _snapshot(s1) == before)
 
-            # 3) Pre-existing empty maintainer_decision index is SKIPPED and preserved (no data loss).
-            s3 = base / "preexisting-md"
+            # U3) governance=true, MA+MD rows, empty MA/MD indexes, MA/MD counters.
+            s3 = base / "u3-gov"
             s3.mkdir()
-            build_store(s3, extra_files={"maintainer_decision" + _opf_check.INDEX_SUFFIX: _FIX_INDEX})
-            mach3 = s3 / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
-            md_before = (mach3 / ("maintainer_decision" + _opf_check.INDEX_SUFFIX)).read_bytes()
+            mach3 = build_store(s3, manifest=_man_gov(), counters=_cnt_gov(),
+                                extra_files={idx("maintainer_action"): _FIX_INDEX,
+                                             idx("maintainer_decision"): _FIX_INDEX})
+            ma_before = (mach3 / idx("maintainer_action")).read_bytes()
+            md_before = (mach3 / idx("maintainer_decision")).read_bytes()
             rc3, out3 = upgrade(s3)
-            check("pre-existing MD index: upgrade exits 0", rc3 == EXIT_OK)
-            check("pre-existing MD index not recreated",
+            check("U3 upgrade exits 0", rc3 == EXIT_OK)
+            check("U3 only contribution+preference_pattern indexes created",
                   '"created_indexes": ["contribution", "preference_pattern"]' in out3)
-            check("pre-existing MD index preserved byte-for-byte",
-                  (mach3 / ("maintainer_decision" + _opf_check.INDEX_SUFFIX)).read_bytes() == md_before)
+            man3 = man_of(mach3)
+            check("U3 governance stays true", man3["modules"].get("governance") is True)
+            check("U3 MA stays module-tier", man3["types"].get("maintainer_action") == {"namespace": "MA"})
+            check("U3 MD row preserved", man3["types"].get("maintainer_decision") == {"namespace": "MD"})
+            check("U3 MA/MD indexes preserved byte-for-byte",
+                  (mach3 / idx("maintainer_action")).read_bytes() == ma_before
+                  and (mach3 / idx("maintainer_decision")).read_bytes() == md_before)
             drc3, dout3 = doctor(s3)
-            check("pre-existing MD index store is doctor-VALID",
-                  drc3 == EXIT_OK and "integrity: VALID" in dout3)
+            check("U3 doctor-VALID", drc3 == EXIT_OK and "integrity: VALID" in dout3)
 
-            # 4) A store already at 1.1.0 is the idempotent no-op, exercised by vector (2) above.
+            # U4) governance=true, POPULATED maintainer_decision index, MD=1.
+            s4 = base / "u4-gov-populated"
+            s4.mkdir()
+            mach4 = build_store(s4, manifest=_man_gov(), counters=_cnt_gov(md=1),
+                                extra_files={idx("maintainer_action"): _FIX_INDEX,
+                                             idx("maintainer_decision"): _FIX_MD_INDEX})
+            md4_before = (mach4 / idx("maintainer_decision")).read_bytes()
+            rc4, out4 = upgrade(s4)
+            check("U4 upgrade exits 0", rc4 == EXIT_OK)
+            check("U4 populated MD index preserved byte-for-byte",
+                  (mach4 / idx("maintainer_decision")).read_bytes() == md4_before)
+            check("U4 MD counter high-water preserved", cnt_of(mach4).get("MD") == 1)
+            drc4, dout4 = doctor(s4)
+            check("U4 doctor-VALID", drc4 == EXIT_OK and "integrity: VALID" in dout4)
 
-            # 5) Above-tooling refusal: a 2.0.0 store is never downgraded.
-            s5 = base / "above"
+            # U5) decision_support=true, PP row, empty PP index, PP counter.
+            s5 = base / "u5-ds"
             s5.mkdir()
-            above_manifest = _FIX_MANIFEST.replace('spec_version = "1.0.0"', 'spec_version = "2.0.0"')
-            build_store(s5, manifest=above_manifest)
+            mach5 = build_store(s5, manifest=_man_ds(), counters=_cnt_ds(),
+                                extra_files={idx("preference_pattern"): _FIX_INDEX})
+            pp5_before = (mach5 / idx("preference_pattern")).read_bytes()
             rc5, out5 = upgrade(s5)
-            check("above-tooling store refused (exit 2)", rc5 == EXIT_ERROR)
-            check("above-tooling refusal names the reason", "ABOVE the 1.1.0" in out5)
+            check("U5 upgrade exits 0", rc5 == EXIT_OK)
+            check("U5 only contribution+maintainer_decision indexes created",
+                  '"created_indexes": ["contribution", "maintainer_decision"]' in out5)
+            man5 = man_of(mach5)
+            check("U5 decision_support module key removed", "decision_support" not in man5["modules"])
+            check("U5 PP row preserved", man5["types"].get("preference_pattern") == {"namespace": "PP"})
+            check("U5 PP index preserved", (mach5 / idx("preference_pattern")).read_bytes() == pp5_before)
+            drc5, dout5 = doctor(s5)
+            check("U5 doctor-VALID", drc5 == EXIT_OK and "integrity: VALID" in dout5)
 
-            # 6) Non-canonical (hand-edited, comment-bearing) manifest is refused fail-closed.
-            s6 = base / "noncanonical"
+            # U6) decision_support=true, POPULATED PP index (bare-active + RATIFIED assistant PP), PP=2.
+            # This vector FAILS without the M5 creation-snapshot fix (the ratified PP at bare active).
+            s6 = base / "u6-ds-ratified"
             s6.mkdir()
-            build_store(s6, manifest="# hand-edited by an adopter\n" + _FIX_MANIFEST)
+            mach6 = build_store(s6, manifest=_man_ds(), counters=_cnt_ds(pp=2),
+                                extra_files={idx("preference_pattern"): _FIX_PP_INDEX})
+            pp6_before = (mach6 / idx("preference_pattern")).read_bytes()
             rc6, out6 = upgrade(s6)
-            check("non-canonical manifest refused (exit 2)", rc6 == EXIT_ERROR)
-            check("non-canonical refusal names canonicity", "canonical" in out6)
+            check("U6 upgrade exits 0 (ratified PP admitted at rest, needs M5)", rc6 == EXIT_OK)
+            check("U6 populated PP index preserved byte-for-byte",
+                  (mach6 / idx("preference_pattern")).read_bytes() == pp6_before)
+            check("U6 PP high-water preserved", cnt_of(mach6).get("PP") == 2)
+            drc6, dout6 = doctor(s6)
+            check("U6 doctor-VALID (the M5 pipeline regression)",
+                  drc6 == EXIT_OK and "integrity: VALID" in dout6)
 
-            # 7) NOT-ADOPTED root: nothing to upgrade, NOT APPLICABLE (exit 0).
-            s7 = base / "not-adopted"
+            # U7) governance AND decision_support, both populated.
+            s7 = base / "u7-gov-ds"
             s7.mkdir()
+            mach7 = build_store(s7, manifest=_man_ds(_man_gov()), counters=_cnt_govds(md=1, pp=2),
+                                extra_files={idx("maintainer_action"): _FIX_INDEX,
+                                             idx("maintainer_decision"): _FIX_MD_INDEX,
+                                             idx("preference_pattern"): _FIX_PP_INDEX})
+            md7_before = (mach7 / idx("maintainer_decision")).read_bytes()
+            pp7_before = (mach7 / idx("preference_pattern")).read_bytes()
             rc7, out7 = upgrade(s7)
-            check("not-adopted root is NOT APPLICABLE (exit 0)",
-                  rc7 == EXIT_OK and "NOT APPLICABLE" in out7)
+            check("U7 upgrade exits 0", rc7 == EXIT_OK)
+            check("U7 only contribution index created", '"created_indexes": ["contribution"]' in out7)
+            check("U7 both populated indexes preserved",
+                  (mach7 / idx("maintainer_decision")).read_bytes() == md7_before
+                  and (mach7 / idx("preference_pattern")).read_bytes() == pp7_before)
+            check("U7 both high-waters preserved",
+                  cnt_of(mach7).get("MD") == 1 and cnt_of(mach7).get("PP") == 2)
+            drc7, dout7 = doctor(s7)
+            check("U7 doctor-VALID", drc7 == EXIT_OK and "integrity: VALID" in dout7)
 
-            # 8) F2: a store at spec_version 1.1.0 that is NOT doctor-VALID (a partial or interrupted
-            # migration) must fail closed, never report "already upgraded, no-op". The version marker alone
-            # would say no-op; the doctor-VALID triage returns exit 2 instead. Take the VALID 1.1.0 store from
-            # vector (1), break it by removing a required index, and re-run `opf upgrade`.
-            broken_idx = mach1 / ("maintainer_decision" + _opf_check.INDEX_SUFFIX)
-            broken_idx.unlink()
-            rc8, out8 = upgrade(s1)
-            check("partial 1.1.0 store is not a false rc-0 no-op (fail-closed exit 2)", rc8 == EXIT_ERROR)
-            check("partial 1.1.0 store fail-closed names not-doctor-VALID", "NOT doctor-VALID" in out8)
-            drc8, dout8 = doctor(s1)
-            check("partial 1.1.0 store doctor is not VALID (exit 2)", drc8 == EXIT_ERROR)
+            # U8) baseline with the optional decision_support module key ABSENT.
+            s8 = base / "u8-no-ds-key"
+            s8.mkdir()
+            mach8 = build_store(s8, manifest=_man_drop_dskey())
+            rc8, out8 = upgrade(s8)
+            check("U8 upgrade exits 0", rc8 == EXIT_OK)
+            man8 = man_of(mach8)
+            check("U8 [modules] unchanged (no decision_support key invented)",
+                  "decision_support" not in man8["modules"])
+            drc8, dout8 = doctor(s8)
+            check("U8 doctor-VALID", drc8 == EXIT_OK and "integrity: VALID" in dout8)
+
+            # U9) baseline with DECISIONS.md omitted from [views].
+            s9 = base / "u9-no-decisions"
+            s9.mkdir()
+            mach9 = build_store(s9, manifest=_man_drop_decisions())
+            rc9, out9 = upgrade(s9)
+            check("U9 upgrade exits 0", rc9 == EXIT_OK)
+            man9 = man_of(mach9)
+            check("U9 DECISIONS.md neither widened nor created", "DECISIONS.md" not in man9["views"])
+            check("U9 two new views still added and rendered",
+                  "CONTRIBUTIONS.md" in man9["views"] and "DECISIONS.toml" in man9["views"]
+                  and (mach9.parent / "DECISIONS.toml").is_file())
+            check("U9 decisions_view reported not-declared", '"decisions_view": "not-declared"' in out9)
+            drc9, dout9 = doctor(s9)
+            check("U9 doctor-VALID", drc9 == EXIT_OK and "integrity: VALID" in dout9)
+
+            # U10) U8 and U9 combined.
+            s10 = base / "u10-both"
+            s10.mkdir()
+            mach10 = build_store(s10, manifest=_man_drop_decisions(_man_drop_dskey()))
+            rc10, out10 = upgrade(s10)
+            check("U10 upgrade exits 0", rc10 == EXIT_OK)
+            man10 = man_of(mach10)
+            check("U10 modules unchanged and DECISIONS.md absent",
+                  "decision_support" not in man10["modules"] and "DECISIONS.md" not in man10["views"])
+            drc10, dout10 = doctor(s10)
+            check("U10 doctor-VALID", drc10 == EXIT_OK and "integrity: VALID" in dout10)
+
+            # U11) delivery_assurance=true (a representative non-migrated module).
+            s11 = base / "u11-delivery"
+            s11.mkdir()
+            da_extra = {idx(t): _FIX_INDEX for t in ("artifact", "gate_run", "release", "waiver")}
+            mach11 = build_store(s11, manifest=_man_da(), counters=_cnt_da(), extra_files=da_extra)
+            da_before = {t: (mach11 / idx(t)).read_bytes()
+                         for t in ("artifact", "gate_run", "release", "waiver")}
+            rc11, out11 = upgrade(s11)
+            check("U11 upgrade exits 0", rc11 == EXIT_OK)
+            man11 = man_of(mach11)
+            check("U11 every delivery_assurance row preserved value-exact", all(
+                man11["types"].get(t) == {"namespace": ns} for t, ns in
+                (("artifact", "AR"), ("gate_run", "GR"), ("release", "RL"), ("waiver", "WV"))))
+            check("U11 every delivery_assurance index preserved byte-for-byte",
+                  all((mach11 / idx(t)).read_bytes() == b for t, b in da_before.items()))
+            check("U11 every delivery_assurance counter preserved",
+                  all(cnt_of(mach11).get(ns) == 0 for ns in ("AR", "GR", "RL", "WV")))
+            drc11, dout11 = doctor(s11)
+            check("U11 doctor-VALID", drc11 == EXIT_OK and "integrity: VALID" in dout11)
+
+            # U12) baseline plus an UNTRACKED well-formed foreign lease.toml.
+            s12 = base / "u12-lease-held"
+            s12.mkdir()
+            mach12 = build_store(s12)
+            (mach12 / _opf_check.LEASE_NAME).write_text(
+                'acquired_at = "2026-01-01T00:00:00Z"\nholder = "peer-runner"\n'
+                'operation = "upgrade"\nschema = 1\n', encoding="utf-8")   # untracked
+            before12 = _snapshot(s12)
+            rc12, out12 = upgrade(s12)
+            check("U12 held lease refuses (exit 2)", rc12 == EXIT_ERROR)
+            check("U12 refusal names the holder", "peer-runner" in out12 and "lease" in out12.lower())
+            check("U12 lease NOT deleted", (mach12 / _opf_check.LEASE_NAME).is_file())
+            check("U12 tree unchanged", _snapshot(s12) == before12)
+
+            # U13) baseline plus a MALFORMED lease.toml (present is held, never absent).
+            s13 = base / "u13-lease-malformed"
+            s13.mkdir()
+            mach13 = build_store(s13)
+            (mach13 / _opf_check.LEASE_NAME).write_text("not valid = = = toml\n", encoding="utf-8")
+            before13 = _snapshot(s13)
+            rc13, out13 = upgrade(s13)
+            check("U13 malformed lease refuses (exit 2)", rc13 == EXIT_ERROR)
+            check("U13 lease NOT deleted", (mach13 / _opf_check.LEASE_NAME).is_file())
+            check("U13 tree unchanged", _snapshot(s13) == before13)
+
+            # U14) baseline plus an uncommitted worklog.toml edit (the reproduced dirty-store case).
+            s14 = base / "u14-dirty"
+            s14.mkdir()
+            mach14 = build_store(s14)
+            (mach14 / _opf_check.WORKLOG_NAME).write_text(
+                "entry = []\nschema = 1\n# an uncommitted owner edit\n", encoding="utf-8")
+            before14 = _snapshot(s14)
+            rc14, out14 = upgrade(s14)
+            check("U14 dirty store refuses BEFORE mutation (exit 2)", rc14 == EXIT_ERROR)
+            check("U14 refusal names the dirty path", "worklog.toml" in out14 and "clean" in out14)
+            check("U14 advises commit-your-changes and offers no restore command (the dirt is the owner's)",
+                  "Commit your store changes" in out14 and "restore --staged" not in out14)
+            check("U14 owner edit intact and tree unchanged", _snapshot(s14) == before14)
+
+            # U15) [types.contribution] pre-declared: an impossible 1.0.0 shape.
+            s15 = base / "u15-contribution-predeclared"
+            s15.mkdir()
+            mach15 = build_store(s15, manifest=_man_add_contribution(),
+                                 extra_files={idx("contribution"): _FIX_INDEX})
+            before15 = _snapshot(s15)
+            rc15, out15 = upgrade(s15)
+            check("U15 pre-declared contribution refuses (exit 2)", rc15 == EXIT_ERROR)
+            check("U15 refusal names contribution as an impossible 1.0.0 shape",
+                  "contribution" in out15 and "impossible" in out15)
+            check("U15 tree unchanged", _snapshot(s15) == before15)
+
+            # U16) governance=false plus [types.maintainer_decision]: a module-inconsistent 1.0.0 shape.
+            s16 = base / "u16-md-no-gov"
+            s16.mkdir()
+            mach16 = build_store(s16, manifest=_man_add_md(),
+                                 extra_files={idx("maintainer_decision"): _FIX_INDEX})
+            before16 = _snapshot(s16)
+            rc16, out16 = upgrade(s16)
+            check("U16 module-inconsistent MD refuses (exit 2)", rc16 == EXIT_ERROR)
+            check("U16 refusal names the module inconsistency",
+                  "maintainer_decision" in out16 and "module" in out16.lower())
+            check("U16 tree unchanged", _snapshot(s16) == before16)
+
+            # U17) the above-tooling / non-canonical / NOT-ADOPTED / partial-1.1.0 triage refusals.
+            s17a = base / "u17-above"
+            s17a.mkdir()
+            above_manifest = _FIX_MANIFEST.replace('spec_version = "1.0.0"', 'spec_version = "2.0.0"')
+            build_store(s17a, manifest=above_manifest)
+            rc17a, out17a = upgrade(s17a)
+            check("U17 above-tooling store refused (exit 2)", rc17a == EXIT_ERROR)
+            check("U17 above-tooling refusal names the reason", "ABOVE the 1.1.0" in out17a)
+
+            s17b = base / "u17-noncanonical"
+            s17b.mkdir()
+            build_store(s17b, manifest="# hand-edited by an adopter\n" + _FIX_MANIFEST)
+            rc17b, out17b = upgrade(s17b)
+            check("U17 non-canonical manifest refused (exit 2)", rc17b == EXIT_ERROR)
+            check("U17 non-canonical refusal names canonicity", "canonical" in out17b)
+
+            s17c = base / "u17-not-adopted"
+            s17c.mkdir()
+            rc17c, out17c = upgrade(s17c)
+            check("U17 not-adopted root is NOT APPLICABLE (exit 0)",
+                  rc17c == EXIT_OK and "NOT APPLICABLE" in out17c)
+
+            # partial 1.1.0 (F2): take the VALID 1.1.0 store from U1, break it, re-run: never a false no-op.
+            (mach1 / idx("maintainer_decision")).unlink()
+            rc17d, out17d = upgrade(s1)
+            check("U17 partial 1.1.0 store is not a false rc-0 no-op (exit 2)", rc17d == EXIT_ERROR)
+            check("U17 partial store fail-closed names not-doctor-VALID", "NOT doctor-VALID" in out17d)
+            check("U17 partial-store recovery offers the .working-scoped restore command",
+                  "--literal-pathspecs restore --staged --worktree -- .working" in out17d)
+            check("U17 partial-store recovery warns against a whole-tree restore",
+                  "Never run a whole-tree restore" in out17d)
+            drc17d, dout17d = doctor(s1)
+            check("U17 partial 1.1.0 store doctor is not VALID (exit 2)", drc17d == EXIT_ERROR)
+
+            # U18) postcondition unit vectors: call opf._upgrade_postcondition directly (the m1 check).
+            old_m = tomllib.loads(_FIX_MANIFEST)
+            old_c = tomllib.loads(_FIX_COUNTERS)
+            old_c["counters"]["BI"] = 4      # a nonzero existing high-water, to exercise lowered/raised
+            new_m, new_c, _added, origin = opf._upgrade_plan(copy.deepcopy(old_m), copy.deepcopy(old_c))
+
+            def post_passes(nm, nc):
+                try:
+                    opf._upgrade_postcondition(old_m, nm, old_c, nc, origin)
+                    return True
+                except opf._UpgradeError:
+                    return False
+
+            check("U18 genuine planner output passes the postcondition", post_passes(new_m, new_c))
+            _m = copy.deepcopy(new_m); _m["modules"]["governance"] = True
+            check("U18 flipped retained module boolean refuses", not post_passes(_m, new_c))
+            _m = copy.deepcopy(new_m); _m["types"]["backlog_item"] = {"namespace": "XX"}
+            check("U18 mutated retained [types] row refuses", not post_passes(_m, new_c))
+            _c = copy.deepcopy(new_c); _c["counters"]["BI"] = 3
+            check("U18 lowered existing counter refuses", not post_passes(new_m, _c))
+            _c = copy.deepcopy(new_c); _c["counters"]["BI"] = 9
+            check("U18 raised existing counter refuses", not post_passes(new_m, _c))
+            _c = copy.deepcopy(new_c); del _c["counters"]["CN"]
+            check("U18 missing CN zero refuses", not post_passes(new_m, _c))
+            _m = copy.deepcopy(new_m)
+            _m["views"]["DECISIONS.md"]["sources"] = list(reversed(_m["views"]["DECISIONS.md"]["sources"]))
+            check("U18 wrong-order DECISIONS.md sources refuses", not post_passes(_m, new_c))
+            _m = copy.deepcopy(new_m)
+            _src = _m["views"]["DECISIONS.md"]["sources"]
+            _m["views"]["DECISIONS.md"]["sources"] = _src + [_src[0]]
+            check("U18 duplicated DECISIONS.md source refuses", not post_passes(_m, new_c))
+
+            # P1) seeded migration property test: 12 generated genuine-VALID 1.0.0 variants all migrate.
+            _NS = {"maintainer_action": "MA", "maintainer_decision": "MD", "preference_pattern": "PP",
+                   "artifact": "AR", "gate_run": "GR", "release": "RL", "waiver": "WV"}
+            _MODT = {"governance": ["maintainer_action", "maintainer_decision"],
+                     "decision_support": ["preference_pattern"],
+                     "delivery_assurance": ["artifact", "gate_run", "release", "waiver"]}
+            _MIGRATED = {"maintainer_decision", "preference_pattern"}   # gain records; become baseline at 1.1.0
+
+            def _p1_record(t, ns, n):
+                t0 = "2026-06-0{}T00:00:00Z".format(1 + (n % 9))
+                if t == "maintainer_decision":
+                    return {"id": "{}-{}".format(ns, n), "type": t, "status": "recorded",
+                            "title": "synthetic {} {}".format(t, n), "created_at": t0, "updated_at": t0,
+                            "actor": {"kind": "maintainer"}, "decision": "d{}".format(n)}
+                # preference_pattern: an assistant-created RATIFIED pattern (active, updated_at > created_at)
+                return {"id": "{}-{}".format(ns, n), "type": t, "status": "active",
+                        "title": "synthetic {} {}".format(t, n), "created_at": t0,
+                        "updated_at": "2026-06-15T00:00:00Z", "actor": {"kind": "assistant"},
+                        "context": "c", "rationale": "r"}
+
+            def _p1_variant(seed):
+                rng = random.Random(seed)
+                m = tomllib.loads(_FIX_MANIFEST)
+                c = tomllib.loads(_FIX_COUNTERS)
+                mods = [x for x in ("governance", "decision_support", "delivery_assurance")
+                        if rng.random() < 0.6]
+                if "decision_support" not in mods and rng.random() < 0.5:
+                    del m["modules"]["decision_support"]      # optional key absent
+                if rng.random() < 0.4:
+                    del m["views"]["DECISIONS.md"]             # optional view absent
+                idxtypes = []
+                populated = {}
+                for mod in mods:
+                    m["modules"][mod] = True
+                    for t in _MODT[mod]:
+                        m["types"][t] = {"namespace": _NS[t]}
+                        c["counters"][_NS[t]] = 0
+                        idxtypes.append(t)
+                        if t in _MIGRATED:
+                            k = rng.randint(0, 2)
+                            if k > 0:
+                                recs = [_p1_record(t, _NS[t], i + 1) for i in range(k)]
+                                populated[t] = _opf_emit.emit_checked({"schema": 1, "record": recs})
+                                c["counters"][_NS[t]] = k       # high-water matches
+                return (_opf_emit.emit_checked(m), _opf_emit.emit_checked(c), idxtypes, populated)
+
+            p1_ok = True
+            for seed in range(12):
+                man, cnt, idxtypes, populated = _p1_variant(1000 + seed)
+                sp = base / "p1-{}".format(seed)
+                sp.mkdir()
+                extra = {idx(t): populated.get(t, _FIX_INDEX) for t in idxtypes}
+                machp = build_store(sp, manifest=man, counters=cnt, extra_files=extra)
+                pre_idx = {t: (machp / idx(t)).read_bytes()
+                           for t in set(_FIX_INDEX_TYPES) | set(idxtypes)}
+                pre_wl = (machp / _opf_check.WORKLOG_NAME).read_bytes()
+                pre_ver = (machp / _opf_check.VERSION_NAME).read_bytes()
+                pre_cnt = tomllib.loads(cnt)["counters"]
+                rcp, outp = upgrade(sp)
+                if rcp != EXIT_OK:
+                    p1_ok = False
+                    continue
+                drcp, doutp = doctor(sp)
+                if not (drcp == EXIT_OK and "integrity: VALID" in doutp):
+                    p1_ok = False
+                    continue
+                if any((machp / idx(t)).read_bytes() != b for t, b in pre_idx.items()):
+                    p1_ok = False
+                if (machp / _opf_check.WORKLOG_NAME).read_bytes() != pre_wl:
+                    p1_ok = False
+                if (machp / _opf_check.VERSION_NAME).read_bytes() != pre_ver:
+                    p1_ok = False
+                post_cnt = cnt_of(machp)
+                if any(post_cnt.get(k) != v for k, v in pre_cnt.items()):
+                    p1_ok = False
+            check("P1 all 12 seeded variants migrate doctor-VALID with byte-preservation", p1_ok)
 
         if failures:
             for label in failures:
