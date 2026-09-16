@@ -140,12 +140,14 @@ def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S):
 # construction (allowlist), so an inherited GIT_DIR / GIT_WORK_TREE / GIT_OBJECT_DIRECTORY / GIT_INDEX_FILE /
 # pathspec variable cannot rebind the repository or redirect object lookup.
 #
-# The env-based CONFIG OVERRIDES (GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM / GIT_CONFIG_NOSYSTEM, the runtime
+# The env-based CONFIG OVERRIDES (GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM, the runtime
 # GIT_CONFIG_COUNT + its indexed GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> pairs, and the legacy GIT_CONFIG /
 # GIT_CONFIG_PARAMETERS) are deliberately DROPPED, not honoured: they can set ANY config key (core.worktree
 # to rebind the tree, trace2.* to make the read-only probe write or append an outside file, core.fsmonitor to
 # launch a process), so carrying them would re-open exactly the redirect/trace surface the scrub exists to
-# close (SECI-threat-model-boundaries, prefer-removing-a-path). DISCLOSED RESIDUAL: because the env-based
+# close (SECI-threat-model-boundaries, prefer-removing-a-path). GIT_CONFIG_NOSYSTEM is NOT among the dropped
+# overrides: it is instead CARRIED as a safe on/off toggle (it only enables/disables the system config and
+# cannot set a key). DISCLOSED RESIDUAL: because the env-based
 # overrides are dropped, an adopter who runs `opf init` with GIT_CONFIG_GLOBAL or GIT_CONFIG_* set (a wrapper,
 # or an explicit `git -c ...`) may see this check diverge from what that same environment's `git add` would
 # do; the common case (a real ~/.gitconfig, no env override) is honoured exactly.
@@ -171,8 +173,9 @@ _TRACE_OFF = {
 
 
 def _config_discovery_env():
-    """Build the environment for the config-discovery ignore probe (OPF-D2B). Carry only PATH, HOME, and
-    XDG_CONFIG_HOME, so git DISCOVERS the adopter's real global and system configuration through its default
+    """Build the environment for the config-discovery ignore probe (OPF-D2B). Carry only PATH, HOME,
+    XDG_CONFIG_HOME, and the safe GIT_CONFIG_NOSYSTEM toggle, so git DISCOVERS the adopter's real global and
+    system configuration through its default
     locations (honouring a global or system core.excludesFile the same way `git add` would), and DROP every
     other ambient GIT_* variable by construction (allowlist), so no inherited redirect, object, pathspec, or
     config-override variable survives. The env-based config overrides (GIT_CONFIG_GLOBAL/SYSTEM, the runtime
@@ -180,7 +183,8 @@ def _config_discovery_env():
     they can set any key (core.worktree, trace2.*, core.fsmonitor) and would re-open the redirect/trace
     surface. Trace is FORCED off through the GIT_TRACE2* / GIT_TRACE* env (which outranks trace2.* config),
     and the call is forced non-interactive and deterministic; core.fsmonitor is disabled by command-scope
-    config at the call site."""
+    config at the call site. Lazy fetching is forced off (GIT_NO_LAZY_FETCH), so a missing indexed .gitignore
+    blob cannot trigger a promisor fetch that would reach core.sshCommand."""
     env = {}
     for name in _CONFIG_DISCOVERY_KEEP:
         val = os.environ.get(name)
@@ -189,6 +193,7 @@ def _config_discovery_env():
     env.update(_TRACE_OFF)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_NO_LAZY_FETCH"] = "1"   # no promisor fetch during the read-only probe (a fetch can reach core.sshCommand)
     env["LC_ALL"] = "C"
     return env
 

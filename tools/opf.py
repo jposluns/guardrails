@@ -772,7 +772,9 @@ def _init_unignored(git, repo, root, paths):
     observer environment, which neutralizes it), so a store ignored ONLY by the adopter's global or system
     core.excludesFile is caught here, matching what the adopter's own `git add` would honour
     (guard-input-soundness). Env-based config overrides are dropped and trace/fsmonitor are forced off, so no
-    reachable configuration can turn the read-only probe into a write or a launched process. Called directly
+    reachable configuration can turn the read-only probe into a write or a launched process. Lazy fetching is
+    forced off so a missing indexed ignore blob cannot trigger a promisor fetch, and a not-ignored result is
+    additionally refused when an explicitly configured core.excludesFile is missing or unreadable. Called directly
     (not via _init_git, which raises on rc != 0) because rc 1 is the success case here; a timeout, launch
     failure, or unexpected rc fails closed and refuses. Matching `git add`, a benign git diagnostic on an
     rc-1 (not-ignored) result is not itself a refusal.
@@ -791,6 +793,25 @@ def _init_unignored(git, repo, root, paths):
     if result.rc != 1:
         raise RuntimeError("git preflight: check-ignore failed (rc={}): {}".format(
             result.rc, result.err))
+    # rc == 1 (not ignored) is trustworthy only if the ignore inputs were readable. An EXPLICITLY configured
+    # core.excludesFile that is missing or unreadable makes check-ignore warn and still report not-ignored, so
+    # the store could be ignored by a declared rule the probe never read. Fail closed on that unreadable
+    # declared input rather than pass (check-fails-closed-on-unreadable).
+    excludes = _opf_observe._run_git_config_discovery(
+        git, repo, ["config", "--get", "--path", "core.excludesFile"])
+    if not excludes.completed:
+        raise RuntimeError(
+            "git preflight: could not read the effective core.excludesFile ({})".format(excludes.err))
+    if excludes.rc == 0:
+        excludes_path = os.fsdecode(excludes.out).strip()
+        if excludes_path and not os.access(excludes_path, os.R_OK):
+            raise RuntimeError(
+                "git preflight: the configured core.excludesFile {!r} is missing or unreadable, so the "
+                "ignore status cannot be verified (fail-closed)".format(excludes_path))
+    elif excludes.rc != 1:
+        raise RuntimeError(
+            "git preflight: could not determine the effective core.excludesFile (rc={}): {}".format(
+                excludes.rc, excludes.err))
 
 
 def _init_same_root(root, root_fd):

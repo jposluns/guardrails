@@ -440,6 +440,28 @@ def _suite(invoke):
                 check("trace2 config does not break a clean init",
                       rc == EXIT_OK and valid_sources(trace_target))
 
+                # OPF-D2B: an EXPLICITLY configured core.excludesFile that is missing or unreadable must make
+                # init FAIL CLOSED (not-ignored is untrustworthy when a declared ignore source could not be
+                # read). check-ignore warns and returns rc 1 for an unreadable excludesFile; the readability
+                # check must turn that into a refusal. DISCRIMINATOR for the fail-closed excludesFile check.
+                unreadable_excl = make_git("unreadable-excludes-target")
+                bad_excl = base / "d2b-unreadable-excludes"
+                bad_excl.write_bytes(b"ignored-pattern\n")
+                bad_excl.chmod(0o000)
+                uconfig = home / ".gitconfig"
+                uconfig.write_bytes(b"[core]\n\texcludesFile = " + str(bad_excl).encode("ascii") + b"\n")
+                ue_before = _snapshot(unreadable_excl)
+                try:
+                    rc, output = run(unreadable_excl)
+                finally:
+                    uconfig.unlink()
+                    bad_excl.chmod(0o600)
+                    bad_excl.unlink()
+                check("unreadable core.excludesFile refuses (fail-closed)",
+                      rc == EXIT_ERROR and "excludesFile" in output)
+                check("unreadable core.excludesFile destination preserved",
+                      _snapshot(unreadable_excl) == ue_before)
+
                 # Defence in depth: after a successful init, the staged-and-committed store resolves
                 # end to end, at the standard machine subdir. resolve_store reads the working tree, so
                 # the commit is not required for resolution; it is included to exercise the realistic
