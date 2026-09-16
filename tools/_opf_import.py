@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""OPF unit U7: import staging (candidate + self-test only; the live `import` verb stays UNWIRED).
+"""OPF unit U7: import operation layer (scan / plan / apply) + staging (the live `import` verb stays UNWIRED).
+
+OPF-IMPORT-OPS adds the operation layer beneath the reserved `opf import [--root DIR] (--scan | --plan |
+--apply <run-id>)` grammar, composing the settled `stage_import` staging primitive rather than replacing
+it (spec 14.1, Fable-synthesized plan):
+  - `scan_import(product_root, import_set) -> ScanResult`: a deterministic, digest-stamped, READ-ONLY
+    enumeration of the declared import set (one whole-file fragment per source; the baseline extractor).
+  - `plan_import(product_root, import_set, *, proposals=None, now, run_nonce) -> PlanResult`: scans, applies
+    the deterministic whole-file baseline classification (every fragment `unmapped` -> preserved as a
+    legacy_fragment; model proposals stay INERT), stages the candidate via `stage_import`, and writes the
+    inventory + IMPORT-REPORT.md review surface (spec 4.2).
+  - `apply_import(...) -> ApplyResult`: promotion is DEFERRED to the OPF-IMPORT-APPLY unit (fail-closed
+    CANNOT-EVALUATE that mutates nothing; see its docstring for the acceptance-model + candidate-context
+    prerequisites). `check_opf_import.py` is the accompanying gate over a staged run and the scan layer.
 
 Offline, stdlib only, fail-closed. This module takes an operator-enumerated set of legacy SOURCE files
 and an untrusted MAPPING PLAN, validates both, mints record ids from the store's counters, and STAGES a
@@ -132,6 +145,31 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _PLAN_KEYS = frozenset({"fragments", "worklog", "version"})
 _FRAGMENT_ROW_KEYS = frozenset({"span", "state", "record", "target", "note"})
 
+# --- operation-layer (scan / plan) fixed names and vocabularies (OPF-IMPORT-OPS) --------------------
+# The deterministic SCAN inventory format and the whole-file baseline EXTRACTOR (spec 14.1). The
+# baseline extractor yields exactly ONE fragment per source, spanning [0, len) (an empty source is one
+# [0, 0] fragment), so raw bytes are accounted for with no format parser invented; a finer, versioned
+# extractor is a disclosed follow-on. These identifiers are folded into every digest so a future
+# extractor produces a distinguishable inventory (the fragment id is content-inclusive; Fable adjudication).
+INVENTORY_FORMAT = "opf-import-inventory-v1"
+EXTRACTOR_ID = "whole-file"
+EXTRACTOR_VERSION = 1
+_FRAGMENT_DESCRIPTOR_FORMAT = "opf-import-fragment-v1"
+
+# The plan_import review surface (spec 4.2) and the frozen scan inventory, staged as review artefacts
+# beside the promotion candidate. Machine artefacts stay TOML (the store's native canonical form, the
+# _opf_emit byte-canonical emitter), matching mappings.toml/plan.toml/report.toml rather than importing a
+# second (JSON) canonicalizer (Fable residual #1: canonical JSON was adopted in the plan over TOML; this
+# build reconciles to the house TOML convention and flags the choice for the finalizer).
+INVENTORY_NAME = "inventory.toml"
+REPORT_MD_NAME = "IMPORT-REPORT.md"
+
+# The closed keyset of an inert model proposal (spec 14.1 untrusted plan data). A proposal is a SUGGESTED
+# mapping recorded verbatim in the review surface; it is NEVER fed to the staging classifier as a resting
+# candidate state, so it can neither mint a record nor select a write destination without a later,
+# attributed human acceptance (the acceptance-capture + apply-promotion unit; a disclosed spec gap).
+_PROPOSAL_KEYS = frozenset({"source_path", "span", "suggested_state", "note"})
+
 
 _MODULE_SCHEMA_REFUSAL = (
     "a module-tier record cannot be fully validated until the module schemas release, spec 8.5; "
@@ -187,6 +225,58 @@ class StageResult:
         self.new_high_water = new_high_water or {}
         self.promotion_ready = promotion_ready
         self.migration_incomplete = migration_incomplete
+
+
+class ScanResult:
+    """The inert result of a read-only SCAN (spec 14.1 enumeration). Judged by its verdict, never by
+    grepping output. On a clean scan `inventory` is the frozen, canonical inventory payload (carrying its
+    own `inventory_digest`), `sources` and `fragments` its record lists, and `inventory_digest` the
+    reproducibility anchor. A scan writes NOTHING and allocates no run id (SECI-preview-has-no-side-effects):
+    it is a preview, and the plan step persists the authoritative inventory."""
+    __slots__ = ("verdict", "findings", "inventory", "inventory_digest", "sources", "fragments")
+
+    def __init__(self, verdict, findings=None, inventory=None, inventory_digest=None,
+                 sources=None, fragments=None):
+        self.verdict = verdict                    # CLEAN / FINDING / CANNOT_EVALUATE
+        self.findings = findings or []
+        self.inventory = inventory or {}
+        self.inventory_digest = inventory_digest
+        self.sources = sources or []
+        self.fragments = fragments or []
+
+
+class PlanResult:
+    """The inert result of a PLAN (scan + deterministic classification + staging). Judged by its verdict.
+    On a clean plan the run is staged under `.working/imports/<run-id>/` with `import_status` remaining the
+    store's `partial`-equivalent staging posture (the run dir carries a promotion candidate; the active
+    store is untouched, spec 14.1); `run_rel` is the store-relative run dir, `inventory_digest` the frozen
+    scan anchor, and `report_rel` the store-relative IMPORT-REPORT.md review surface (spec 4.2)."""
+    __slots__ = ("verdict", "findings", "run_id", "run_rel", "inventory_digest", "report_rel",
+                 "migration_incomplete")
+
+    def __init__(self, verdict, findings=None, run_id=None, run_rel=None, inventory_digest=None,
+                 report_rel=None, migration_incomplete=False):
+        self.verdict = verdict                    # CLEAN / FINDING / CANNOT_EVALUATE
+        self.findings = findings or []
+        self.run_id = run_id
+        self.run_rel = run_rel
+        self.inventory_digest = inventory_digest
+        self.report_rel = report_rel
+        self.migration_incomplete = migration_incomplete
+
+
+class ApplyResult:
+    """The inert result of an APPLY-PROMOTION attempt. Judged by its verdict. `promoted` is never inferred
+    from the verdict alone (a caller reads this field). See apply_import: promotion is DEFERRED to the
+    OPF-IMPORT-APPLY unit, so this result is always a fail-closed CANNOT-EVALUATE that mutates nothing."""
+    __slots__ = ("verdict", "findings", "promoted", "outcome", "restore_ref")
+
+    def __init__(self, verdict, findings=None, promoted=False, outcome=None, restore_ref=None):
+        self.verdict = verdict                    # CLEAN / FINDING / CANNOT_EVALUATE
+        self.findings = findings or []
+        self.promoted = promoted
+        self.outcome = outcome                    # promoted / aborted / rejected / noop_already_complete
+        self.restore_ref = restore_ref
 
 
 class _StageError(Exception):
@@ -1531,6 +1621,336 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
         raise _cannot("report.toml write failed after a clean re-check ({}); partial run left as "
                       "evidence".format(exc))
     return run_rel
+
+
+# --- the operation layer: scan / plan / apply-promotion (OPF-IMPORT-OPS) -----------------------------
+
+def _fragment_id(source_path, source_digest, start, end):
+    """A deterministic, content-inclusive fragment id (Fable adjudication over a location-only id): a
+    16-hex digest over the canonical descriptor tuple (extractor version, source path, source digest,
+    span). Content-inclusive so each fragment quad is self-verifying and a changed source yields a
+    different id, which the plan/apply freshness bindings rely on. `frag-` prefixed so it reads as an id,
+    never a path component."""
+    descriptor = {
+        "format": _FRAGMENT_DESCRIPTOR_FORMAT,
+        "extractor_version": EXTRACTOR_VERSION,
+        "source_path": source_path,
+        "source_digest": source_digest,
+        "span": [start, end],
+    }
+    return "frag-" + _sha256_hex(_emit_bytes(descriptor, "fragment descriptor"))[:16]
+
+
+def _build_inventory(sources):
+    """Assemble the deterministic, canonical inventory from the enumerated sources. Sources sort by
+    unsigned UTF-8 path bytes; the whole-file baseline extractor yields exactly one fragment per source,
+    span [0, size) (an empty source is one [0, 0] fragment); fragments sort by (path bytes, start, end).
+    The `inventory_digest` is computed over the canonical emission of the payload EXCLUDING its own digest
+    field, so two scans over identical inputs (in any declaration order) produce a byte-identical inventory
+    and an equal digest. Returns (inventory-with-digest, digest, source_records, fragment_records)."""
+    ordered = sorted(sources, key=lambda s: s["path"].encode("utf-8"))
+    source_records = [{"path": s["path"], "size": s["size"], "sha256": s["sha256"]} for s in ordered]
+    fragment_records = []
+    for s in ordered:
+        # Whole-file baseline: the single fragment's bytes ARE the whole source, so the fragment digest
+        # equals the source digest (an empty source: sha256(b"") for both). A finer extractor would differ.
+        fragment_records.append({
+            "fragment_id": _fragment_id(s["path"], s["sha256"], 0, s["size"]),
+            "source_path": s["path"],
+            "source_digest": s["sha256"],
+            "span": [0, s["size"]],
+            "fragment_digest": s["sha256"],
+        })
+    payload = {
+        "format": INVENTORY_FORMAT,
+        "extractor": {"id": EXTRACTOR_ID, "version": EXTRACTOR_VERSION},
+        "source": source_records,
+        "fragment": fragment_records,
+    }
+    digest = "sha256:" + _sha256_hex(_emit_bytes(payload, "inventory"))
+    inventory = dict(payload)
+    inventory["inventory_digest"] = digest
+    return inventory, digest, source_records, fragment_records
+
+
+def scan_import(product_root, import_set):
+    """Deterministically ENUMERATE the declared import set into a digest-stamped inventory (spec 14.1),
+    read-only. Resolves the store first (the init-first precondition: an unresolved or invalid store is
+    CANNOT-EVALUATE, so `--scan` cannot run against a location with no store), then reads each declared
+    source through the SAME contained no-follow enumerator staging uses (`_read_sources`), so scan, plan,
+    and stage share one enumeration path and cannot drift. Every declared input is enumerated in full; an
+    unreadable, absent, symlinked, exotic, or non-UTF-8 declared source is a refusing failure naming the
+    entry (never a silent skip or an empty inventory). Writes NOTHING and allocates no run id
+    (SECI-preview-has-no-side-effects). Returns a ScanResult; fail-closed on anything unreadable or exotic.
+
+    Disclosed residual (inherited from the settled staging pipeline): a non-UTF-8 declared source is
+    CANNOT-EVALUATE, matching `stage_import` (the whole pipeline is UTF-8 in this build); a raw-bytes
+    extractor is a follow-on. `now`-free by design (Fable adjudication): the inventory carries no
+    timestamp, run id, nonce, or absolute root, so it is byte-identical across runs; runtime metadata
+    belongs to the plan envelope, not the deterministic inventory."""
+    try:
+        _journal.require_containment()
+    except _journal.JournalError as exc:
+        return ScanResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)])
+    try:
+        if not isinstance(product_root, (str, os.PathLike)):
+            raise _cannot("product_root must be a path string or os.PathLike, got {}".format(
+                type(product_root).__name__))
+        if not (isinstance(import_set, (list, tuple)) and all(isinstance(p, str) for p in import_set)):
+            raise _cannot("import_set must be a list of source-path strings")
+        # Init-first precondition: resolve and validate the store before enumerating (an unresolved store
+        # is CANNOT-EVALUATE, exit 2), even though enumeration reads the product tree, not the store.
+        try:
+            resolution = _opf_store.resolve_store(product_root)
+            if resolution.status != _opf_store.RESOLVED:
+                raise _cannot("store did not resolve ({}: {}); run `opf init` first".format(
+                    resolution.status, resolution.detail))
+            mv = _opf_store.load_manifest(resolution)
+        except ValueError as exc:
+            raise _cannot("cannot parse store manifest for {!r} ({})".format(product_root, exc))
+        if mv.status != _opf_store.VALID:
+            raise _cannot("store manifest is not VALID ({}: {})".format(mv.status, "; ".join(mv.findings)))
+
+        try:
+            product_root_fd = _opf_store._open_root_fd(Path(os.path.abspath(product_root)))
+        except OSError as exc:
+            raise _cannot("cannot open product root {!r} ({})".format(product_root, exc))
+        try:
+            sources = _read_sources(product_root_fd, import_set)
+        finally:
+            os.close(product_root_fd)
+
+        inventory, digest, source_records, fragment_records = _build_inventory(sources)
+        return ScanResult(CLEAN, inventory=inventory, inventory_digest=digest,
+                          sources=source_records, fragments=fragment_records)
+    except _StageError as exc:
+        return ScanResult(exc.verdict, [exc.message])
+    except _journal.JournalError as exc:
+        return ScanResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)])
+    except OSError as exc:
+        return ScanResult(CANNOT_EVALUATE, ["fail-closed on a filesystem read error: {}".format(exc)])
+    except RecursionError as exc:
+        return ScanResult(CANNOT_EVALUATE, ["fail-closed on excessive input nesting: {}".format(exc)])
+
+
+def _validate_proposals(proposals, source_sizes):
+    """Validate an optional set of INERT model proposals (spec 14.1 untrusted plan data) and return them
+    sorted deterministically. A proposal is a SUGGESTED mapping recorded verbatim in the review surface,
+    never fed to the classifier: it can neither mint a record nor select a write destination. Each is a
+    closed `{source_path, span, suggested_state[, note]}` table whose `source_path` MUST name a scanned
+    source (confinement: a proposal cannot target a path outside the enumerated set), whose `span` is a
+    two-int half-open range within [0, size], whose `suggested_state` is a MAPPING_STATES member, and whose
+    `note` (optional) is a string. A malformed proposal is a finding (untrusted data validated at the
+    boundary), never silently dropped or accepted. `source_sizes` maps scanned path -> size."""
+    if proposals is None:
+        return []
+    if not isinstance(proposals, (list, tuple)):
+        raise _finding("proposals must be a list of inert model-proposal tables")
+    out = []
+    for i, p in enumerate(proposals):
+        where = "proposals[{}]".format(i)
+        if not isinstance(p, dict):
+            raise _finding("{}: a proposal must be a table".format(where))
+        extra = set(p) - _PROPOSAL_KEYS
+        if extra:
+            raise _finding("{}: proposal carries unknown key(s): {} (a proposal is a closed "
+                           "{{source_path, span, suggested_state, note}})".format(
+                               where, ", ".join(_opf_store._sorted_key_names(extra))))
+        sp = p.get("source_path")
+        if not (isinstance(sp, str) and sp in source_sizes):
+            raise _finding("{}: proposal.source_path {!r} names no scanned source (a proposal is confined "
+                           "to the enumerated import set; it cannot target an arbitrary path)".format(
+                               where, sp))
+        span = p.get("span")
+        if (not isinstance(span, list) or len(span) != 2 or not all(type(x) is int for x in span)
+                or not (0 <= span[0] <= span[1] <= source_sizes[sp])):
+            raise _finding("{}: proposal.span must be a [start, end] half-open range within [0, {}]".format(
+                where, source_sizes[sp]))
+        st = p.get("suggested_state")
+        if not isinstance(st, str) or st not in MAPPING_STATES:
+            raise _finding("{}: proposal.suggested_state {!r} is not a mapping state".format(where, st))
+        if "note" in p and not isinstance(p["note"], str):
+            raise _finding("{}: proposal.note must be a string when present".format(where))
+        out.append({"source_path": sp, "span": [span[0], span[1]], "suggested_state": st,
+                    "note": p.get("note", "")})
+    out.sort(key=lambda p: (p["source_path"].encode("utf-8"), p["span"][0], p["span"][1]))
+    return out
+
+
+def _render_report_md(inventory_digest, fragments, proposals, run_id):
+    """Render IMPORT-REPORT.md (spec 4.2), the human review surface, DETERMINISTICALLY from the frozen
+    inventory and the inert proposals, so regenerating it byte-reproduces it (a derivative, never
+    independently authored; generated-artefact-source-only). Every source fragment is enumerated with its
+    deterministic mapping state (the whole-file baseline is `unmapped`: nothing is mechanically mapped, so
+    everything is preserved as a legacy_fragment). Model proposals are listed as INERT suggestions that a
+    later attributed step may accept; accepting one is never automatic here (spec 14.1)."""
+    lines = [
+        "# OPF import review: {}".format(run_id),
+        "",
+        "GENERATED from the staged inventory and plan (spec 4.2); do not hand-edit (regenerating this file",
+        "byte-reproduces it). Every source fragment is enumerated with its deterministic mapping state. In",
+        "the whole-file baseline nothing is mechanically mapped, so every fragment is preserved as a",
+        "legacy_fragment. Model proposals below are INERT untrusted suggestions (spec 14.1): accepting one",
+        "is a later, attributed step (the acceptance-capture + apply-promotion unit), never automatic here.",
+        "",
+        "inventory digest: `{}`".format(inventory_digest),
+        "",
+        "## Fragments (deterministic state = unmapped; preserved as legacy_fragment)",
+        "",
+    ]
+    for frag in fragments:
+        lines.append("- `{}` [{}:{}] state=unmapped fragment_id=`{}` digest=`{}`".format(
+            frag["source_path"], frag["span"][0], frag["span"][1], frag["fragment_id"],
+            frag["fragment_digest"]))
+    lines += ["", "## Model proposals (inert; require attributed acceptance)", ""]
+    if not proposals:
+        lines.append("- (none)")
+    else:
+        for p in proposals:
+            suffix = " note={!r}".format(p["note"]) if p["note"] else ""
+            lines.append("- `{}` [{}:{}] suggested_state={} origin=model_proposal{}".format(
+                p["source_path"], p["span"][0], p["span"][1], p["suggested_state"], suffix))
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _write_plan_artifacts(product_root, run_rel, run_id, inventory, report_md_bytes):
+    """Stage the two plan REVIEW artefacts (inventory.toml + IMPORT-REPORT.md) into the run dir a clean
+    `stage_import` just created, as an additive create-only pass through the same contained, no-follow,
+    fsync'd, digest-verified `_journal.apply_ops` primitive staging uses. These are review inputs, not the
+    promotion candidate (report.toml, written last by stage_import, remains the promotion-ready marker and
+    enumerates only the candidate set); they never mutate the active store. inventory.toml is byte-canonical
+    store TOML held under the contained store-read cap; IMPORT-REPORT.md is markdown (never read by the TOML
+    reader). Fail-closed on any write error (CANNOT-EVALUATE)."""
+    resolution = _opf_store.resolve_store(product_root)
+    if resolution.status != _opf_store.RESOLVED:
+        raise _cannot("store did not resolve for the plan review-artefact write ({}: {})".format(
+            resolution.status, resolution.detail))
+    inv_bytes = _emit_bytes(inventory, INVENTORY_NAME)
+    if len(inv_bytes) > _opf_store.MAX_STORE_READ_BYTES:
+        raise _cannot("{} is {} bytes, over the {}-byte contained store-read cap; the staged inventory "
+                      "would be unreadable (rejected at the producer boundary)".format(
+                          INVENTORY_NAME, len(inv_bytes), _opf_store.MAX_STORE_READ_BYTES))
+    inv_rel = run_rel + "/" + INVENTORY_NAME
+    md_rel = run_rel + "/" + REPORT_MD_NAME
+    content = {inv_rel: inv_bytes, md_rel: report_md_bytes}
+    ops = [
+        {"op": "create", "path": inv_rel,
+         "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(inv_bytes)}},
+        {"op": "create", "path": md_rel,
+         "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(report_md_bytes)}},
+    ]
+
+    def staged_reader(op):
+        return content[op["path"]]
+
+    try:
+        store_root_fd = _opf_store._open_store_root_fd(
+            resolution.store_root, resolution.pointer_source != "default")
+    except OSError as exc:
+        raise _cannot("cannot open store root {!r} for the plan review-artefact write ({})".format(
+            resolution.store_root, exc))
+    try:
+        _journal.apply_ops(store_root_fd, ops, staged_reader)
+    except _journal.JournalError as exc:
+        raise _cannot("plan review-artefact write failed ({}); the staged candidate is intact, the review "
+                      "surface incomplete".format(exc))
+    finally:
+        os.close(store_root_fd)
+
+
+def plan_import(product_root, import_set, *, proposals=None, now, run_nonce):
+    """Produce a candidate mapping PLAN over a scanned import set and STAGE it under
+    `.working/imports/<run-id>/` (spec 14.1), plus the review surface. This is the operation-layer plan
+    step; it composes the read-only `scan_import` (the single enumeration source of truth, so a plan is
+    never built over a stale inventory) with the settled `stage_import` staging primitive, then writes the
+    inventory and IMPORT-REPORT.md review artefacts beside the candidate. It never mutates the active store.
+
+    Deterministic classification (spec 14.1): in the whole-file baseline nothing is mechanically mapped, so
+    every fragment classifies to `unmapped` and is preserved as a legacy_fragment quarantine record (the
+    strongest no-drop posture; nothing is lost). Model `proposals` are INERT untrusted plan data: they are
+    validated (confined to the scanned set, schema-bound) and recorded verbatim in IMPORT-REPORT.md as
+    suggestions, and are NEVER fed to the classifier as a resting candidate state. A proposal reaches a
+    resting `mapped`/`split`/`duplicate`/`ignored` state only through a later ATTRIBUTED human acceptance in
+    the acceptance-capture + apply-promotion unit (a disclosed spec gap: no acceptance-capture mechanism nor
+    provenance/origin tag exists in the staged plan schema today, so this build cannot enforce acceptance at
+    apply and therefore does not auto-rest any proposal now). Returns a PlanResult; fail-closed throughout.
+
+    `now`/`run_nonce` are injected (clock-read, never guessed) and, per the settled staging contract,
+    compose the deterministic run id; the deterministic inventory excludes them."""
+    try:
+        _journal.require_containment()
+    except _journal.JournalError as exc:
+        return PlanResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)])
+    try:
+        _require_utc(now)
+        _require_nonce(run_nonce)
+        scan = scan_import(product_root, import_set)
+        if scan.verdict != CLEAN:
+            # A scan finding/cannot-evaluate is the plan's outcome: no plannable inventory, nothing staged.
+            return PlanResult(scan.verdict, scan.findings)
+        source_sizes = {s["path"]: s["size"] for s in scan.sources}
+        proposal_rows = _validate_proposals(proposals, source_sizes)
+
+        # Deterministic baseline plan: one whole-file fragment per source, classified `unmapped` (nothing
+        # mechanically mapped). Handed to the settled staging classifier, which mints a legacy_fragment
+        # quarantine record per fragment and stages the byte-canonical candidate run dir.
+        plan = {"fragments": {s["path"]: [{"span": [0, s["size"]], "state": "unmapped"}]
+                              for s in scan.sources}}
+        result = stage_import(product_root, import_set, plan, now=now, run_nonce=run_nonce)
+        if result.verdict != CLEAN:
+            return PlanResult(result.verdict, result.findings, run_id=result.run_id,
+                              run_rel=result.run_rel, migration_incomplete=result.migration_incomplete)
+
+        report_md = _render_report_md(scan.inventory_digest, scan.fragments, proposal_rows, result.run_id)
+        _write_plan_artifacts(product_root, result.run_rel, result.run_id, scan.inventory,
+                              report_md.encode("utf-8"))
+        return PlanResult(CLEAN, run_id=result.run_id, run_rel=result.run_rel,
+                          inventory_digest=scan.inventory_digest,
+                          report_rel=result.run_rel + "/" + REPORT_MD_NAME,
+                          migration_incomplete=result.migration_incomplete)
+    except _StageError as exc:
+        return PlanResult(exc.verdict, [exc.message])
+    except _journal.JournalError as exc:
+        return PlanResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)])
+    except OSError as exc:
+        return PlanResult(CANNOT_EVALUATE, ["fail-closed on a filesystem read error: {}".format(exc)])
+    except RecursionError as exc:
+        return PlanResult(CANNOT_EVALUATE, ["fail-closed on excessive input nesting: {}".format(exc)])
+
+
+def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
+    """APPLY-PROMOTION: validate an accepted staged run and promote its candidate atomically to the active
+    store. DEFERRED to the OPF-IMPORT-APPLY unit (the Fable plan's PR2, its critical slice); this entry is a
+    fail-closed CANNOT-EVALUATE that mutates NOTHING, so the reserved capability can never read as a silent
+    no-op or a partial promotion (SECI-fail-closed; SECA-verified-restore-path). It is a deliberate,
+    surfaced deferral (never a silent scope cut), for two reasons that must be resolved before a truthful
+    promotion contract can be built:
+
+      1. ACCEPTANCE / PROVENANCE MODEL (a spec gap requiring a maintainer design decision). Spec 14.1
+         requires model proposals to be inert untrusted plan data promoted only through an ATTRIBUTED human
+         acceptance. No acceptance-capture mechanism (`acceptance.json`), and no origin/provenance tag on
+         the staged plan schema (its keyset is closed: {span, state, record, target, note}), exists today.
+         Enforcing the acceptance rule at apply therefore requires first establishing that model (an
+         `acceptance.json` contract + a plan-schema origin tag), which reshapes the settled staging schema
+         and is the maintainer's to settle.
+
+      2. CANDIDATE-CONTEXT VALIDATION. Apply must grade the fully-assembled candidate store with the U6
+         `validate_store` engine and regenerate the U4 views over it BEFORE any live write, without ever
+         swapping the live store to test a candidate. That candidate-context adapter is not yet built.
+
+    The promotion MECHANISM itself is already available and composes cleanly (confirmed pre-flight): the
+    crash-durable, lock-guarded cutover primitive `_journal.run_transaction` (with `acquire_lock`,
+    `capture_preimages`, preimage rollback, and `recover`) delivers the single-writer, journaled,
+    verified-restore publication the plan's section 1.3/3.3 describe. What remains for PR2 is the acceptance
+    model, the candidate-context doctor/render adapter, the baseline-freshness binding, and the
+    import_status partial->complete lifecycle flip, driven through that primitive."""
+    return ApplyResult(
+        CANNOT_EVALUATE,
+        ["apply_import (import promotion) is deferred to the OPF-IMPORT-APPLY unit and is not yet "
+         "implemented; the acceptance/provenance model (spec 14.1) and the candidate-context validation "
+         "adapter are unresolved prerequisites. Fail-closed: the active store is never mutated."],
+        promoted=False, outcome="aborted")
 
 
 # --- self-test ---------------------------------------------------------------------------------------
@@ -2934,6 +3354,133 @@ def self_test():
         check("G6-absent-namespace-no-durable-id-clean",
               stage_import(rootG6b, ["a.txt"], lf_only, now=NOW, run_nonce=NONCE).verdict == 0)
 
+        # --- OPF-IMPORT-OPS: scan_import (read-only enumeration) --------------------------------------
+        # S1 positive scan: a clean two-source store enumerates both, one whole-file fragment each, with a
+        # digest and a fragment_id; the store is byte-untouched (scan is read-only).
+        rootS1, mS1 = build_store(sources={"a.txt": "aaaa", "b.txt": "bbbbbb"})
+        s1_before = snapshot(mS1)
+        sc1 = scan_import(rootS1, ["a.txt", "b.txt"])
+        check("S1-scan-clean", sc1.verdict == 0)
+        check("S1-scan-two-sources", len(sc1.sources) == 2 and len(sc1.fragments) == 2)
+        check("S1-scan-whole-file-span",
+              all(f["span"] == [0, sz] for f, sz in zip(
+                  sorted(sc1.fragments, key=lambda f: f["source_path"]), (4, 6))))
+        check("S1-scan-has-digest", bool(sc1.inventory_digest and sc1.inventory_digest.startswith("sha256:")))
+        check("S1-scan-read-only", snapshot(mS1) == s1_before)
+        check("S1-scan-no-imports-written", not (mS1.parent / "imports").exists())
+
+        # S2 determinism: the SAME inputs in REVERSED declaration order yield a byte-identical inventory
+        # digest (sorted by path bytes; declaration order does not perturb it). Reverting the sort reds.
+        rootS2, _mS2 = build_store(sources={"a.txt": "aaaa", "b.txt": "bbbbbb"})
+        sc2 = scan_import(rootS2, ["b.txt", "a.txt"])
+        check("S2-scan-order-independent-digest",
+              sc2.verdict == 0 and sc2.inventory_digest == sc1.inventory_digest)
+        # a DIFFERENT source body changes the digest (the digest actually covers content).
+        rootS2b, _mS2b = build_store(sources={"a.txt": "AAAA", "b.txt": "bbbbbb"})
+        sc2b = scan_import(rootS2b, ["a.txt", "b.txt"])
+        check("S2-scan-content-changes-digest",
+              sc2b.verdict == 0 and sc2b.inventory_digest != sc1.inventory_digest)
+
+        # S3 fail-closed: an unreadable/absent/symlinked/exotic declared source is cannot-evaluate (verdict
+        # 2), never an empty or partial inventory. An absent declared member and a symlinked source both red.
+        rootS3, _mS3 = build_store(sources={"a.txt": "aaaa"})
+        check("S3-scan-absent-declared-cannot-eval",
+              scan_import(rootS3, ["a.txt", "missing.txt"]).verdict == 2)
+        rootS3b, _mS3b = build_store(sources={"a.txt": "aaaa"})
+        os.symlink("a.txt", str(rootS3b / "link.txt"))
+        check("S3-scan-symlink-source-cannot-eval", scan_import(rootS3b, ["link.txt"]).verdict == 2)
+        # an empty (readable) source is a clean zero-length whole-file fragment [0, 0], never a refusal.
+        rootS3c, _mS3c = build_store(sources={"empty.txt": ""})
+        scE = scan_import(rootS3c, ["empty.txt"])
+        check("S3-scan-empty-source-clean",
+              scE.verdict == 0 and scE.fragments and scE.fragments[0]["span"] == [0, 0])
+
+        # S4 init-first: scanning a location with NO resolvable store is cannot-evaluate (verdict 2).
+        noroot = base / "noopf-{:02d}".format(counter[0] + 999)
+        (noroot).mkdir(parents=True)
+        (noroot / "a.txt").write_text("aaaa", encoding="utf-8")
+        check("S4-scan-no-store-cannot-eval", scan_import(noroot, ["a.txt"]).verdict == 2)
+
+        # --- OPF-IMPORT-OPS: plan_import (scan + baseline classify + stage + review surface) -----------
+        # P1 positive plan: a clean store stages a run whose every source fragment is unmapped -> a
+        # legacy_fragment per source; inventory.toml + IMPORT-REPORT.md review artefacts present; the
+        # ACTIVE store (machine subdir) is byte-untouched.
+        rootP1, mP1 = build_store(sources={"a.txt": "aaaa", "b.txt": "bbbbbb"})
+        p1_before = snapshot(mP1)
+        pr1 = plan_import(rootP1, ["a.txt", "b.txt"], now=NOW, run_nonce=NONCE)
+        check("P1-plan-clean", pr1.verdict == 0)
+        check("P1-plan-run-id-grammar", bool(pr1.run_id and INDEP_RUN_ID_RE.match(pr1.run_id)))
+        check("P1-plan-migration-incomplete", pr1.migration_incomplete is True)  # all-unmapped -> all LF
+        check("P1-plan-active-store-unchanged", snapshot(mP1) == p1_before)
+        p1_dir = mP1.parent / "imports" / (pr1.run_id or "MISSING")
+        check("P1-plan-run-dir", p1_dir.is_dir())
+        check("P1-plan-inventory-present", (p1_dir / "inventory.toml").is_file())
+        check("P1-plan-report-present", (p1_dir / "IMPORT-REPORT.md").is_file())
+        check("P1-plan-report-rel", pr1.report_rel == ".working/imports/" + (pr1.run_id or "M")
+              + "/IMPORT-REPORT.md")
+        if (p1_dir / "fragments" / "legacy_fragment.index.toml").is_file():
+            lfp = tomllib.loads((p1_dir / "fragments" / "legacy_fragment.index.toml").read_text())
+            check("P1-plan-one-lf-per-source", len(lfp["record"]) == 2)
+        # the persisted inventory digest matches the scan's, and the report cites it.
+        if (p1_dir / "inventory.toml").is_file():
+            invp = tomllib.loads((p1_dir / "inventory.toml").read_text())
+            check("P1-plan-inventory-digest-matches", invp.get("inventory_digest") == pr1.inventory_digest)
+        if (p1_dir / "IMPORT-REPORT.md").is_file():
+            md = (p1_dir / "IMPORT-REPORT.md").read_text()
+            check("P1-plan-report-cites-digest", pr1.inventory_digest in md)
+            check("P1-plan-report-byte-reproducible",
+                  md == _render_report_md(pr1.inventory_digest,
+                                          scan_import(rootP1, ["a.txt", "b.txt"]).fragments, [], pr1.run_id))
+
+        # P2 determinism: identical inputs -> identical run id; a different nonce -> a different run id.
+        rootP2, _mP2 = build_store(sources={"a.txt": "aaaa", "b.txt": "bbbbbb"})
+        pr2 = plan_import(rootP2, ["a.txt", "b.txt"], now=NOW, run_nonce=NONCE)
+        check("P2-plan-deterministic-run-id", pr2.verdict == 0 and pr2.run_id == pr1.run_id)
+        rootP2b, _mP2b = build_store(sources={"a.txt": "aaaa", "b.txt": "bbbbbb"})
+        pr2b = plan_import(rootP2b, ["a.txt", "b.txt"], now=NOW, run_nonce="other-nonce")
+        check("P2-plan-nonce-changes-run-id", pr2b.verdict == 0 and pr2b.run_id != pr1.run_id)
+
+        # P3 inert proposals: a well-formed proposal is RECORDED in the report as an inert suggestion but
+        # NEVER auto-rested (the fragment stays unmapped -> legacy_fragment); a proposal targeting a path
+        # outside the scanned set is a finding (confinement); a bad suggested_state is a finding.
+        rootP3, mP3 = build_store(sources={"a.txt": "aaaa"})
+        good_prop = [{"source_path": "a.txt", "span": [0, 4], "suggested_state": "mapped",
+                      "note": "looks like a backlog item"}]
+        pr3 = plan_import(rootP3, ["a.txt"], proposals=good_prop, now=NOW, run_nonce=NONCE)
+        check("P3-plan-with-proposal-clean", pr3.verdict == 0)
+        p3_dir = mP3.parent / "imports" / (pr3.run_id or "MISSING")
+        if (p3_dir / "IMPORT-REPORT.md").is_file():
+            md3 = (p3_dir / "IMPORT-REPORT.md").read_text()
+            check("P3-proposal-recorded-inert", "model_proposal" in md3 and "suggested_state=mapped" in md3)
+        if (p3_dir / "candidate").is_dir():
+            # inert: NO candidate index minted from the proposal; the fragment is quarantined as LF.
+            check("P3-proposal-not-auto-rested",
+                  not (p3_dir / "candidate" / "backlog_item.index.toml").is_file()
+                  and (p3_dir / "fragments" / "legacy_fragment.index.toml").is_file())
+        rootP3b, _mP3b = build_store(sources={"a.txt": "aaaa"})
+        bad_target = [{"source_path": "outside.txt", "span": [0, 1], "suggested_state": "mapped"}]
+        check("P3-proposal-confinement-finding",
+              plan_import(rootP3b, ["a.txt"], proposals=bad_target, now=NOW, run_nonce=NONCE).verdict == 1)
+        rootP3c, _mP3c = build_store(sources={"a.txt": "aaaa"})
+        bad_state = [{"source_path": "a.txt", "span": [0, 4], "suggested_state": "renamed"}]
+        check("P3-proposal-bad-state-finding",
+              plan_import(rootP3c, ["a.txt"], proposals=bad_state, now=NOW, run_nonce=NONCE).verdict == 1)
+
+        # P4 init-first + fail-closed: planning a location with no store is cannot-evaluate.
+        noroot2 = base / "noopf2-{:02d}".format(counter[0] + 998)
+        noroot2.mkdir(parents=True)
+        (noroot2 / "a.txt").write_text("aaaa", encoding="utf-8")
+        check("P4-plan-no-store-cannot-eval",
+              plan_import(noroot2, ["a.txt"], now=NOW, run_nonce=NONCE).verdict == 2)
+
+        # --- OPF-IMPORT-OPS: apply_import (promotion) is DEFERRED, fail-closed, mutates nothing ---------
+        rootA1, mA1 = build_store(sources={"a.txt": "aaaa"})
+        prA = plan_import(rootA1, ["a.txt"], now=NOW, run_nonce=NONCE)
+        a1_before = snapshot(mA1)
+        appl = apply_import(rootA1, prA.run_id or "imp-x", accepted_plan_digest="sha256:0", now=NOW)
+        check("A1-apply-deferred-cannot-eval", appl.verdict == 2 and appl.promoted is False)
+        check("A1-apply-mutates-nothing", snapshot(mA1) == a1_before)
+
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -2942,7 +3489,7 @@ def self_test():
         for f in failures:
             print("  FAILED: {}".format(f))
         return 1
-    print("OPF-IMPORT SELF-TEST: PASS ({} import-staging checks)".format(checked[0]))
+    print("OPF-IMPORT SELF-TEST: PASS ({} import operation-layer + staging checks)".format(checked[0]))
     return 0
 
 
