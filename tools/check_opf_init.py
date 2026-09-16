@@ -917,6 +917,41 @@ def _suite(invoke):
                       rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
                 check("ext-format0 fixture preserved", _snapshot(ext_v0) == ev0_before)
 
+                # OPF-D2B round 12 / R11-1 (BLOCKER, fail-open false pass): a promisor remote whose NAME
+                # carries non-UTF-8 bytes (promisor=true, no filter, no extension). The round-11 loop
+                # enumerated the promisor key byte-preserving (b"remote.up\xffstream.promisor\x00") but then
+                # re-queried it via a "replace"-decoded key ("remote.up�stream.promisor"), which asks git
+                # for a DIFFERENT (nonexistent) key and returns rc 1 (not found); the round-11 code read that
+                # rc 1 as "not a true promisor" and returned FULL, so the availability check was skipped and
+                # init PROCEEDED (rc 0) even though `git add` lazy-fetches through the real up\xffstream
+                # promisor and IGNORES the store. The fix fails closed: an enumerated promisor key that cannot
+                # cleanly re-query (non-UTF-8 name, or any re-query rc != 0) is a cannot-determine -> partial.
+                # DISCRIMINATOR: rc 0 (creates a store git add would skip) against the round-11 HEAD.
+                nonutf8 = d2b_stripped_partial("d2b-nonutf8-promisor")
+                git_call(nonutf8, ["config", "remote.origin.promisor", "true"])
+                nu_cfg = nonutf8 / ".git" / "config"
+                nu_raw = nu_cfg.read_bytes()
+                if b'[remote "origin"]' not in nu_raw:
+                    raise OSError("R11-1 fixture: expected a [remote \"origin\"] section to rename")
+                nu_cfg.write_bytes(nu_raw.replace(b'[remote "origin"]', b'[remote "up\xffstream"]'))
+                # Ground truth in a byte-exact COPY (git add mutates the index and can fetch): the real
+                # `git add -A` fetches through the non-UTF-8 promisor and IGNORES the store, so .working is NOT
+                # staged and check-ignore reports it ignored. This is the hazard the refusal below guards.
+                nu_gt = base / "d2b-nonutf8-groundtruth"
+                shutil.copytree(str(nonutf8), str(nu_gt))
+                (nu_gt / working).mkdir()
+                (nu_gt / working / "f").write_bytes(b"store\n")
+                git_call(nu_gt, ["-c", "protocol.file.allow=always", "add", "-A"])
+                nu_staged = git_call(nu_gt, ["--literal-pathspecs", "ls-files", "--", working])
+                nu_ign = _opf_observe._run_git(git, nu_gt, ["check-ignore", working + "/f"])
+                check("R11-1 ground truth: git add fetches via the non-UTF-8 promisor and ignores the store",
+                      nu_staged.strip() == b"" and nu_ign.completed and nu_ign.rc == 0)
+                nu_before = _snapshot(nonutf8)
+                rc, output = run(nonutf8)
+                check("non-UTF-8-named promisor remote refused (R11-1)",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("non-UTF-8-named promisor fixture preserved", _snapshot(nonutf8) == nu_before)
+
                 # OPF-D2B / D3 (fixture hermeticity): the stdin-fed fixture git helper must build its OWN
                 # scrubbed environment, so an inherited GIT_INDEX_FILE (or GIT_DIR / GIT_WORK_TREE /
                 # GIT_OBJECT_DIRECTORY / GIT_COMMON_DIR) cannot redirect its write to a caller's external

@@ -274,7 +274,13 @@ def _is_partial_clone(git, store_root):
           (true/yes/on/1/nonzero-int; false/no/off/empty/0 do NOT register). A `promisor=false` does NOT
           remove a registration made by (a) or (c). Because value semantics decide this, each occurrence is
           re-evaluated with git's own `--type=bool` rather than hand-parsed, and a garbage/unparseable bool
-          (a git error) fails closed to partial.
+          (a git error) fails closed to partial. The re-query addresses the ENUMERATED key by name, so a
+          promisor remote whose name does not cleanly UTF-8 round-trip (e.g. a non-UTF-8 remote name like
+          `[remote "up\xffstream"]`) cannot be re-queried -- a lossy decode would ask for a different,
+          nonexistent key and read rc 1 (not found). An enumerated key that cannot be cleanly re-queried
+          (a non-UTF-8 name, or any re-query rc other than 0) is a cannot-determine that fails closed to
+          partial: it is NEVER read as boolean-false / full, because the key demonstrably exists (it was just
+          enumerated) and git would still lazy-fetch through the real promisor remote it names.
       (c) `extensions.partialClone` is PRESENT (its value names the default promisor remote, so it is tested
           by presence, and a `false` value merely names a remote called "false"). The stated predicate
           gated this on `core.repositoryformatversion >= 1`; that gate is DROPPED. Empirically (isolated
@@ -317,14 +323,27 @@ def _is_partial_clone(git, store_root):
         return True    # cannot determine -> partial (fail-closed)
     if prom.rc == 1:
         return False   # no promisor filter, no extension, and no promisor key at all: a full clone
-    keys = [k for k in prom.out.decode("utf-8", "replace").split("\0") if k]
-    for key in keys:
+    for kb in prom.out.split(b"\0"):
+        if not kb:
+            continue
+        # The enumerated key name must round-trip cleanly to re-query it. A remote name carrying non-UTF-8
+        # bytes (e.g. `[remote "up\xffstream"]`) enumerates fine as raw bytes, but a lossy decode would mangle
+        # it, so the --type=bool re-query below would ask for a DIFFERENT (nonexistent) key and read rc 1
+        # (not found) -- which must NOT be mistaken for boolean-false / full. The key demonstrably EXISTS (it
+        # was just enumerated), so a name that cannot be re-queried is a cannot-determine -> partial.
+        try:
+            key = kb.decode("utf-8")
+        except UnicodeDecodeError:
+            return True    # a non-UTF-8 promisor key name cannot be cleanly re-queried: fail-closed to partial
         val = _run_git_config_discovery(git, store_root, ["config", "--type=bool", "--get-all", key])
-        if not val.completed or val.rc not in (0, 1):
-            return True    # unreadable, or a garbage/unparseable bool (git error): fail-closed to partial
+        if not val.completed or val.rc != 0:
+            return True    # an ENUMERATED key that does not cleanly re-query -- rc 1 (not found: the name did
+                           # not round-trip), a garbage/unparseable bool (rc 128), or a probe that cannot run
+                           # -- is a cannot-determine -> partial (fail-closed), NEVER read as boolean-false/full
         if any(line.strip() == "true" for line in val.out.decode("utf-8", "replace").splitlines()):
             return True    # a boolean-true promisor remote: a partial clone
-    return False   # every promisor key evaluated boolean-false, and no filter or extension: a full clone
+    return False   # every enumerated promisor key cleanly re-queried (rc 0) AND evaluated boolean-false, and
+                   # no filter or extension: a full clone
 
 
 def indexed_ignore_availability(git, store_root, gitignore_relpaths):
