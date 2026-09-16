@@ -731,6 +731,51 @@ def _suite(invoke):
                 check("descendant .gitignore/data proceeds (exact-membership candidate)",
                       rc == EXIT_OK and valid_sources(descendant))
 
+                # OPF-D2B round 8 / D5 (BLOCKER): a stage-0 skip-worktree GITLINK-mode (160000) index
+                # .gitignore whose OID is a promisor-fetchable BLOB. git's fallback
+                # (read_skip_worktree_file_from_index -> do_read_blob) is MODE-BLIND: for a skip-worktree
+                # entry whose worktree open fails it reads the entry's OID and applies the object as ignore
+                # patterns whenever it is a blob, never consulting the index mode. So this fabricated
+                # gitlink-mode entry slips a mode allowlist, yet the adopter's own `git add` fetches the blob
+                # and silently ignores the store (confirmed ground truth). The round-8 mode allowlist
+                # (regular-file / symlink only) treated mode 160000 as not-an-ignore-source and PASSED (false
+                # pass, rc 0, a store git add would skip); the mode-blind check refuses on the unavailable OID
+                # regardless of mode. DISCRIMINATOR: rc 0 against the mode-allowlist version.
+                gitlink = base / "d2b-gitlink-blob"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", src_url, str(gitlink)])
+                git_call(gitlink, ["read-tree", "HEAD"])
+                gitlink_blob = git_call(
+                    promisor_src, ["rev-parse", "HEAD:.gitignore"]).decode("ascii").strip()
+                git_call(gitlink, ["rm", "--cached", "-q", ".gitignore"])
+                git_input(gitlink, ["update-index", "--index-info"],
+                          ("160000 " + gitlink_blob + " 0\t.gitignore\n").encode("ascii"))
+                git_call(gitlink, ["update-index", "--skip-worktree", ".gitignore"])
+                gl_before = _snapshot(gitlink)
+                rc, output = run(gitlink)
+                check("gitlink-mode index .gitignore over fetchable blob refused",
+                      rc == EXIT_ERROR and "indexed .gitignore blob is unavailable" in output)
+                check("gitlink-mode index .gitignore preserved", _snapshot(gitlink) == gl_before)
+
+                # OPF-D2B round 8 / D5 control (no over-refusal): the SAME gitlink-mode (160000) skip-worktree
+                # entry, but with a real DIRECTORY at the worktree .gitignore path, as a valid initialized
+                # submodule has. git's O_NOFOLLOW open of the directory SUCCEEDS, so git never index-reads the
+                # OID and `git add` cannot ignore the store through it; init must PROCEED. This proves the
+                # refusal is gated by the worktree open FAILING, not by the gitlink mode, so a valid submodule
+                # is not blanket-refused.
+                gitlink_dir = base / "d2b-gitlink-dir"
+                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                                "--no-checkout", src_url, str(gitlink_dir)])
+                git_call(gitlink_dir, ["read-tree", "HEAD"])
+                git_call(gitlink_dir, ["rm", "--cached", "-q", ".gitignore"])
+                git_input(gitlink_dir, ["update-index", "--index-info"],
+                          ("160000 " + gitlink_blob + " 0\t.gitignore\n").encode("ascii"))
+                git_call(gitlink_dir, ["update-index", "--skip-worktree", ".gitignore"])
+                (gitlink_dir / ".gitignore").mkdir()
+                rc, output = run(gitlink_dir)
+                check("gitlink-mode with directory at worktree path proceeds (no over-refusal)",
+                      rc == EXIT_OK and valid_sources(gitlink_dir))
+
                 # OPF-D2B / D3 (fixture hermeticity): the stdin-fed fixture git helper must build its OWN
                 # scrubbed environment, so an inherited GIT_INDEX_FILE (or GIT_DIR / GIT_WORK_TREE /
                 # GIT_OBJECT_DIRECTORY / GIT_COMMON_DIR) cannot redirect its write to a caller's external

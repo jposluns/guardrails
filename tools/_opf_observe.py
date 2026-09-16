@@ -259,28 +259,49 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
     .gitignore with a readable regular working-tree file is read from disk by both, so neither is returned.
 
     git index-reads a .gitignore ONLY for a stage-0 skip-worktree entry whose worktree path its own
-    O_NOFOLLOW open cannot use (add_patterns -> read_skip_worktree_file_from_index): confirmed against git
-    2.53.0. So an entry is returned only when ALL hold -- (1) its returned path is EXACTLY one of the
-    requested candidate paths (a --literal-pathspecs listing still matches DESCENDANTS of a candidate that
-    is a directory, e.g. ".gitignore/data" under a candidate ".gitignore"; a descendant is not a file git
-    ever reads as ignore patterns, so it is dropped); (2) a blob mode git reads as ignore patterns, which is
-    a regular file (100644/100755) OR a symlink (120000, whose target text git reads as patterns), never a
-    gitlink (160000) or tree (040000); (3) stage 0 with the skip-worktree flag set (`ls-files -t`/`-v` tags
-    it "S"); (4) a worktree path where git's own O_RDONLY|O_NOFOLLOW open is UNSUCCESSFUL, so git falls back
-    to the index blob (see _worktree_open_succeeds: this covers an absent path, a symlink, an unreadable
-    regular file, and an UNREADABLE directory, while a readable regular file -- read from disk, parity with
-    the probe -- and a readable directory -- opened, its read then fails with no fallback -- both PROCEED);
-    and (5) an unavailable blob. Any other entry -- not an exact candidate, not a blob mode, not stage 0,
-    not skip-worktree, or one whose worktree open succeeds -- is one git never index-reads, so an absent
-    blob for it cannot change what `git add` ignores and it is not returned (no over-refusal). Candidate
+    O_NOFOLLOW open cannot use (add_patterns -> read_skip_worktree_file_from_index -> do_read_blob):
+    confirmed against git 2.53.0. That fallback is MODE-BLIND -- do_read_blob reads the entry's OID and
+    applies the object as ignore patterns whenever it is a blob, NEVER consulting the index mode -- so this
+    guard is mode-blind too: it refuses on an unavailable OID regardless of the entry's mode. An entry is
+    returned only when ALL hold -- (1) its returned path is EXACTLY one of the requested candidate paths (a
+    --literal-pathspecs listing still matches DESCENDANTS of a candidate directory, e.g. ".gitignore/data"
+    under a candidate ".gitignore", and a tree / sparse-dir entry, whose ls-files path carries a trailing
+    "/"; neither is a file git reads as ignore patterns, so exact membership drops both); (2) stage 0 with
+    the skip-worktree flag set (`ls-files -t`/`-v` tags it "S"); (3) a worktree path where git's own
+    O_RDONLY|O_NOFOLLOW open is UNSUCCESSFUL, so git falls back to the index OID (see _worktree_open_succeeds:
+    this covers an absent path, a symlink, an unreadable regular file, and an UNREADABLE directory, while a
+    readable regular file -- read from disk, parity with the probe -- and a readable directory -- opened, its
+    read then fails with no fallback -- both PROCEED); and (4) an unavailable OID. Any other entry -- not an
+    exact candidate, not stage 0, not skip-worktree, or one whose worktree open succeeds -- is one git never
+    index-reads, so an absent object for it cannot change what `git add` ignores and it is not returned (no
+    over-refusal).
+
+    The mode allowlist that earlier gated this (regular file / symlink only) is deliberately GONE, because
+    it was a FALSE PASS of the guarded class: a fabricated stage-0 skip-worktree GITLINK-mode (160000) entry
+    whose OID is a promisor-fetchable BLOB slips a mode check, yet git's mode-blind do_read_blob fetches that
+    blob and silently ignores the store, so refusing on the unavailable OID regardless of mode is what
+    matches `git add`. An AVAILABLE OID is not evaluated here at all: the sibling layer-1 check-ignore probe
+    in opf.py reads it mode-blind, and with the object present that probe itself refuses a matching store, so
+    this availability check is reached only for an unavailable OID. A VALID submodule (gitlink 160000) has a
+    directory at its worktree path, so its worktree open SUCCEEDS and it proceeds (no over-refusal).
+    DISCLOSED CONSERVATIVE RESIDUAL (disclose-guard-residuals): an uninitialized submodule whose commit OID
+    is genuinely unavailable in a partial clone becomes a conservative cannot-evaluate REFUSAL here, even
+    though `git add` would stage it (do_read_blob rejects a non-blob object and stages nothing to ignore);
+    this is a rare fail-closed over-refusal (commit objects are usually present, since a blob:none filter
+    omits only blobs) and it is the safe direction, where the discarded mode allowlist was instead a false
+    pass of the guarded class. A second conservative residual, unchanged: an unavailable applicable ignore
+    OID is refused even though its (unfetchable) rules might not in fact match the store. Candidate
     paths are matched as LITERAL pathspecs (--literal-pathspecs) so a pathspec-magic sigil (a leading colon)
     is not read as magic (an empty listing that would MISS the ignoring blob) and a glob metacharacter (a
     bracketed class) is not expanded onto an unrelated indexed path (a false refusal); this mirrors the
     literal-"./"-prefix trick the sibling check-ignore call in opf.py uses for the same reason.
 
     Returns a sorted list of the unavailable repo-relative .gitignore paths; an empty list means every
-    applicable ignore input is answerable without a fetch. Raises RuntimeError when the index listing or an
-    availability probe cannot be read (itself a cannot-evaluate)."""
+    applicable ignore OID is answerable without a fetch. Raises RuntimeError only when git could not be RUN
+    to list the index or to probe an OID (the call did not complete), or when `ls-files` itself failed -- a
+    cannot-evaluate the caller fails closed on. A nonzero `cat-file -e` rc, whether the object is genuinely
+    absent or its pack is unreadable, is not raised: it is treated as an unavailable OID and REFUSED
+    (appended to the returned list). Both paths are fail-closed."""
     if not gitignore_relpaths:
         return []
     listing = _run_git_config_discovery(
@@ -299,27 +320,30 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
         fields = meta.split()
         if not tab or len(fields) != 4:
             raise RuntimeError("unparseable ls-files entry: {!r}".format(entry))
-        tag, mode, blob, stage = fields
+        tag, _mode, oid, stage = fields
         if path not in requested:
             continue  # a --literal-pathspecs listing still matches DESCENDANTS of a candidate directory
-                      # (e.g. ".gitignore/data" under candidate ".gitignore"); only an entry whose path IS
-                      # a requested candidate is a .gitignore git reads, so a descendant is not an ignore
-                      # source and is dropped (no false refusal)
-        if mode not in ("100644", "100755", "120000"):
-            continue  # git reads a regular-file (100644/100755) or a symlink (120000, its target text)
-                      # blob as ignore patterns; a gitlink (160000) or tree (040000) is not one it reads
+                      # (e.g. ".gitignore/data" under candidate ".gitignore"), and a tree / sparse-dir entry
+                      # (trailing "/"); only an entry whose path IS a requested candidate is a .gitignore git
+                      # reads, so exact membership drops both (no false refusal)
+        # No mode gate: git's read_skip_worktree_file_from_index -> do_read_blob is MODE-BLIND (it reads the
+        # entry's OID and applies the object as ignore patterns whenever it is a blob, never consulting the
+        # index mode), so a mode allowlist would false-pass a fabricated gitlink-mode (160000) entry whose
+        # OID is a promisor-fetchable blob that `git add` fetches and ignores the store with. Refusing on an
+        # unavailable OID regardless of mode is git-faithful; see the docstring for the disclosed residual.
         if stage != "0" or tag != "S":
             continue  # git index-reads only a stage-0 skip-worktree entry; nothing else can fall back
         if _worktree_open_succeeds(store_root / path):
             continue  # git's O_RDONLY|O_NOFOLLOW open succeeds, so git reads from the descriptor (or its
-                      # read fails, for a directory) and never index-reads: an absent blob cannot change
+                      # read fails, for a directory) and never index-reads: an absent OID cannot change
                       # what `git add` ignores (a readable regular file is parity with the probe)
-        # git's open is unsuccessful (absent, symlink, unreadable regular file, or unreadable directory),
-        # so git falls back to the index blob; an unavailable blob is a cannot-evaluate the caller refuses.
-        avail = _run_git_config_discovery(git, store_root, ["cat-file", "-e", blob])
+        # git's open is unsuccessful (absent, symlink, unreadable regular file, or unreadable directory), so
+        # git falls back to the index OID (mode-blind); an unavailable OID is a cannot-evaluate the caller
+        # refuses. cat-file -e forces no lazy fetch via _run_git_config_discovery, so it never fetches here.
+        avail = _run_git_config_discovery(git, store_root, ["cat-file", "-e", oid])
         if not avail.completed:
-            raise RuntimeError("could not probe ignore-blob availability ({})".format(avail.err))
-        if avail.rc != 0:
+            raise RuntimeError("could not probe ignore-OID availability ({})".format(avail.err))
+        if avail.rc != 0:  # genuinely absent OR an unreadable pack: both refuse (not raise), fail-closed
             unavailable.append(path)
     return sorted(set(unavailable))
 
