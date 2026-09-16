@@ -1293,6 +1293,101 @@ def _suite():
             check("U27 relocated .working restore names the STORE root, not the product root (R1a)",
                   _want27 in out27b and _bad27 not in out27b)
 
+            # U28) FIX1 compound-failure surfaces BOTH: a mid-run failure (the view render RAISES after the
+            # manifest+counters mutation) is already propagating with its own "staged change is left for
+            # review" recovery advice WHEN the finally's lease release ALSO fails (a peer replaced the lease
+            # -> the release's never-seize _UpgradeError). The release error must NOT displace the propagating
+            # render failure: _cmd_upgrade surfaces BOTH on stderr (the render recovery advice AND the
+            # lease-replaced note), exits 2, and LEAVES the peer lease (never seized). Driven in-process (U25).
+            import contextlib as _ctx28
+            import io as _io28
+            s28 = base / "u28-compound-failure"
+            s28.mkdir()
+            mach28 = build_store(s28)
+            _lp28 = mach28 / _opf_check.LEASE_NAME
+            _peer28 = (b'acquired_at = "2026-04-04T00:00:00Z"\nholder = "peer-runner"\n'
+                       b'operation = "upgrade"\nschema = 1\n')
+            _orig_render28 = opf._opf_views.render
+
+            def _render_replace_lease_then_fail(*a, **k):
+                # a peer swaps the lease in the (post-mutation) render window, then the render fails
+                if _lp28.exists():
+                    _lp28.unlink()
+                _lp28.write_bytes(_peer28)
+                raise RuntimeError("synthetic render failure after mutation")
+
+            try:
+                opf._opf_views.render = _render_replace_lease_then_fail
+                _buf28 = _io28.StringIO()
+                with _ctx28.redirect_stdout(_buf28), _ctx28.redirect_stderr(_buf28):
+                    rc28 = opf._cmd_upgrade(["--root", str(s28)])
+                out28 = _buf28.getvalue()
+            finally:
+                opf._opf_views.render = _orig_render28
+            check("U28/FIX1 compound failure exits 2", rc28 == EXIT_ERROR)
+            check("U28/FIX1 the mid-run render recovery advice still reaches the operator",
+                  "staged change is left for review" in out28)
+            check("U28/FIX1 the render failure (not the lease error) governs the refusal line",
+                  "view render after the schema delta failed" in out28)
+            check("U28/FIX1 the lease-replaced note is ALSO surfaced (not displaced)",
+                  "releasing the upgrade lease failed" in out28
+                  and "REPLACED by another holder" in out28 and "peer-runner" in out28)
+            check("U28/FIX1 the peer lease is LEFT in place (never seized)",
+                  _lp28.is_file() and _lp28.read_bytes() == _peer28)
+
+            # U29) FIX3 absent-vs-replaced release wording: the release refusal DISTINGUISHES a genuine
+            # ABSENCE (the lease was deleted, not replaced) from a REPLACEMENT (a present-but-different
+            # payload). Both stay fail-closed / never-seize; only the operator-facing wording differs. Driven
+            # directly (like U25b), reusing mrel24 and the _peer24 well-formed peer lease.
+            s29 = base / "u29-absent-vs-replaced"
+            s29.mkdir()
+            mach29 = build_store(s29)
+            _lp29 = mach29 / _opf_check.LEASE_NAME
+            fd29 = _opf_store._open_dir_nofollow(str(s29.resolve()))
+            _pay29 = opf._upgrade_acquire_lease(fd29, mrel24)
+            _absent_msg = None
+            _lp29.unlink()                          # ABSENT: removed, not replaced
+            try:
+                opf._upgrade_release_lease(fd29, mrel24, _pay29)
+            except opf._UpgradeError as _e29a:
+                _absent_msg = str(_e29a)
+            check("U29/FIX3 absent lease release refuses (fail-closed, no false success)",
+                  _absent_msg is not None)
+            check("U29/FIX3 absent case names ABSENCE, not replacement",
+                  _absent_msg is not None and "absent" in _absent_msg.lower()
+                  and "replaced by another holder" not in _absent_msg.lower())
+            _lp29.write_bytes(_peer24)              # REPLACED: present-but-different payload
+            _replaced_msg = None
+            try:
+                opf._upgrade_release_lease(fd29, mrel24, _pay29)
+            except opf._UpgradeError as _e29b:
+                _replaced_msg = str(_e29b)
+            check("U29/FIX3 replaced lease release refuses (fail-closed)", _replaced_msg is not None)
+            check("U29/FIX3 replaced case names REPLACEMENT and the holder, not absence",
+                  _replaced_msg is not None and "replaced by another holder" in _replaced_msg.lower()
+                  and "peer-runner" in _replaced_msg and "absent at release" not in _replaced_msg.lower())
+            os.close(fd29)
+
+            # FIX2) the TOCTOU disclosure on _upgrade_unlink_owned_lease now also discloses the false-success
+            # (exit-0 "released") over a swapped peer lease, not only the errant unlink, and names the
+            # release-only-when-no-run-is-live reachability condition. Assert the extended clause is present.
+            _fix2_doc = (opf._upgrade_unlink_owned_lease.__doc__ or "").lower()
+            check("FIX2 TOCTOU disclosure covers the false-success residual",
+                  "reports exit-0 success" in _fix2_doc and 'false "released"' in _fix2_doc
+                  and "release-only-when-no-run-is-live" in _fix2_doc)
+
+            # U30) FIX5 forward-drift pin: opf pins the valid 1.0.0 [modules] vocabulary to a FROZEN expected
+            # set, and _upgrade_plan reconciles the LIVE _opf_store.KNOWN_MODULES-derived set against it, so a
+            # future KNOWN_MODULES edit that shifts the 1.0.0 vocabulary fails HERE. Binds derived to frozen.
+            _expected_1_0_0_modules = frozenset({
+                "governance", "delivery_assurance", "operational_policy", "concurrent_operation",
+                "decision_support"})
+            check("U30/FIX5 opf pins the 1.0.0 module vocabulary to the frozen expected set",
+                  opf._VALID_1_0_0_MODULES == _expected_1_0_0_modules)
+            check("U30/FIX5 the pin still equals the live KNOWN_MODULES + retired-module derivation",
+                  opf._VALID_1_0_0_MODULES
+                  == (frozenset(_opf_store.KNOWN_MODULES) | {opf._UPGRADE_RETIRED_MODULE}))
+
             # P1) seeded migration property test: 12 generated genuine-VALID 1.0.0 variants all migrate.
             _NS = {"maintainer_action": "MA", "maintainer_decision": "MD", "preference_pattern": "PP",
                    "artifact": "AR", "gate_run": "GR", "release": "RL", "waiver": "WV"}

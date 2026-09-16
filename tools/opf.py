@@ -1057,6 +1057,17 @@ _UPGRADE_NEW_VIEWS = ("CONTRIBUTIONS.md", "DECISIONS.toml")
 _UPGRADE_WIDENED_VIEW = "DECISIONS.md"
 _UPGRADE_VIEW_FROM_SOURCES = ("pending_decision", "autonomous_decision")
 
+# FIX5 forward-drift PIN (guard-input-soundness): the 1.0.0-valid [modules] vocabulary is the four 1.0.0
+# baseline modules PLUS the one module this 1.0.0 -> 1.1.0 delta retires (decision_support); their union is
+# exactly the merge-base (1c90fbb) _opf_store.KNOWN_MODULES. _upgrade_plan DERIVES that set from the LIVE
+# _opf_store.KNOWN_MODULES at the point of use, which is correct today but UNPINNED: a future KNOWN_MODULES
+# edit would silently shift what counts as a valid 1.0.0 module. This FROZEN set pins the intended 1.0.0
+# vocabulary (a plain literal, since _opf_store is bound only after _bootstrap); _upgrade_plan reconciles
+# the live derivation against it and fails closed on any divergence, and check_opf_upgrade.py binds the two,
+# so a future drift fails a gate rather than re-vocabularying the check unseen.
+_VALID_1_0_0_MODULES = frozenset({
+    "governance", "delivery_assurance", "operational_policy", "concurrent_operation", "decision_support"})
+
 
 class _UpgradeError(Exception):
     """A fail-closed upgrade refusal carrying the operator-facing reason (mapped to exit 2)."""
@@ -1198,7 +1209,16 @@ def _upgrade_plan(manifest_model, counters_model):
     # coded list. An unknown key (e.g. [modules].unknown_present) is refused UPFRONT, fail-closed, rather than
     # carried through to a post-mutation doctor failure -- keeping the docstring's up-front-validation claim
     # honest (a MISSING type row or WRONG namespace stays the render/doctor gate's job, disclosed on _cmd_upgrade).
-    _valid_1_0_0_modules = set(_opf_store.KNOWN_MODULES) | {_UPGRADE_RETIRED_MODULE}
+    # FIX5: reconcile the LIVE derivation against the frozen pin (forward-drift guard). A KNOWN_MODULES edit
+    # that shifts the 1.0.0 module vocabulary fails HERE (fail-closed), rather than silently re-scoping this
+    # 1.0.0-validity check; the pin, not the live union, is then the vocabulary the check uses.
+    _derived_1_0_0_modules = frozenset(_opf_store.KNOWN_MODULES) | {_UPGRADE_RETIRED_MODULE}
+    if _derived_1_0_0_modules != _VALID_1_0_0_MODULES:
+        raise _UpgradeError(
+            "the derived 1.0.0 module vocabulary {} drifted from the pinned set {}; reconcile "
+            "_VALID_1_0_0_MODULES with _opf_store.KNOWN_MODULES before upgrading (forward-drift pin, "
+            "fail-closed)".format(sorted(_derived_1_0_0_modules), sorted(_VALID_1_0_0_MODULES)))
+    _valid_1_0_0_modules = _VALID_1_0_0_MODULES
     for _mname in sorted(modules):
         if _mname not in _valid_1_0_0_modules:
             raise _UpgradeError("manifest [modules].{} is not a known 1.0.0 module (known: {}); not a valid "
@@ -1829,15 +1849,27 @@ def _upgrade_unlink_owned_lease(pfd, name, lease_rel, expected_payload):
     lease this run cannot prove is its own is ever removed here.
 
     DISCLOSED RESIDUAL (disclose-guard-residuals): a tiny TOCTOU window remains between the ownership read and
-    the unlink -- a swap in exactly that window could still unlink a replacement. This is inherent to unlink-
-    by-name (there is no unlink-this-exact-inode primitive available here); it is vastly smaller than the
-    prior ownership-blind unlink and never-seizes under any non-adversarial-mid-window sequence."""
+    the unlink -- a swap in exactly that window could still unlink a replacement, and because that unlink then
+    succeeds the run also reports exit-0 SUCCESS (a false "released") over the deleted peer lease rather than
+    the never-seize refusal. This is inherent to unlink-by-name (there is no unlink-this-exact-inode primitive
+    available here) and cannot be eliminated, only disclosed; it is reachable ONLY when an operator or peer
+    violates the documented release-only-when-no-run-is-live reconciliation (spec 5.7). It is vastly smaller
+    than the prior ownership-blind unlink and never-seizes under any non-adversarial-mid-window sequence."""
     on_disk = _upgrade_read_lease_payload(pfd, name)
     if on_disk != expected_payload:
+        # FIX3: distinguish a genuine ABSENCE (the lease was deleted, not replaced) from a REPLACEMENT (a
+        # present-but-different payload). Both stay fail-closed / never-seize; only the operator-facing
+        # wording differs. _upgrade_read_lease_payload returns None for absent, non-regular, or unreadable.
+        if on_disk is None:
+            detail = ("the lease is ABSENT at release (already removed, or present as a non-regular entry); "
+                      "this run's own lease is gone")
+        else:
+            detail = ("the lease was REPLACED by another holder ({}) before release; this run's own lease "
+                      "is gone".format(_upgrade_lease_holder_of(on_disk)))
         raise _UpgradeError(
-            "the upgrade lease {} was replaced by another holder ({}) before release; it is NEVER seized "
-            "(spec 5.7) and is LEFT in place for operator reconciliation. This run's own lease is gone, so "
-            "no lease is removed here (fail-closed).".format(lease_rel, _upgrade_lease_holder_of(on_disk)))
+            "the upgrade lease {} could not be released as this run's own: {}. It is NEVER seized (spec 5.7) "
+            "and is LEFT in place for operator reconciliation, so no lease is removed here "
+            "(fail-closed).".format(lease_rel, detail))
     try:
         os.unlink(name, dir_fd=pfd)
     except OSError as exc:
@@ -2035,7 +2067,30 @@ def _upgrade_run(root):
             return EXIT_OK
         finally:
             if not released:
-                _upgrade_release_lease(root_fd, machine_rel, lease_payload)
+                # R5/FIX1: release the lease on every non-success exit. When a mid-run failure is ALREADY
+                # propagating (a render/doctor escape after the manifest+counters were rewritten, which
+                # carries its own "staged change is left for review" recovery advice) and the release then
+                # ALSO fails (its lease-replaced never-seize _UpgradeError), the release error must NOT
+                # DISPLACE that original exception: the operator still needs the mid-run recovery advice, so
+                # the lease-replaced note is surfaced ALONGSIDE it, never in place of it (exit 2 preserved,
+                # peer lease left, never seized). A propagating KeyboardInterrupt/SystemExit is likewise not
+                # masked by a release failure.
+                pending = sys.exc_info()[1]
+                if pending is None:
+                    # A `return` (or normal fall-through) is passing through with no in-flight exception: a
+                    # release failure legitimately becomes the surfaced outcome (exit 2), exactly as before.
+                    _upgrade_release_lease(root_fd, machine_rel, lease_payload)
+                else:
+                    try:
+                        _upgrade_release_lease(root_fd, machine_rel, lease_payload)
+                    except (KeyboardInterrupt, SystemExit):
+                        raise
+                    except Exception as rel_exc:  # noqa: BLE001  surfaced, never displaces the original
+                        print("opf upgrade: additionally, releasing the upgrade lease failed ({}); the peer "
+                              "lease is LEFT in place (never seized, spec 5.7) and the original failure above "
+                              "still governs (exit 2).".format(rel_exc), file=sys.stderr)
+                        # returning from the except lets `pending` resume propagating (the finally completes
+                        # without raising a new exception), so _cmd_upgrade surfaces the original refusal.
     finally:
         os.close(root_fd)
 
