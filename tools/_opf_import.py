@@ -18,9 +18,13 @@ it (spec 14.1, Fable-synthesized plan):
     validating completeness + the origin/proposed_state echo and requiring an explicit accept for every
     model_proposal resting mapping. It NEVER mutates the active store and NEVER re-plans (a reject makes a
     later apply refuse). `review_import_interactive` is a thin TTY front-end funnelling into the same core.
-  - `apply_import(...) -> ApplyResult`: promotion is DEFERRED to the OPF-IMPORT-APPLY unit (fail-closed
-    CANNOT-EVALUATE that mutates nothing; see its docstring for the candidate-context prerequisite).
-    `check_opf_import.py` is the accompanying gate over a staged run and the scan layer.
+  - `apply_import(...) -> ApplyResult`: APPLY-PROMOTION (OPF-IMPORT-APPLY, PR-C). Validates an accepted
+    staged run and promotes its candidate to the active store through the crash-durable, lock-guarded
+    `_journal.run_transaction` cutover (D1 relocates the preserved sources + acceptance to a durable archive;
+    D2/D3 keep the journal, the idempotency signal, and `transaction.toml` outside `.working/`; D4 composes
+    the candidate through validate_store over a tempdir preview; D5 requires the assembled views reproducible;
+    the staging run dir is deleted as the terminal journaled step). Fail-closed throughout. `check_opf_import.py`
+    is the accompanying gate over a staged run, the scan layer, and the per-run transaction record.
 
 Offline, stdlib only, fail-closed. This module takes an operator-enumerated set of legacy SOURCE files
 and an untrusted MAPPING PLAN, validates both, mints record ids from the store's counters, and STAGES a
@@ -34,15 +38,14 @@ release-boundary gate), and U8 (the constrained-subset canonical emitter) rather
 
 Sequencing (build plan): U7 landed the operation layer as MODULE + SELF-TEST first, like U4/U5; the live
 `import` verb wiring landed next (OPF-IMPORT-VERB, opf.py `_cmd_import` + its main() dispatch branch),
-composing this operation layer unchanged. The former dispatch-deferral vector (F-373 / VC-4-HARDEN) is
-converted to its verb-wiring successor here: a bare `opf.py import` with no mode still exits 2 and stages
-nothing (the grammar's exactly-one-mode rule), and `--apply <run-id>` still exits 2 mutating nothing (the
-apply-promotion stub stays deferred to the OPF-IMPORT-APPLY unit), so PR-C's promotion landing is again a
-conscious edit to this test rather than a silent drift.
+composing this operation layer unchanged, and PR-C landed apply-promotion (`apply_import`) as the real,
+journaled, verified-restore cutover that promotes an accepted run to the active store. A bare `opf.py import`
+with no mode still exits 2 and stages nothing (the grammar's exactly-one-mode rule).
 
-Promotion (mutating the active store, advancing counters.toml, flipping import_status) is OUT OF SCOPE:
-U7 stages proposals only. Staged ids are PROPOSALS; the sole durable reservation is counters.toml, which
-promotion advances under the store lease (a single writer). The R6 sibling-run union is checked once
+Staging still mutates nothing durable: `stage_import`/`plan_import` stage PROPOSALS only, and the sole durable
+reservation is counters.toml, which PROMOTION (`apply_import`) advances under the import writer lock (a single
+writer), alongside merging the candidate indexes, flipping `import_status`, relocating the preserved sources,
+and deleting the staging run dir, all in one journaled transaction. The R6 sibling-run union is checked once
 before the run-dir claim and RE-CHECKED after it (excluding this run's own dir), which NARROWS the
 concurrent-proposal window but, absent a lock, does not eliminate it: a true TOCTOU interleaving between
 two racing proposals can still leave both to fail closed or, narrowly, neither to block
@@ -102,6 +105,7 @@ import os
 import re
 import stat
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -135,6 +139,35 @@ ARCHIVE_DIRNAME = "archive"
 DIR_MODE = 0o755
 FILE_MODE = 0o644
 SCHEMA = 1
+
+# --- apply-promotion (OPF-IMPORT-APPLY, PR-C) fixed locations -----------------------------------------
+# Every apply-promotion control artefact lives at the STORE ROOT under `.aiqt/`, OUTSIDE `.working/`, so it
+# (a) survives the terminal deletion of the staging run dir and (b) never enters the store containment walk
+# (which is rooted at `.working/`), exactly as migrate.py's `.aiqt/migration/journal` does (D2/D3, the ruled
+# PR-C design). All are store-root relative, contained no-follow paths (reachable from the store-root fd the
+# journal + apply_ops walk). The idempotency truth is the crash-durable `_journal` frames; `transaction.toml`
+# is the gate-readable projection of the terminal state, per run.
+IMPORT_OPS_REL = ".aiqt/import"                        # import-promotion ops root (journal + per-run txn record)
+IMPORT_JOURNAL_REL = ".aiqt/import/journal"            # the crash-durable journal root (txn dirs beneath it)
+IMPORT_ARCHIVE_REL = ".aiqt/import-archive"            # D1: durable preserved-source + acceptance archive root
+TRANSACTION_NAME = "transaction.toml"
+TRANSACTION_FORMAT = "opf.import.transaction/v1"
+# The state machine of the per-run transaction record (the gate-readable projection): prepared is written
+# before publication, published during the mutation, complete on the validated finish. A record present at
+# `complete` whose live digests match is the idempotency signal (a re-apply is a noop_already_complete).
+_TRANSACTION_STATES = ("prepared", "published", "complete")
+
+# D4 composition gate: the check ids whose CANNOT-EVALUATE the disclosed-benign set tolerates over the
+# assembled candidate PREVIEW. The four git-observation checks cannot evaluate when the throwaway tempdir
+# preview is not a git repository (a disclosed omission, not a failure); C-RECORDS / C-PERRECORD-RECONCILE /
+# C-HISTORY-RESURRECTION cannot evaluate when the store carries importer-tier legacy_fragment records whose
+# record schema the baseline validator defers (spec 8.5 / _opf_check._schema_deferred). ANY OTHER cannot-
+# evaluate, or ANY INVALID finding, is a real composition failure that aborts the promotion (fail-closed).
+_PREVIEW_GIT_OBSERVATION_CANTS = frozenset({
+    "C-TRACKED", "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-HISTORY-RESURRECTION"})
+_PREVIEW_SCHEMA_DEFERRAL_CANTS = frozenset({
+    "C-RECORDS", "C-PERRECORD-RECONCILE", "C-HISTORY-RESURRECTION"})
+_PREVIEW_BENIGN_CANTS = _PREVIEW_GIT_OBSERVATION_CANTS | _PREVIEW_SCHEMA_DEFERRAL_CANTS
 
 # The closed mapping-state vocabulary (spec 14.1). mapped/split mint a candidate record; duplicate names
 # an existing record; every other state quarantines as a legacy_fragment.
@@ -318,8 +351,9 @@ class PlanResult:
 
 class ApplyResult:
     """The inert result of an APPLY-PROMOTION attempt. Judged by its verdict. `promoted` is never inferred
-    from the verdict alone (a caller reads this field). See apply_import: promotion is DEFERRED to the
-    OPF-IMPORT-APPLY unit, so this result is always a fail-closed CANNOT-EVALUATE that mutates nothing."""
+    from the verdict alone (a caller reads this field); `outcome` distinguishes promoted / aborted / rejected
+    / noop_already_complete, and `restore_ref` records the transaction id + journal location + observed HEAD
+    the verified restore rests on. See apply_import for the fail-closed ten-step promotion."""
     __slots__ = ("verdict", "findings", "promoted", "outcome", "restore_ref")
 
     def __init__(self, verdict, findings=None, promoted=False, outcome=None, restore_ref=None):
@@ -2722,38 +2756,652 @@ def review_import_interactive(product_root, run_id, *, actor, now, in_stream=Non
     return review_import(product_root, run_id, actor=actor, decisions=decisions, now=now)
 
 
+# --- apply-promotion helpers (OPF-IMPORT-APPLY, PR-C ruled full design D1-D5 + terminal delete) --------
+
+def _txn_record_rel(run_id):
+    """Store-relative path of the per-run transaction record (the gate-readable projection), OUTSIDE
+    `.working/` so it survives the terminal run-dir deletion (D2/D3)."""
+    return "{}/{}/{}".format(IMPORT_OPS_REL, run_id, TRANSACTION_NAME)
+
+
+def _archive_run_rel(run_id):
+    """Store-relative path of the durable preserved-source + acceptance archive for a run (D1), OUTSIDE
+    `.working/`."""
+    return "{}/{}".format(IMPORT_ARCHIVE_REL, run_id)
+
+
+def _claim_apply_lock(journal_root, jr_fd, root_fd):
+    """Atomically claim the import-promotion journal lock, recover-aware, mirroring migrate._claim_recover_lock.
+    Returns 'acquired' (this apply owns the lock and every prior journal is reconciled terminal),
+    'possibly-live' (a live owner holds it: NEVER seized), or raises JournalError fail-closed. An absent lock
+    is acquired via O_EXCL; a confirmed-dead stale lease is reconciled-then-broken under the fcntl arbitration
+    primitive only after every journal validates terminal; a possibly-live owner is refused."""
+    owner = _journal.read_lock_owner(journal_root)
+    if owner is None:
+        _journal.acquire_lock(journal_root, session_id="import-apply")
+        return "acquired"
+    if not _journal.owner_confirmed_dead(owner):
+        return "possibly-live"
+    return _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id="import-apply")
+
+
+def _recover_open_txns(jr_fd, journal_root, root_fd):
+    """Reconcile every existing transaction dir to a terminal state before proceeding (idempotent). A prior
+    crash that rolled forward leaves a COMPLETE frame (the store carries the promotion); one that rolled back
+    restores the prestate. Returns the mapping txn-name -> outcome. JournalError propagates fail-closed."""
+    outcomes = {}
+    for txn_dir in _journal._journal_txn_dirs(jr_fd, journal_root):
+        outcomes[txn_dir.name] = _journal.recover(jr_fd, txn_dir, root_fd)
+    return outcomes
+
+
+def _merged_index_bytes(store_root_fd, live_rel, candidate_rel, where):
+    """Merge a staged candidate `{schema, record}` index onto its live counterpart and return the byte-
+    canonical merged bytes. Live records come first (order preserved), the candidate records are appended.
+    A missing live index contributes zero records (a first import of the type); a malformed live or candidate
+    index is CANNOT-EVALUATE (fail-closed, never a partial merge). The candidate index MUST be present and
+    non-empty (the caller only merges a type that staged records)."""
+    cand = _read_toml(store_root_fd, candidate_rel)
+    if cand is None:
+        raise _cannot("{}: staged candidate index {} is absent (malformed run; cannot promote)".format(
+            where, candidate_rel))
+    cand_recs = cand.get("record")
+    if not isinstance(cand_recs, list) or not cand_recs:
+        raise _cannot("{}: staged candidate index {} carries no record array (malformed run)".format(
+            where, candidate_rel))
+    live = _read_toml(store_root_fd, live_rel)
+    if live is None:
+        live_recs = []
+    else:
+        live_recs = live.get("record")
+        if not isinstance(live_recs, list):
+            raise _cannot("{}: live index {} is malformed (record is not an array; cannot promote)".format(
+                where, live_rel))
+    return _emit_bytes({"schema": SCHEMA, "record": list(live_recs) + list(cand_recs)}, where)
+
+
+def _flip_import_status_bytes(store_root_fd, manifest_rel):
+    """Return the live manifest bytes with `import_status` set to "complete" (the validated-finish lifecycle
+    flip, spec 9.2/OPF-SPEC 1166-1177), operating on the raw text so the manifest's exact formatting and any
+    comments survive (the manifest is NOT a byte-canonical _opf_emit artefact). Fail-closed unless EXACTLY one
+    `import_status = "<state>"` assignment is present (an absent, duplicate, or unparseable directive is a
+    malformed manifest, CANNOT-EVALUATE, never a silent no-op)."""
+    try:
+        raw, _st = _journal._read_contained(store_root_fd, manifest_rel)
+    except _journal.JournalError as exc:
+        raise _cannot("cannot read the live manifest {} ({}); cannot promote".format(manifest_rel, exc))
+    text = raw.decode("utf-8")
+    pat = re.compile(r'(?m)^([ \t]*import_status[ \t]*=[ \t]*)"[a-z]+"([ \t]*)$')
+    matches = pat.findall(text)
+    if len(matches) != 1:
+        raise _cannot("{}: expected exactly one `import_status = \"...\"` directive to flip to complete, "
+                      "found {} (malformed manifest; fail-closed)".format(manifest_rel, len(matches)))
+    new_text = pat.sub(lambda m: '{}"complete"{}'.format(m.group(1), m.group(2)), text, count=1)
+    return new_text.encode("utf-8")
+
+
+def _minted_by_namespace(store_root_fd, run_rel, machine_rel, candidate_types):
+    """Group every minted candidate id (candidate/<type>.index.toml + fragments/legacy_fragment.index.toml +
+    candidate/worklog.toml) by its two-letter namespace, fail-closed. Returns {ns: [ids...]}. A malformed id
+    is CANNOT-EVALUATE (the caller cannot bind a freshness base to an unparseable allocation)."""
+    by_ns = {}
+    rels = ["candidate/{}.index.toml".format(t) for t in sorted(candidate_types)]
+    rels.append("fragments/legacy_fragment.index.toml")
+    rels.append("candidate/worklog.toml")
+    for suffix in rels:
+        data = _read_toml(store_root_fd, run_rel + "/" + suffix)
+        if data is None:
+            continue
+        recs = data.get("record")
+        if not isinstance(recs, list):
+            raise _cannot("staged candidate {} is malformed (record is not an array; cannot promote)".format(
+                suffix))
+        for rec in recs:
+            rid = rec.get("id") if isinstance(rec, dict) else None
+            shape = _opf_schema._valid_id_shape(rid)
+            if shape is None:
+                raise _cannot("staged candidate {} carries a record with a malformed id {!r} (cannot "
+                              "promote)".format(suffix, rid))
+            by_ns.setdefault(shape[0], []).append(rid)
+    return by_ns
+
+
+def _preview_composition_findings(preview_root):
+    """D4 composition gate: resolve + validate_store over the assembled candidate PREVIEW, returning a list of
+    the REAL findings that must abort the promotion. Empty list == the composition is sound. Observations are
+    omitted (the throwaway tempdir preview is not a git repo, a disclosed omission). A tolerated result is
+    VALID, or CANNOT-EVALUATE whose ONLY cannot-evaluate checks are the disclosed-benign set (git-observation
+    omission + importer/module schema-deferral, _PREVIEW_BENIGN_CANTS) with no unattributed fault. ANY INVALID
+    finding, ANY unattributed fault, or ANY cannot-evaluate on a check OUTSIDE the benign set is a real finding
+    (fail-closed: a store the validator could not resolve is itself a finding)."""
+    import _opf_check   # lazy: _opf_check imports _opf_views/_opf_import transitively; call-time avoids a cycle
+    try:
+        res = _opf_store.resolve_store(Path(preview_root))
+        if res.status != _opf_store.RESOLVED:
+            return ["candidate preview did not resolve as a store ({}: {})".format(res.status, res.detail)]
+        result = _opf_check.validate_store(res, observations=None)
+    except Exception as exc:  # noqa: BLE001  a validator escape over the preview is a fail-closed real finding
+        return ["candidate preview validation raised ({!r}); fail-closed".format(exc)]
+    findings = list(getattr(result, "findings", []) or [])
+    findings += ["unattributed: {}".format(m) for m in (getattr(result, "unattributed", []) or [])]
+    checks = getattr(result, "checks", None) or {}
+    for cid, verdict in checks.items():
+        if verdict == "CANNOT-EVALUATE" and cid not in _PREVIEW_BENIGN_CANTS:
+            msgs = "; ".join(getattr(result, "by_check", {}).get(cid, []))
+            findings.append("composition check {} is CANNOT-EVALUATE outside the disclosed-benign set "
+                            "({})".format(cid, msgs))
+    return findings
+
+
+def _preview_render_reproducible(preview_root):
+    """D5 view reproducibility over the assembled PREVIEW: run `opf render --check` over the preview and return
+    (ok, needs_write). A view-feeding promoted record leaves the copied-from-live views stale, which --check
+    reports as drift. Returns (True, False) when the views are already reproducible (0), (True, True) when a
+    re-render is required (drift, 1), or (False, _) when the check cannot evaluate (2, fail-closed)."""
+    import _opf_views   # lazy: mirrors the render dispatch's own call-time import (circular through _opf_check)
+    try:
+        rc = _opf_views.render(["--root", str(preview_root), "--check"])
+    except Exception as exc:  # noqa: BLE001  a render-check escape over the preview is fail-closed
+        return False, False
+    if rc == _opf_views.EXIT_OK:
+        return True, False
+    if rc == _opf_views.EXIT_DRIFT:
+        return True, True
+    return False, False
+
+
+def _read_json_acceptance(store_root_fd, run_rel):
+    """Read + parse the staged acceptance.json (canonical JSON), fail-closed. Returns the parsed object, or
+    None when absent (a run with no acceptance is not promotion-ready, surfaced by the caller). A present but
+    unreadable/malformed acceptance is CANNOT-EVALUATE."""
+    acc_rel = run_rel + "/" + ACCEPTANCE_NAME
+    st = _journal._lstat_contained(store_root_fd, acc_rel)
+    if st is None:
+        return None
+    try:
+        raw, _st = _journal._read_contained(store_root_fd, acc_rel)
+    except _journal.JournalError as exc:
+        raise _cannot("cannot read acceptance.json ({}); cannot promote".format(exc))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise _cannot("acceptance.json is not valid JSON ({}); cannot promote".format(exc))
+
+
+def _staged_candidate_types(store_root_fd, run_rel):
+    """The record-type names staged under `candidate/<type>.index.toml` (mapped/split candidates), excluding
+    the counters/worklog artefacts. Legacy_fragment is staged separately under `fragments/`, so it is not
+    included here."""
+    names = _list_contained(store_root_fd, run_rel + "/candidate")
+    if names is None:
+        return set()
+    return {n[:-len(".index.toml")] for n in names if n.endswith(".index.toml")}
+
+
+def _baseline_freshness_findings(live_high, cand_high, count_minted):
+    """Findings when the live counters no longer equal the plan-time base (spec 8.2). At plan the candidate
+    high-water is the live base advanced by the minted count, so live[ns] must still equal cand[ns] -
+    minted[ns] for every namespace. Any inequality (the live store advanced since the plan), a namespace with
+    minted or live ids but no candidate high-water, or a candidate high-water below its minted count is a
+    finding (re-plan). Returns a findings list."""
+    findings = []
+    for ns in sorted(set(cand_high) | set(live_high) | set(count_minted)):
+        minted_n = count_minted.get(ns, 0)
+        live_n = live_high.get(ns, 0)
+        if ns not in cand_high:
+            findings.append("namespace {!r} carries minted/live ids but no candidate high-water".format(ns))
+            continue
+        base = cand_high[ns] - minted_n
+        if base < 0:
+            findings.append("candidate high-water {}={} is below its minted count {}".format(
+                ns, cand_high[ns], minted_n))
+            continue
+        if live_n != base:
+            findings.append("namespace {!r}: live counter {} does not equal the plan-time base {} "
+                            "(candidate {} minus minted {})".format(ns, live_n, base, cand_high[ns], minted_n))
+    return findings
+
+
+def _build_promotion_machine_files(store_root_fd, machine_rel, run_rel, candidate_types, cand_high):
+    """Assemble the live-relative machine files a promotion writes, as {store-relative path -> byte-canonical
+    bytes}: counters.toml set to the candidate high-water, manifest.toml with import_status flipped to
+    complete, each candidate type index merged onto its live counterpart, and (when present) the merged
+    legacy_fragment index. A staged worklog candidate is REFUSED fail-closed: the staged candidate worklog is
+    a `{schema, record}` array while the live worklog is a `{schema, [[entry]]}` ledger, so promoting it needs
+    a record->entry transform that is a DISCLOSED PR-C residual not implemented in this draft (plan_import
+    produces no worklog candidates, so the real e2e is unaffected)."""
+    files = {}
+    files["{}/counters.toml".format(machine_rel)] = _emit_bytes(
+        {"schema": SCHEMA, "counters": cand_high}, "counters.toml")
+    files["{}/manifest.toml".format(machine_rel)] = _flip_import_status_bytes(
+        store_root_fd, "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME))
+    for t in sorted(candidate_types):
+        live_rel = "{}/{}.index.toml".format(machine_rel, t)
+        cand_rel = run_rel + "/candidate/{}.index.toml".format(t)
+        files[live_rel] = _merged_index_bytes(store_root_fd, live_rel, cand_rel, "{} index".format(t))
+    lf_cand_rel = run_rel + "/fragments/legacy_fragment.index.toml"
+    if _journal._lstat_contained(store_root_fd, lf_cand_rel) is not None:
+        live_rel = "{}/{}.index.toml".format(machine_rel, LF_TYPE)
+        files[live_rel] = _merged_index_bytes(store_root_fd, live_rel, lf_cand_rel, "legacy_fragment index")
+    if _journal._lstat_contained(store_root_fd, run_rel + "/candidate/worklog.toml") is not None:
+        raise _cannot("staged run carries worklog candidates; promoting a staged `{schema, record}` worklog "
+                      "into the live `{schema, [[entry]]}` worklog ledger is a disclosed PR-C residual not "
+                      "implemented in this draft (fail-closed; plan_import produces no worklog candidates)")
+    return files
+
+
+def _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shutil):
+    """Copy the live store into a throwaway tempdir PREVIEW (ignoring the VCS dir, the `.aiqt/` ops trees, and
+    the `.working/imports/` staging area, so the preview models the post-promotion, staging-deleted store) and
+    overlay the merged machine files. resolve_store(preview_dir) then discovers the machine store exactly as
+    it does live. Disclosed residual: this copytree assumes a DEFAULT-resolution store where the product root
+    is the store root; a pointer store (product root != store root) needs the pointer relocated into the
+    preview, which the finalizer must handle (flagged)."""
+    store_root = str(resolution.store_root)
+
+    def _ignore(dirpath, names):
+        drop = set(n for n in names if n in (".git", ".aiqt"))
+        # Drop the staging area ONLY at the `.working` level (never a same-named dir elsewhere).
+        if os.path.basename(os.path.normpath(dirpath)) == _opf_store.WORKING_DIRNAME and "imports" in names:
+            drop.add("imports")
+        return drop
+
+    shutil.copytree(store_root, preview_dir, ignore=_ignore, dirs_exist_ok=True, symlinks=True)
+    for live_rel, data in machine_files.items():
+        p = Path(preview_dir) / live_rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+
+
+def _build_publication_ops(store_root_fd, machine_rel, run_rel, run_id, machine_files, acceptance,
+                           plan_digest, inventory_digest, minted, txn_id, restore_ref, observed_head):
+    """Build the ONE journaled publication op set + its staged-content map. In dependency order:
+    (D1) relocate the preserved source bodies and acceptance.json to the durable `.aiqt/import-archive/<run>`;
+    publish the merged machine files (write when the live file exists, create when new); (D2/D3) write the
+    per-run transaction.toml under `.aiqt/import/<run>`; then delete the staging run dir as the TERMINAL step
+    (its files, then its subdirs, then the run dir). reversed(ops) is the valid preimage-rollback order."""
+    ops = []
+    content = {}
+    arch_rel = _archive_run_rel(run_id)
+
+    # D1: relocate the preserved sources + acceptance to the durable archive (create ops; prior-absence).
+    if _journal._lstat_contained(store_root_fd, IMPORT_ARCHIVE_REL) is None:
+        ops.append({"op": "mkdir", "path": IMPORT_ARCHIVE_REL, "poststate": {"kind": "dir", "mode": DIR_MODE}})
+    ops.append({"op": "mkdir", "path": arch_rel, "poststate": {"kind": "dir", "mode": DIR_MODE}})
+    ops.append({"op": "mkdir", "path": arch_rel + "/sources", "poststate": {"kind": "dir", "mode": DIR_MODE}})
+    for name in (_list_contained(store_root_fd, run_rel + "/sources") or []):
+        src_body_rel = run_rel + "/sources/" + name
+        st = _journal._lstat_contained(store_root_fd, src_body_rel)
+        if st is None or not stat.S_ISREG(st.st_mode):
+            raise _cannot("staged source body {} is missing or not a regular file (cannot relocate)".format(
+                src_body_rel))
+        raw, _st = _journal._read_contained(store_root_fd, src_body_rel)
+        dst = arch_rel + "/sources/" + name
+        ops.append({"op": "create", "path": dst,
+                    "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(raw)}})
+        content[dst] = raw
+    acc_raw, _ast = _journal._read_contained(store_root_fd, run_rel + "/" + ACCEPTANCE_NAME)
+    acc_dst = arch_rel + "/" + ACCEPTANCE_NAME
+    ops.append({"op": "create", "path": acc_dst,
+                "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(acc_raw)}})
+    content[acc_dst] = acc_raw
+
+    # Publish the merged machine files (write existing, create new). A write op preserves the target's own
+    # mode (its poststate carries no mode, matching migrate's op shape); a create op pins FILE_MODE.
+    for live_rel in sorted(machine_files):
+        data = machine_files[live_rel]
+        exists = _journal._lstat_contained(store_root_fd, live_rel) is not None
+        if exists:
+            poststate = {"kind": "file", "content-sha256": _sha256_hex(data)}
+        else:
+            poststate = {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(data)}
+        ops.append({"op": "write" if exists else "create", "path": live_rel, "poststate": poststate})
+        content[live_rel] = data
+
+    # D2/D3: the per-run transaction record (the gate-readable projection of the terminal state).
+    txn_dir_rel = "{}/{}".format(IMPORT_OPS_REL, run_id)
+    if _journal._lstat_contained(store_root_fd, txn_dir_rel) is None:
+        ops.append({"op": "mkdir", "path": txn_dir_rel, "poststate": {"kind": "dir", "mode": DIR_MODE}})
+    txn_model = {
+        "schema": SCHEMA, "format": TRANSACTION_FORMAT, "run_id": run_id, "state": "complete",
+        "txn_id": txn_id, "plan_digest": plan_digest, "inventory_digest": inventory_digest,
+        "allocation": {ns: list(minted[ns]) for ns in sorted(minted)},
+        "restore_ref": {"txn_id": restore_ref["txn_id"], "journal_rel": restore_ref["journal_rel"],
+                        "observed_head": observed_head},
+    }
+    txn_bytes = _emit_bytes(txn_model, "transaction.toml")
+    txn_rel = _txn_record_rel(run_id)
+    ops.append({"op": "create", "path": txn_rel,
+                "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(txn_bytes)}})
+    content[txn_rel] = txn_bytes
+
+    # TERMINAL: delete the staging run dir. Files first (children), then subdirs, then the run dir (parents).
+    file_ops = []
+    subdir_ops = []
+    for name in (_list_contained(store_root_fd, run_rel) or []):
+        entry_rel = run_rel + "/" + name
+        st = _journal._lstat_contained(store_root_fd, entry_rel)
+        if st is None:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            for iname in (_list_contained(store_root_fd, entry_rel) or []):
+                irel = entry_rel + "/" + iname
+                ist = _journal._lstat_contained(store_root_fd, irel)
+                if ist is None:
+                    continue
+                if stat.S_ISDIR(ist.st_mode):
+                    raise _cannot("unexpected nested directory {} under the staging run; cannot enumerate "
+                                  "for deletion (fail-closed)".format(irel))
+                file_ops.append({"op": "remove", "path": irel, "poststate": {"kind": "absent"}})
+            subdir_ops.append({"op": "rmdir", "path": entry_rel, "poststate": {"kind": "absent"}})
+        else:
+            file_ops.append({"op": "remove", "path": entry_rel, "poststate": {"kind": "absent"}})
+    ops.extend(file_ops)
+    ops.extend(subdir_ops)
+    ops.append({"op": "rmdir", "path": run_rel, "poststate": {"kind": "absent"}})
+    return ops, content
+
+
+def _unmanaged_paths(ops, machine_rel, run_rel, run_id):
+    """Step-7 unmanaged-path pre-flight: every op path must be an OPF-managed store path (under the machine
+    subdir), the import-ops or archive tree (`.aiqt/import` / `.aiqt/import-archive`, outside `.working/`), or
+    the staging run dir being deleted. Any other path is refused (fail-closed, no default action). Returns the
+    sorted set of offending paths."""
+    allowed_prefixes = (machine_rel + "/", IMPORT_ARCHIVE_REL + "/", IMPORT_OPS_REL + "/")
+    bad = set()
+    for op in ops:
+        p = op["path"]
+        if p == run_rel or p.startswith(run_rel + "/"):
+            continue
+        if p in (IMPORT_ARCHIVE_REL, IMPORT_OPS_REL):
+            continue
+        if any(p.startswith(pre) for pre in allowed_prefixes):
+            continue
+        bad.add(p)
+    return sorted(bad)
+
+
 def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
-    """APPLY-PROMOTION: validate an accepted staged run and promote its candidate atomically to the active
-    store. DEFERRED to the OPF-IMPORT-APPLY unit (the Fable plan's PR2, its critical slice); this entry is a
-    fail-closed CANNOT-EVALUATE that mutates NOTHING, so the reserved capability can never read as a silent
-    no-op or a partial promotion (SECI-fail-closed; SECA-verified-restore-path). It is a deliberate,
-    surfaced deferral (never a silent scope cut), for two reasons that must be resolved before a truthful
-    promotion contract can be built:
+    """APPLY-PROMOTION (OPF-IMPORT-APPLY, PR-C): validate an ACCEPTED staged import run and promote its
+    candidate to the active store through the crash-durable, lock-guarded `_journal.run_transaction` cutover,
+    then delete the staging run as the terminal journaled step, leaving a clean, doctor-composable store.
+    Returns an ApplyResult; `promoted`/`outcome` are read from the result, never inferred from the verdict.
 
-      1. ACCEPTANCE / PROVENANCE MODEL (a spec gap requiring a maintainer design decision). Spec 14.1
-         requires model proposals to be inert untrusted plan data promoted only through an ATTRIBUTED human
-         acceptance. No acceptance-capture mechanism (`acceptance.json`), and no origin/provenance tag on
-         the staged plan schema (its keyset is closed: {span, state, record, target, note}), exists today.
-         Enforcing the acceptance rule at apply therefore requires first establishing that model (an
-         `acceptance.json` contract + a plan-schema origin tag), which reshapes the settled staging schema
-         and is the maintainer's to settle.
+    The ruled full fail-closed design (D1-D5 + terminal delete):
+      - D1: the preserved source bodies (`sources/<sha256>`) and `acceptance.json` are RELOCATED to a durable
+        non-`.working/` archive (`.aiqt/import-archive/<run-id>/`) inside the same journaled transaction
+        BEFORE the run dir is deleted, so spec 14.2 preservation survives (no data loss).
+      - D2/D3: the journal, the idempotency signal, and `transaction.toml` live OUTSIDE `.working/`
+        (`.aiqt/import/...`, mirroring migrate), so they survive the run-dir deletion and never trip the
+        store containment walk. Idempotency (re-apply -> noop_already_complete) is read from the retained
+        transaction record + journal, not the deleted run dir.
+      - D4: the composition gate assembles the merged store into a machine-subdir-carrying tempdir PREVIEW and
+        requires validate_store to report NO real finding, tolerating ONLY the disclosed-benign cannot-
+        evaluates (importer/module schema-deferral + git-observation omission). ANY real finding aborts.
+      - D5: promotion re-renders views so a view-feeding record never leaves the store drifted; a `render
+        --check` over the assembled preview is required to report no drift (see the residual note below).
+      - TERMINAL: the staging run dir is deleted as the last journaled op set, so `import_status = complete`
+        leaves no unregistered staging tree for the containment check to find.
 
-      2. CANDIDATE-CONTEXT VALIDATION. Apply must grade the fully-assembled candidate store with the U6
-         `validate_store` engine and regenerate the U4 views over it BEFORE any live write, without ever
-         swapping the live store to test a candidate. That candidate-context adapter is not yet built.
+    Fail-closed throughout (SECI-fail-closed; SECA-verified-restore-path): a failure at any step returns the
+    mapped verdict and never advances a live counter or leaves a half-published store without the journal's
+    verified preimage restore. The staged report/plan digest is the AUTHORITATIVE binding; accepted_plan_digest
+    is an optional extra assertion checked only when not None (the CLI does not forward it today).
 
-    The promotion MECHANISM itself is already available and composes cleanly (confirmed pre-flight): the
-    crash-durable, lock-guarded cutover primitive `_journal.run_transaction` (with `acquire_lock`,
-    `capture_preimages`, preimage rollback, and `recover`) delivers the single-writer, journaled,
-    verified-restore publication the plan's section 1.3/3.3 describe. What remains for PR2 is the acceptance
-    model, the candidate-context doctor/render adapter, the baseline-freshness binding, and the
-    import_status partial->complete lifecycle flip, driven through that primitive."""
-    return ApplyResult(
-        CANNOT_EVALUATE,
-        ["apply_import (import promotion) is deferred to the OPF-IMPORT-APPLY unit and is not yet "
-         "implemented; the acceptance/provenance model (spec 14.1) and the candidate-context validation "
-         "adapter are unresolved prerequisites. Fail-closed: the active store is never mutated."],
-        promoted=False, outcome="aborted")
+    DISCLOSED RESIDUAL (D5, surfaced for the finalizer, not silently resolved): a promotion that would drift a
+    view is reconciled inside the transaction ONLY if the assembled candidate can be re-rendered. `render
+    --write`'s SOURCE gate (`_opf_check.source_integrity_ok`) requires every source check to PASS, which a
+    store carrying importer legacy_fragment records (C-RECORDS schema-deferral) or a non-git preview (the git-
+    observation cannot-evaluates) cannot satisfy, so `render --write` cannot run over such a preview. This
+    build therefore promotes only when the assembled preview shows NO view drift (`render --check` == 0), which
+    holds for the quarantine import plan_import produces today (legacy_fragment records feed no view); a
+    view-feeding promotion aborts fail-closed (exit 1) rather than commit a drifted store. Closing this (a
+    render path that reconciles views for a schema-deferred/non-git candidate) is a reserved design decision."""
+    resolution = None
+    try:
+        _journal.require_containment()
+    except _journal.JournalError as exc:
+        return ApplyResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)], promoted=False, outcome="aborted")
+    try:
+        _require_utc(now)
+        if not isinstance(product_root, (str, os.PathLike)):
+            raise _cannot("product_root must be a path string or os.PathLike, got {}".format(
+                type(product_root).__name__))
+        # Validate run_id as an identifier BEFORE any path use (guard-input-soundness): a value outside the
+        # grammar is CANNOT-EVALUATE, never a path fragment.
+        if not (isinstance(run_id, str) and _RUN_ID_RE.match(run_id)):
+            raise _cannot("run-id {!r} does not match the run-id grammar (fail-closed)".format(run_id))
+        if accepted_plan_digest is not None and not (
+                isinstance(accepted_plan_digest, str) and _DIGEST_RE.match(accepted_plan_digest)):
+            raise _cannot("accepted_plan_digest, when supplied, must be a 'sha256:'+64-hex digest")
+
+        resolution = _resolve_store_for_review(product_root)
+        machine_rel = resolution.machine_rel
+        run_rel = "{}/{}".format(IMPORTS_REL, run_id)
+        journal_root = Path(resolution.store_root) / IMPORT_JOURNAL_REL
+
+        try:
+            root_fd = _opf_store._open_store_root_fd(
+                resolution.store_root, resolution.pointer_source != "default")
+        except OSError as exc:
+            raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
+        jr_fd = None
+        we_hold_lock = False   # this apply owns the writer lock (never release another owner's)
+        retain_lock = False    # keep the lock held for a later `recover` (rollback-incomplete only)
+        try:
+            # --- step 2: journal + exclusive writer lock (recover-aware), then reconcile any open txn -------
+            try:
+                _journal.ensure_journal_dirs(root_fd, IMPORT_JOURNAL_REL)
+                jr_fd = _journal.open_journal_root_fd(root_fd, IMPORT_JOURNAL_REL)
+            except (_journal.JournalError, OSError) as exc:
+                raise _cannot("cannot prepare the import-promotion journal ({}); fail-closed".format(exc))
+            try:
+                claim = _claim_apply_lock(journal_root, jr_fd, root_fd)
+                if claim == "possibly-live":
+                    owner = _journal.read_lock_owner(journal_root)
+                    raise _cannot("another import apply holds the promotion lock (pid {}); NOT seized "
+                                  "(fail-closed)".format((owner or {}).get("pid")))
+                we_hold_lock = True   # from here every exit path releases the lock in the finally below,
+                                      # except the rollback-incomplete path which sets retain_lock
+                _recover_open_txns(jr_fd, journal_root, root_fd)
+
+                # --- step 3/4: idempotency reconcile BEFORE any write -----------------------------------
+                # The retained transaction record is the durable idempotency signal (it survives the run-dir
+                # deletion). A record at state=complete whose live digests match this run's staged digests is a
+                # verified no-op; a partial/torn state was reconciled by the journal recover above.
+                txn_record = _read_toml(root_fd, _txn_record_rel(run_id))
+                if txn_record is not None:
+                    if txn_record.get("state") == "complete":
+                        return ApplyResult(CLEAN, [], promoted=True, outcome="noop_already_complete",
+                                           restore_ref=txn_record.get("restore_ref"))
+                    raise _cannot("a transaction record for run {} exists in a non-complete state {!r}; the "
+                                  "run must be reconciled through recover before re-apply (fail-closed; never "
+                                  "renumber)".format(run_id, txn_record.get("state")))
+
+                # --- step 3: load the staged run fail-closed (reuse the review loader's digest binding) ----
+                plan_digest, inventory_digest, frag_by_id, key_meta, _ordered = \
+                    _load_staged_run_for_review(root_fd, run_rel)
+                if accepted_plan_digest is not None and accepted_plan_digest != plan_digest:
+                    raise _finding("accepted_plan_digest {!r} does not match the staged plan digest {!r} "
+                                   "(stale binding; re-plan)".format(accepted_plan_digest, plan_digest))
+
+                # --- step 5: acceptance validation + binding ------------------------------------------------
+                acceptance = _read_json_acceptance(root_fd, run_rel)
+                if acceptance is None:
+                    raise _cannot("run {} has no acceptance.json; it is not promotion-ready (capture a review "
+                                  "with `opf import --review` first)".format(run_id))
+                schema_findings = _validate_acceptance(acceptance)
+                if schema_findings:
+                    raise _cannot("acceptance.json is malformed ({}); cannot promote".format(
+                        "; ".join(schema_findings)))
+                if acceptance.get("run_id") != run_id:
+                    raise _finding("acceptance.json binds run {!r}, not {!r} (stale binding; re-review)".format(
+                        acceptance.get("run_id"), run_id))
+                if acceptance.get("plan_digest") != plan_digest \
+                        or acceptance.get("inventory_digest") != inventory_digest:
+                    raise _finding("acceptance.json digests do not bind the staged run (stale acceptance; "
+                                   "re-review the current plan)")
+                dec_findings, _normalized = _validate_review_decisions(
+                    acceptance.get("decisions", []), frag_by_id, key_meta)
+                if dec_findings:
+                    raise _finding("acceptance decisions do not validate against the staged run ({}); a "
+                                   "rejected or incomplete acceptance blocks promotion (re-plan with "
+                                   "origin=human_revision)".format("; ".join(dec_findings)))
+                if any(d.get("decision") == "reject" for d in acceptance.get("decisions", [])
+                       if isinstance(d, dict)):
+                    return ApplyResult(FINDING,
+                                       ["the acceptance record carries a reject decision; promotion is "
+                                        "refused (resolution is a fresh `opf import --plan` carrying a "
+                                        "human_revision mapping, never a silent re-label)"],
+                                       promoted=False, outcome="rejected")
+
+                # --- step 6: baseline freshness (derived base; no base fingerprint in report.toml) ---------
+                active_types = _active_types(root_fd, machine_rel)
+                roster = _roster()
+                registered_vendors = _registered_vendors(root_fd, machine_rel)
+                _require_inline_layout(root_fd, machine_rel)
+                cand_counters = _read_toml(root_fd, run_rel + "/candidate/counters.toml")
+                if cand_counters is None:
+                    raise _cannot("staged run has no candidate/counters.toml (malformed run; cannot promote)")
+                cand_high, cfind = _opf_schema.validate_counters(cand_counters)
+                if cfind:
+                    raise _cannot("staged candidate counters are malformed ({}); cannot promote".format(
+                        "; ".join(cfind)))
+                live_counters = _read_toml(root_fd, "{}/counters.toml".format(machine_rel))
+                if live_counters is None:
+                    raise _cannot("the live store has no counters.toml; cannot promote (spec 8.2)")
+                live_high, lfind = _opf_schema.validate_counters(live_counters)
+                if lfind:
+                    raise _cannot("live counters are malformed ({}); cannot promote".format("; ".join(lfind)))
+                candidate_types = _staged_candidate_types(root_fd, run_rel)
+                minted = _minted_by_namespace(root_fd, run_rel, machine_rel, candidate_types)
+                count_minted = {ns: len(ids) for ns, ids in minted.items()}
+                freshness = _baseline_freshness_findings(live_high, cand_high, count_minted)
+                if freshness:
+                    raise _finding("baseline freshness: {} (the live store advanced since the plan; re-plan "
+                                   "against the current store)".format("; ".join(freshness)))
+                # Defence-in-depth: no minted id may already be seated in the live active/archive id set.
+                live_ids = set(_active_store_ids(root_fd, machine_rel, active_types, roster,
+                                                 registered_vendors))
+                collide = sorted({rid for ids in minted.values() for rid in ids} & live_ids)
+                if collide:
+                    raise _finding("baseline freshness: minted id(s) {} are already seated in the live store "
+                                   "(collision; re-plan)".format(", ".join(collide)))
+
+                # --- step 8 (restore context) + step 9 (assemble, D4 composition, D5 render) ----------------
+                observed_head = ""
+                try:
+                    import _opf_observe   # lazy: hardened git idiom (see _gather_review_context)
+                    obs, _notes = _opf_observe.gather(resolution)
+                    if isinstance(obs, dict):
+                        prior = obs.get("prior")
+                        if isinstance(prior, dict) and isinstance(prior.get("head"), str):
+                            observed_head = prior["head"]
+                except Exception:  # noqa: BLE001  git context is advisory; the journal preimages are the restore
+                    observed_head = ""
+
+                machine_files = _build_promotion_machine_files(
+                    root_fd, machine_rel, run_rel, candidate_types, cand_high)
+                import tempfile
+                import shutil
+                preview_dir = tempfile.mkdtemp(prefix="opf-import-apply-preview-")
+                try:
+                    _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shutil)
+                    comp_findings = _preview_composition_findings(preview_dir)
+                    if comp_findings:
+                        raise _finding("candidate composition gate: the assembled store is not doctor-"
+                                       "composable ({}); nothing promoted".format("; ".join(comp_findings)))
+                    render_ok, needs_write = _preview_render_reproducible(preview_dir)
+                    if not render_ok:
+                        raise _cannot("candidate render reproducibility could not be evaluated over the "
+                                      "assembled preview (`opf render --check` cannot-evaluate); fail-closed")
+                    if needs_write:
+                        raise _finding("candidate view reproducibility: the promotion would drift a view "
+                                       "(`opf render --check` reports drift over the assembled preview) and "
+                                       "this build cannot re-render a schema-deferred / non-git candidate in "
+                                       "the transaction (disclosed D5 residual); nothing promoted")
+                finally:
+                    shutil.rmtree(preview_dir, ignore_errors=True)
+
+                # --- step 7 + step 10: build the journaled publication op set and publish -------------------
+                txn_id = "import-{}.{}.{}".format(run_id, os.getpid(), time.time_ns())
+                restore_ref = {"txn_id": txn_id, "journal_rel": IMPORT_JOURNAL_REL,
+                               "observed_head": observed_head}
+                ops, content = _build_publication_ops(
+                    root_fd, machine_rel, run_rel, run_id, machine_files, acceptance,
+                    plan_digest, inventory_digest, minted, txn_id, restore_ref, observed_head)
+                # step 7: unmanaged-path pre-flight over the computed write set (defence in depth; every op
+                # path must be an OPF-managed store path, the import-ops/archive tree, or the staging run dir).
+                unmanaged = _unmanaged_paths(ops, machine_rel, run_rel, run_id)
+                if unmanaged:
+                    raise _cannot("promotion write set touches non-managed path(s): {} (fail-closed; no "
+                                  "default action)".format(", ".join(unmanaged)))
+
+                def staged_reader(op):
+                    return content[op["path"]]
+
+                header = {"unit": run_id, "kind": "import-apply", "plan_digest": plan_digest}
+                txn_dir = journal_root / txn_id
+                try:
+                    _journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
+                                             staged_reader, session_id="import-apply")
+                except _journal.JournalError as exc:
+                    # run_transaction rolled back from the durable preimages (verified restore) unless the
+                    # rollback itself failed; classify and surface fail-closed, retaining evidence on an open
+                    # (rollback-incomplete) journal for a later recover.
+                    try:
+                        state = _journal.classify_state(jr_fd, txn_dir)
+                    except _journal.JournalError:
+                        state = "open"
+                    if state in ("nothing-opened", "rolled-back"):
+                        return ApplyResult(CANNOT_EVALUATE,
+                                           ["promotion aborted and rolled back to the pre-apply store ({}); "
+                                            "nothing promoted".format(exc)],
+                                           promoted=False, outcome="aborted", restore_ref=restore_ref)
+                    retain_lock = True   # rollback incomplete: hold the lock for `recover`, do not release
+                    return ApplyResult(CANNOT_EVALUATE,
+                                       ["promotion FAILED and the rollback did not complete ({}); the "
+                                        "transaction is left open under the retained lock for `recover`; "
+                                        "fail-closed".format(exc)],
+                                       promoted=False, outcome="aborted", restore_ref=restore_ref)
+
+                # --- post-publish verification (defence in depth; identical bytes -> passes) ---------------
+                post_findings = _preview_composition_findings(str(resolution.store_root)) \
+                    if resolution.pointer_source == "default" else []
+                # (The live store is graded via the same predicate; a default-resolution store resolves at its
+                # root. A pointer store is validated by the finalizer's live doctor; flagged as a residual.)
+                if post_findings:
+                    return ApplyResult(CANNOT_EVALUATE,
+                                       ["post-publish validation found a finding over the LIVE store ({}); "
+                                        "the promotion committed but the store is not composition-clean, "
+                                        "evidence retained for recover".format("; ".join(post_findings))],
+                                       promoted=True, outcome="promoted", restore_ref=restore_ref)
+                return ApplyResult(CLEAN, [], promoted=True, outcome="promoted", restore_ref=restore_ref)
+            finally:
+                # Release the writer lock on EVERY exit path we hold it, except the rollback-incomplete path
+                # (retain_lock) which keeps it for `recover`; never release a lock a live owner holds (the
+                # possibly-live path never set we_hold_lock). A release failure is surfaced fail-closed, never
+                # swallowed, but never masks an already-formed result on the normal path.
+                if we_hold_lock and not retain_lock:
+                    try:
+                        _journal.release_lock(journal_root)
+                    except _journal.JournalError:
+                        pass
+                if jr_fd is not None:
+                    os.close(jr_fd)
+        finally:
+            os.close(root_fd)
+    except _StageError as exc:
+        return ApplyResult(exc.verdict, [exc.message], promoted=False,
+                           outcome="rejected" if exc.verdict == FINDING else "aborted")
+    except _journal.JournalError as exc:
+        return ApplyResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)], promoted=False, outcome="aborted")
+    except OSError as exc:
+        return ApplyResult(CANNOT_EVALUATE, ["fail-closed on a filesystem error: {}".format(exc)],
+                           promoted=False, outcome="aborted")
+    except RecursionError as exc:
+        return ApplyResult(CANNOT_EVALUATE, ["fail-closed on excessive input nesting: {}".format(exc)],
+                           promoted=False, outcome="aborted")
 
 
 # --- self-test ---------------------------------------------------------------------------------------
@@ -2880,6 +3528,54 @@ def self_test():
             snap[str(p.relative_to(machine))] = p.read_bytes()
         return snap
 
+    def build_apply_store(src=b"legacy source body here"):
+        """A DOCTOR-COMPOSABLE store that accepts quarantine imports, for the apply-promotion behaviour
+        checks: the init-canonical baseline (all baseline types + ledgers + empty indexes), PLUS a declared
+        `legacy_fragment` type + an LF counter + an empty legacy_fragment index, PLUS the rendered views. The
+        views are rendered through the U4 engine DIRECTLY (no git), so validate_store over the store returns
+        only the disclosed-benign git-observation cannot-evaluates and apply's D4 composition gate passes.
+        Declaring legacy_fragment here is the FIXTURE-level analogue of the D6 init work (a real init store
+        will declare it), not D6 itself; it lets apply tests run without depending on D6 (per the brief)."""
+        import _opf_init
+        import _opf_views
+        counter[0] += 1
+        root = base / "apply-{:02d}".format(counter[0])
+        mdir = root / ".working" / "toml"
+        mdir.mkdir(parents=True)
+        model = _opf_init._manifest_model()
+        model["types"]["legacy_fragment"] = {"namespace": "LF"}
+        (mdir / "manifest.toml").write_text(_opf_emit.emit_checked(model), encoding="utf-8")
+        nss = list(_opf_store.BASELINE_TYPES.values()) + ["LF"]
+        (mdir / "counters.toml").write_text(
+            _opf_emit.emit_checked({"schema": SCHEMA, "counters": {n: 0 for n in nss}}), encoding="utf-8")
+        (mdir / "version.toml").write_text(_opf_init.build_version(), encoding="utf-8")
+        (mdir / "worklog.toml").write_text(_opf_init.build_worklog(), encoding="utf-8")
+        for t in _opf_init.INDEX_TYPES:
+            (mdir / "{}.index.toml".format(t)).write_text(_opf_init.build_index(t), encoding="utf-8")
+        (mdir / "legacy_fragment.index.toml").write_text(
+            _opf_emit.emit_checked({"schema": SCHEMA, "record": []}), encoding="utf-8")
+        (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+        (root / "a.txt").write_bytes(src if isinstance(src, bytes) else src.encode("utf-8"))
+        res = _opf_store.resolve_store(root)
+        _opf_views._render_resolved_store(root, res, False, capture={"preimages": {}})
+        return root, mdir
+
+    def review_accept_all(root, run_id, verb_for_first="accept"):
+        """Load the staged run's ordered fragments and capture an accept-all acceptance (optionally rejecting
+        the FIRST fragment, to exercise the apply reject-block path). Returns the ReviewResult."""
+        res = _opf_store.resolve_store(root)
+        fd = _opf_store._open_store_root_fd(res.store_root, res.pointer_source != "default")
+        try:
+            _pd, _iv, _fb, _km, ordered = _load_staged_run_for_review(
+                fd, "{}/{}".format(IMPORTS_REL, run_id))
+        finally:
+            os.close(fd)
+        decs = [{"fragment_id": o["fragment_id"],
+                 "decision": verb_for_first if i == 0 else "accept",
+                 "origin": o["origin"], "proposed_state": o["proposed_state"]}
+                for i, o in enumerate(ordered)]
+        return review_import(root, run_id, actor="apply-tester", decisions=decs, now=NOW)
+
     try:
         # 1: positive stage (mapped + unmapped): verdict 0, run dir + files present, LF quarantine for the
         # unmapped fragment carrying all four provenance fields, active store + counters unchanged.
@@ -2965,16 +3661,19 @@ def self_test():
                                    capture_output=True)
         check("3-verb-no-mode-exits-2", cp_nomode.returncode == 2)
         check("3-verb-no-mode-stages-nothing", not (machine4.parent / "imports").exists())
-        # Stage a real run over root4, then `--apply` it: the deferred stub exits 2 and the store machine
-        # tree is byte-unchanged (nothing promoted). An INDEPENDENT run-id-grammar literal for the operand.
+        # Stage a real run over root4, then `--apply` it WITHOUT a review: apply_import (PR-C, now real) finds
+        # no acceptance.json, so the run is not promotion-ready -> exit 2, and the store machine tree is
+        # byte-unchanged (nothing promoted). This exercises the live CLI dispatch onto the REAL apply layer;
+        # the full promoted/idempotent/reject behaviour is covered by the module A1-A6 checks above and the
+        # opf-cli self-test's own promoted/no-op vectors. An INDEPENDENT run-id-grammar literal for the operand.
         plan4 = plan_import(root4, ["a.txt"], now=NOW, run_nonce="verb-apply-pin")
         check("3-apply-plan-staged", plan4.verdict == 0 and bool(plan4.run_id))
         machine4_before = snapshot(machine4)
         cp_apply = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--apply",
                                    plan4.run_id or "imp-00000000T000000Z-0000000000000000",
                                    "--root", str(root4)], capture_output=True)
-        check("3-apply-stub-exits-2", cp_apply.returncode == 2)
-        check("3-apply-stub-mutates-nothing", snapshot(machine4) == machine4_before)
+        check("3-apply-unreviewed-exits-2", cp_apply.returncode == 2)
+        check("3-apply-unreviewed-mutates-nothing", snapshot(machine4) == machine4_before)
 
         # 4: R6 active collision: a fully-valid active index already carries the id next_id will mint (BI-1
         # above the BI=0 high-water) -> verdict 1, nothing written. The active record is now routed through
@@ -4291,13 +4990,89 @@ def self_test():
         check("P4-plan-no-store-cannot-eval",
               plan_import(noroot2, ["a.txt"], now=NOW, run_nonce=NONCE).verdict == 2)
 
-        # --- OPF-IMPORT-OPS: apply_import (promotion) is DEFERRED, fail-closed, mutates nothing ---------
-        rootA1, mA1 = build_store(sources={"a.txt": "aaaa"})
-        prA = plan_import(rootA1, ["a.txt"], now=NOW, run_nonce=NONCE)
-        a1_before = snapshot(mA1)
-        appl = apply_import(rootA1, prA.run_id or "imp-x", accepted_plan_digest="sha256:0", now=NOW)
-        check("A1-apply-deferred-cannot-eval", appl.verdict == 2 and appl.promoted is False)
-        check("A1-apply-mutates-nothing", snapshot(mA1) == a1_before)
+        # --- OPF-IMPORT-APPLY (PR-C): apply_import promotion behaviour, driven through apply_import over
+        # doctor-composable synthetic stores (Group B). The deferred-stub A1 pin is CONSCIOUSLY converted to
+        # these real-promotion checks (change-carries-check): the stub returned verdict 2 for every run, so a
+        # promoted (verdict 0) / rejected (verdict 1) / noop outcome flips red against the pre-PR-C stub. ----
+        # A1 (happy path): plan a quarantine import, review accept-all, promote. verdict 0, promoted, and the
+        # ruled D1/D2/D3 + terminal-delete artefacts are all present; the store is left doctor-composable.
+        rootA1, mA1 = build_apply_store()
+        prA1 = plan_import(rootA1, ["a.txt"], now=NOW, run_nonce="apply-a1")
+        check("A1-plan-clean", prA1.verdict == 0 and bool(prA1.run_id))
+        rvA1 = review_accept_all(rootA1, prA1.run_id)
+        check("A1-review-clean", rvA1.verdict == 0)
+        apA1 = apply_import(rootA1, prA1.run_id, now=NOW)
+        check("A1-apply-promoted",
+              apA1.verdict == 0 and apA1.promoted is True and apA1.outcome == "promoted")
+        runA1 = mA1.parent / "imports" / (prA1.run_id or "X")
+        check("A1-run-dir-deleted", not runA1.exists())                                    # TERMINAL delete
+        check("A1-journal-outside-working", (rootA1 / ".aiqt" / "import" / "journal").is_dir())  # D2
+        txnA1 = rootA1 / ".aiqt" / "import" / (prA1.run_id or "X") / "transaction.toml"
+        check("A1-txn-record-outside-working", txnA1.is_file())                            # D3
+        if txnA1.is_file():
+            txn = tomllib.loads(txnA1.read_text())
+            check("A1-txn-state-complete",
+                  txn.get("state") == "complete" and txn.get("run_id") == prA1.run_id)
+        archA1 = rootA1 / ".aiqt" / "import-archive" / (prA1.run_id or "X")                 # D1
+        check("A1-archive-acceptance-relocated", (archA1 / "acceptance.json").is_file())
+        src_bodies = list((archA1 / "sources").iterdir()) if (archA1 / "sources").is_dir() else []
+        check("A1-original-preserved",
+              len(src_bodies) == 1 and src_bodies[0].read_bytes() == b"legacy source body here")
+        lf_liveA1 = mA1 / "legacy_fragment.index.toml"
+        lf_recsA1 = tomllib.loads(lf_liveA1.read_text()).get("record", []) if lf_liveA1.is_file() else []
+        check("A1-lf-promoted",
+              len(lf_recsA1) == 1 and lf_recsA1[0].get("body") == "legacy source body here")
+        check("A1-counter-advanced",
+              tomllib.loads((mA1 / "counters.toml").read_text())["counters"].get("LF") == 1)
+        check("A1-status-complete",
+              tomllib.loads((mA1 / "manifest.toml").read_text())["opf"]["import_status"] == "complete")
+
+        # A2 (idempotency): re-apply a completed run -> noop_already_complete, exit 0, NO further mutation.
+        a1_after = snapshot(mA1)
+        apA2 = apply_import(rootA1, prA1.run_id, now=NOW)
+        check("A2-idempotent-noop",
+              apA2.verdict == 0 and apA2.outcome == "noop_already_complete" and apA2.promoted is True)
+        check("A2-idempotent-no-mutation", snapshot(mA1) == a1_after)
+
+        # A3 (acceptance required): a planned-but-UNREVIEWED run is not promotion-ready -> exit 2, and the
+        # aborted apply releases the writer lock (a following good apply is not blocked). Mutates nothing.
+        rootA3, mA3 = build_apply_store()
+        prA3 = plan_import(rootA3, ["a.txt"], now=NOW, run_nonce="apply-a3")
+        a3_before = snapshot(mA3)
+        apA3 = apply_import(rootA3, prA3.run_id, now=NOW)
+        check("A3-unreviewed-cannot-eval", apA3.verdict == 2 and apA3.promoted is False)
+        check("A3-unreviewed-mutates-nothing", snapshot(mA3) == a3_before)
+        review_accept_all(rootA3, prA3.run_id)
+        apA3b = apply_import(rootA3, prA3.run_id, now=NOW)   # lock not leaked by the abort above
+        check("A3-lock-not-leaked", apA3b.verdict == 0 and apA3b.promoted is True)
+
+        # A4 (reject blocks): a reject decision in the acceptance record blocks promotion -> exit 1
+        # (outcome=rejected), and nothing is promoted or mutated.
+        rootA4, mA4 = build_apply_store()
+        prA4 = plan_import(rootA4, ["a.txt"], now=NOW, run_nonce="apply-a4")
+        rvA4 = review_accept_all(rootA4, prA4.run_id, verb_for_first="reject")
+        check("A4-review-with-reject-captured", rvA4.verdict == 0)
+        a4_before = snapshot(mA4)
+        apA4 = apply_import(rootA4, prA4.run_id, now=NOW)
+        check("A4-reject-blocks",
+              apA4.verdict == 1 and apA4.outcome == "rejected" and apA4.promoted is False)
+        check("A4-reject-mutates-nothing", snapshot(mA4) == a4_before)
+
+        # A5 (composition gate fail-closed): a real store finding (a corrupted rendered view -> C-VIEW-DRIFT)
+        # makes apply's D4 composition gate over the assembled preview abort -> exit 1, nothing promoted.
+        rootA5, mA5 = build_apply_store()
+        for _view in (rootA5 / ".working").glob("*.md"):
+            _view.write_text(_view.read_text() + "\nINJECTED DRIFT\n", encoding="utf-8")
+        prA5 = plan_import(rootA5, ["a.txt"], now=NOW, run_nonce="apply-a5")
+        review_accept_all(rootA5, prA5.run_id)
+        a5_before = snapshot(mA5)
+        apA5 = apply_import(rootA5, prA5.run_id, now=NOW)
+        check("A5-composition-gate-fail-closed", apA5.verdict == 1 and apA5.promoted is False)
+        check("A5-composition-mutates-nothing", snapshot(mA5) == a5_before)
+
+        # A6 (run-id grammar): a run-id outside the grammar is cannot-evaluate BEFORE any path use.
+        apA6 = apply_import(rootA1, "not-a-run-id", now=NOW)
+        check("A6-bad-run-id-cannot-eval", apA6.verdict == 2 and apA6.promoted is False)
 
         # --- OPF-IMPORT-VERB PR-A: origin provenance schema ------------------------------------------
         # A plan fragment row missing `origin`, or carrying an out-of-vocabulary origin, is a finding (the
