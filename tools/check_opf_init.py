@@ -45,11 +45,18 @@ def _run_init(argv):
 
 
 def _snapshot(root):
-    """Read the complete small fixture tree, including hidden files, links, and empty directories."""
+    """Read the complete small fixture tree, including hidden files, links, and empty directories.
+
+    A .git directory (top-level or nested) is excluded and never descended into: ambient git
+    bookkeeping (for example .git/index, which init's read-only git status / ls-files refreshes)
+    is not part of the working-tree state the preservation checks assert.
+    """
     result = {}
 
     def walk(directory):
         for path in sorted(directory.iterdir()):
+            if path.name == ".git":
+                continue
             st = path.lstat()
             relpath = path.relative_to(root).as_posix()
             mode = stat.S_IMODE(st.st_mode)
