@@ -2282,6 +2282,10 @@ def _import_read_decisions(path, run_id):
     decisions = doc.get("decisions")
     if not isinstance(decisions, list):
         raise ValueError("--decisions file \"decisions\" must be an array")
+    extra = set(doc) - {"schema", "run_id", "decisions"}
+    if extra:
+        raise ValueError("--decisions file carries unknown key(s): {} (the envelope is a closed {{schema, "
+                         "run_id, decisions}})".format(", ".join(sorted(extra))))
     return decisions
 
 
@@ -2902,6 +2906,22 @@ def _cli_self_test():
                 if rc != EXIT_MALFORMED or "--decisions file" not in buf.getvalue():
                     failures.append("import --review with a RecursionError-raising decisions JSON: rc={!r} "
                                     "(expected 2 + a located reader message)".format(rc))
+
+                # 13 (R2-F5 --decisions envelope CLOSED-KEYSET, class-width parity with the --set envelope
+                # + proposal rows): an otherwise-VALID --decisions file (schema 1, matching run_id, list
+                # decisions) carrying an EXTRA top-level key -- even one nested deeply -- is a MALFORMED
+                # envelope -> exit 2, never silently accepted. Flip: without the closed-keyset check the
+                # extra-key file exits 0 (the exact round-2 bug). The SAME content WITHOUT the extra key
+                # still reviews at exit 0 (vector 5 above proved `complete` -> 0), so this isolates the
+                # extra key alone as the discriminator.
+                dec_extra = os.path.join(ibase, "dec-extra-key.json")
+                junk = "x"
+                for _ in range(40):
+                    junk = {"n": junk}
+                with open(dec_extra, "w", encoding="utf-8") as fh:
+                    json.dump({"schema": 1, "run_id": rid, "decisions": all_decisions, "extra": junk}, fh)
+                expect(["import", "--review", rid, "--actor", "tester", "--decisions", dec_extra,
+                        "--root", store], EXIT_MALFORMED)
             finally:
                 shutil.rmtree(ibase, ignore_errors=True)
             return None
