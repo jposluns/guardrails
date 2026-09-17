@@ -377,8 +377,14 @@ def check_staged_run(run_dir):
             pa_ok, pa_detail = False, "proposals.toml schema/run_id/proposal array malformed"
         else:
             for pr in prows:
+                # span mirrors _validate_proposals: a 2-element int list, not merely a list. A list that is
+                # not a [start, end] int pair ([] or [5]) is a located row FINDING here rather than an
+                # uncaught IndexError when _render_report_md below indexes span[0]/span[1] over this UNTRUSTED
+                # staged proposal (R6-F1, the exception-coverage class sibling of the artifact-list guard).
+                span = pr.get("span") if isinstance(pr, dict) else None
                 if not (isinstance(pr, dict) and pr.get("origin") == imp._MODEL_PROPOSAL_ORIGIN
-                        and isinstance(pr.get("source_path"), str) and isinstance(pr.get("span"), list)
+                        and isinstance(pr.get("source_path"), str)
+                        and isinstance(span, list) and len(span) == 2 and all(type(x) is int for x in span)
                         and isinstance(pr.get("suggested_state"), str)
                         and pr.get("suggested_state") in imp.MAPPING_STATES):
                     pa_ok, pa_detail = False, "a proposals.toml row is malformed or not origin=model_proposal"
@@ -397,7 +403,12 @@ def check_staged_run(run_dir):
             if expected_md.encode("utf-8") != actual_md:
                 pa_ok, pa_detail = False, ("IMPORT-REPORT.md is not byte-reproducible from inventory.toml "
                                            "+ proposals.toml + run id")
-        except (OSError, KeyError, TypeError, ValueError) as exc:
+        # IndexError joins the tuple as a defence-in-depth backstop (marginal cost: one exception name): the
+        # proposal-span row-check above now rejects a malformed proposal span, but _render_report_md also
+        # indexes each inventory FRAGMENT span (frag["span"][0/1]), which this check does not shape-validate
+        # upstream, so a malformed inventory fragment span becomes the located "cannot reproduce" FINDING
+        # rather than an uncaught IndexError propagating to a direct check_staged_run caller.
+        except (OSError, KeyError, TypeError, ValueError, IndexError) as exc:
             pa_ok, pa_detail = False, "cannot reproduce IMPORT-REPORT.md ({})".format(exc)
     record("proposals-artifact", pa_ok, pa_detail)
 
@@ -894,6 +905,38 @@ def _self_test():
         (m / "IMPORT-REPORT.md").write_bytes(crlf)
         rewrite_report_digest(m, "IMPORT-REPORT.md")
         expect("disc-proposals-artifact-crlf", check_staged_run(m)["proposals-artifact"][0] is False)
+
+        # proposals-artifact (R6-F1, proposal span shape): a proposal span that is a list but NOT a 2-element
+        # int pair ([] or [5]) must be a located row FINDING, never an uncaught IndexError when
+        # _render_report_md indexes span[0]/span[1]. proposals.toml is not in report's artefact list, so only
+        # the proposals-artifact check fires. Without the row-check's 2-element-int guard this raises out of
+        # check_staged_run instead of returning a False result.
+        # Each span discriminator asserts the located ROW FINDING (primary boundary guard), not merely a
+        # False result: the IndexError backstop below would also flip this to False, so isolating the
+        # row-check detail proves the primary guard fired (removing only the row-check guard flips the detail
+        # to "cannot reproduce" and fails this assertion, per change-carries-check).
+        for bad_span in ([], [5]):
+            m = copy_run(clean)
+            props = _load_toml(m / "proposals.toml")
+            props["proposal"] = [{"origin": imp._MODEL_PROPOSAL_ORIGIN, "source_path": "a.txt",
+                                  "span": bad_span, "suggested_state": "unmapped", "note": ""}]
+            (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+            pa = check_staged_run(m)["proposals-artifact"]
+            expect("disc-proposals-artifact-span-{}".format(len(bad_span)),
+                   pa[0] is False and "row is malformed" in pa[1])
+
+        # proposals-artifact (R6-F1, IndexError backstop): a malformed inventory FRAGMENT span ([]) reaches
+        # _render_report_md (which indexes frag["span"][0]/[1]) because the proposals-artifact check does not
+        # shape-validate inventory fragments upstream. The proposal rows stay valid so the render is reached;
+        # the IndexError-in-except backstop turns the fragment crash into the located "cannot reproduce"
+        # FINDING rather than an uncaught IndexError out of check_staged_run.
+        m = copy_run(clean)
+        inv = _load_toml(m / "inventory.toml")
+        inv["fragment"][0]["span"] = []
+        (m / "inventory.toml").write_text(_opf_emit.emit(inv), encoding="utf-8")
+        pa = check_staged_run(m)["proposals-artifact"]
+        expect("disc-proposals-artifact-fragment-span-index",
+               pa[0] is False and "cannot reproduce" in pa[1])
 
         # --- acceptance.json (conditionally present): absent PASSes, present-and-valid PASSes, and each
         #     new acceptance check FINDINGs on its single mutation (acceptance.json is not in report's
