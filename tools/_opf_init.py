@@ -114,8 +114,10 @@ def build_manifest():
 
 
 def build_counters():
-    """Return a zero high-water for every baseline namespace, including worklog."""
-    namespaces = frozenset(_opf_store.BASELINE_TYPES.values())
+    """Return a zero high-water for every baseline namespace, including worklog, and for the
+    legacy_fragment importer namespace (LF) so a fresh store can accept quarantine imports."""
+    namespaces = (frozenset(_opf_store.BASELINE_TYPES.values())
+                  | frozenset(_opf_store.IMPORTER_TYPES.values()))
     document = {"schema": SUPPORTED_SCHEMA, "counters": {ns: 0 for ns in namespaces}}
     text = _opf_emit.emit_checked(document)
     _high, findings = validate_counters(tomllib.loads(text), known_namespaces=namespaces)
@@ -241,7 +243,7 @@ def self_test():
         schema_line = "schema = {}\n".format(SUPPORTED_SCHEMA)
         expected_counters = (
             schema_line + "\n[counters]\n"
-            "AD = 0\nBI = 0\nBL = 0\nCN = 0\nDN = 0\nFN = 0\nHO = 0\nMD = 0\nPD = 0\n"
+            "AD = 0\nBI = 0\nBL = 0\nCN = 0\nDN = 0\nFN = 0\nHO = 0\nLF = 0\nMD = 0\nPD = 0\n"
             "PP = 0\nRF = 0\nWL = 0\n"
         )
         expected_version = "release = []\n" + schema_line + "summary = []\n"
@@ -257,7 +259,8 @@ def self_test():
             check(name + " canonical bytes", text.encode("utf-8") == expected.encode("ascii"))
             check(name + " repeat bytes", text == builder())
             check(name + " keys", set(tomllib.loads(text)) == keys)
-        namespaces = frozenset(_opf_store.BASELINE_TYPES.values())
+        namespaces = (frozenset(_opf_store.BASELINE_TYPES.values())
+                      | frozenset(_opf_store.IMPORTER_TYPES.values()))
         counters = tomllib.loads(documents[COUNTERS_NAME])
         high, findings = validate_counters(counters, known_namespaces=namespaces)
         check("counters validate and are complete", not findings and high == {
