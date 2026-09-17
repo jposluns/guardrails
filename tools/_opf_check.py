@@ -1029,13 +1029,28 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
     enabled type with no `<type>.index.toml` is an INVALID finding (a declared input is absent; spec 11)."""
     recs = []
     recon = []
-    for tname in sorted(name for name in enabled_types if name != "worklog"):
-        namespace = enabled_types[tname]
+    # Read the enabled-type roster PLUS any importer type (legacy_fragment) whose index is PRESENT. Per the
+    # decoupled D6 design an importer type is never declared in the manifest, so it is absent from
+    # enabled_types; yet a PRESENT importer index must still be READ and content-schema-deferred (PRC-F1/N-1:
+    # merely recognizing the containment leaf without reading it laundered arbitrary bytes and rogue records
+    # at that reserved name). An importer index is accepted-if-present, never required: a PRESENT index is
+    # read + structurally graded (envelope, ids seated for id-space/counters/no-deletion) + content-schema
+    # deferred (the _SCHEMA_DEFERRAL cant), while an ABSENT index is NOT a finding, exactly mirroring the
+    # C-COUNTERS optional_namespaces treatment.
+    read_roster = dict(enabled_types)
+    for _imp_tname, _imp_ns in IMPORTER_TYPES.items():
+        read_roster.setdefault(_imp_tname, _imp_ns)
+    for tname in sorted(name for name in read_roster if name != "worklog"):
+        namespace = read_roster[tname]
         idx_rel = _rel(machine_rel, "{}{}".format(tname, INDEX_SUFFIX))
         data, st = _read_toml(root_fd, idx_rel, rep)
         if st == "error":
             continue
         if st == "absent":
+            if tname in IMPORTER_TYPES and tname not in enabled_types:
+                # An importer type is accepted-if-present, never required: an absent index is not a finding
+                # (a store with no import legitimately carries no legacy_fragment index).
+                continue
             rep.finding("enabled type {!r} has no {}{} (a declared input is absent; spec 11)".format(
                 tname, tname, INDEX_SUFFIX))
             continue
@@ -3321,6 +3336,19 @@ def self_test():
         rlfi = run(lfi)
         check("importer-index-leaf-not-flagged",
               not any("C-CONTAINMENT" in f and "legacy_fragment.index.toml" in f for f in rlfi.findings))
+        # PRC-F1 read-side (N-1): a PRESENT NON-EMPTY undeclared importer index is now READ by
+        # _gather_active_records and content-schema-deferred (the _SCHEMA_DEFERRAL cant under C-RECORDS), so it
+        # is GRADED rather than laundered. Without the read of a present importer index (round-2 recognized the
+        # containment leaf but read nothing), a rogue LF index drew no C-RECORDS message and passed clean - the
+        # N-1 blind spot. The assertion: C-RECORDS emitted the deferral message for the LF index AND the store
+        # is not VALID (graded).
+        lfr = clean_machine()
+        lfr["legacy_fragment.index.toml"] = idx([dict(id="LF-1", body="quarantined fragment")])
+        rlfr = run(lfr)
+        check("importer-index-content-graded",
+              rlfr.status != VALID
+              and any("legacy_fragment" in m and "schema-deferred" in m
+                      for m in rlfr.by_check.get("C-RECORDS", [])))
         # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
         # is still caught.
         wlr = copy.deepcopy(pr_machine)
