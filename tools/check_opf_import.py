@@ -114,7 +114,11 @@ def _load_toml(path):
             return tomllib.load(fh)
     except FileNotFoundError:
         raise _GateError("required artefact absent: {}".format(path))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
+        # RecursionError joins the tuple (R8-F1): deeply-nested TOML (a malicious staged artefact) drives
+        # tomllib into unbounded recursion, which is neither an OSError nor a ValueError, so without it a
+        # crafted artefact crashes the gate on the direct call path instead of failing closed to a located
+        # FINDING. MemoryError/KeyboardInterrupt/SystemExit still propagate.
         raise _GateError("required artefact unreadable/unparseable: {} ({})".format(path, exc))
 
 
@@ -193,7 +197,11 @@ def check_staged_run(run_dir):
             p = run_dir / entry["path"]
             try:
                 data = p.read_bytes()
-            except OSError as exc:
+            except (OSError, ValueError, RecursionError) as exc:
+                # ValueError covers an embedded-NUL path (open() raises ValueError, not OSError) so a
+                # crafted report.toml artifact path is a located FINDING, not an uncaught crash; RecursionError
+                # is the class sibling for a pathological path (R8-F1). MemoryError/KeyboardInterrupt/SystemExit
+                # still propagate.
                 art_ok, art_detail = False, "enumerated artefact unreadable: {} ({})".format(p, exc)
                 break
             if _sha256_hex(data) != entry["sha256"]:
@@ -313,7 +321,10 @@ def check_staged_run(run_dir):
         body_path = run_dir / "sources" / s["sha256"]
         try:
             body = body_path.read_bytes()
-        except OSError as exc:
+        except (OSError, ValueError, RecursionError) as exc:
+            # ValueError covers an embedded-NUL sha256 (the path component is untrusted staged data, so
+            # open() raises ValueError, not OSError) so it is a located FINDING, not an uncaught crash;
+            # RecursionError is the class sibling (R8-F1). MemoryError/KeyboardInterrupt/SystemExit propagate.
             src_ok, src_detail = False, "preserved source bytes absent/unreadable: {} ({})".format(
                 body_path, exc)
             break
@@ -446,7 +457,11 @@ def check_staged_run(run_dir):
         acc_err = ""
         try:
             acc = json.loads(acc_path.read_bytes().decode("utf-8"))
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
+            # RecursionError joins the tuple (R8-F1): deeply-nested JSON (a malicious staged acceptance.json,
+            # even under the size cap) drives json.loads into unbounded recursion, which is neither an OSError
+            # nor a ValueError; without it a crafted record crashes the gate instead of every acceptance check
+            # failing closed. MemoryError/KeyboardInterrupt/SystemExit still propagate.
             acc_err = "acceptance.json present but unreadable/unparseable ({})".format(exc)
         if acc is None or not isinstance(acc, dict):
             for cid in acc_checks:
@@ -1064,6 +1079,60 @@ def _self_test():
         empty.mkdir()
         empty_results = check_staged_run(empty)
         expect("fail-closed-empty", all(not ok for ok, _ in empty_results.values()))
+
+        # --- R8-F1: untrusted read/parse boundaries fail closed to a located FINDING, never an uncaught
+        #     crash on the DIRECT gate-call path (check-fails-closed-on-unreadable). Each mutation is a
+        #     malicious staged artefact whose too-narrow except tuple would otherwise let an exotic exception
+        #     escape; the flip in each case (narrowing the boundary's except back) turns the FINDING into an
+        #     uncaught RecursionError/ValueError out of check_staged_run. -----------------------------------
+        # (a) deeply-nested TOML -> tomllib RecursionError (neither OSError nor ValueError). _load_toml's
+        #     broadened (OSError, ValueError, RecursionError) makes it a located FINDING. proposals.toml is
+        #     loaded in its own check and is not in report's artefact list, so ONLY proposals-artifact fires.
+        m = copy_run(clean)
+        (m / "proposals.toml").write_text("a = " + "[" * 3000 + "]" * 3000, encoding="utf-8")
+        r8_toml = check_staged_run(m)
+        expect("disc-r8f1-deep-nested-toml-proposals",
+               set(r8_toml) == set(EXPECTED_CHECKS) and r8_toml["proposals-artifact"][0] is False)
+
+        # (b) deeply-nested acceptance.json -> json.loads RecursionError (under the size cap). The broadened
+        #     except makes every acceptance check a located FINDING (fail-closed), never a crash.
+        m = copy_run(reviewed)
+        (m / imp.ACCEPTANCE_NAME).write_text("[" * 100000 + "]" * 100000, encoding="utf-8")
+        r8_json = check_staged_run(m)
+        expect("disc-r8f1-deep-nested-json-acceptance",
+               set(r8_json) == set(EXPECTED_CHECKS)
+               and all(r8_json[cid][0] is False for cid in
+                       ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
+                        "acceptance-completeness")))
+
+        # (c) embedded-NUL artefact path -> open() raises ValueError, not OSError. The broadened
+        #     (OSError, ValueError, RecursionError) at the artefact read makes it a located FINDING. The NUL is
+        #     injected via a backslash-u escape (the emitter refuses a raw control byte), replacing a unique
+        #     sentinel token so tomllib decodes it back to the NUL path; the entry is appended last so the
+        #     untouched entries pass first and only artifact-digest-integrity fires.
+        m = copy_run(clean)
+        rep = _load_toml(m / "report.toml")
+        rep["artifact"].append({"path": "NULPATHSENTINEL", "sha256": "0" * 64})
+        (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
+        txt = (m / "report.toml").read_text(encoding="utf-8").replace("NULPATHSENTINEL", "a\\u0000b")
+        (m / "report.toml").write_text(txt, encoding="utf-8")
+        r8_art = check_staged_run(m)
+        expect("disc-r8f1-embedded-nul-artifact-path",
+               set(r8_art) == set(EXPECTED_CHECKS) and r8_art["artifact-digest-integrity"][0] is False)
+
+        # (d) embedded-NUL source-body path -> the sources/<sha256> read raises ValueError, not OSError (the
+        #     path component is untrusted staged data). The broadened except makes source-preservation a
+        #     located FINDING. The run.toml digest is refreshed so artifact-digest-integrity stays coherent.
+        m = copy_run(clean)
+        run = _load_toml(m / "run.toml")
+        run["source"][0]["sha256"] = "NULSHASENTINEL"
+        (m / "run.toml").write_text(_opf_emit.emit(run), encoding="utf-8")
+        txt = (m / "run.toml").read_text(encoding="utf-8").replace("NULSHASENTINEL", "a\\u0000b")
+        (m / "run.toml").write_text(txt, encoding="utf-8")
+        rewrite_report_digest(m, "run.toml")
+        r8_src = check_staged_run(m)
+        expect("disc-r8f1-embedded-nul-source-path",
+               set(r8_src) == set(EXPECTED_CHECKS) and r8_src["source-preservation"][0] is False)
 
         # --- scan-determinism + scan fail-closed -----------------------------------------------------
         sroot, _sm = build_store({"a.txt": "aaaa", "b.txt": "bbbbbb"})

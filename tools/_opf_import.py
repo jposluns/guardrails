@@ -2604,17 +2604,27 @@ def review_import(product_root, run_id, *, actor, decisions, now):
         # (an AttributeError from gate_results.items()) each become verdict 2 rather than an uncaught
         # exception. Catch Exception only, so KeyboardInterrupt/SystemExit stay uncaught; the resulting _cannot
         # is handled by the outer _StageError branch. The import stays lazy (a module-top import would form a
-        # circular import: check_opf_import imports _opf_import), now inside the guard.
+        # circular import: check_opf_import imports _opf_import), now inside the guard. R8-F1 widens the guard
+        # once more to the gate_findings result-read AND the `", ".join(gate_findings)` FINDING-raise: a gate
+        # result carrying a NON-STRING failing-check id (a first-party contract violation) would raise an
+        # uncaught TypeError at the join if it sat outside the try, escaping the "malformed gate result ->
+        # verdict 2" intent. The deliberate `_cannot(...)` for a normally-failing gate is a _StageError, so it
+        # is let through unwrapped (its own message preserved); only an UNEXPECTED exception (the TypeError, an
+        # AttributeError, an ImportError) becomes the malformed-gate CANNOT-EVALUATE. Catch Exception only, so
+        # KeyboardInterrupt/SystemExit stay uncaught.
         try:
             import check_opf_import   # lazy: avoids a module-top circular import (see _gather_review_context)
             gate_results = check_opf_import.check_staged_run(run_dir_path)
             gate_findings = sorted(cid for cid, (ok, _detail) in gate_results.items() if not ok)
+            if gate_findings:
+                raise _cannot("staged run fails the import-operation gate; not reviewable until it is a "
+                              "coherent, promotion-ready run (failing gate checks: {})".format(
+                                  ", ".join(gate_findings)))
+        except _StageError:
+            raise
         except Exception as exc:
             raise _cannot("the import-operation gate could not be loaded, raised, or returned a malformed "
                           "result evaluating the staged run ({!r}); cannot review".format(exc))
-        if gate_findings:
-            raise _cannot("staged run fails the import-operation gate; not reviewable until it is a coherent, "
-                          "promotion-ready run (failing gate checks: {})".format(", ".join(gate_findings)))
 
         findings, normalized = _validate_review_decisions(decisions, frag_by_id, key_meta)
         if findings:
@@ -4843,6 +4853,28 @@ def self_test():
             check("G6-{}-gate-nondict-no-acceptance".format(_g6_tag),
                   not (g6_dir / "acceptance.json").is_file())
             check("G6-{}-gate-restored".format(_g6_tag), _chk_g6.check_staged_run is _orig_g6)
+        # (f2) R8-F1 widened defence-in-depth: the gate_findings result-read AND the ", ".join(gate_findings)
+        #     FINDING-raise now sit INSIDE the widened guard. A gate result dict with a NON-STRING failing-check
+        #     id (a first-party contract violation) would raise an uncaught TypeError at the join if it sat
+        #     outside the try; review must instead return CANNOT-EVALUATE (verdict 2) with NO acceptance and no
+        #     propagated exception. Monkeypatch the gate to return {123: (False, ...)} (a non-string failing id;
+        #     sorted() succeeds on the single element, so the crash lands at the join, not the sort); restore in
+        #     a finally. FLIP: move the `if gate_findings: raise` back OUTSIDE the try and this crashes with an
+        #     uncaught TypeError instead of verdict 2.
+        rootG8, mG8 = build_store(sources={"a.txt": "aaaa"})
+        prg8 = plan_import(rootG8, ["a.txt"], now=NOW, run_nonce=NONCE)
+        g8_dir = mG8.parent / "imports" / (prg8.run_id or "MISSING")
+        g8_decs = all_decisions(g8_dir)
+        import check_opf_import as _chk_g8
+        _orig_g8 = _chk_g8.check_staged_run
+        _chk_g8.check_staged_run = lambda _run_dir: {123: (False, "a non-string failing-check id")}
+        try:
+            rrg8 = review_import(rootG8, prg8.run_id, actor="R", decisions=g8_decs, now=NOW)
+        finally:
+            _chk_g8.check_staged_run = _orig_g8
+        check("G8-gate-nonstring-id-cannot-eval", rrg8.verdict == 2)
+        check("G8-gate-nonstring-id-no-acceptance", not (g8_dir / "acceptance.json").is_file())
+        check("G8-gate-restored", _chk_g8.check_staged_run is _orig_g8)
         # (g) R7-F2 best-effort-import contract: _gather_review_context promises every field is best-effort
         #     and NEVER required (any failure records ""). Its lazy `import _opf_observe` must sit INSIDE the
         #     git-discovery try, so a broken/absent first-party _opf_observe degrades git_identity to ""
