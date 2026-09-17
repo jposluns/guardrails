@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""OPF unit U7: import operation layer (scan / plan / apply) + staging (the live `import` verb stays UNWIRED).
+"""OPF unit U7: import operation layer (scan / plan / review / apply) + staging (the live `import` verb is
+wired by OPF-IMPORT-VERB, in opf.py `_cmd_import`).
 
-OPF-IMPORT-OPS adds the operation layer beneath the reserved `opf import [--root DIR] (--scan | --plan |
---apply <run-id>)` grammar, composing the settled `stage_import` staging primitive rather than replacing
+OPF-IMPORT-OPS adds the operation layer beneath the `opf import [--root DIR] (--scan --set FILE | --plan
+--set FILE | --review <run-id> --actor NAME (--decisions FILE | --interactive) | --apply <run-id>)`
+grammar (wired by OPF-IMPORT-VERB in opf.py), composing the settled `stage_import` staging primitive rather than replacing
 it (spec 14.1, Fable-synthesized plan):
   - `scan_import(product_root, import_set) -> ScanResult`: a deterministic, digest-stamped, READ-ONLY
     enumeration of the declared import set (one whole-file fragment per source; the baseline extractor).
@@ -30,11 +32,13 @@ staging area, not the active store) and the new run directory beneath it: the ac
 composes U1 (store resolution + manifest), U2 (record envelope + counters + id helpers), U3 (the worklog
 release-boundary gate), and U8 (the constrained-subset canonical emitter) rather than re-deriving them.
 
-Sequencing (build plan): U7 lands as MODULE + SELF-TEST ONLY, like U4/U5. The live `import` verb is left
-on opf.py's fail-closed KNOWN_VERBS path (F-373 / VC-4-HARDEN): opf.py gains an `import _opf_import` line
-and one `("opf-import", _opf_import.self_test)` SELF_TESTS row, and NOTHING in main()/KNOWN_VERBS/dispatch.
-A self-test vector (dispatch deferral) proves `opf.py import` still exits 2 and stages nothing, so wiring
-the verb later is a conscious edit to this test rather than a silent drift.
+Sequencing (build plan): U7 landed the operation layer as MODULE + SELF-TEST first, like U4/U5; the live
+`import` verb wiring landed next (OPF-IMPORT-VERB, opf.py `_cmd_import` + its main() dispatch branch),
+composing this operation layer unchanged. The former dispatch-deferral vector (F-373 / VC-4-HARDEN) is
+converted to its verb-wiring successor here: a bare `opf.py import` with no mode still exits 2 and stages
+nothing (the grammar's exactly-one-mode rule), and `--apply <run-id>` still exits 2 mutating nothing (the
+apply-promotion stub stays deferred to the OPF-IMPORT-APPLY unit), so PR-C's promotion landing is again a
+conscious edit to this test rather than a silent drift.
 
 Promotion (mutating the active store, advancing counters.toml, flipping import_status) is OUT OF SCOPE:
 U7 stages proposals only. Staged ids are PROPOSALS; the sole durable reservation is counters.toml, which
@@ -2949,13 +2953,28 @@ def self_test():
         res3 = stage_import(root3, ["a.txt"], {"fragments": {"a.txt": rows}}, now=NOW, run_nonce="other")
         check("2-nonce-changes-id", res3.run_id != res.run_id and res3.verdict == 0)
 
-        # 3: dispatch deferral (F-373): `opf.py import` still exits 2 and stages nothing.
+        # 3: verb wiring (OPF-IMPORT-VERB PR-B, converted from the F-373 dispatch-deferral vector). The
+        # `import` verb is now WIRED (opf.py `_cmd_import`), but a bare `opf.py import` with NO mode is a
+        # usage error (exactly one mode required) -> exit 2 and stages nothing; and `--apply <run-id>` wires
+        # onto the STILL-DEFERRED apply_import stub -> exit 2 (cannot-evaluate) and mutates nothing, so
+        # PR-C's promotion landing is again a conscious edit to this vector. Both cases exercise the live
+        # dispatcher through opf.py (the CLI round-trip lives in opf.py's own opf-cli self-test leg).
         opf_py = str(Path(__file__).resolve().parent / "opf.py")
         root4, machine4 = build_store(sources={"a.txt": src})
-        cp = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--root", str(root4)],
-                            capture_output=True)
-        check("3-verb-exits-2", cp.returncode == 2)
-        check("3-verb-stages-nothing", not (machine4.parent / "imports").exists())
+        cp_nomode = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--root", str(root4)],
+                                   capture_output=True)
+        check("3-verb-no-mode-exits-2", cp_nomode.returncode == 2)
+        check("3-verb-no-mode-stages-nothing", not (machine4.parent / "imports").exists())
+        # Stage a real run over root4, then `--apply` it: the deferred stub exits 2 and the store machine
+        # tree is byte-unchanged (nothing promoted). An INDEPENDENT run-id-grammar literal for the operand.
+        plan4 = plan_import(root4, ["a.txt"], now=NOW, run_nonce="verb-apply-pin")
+        check("3-apply-plan-staged", plan4.verdict == 0 and bool(plan4.run_id))
+        machine4_before = snapshot(machine4)
+        cp_apply = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--apply",
+                                   plan4.run_id or "imp-00000000T000000Z-0000000000000000",
+                                   "--root", str(root4)], capture_output=True)
+        check("3-apply-stub-exits-2", cp_apply.returncode == 2)
+        check("3-apply-stub-mutates-nothing", snapshot(machine4) == machine4_before)
 
         # 4: R6 active collision: a fully-valid active index already carries the id next_id will mint (BI-1
         # above the BI=0 high-water) -> verdict 1, nothing written. The active record is now routed through

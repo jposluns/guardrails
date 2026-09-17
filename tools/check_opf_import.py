@@ -62,9 +62,11 @@ exercised here; the semantic correctness of a mapping, and the AUTHENTICITY of a
 dir) are gate-blind: the gate guards the review-to-promotion BINDING, not identity authenticity (the
 reserved signature seam is the upgrade path). A passing gate proves nothing about those.
 
-This repository is not a DevProcess adopter and the `opf import` verb is unwired, so the live leg prints
-NOT APPLICABLE and exits 0, spec-honest like the doctor/drift legs in run_all_checks.sh; the assurance
-rides the --self-test leg over synthetic staged runs. Offline, stdlib only, fail-closed, launched isolated
+This repository is not a DevProcess adopter (it has no store to import into), so even though the `opf
+import` verb is now wired (OPF-IMPORT-VERB, opf.py `_cmd_import`) there is no staged import run to check
+live: the live leg prints NOT APPLICABLE and exits 0, spec-honest like the doctor/drift legs in
+run_all_checks.sh; the assurance rides the --self-test leg over synthetic staged runs. Offline, stdlib
+only, fail-closed, launched isolated
 (-I -B). The tempdir is removed in a finally (test-hermeticity).
 """
 import hashlib
@@ -1176,11 +1178,11 @@ def main(argv=None):
         if args:
             print("check_opf_import: unexpected argument(s): {}".format(" ".join(args)), file=sys.stderr)
             return EXIT_ERROR
-        # Live leg: this repo is not a DevProcess adopter and the `opf import` verb is unwired, so there is
-        # no staged run to check live. NOT APPLICABLE, exit 0 (the doctor/drift non-adopter posture); the
-        # assurance rides the --self-test leg over synthetic staged runs.
-        print("check_opf_import: NOT APPLICABLE (this repository is not a DevProcess adopter and the "
-              "`opf import` operation is unwired; the --self-test leg carries the assurance)")
+        # Live leg: the `opf import` verb is now wired (opf.py `_cmd_import`), but this repo is not a
+        # DevProcess adopter and has no staged import run to check live. NOT APPLICABLE, exit 0 (the
+        # doctor/drift non-adopter posture); the assurance rides the --self-test leg over synthetic runs.
+        print("check_opf_import: NOT APPLICABLE (this repository is not a DevProcess adopter, so there is "
+              "no staged `opf import` run to check live; the --self-test leg carries the assurance)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false-0 or uncaught exit-1
         print("check_opf_import: cannot evaluate: unexpected error in the import-operation gate ({!r}); "
