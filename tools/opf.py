@@ -1720,8 +1720,28 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
     4's held-lease message). Reuses _opf_observe's scrubbed-env, --no-replace-objects, -C-bound, timeout-
     bounded boundary (G6). Fail-closed: a non-completed probe, a not-a-repository, a nonzero exit, an
     undeterminable store prefix, or a malformed payload refuses; never a clean pass on an unreadable probe
-    (check-fails-closed-on-unreadable, SECA-verified-restore-path)."""
-    args = (["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+    (check-fails-closed-on-unreadable, SECA-verified-restore-path).
+
+    This is the ONE caller that COMPARES WORKTREE CONTENT against the index (the operation that makes git run
+    a repo/worktree-configured clean/process filter), so it prepends _filter_neutralizing_args to the status
+    argv: git EXECUTES such a filter's external command during this read-only observation, an exec-on-observe
+    vector of the executable-config-trust-gate class (SECI-config-is-executable-trust-gate,
+    OPF-STATUS-FILTER-SUPPRESS) that OPF-FSMON-SUPPRESS closed for core.fsmonitor and GIT_NO_LAZY_FETCH closed
+    for the lazy-fetch->core.sshCommand vector. Both _upgrade_check_clean call sites (store and product_root)
+    inherit the neutralization through this single narrow call. Any FUTURE worktree-content observation (a
+    non-`--cached` diff, diff-files, ls-files -m, update-index --refresh, a status elsewhere) must adopt
+    _filter_neutralizing_args the same way; the other observe verbs read no worktree content and do not."""
+    try:
+        neutralizing = _opf_observe._filter_neutralizing_args(git, root)
+    except RuntimeError as exc:
+        # The enumeration that proves which clean/process filters git could exec on the status is a guard; an
+        # unreadable enumeration is a cannot-evaluate, so the probe refuses rather than run a status that might
+        # execute a repo-planted filter (guard-input-soundness, check-fails-closed-on-unreadable).
+        raise _UpgradeError("could not verify the store is clean before the upgrade: its git clean/process "
+                            "filter configuration is unreadable ({}), so a read-only status probe cannot run "
+                            "without risking filter execution; refusing the destructive rewrite "
+                            "(fail-closed)".format(exc))
+    args = (neutralizing + ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
              "--no-renames", "--"] + list(pathspecs))
     out = _opf_observe._run_git(git, root, args)
     if not out.completed:

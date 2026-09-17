@@ -152,6 +152,110 @@ def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S, allow_lazy_fetch=Fal
     return _GitOutcome(True, proc.returncode, proc.stdout or b"", err)
 
 
+# --- OPF-STATUS-FILTER-SUPPRESS: neutralize repo/worktree clean-process filters on a worktree-content probe -
+# A `git status` that COMPARES WORKTREE CONTENT against the index runs any repository- or worktree-configured
+# `clean` / `process` filter driver for a matched path, EXECUTING that driver's external command during a
+# read-only observation (exec-on-observe; SECI-config-is-executable-trust-gate). This is the same
+# executable-config trust-gate class the fsmonitor and lazy-fetch->core.sshCommand suppressions in _run_git
+# already close, but those vectors never read worktree content, so `-c core.fsmonitor=false` + GIT_NO_LAZY_FETCH
+# cover them while a clean/process filter is reached ONLY through worktree-content comparison and needs the
+# targeted neutralization below. The scrubbed env already points global/system config at os.devnull, so the
+# only filter git can exec on such a probe is one defined in the repo's OWN .git/config or .git/config.worktree
+# -- exactly the set _filter_neutralizing_args enumerates and empties.
+
+def _filter_neutralizing_args(git, store_root, timeout=_GIT_TIMEOUT_S):
+    """Return the command-scope `-c` flags that neutralize every repository/worktree-configured clean/process
+    filter driver reachable when git compares worktree content against the index at `store_root`, so a
+    `git status` over that root cannot EXECUTE a repo-planted external filter command on a read-only
+    observation (exec-on-observe; SECI-config-is-executable-trust-gate, the class OPF-FSMON-SUPPRESS closed
+    for core.fsmonitor and the lazy-fetch->core.sshCommand vector).
+
+    Enumerates the exec-capable driver names through the SAME _run_git boundary and scrubbed env the status
+    probe uses (`config -z --name-only --list`), so the neutralized set provably EQUALS the set git could
+    exec on the probe (global/system config is neutralized to os.devnull for both; guard-input-soundness).
+    Using _run_git, NOT _run_git_config_discovery, is load-bearing for that equality: the config-discovery
+    variant would let global/system config in and enumerate keys git will not read on the scrubbed status.
+    `--name-only` returns keys WITHOUT values, so a malicious command BODY is never read or logged; reading
+    config runs no filter and no hook, so the enumeration is itself inert, and `-c core.fsmonitor=false`
+    (added by _run_git) keeps fsmonitor suppressed during it too.
+
+    For each distinct driver <name> whose `filter.<name>.clean` or `filter.<name>.process` key is configured
+    (git config section/subkey are case-insensitive, matched here case-insensitively; the subsection <name>
+    is case-sensitive and may itself contain dots, so exactly ONE fixed trailing component is stripped),
+    emits `-c filter.<name>.clean= -c filter.<name>.process= -c filter.<name>.required=false`. Command-scope
+    `-c` is highest precedence (it overrides repo AND worktree config, the relationship `-c
+    core.fsmonitor=false` already relies on); an empty clean/process makes git treat the driver as identity
+    so NO external command is spawned; required=false stops an emptied-but-required driver from erroring and
+    masking the verdict. git's BUILT-IN text/eol/working-tree-encoding conversion is not a filter driver and
+    is untouched, so a text=auto / CRLF store is not falsely flagged dirty: that built-in conversion is
+    deliberately PRESERVED (the A-vs-B property a raw --no-filters reimplementation would regress).
+
+    FAIL-CLOSED (guard-input-soundness, check-fails-closed-on-unreadable): neutralization completeness rests
+    entirely on this enumeration, so any state where the exec-able set cannot be proven is a cannot-evaluate
+    that RAISES RuntimeError (the caller turns it into a fail-closed refusal), never a silent empty list read
+    as "no filters". Raises when the enumeration could not run (timeout / launch failure), returned a nonzero
+    rc (a corrupt .git/config makes --list fail; unreadable input is not "no filters"), was not
+    NUL-terminated as `-z` promises, carried a filter clean/process key with a non-UTF-8 driver name that
+    cannot be safely re-emitted as a matching `-c` override (emitting a replacement-mangled name would leave
+    the REAL driver exec-able -- a fail-OPEN, so it fails closed, mirroring _is_partial_clone), or carried a
+    filter clean/process key that does not parse into a well-formed (non-empty) driver name.
+
+    FUTURE CALLERS (disclose-guard-residuals): any NEW observation that reads WORKTREE CONTENT through git (a
+    non-`--cached` diff, `diff-files`, `ls-files -m`, `update-index --refresh`, or a `status` elsewhere) runs
+    clean/process filters and MUST prepend these args too; a verb that never compares worktree content
+    (rev-parse, ls-files, config, cat-file, remote, show HEAD:<blob>) does not and must not pay the cost. A
+    residual TOCTOU remains: enumeration and the status are two calls, so a driver ADDED to .git/config
+    between them could exec on the status; under the held OPF lease with no legitimate concurrent writer the
+    window is milliseconds and the same adversary could already rewrite HEAD, so only a raw filter-free
+    reimplementation (rejected for its text/eol regression) would close it fully."""
+    listing = _run_git(git, store_root, ["config", "-z", "--name-only", "--list"], timeout=timeout)
+    if not listing.completed:
+        raise RuntimeError("could not enumerate the store's git filter configuration ({})".format(
+            listing.err.strip()))
+    if listing.rc != 0:
+        raise RuntimeError("git config --list failed (rc {}); the store's filter configuration is unreadable, "
+                           "so its exec-capable filters cannot be neutralized".format(listing.rc))
+    raw = listing.out
+    if raw and not raw.endswith(b"\x00"):
+        raise RuntimeError("git config --list returned a payload that is not NUL-terminated; the store's "
+                           "filter configuration cannot be trusted (fail-closed)")
+    names = []
+    seen = set()
+    for kb in raw.split(b"\x00"):
+        if not kb:
+            continue
+        low = kb.lower()   # git section/subkey are case-insensitive; ASCII lower on the raw bytes suffices
+        if not low.startswith(b"filter."):
+            continue
+        if not (low.endswith(b".clean") or low.endswith(b".process")):
+            continue   # a filter.<name>.smudge / .required (etc.) is not exec-able on status: not neutralized
+        # A filter clean/process key: its <name> must round-trip cleanly to emit a MATCHING -c override. A
+        # non-UTF-8 subsection name cannot, and emitting a replacement-mangled name would leave the REAL
+        # driver exec-able (a fail-OPEN), so a non-UTF-8 name is a cannot-evaluate -> fail-closed (mirrors
+        # _is_partial_clone's non-UTF-8 handling).
+        try:
+            key = kb.decode("utf-8")
+        except UnicodeDecodeError:
+            raise RuntimeError("git config carries a filter driver key with a non-UTF-8 name; it cannot be "
+                               "safely neutralized, so the store's filter configuration is refused "
+                               "(fail-closed)")
+        # <name> is everything between the fixed `filter.` prefix and the fixed trailing `.clean`/`.process`
+        # component. The subsection may itself contain dots, so strip exactly ONE trailing component (rfind).
+        name = key[len("filter."):key.rfind(".")]
+        if not name:
+            raise RuntimeError("git config carries a malformed filter key {!r} with no driver name; the "
+                               "store's filter configuration cannot be trusted (fail-closed)".format(key))
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    args = []
+    for name in names:
+        args += ["-c", "filter.{}.clean=".format(name),
+                 "-c", "filter.{}.process=".format(name),
+                 "-c", "filter.{}.required=false".format(name)]
+    return args
+
+
 # --- OPF-D2B: the config-discovery ignore probe --------------------------------------------------------
 # The default _scrubbed_env above NEUTRALIZES global/system git configuration so an observation reads only
 # the repository. The `opf init` ignore preflight (opf.py:_init_unignored) needs the OPPOSITE for one
