@@ -244,9 +244,11 @@ def _filter_neutralizing_config(git, store_root, timeout=_GIT_TIMEOUT_S):
     clean/process filters and MUST pass these overrides to _run_git too; a verb that never compares worktree content
     (rev-parse, ls-files, config, cat-file, remote, show HEAD:<blob>) does not and must not pay the cost. A
     residual TOCTOU remains: enumeration and the status are two calls, so a driver ADDED to .git/config
-    between them could exec on the status; under the held OPF lease with no legitimate concurrent writer the
-    window is milliseconds and the same adversary could already rewrite HEAD, so only a raw filter-free
-    reimplementation (rejected for its text/eol regression) would close it fully."""
+    between them could exec on the status. The upgrade's dirty-probe runs as a read-only gate BEFORE the
+    single-writer lease is claimed (opf.py step 3 precedes step 4), so the lease does NOT bound this window;
+    the mitigation is that adding a driver between the two calls requires an adversary with concurrent write
+    access to the store's .git/config, who could already rewrite HEAD (or the driver) directly, so only a raw
+    filter-free reimplementation (rejected for its text/eol regression) would close it fully."""
     listing = _run_git(git, store_root, ["config", "-z", "--name-only", "--list"], timeout=timeout)
     if not listing.completed:
         raise RuntimeError("could not enumerate the store's git filter configuration ({})".format(
