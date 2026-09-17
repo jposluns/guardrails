@@ -5771,7 +5771,8 @@ def self_test():
         # temporary single-guard reverts (in a /dev/shm scratch): reverting ONLY the pre-read check fails ONLY
         # -preread (the post-read check then emits an "after reading" message, no "before it is read", and the
         # record IS read so the read-count is non-zero); reverting ONLY the post-read check fails ONLY -postread
-        # (the raced-growth vector then reads+parses within the 16 MiB cap and is rejected LATER by the R4-C1
+        # (the raced-growth vector is then read within the 16 MiB cap and rejected LATER by a DIFFERENT guard:
+        # here the TOML parse refuses the injected bytes, a valid-TOML growth would instead meet the R4-C1
         # hash mismatch, so no "after reading" message); reverting R6-C1 still fails ONLY -disappeared-sources.
         #
         # -preread: grow the LIVE transaction.toml past MAX_STORE_READ_BYTES with a huge trailing TOML comment
