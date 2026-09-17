@@ -3357,7 +3357,36 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                 # it fails closed rather than reporting a false promotion (PRC-F2). A shape-valid, run-bound
                 # record at state=complete is the idempotent no-op; a partial/torn state was reconciled by the
                 # journal recover above.
-                txn_record = _read_toml(root_fd, _txn_record_rel(run_id))
+                # R5-C1 (single-read TOCTOU close): read the retained record's RAW BYTES exactly ONCE here and
+                # use those same bytes for BOTH every identity/archive check below AND the R4-C1 journal bind,
+                # so no interleaving can validate the archive against a first read while the journal-bind
+                # authenticates a divergent second read. Absence is preserved identically to the prior
+                # _read_toml path: a missing record (or parent) lstats as None and falls through to the normal
+                # staged path; a present-but-unreadable or unparseable record is fail-closed CANNOT-EVALUATE,
+                # never a silent no-op. require_single_link mirrors _read_toml's contained reader (F-R17-A1).
+                noop_rec_rel = _txn_record_rel(run_id)
+                try:
+                    noop_rec_st = _journal._lstat_contained(root_fd, noop_rec_rel)
+                except (_journal.JournalError, OSError) as exc:
+                    raise _cannot("cannot stat the retained transaction record {} ({}); fail-closed".format(
+                        noop_rec_rel, exc))
+                if noop_rec_st is None:
+                    txn_record = None
+                    noop_rec_raw = None
+                else:
+                    try:
+                        noop_rec_raw, _noop_rec_readst = _journal._read_contained(
+                            root_fd, noop_rec_rel, require_single_link=True)
+                    except (_journal.JournalError, OSError) as exc:
+                        raise _cannot("cannot read the retained transaction record {} ({}); a present record "
+                                      "that cannot be read is fail-closed, never a silent no-op".format(
+                                          noop_rec_rel, exc))
+                    try:
+                        txn_record = tomllib.loads(noop_rec_raw.decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+                        raise _cannot("cannot parse the retained transaction record {} ({}); a present but "
+                                      "unparseable record is fail-closed, never a silent no-op".format(
+                                          noop_rec_rel, exc))
                 if txn_record is not None:
                     ok, detail = _validate_transaction_record(txn_record, run_id)
                     if not ok:
@@ -3430,7 +3459,6 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                         # own fields) no longer matches, so it cannot certify a no-op (reconcile through
                         # recover; fail-closed). capture_preimages adds prestate to each op but leaves the
                         # poststate untouched, so the recorded content-sha256 is the create's own.
-                        noop_rec_rel = _txn_record_rel(run_id)
                         noop_intent_ops = noop_intent.get("ops")
                         noop_rec_op = None
                         if isinstance(noop_intent_ops, list):
@@ -3453,13 +3481,10 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                                           "completed run {} carries no valid content hash; a malformed recorded "
                                           "op cannot bind the record and so cannot certify an idempotent no-op "
                                           "(reconcile through recover; fail-closed)".format(run_id))
-                        try:
-                            noop_rec_raw, _recst = _journal._read_contained(root_fd, noop_rec_rel)
-                        except _journal.JournalError as exc:
-                            raise _cannot("the retained transaction record for completed run {} is unreadable "
-                                          "({}); a completed record whose live bytes cannot be read cannot be "
-                                          "bound to the immutable journal and so cannot certify an idempotent "
-                                          "no-op (reconcile through recover; fail-closed)".format(run_id, exc))
+                        # R5-C1: bind the SINGLE authenticated read captured at step 3/4 (never a second read
+                        # of the live record), so the exact bytes validated for identity and the archive below
+                        # are the bytes the journal authenticates here; a two-read interleaving can no longer
+                        # hand divergent bytes to the archive check and the journal bind.
                         if _sha256_hex(noop_rec_raw) != noop_rec_sha:
                             raise _cannot("the retained transaction record for completed run {} does not match "
                                           "its journal-recorded content hash; the projection was modified after "
@@ -5627,6 +5652,42 @@ def self_test():
         _live_txn_path_d23(rT3, prT3).write_text(_opf_emit.emit(_recT3), encoding="utf-8")
         apT3 = apply_import(rT3, prT3.run_id, now=NOW)
         check("D23-noop-rejects-tampered-record-field", apT3.verdict != 0 and apT3.promoted is False)
+
+        # R5-C1 (round-6): the no-op path reads the retained record EXACTLY ONCE. The prior two-read code
+        # parsed the record on a FIRST read (identity + FIX C archive validation) and authenticated a SECOND
+        # read against the journal, so an interleaving that returned a TAMPERED record T on the first read and
+        # the ORIGINAL R on the second passed the journal-bind (on R) while validating the archive against T ->
+        # a false-clean no-op WITHOUT forging the journal. The single-read fix reads T once and BOTH parses and
+        # journal-binds those same bytes, so T's hash != the journal-recorded hash -> fail-closed. This
+        # simulates the interleaving by monkeypatching the record reader to return T on the FIRST record read
+        # and R on any SECOND read; the archive is dropped to a body T's archived_sources omits, so T is
+        # self-consistent with the tampered archive (only R4-C1's whole-record bind, on the single read,
+        # rejects it). Verified against a temporary two-read revert: the OLD code false-cleans this vector.
+        rRS, prRS, _ap0RS, ap1RS = _fresh_promoted_d23("apply-d23r5-swap")
+        check("D23-r5-swap-baseline-clean", ap1RS.verdict == 0 and ap1RS.promoted is True)
+        _rec_rel_RS = _txn_record_rel(prRS.run_id)
+        _srcs_dir_RS = _arch_d23(rRS, prRS) / "sources"
+        _dropped_RS = sorted(p.name for p in _srcs_dir_RS.iterdir())[0]
+        (_srcs_dir_RS / _dropped_RS).unlink()                     # archive now omits one preserved body
+        _recRS = tomllib.loads(_live_txn_path_d23(rRS, prRS).read_text())
+        _recRS["archived_sources"] = [s for s in _recRS.get("archived_sources", []) if s != _dropped_RS]
+        _tamper_RS = _opf_emit.emit(_recRS).encode("utf-8")       # T: self-consistent with the tampered archive
+        _orig_rc_RS = _journal._read_contained
+        _rc_calls_RS = {"n": 0}
+        def _swap_rc_RS(root_fd, relpath, *a, **k):
+            if relpath == _rec_rel_RS:
+                _rc_calls_RS["n"] += 1
+                if _rc_calls_RS["n"] == 1:
+                    _r, _st = _orig_rc_RS(root_fd, relpath, *a, **k)   # real stat; substitute tampered bytes
+                    return _tamper_RS, _st
+                return _orig_rc_RS(root_fd, relpath, *a, **k)          # ORIGINAL R on any second read
+            return _orig_rc_RS(root_fd, relpath, *a, **k)
+        _journal._read_contained = _swap_rc_RS
+        try:
+            apRS = apply_import(rRS, prRS.run_id, now=NOW)
+        finally:
+            _journal._read_contained = _orig_rc_RS
+        check("D23-noop-rejects-record-read-swap", apRS.verdict != 0 and apRS.promoted is False)
 
         # A3 (acceptance required): a planned-but-UNREVIEWED run is not promotion-ready -> exit 2, and the
         # aborted apply releases the writer lock (a following good apply is not blocked). Mutates nothing.
