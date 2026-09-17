@@ -29,8 +29,8 @@ landed (OPF-IMPORT-VERB): `opf import [--root DIR] (--scan --set FILE | --plan -
 <run-id> --actor NAME (--decisions FILE | --interactive) | --apply <run-id>)` wires the reserved verb onto
 the U7 operation layer (_opf_import scan/plan/review/apply). Exactly one mode is required; `--scan` renders
 the canonical inventory to stdout writing nothing, `--plan` stages a candidate run, `--review` captures an
-attributed acceptance.json (no live-store write), and `--apply` wires onto the STILL-DEFERRED apply-promotion
-stub (exit 2, mutating nothing, until the OPF-IMPORT-APPLY unit lands). Each mode maps the operation layer's
+attributed acceptance.json (no live-store write), and `--apply` wires onto the PR-C apply-promotion
+(the journaled, verified-restore cutover that promotes an accepted run). Each mode maps the operation layer's
 0/1/2 verdict to the CLI exit contract. Unlike the applicability-probe siblings, import is a REQUESTED
 operation: an unresolved / NOT-ADOPTED root fails cannot-evaluate (exit 2) with a "run `opf init` first"
 message rather than reporting NOT APPLICABLE (divergence D7).
@@ -84,7 +84,7 @@ def _bootstrap():
         import _opf_emit        # U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
         import _opf_views       # U4: deterministic view generators + the closed transform vocabulary
         import _opf_fuzz        # adversarial input-hardening proof (membership/type-guard class closure)
-        import _opf_import      # U7: import staging (module + self-test; the live import verb stays unwired)
+        import _opf_import      # U7: import staging (module + self-test; the live import verb is wired below)
         import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
@@ -2369,8 +2369,10 @@ def _cmd_import(rest):
                            acceptance.json, NO live-store write. (0 captured; 1 a decisions finding; 2 an
                            unresolved/missing/not-promotion-ready run, missing actor, unreadable decisions
                            file, or non-TTY --interactive)
-      --apply RUN        : apply_import, STILL the deferred stub: exit 2 (cannot-evaluate), mutates nothing.
-                           A CLI vector pins this so PR-C's promotion is a conscious edit.
+      --apply RUN        : apply_import (PR-C, the real fail-closed promotion): promotes an accepted staged
+                           run to the active store (0 promoted / verified no-op; 1 a reject or composition
+                           finding; 2 not-promotion-ready / unverifiable / indeterminate). Mutates the store
+                           only through the journaled, verified-restore cutover.
 
     D7 (verb-family precedent, deliberate divergence from the sibling verbs): every import mode requires a
     RESOLVED, initialized store; an unresolved / NOT-ADOPTED root is exit 2 with the operation layer's "run
@@ -2544,9 +2546,9 @@ def _cmd_import(rest):
         # mode == "apply": every import mode requires a RESOLVED, initialized store (D7). Resolve first via
         # the operation layer's shared init-first precondition (single-sourced; the message is NOT
         # re-authored here) so a NOT-ADOPTED root reports "run `opf init` first" at exit 2, consistent with
-        # scan / plan / review, rather than the deferred-promotion stub's message. An adopted store still
-        # forwards to the STILL-DEFERRED apply_import stub (exit 2, mutates nothing): the PR-C promotion pin
-        # is intact.
+        # scan / plan / review, rather than a promotion-specific message. An adopted store forwards to the
+        # now-real apply_import (PR-C): a run with no acceptance is not promotion-ready -> exit 2 mutating
+        # nothing, and a reviewed run promotes.
         try:
             _opf_import._resolve_store_for_review(root_abs)
         except _opf_import._StageError as exc:
@@ -2721,8 +2723,8 @@ def _cli_self_test():
             store tree byte-unchanged (pure read); --plan -> 0 staging one run; --review with an INCOMPLETE
             decisions file -> 1 and NO acceptance.json; --review with a COMPLETE decisions file -> 0 and a
             schema-valid acceptance.json; --review --interactive over a non-TTY stdin -> 2 (interactive
-            front-end refusal); --apply over the staged run -> 2 (the DEFERRED stub) AND the store
-            byte-unchanged (the PR-C stub pin: promotion landing is a conscious edit to this vector)."""
+            front-end refusal); --apply over an UNREVIEWED staged run -> 2 (now-real apply_import finds no
+            acceptance.json) AND the store byte-unchanged (nothing promoted; a reviewed run promotes)."""
             import tomllib
 
             def tree_snapshot(rootdir):
@@ -2860,13 +2862,16 @@ def _cli_self_test():
                     failures.append("import --review --interactive over a non-TTY: rc={!r} (expected "
                                     "2)".format(rc))
 
-                # 7: --apply over the staged run -> 2 (the DEFERRED stub) AND the store byte-unchanged. This
-                # PINS the deferral: when PR-C lands promotion, apply returns 0/1 for this run and this
-                # vector must be consciously edited (change-carries-check).
+                # 7: --apply over the REVIEWED staged run (PR-C, apply is now REAL). This minimal fixture
+                # store declares only [types.backlog_item], so the assembled candidate is NOT doctor-
+                # composable and apply's D4 composition gate aborts fail-closed -> EXIT_FINDING (1), nothing
+                # promoted, and the store tree is byte-unchanged (the abort precedes any publication write).
+                # This CONSCIOUSLY replaces the former deferred-stub exit-2 pin (change-carries-check): the
+                # deferred stub returned 2 for every run, so a real exit-1 composition abort flips it red.
                 store_before = tree_snapshot(store)
-                expect(["import", "--apply", rid, "--root", store], EXIT_MALFORMED)
+                expect(["import", "--apply", rid, "--root", store], EXIT_FINDING)
                 if tree_snapshot(store) != store_before:
-                    failures.append("import --apply (deferred stub) mutated the store (must mutate nothing)")
+                    failures.append("import --apply (composition abort) mutated the store (must mutate nothing)")
 
                 # 8 (F1 schema bool/float-slip, R5-F2 class at the new CLI readers): a --set whose schema is
                 # a bool (True == 1) or a float (1.0 == 1) is a MALFORMED file -> exit 2, never accepted.
@@ -2927,17 +2932,19 @@ def _cli_self_test():
                 if rc != EXIT_MALFORMED or "opf init" not in buf.getvalue():
                     failures.append("import --apply over a NOT-ADOPTED root: rc={!r} (expected 2 + an "
                                     "init-first message)".format(rc))
-                # On an ADOPTED store naming no staged run, --apply still forwards to the DEFERRED stub ->
-                # exit 2 (deferred) AND mutates nothing (the PR-C promotion pin holds for an unknown run too).
+                # On an ADOPTED store naming NO staged run, --apply (PR-C, real) loads the run fail-closed,
+                # finds no such promotion-ready run, and reports "not promotion-ready" at exit 2, mutating
+                # nothing (the store tree is byte-unchanged; the journal/lock infrastructure under .aiqt/ adds
+                # no files once the lock is released). This replaces the former deferred-stub message pin.
                 store_before_apply = tree_snapshot(store)
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                     rc = main(["import", "--apply", _VALID_RID, "--root", store])
-                if rc != EXIT_MALFORMED or "deferred" not in buf.getvalue():
+                if rc != EXIT_MALFORMED or "not promotion-ready" not in buf.getvalue():
                     failures.append("import --apply over an ADOPTED store (unknown run): rc={!r} (expected "
-                                    "2 + the deferred-stub message)".format(rc))
+                                    "2 + a not-promotion-ready message)".format(rc))
                 if tree_snapshot(store) != store_before_apply:
-                    failures.append("import --apply (adopted, deferred stub) mutated the store")
+                    failures.append("import --apply (adopted, unknown run) mutated the store")
 
                 # 12 (F4 read-boundary RecursionError parity, R8-F1 class): a deeply-nested --decisions JSON
                 # raises RecursionError from json.loads (not fh.read). The reader catches it and fails closed
@@ -3030,8 +3037,9 @@ def _cli_self_test():
               "store, NOT-ADOPTED -> 0 and a garbage store -> 2; import wires scan/plan/review/apply onto "
               "the U7 operation layer -- an unresolved store -> 2 init-first, --scan -> 0 writing nothing, "
               "--plan -> 0 staging a run, --review incomplete -> 1 and complete -> 0 with a valid "
-              "acceptance.json, non-TTY --interactive -> 2, and the deferred --apply stub -> 2 mutating "
-              "nothing; fixture-setup and fixture-I/O OSError fail closed to exit 2)")
+              "acceptance.json, non-TTY --interactive -> 2, and --apply over a reviewed run on a non-doctor-"
+              "composable fixture -> 1 (composition abort) and over an unknown run -> 2 not-promotion-ready, "
+              "each mutating nothing; fixture-setup and fixture-I/O OSError fail closed to exit 2)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("opf cli self-test: harness error: unexpected error ({!r}); failing closed to exit 2".format(

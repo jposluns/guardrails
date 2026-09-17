@@ -43,6 +43,12 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
                            mapping resting in a resting state carries an explicit accept.
   - scan-determinism     : scan_import over the same inputs in reversed declaration order yields an equal
                            inventory digest, and an unreadable/absent declared source fails closed (exit 2).
+  - transaction-schema   : the per-run apply-promotion transaction record (PR-C), when present at the store-
+                           root `.aiqt/import/<run-id>/transaction.toml` (OUTSIDE .working/, so it survives
+                           the terminal run-dir deletion), is well-formed: schema/format/run-id binding, a
+                           known state, digest-shaped bindings, and allocation/restore_ref tables.
+  - transaction-consistency : the transaction record's state machine, and that the attributed acceptance is
+                           archived (`.aiqt/import-archive/<run-id>/acceptance.json`) once state >= published.
 
 acceptance.json is CONDITIONALLY PRESENT: absent until a run is reviewed, so an absent acceptance.json is a
 legitimate pre-review state recorded as a PASS ("not yet reviewed") for the four acceptance checks; a
@@ -51,16 +57,19 @@ runs the binding, attribution, and completeness recompute independently over the
 defence-in-depth re-derivation, not a re-run of the review tool: the acceptance record is unauthenticated).
 
 The --self-test also DELEGATES to the operation-layer module suite (_opf_import.self_test()) and requires
-it green, so the module's scan/plan/review/apply unit invariants (including apply-deferred-cannot-evaluate,
+it green, so the module's scan/plan/review/apply unit invariants (including the apply-promotion behaviour
+checks: promoted / idempotent no-op / reject-blocked / acceptance-required / composition-gate-fail-closed,
 the review acceptance-capture invariants, and plan-leaves-the-active-store-unchanged) run wherever this
 CI-registered gate runs.
 
-Disclosed coverage limits (part of the gate, not a footnote): apply-promotion (live-store mutation) is
-deferred to the OPF-IMPORT-APPLY unit, so its transaction/journal/restore/idempotency invariants are NOT
-exercised here; the semantic correctness of a mapping, and the AUTHENTICITY of a named acceptance actor
-(actor impersonation, review-time backdating, or fabrication by any principal with write access to the run
-dir) are gate-blind: the gate guards the review-to-promotion BINDING, not identity authenticity (the
-reserved signature seam is the upgrade path). A passing gate proves nothing about those.
+Disclosed coverage limits (part of the gate, not a footnote): the apply-promotion live-store cutover's deep
+crash/journal/restore invariants (journaled preimage rollback, crash-recovery replay, single-writer lock
+reconcile) are exercised by the _opf_import module suite (through apply_import) and by _journal's own
+crash-injection harness, NOT by this staged-run gate, which validates the RESULTING transaction record shape
+and state-machine consistency (Group C above); the semantic correctness of a mapping, and the AUTHENTICITY of
+a named acceptance actor (actor impersonation, review-time backdating, or fabrication by any principal with
+write access to the run dir) are gate-blind: the gate guards the review-to-promotion BINDING, not identity
+authenticity (the reserved signature seam is the upgrade path). A passing gate proves nothing about those.
 
 This repository is not a DevProcess adopter (it has no store to import into), so even though the `opf
 import` verb is now wired (OPF-IMPORT-VERB, opf.py `_cmd_import`) there is no staged import run to check
@@ -94,6 +103,11 @@ EXPECTED_CHECKS = (
     "mapping-state-vocab", "mapping-origin-vocab", "lf-bijection", "lf-quad-completeness", "source-preservation",
     "inventory-digest", "report-binding-digests", "proposals-artifact",
     "acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness",
+    # Group C (OPF-IMPORT-APPLY, PR-C): the per-run transaction record the promotion writes OUTSIDE .working/
+    # at the store-root `.aiqt/import/<run-id>/transaction.toml`, conditionally present (absent = not yet
+    # applied). transaction-schema validates its shape; transaction-consistency validates the state machine
+    # and that the archived acceptance exists once the record's state reaches published (spec 14.1 / apply).
+    "transaction-schema", "transaction-consistency",
 )
 
 
@@ -578,6 +592,44 @@ def check_staged_run(run_dir):
                             break
             record("acceptance-completeness", comp_ok, comp_detail)
 
+    # --- Group C: the per-run transaction record (apply-promotion, PR-C) --------------------------------
+    # The record lives OUTSIDE .working/ at the store-root `.aiqt/import/<run-id>/transaction.toml` (D2/D3:
+    # it survives the terminal run-dir deletion and never enters the store containment walk). It is
+    # CONDITIONALLY PRESENT (mirroring acceptance.json): absent = "run not yet applied", recorded as a PASS
+    # for both Group C checks; present = validated for schema and state-machine consistency. The store root
+    # is derived from the run dir (<store>/.working/imports/<run-id>), so the gate finds the record at its
+    # relocated home without a separate argument.
+    store_root = run_dir.parent.parent.parent
+    run_name = run_dir.name
+    txn_path = store_root / imp.IMPORT_OPS_REL / run_name / imp.TRANSACTION_NAME
+    if not txn_path.is_file():
+        record("transaction-schema", True, "no transaction record (run not yet applied)")
+        record("transaction-consistency", True, "no transaction record (run not yet applied)")
+    else:
+        try:
+            txn = _load_toml(txn_path)
+        except _GateError as exc:
+            record("transaction-schema", False, str(exc))
+            record("transaction-consistency", False, "transaction record unreadable/unparseable")
+        else:
+            # transaction-schema: shape of the record, validated by the SHARED
+            # imp._validate_transaction_record so the gate and the apply idempotency no-op cannot drift
+            # (PRC-F2). The run binding is the run dir name.
+            ts_ok, ts_detail = imp._validate_transaction_record(txn, run_name)
+            record("transaction-schema", ts_ok, ts_detail)
+
+            # transaction-consistency: the state-machine invariant that the attributed acceptance exists once
+            # the record's state reaches published (>= published). The apply relocates acceptance.json to the
+            # durable archive at `.aiqt/import-archive/<run-id>/acceptance.json`, so its presence there is the
+            # authoritative post-deletion witness of the review-to-apply binding.
+            tc_ok, tc_detail = True, ""
+            if txn.get("state") in ("published", "complete"):
+                arch_acc = store_root / imp.IMPORT_ARCHIVE_REL / run_name / imp.ACCEPTANCE_NAME
+                if not arch_acc.is_file():
+                    tc_ok, tc_detail = False, ("state is >= published but the archived acceptance.json is "
+                                               "absent (acceptance must exist once state reaches published)")
+            record("transaction-consistency", tc_ok, tc_detail)
+
     # Registry reconciliation (guard-input-soundness): every declared check MUST have produced a result;
     # one that did not run is recorded as a FINDING, never a silent omission a caller could read as pass.
     for cid in EXPECTED_CHECKS:
@@ -718,6 +770,46 @@ def _self_test():
         # The emitted check-set must be EXACTLY the declared registry (no omission, no stray): an omitted
         # check can never read as a clean pass.
         expect("clean-registry-complete", set(clean_results) == set(EXPECTED_CHECKS))
+
+        # --- Group C discriminators (PR-C): the per-run transaction record at its relocated store-root home
+        # `.aiqt/import/<run-id>/transaction.toml`, and the archived acceptance at `.aiqt/import-archive/
+        # <run-id>/acceptance.json`. Each check PASSes when absent (not yet applied) and on a valid record,
+        # and FINDINGs on a targeted mutation (change-carries-check flip evidence). -----------------------
+        def write_txn(store, rid, **over):
+            model = {"schema": 1, "format": imp.TRANSACTION_FORMAT, "run_id": rid, "state": "complete",
+                     "txn_id": "t1", "plan_digest": "sha256:" + "0" * 64,
+                     "inventory_digest": "sha256:" + "1" * 64, "allocation": {"LF": ["LF-1"]},
+                     "restore_ref": {"txn_id": "t1", "journal_rel": imp.IMPORT_JOURNAL_REL,
+                                     "observed_head": ""}}
+            model.update(over)
+            d = store / imp.IMPORT_OPS_REL / rid
+            d.mkdir(parents=True, exist_ok=True)
+            (d / imp.TRANSACTION_NAME).write_text(_opf_emit.emit(model), encoding="utf-8")
+
+        def write_archived_acceptance(store, rid):
+            d = store / imp.IMPORT_ARCHIVE_REL / rid
+            d.mkdir(parents=True, exist_ok=True)
+            (d / imp.ACCEPTANCE_NAME).write_text("{}\n", encoding="utf-8")
+
+        # (a) no record present: both Group C checks PASS ("run not yet applied"), asserted on the clean run.
+        expect("txn-absent-schema-pass", clean_results["transaction-schema"][0] is True)
+        expect("txn-absent-consistency-pass", clean_results["transaction-consistency"][0] is True)
+        # (b) a valid COMPLETE record + an archived acceptance: both PASS.
+        tcb = stage_clean()
+        write_txn(tcb.parent.parent.parent, tcb.name)
+        write_archived_acceptance(tcb.parent.parent.parent, tcb.name)
+        tcb_res = check_staged_run(tcb)
+        expect("txn-valid-schema-pass", tcb_res["transaction-schema"][0] is True)
+        expect("txn-valid-consistency-pass", tcb_res["transaction-consistency"][0] is True)
+        # (c) a malformed record (wrong format): transaction-schema FINDING.
+        tcc = stage_clean()
+        write_txn(tcc.parent.parent.parent, tcc.name, format="wrong/format/v9")
+        write_archived_acceptance(tcc.parent.parent.parent, tcc.name)
+        expect("disc-txn-schema", check_staged_run(tcc)["transaction-schema"][0] is False)
+        # (d) state >= published but the archived acceptance is absent: transaction-consistency FINDING.
+        tcd = stage_clean()
+        write_txn(tcd.parent.parent.parent, tcd.name, state="published")
+        expect("disc-txn-consistency", check_staged_run(tcd)["transaction-consistency"][0] is False)
 
         # --- one discriminator per check: a single mutation flips its TARGET check to FINDING ---------
         # structure: remove plan.toml.

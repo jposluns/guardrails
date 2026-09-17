@@ -174,8 +174,15 @@ def _close_fd_quietly(fd):
         os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
         return
     except OSError as exc2:
-        print("warning: cleanup close of fd {} failed to release it ({} / {}); fail-surfaced"
-              .format(fd, first, exc2), file=sys.stderr)
+        # The diagnostic itself must never raise out of this teardown helper: a broken stderr (an OSError
+        # on the write) after this double close-failure would otherwise ESCAPE the helper and, at the apply
+        # cleanup call sites, reach the outer `except OSError` and overturn a committed promotion. Swallow a
+        # stderr-write OSError so the fail-surface path still returns; the leak is already surfaced when it can be.
+        try:
+            print("warning: cleanup close of fd {} failed to release it ({} / {}); fail-surfaced"
+                  .format(fd, first, exc2), file=sys.stderr)
+        except OSError:
+            pass
 
 
 def _open_parent(root_fd, relpath):
