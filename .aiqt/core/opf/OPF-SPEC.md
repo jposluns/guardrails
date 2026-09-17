@@ -1130,6 +1130,28 @@ section fixes the posture the tooling must honour.
   candidate, leaving originals in place. The staging tree is a store-level area beside the machine
   store, not inside it: the machine store carries TOML records only, so an import run's non-TOML
   content (the preserved source bodies) never lands under the machine subdirectory.
+- Review and acceptance are explicit and attributed. A staged plan is promoted only after a human, or
+  the assistant acting on the adopter's behalf, reviews it and records a decision on every fragment
+  through a review step, never by editing the human-readable report. The review step captures a decision
+  record that binds the exact run it reviewed, the run id, the plan digest, and the inventory digest, so
+  a regenerated plan (a new run) invalidates a prior acceptance by construction. Every model-proposed
+  mapping that comes to rest in a mapped, split, duplicate, or ignored state requires its own explicit
+  acceptance; a blanket acceptance of model proposals is not offered. A rejected fragment blocks
+  promotion and is resolved by a fresh plan whose operator-supplied mapping is recorded as a human
+  revision, never by silently re-labelling or dropping the fragment.
+- Actor attribution is recorded, and its assurance is stated honestly. The decision record names the
+  actor, recorded as self-asserted; under a single-writer posture the tooling does not authenticate that
+  identity, and the record discloses that actor impersonation, review-time backdating, and fabrication by
+  any principal with write access to the staging area are outside what the acceptance check guarantees.
+  The record reserves a place for a verifiable signature, so a future multi-writer posture can raise that
+  assurance without a format break; the acceptance check guards the review-to-promotion binding, not the
+  authenticity of the named actor.
+- The import set is a declared input, not an inferred one. The scan and plan steps read an explicitly
+  declared set of sources, and any model-proposed mappings, rather than absorbing whatever is present at
+  a location; an unreadable or malformed declaration is a failure, never an empty set. Import is a
+  requested operation, so it runs only against a resolved, initialized store; where no store is present
+  the tooling reports that the store must be initialized first rather than treating the absence as
+  not-applicable.
 
 ### 14.2 Pre-existing files at the store location
 
