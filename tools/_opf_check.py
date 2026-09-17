@@ -1728,6 +1728,11 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
                 rep.cant("C-CONTAINMENT: [unmanaged] path entry {} is not a contained store-relative string "
                          "(spec 14.2); the unmanaged declaration cannot be evaluated".format(_safe_display(p)))
     ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, WORKLOG_NAME, LEASE_NAME})
+    # Importer namespaces (legacy_fragment) are schema-deferred and, per the decoupled D6 design, are NOT
+    # declared in the manifest [types]; their type index (e.g. legacy_fragment.index.toml) is therefore a
+    # managed leaf IF PRESENT even without a declaration, mirroring C-COUNTERS' optional_namespaces
+    # (accepted-if-present, never required). Ledger importer types (none today) are excluded.
+    importer_index_types = frozenset(IMPORTER_TYPES) - _LEDGER_TYPES
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
     # imports is store-scope (`.working/imports`), a SIBLING of the machine subdir (disjoint from mrel), read
     # from the shared _opf_import.IMPORTS_REL constant so the checker and U7 cannot drift (spec 14.1). The
@@ -1751,7 +1756,7 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
                     t = r[:-len(INDEX_SUFFIX)]
                     # worklog is a ledger only (home: worklog.toml), so worklog.index.toml is NEVER a
                     # managed leaf (F2); a ledger type has no `<type>.index.toml`.
-                    if t in enabled_types and t not in _LEDGER_TYPES:
+                    if t not in _LEDGER_TYPES and (t in enabled_types or t in importer_index_types):
                         return True
             elif layout == "per-record":
                 head, tail = r.split("/", 1)
@@ -3308,6 +3313,14 @@ def self_test():
         check("worklog-index-leaf-invalid", rwli.status == INVALID)
         check("worklog-index-leaf-named",
               any("C-CONTAINMENT" in f and "worklog.index.toml" in f for f in rwli.findings))
+        # PRC-F1: a present importer-type index (legacy_fragment.index.toml) is a managed leaf even when the
+        # manifest does not declare the type (decoupled D6, schema-deferred); C-CONTAINMENT must NOT flag it.
+        # Without the importer_index_types recognition this flips to a C-CONTAINMENT finding on the LF index.
+        lfi = clean_machine()
+        lfi["legacy_fragment.index.toml"] = idx([])
+        rlfi = run(lfi)
+        check("importer-index-leaf-not-flagged",
+              not any("C-CONTAINMENT" in f and "legacy_fragment.index.toml" in f for f in rlfi.findings))
         # F2 (per-record): worklog/<WL-n>.toml is never a per-record body -> INVALID; a garbage body control
         # is still caught.
         wlr = copy.deepcopy(pr_machine)

@@ -612,28 +612,10 @@ def check_staged_run(run_dir):
             record("transaction-schema", False, str(exc))
             record("transaction-consistency", False, "transaction record unreadable/unparseable")
         else:
-            # transaction-schema: shape of the record (strict-int schema, exact format, run binding, a known
-            # state, digest-shaped bindings, allocation + restore_ref tables). type(...) is int excludes the
-            # bool slip (True == 1), mirroring the report-schema guard.
-            ts_ok, ts_detail = True, ""
-            pd = txn.get("plan_digest")
-            iv = txn.get("inventory_digest")
-            if not (type(txn.get("schema")) is int and txn.get("schema") == 1):
-                ts_ok, ts_detail = False, "transaction schema is not the integer 1"
-            elif txn.get("format") != imp.TRANSACTION_FORMAT:
-                ts_ok, ts_detail = False, "format is not {!r}".format(imp.TRANSACTION_FORMAT)
-            elif txn.get("run_id") != run_name:
-                ts_ok, ts_detail = False, "run_id does not name this run dir"
-            elif txn.get("state") not in imp._TRANSACTION_STATES:
-                ts_ok, ts_detail = False, "state {!r} is not a transaction state".format(txn.get("state"))
-            elif not (isinstance(pd, str) and imp._DIGEST_RE.match(pd)):
-                ts_ok, ts_detail = False, "plan_digest is not a 'sha256:'+64-hex digest"
-            elif not (isinstance(iv, str) and imp._DIGEST_RE.match(iv)):
-                ts_ok, ts_detail = False, "inventory_digest is not a 'sha256:'+64-hex digest"
-            elif not isinstance(txn.get("allocation"), dict):
-                ts_ok, ts_detail = False, "allocation is not a table"
-            elif not isinstance(txn.get("restore_ref"), dict):
-                ts_ok, ts_detail = False, "restore_ref is not a table"
+            # transaction-schema: shape of the record, validated by the SHARED
+            # imp._validate_transaction_record so the gate and the apply idempotency no-op cannot drift
+            # (PRC-F2). The run binding is the run dir name.
+            ts_ok, ts_detail = imp._validate_transaction_record(txn, run_name)
             record("transaction-schema", ts_ok, ts_detail)
 
             # transaction-consistency: the state-machine invariant that the attributed acceptance exists once
