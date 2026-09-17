@@ -1723,16 +1723,27 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
     (check-fails-closed-on-unreadable, SECA-verified-restore-path).
 
     This is the ONE caller that COMPARES WORKTREE CONTENT against the index (the operation that makes git run
-    a repo/worktree-configured clean/process filter), so it prepends _filter_neutralizing_args to the status
-    argv: git EXECUTES such a filter's external command during this read-only observation, an exec-on-observe
-    vector of the executable-config-trust-gate class (SECI-config-is-executable-trust-gate,
+    a repo/worktree-configured clean/process filter), so it passes _filter_neutralizing_config to _run_git as
+    config_overrides: git EXECUTES such a filter's external command during this read-only observation, an
+    exec-on-observe vector of the executable-config-trust-gate class (SECI-config-is-executable-trust-gate,
     OPF-STATUS-FILTER-SUPPRESS) that OPF-FSMON-SUPPRESS closed for core.fsmonitor and GIT_NO_LAZY_FETCH closed
-    for the lazy-fetch->core.sshCommand vector. Both _upgrade_check_clean call sites (store and product_root)
-    inherit the neutralization through this single narrow call. Any FUTURE worktree-content observation (a
-    non-`--cached` diff, diff-files, ls-files -m, update-index --refresh, a status elsewhere) must adopt
-    _filter_neutralizing_args the same way; the other observe verbs read no worktree content and do not."""
+    for the lazy-fetch->core.sshCommand vector. The overrides are injected as SEPARATE GIT_CONFIG_KEY/VALUE
+    env strings (never `-c key=value` argv, whose first-`=` split a subsection name containing `=` would
+    exploit to leave the real driver executable, F-OPF-STATUSFILTER-EQ-BYPASS). Both _upgrade_check_clean call
+    sites (store and product_root) inherit the neutralization through this single narrow call. Any FUTURE
+    worktree-content observation (a non-`--cached` diff, diff-files, ls-files -m, update-index --refresh, a
+    status elsewhere) must pass _filter_neutralizing_config the same way; the other observe verbs read no
+    worktree content and do not.
+
+    RESIDUAL (disclose-guard-residuals, F-OPF-STATUSFILTER-LFS-FALSEPOS): neutralizing an EXTERNAL NORMALIZING
+    clean/process filter (the git-lfs shape, index=cleaned/pointer blob, worktree=smudged body, required=true)
+    stops git reproducing the cleaned blob, so in the racy-clean mtime window (normal post-add/checkout/clone
+    state) status re-hashes the raw worktree bytes, which differ from the index blob, and a genuinely-CLEAN
+    store reads DIRTY. This is inherent to driver neutralization and is FAIL-CLOSED (it over-refuses the
+    upgrade; never a false-clean, never a filter exec). _upgrade_check_clean surfaces it with operator-clear
+    guidance to settle the worktree first."""
     try:
-        neutralizing = _opf_observe._filter_neutralizing_args(git, root)
+        neutralizing = _opf_observe._filter_neutralizing_config(git, root)
     except RuntimeError as exc:
         # The enumeration that proves which clean/process filters git could exec on the status is a guard; an
         # unreadable enumeration is a cannot-evaluate, so the probe refuses rather than run a status that might
@@ -1741,9 +1752,9 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
                             "filter configuration is unreadable ({}), so a read-only status probe cannot run "
                             "without risking filter execution; refusing the destructive rewrite "
                             "(fail-closed)".format(exc))
-    args = (neutralizing + ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+    args = (["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
              "--no-renames", "--"] + list(pathspecs))
-    out = _opf_observe._run_git(git, root, args)
+    out = _opf_observe._run_git(git, root, args, config_overrides=neutralizing)
     if not out.completed:
         raise _UpgradeError("could not verify the store is clean before the upgrade ({}); refusing the "
                             "destructive rewrite (fail-closed)".format(out.err.strip()))
@@ -1785,7 +1796,14 @@ def _upgrade_check_clean(res, manifest_model):
     NOT part of that residual and is NOT silently excluded like the legitimate untracked held lease: it
     surfaces on the lease path as a tracked porcelain status (e.g. " D" for a committed lease deleted in the
     worktree) and is REFUSED fail-closed by _upgrade_parse_porcelain, naming the spec-5.7 tracked-lease
-    violation, so that corner is handled here rather than slipping past the lease exclusion into step 4."""
+    violation, so that corner is handled here rather than slipping past the lease exclusion into step 4.
+
+    Residual (F-OPF-STATUSFILTER-LFS-FALSEPOS, disclose-guard-residuals): a store with an EXTERNAL NORMALIZING
+    clean/process filter (the git-lfs shape) can read DIRTY here even when genuinely clean, because the probe
+    neutralizes filter execution (so no repo-planted filter runs on this read-only observation) and the
+    racy-clean window then re-hashes raw worktree bytes against the cleaned index blob. This is a fail-closed
+    over-refusal (never a false-clean, never a filter exec); the refusal message adds operator-clear guidance
+    to settle the worktree when the store carries such a filter."""
     git = _opf_observe._git_path()
     if git is None:
         raise _UpgradeError("cannot locate git to verify the store is clean before the upgrade; without a "
@@ -1805,11 +1823,30 @@ def _upgrade_check_clean(res, manifest_model):
     if dirty:
         shown = sorted(set(dirty))
         head = shown[:10]
+        # A store with a configured external NORMALIZING clean/process filter (the git-lfs shape) can read
+        # DIRTY here even when genuinely clean: the probe neutralizes filter EXECUTION (fail-closed, so no
+        # repo-planted filter runs on this read-only observation), so the cleaned index blob cannot be
+        # reproduced and the racy-clean window re-hashes raw worktree bytes as a mismatch
+        # (F-OPF-STATUSFILTER-LFS-FALSEPOS). It is a fail-closed over-refusal, never a false-clean. When the
+        # store carries such a filter, guide the operator to settle the worktree rather than leaving a bare
+        # "dirty". The presence probe is on the error path only; a RuntimeError there (a config that turned
+        # unreadable since the probe) resolves to the generic message, never a crash.
+        def _has_clean_process_filter(rt):
+            try:
+                return bool(_opf_observe._filter_neutralizing_config(git, rt))
+            except RuntimeError:
+                return False
+        filtered = _has_clean_process_filter(store_root) or (
+            bool(product_specs) and _has_clean_process_filter(product_root))
+        note = (" This store has a configured clean/process filter (git-lfs-shape): the upgrade probe "
+                "neutralizes filter execution for safety, so a normalizing filter can make a genuinely-clean "
+                "store read dirty in the racy-clean window. Settle the worktree (commit, or check out so the "
+                "index and worktree agree for the filtered path) before upgrading." if filtered else "")
         raise _UpgradeError(
             "the store working tree is not clean over the paths this upgrade writes: {} dirty path(s), "
             "showing {}: {}. Commit your store changes (or move them aside), then re-run opf upgrade; the "
-            "uncommitted work is yours and the upgrade never restores or discards it.".format(
-                len(shown), len(head), ", ".join(head)))
+            "uncommitted work is yours and the upgrade never restores or discards it.{}".format(
+                len(shown), len(head), ", ".join(head), note))
 
 
 def _upgrade_lease_held_message(pfd, name, lease_rel):

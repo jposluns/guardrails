@@ -985,9 +985,12 @@ def _suite():
             _GO = _obs_r1b._GitOutcome
             _orig_run_git = _obs_r1b._run_git
             try:
-                def _fake_run_git(_git, _root, args, timeout=None):
+                def _fake_run_git(_git, _root, args, timeout=None, allow_lazy_fetch=False,
+                                  config_overrides=None):
                     if "rev-parse" in args:
                         return _GO(True, 0, b" leading/\n", b"")
+                    if "config" in args:
+                        return _GO(True, 0, b"", b"")   # no filters configured: empty (NUL-free) --list output
                     return _GO(True, 0, b"??  leading/.working/toml/lease.toml\x00", b"")
                 _obs_r1b._run_git = _fake_run_git
                 _r1b_dirty = opf._upgrade_probe_dirty("git", base, [".working"],
@@ -1568,12 +1571,12 @@ def _suite():
                   not (sA / "SENTINEL").exists())
             check("U28a FIX: a racy-but-unchanged store reads CLEAN under neutralization", dA == [])
             _reset(sA)
-            _orig_neut = _obs_flt._filter_neutralizing_args
+            _orig_neut = _obs_flt._filter_neutralizing_config
             try:
-                _obs_flt._filter_neutralizing_args = lambda *a, **k: []
+                _obs_flt._filter_neutralizing_config = lambda *a, **k: []
                 _probe(_git_flt, str(sA), [_opf_store.WORKING_DIRNAME], _lease_flt)
             finally:
-                _obs_flt._filter_neutralizing_args = _orig_neut
+                _obs_flt._filter_neutralizing_config = _orig_neut
             check("U28a FLIP: without the neutralization the probe executes the filter (the exploit; teeth)",
                   (sA / "SENTINEL").exists())
 
@@ -1609,16 +1612,16 @@ def _suite():
             check("U28d FIX: a required (emptied) driver is not executed and does not mask the verdict",
                   not (sD / "SENTINEL").exists() and dD == [])
             _reset(sD)
-            _orig_neut = _obs_flt._filter_neutralizing_args
+            _orig_neut = _obs_flt._filter_neutralizing_config
             _raised_d = False
             try:
-                _obs_flt._filter_neutralizing_args = (
-                    lambda *a, **k: ["-c", "filter.pwn.clean=", "-c", "filter.pwn.process="])
+                _obs_flt._filter_neutralizing_config = (
+                    lambda *a, **k: [("filter.pwn.clean", ""), ("filter.pwn.process", "")])
                 _probe(_git_flt, str(sD), [_opf_store.WORKING_DIRNAME], _lease_flt)
             except opf._UpgradeError:
                 _raised_d = True
             finally:
-                _obs_flt._filter_neutralizing_args = _orig_neut
+                _obs_flt._filter_neutralizing_config = _orig_neut
             check("U28d FLIP: omitting required=false lets a required emptied driver break the probe (teeth)",
                   _raised_d)
 
@@ -1693,7 +1696,7 @@ def _suite():
             (sH / ".git" / "config").write_text("[this is not valid\n = = =\n", encoding="utf-8")
             _raised_h = False
             try:
-                _obs_flt._filter_neutralizing_args(_git_flt, str(sH))
+                _obs_flt._filter_neutralizing_config(_git_flt, str(sH))
             except RuntimeError:
                 _raised_h = True
             check("U28h helper fails closed (RuntimeError) on a corrupt .git/config", _raised_h)
@@ -1705,19 +1708,20 @@ def _suite():
             check("U28h probe refuses fail-closed (_UpgradeError) when the enumeration cannot run",
                   _probe_raised_h)
 
-            # (i) helper argv unit vector: only clean/process keys are neutralized (a smudge-only driver is
-            # not), each yielding the exact three -c overrides, the neutralized set == the exec-able set.
-            sI = base / "u28i-argv"
+            # (i) helper config-pair unit vector: only clean/process keys are neutralized (a smudge-only driver
+            # is not), each yielding the exact three (key, value) overrides, the neutralized set == the
+            # exec-able set. Values are separate strings (no `-c` first-`=` split hazard).
+            sI = base / "u28i-config"
             sI.mkdir()
             build_store(sI)
             git_call(sI, ["config", "filter.pwn.clean", "sh -c cat"])
             git_call(sI, ["config", "filter.lfs.smudge", "git-lfs smudge -- %f"])   # smudge is checkout-side
-            _argv = _obs_flt._filter_neutralizing_args(_git_flt, str(sI))
-            check("U28i helper neutralizes the clean driver with the three exact -c overrides",
-                  _argv == ["-c", "filter.pwn.clean=", "-c", "filter.pwn.process=",
-                            "-c", "filter.pwn.required=false"])
+            _cfg = _obs_flt._filter_neutralizing_config(_git_flt, str(sI))
+            check("U28i helper neutralizes the clean driver with the three exact config overrides",
+                  _cfg == [("filter.pwn.clean", ""), ("filter.pwn.process", ""),
+                           ("filter.pwn.required", "false")])
             check("U28i helper does not neutralize a smudge-only driver (not exec-able on status)",
-                  "filter.lfs.clean=" not in _argv and "filter.lfs.process=" not in _argv)
+                  not any(k.startswith("filter.lfs.") for k, _v in _cfg))
 
             # (j) BOTH _upgrade_check_clean call sites are covered: the fix lives inside _upgrade_probe_dirty,
             # which _upgrade_check_clean calls for the store root AND, when the product render target has a
@@ -1728,6 +1732,79 @@ def _suite():
             _probe(_git_flt, str(sJ), [_opf_store.WORKING_DIRNAME], None)
             check("U28j the fix holds for a product-root binding (second _upgrade_check_clean call site)",
                   not (sJ / "SENTINEL").exists())
+
+            # (k) SECURITY (F-OPF-STATUSFILTER-EQ-BYPASS): a driver whose SUBSECTION NAME contains `=`
+            # ([filter "pwn=bypass"], reachable via `.gitattributes: <target> filter=pwn=bypass`). A `-c
+            # filter.pwn=bypass.clean=` argv splits at the FIRST `=` (parsed as key `filter.pwn` = value
+            # `bypass.clean=`), leaving the REAL `filter.pwn=bypass.clean` driver EXECUTABLE; the GIT_CONFIG_*
+            # env mechanism passes key and value as SEPARATE strings and neutralizes ANY subsection name. The
+            # identity `cat` clean filter keeps the store reading CLEAN under neutralization so the only
+            # observable is sentinel exec. FLIP renders the SAME neutralization set the OLD -c key=value way to
+            # prove the env injection (not merely the enumeration) is what closes the vector (change-carries-check).
+            sK = _flt_store("u28k-eqname", "pwn=bypass", "clean", "pwn=bypass")
+            _reset(sK)
+            _obs_flt._run_git(_git_flt, str(sK), _status_args)   # positive control: un-neutralized status
+            check("U28k positive control: an un-neutralized status executes the =-named clean filter",
+                  (sK / "SENTINEL").exists())
+            _reset(sK)
+            dK = _probe(_git_flt, str(sK), [_opf_store.WORKING_DIRNAME], _lease_flt)
+            check("U28k FIX: the =-in-subsection-name clean filter is NOT executed under env neutralization",
+                  not (sK / "SENTINEL").exists())
+            check("U28k FIX: an identity-filter =-named store reads CLEAN under neutralization", dK == [])
+            _reset(sK)
+            # FLIP: render the neutralization set the pre-fix way (-c key=value argv). git's first-`=` split
+            # mis-parses the =-name and the REAL filter FIRES -- the exact bypass the env fix closes.
+            _cfgK = _obs_flt._filter_neutralizing_config(_git_flt, str(sK))
+            _old_c = []
+            for _k, _v in _cfgK:
+                _old_c += ["-c", "{}={}".format(_k, _v)]
+            _obs_flt._run_git(_git_flt, str(sK), _old_c + _status_args)
+            check("U28k FLIP: the old -c key=value mechanism leaves the =-named filter EXECUTABLE (the bypass; teeth)",
+                  (sK / "SENTINEL").exists())
+
+            # (l) ACCURACY residual (F-OPF-STATUSFILTER-LFS-FALSEPOS): an EXTERNAL NORMALIZING clean filter
+            # (git-lfs shape: index holds the CLEANED blob, worktree holds the smudged body, required=true)
+            # makes a genuinely-CLEAN store read DIRTY in the racy-clean window under neutralization (the
+            # cleaned blob cannot be reproduced, so raw worktree bytes mismatch the index) -- a FAIL-CLOSED
+            # over-refusal (never a false-clean, never a filter exec). A digit-stripping clean filter models
+            # the normalization: worktree "abc123" -> cleaned index "abc". No sentinel: this vector is the
+            # false-positive, not exec.
+            sL = base / "u28l-normalizing"
+            sL.mkdir()
+            machL = build_store(sL, extra_files={"norm.dat": "abc123\n"}, commit=False)
+            _normtgt = "{}/norm.dat".format(_mach_rel_flt)
+            git_call(sL, ["config", "filter.norm.clean", "sed 's/[0-9]//g'"])
+            git_call(sL, ["config", "filter.norm.required", "true"])   # git-lfs shape: a required driver
+            (sL / ".gitattributes").write_text("{} filter=norm\n".format(_normtgt), encoding="utf-8")
+            git_call(sL, ["--literal-pathspecs", "add", "-A"])   # runs clean: index holds "abc\n"
+            git_call(sL, ["commit", "-m", "seed normalizing store"])
+            check("U28l fixture is the git-lfs shape (index CLEANED != smudged worktree)",
+                  git_call(sL, ["show", ":{}".format(_normtgt)]) == "abc\n"
+                  and (sL / _normtgt).read_text() == "abc123\n")
+            # positive control: with the filter ACTIVE (un-neutralized) the store is genuinely CLEAN (git
+            # re-runs clean -> "abc" == index), so the dirty read below is purely the neutralization residual.
+            os.utime(str(sL / _normtgt), _FUTURE)
+            _natL = _obs_flt._run_git(_git_flt, str(sL), _status_args)
+            check("U28l positive control: with the filter active the normalizing store is genuinely CLEAN",
+                  _natL.completed and _natL.out.strip() == b"")
+            os.utime(str(sL / _normtgt), _FUTURE)
+            dL = _probe(_git_flt, str(sL), [_opf_store.WORKING_DIRNAME], _lease_flt)
+            check("U28l FAIL-CLOSED residual: the normalizing store reads DIRTY under neutralization (over-refuse)",
+                  _normtgt in dL)
+            # operator-clear refusal end-to-end: `opf upgrade` refuses (exit 2) and NAMES the filter and the
+            # settle-the-worktree remedy, rather than a bare "dirty".
+            os.utime(str(sL / _normtgt), _FUTURE)
+            _rcL, _outL = upgrade(sL)
+            check("U28l upgrade refuses (exit 2) the normalizing-filter store in the racy-clean window",
+                  _rcL == 2)
+            check("U28l refusal is operator-clear: names the git-lfs-shape filter and settling the worktree",
+                  "git-lfs-shape" in _outL and "Settle the worktree" in _outL)
+            # genuine dirt is STILL detected alongside the filter (neutralization removes exec, not detection).
+            (machL / "genuine.txt").write_text("real\n", encoding="utf-8")
+            os.utime(str(sL / _normtgt), _FUTURE)
+            dL2 = _probe(_git_flt, str(sL), [_opf_store.WORKING_DIRNAME], _lease_flt)
+            check("U28l genuine dirt (untracked file) still detected under neutralization",
+                  "{}/genuine.txt".format(_mach_rel_flt) in dL2)
 
         if failures:
             for label in failures:
