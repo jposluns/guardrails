@@ -3421,6 +3421,50 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                                           "run, kind, or plan digest; a projection pointing at another run's "
                                           "journal cannot certify an idempotent no-op (reconcile through "
                                           "recover; fail-closed)".format(run_id, noop_txn_id))
+                        # R4-C1: bind the WHOLE record to the immutable journal, so R3-C1's trust in the
+                        # record's archived_sources/acceptance_sha256 is warranted. FIX B proved the INTENT
+                        # binds this run; that same INTENT's `ops` list records the create of THIS run's
+                        # transaction.toml with its content-sha256 (_build_publication_ops), so the live
+                        # record certifies a no-op only while its bytes still hash to that journal-recorded
+                        # digest. A record modified after publication (even a self-consistent tamper of its
+                        # own fields) no longer matches, so it cannot certify a no-op (reconcile through
+                        # recover; fail-closed). capture_preimages adds prestate to each op but leaves the
+                        # poststate untouched, so the recorded content-sha256 is the create's own.
+                        noop_rec_rel = _txn_record_rel(run_id)
+                        noop_intent_ops = noop_intent.get("ops")
+                        noop_rec_op = None
+                        if isinstance(noop_intent_ops, list):
+                            for _iop in noop_intent_ops:
+                                if (isinstance(_iop, dict) and _iop.get("path") == noop_rec_rel
+                                        and _iop.get("op") in ("create", "write")):
+                                    noop_rec_op = _iop
+                                    break
+                        if noop_rec_op is None:
+                            raise _cannot("the durable journal for completed run {} (txn {}) records no create "
+                                          "of this run's transaction record {}; a projection whose publication "
+                                          "the journal does not record cannot certify an idempotent no-op "
+                                          "(reconcile through recover; fail-closed)".format(
+                                              run_id, noop_txn_id, noop_rec_rel))
+                        noop_rec_post = noop_rec_op.get("poststate")
+                        noop_rec_sha = noop_rec_post.get("content-sha256") if isinstance(noop_rec_post, dict) \
+                            else None
+                        if not (isinstance(noop_rec_sha, str) and _HEX64_RE.match(noop_rec_sha)):
+                            raise _cannot("the durable journal's recorded op for the transaction record of "
+                                          "completed run {} carries no valid content hash; a malformed recorded "
+                                          "op cannot bind the record and so cannot certify an idempotent no-op "
+                                          "(reconcile through recover; fail-closed)".format(run_id))
+                        try:
+                            noop_rec_raw, _recst = _journal._read_contained(root_fd, noop_rec_rel)
+                        except _journal.JournalError as exc:
+                            raise _cannot("the retained transaction record for completed run {} is unreadable "
+                                          "({}); a completed record whose live bytes cannot be read cannot be "
+                                          "bound to the immutable journal and so cannot certify an idempotent "
+                                          "no-op (reconcile through recover; fail-closed)".format(run_id, exc))
+                        if _sha256_hex(noop_rec_raw) != noop_rec_sha:
+                            raise _cannot("the retained transaction record for completed run {} does not match "
+                                          "its journal-recorded content hash; the projection was modified after "
+                                          "publication, so it cannot certify an idempotent no-op (reconcile "
+                                          "through recover; fail-closed)".format(run_id))
                         # R3-C1: the durable archive must be present AND type/content-valid, not merely exist.
                         # The completed record self-describes its archive (FIX A: archived_sources +
                         # acceptance_sha256); a record lacking either recorded digest cannot certify a no-op. It
@@ -3898,6 +3942,12 @@ def self_test():
                 for i, o in enumerate(ordered)]
         return review_import(root, run_id, actor="apply-tester", decisions=decs, now=NOW)
 
+    # R4-C2 (self-test hermeticity): neutralize an INHERITED journal crash-injection var for the whole
+    # run. A promote fixture (D23 and the crash-recovery vectors) drives capture_preimages/publish, each
+    # of which calls _journal._kill_point; an inherited AIQT_JOURNAL_KILL would os._exit the process mid
+    # fixture setup. Save+clear it here and restore it in the finally below. A vector that sets the var
+    # DELIBERATELY sets+unsets it locally within its own block; this only removes an inherited value.
+    _saved_kill_env = os.environ.pop(_journal.KILL_ENV, None)
     try:
         # 1: positive stage (mapped + unmapped): verdict 0, run dir + files present, LF quarantine for the
         # unmapped fragment carrying all four provenance fields, active store + counters unchanged.
@@ -5534,6 +5584,50 @@ def self_test():
         apFor = apply_import(rFa, prFa.run_id, now=NOW)
         check("D23-noop-rejects-foreign-journal", apFor.verdict != 0 and apFor.promoted is False)
 
+        # R4-C1 (round-5): with the journal INTACT and the record + archive kept SELF-CONSISTENT, a tamper
+        # of the record's own fields is caught ONLY by binding the WHOLE record to the immutable journal.
+        # Each case below edits the LIVE transaction.toml AND (where relevant) the archive together so they
+        # agree, so R3-C1's archive validation passes and ONLY R4-C1 (live record bytes != journal-recorded
+        # content hash) rejects it. Without R4-C1 each returned a false promoted no-op (verdict 0).
+        def _live_txn_path_d23(root, pr):
+            return root / ".aiqt" / "import" / (pr.run_id or "X") / "transaction.toml"
+
+        # tampered archived_sources: drop one preserved body AND remove it from the record's set, so record
+        # and archive still AGREE; only the record-to-journal binding sees the change.
+        rT1, prT1, _ap0T1, ap1T1 = _fresh_promoted_d23("apply-d23r4-src")
+        check("D23-r4-src-baseline-clean", ap1T1.verdict == 0 and ap1T1.promoted is True)
+        _srcs_dir_T1 = _arch_d23(rT1, prT1) / "sources"
+        _dropped_T1 = sorted(p.name for p in _srcs_dir_T1.iterdir())[0]
+        (_srcs_dir_T1 / _dropped_T1).unlink()
+        _recT1 = tomllib.loads(_live_txn_path_d23(rT1, prT1).read_text())
+        _recT1["archived_sources"] = [s for s in _recT1.get("archived_sources", []) if s != _dropped_T1]
+        _live_txn_path_d23(rT1, prT1).write_text(_opf_emit.emit(_recT1), encoding="utf-8")
+        apT1 = apply_import(rT1, prT1.run_id, now=NOW)
+        check("D23-noop-rejects-tampered-record-sources", apT1.verdict != 0 and apT1.promoted is False)
+
+        # tampered acceptance: replace the archived acceptance bytes AND update the record's acceptance_sha256
+        # to match them, so record and archive still AGREE; only the record-to-journal binding sees it.
+        rT2, prT2, _ap0T2, ap1T2 = _fresh_promoted_d23("apply-d23r4-acc")
+        check("D23-r4-acc-baseline-clean", ap1T2.verdict == 0 and ap1T2.promoted is True)
+        _new_acc_T2 = b"replacement acceptance bytes (self-consistent record+archive)"
+        (_arch_d23(rT2, prT2) / "acceptance.json").write_bytes(_new_acc_T2)
+        _recT2 = tomllib.loads(_live_txn_path_d23(rT2, prT2).read_text())
+        _recT2["acceptance_sha256"] = _sha256_hex(_new_acc_T2)
+        _live_txn_path_d23(rT2, prT2).write_text(_opf_emit.emit(_recT2), encoding="utf-8")
+        apT2 = apply_import(rT2, prT2.run_id, now=NOW)
+        check("D23-noop-rejects-tampered-record-acceptance", apT2.verdict != 0 and apT2.promoted is False)
+
+        # tampered other field: change a well-shaped record field (inventory_digest) to another well-shaped
+        # value, leaving the archive untouched. The record still passes _validate_transaction_record and
+        # FIX B (plan_digest unchanged), so only the record-to-journal binding rejects it.
+        rT3, prT3, _ap0T3, ap1T3 = _fresh_promoted_d23("apply-d23r4-field")
+        check("D23-r4-field-baseline-clean", ap1T3.verdict == 0 and ap1T3.promoted is True)
+        _recT3 = tomllib.loads(_live_txn_path_d23(rT3, prT3).read_text())
+        _recT3["inventory_digest"] = "sha256:" + ("d" * 64)   # well-shaped, different from the recorded value
+        _live_txn_path_d23(rT3, prT3).write_text(_opf_emit.emit(_recT3), encoding="utf-8")
+        apT3 = apply_import(rT3, prT3.run_id, now=NOW)
+        check("D23-noop-rejects-tampered-record-field", apT3.verdict != 0 and apT3.promoted is False)
+
         # A3 (acceptance required): a planned-but-UNREVIEWED run is not promotion-ready -> exit 2, and the
         # aborted apply releases the writer lock (a following good apply is not blocked). Mutates nothing.
         rootA3, mA3 = build_apply_store()
@@ -6458,6 +6552,12 @@ def self_test():
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
+        # R4-C2: restore the inherited crash-injection var (if any) elapsed-agnostic; a value the run
+        # itself leaked is dropped, an inherited one is put back exactly as found.
+        if _saved_kill_env is None:
+            os.environ.pop(_journal.KILL_ENV, None)
+        else:
+            os.environ[_journal.KILL_ENV] = _saved_kill_env
 
     if failures:
         print("OPF-IMPORT SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
