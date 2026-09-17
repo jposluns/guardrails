@@ -286,7 +286,7 @@ def _suite(invoke):
                 check("second init names existing state",
                       rc == EXIT_ERROR and "existing pointer" in output
                       and _opf_store.POINTER_REL in output)
-                check("second init preserves source and git bytes", _snapshot(clean) == before)
+                check("second init preserves source", _snapshot(clean) == before)
 
                 foreign = make_git("foreign")
                 (foreign / working / ".empty" / "nested").mkdir(parents=True)
