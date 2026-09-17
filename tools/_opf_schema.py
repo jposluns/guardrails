@@ -1181,10 +1181,19 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
 
 # --- counters (spec 8.2) -----------------------------------------------------------------------------
 
-def validate_counters(data, known_namespaces=None):
+def validate_counters(data, known_namespaces=None, optional_namespaces=None):
     """Validate a parsed counters.toml (see the counters layout ambiguity note). Returns (high_water,
     findings): high_water is {namespace: int}. Each namespace is two uppercase letters (optionally
-    restricted to `known_namespaces`); each value is a non-negative int (a bool is rejected)."""
+    restricted to `known_namespaces`); each value is a non-negative int (a bool is rejected).
+
+    `optional_namespaces` names namespaces that are ACCEPTED-if-present but NOT REQUIRED (importer/
+    quarantine namespaces such as LF): a counter namespace is accepted (never flagged "not a known
+    namespace") when it is in known_namespaces OR in optional_namespaces, but the completeness check
+    (every known namespace must carry a high-water) applies ONLY to known_namespaces, so an optional
+    namespace absent from [counters] is not a finding. The section-8.1 taxonomy-validity check still
+    applies to every counter including optional ones (an optional namespace bound to no record type is
+    still flagged). It is validated fail-closed exactly like known_namespaces (a malformed control is a
+    finding and treated as empty), and when None/omitted every existing behaviour is unchanged."""
     findings = []
     high_water = {}
     if not isinstance(data, dict):
@@ -1198,6 +1207,12 @@ def validate_counters(data, known_namespaces=None):
     if known_namespaces is not None and not _is_str_token_control(known_namespaces):
         findings.append("known_namespaces must be a collection of namespace strings (fail-closed)")
         known_namespaces = frozenset()
+    # optional_namespaces (accepted-if-present, not required) is validated the same fail-closed way: a
+    # malformed control is a finding and treated as EMPTY, so it can never widen what is accepted beyond
+    # what a well-formed control names (guard-input-soundness; spec 8.2).
+    if optional_namespaces is not None and not _is_str_token_control(optional_namespaces):
+        findings.append("optional_namespaces must be a collection of namespace strings (fail-closed)")
+        optional_namespaces = frozenset()
     extra = set(data) - COUNTERS_TOP_KEYS
     if extra:
         findings.append("counters.toml unknown top-level key(s): {}".format(
@@ -1238,7 +1253,12 @@ def validate_counters(data, known_namespaces=None):
             findings.append("[counters] namespace {!r} is bound to no record type in the section 8.1 "
                             "taxonomy (spec 8.1/8.2)".format(ns))
             continue
-        if known_namespaces is not None and ns not in known_namespaces:
+        # A counter namespace is ACCEPTED when it is a known (required) namespace OR an optional
+        # (accepted-if-present) one; only a namespace that is neither, under a known-namespaces
+        # restriction, is flagged unknown. The taxonomy-validity check above still applies to all.
+        accepted_ns = (known_namespaces is not None and ns in known_namespaces) or \
+                      (optional_namespaces is not None and ns in optional_namespaces)
+        if known_namespaces is not None and not accepted_ns:
             findings.append("[counters] namespace {!r} is not a known namespace".format(ns))
         # A bool is an int subclass; a high-water is a genuine non-negative int, never True/False.
         if not _genuine_high_water(val):
@@ -1825,6 +1845,30 @@ def self_test():
     check("counters-complete-known-ns-ok", not m3c)
     _, m3d = validate_counters({"schema": 1}, known_namespaces=None)   # no known ns: an empty file is not a finding
     check("counters-empty-no-known-ns-ok", not m3d)
+
+    # 20b (optional/importer namespaces, accepted-if-present, NOT required; the LF fresh-init case). An
+    # optional namespace present alongside a complete known baseline is CLEAN; the SAME optional namespace
+    # ABSENT is still clean (not required); an optional namespace that is NOT taxonomy-valid is still
+    # flagged; and a REQUIRED (known) namespace missing is still flagged even when an optional set is given.
+    _, o1 = validate_counters({"schema": 1, "counters": {"BI": 5, "LF": 0}},
+                              known_namespaces={"BI"}, optional_namespaces={"LF"})
+    check("counters-optional-ns-present-ok", not o1)
+    _, o2 = validate_counters({"schema": 1, "counters": {"BI": 5}},
+                              known_namespaces={"BI"}, optional_namespaces={"LF"})
+    check("counters-optional-ns-absent-ok", not o2)
+    _, o3 = validate_counters({"schema": 1, "counters": {"BI": 5, "ZZ": 1}},
+                              known_namespaces={"BI"}, optional_namespaces={"ZZ"})
+    check("counters-optional-ns-not-taxonomy-valid-flagged",
+          any("bound to no record type" in f for f in o3))
+    _, o4 = validate_counters({"schema": 1, "counters": {"LF": 0}},
+                              known_namespaces={"BI"}, optional_namespaces={"LF"})
+    check("counters-required-ns-missing-flagged-with-optional",
+          any("missing a high-water" in f for f in o4))
+    # a malformed optional_namespaces control is a finding and treated as empty (fail-closed).
+    _, o5 = validate_counters({"schema": 1, "counters": {"BI": 5}},
+                              known_namespaces={"BI"}, optional_namespaces="LF")
+    check("counters-optional-ns-malformed-control-flagged",
+          any("optional_namespaces must be a collection" in f for f in o5))
 
     # 21 (M8): a schema field other than the supported version fails closed, not parsed under v1.
     _, m8a = validate_counters({"schema": 999, "counters": {}})

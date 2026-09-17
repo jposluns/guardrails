@@ -2227,7 +2227,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.finding("C-COUNTERS: {} is absent (one monotonic high-water per namespace is required; spec "
                     "8.2)".format(_rel(machine_rel, COUNTERS_NAME)))
     elif cst == "ok":
-        high, cfindings = validate_counters(counters_data, known_namespaces=known_ns)
+        # Importer/quarantine namespaces (IMPORTER_TYPES, i.e. LF) are ACCEPTED-if-present but NOT
+        # REQUIRED: a fresh 1.1.0 store declares an LF counter (opf init) while legacy_fragment stays out
+        # of the manifest [types] (schema-deferred), so LF is absent from known_ns; passing it as optional
+        # keeps the fresh-init store clean without requiring LF on a store that lacks it (spec 8.2).
+        high, cfindings = validate_counters(counters_data, known_namespaces=known_ns,
+                                            optional_namespaces=frozenset(IMPORTER_TYPES.values()))
         for f in cfindings:
             rep.finding("counters.toml: {}".format(f))
         counters_ok = not cfindings
@@ -3737,6 +3742,21 @@ def self_test():
         ccr = run(ccf)
         check("c-counters-missing-namespace-flagged",
               ccr is not None and ccr.checks.get("C-COUNTERS") == "FINDING")
+
+        # C-COUNTERS (fresh-init LF regression, round-2): a fresh 1.1.0 store declares an LF
+        # (legacy_fragment) counter at `opf init` while legacy_fragment stays OUT of the manifest [types]
+        # (schema-deferred), so LF is not a known/required namespace. It is an ACCEPTED-if-present importer
+        # namespace, NOT a "not a known namespace" finding: doctor must pass it. Without the optional-
+        # namespaces wiring (C-COUNTERS passing optional_namespaces=IMPORTER_TYPES) this vector flips to a
+        # C-COUNTERS FINDING flagging LF, the round-1 fresh-init doctor / render failure this fix closes.
+        lfi = clean_machine()
+        lfi["counters.toml"] = counters(LF=0)
+        lfir = run(lfi)
+        check("c-counters-fresh-init-lf-accepted",
+              lfir is not None and lfir.checks.get("C-COUNTERS") == "PASS")
+        check("c-counters-fresh-init-lf-no-unknown-ns-finding",
+              lfir is not None and not any("LF" in f and "not a known namespace" in f
+                                           for f in lfir.findings))
 
         # C-STAGING (enumeration): a staged sibling id that collides with a committed id is only caught
         # because the staging enumerator contributes it to the uniqueness union; removing that enumeration
