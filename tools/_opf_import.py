@@ -3384,8 +3384,8 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                     # resource-bounds; check-fails-closed-on-unreadable).
                     if noop_rec_st.st_size > _opf_store.MAX_STORE_READ_BYTES:
                         raise _cannot("the retained transaction record {} is {} bytes, over the {}-byte "
-                                      "store-read cap; an oversized record is fail-closed before it is read, "
-                                      "never a silent no-op".format(
+                                      "store-read cap before it is read; an oversized record is fail-closed "
+                                      "before any open, never a silent no-op".format(
                                           noop_rec_rel, noop_rec_st.st_size, _opf_store.MAX_STORE_READ_BYTES))
                     try:
                         noop_rec_raw, _noop_rec_readst = _journal._read_contained(
@@ -3396,9 +3396,10 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                                           noop_rec_rel, exc))
                     if len(noop_rec_raw) > _opf_store.MAX_STORE_READ_BYTES:
                         raise _cannot("the retained transaction record {} read {} bytes, over the {}-byte "
-                                      "store-read cap (a raced swap or growth past the pre-open size); an "
-                                      "oversized record is fail-closed before parse, never a silent no-op"
-                                      .format(noop_rec_rel, len(noop_rec_raw), _opf_store.MAX_STORE_READ_BYTES))
+                                      "store-read cap after reading (a raced swap or growth past the pre-open "
+                                      "size); an oversized record is fail-closed before parse, never a silent "
+                                      "no-op".format(
+                                          noop_rec_rel, len(noop_rec_raw), _opf_store.MAX_STORE_READ_BYTES))
                     try:
                         txn_record = tomllib.loads(noop_rec_raw.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
@@ -3564,10 +3565,10 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                         noop_src_names = _list_contained(root_fd, noop_arch_rel + "/sources")
                         if noop_src_names is None:
                             raise _cannot("the durable archived sources directory for completed run {} "
-                                          "disappeared or is unreadable at revalidation; a completed record "
-                                          "whose durable sources cannot be enumerated cannot certify an "
-                                          "idempotent no-op (reconcile through recover; fail-closed)".format(
-                                              run_id))
+                                          "disappeared at revalidation (it was confirmed present, then could "
+                                          "not be listed as present); a completed record whose durable sources "
+                                          "cannot be enumerated cannot certify an idempotent no-op (reconcile "
+                                          "through recover; fail-closed)".format(run_id))
                         noop_seen_bodies = set()
                         for bname in noop_src_names:
                             body_rel = noop_arch_rel + "/sources/" + bname
@@ -5757,25 +5758,70 @@ def self_test():
         check("D23-noop-rejects-disappeared-sources-dir", apZd.verdict != 0 and apZd.promoted is False)
 
         # R6-C2 (round-6): the no-op single-read (R5-C1) restores the 1 MiB store-read cap the prior
-        # _read_toml_contained route enforced, refusing an oversized record BEFORE it is read+parsed rather
-        # than after the R4-C1 hash rejects it (a resource-policy regression: only _read_contained's generic
-        # 16 MiB cap otherwise remained). Take a real promote whose baseline no-op is CLEAN, then grow the LIVE
-        # transaction.toml past MAX_STORE_READ_BYTES with a huge trailing TOML comment (the record fields stay
-        # valid; tomllib ignores the comment). WITH the fix the PRE-read lstat-size check fires the
-        # oversized-specific _cannot before any read/parse; WITHOUT it the record is read+parsed within the
-        # 16 MiB cap and rejected LATER by a DIFFERENT check (the R4-C1 journal-hash mismatch, since the grown
-        # bytes no longer hash to the recorded digest), so the oversized-specific message is absent. Asserting
-        # that message isolates R6-C2; verified against a temporary revert of the size checks, under which the
-        # hash-mismatch message fires instead and this check FAILS.
+        # _read_toml_contained route enforced, as TWO independent guards (mirroring _opf_store's two-check
+        # idiom): a PRE-read reject bound to the already-captured lstat size (an oversized record refused
+        # BEFORE any read), and a POST-read reject on the bytes actually read (a record that lstats under cap
+        # but reads over it, a raced swap/growth past the pre-open size). Each guard carries a DISTINCT stable
+        # substring ("store-read cap before it is read" vs "store-read cap after reading") so it is
+        # independently assertable, and each has its OWN change-carries-check discriminator below. F1 (round-2):
+        # the prior single combined discriminator only asserted the shared "store-read cap" text and tripped
+        # the PRE check first, so it stayed green with EITHER guard alone removed (the other emitted a
+        # "store-read cap" message); it could not pin the reject-BEFORE-read property R6-C2 exists for. The two
+        # discriminators below each fail closed when ONLY their own guard is removed. Verified per-guard against
+        # temporary single-guard reverts (in a /dev/shm scratch): reverting ONLY the pre-read check fails ONLY
+        # -preread (the post-read check then emits an "after reading" message, no "before it is read", and the
+        # record IS read so the read-count is non-zero); reverting ONLY the post-read check fails ONLY -postread
+        # (the raced-growth vector then reads+parses within the 16 MiB cap and is rejected LATER by the R4-C1
+        # hash mismatch, so no "after reading" message); reverting R6-C1 still fails ONLY -disappeared-sources.
+        #
+        # -preread: grow the LIVE transaction.toml past MAX_STORE_READ_BYTES with a huge trailing TOML comment
+        # (the record fields stay valid; tomllib ignores the comment), so its real lstat size exceeds the cap.
+        # Count every _read_contained of the record rel; the PRE-read check must fire BEFORE any such read, so
+        # the record is NEVER read (count == 0). This pins reject-before-read, the property a refactor could
+        # otherwise silently drop back to read-then-reject with the suite green.
         rOv, prOv, _ap0Ov, ap1Ov = _fresh_promoted_d23("apply-d23r6-big")
         check("D23-r6-oversized-baseline-clean", ap1Ov.verdict == 0 and ap1Ov.promoted is True)
+        _rec_rel_Ov = _txn_record_rel(prOv.run_id)
         _rec_path_Ov = _live_txn_path_d23(rOv, prOv)
         _pad_Ov = b"\n# " + b"x" * (_opf_store.MAX_STORE_READ_BYTES + 16) + b"\n"
         _rec_path_Ov.write_bytes(_rec_path_Ov.read_bytes() + _pad_Ov)   # valid record + huge comment, over cap
-        apOv = apply_import(rOv, prOv.run_id, now=NOW)
-        check("D23-noop-rejects-oversized-record",
-              apOv.verdict != 0 and apOv.promoted is False
-              and any("store-read cap" in f for f in apOv.findings))
+        _orig_rc_Ov = _journal._read_contained
+        _rc_reads_Ov = {"n": 0}
+        def _count_rc_Ov(root_fd, relpath, *a, **k):
+            if relpath == _rec_rel_Ov:
+                _rc_reads_Ov["n"] += 1
+            return _orig_rc_Ov(root_fd, relpath, *a, **k)
+        _journal._read_contained = _count_rc_Ov
+        try:
+            apOvP = apply_import(rOv, prOv.run_id, now=NOW)
+        finally:
+            _journal._read_contained = _orig_rc_Ov
+        check("D23-noop-rejects-oversized-record-preread",
+              apOvP.verdict == 2 and apOvP.promoted is False
+              and _rc_reads_Ov["n"] == 0
+              and any("store-read cap before it is read" in f for f in apOvP.findings))
+
+        # -postread: the PRE check cannot see a record that lstats UNDER cap but READS over it. Take a fresh
+        # CLEAN baseline no-op, then monkeypatch the record reader to return >cap bytes for the record rel ONLY
+        # (the real lstat stays under cap, so the PRE check passes), so ONLY the POST-read length check fires.
+        rOw, prOw, _ap0Ow, ap1Ow = _fresh_promoted_d23("apply-d23r6-grow")
+        check("D23-r6-oversized-postread-baseline-clean", ap1Ow.verdict == 0 and ap1Ow.promoted is True)
+        _rec_rel_Ow = _txn_record_rel(prOw.run_id)
+        _orig_rc_Ow = _journal._read_contained
+        _over_bytes_Ow = b"# raced growth past the pre-open size\n" + b"y" * (_opf_store.MAX_STORE_READ_BYTES + 16)
+        def _grow_rc_Ow(root_fd, relpath, *a, **k):
+            if relpath == _rec_rel_Ow:
+                _r, _st = _orig_rc_Ow(root_fd, relpath, *a, **k)   # real (under-cap) stat; over-cap bytes
+                return _over_bytes_Ow, _st
+            return _orig_rc_Ow(root_fd, relpath, *a, **k)
+        _journal._read_contained = _grow_rc_Ow
+        try:
+            apOwP = apply_import(rOw, prOw.run_id, now=NOW)
+        finally:
+            _journal._read_contained = _orig_rc_Ow
+        check("D23-noop-rejects-oversized-record-postread",
+              apOwP.verdict == 2 and apOwP.promoted is False
+              and any("store-read cap after reading" in f for f in apOwP.findings))
 
         # A3 (acceptance required): a planned-but-UNREVIEWED run is not promotion-ready -> exit 2, and the
         # aborted apply releases the writer lock (a following good apply is not blocked). Mutates nothing.
