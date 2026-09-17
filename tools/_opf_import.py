@@ -5242,6 +5242,17 @@ def self_test():
         # no-op returns before that load). Without the no-op digest check this returned a false promoted no-op.
         apA2e = apply_import(rootA1, prA1.run_id, accepted_plan_digest="sha256:" + "e" * 64, now=NOW)
         check("A2e-stale-caller-digest-fail-closed", apA2e.verdict != 0 and apA2e.promoted is False)
+        # A2f (PRC-F2 round-4): an allocation id member that is an EMPTY string is not a valid id; the round-4
+        # `and _i` guard in _validate_transaction_record rejects it on the no-op path. This runs on rootA1
+        # BEFORE A-f6 (which leaks a promotion lock into rootA1), so the guard is actually reached rather than
+        # masked by a stale-lock abort. Without the non-empty check an empty-string id rode through as a false
+        # promoted no-op (A2d covers only the non-list shape the pre-round-4 isinstance-list check caught).
+        bad_txn_empty = tomllib.loads(valid_txn_text)
+        bad_txn_empty["allocation"] = {"LF": [""]}
+        txnA1.write_text(_opf_emit.emit(bad_txn_empty), encoding="utf-8")
+        apA2f = apply_import(rootA1, prA1.run_id, now=NOW)
+        check("A2f-empty-id-member-fail-closed", apA2f.verdict != 0 and apA2f.promoted is False)
+        txnA1.write_text(valid_txn_text, encoding="utf-8")   # restore the true record
         # A-f6 (PRC-F6): a release_lock failure (an OSError from its os.unlink) does NOT overturn an
         # already-committed result. Inject an OSError at release and re-apply the completed run (the no-op path
         # still runs the finally): the no-op result STANDS. Without the broadened (JournalError, OSError) catch
@@ -5368,6 +5379,97 @@ def self_test():
         check("A10-promoted-run-dropped-sibling-retained",
               not (prevA10 / ".working" / "imports" / prom_run_a10).exists()
               and (prevA10 / ".working" / "imports" / sib_run_a10 / "y.toml").is_file())
+
+        # ======================= round-4 fix discriminators (change-carries-check) =======================
+        # The round-4 fixes (N1 TOML-aware manifest flip, F5b store-root imports anchor, N2 close-quietly
+        # cleanup) each land with a check that fails when the fix is absent. (The F2 non-empty-id discriminator
+        # A2f sits with the A2-series no-op checks above, before A-f6 leaks a lock into rootA1.)
+
+        # N1flip (PRC-N1 round-4): _flip_import_status_bytes is TOML-aware and re-emits canonically, so it
+        # flips import_status="complete" for ANY valid manifest form, not only the bare double-quoted
+        # `import_status = "x"` the old regex matched. A single-quoted import_status (valid TOML the
+        # double-quote-only regex missed) flips cleanly. Without the tomllib rewrite this raised _cannot
+        # (0 regex matches -> "expected exactly one `import_status` directive").
+        rootN1, mN1 = build_apply_store()
+        manifest_relN1 = "{}/manifest.toml".format(mN1.relative_to(rootN1))   # ".working/toml/manifest.toml"
+        canonN1 = (mN1 / "manifest.toml").read_text(encoding="utf-8")
+        check("N1flip-canonical-double-quoted-present", 'import_status = "none"' in canonN1)
+        altN1 = canonN1.replace('import_status = "none"', "import_status = 'none'", 1)   # single-quoted form
+        (mN1 / "manifest.toml").write_text(altN1, encoding="utf-8")
+        resN1 = _opf_store.resolve_store(rootN1)
+        fdN1 = _opf_store._open_store_root_fd(resN1.store_root, resN1.pointer_source != "default")
+        try:
+            flippedN1 = _flip_import_status_bytes(fdN1, manifest_relN1)
+        finally:
+            os.close(fdN1)
+        check("N1flip-differently-formatted-flips-to-complete",
+              tomllib.loads(flippedN1.decode("utf-8"))["opf"]["import_status"] == "complete")
+
+        # N2a (PRC-N2 round-4, unit): _journal._close_fd_quietly swallows a close-time OSError rather than
+        # propagating it. A double close (the second os.close raises EBADF and fstat confirms the fd gone)
+        # returns cleanly; a raw os.close would raise EBADF out to the caller.
+        _rp_n2, _wp_n2 = os.pipe()
+        os.close(_wp_n2)
+        os.close(_rp_n2)                       # first, real close
+        _n2a_raised = False
+        try:
+            _journal._close_fd_quietly(_rp_n2)   # second close: EBADF; fstat EBADF -> confirmed gone, no raise
+        except OSError:
+            _n2a_raised = True
+        check("N2a-close-quietly-swallows-oserror", _n2a_raised is False)
+
+        # N2b (PRC-N2 round-4, behavioural): a descriptor-close OSError on the apply cleanup path does NOT
+        # overturn a committed promotion. Inject an OSError on the FIRST close of the journal-root fd (jr_fd),
+        # then promote a reviewed run: _close_fd_quietly swallows the raise (fstat confirms the fd, retries)
+        # and the CLEAN result stands. Without the _close_fd_quietly routing the raw os.close raised into the
+        # outer OSError handler and flipped promoted=True to aborted. `fired` asserts the injection ran.
+        rootN2, mN2 = build_apply_store()
+        prN2 = plan_import(rootN2, ["a.txt"], now=NOW, run_nonce="apply-n2")
+        review_accept_all(rootN2, prN2.run_id)
+        _saved_ojr_n2 = _journal.open_journal_root_fd
+        _saved_close_n2 = os.close
+        _n2b = {"jr_fd": None, "fired": False}
+        def _capture_ojr_n2(_rfd, _rel):
+            _fd = _saved_ojr_n2(_rfd, _rel)
+            _n2b["jr_fd"] = _fd
+            return _fd
+        def _close_n2(_fd):
+            if _fd == _n2b["jr_fd"] and not _n2b["fired"]:
+                _n2b["fired"] = True
+                raise OSError(errno.EIO, "injected jr_fd cleanup-close error")
+            return _saved_close_n2(_fd)
+        _journal.open_journal_root_fd = _capture_ojr_n2
+        os.close = _close_n2
+        try:
+            apN2 = apply_import(rootN2, prN2.run_id, now=NOW)
+        finally:
+            os.close = _saved_close_n2
+            _journal.open_journal_root_fd = _saved_ojr_n2
+        check("N2b-cleanup-close-oserror-does-not-overturn",
+              apN2.verdict == 0 and apN2.promoted is True and apN2.outcome == "promoted"
+              and _n2b["fired"] is True)
+
+        # F5bN (PRC-F5b round-4): the promoted-run drop is anchored to the STORE-ROOT imports dir by ABSOLUTE
+        # path, not a basename pair, so a directory named like the promoted run planted inside a NESTED
+        # `.working/imports` deeper in a staging run is NOT dropped (only the real store-root imports/<run> is).
+        # Without the abspath anchor the basename check also matched the nested `.working/imports` and dropped
+        # the same-named entry there. (A10 above covers store-root sibling retention; this covers the nested
+        # same-named entry the basename check would have wrongly dropped.)
+        import shutil as _shutil_f5bn
+        rootF5bn, mF5bn = build_apply_store()
+        prom_run_f5bn = "run-promoted-9001"
+        (rootF5bn / ".working" / "imports" / prom_run_f5bn).mkdir(parents=True, exist_ok=True)
+        (rootF5bn / ".working" / "imports" / prom_run_f5bn / "r.toml").write_text("schema = 1", encoding="utf-8")
+        nested_f5bn = (rootF5bn / ".working" / "imports" / "run-sib-9002" / ".working" / "imports" / prom_run_f5bn)
+        nested_f5bn.mkdir(parents=True, exist_ok=True)
+        (nested_f5bn / "nested.toml").write_text("schema = 1", encoding="utf-8")
+        resF5bn = _opf_store.resolve_store(rootF5bn)
+        prevF5bn = base / "preview-f5bn"
+        _assemble_preview(resF5bn, str(mF5bn.relative_to(rootF5bn)), {}, str(prevF5bn), _shutil_f5bn, prom_run_f5bn)
+        check("F5bN-nested-imports-not-dropped",
+              not (prevF5bn / ".working" / "imports" / prom_run_f5bn).exists()
+              and (prevF5bn / ".working" / "imports" / "run-sib-9002" / ".working" / "imports"
+                   / prom_run_f5bn / "nested.toml").is_file())
 
         # --- OPF-IMPORT-VERB PR-A: origin provenance schema ------------------------------------------
         # A plan fragment row missing `origin`, or carrying an out-of-vocabulary origin, is a finding (the
