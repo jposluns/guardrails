@@ -84,7 +84,7 @@ def _bootstrap():
         import _opf_emit        # U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
         import _opf_views       # U4: deterministic view generators + the closed transform vocabulary
         import _opf_fuzz        # adversarial input-hardening proof (membership/type-guard class closure)
-        import _opf_import      # U7: import staging (module + self-test; the live import verb stays unwired)
+        import _opf_import      # U7: import staging (module + self-test; the live import verb is wired below)
         import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
@@ -2546,9 +2546,9 @@ def _cmd_import(rest):
         # mode == "apply": every import mode requires a RESOLVED, initialized store (D7). Resolve first via
         # the operation layer's shared init-first precondition (single-sourced; the message is NOT
         # re-authored here) so a NOT-ADOPTED root reports "run `opf init` first" at exit 2, consistent with
-        # scan / plan / review, rather than the deferred-promotion stub's message. An adopted store still
-        # forwards to the STILL-DEFERRED apply_import stub (exit 2, mutates nothing): the PR-C promotion pin
-        # is intact.
+        # scan / plan / review, rather than a promotion-specific message. An adopted store forwards to the
+        # now-real apply_import (PR-C): a run with no acceptance is not promotion-ready -> exit 2 mutating
+        # nothing, and a reviewed run promotes.
         try:
             _opf_import._resolve_store_for_review(root_abs)
         except _opf_import._StageError as exc:
@@ -2723,8 +2723,8 @@ def _cli_self_test():
             store tree byte-unchanged (pure read); --plan -> 0 staging one run; --review with an INCOMPLETE
             decisions file -> 1 and NO acceptance.json; --review with a COMPLETE decisions file -> 0 and a
             schema-valid acceptance.json; --review --interactive over a non-TTY stdin -> 2 (interactive
-            front-end refusal); --apply over the staged run -> 2 (the DEFERRED stub) AND the store
-            byte-unchanged (the PR-C stub pin: promotion landing is a conscious edit to this vector)."""
+            front-end refusal); --apply over an UNREVIEWED staged run -> 2 (now-real apply_import finds no
+            acceptance.json) AND the store byte-unchanged (nothing promoted; a reviewed run promotes)."""
             import tomllib
 
             def tree_snapshot(rootdir):

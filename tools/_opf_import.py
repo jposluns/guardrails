@@ -32,7 +32,7 @@ byte-canonical candidate under `.working/imports/<run-id>/` (store scope, a sibl
 which carries TOML records only; spec 14.1). Its writes are confined to the `.working/imports/` staging ROOT
 (created if absent; spec 14 stages under `.working/imports/<run-id>/`, so the staging root is part of the
 staging area, not the active store) and the new run directory beneath it: the active store, its
-`counters.toml`, its indexes, its archive, and the sources are read-only inputs, never written. It
+`counters.toml`, its indexes, its archive, and the sources are read-only inputs to scan/plan/review/stage; only the apply-promotion cutover (apply_import, PR-C) writes them. It
 composes U1 (store resolution + manifest), U2 (record envelope + counters + id helpers), U3 (the worklog
 release-boundary gate), and U8 (the constrained-subset canonical emitter) rather than re-deriving them.
 
@@ -2020,9 +2020,9 @@ def plan_import(product_root, import_set, *, proposals=None, now, run_nonce):
     validated (confined to the scanned set, schema-bound) and recorded verbatim in IMPORT-REPORT.md as
     suggestions, and are NEVER fed to the classifier as a resting candidate state. A proposal reaches a
     resting `mapped`/`split`/`duplicate`/`ignored` state only through a later ATTRIBUTED human acceptance in
-    the acceptance-capture + apply-promotion unit (a disclosed spec gap: no acceptance-capture mechanism nor
-    provenance/origin tag exists in the staged plan schema today, so this build cannot enforce acceptance at
-    apply and therefore does not auto-rest any proposal now). Returns a PlanResult; fail-closed throughout.
+    the acceptance-capture + apply-promotion unit: an ATTRIBUTED human acceptance is captured by `opf import
+    --review` (a canonical acceptance.json with an origin/provenance tag; PR-A) and enforced at apply-promotion
+    (PR-C); plan itself never auto-rests a proposal. Returns a PlanResult; fail-closed throughout.
 
     `now`/`run_nonce` are injected (clock-read, never guessed) and, per the settled staging contract,
     compose the deterministic run id; the deterministic inventory excludes them."""
@@ -2801,7 +2801,7 @@ def _validate_transaction_record(txn, run_id):
         return False, "allocation is not a table"
     for _ns, _ids in allocation.items():
         if not (isinstance(_ns, str) and isinstance(_ids, list)
-                and all(isinstance(_i, str) for _i in _ids)):
+                and all(isinstance(_i, str) and _i for _i in _ids)):   # PRC-F2 round-4: id members non-empty
             return False, "allocation entry {!r} is not a namespace -> list-of-id-strings mapping".format(_ns)
     restore = txn.get("restore_ref")
     if not isinstance(restore, dict):
@@ -2879,14 +2879,26 @@ def _flip_import_status_bytes(store_root_fd, manifest_rel):
         raw, _st = _journal._read_contained(store_root_fd, manifest_rel)
     except _journal.JournalError as exc:
         raise _cannot("cannot read the live manifest {} ({}); cannot promote".format(manifest_rel, exc))
-    text = raw.decode("utf-8")
-    pat = re.compile(r'(?m)^([ \t]*import_status[ \t]*=[ \t]*)"[a-z]+"([ \t]*)$')
-    matches = pat.findall(text)
-    if len(matches) != 1:
-        raise _cannot("{}: expected exactly one `import_status = \"...\"` directive to flip to complete, "
-                      "found {} (malformed manifest; fail-closed)".format(manifest_rel, len(matches)))
-    new_text = pat.sub(lambda m: '{}"complete"{}'.format(m.group(1), m.group(2)), text, count=1)
-    return new_text.encode("utf-8")
+    import tomllib   # lazy: stdlib TOML reader; the writer is _opf_emit's canonical emitter
+    try:
+        model = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise _cannot("cannot parse the live manifest {} ({}); cannot promote".format(manifest_rel, exc))
+    opf_tbl = model.get("opf")
+    if not (isinstance(opf_tbl, dict) and isinstance(opf_tbl.get("import_status"), str)):
+        raise _cannot("{}: [opf].import_status is missing or not a string; cannot flip to complete "
+                      "(malformed manifest; fail-closed)".format(manifest_rel))
+    # PRC-N1: flip the PARSED value and RE-EMIT through the canonical emitter opf init uses, so ANY valid
+    # manifest formatting (single-quoted value, trailing comment, quoted key, reordered keys) promotes. The
+    # earlier regex matched only `import_status = "value"` and fail-closed on every other valid form.
+    # emit_checked is order-independent and reparses its output, so the result is the canonical manifest with
+    # import_status = "complete".
+    opf_tbl["import_status"] = "complete"
+    try:
+        return _opf_emit.emit_checked(model).encode("utf-8")
+    except Exception as exc:  # noqa: BLE001  a first-party emit failure is fail-closed, never a bad promotion
+        raise _cannot("cannot re-emit the live manifest {} with import_status=complete ({}); cannot "
+                      "promote".format(manifest_rel, exc))
 
 
 def _minted_by_namespace(store_root_fd, run_rel, machine_rel, candidate_types):
@@ -3077,9 +3089,13 @@ def _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shuti
         # Drop ONLY the run being promoted from `.working/imports/` (publication deletes exactly that run),
         # keeping any sibling staging run so the preview models the true post-promotion store and D4 grades a
         # leftover sibling rather than the whole imports tree being hidden wholesale (PRC-F5b).
-        norm = os.path.normpath(dirpath)
-        if os.path.basename(norm) == "imports" \
-                and os.path.basename(os.path.dirname(norm)) == _opf_store.WORKING_DIRNAME \
+        # Anchor to the STORE-ROOT imports dir by ABSOLUTE path, not a basename pair (PRC-F5b round-4):
+        # a basename check (".../imports" whose parent basename is ".working") also matches a nested
+        # `.working/imports` planted DEEPER inside a staging run, which could drop a same-named entry
+        # there. The store-root anchor drops the promoted run ONLY from the real imports root.
+        imports_root_abs = os.path.join(os.path.abspath(store_root),
+                                         _opf_store.WORKING_DIRNAME, IMPORTS_DIRNAME)
+        if os.path.abspath(dirpath) == imports_root_abs \
                 and promoted_run_id is not None and promoted_run_id in names:
             drop.add(promoted_run_id)
         return drop
@@ -3547,9 +3563,12 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                     except (_journal.JournalError, OSError):
                         pass   # recoverable: a dead-owner stale lock is reconciled by the next apply (see above)
                 if jr_fd is not None:
-                    os.close(jr_fd)
+                    # PRC-N2 round-4: a descriptor-close OSError on this cleanup path must not overturn a
+                    # committed promotion (the F6 hazard: a raw os.close raising in `finally` reaches the
+                    # outer handler and flips promoted=True to aborted). _close_fd_quietly swallows it.
+                    _journal._close_fd_quietly(jr_fd)
         finally:
-            os.close(root_fd)
+            _journal._close_fd_quietly(root_fd)
     except _StageError as exc:
         return ApplyResult(exc.verdict, [exc.message], promoted=False,
                            outcome="rejected" if exc.verdict == FINDING else "aborted")
@@ -6001,7 +6020,7 @@ def main():
     args = sys.argv[1:]
     if "--self-test" in args or "--selftest" in args:
         return self_test()
-    print("usage: _opf_import.py --self-test (a library module; the import verb stays unwired)",
+    print("usage: _opf_import.py --self-test (a library module; the import verb is wired via opf.py)",
           file=sys.stderr)
     return 2
 
