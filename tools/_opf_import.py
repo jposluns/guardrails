@@ -2800,8 +2800,8 @@ def _validate_transaction_record(txn, run_id):
     if not isinstance(allocation, dict):
         return False, "allocation is not a table"
     for _ns, _ids in allocation.items():
-        if not (isinstance(_ns, str) and isinstance(_ids, list)
-                and all(isinstance(_i, str) and _i for _i in _ids)):   # PRC-F2 round-4: id members non-empty
+        if not (isinstance(_ns, str) and _ns.strip() and isinstance(_ids, list)
+                and all(isinstance(_i, str) and _i.strip() for _i in _ids)):   # PRC-F2 r3: non-blank ns key + non-blank id members; an EMPTY list is legit (a touched-but-unminted namespace, producer emits {ns: []})
             return False, "allocation entry {!r} is not a namespace -> list-of-id-strings mapping".format(_ns)
     restore = txn.get("restore_ref")
     if not isinstance(restore, dict):
@@ -2870,11 +2870,17 @@ def _merged_index_bytes(store_root_fd, live_rel, candidate_rel, where):
 
 
 def _flip_import_status_bytes(store_root_fd, manifest_rel):
-    """Return the live manifest bytes with `import_status` set to "complete" (the validated-finish lifecycle
-    flip, spec 9.2/OPF-SPEC 1166-1177), operating on the raw text so the manifest's exact formatting and any
-    comments survive (the manifest is NOT a byte-canonical _opf_emit artefact). Fail-closed unless EXACTLY one
-    `import_status = "<state>"` assignment is present (an absent, duplicate, or unparseable directive is a
-    malformed manifest, CANNOT-EVALUATE, never a silent no-op)."""
+    """Return the live manifest bytes with `[opf].import_status` set to "complete" (the validated-finish
+    lifecycle flip, spec 9.2/OPF-SPEC 1166-1177). Parses the manifest with tomllib and RE-EMITS it through the
+    canonical _opf_emit emitter with only import_status changed, so ANY valid TOML form of the directive
+    (single- or double-quoted value, trailing comment, quoted key, reordered keys) promotes rather than only
+    the bare `import_status = "..."` an earlier regex matched. emit_checked asserts model-equality against a
+    reparse of its output, so no field is silently dropped or reordered; every other key/table/value is
+    preserved at the MODEL level, though canonical re-emission normalizes formatting and does NOT preserve
+    comments or byte-exact layout (the store manifest is itself a machine-managed _opf_emit artefact, so on a
+    real store this is byte-idempotent except for import_status). Fail-closed (CANNOT-EVALUATE, never a silent
+    no-op) when the manifest is unreadable or unparseable, when [opf].import_status is missing or not a string,
+    or when the changed model falls outside the emitter's supported subset (a first-party emit failure)."""
     try:
         raw, _st = _journal._read_contained(store_root_fd, manifest_rel)
     except _journal.JournalError as exc:
@@ -3074,9 +3080,13 @@ def _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shuti
     the store root only), and drops ONLY the run being promoted from `.working/imports/` -- publication
     deletes exactly that one run and leaves any SIBLING staging run in place, so the preview must RETAIN
     siblings and let C-CONTAINMENT grade them rather than hide the whole imports tree (PRC-F5b). resolve_store
-    (preview_dir) then discovers the machine store exactly as it does live. Disclosed residual: this copytree
-    assumes a DEFAULT-resolution store where the product root is the store root; a pointer store (product root
-    != store root) needs the pointer relocated into the preview, which the finalizer must handle (flagged)."""
+    (preview_dir) then discovers the machine store exactly as it does live. The store-root OPF pointer files
+    (`.opf.toml`/`.opf.local.toml`) are NEUTRALIZED (dropped at the store root only), so the preview resolves as
+    a self-contained DEFAULT store that binds to ITSELF (product root == store root == preview) rather than
+    following an absolute `[store].target` pointer BACK to the original store and grading the wrong target
+    (PRC-F5ptr). Disclosed residual: this copytree assumes the live store is DEFAULT-resolution (the machine
+    subdir sits at the store root); a live pointer store (product root != store root) needs the machine tree
+    relocated into the preview, which the finalizer must handle (flagged)."""
     store_root = str(resolution.store_root)
 
     def _ignore(dirpath, names):
@@ -3086,6 +3096,12 @@ def _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shuti
         # preview and graded by C-CONTAINMENT rather than hidden from the D4 gate (PRC-F5).
         if os.path.abspath(dirpath) == os.path.abspath(store_root):
             drop |= set(n for n in names if n in (".git", ".aiqt"))
+            # Also neutralize the store-root OPF pointer files: the D4 gate runs resolve_store(preview),
+            # which reads a `[store].target` pointer FIRST, so a copied pointer whose target is an absolute
+            # path would redirect resolution BACK to the ORIGINAL store and grade the wrong target. Dropping
+            # them makes the preview a self-contained DEFAULT store (product root == store root == preview),
+            # so composition grades the preview itself (PRC-F5ptr).
+            drop |= set(n for n in names if n in (_opf_store.POINTER_REL, _opf_store.LOCAL_POINTER_REL))
         # Drop ONLY the run being promoted from `.working/imports/` (publication deletes exactly that run),
         # keeping any sibling staging run so the preview models the true post-promotion store and D4 grades a
         # leftover sibling rather than the whole imports tree being hidden wholesale (PRC-F5b).
@@ -3353,6 +3369,32 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                                            "recorded plan digest {!r} (stale binding; the named run completed "
                                            "under a different plan)".format(
                                                accepted_plan_digest, txn_record.get("plan_digest")))
+                        # The completed PROJECTION record certifies an idempotent no-op ONLY while the run's own
+                        # DURABLE evidence still backs it (never on the record independently): (a) the run's
+                        # journal is present and TERMINAL, and (b) the durable import archive (acceptance.json +
+                        # the preserved source bodies) still exists. A completed record whose journal was
+                        # deleted/torn or whose archive payload is gone cannot certify a no-op; it fails closed
+                        # for reconciliation through recover rather than reporting a false promoted no-op.
+                        noop_txn_id = txn_record.get("txn_id")   # _validate_transaction_record proved it a non-empty str
+                        try:
+                            noop_jstate = _journal.classify_state(jr_fd, journal_root / noop_txn_id)
+                        except _journal.JournalError as exc:
+                            raise _cannot("the durable journal for completed run {} (txn {}) is unreadable "
+                                          "({}); a completed record with no readable journal cannot certify an "
+                                          "idempotent no-op (reconcile through recover; fail-closed)".format(
+                                              run_id, noop_txn_id, exc))
+                        if noop_jstate != "complete":
+                            raise _cannot("the durable journal for completed run {} (txn {}) is absent or "
+                                          "non-terminal (state {!r}); a completed record with no terminal "
+                                          "journal cannot certify an idempotent no-op (reconcile through "
+                                          "recover; fail-closed)".format(run_id, noop_txn_id, noop_jstate))
+                        noop_arch_rel = _archive_run_rel(run_id)
+                        if _journal._lstat_contained(root_fd, noop_arch_rel + "/" + ACCEPTANCE_NAME) is None \
+                                or _journal._lstat_contained(root_fd, noop_arch_rel + "/sources") is None:
+                            raise _cannot("the durable import archive for completed run {} is missing its "
+                                          "acceptance or preserved-source payload; a completed record with no "
+                                          "durable archive cannot certify an idempotent no-op (reconcile through "
+                                          "recover; fail-closed)".format(run_id))
                         return ApplyResult(CLEAN, [], promoted=True, outcome="noop_already_complete",
                                            restore_ref=txn_record.get("restore_ref"))
                     raise _cannot("a transaction record for run {} exists in a non-complete state {!r}; the "
@@ -5242,16 +5284,24 @@ def self_test():
         # no-op returns before that load). Without the no-op digest check this returned a false promoted no-op.
         apA2e = apply_import(rootA1, prA1.run_id, accepted_plan_digest="sha256:" + "e" * 64, now=NOW)
         check("A2e-stale-caller-digest-fail-closed", apA2e.verdict != 0 and apA2e.promoted is False)
-        # A2f (PRC-F2 round-4): an allocation id member that is an EMPTY string is not a valid id; the round-4
-        # `and _i` guard in _validate_transaction_record rejects it on the no-op path. This runs on rootA1
-        # BEFORE A-f6 (which leaks a promotion lock into rootA1), so the guard is actually reached rather than
-        # masked by a stale-lock abort. Without the non-empty check an empty-string id rode through as a false
-        # promoted no-op (A2d covers only the non-list shape the pre-round-4 isinstance-list check caught).
+        # A2f (PRC-F2 r3): a BLANK allocation id member (empty OR whitespace-only) is not a valid id; the
+        # `and _i.strip()` guard in _validate_transaction_record rejects it on the no-op path. Runs on rootA1
+        # BEFORE A-f6 (which leaks a promotion lock into rootA1) so the guard is reached, not masked by a
+        # stale-lock abort. Without .strip() a whitespace-only id rode through as a false promoted no-op
+        # (round-4's bare `and _i` accepted "   "; A2d covers only the non-list shape).
         bad_txn_empty = tomllib.loads(valid_txn_text)
-        bad_txn_empty["allocation"] = {"LF": [""]}
+        bad_txn_empty["allocation"] = {"LF": ["   "]}
         txnA1.write_text(_opf_emit.emit(bad_txn_empty), encoding="utf-8")
         apA2f = apply_import(rootA1, prA1.run_id, now=NOW)
-        check("A2f-empty-id-member-fail-closed", apA2f.verdict != 0 and apA2f.promoted is False)
+        check("A2f-blank-id-member-fail-closed", apA2f.verdict != 0 and apA2f.promoted is False)
+        txnA1.write_text(valid_txn_text, encoding="utf-8")   # restore the true record
+        # A2g (PRC-F2 r3): a BLANK allocation namespace name is rejected by the `_ns.strip()` guard (the real
+        # producer emits only 2-letter namespaces, never ""). Without _ns.strip() an empty key rode through.
+        bad_txn_ns = tomllib.loads(valid_txn_text)
+        bad_txn_ns["allocation"] = {"": ["LF-0001"]}
+        txnA1.write_text(_opf_emit.emit(bad_txn_ns), encoding="utf-8")
+        apA2g = apply_import(rootA1, prA1.run_id, now=NOW)
+        check("A2g-blank-namespace-fail-closed", apA2g.verdict != 0 and apA2g.promoted is False)
         txnA1.write_text(valid_txn_text, encoding="utf-8")   # restore the true record
         # A-f6 (PRC-F6): a release_lock failure (an OSError from its os.unlink) does NOT overturn an
         # already-committed result. Inject an OSError at release and re-apply the completed run (the no-op path
@@ -5267,6 +5317,38 @@ def self_test():
             _journal.release_lock = _orig_release_f6
         check("f6-release-oserror-does-not-overturn",
               apF6.verdict == 0 and apF6.outcome == "noop_already_complete" and apF6.promoted is True)
+
+        # D23 (re-QA): a CLEAN no-op binds to the run's DURABLE evidence, not the projection record alone. On a
+        # fresh promote the re-apply is a verified no-op; but if the run's durable journal txn dir is deleted, or
+        # the archived acceptance payload is removed, the completed record can no longer certify an idempotent
+        # no-op and apply fails closed (reconcile through recover), never a false promoted no-op. Without the
+        # durable-evidence binding on the no-op path both broken stores returned verdict 0 / promoted True.
+        rootD23j, mD23j = build_apply_store()
+        prD23j = plan_import(rootD23j, ["a.txt"], now=NOW, run_nonce="apply-d23j")
+        review_accept_all(rootD23j, prD23j.run_id)
+        apD23j0 = apply_import(rootD23j, prD23j.run_id, now=NOW)          # real promote
+        apD23j1 = apply_import(rootD23j, prD23j.run_id, now=NOW)          # baseline no-op is CLEAN
+        check("D23-baseline-noop-clean",
+              apD23j0.verdict == 0 and apD23j1.verdict == 0
+              and apD23j1.outcome == "noop_already_complete" and apD23j1.promoted is True)
+        txnD23j = tomllib.loads((rootD23j / ".aiqt" / "import" / (prD23j.run_id or "X")
+                                 / "transaction.toml").read_text())
+        jdirD23j = rootD23j / ".aiqt" / "import" / "journal" / txnD23j.get("txn_id", "X")
+        shutil.rmtree(jdirD23j)                                           # durable journal for THIS run gone
+        apD23j = apply_import(rootD23j, prD23j.run_id, now=NOW)
+        check("D23-noop-requires-durable-journal",
+              apD23j.verdict != 0 and apD23j.promoted is False)
+        rootD23a, mD23a = build_apply_store()
+        prD23a = plan_import(rootD23a, ["a.txt"], now=NOW, run_nonce="apply-d23a")
+        review_accept_all(rootD23a, prD23a.run_id)
+        apD23a0 = apply_import(rootD23a, prD23a.run_id, now=NOW)          # real promote
+        apD23a1 = apply_import(rootD23a, prD23a.run_id, now=NOW)          # baseline no-op is CLEAN
+        check("D23-archive-baseline-noop-clean",
+              apD23a0.verdict == 0 and apD23a1.verdict == 0 and apD23a1.promoted is True)
+        (rootD23a / ".aiqt" / "import-archive" / (prD23a.run_id or "X") / "acceptance.json").unlink()
+        apD23a = apply_import(rootD23a, prD23a.run_id, now=NOW)
+        check("D23-noop-requires-durable-archive",
+              apD23a.verdict != 0 and apD23a.promoted is False)
 
         # A3 (acceptance required): a planned-but-UNREVIEWED run is not promotion-ready -> exit 2, and the
         # aborted apply releases the writer lock (a following good apply is not blocked). Mutates nothing.
@@ -5418,6 +5500,36 @@ def self_test():
             _n2a_raised = True
         check("N2a-close-quietly-swallows-oserror", _n2a_raised is False)
 
+        # N2d (re-QA): _close_fd_quietly's DIAGNOSTIC path must NEVER raise. Drive it to the fail-surface branch
+        # (both os.close calls raise while fstat proves the fd still open) AND make the stderr WRITE itself raise
+        # OSError (a broken stderr): the helper must RETURN, not propagate. Without the try/except around the
+        # final print, a broken-stderr OSError escapes the helper and, at the apply cleanup call sites, reaches
+        # the outer `except OSError` and overturns a committed promotion.
+        _rp_n2d, _wp_n2d = os.pipe()                     # a real, open fd so the helper's fstat confirms it live
+        _saved_close_n2d = os.close
+        _saved_stderr_n2d = sys.stderr
+        class _BrokenStderr_n2d:
+            def write(self, *_a, **_k):
+                raise OSError(errno.EIO, "broken stderr write")
+            def flush(self, *_a, **_k):
+                raise OSError(errno.EIO, "broken stderr flush")
+        def _close_raises_n2d(_fd):
+            raise OSError(errno.EIO, "injected close failure")
+        _n2d_raised = False
+        try:
+            os.close = _close_raises_n2d                  # BOTH closes in the helper now raise
+            sys.stderr = _BrokenStderr_n2d()             # ... and the diagnostic write raises too
+            try:
+                _journal._close_fd_quietly(_rp_n2d)
+            except BaseException:
+                _n2d_raised = True
+        finally:
+            os.close = _saved_close_n2d
+            sys.stderr = _saved_stderr_n2d
+        os.close(_rp_n2d)                                # real cleanup of the still-open fds
+        os.close(_wp_n2d)
+        check("N2d-close-quietly-diagnostic-nonthrow", _n2d_raised is False)
+
         # N2b (PRC-N2 round-4, behavioural): a descriptor-close OSError on the apply cleanup path does NOT
         # overturn a committed promotion. Inject an OSError on the FIRST close of the journal-root fd (jr_fd),
         # then promote a reviewed run: _close_fd_quietly swallows the raise (fstat confirms the fd, retries)
@@ -5449,6 +5561,40 @@ def self_test():
               apN2.verdict == 0 and apN2.promoted is True and apN2.outcome == "promoted"
               and _n2b["fired"] is True)
 
+        # N2c (PRC-N2 r3): the N2 fix routes BOTH cleanup closes (jr_fd then root_fd) through _close_fd_quietly.
+        # N2b guards the jr_fd routing; this guards the root_fd routing (reverting ONLY root_fd otherwise leaves
+        # the suite green). Arm AFTER jr_fd's cleanup close so the injected OSError lands on root_fd's close (the
+        # next close, in the outer finally); the committed promotion must stand. Without _close_fd_quietly on
+        # root_fd the raw os.close raises into the outer OSError handler and flips promoted=True to aborted.
+        rootN2c, mN2c = build_apply_store()
+        prN2c = plan_import(rootN2c, ["a.txt"], now=NOW, run_nonce="apply-n2c")
+        review_accept_all(rootN2c, prN2c.run_id)
+        _saved_ojr_n2c = _journal.open_journal_root_fd
+        _saved_close_n2c = os.close
+        _n2c = {"jr_fd": None, "jr_closed": False, "fired": False}
+        def _capture_ojr_n2c(_rfd, _rel):
+            _fd = _saved_ojr_n2c(_rfd, _rel)
+            _n2c["jr_fd"] = _fd
+            return _fd
+        def _close_n2c(_fd):
+            if _fd == _n2c["jr_fd"] and not _n2c["jr_closed"]:
+                _n2c["jr_closed"] = True
+                return _saved_close_n2c(_fd)               # let jr_fd close normally (N2b covers it)
+            if _n2c["jr_closed"] and not _n2c["fired"]:
+                _n2c["fired"] = True
+                raise OSError(errno.EIO, "injected root_fd cleanup-close error")
+            return _saved_close_n2c(_fd)
+        _journal.open_journal_root_fd = _capture_ojr_n2c
+        os.close = _close_n2c
+        try:
+            apN2c = apply_import(rootN2c, prN2c.run_id, now=NOW)
+        finally:
+            os.close = _saved_close_n2c
+            _journal.open_journal_root_fd = _saved_ojr_n2c
+        check("N2c-rootfd-close-oserror-does-not-overturn",
+              apN2c.verdict == 0 and apN2c.promoted is True and apN2c.outcome == "promoted"
+              and _n2c["fired"] is True)
+
         # F5bN (PRC-F5b round-4): the promoted-run drop is anchored to the STORE-ROOT imports dir by ABSOLUTE
         # path, not a basename pair, so a directory named like the promoted run planted inside a NESTED
         # `.working/imports` deeper in a staging run is NOT dropped (only the real store-root imports/<run> is).
@@ -5470,6 +5616,26 @@ def self_test():
               not (prevF5bn / ".working" / "imports" / prom_run_f5bn).exists()
               and (prevF5bn / ".working" / "imports" / "run-sib-9002" / ".working" / "imports"
                    / prom_run_f5bn / "nested.toml").is_file())
+
+        # F5ptr (re-QA): _assemble_preview NEUTRALIZES the store-root OPF pointer files, so resolve_store over
+        # the preview binds to the preview ITSELF (a self-contained default store) rather than following a copied
+        # `[store].target` pointer BACK to the original store and grading the wrong target at the D4 gate. Build
+        # the preview from a default store carrying a committed `.opf.toml` whose ABSOLUTE target names a SECOND
+        # valid store: without the pointer drop resolve_store(preview) follows it OUT to that second store.
+        import shutil as _shutil_f5p
+        rootF5p, mF5p = build_apply_store()
+        otherF5p, _mOtherF5p = build_apply_store()       # a second, resolvable store the pointer will name
+        resF5p = _opf_store.resolve_store(rootF5p)        # default resolution captured BEFORE the pointer lands
+        (rootF5p / _opf_store.POINTER_REL).write_text(
+            '[store]\ntarget = "{}"\n'.format(otherF5p), encoding="utf-8")   # absolute target -> the other store
+        prevF5p = base / "preview-f5ptr"
+        _assemble_preview(resF5p, str(mF5p.relative_to(rootF5p)), {}, str(prevF5p), _shutil_f5p, None)
+        resolvedF5p = _opf_store.resolve_store(prevF5p)
+        prev_abs_f5p = os.path.abspath(str(prevF5p))
+        sr_abs_f5p = os.path.abspath(str(resolvedF5p.store_root)) if resolvedF5p.store_root is not None else ""
+        check("F5ptr-preview-pointer-neutralized",
+              resolvedF5p.status == _opf_store.RESOLVED
+              and (sr_abs_f5p == prev_abs_f5p or sr_abs_f5p.startswith(prev_abs_f5p + os.sep)))
 
         # --- OPF-IMPORT-VERB PR-A: origin provenance schema ------------------------------------------
         # A plan fragment row missing `origin`, or carrying an out-of-vocabulary origin, is a finding (the
