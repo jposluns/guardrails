@@ -3374,6 +3374,19 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                     txn_record = None
                     noop_rec_raw = None
                 else:
+                    # R6-C2: the SINGLE authenticated read (R5-C1) still holds the 1 MiB store-read cap the
+                    # prior _read_toml_contained route enforced, so an oversized record is refused BEFORE it is
+                    # read+parsed rather than after the hash rejects it. This mirrors _opf_store's two-check
+                    # idiom: a PRE-read fast reject bound to the already-captured lstat size (before the open),
+                    # and a POST-read check on the bytes actually read (a store file swapped or grown between the
+                    # lstat and the open). _read_contained's generic 16 MiB cap remains the outer bound; this
+                    # restores the tighter store cap the no-op single-read otherwise dropped (SECA
+                    # resource-bounds; check-fails-closed-on-unreadable).
+                    if noop_rec_st.st_size > _opf_store.MAX_STORE_READ_BYTES:
+                        raise _cannot("the retained transaction record {} is {} bytes, over the {}-byte "
+                                      "store-read cap; an oversized record is fail-closed before it is read, "
+                                      "never a silent no-op".format(
+                                          noop_rec_rel, noop_rec_st.st_size, _opf_store.MAX_STORE_READ_BYTES))
                     try:
                         noop_rec_raw, _noop_rec_readst = _journal._read_contained(
                             root_fd, noop_rec_rel, require_single_link=True)
@@ -3381,6 +3394,11 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                         raise _cannot("cannot read the retained transaction record {} ({}); a present record "
                                       "that cannot be read is fail-closed, never a silent no-op".format(
                                           noop_rec_rel, exc))
+                    if len(noop_rec_raw) > _opf_store.MAX_STORE_READ_BYTES:
+                        raise _cannot("the retained transaction record {} read {} bytes, over the {}-byte "
+                                      "store-read cap (a raced swap or growth past the pre-open size); an "
+                                      "oversized record is fail-closed before parse, never a silent no-op"
+                                      .format(noop_rec_rel, len(noop_rec_raw), _opf_store.MAX_STORE_READ_BYTES))
                     try:
                         txn_record = tomllib.loads(noop_rec_raw.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
@@ -3535,8 +3553,23 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                                           "preserved-source directory, or it is not a directory; a completed "
                                           "record with no valid durable archive cannot certify an idempotent "
                                           "no-op (reconcile through recover; fail-closed)".format(run_id))
+                        # R6-C1: capture the listing ONCE and fail closed on None. _list_contained returns
+                        # None on a FileNotFoundError at the sources dir, an OBSERVED disappearance. The dir was
+                        # just S_ISDIR-confirmed above, so a None here is a genuine race/fault disappearance, not
+                        # normal absence; the prior `or []` collapsed it to an empty listing, which for a
+                        # ZERO-SOURCE completed record (archived_sources == []) then equalled the recorded empty
+                        # set and false-cleaned the no-op over a durable sources dir that vanished under
+                        # revalidation. An unreadable/absent durable directory is a fail-closed cannot-evaluate,
+                        # never nothing-to-check (check-fails-closed-on-unreadable).
+                        noop_src_names = _list_contained(root_fd, noop_arch_rel + "/sources")
+                        if noop_src_names is None:
+                            raise _cannot("the durable archived sources directory for completed run {} "
+                                          "disappeared or is unreadable at revalidation; a completed record "
+                                          "whose durable sources cannot be enumerated cannot certify an "
+                                          "idempotent no-op (reconcile through recover; fail-closed)".format(
+                                              run_id))
                         noop_seen_bodies = set()
-                        for bname in (_list_contained(root_fd, noop_arch_rel + "/sources") or []):
+                        for bname in noop_src_names:
                             body_rel = noop_arch_rel + "/sources/" + bname
                             body_st = _journal._lstat_contained(root_fd, body_rel)
                             if body_st is None or not stat.S_ISREG(body_st.st_mode):
@@ -5688,6 +5721,61 @@ def self_test():
         finally:
             _journal._read_contained = _orig_rc_RS
         check("D23-noop-rejects-record-read-swap", apRS.verdict != 0 and apRS.promoted is False)
+
+        # R6-C1 (round-6): the no-op archive revalidation captures the sources listing ONCE and fails closed
+        # when _list_contained returns None. _list_contained returns None on a FileNotFoundError at the sources
+        # dir (an OBSERVED disappearance AFTER the S_ISDIR check just above); the prior `or []` collapsed that
+        # to an empty listing, which for a ZERO-SOURCE completed record (archived_sources == []) equalled the
+        # recorded empty set and FALSE-CLEANED the no-op over a durable sources dir that vanished under
+        # revalidation. Build a real zero-source promote (import_set == [], so archived_sources == []); its
+        # intact repeat no-op stays CLEAN (a present-but-empty sources dir lists [] from _list_contained, which
+        # is NOT None). Then monkeypatch _list_contained to return None ONLY for that run's archive sources rel
+        # (simulating the race disappearance at the enumeration boundary) and confirm the repeat apply fails
+        # closed, NOT a no-op. Verified against a temporary `or []` revert: the OLD code false-cleans (verdict 0).
+        rootZ, mZ = build_apply_store()
+        prZ = plan_import(rootZ, [], now=NOW, run_nonce="apply-d23r6-zero")
+        rvZ = review_accept_all(rootZ, prZ.run_id)
+        apZ0 = apply_import(rootZ, prZ.run_id, now=NOW)          # real zero-source promote
+        apZ1 = apply_import(rootZ, prZ.run_id, now=NOW)          # intact zero-source no-op is CLEAN
+        _txnZ = tomllib.loads((rootZ / ".aiqt" / "import" / (prZ.run_id or "X")
+                               / "transaction.toml").read_text())
+        check("D23-r6-zero-source-noop-clean",
+              rvZ.verdict == 0 and apZ0.verdict == 0 and apZ0.promoted is True
+              and apZ1.verdict == 0 and apZ1.promoted is True
+              and apZ1.outcome == "noop_already_complete" and _txnZ.get("archived_sources") == [])
+        _srcs_rel_Z = _archive_run_rel(prZ.run_id) + "/sources"
+        _orig_lc_Z = _list_contained
+        def _none_lc_Z(store_root_fd, rel):
+            if rel == _srcs_rel_Z:
+                return None                                     # the sources dir vanished after the S_ISDIR check
+            return _orig_lc_Z(store_root_fd, rel)
+        globals()["_list_contained"] = _none_lc_Z
+        try:
+            apZd = apply_import(rootZ, prZ.run_id, now=NOW)
+        finally:
+            globals()["_list_contained"] = _orig_lc_Z
+        check("D23-noop-rejects-disappeared-sources-dir", apZd.verdict != 0 and apZd.promoted is False)
+
+        # R6-C2 (round-6): the no-op single-read (R5-C1) restores the 1 MiB store-read cap the prior
+        # _read_toml_contained route enforced, refusing an oversized record BEFORE it is read+parsed rather
+        # than after the R4-C1 hash rejects it (a resource-policy regression: only _read_contained's generic
+        # 16 MiB cap otherwise remained). Take a real promote whose baseline no-op is CLEAN, then grow the LIVE
+        # transaction.toml past MAX_STORE_READ_BYTES with a huge trailing TOML comment (the record fields stay
+        # valid; tomllib ignores the comment). WITH the fix the PRE-read lstat-size check fires the
+        # oversized-specific _cannot before any read/parse; WITHOUT it the record is read+parsed within the
+        # 16 MiB cap and rejected LATER by a DIFFERENT check (the R4-C1 journal-hash mismatch, since the grown
+        # bytes no longer hash to the recorded digest), so the oversized-specific message is absent. Asserting
+        # that message isolates R6-C2; verified against a temporary revert of the size checks, under which the
+        # hash-mismatch message fires instead and this check FAILS.
+        rOv, prOv, _ap0Ov, ap1Ov = _fresh_promoted_d23("apply-d23r6-big")
+        check("D23-r6-oversized-baseline-clean", ap1Ov.verdict == 0 and ap1Ov.promoted is True)
+        _rec_path_Ov = _live_txn_path_d23(rOv, prOv)
+        _pad_Ov = b"\n# " + b"x" * (_opf_store.MAX_STORE_READ_BYTES + 16) + b"\n"
+        _rec_path_Ov.write_bytes(_rec_path_Ov.read_bytes() + _pad_Ov)   # valid record + huge comment, over cap
+        apOv = apply_import(rOv, prOv.run_id, now=NOW)
+        check("D23-noop-rejects-oversized-record",
+              apOv.verdict != 0 and apOv.promoted is False
+              and any("store-read cap" in f for f in apOv.findings))
 
         # A3 (acceptance required): a planned-but-UNREVIEWED run is not promotion-ready -> exit 2, and the
         # aborted apply releases the writer lock (a following good apply is not blocked). Mutates nothing.
