@@ -3202,6 +3202,13 @@ def _build_publication_ops(store_root_fd, machine_rel, run_rel, run_id, machine_
         "schema": SCHEMA, "format": TRANSACTION_FORMAT, "run_id": run_id, "state": "complete",
         "txn_id": txn_id, "plan_digest": plan_digest, "inventory_digest": inventory_digest,
         "allocation": {ns: list(minted[ns]) for ns in sorted(minted)},
+        # PRC R3-C1: the completed record self-describes its DURABLE archive so a later no-op can revalidate
+        # the immutable evidence by type + content, not mere existence. `archived_sources` is the content-
+        # address set relocated above (each entry == the sha256 of a preserved body / its filename), and
+        # `acceptance_sha256` is the archived acceptance.json's content hash. (OPF import is unshipped, so no
+        # legacy record lacks these; forward-compatible.)
+        "archived_sources": sorted(expected_bodies),
+        "acceptance_sha256": _sha256_hex(acc_raw),
         "restore_ref": {"txn_id": restore_ref["txn_id"], "journal_rel": restore_ref["journal_rel"],
                         "observed_head": observed_head},
     }
@@ -3388,13 +3395,106 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                                           "non-terminal (state {!r}); a completed record with no terminal "
                                           "journal cannot certify an idempotent no-op (reconcile through "
                                           "recover; fail-closed)".format(run_id, noop_txn_id, noop_jstate))
+                        # R3-C2: classify_state proves the journal is TERMINAL, not WHOSE run it certifies. A
+                        # completed record whose txn_id projects at ANOTHER run's complete journal (a copied or
+                        # re-pointed record) would otherwise read as a false no-op, so the durable INTENT frame
+                        # must BIND THIS run: its own txn id, the header unit (run_id), the import-apply kind,
+                        # and the plan_digest the record carries. A missing/malformed INTENT or any mismatch is
+                        # fail-closed (reconcile through recover). This reads the INTENT the same way recover
+                        # does (read_frames + _first), guarded against a JournalError read failure.
+                        try:
+                            noop_frames, _trn, _gl = _journal.read_frames(jr_fd, journal_root / noop_txn_id)
+                        except _journal.JournalError as exc:
+                            raise _cannot("the durable journal INTENT for completed run {} (txn {}) is "
+                                          "unreadable ({}); a completed record whose journal identity cannot be "
+                                          "read cannot certify an idempotent no-op (reconcile through recover; "
+                                          "fail-closed)".format(run_id, noop_txn_id, exc))
+                        noop_intent = _journal._first(noop_frames, _journal.F_INTENT)
+                        noop_hdr = noop_intent.get("header") if isinstance(noop_intent, dict) else None
+                        if not (isinstance(noop_intent, dict) and isinstance(noop_hdr, dict)
+                                and noop_intent.get("txn") == noop_txn_id
+                                and noop_hdr.get("unit") == run_id
+                                and noop_hdr.get("kind") == "import-apply"
+                                and noop_hdr.get("plan_digest") == txn_record.get("plan_digest")):
+                            raise _cannot("the durable journal for completed run {} (txn {}) does not bind this "
+                                          "run: its INTENT frame is missing/malformed or names a different "
+                                          "run, kind, or plan digest; a projection pointing at another run's "
+                                          "journal cannot certify an idempotent no-op (reconcile through "
+                                          "recover; fail-closed)".format(run_id, noop_txn_id))
+                        # R3-C1: the durable archive must be present AND type/content-valid, not merely exist.
+                        # The completed record self-describes its archive (FIX A: archived_sources +
+                        # acceptance_sha256); a record lacking either recorded digest cannot certify a no-op. It
+                        # is revalidated with the SAME contained no-follow readers the promote path uses,
+                        # restricted to the immutable archive (never the live counters/indexes): acceptance is a
+                        # regular file whose bytes hash to the recorded acceptance_sha256, and sources is a
+                        # directory whose content-addressed regular-file bodies each hash to their own filename
+                        # and whose name set exactly equals the recorded archived_sources set (a wrong type, a
+                        # symlink, a corrupt body, or a missing/extra/renamed body each fails closed).
                         noop_arch_rel = _archive_run_rel(run_id)
-                        if _journal._lstat_contained(root_fd, noop_arch_rel + "/" + ACCEPTANCE_NAME) is None \
-                                or _journal._lstat_contained(root_fd, noop_arch_rel + "/sources") is None:
+                        noop_acc_sha = txn_record.get("acceptance_sha256")
+                        noop_arch_srcs = txn_record.get("archived_sources")
+                        if not (isinstance(noop_acc_sha, str) and _HEX64_RE.match(noop_acc_sha)
+                                and isinstance(noop_arch_srcs, list)
+                                and all(isinstance(s, str) and _HEX64_RE.match(s) for s in noop_arch_srcs)):
+                            raise _cannot("the completed record for run {} carries no valid durable-evidence "
+                                          "digests (archived_sources + acceptance_sha256); a completed record "
+                                          "that cannot describe its own durable archive cannot certify an "
+                                          "idempotent no-op (reconcile through recover; fail-closed)".format(
+                                              run_id))
+                        acc_st = _journal._lstat_contained(root_fd, noop_arch_rel + "/" + ACCEPTANCE_NAME)
+                        if acc_st is None or not stat.S_ISREG(acc_st.st_mode):
                             raise _cannot("the durable import archive for completed run {} is missing its "
-                                          "acceptance or preserved-source payload; a completed record with no "
-                                          "durable archive cannot certify an idempotent no-op (reconcile through "
+                                          "acceptance, or the acceptance is not a regular file; a completed "
+                                          "record with no valid durable archive cannot certify an idempotent "
+                                          "no-op (reconcile through recover; fail-closed)".format(run_id))
+                        try:
+                            noop_acc_raw, _accst = _journal._read_contained(
+                                root_fd, noop_arch_rel + "/" + ACCEPTANCE_NAME)
+                        except _journal.JournalError as exc:
+                            raise _cannot("the durable archived acceptance for completed run {} is unreadable "
+                                          "({}); a completed record whose durable archive cannot be read cannot "
+                                          "certify an idempotent no-op (reconcile through recover; fail-closed)"
+                                          .format(run_id, exc))
+                        if _sha256_hex(noop_acc_raw) != noop_acc_sha:
+                            raise _cannot("the durable archived acceptance for completed run {} does not match "
+                                          "its recorded content hash; the immutable archive is corrupt or "
+                                          "tampered, so it cannot certify an idempotent no-op (reconcile through "
                                           "recover; fail-closed)".format(run_id))
+                        srcs_st = _journal._lstat_contained(root_fd, noop_arch_rel + "/sources")
+                        if srcs_st is None or not stat.S_ISDIR(srcs_st.st_mode):
+                            raise _cannot("the durable import archive for completed run {} is missing its "
+                                          "preserved-source directory, or it is not a directory; a completed "
+                                          "record with no valid durable archive cannot certify an idempotent "
+                                          "no-op (reconcile through recover; fail-closed)".format(run_id))
+                        noop_seen_bodies = set()
+                        for bname in (_list_contained(root_fd, noop_arch_rel + "/sources") or []):
+                            body_rel = noop_arch_rel + "/sources/" + bname
+                            body_st = _journal._lstat_contained(root_fd, body_rel)
+                            if body_st is None or not stat.S_ISREG(body_st.st_mode):
+                                raise _cannot("the durable archived source body {} for completed run {} is not "
+                                              "a regular file; the immutable archive is malformed, so it cannot "
+                                              "certify an idempotent no-op (reconcile through recover; "
+                                              "fail-closed)".format(body_rel, run_id))
+                            try:
+                                body_raw, _bst = _journal._read_contained(root_fd, body_rel)
+                            except _journal.JournalError as exc:
+                                raise _cannot("the durable archived source body {} for completed run {} is "
+                                              "unreadable ({}); a completed record whose durable archive cannot "
+                                              "be read cannot certify an idempotent no-op (reconcile through "
+                                              "recover; fail-closed)".format(body_rel, run_id, exc))
+                            if _sha256_hex(body_raw) != bname:
+                                raise _cannot("the durable archived source body {} for completed run {} does "
+                                              "not match its content-address (sha256) filename; the immutable "
+                                              "archive is corrupt or tampered, so it cannot certify an "
+                                              "idempotent no-op (reconcile through recover; fail-closed)".format(
+                                                  body_rel, run_id))
+                            noop_seen_bodies.add(bname)
+                        if noop_seen_bodies != set(noop_arch_srcs):
+                            raise _cannot("the durable archived source bodies for completed run {} do not match "
+                                          "the record's archived_sources set (missing, extra, or renamed body); "
+                                          "the immutable archive is incomplete or tampered, so it cannot certify "
+                                          "an idempotent no-op (reconcile through recover; fail-closed)".format(
+                                              run_id))
                         return ApplyResult(CLEAN, [], promoted=True, outcome="noop_already_complete",
                                            restore_ref=txn_record.get("restore_ref"))
                     raise _cannot("a transaction record for run {} exists in a non-complete state {!r}; the "
@@ -5349,6 +5449,90 @@ def self_test():
         apD23a = apply_import(rootD23a, prD23a.run_id, now=NOW)
         check("D23-noop-requires-durable-archive",
               apD23a.verdict != 0 and apD23a.promoted is False)
+
+        # R3-C1/R3-C2 (round-4): a CLEAN no-op binds the run's durable evidence by TYPE + CONTENT + IDENTITY,
+        # not mere existence. Each case is a fresh real promote whose baseline re-apply is a verified no-op; a
+        # targeted corruption of the IMMUTABLE archive (wrong type, symlink, corrupt bytes, missing/renamed
+        # body) or a journal-identity mismatch then fails closed, never a false promoted no-op. Without the
+        # round-4 checks each corrupted store returned verdict 0 / promoted True.
+        def _fresh_promoted_d23(nonce):
+            r, m = build_apply_store()
+            pr = plan_import(r, ["a.txt"], now=NOW, run_nonce=nonce)
+            review_accept_all(r, pr.run_id)
+            ap0 = apply_import(r, pr.run_id, now=NOW)     # real promote
+            ap1 = apply_import(r, pr.run_id, now=NOW)     # baseline no-op is CLEAN (intact evidence)
+            return r, pr, ap0, ap1
+
+        def _arch_d23(root, pr):
+            return root / ".aiqt" / "import-archive" / (pr.run_id or "X")
+
+        # R3-C1: archive acceptance.json replaced by a DIRECTORY (wrong type) -> fail-closed.
+        rC1t, prC1t, ap0C1t, ap1C1t = _fresh_promoted_d23("apply-d23c1t")
+        check("D23-c1-acc-type-baseline-clean",
+              ap0C1t.verdict == 0 and ap1C1t.verdict == 0 and ap1C1t.promoted is True)
+        accC1t = _arch_d23(rC1t, prC1t) / "acceptance.json"
+        accC1t.unlink(); accC1t.mkdir()
+        apC1t = apply_import(rC1t, prC1t.run_id, now=NOW)
+        check("D23-noop-rejects-acceptance-wrong-type", apC1t.verdict != 0 and apC1t.promoted is False)
+
+        # R3-C1: archive sources DIR replaced by a regular FILE (wrong type) -> fail-closed.
+        rC1s, prC1s, _ap0C1s, ap1C1s = _fresh_promoted_d23("apply-d23c1s")
+        check("D23-c1-sources-type-baseline-clean", ap1C1s.verdict == 0 and ap1C1s.promoted is True)
+        srcsC1s = _arch_d23(rC1s, prC1s) / "sources"
+        shutil.rmtree(srcsC1s); srcsC1s.write_bytes(b"not a directory")
+        apC1s = apply_import(rC1s, prC1s.run_id, now=NOW)
+        check("D23-noop-rejects-sources-wrong-type", apC1s.verdict != 0 and apC1s.promoted is False)
+
+        # R3-C1: archive acceptance.json replaced by a dangling SYMLINK -> fail-closed (no-follow).
+        rC1l, prC1l, _ap0C1l, ap1C1l = _fresh_promoted_d23("apply-d23c1l")
+        check("D23-c1-acc-symlink-baseline-clean", ap1C1l.verdict == 0 and ap1C1l.promoted is True)
+        accC1l = _arch_d23(rC1l, prC1l) / "acceptance.json"
+        accC1l.unlink(); accC1l.symlink_to("does-not-exist")
+        apC1l = apply_import(rC1l, prC1l.run_id, now=NOW)
+        check("D23-noop-rejects-acceptance-symlink", apC1l.verdict != 0 and apC1l.promoted is False)
+
+        # R3-C1: archive acceptance.json bytes corrupted (sha mismatch vs the recorded acceptance_sha256).
+        rC1c, prC1c, _ap0C1c, ap1C1c = _fresh_promoted_d23("apply-d23c1c")
+        check("D23-c1-acc-corrupt-baseline-clean", ap1C1c.verdict == 0 and ap1C1c.promoted is True)
+        (_arch_d23(rC1c, prC1c) / "acceptance.json").write_text("corrupted-acceptance", encoding="utf-8")
+        apC1c = apply_import(rC1c, prC1c.run_id, now=NOW)
+        check("D23-noop-rejects-corrupt-acceptance", apC1c.verdict != 0 and apC1c.promoted is False)
+
+        # R3-C1: a recorded source body deleted (dir kept) -> the archived set no longer equals the record.
+        rC1m, prC1m, _ap0C1m, ap1C1m = _fresh_promoted_d23("apply-d23c1m")
+        check("D23-c1-missing-body-baseline-clean", ap1C1m.verdict == 0 and ap1C1m.promoted is True)
+        for _b in (_arch_d23(rC1m, prC1m) / "sources").iterdir():
+            _b.unlink()
+        apC1m = apply_import(rC1m, prC1m.run_id, now=NOW)
+        check("D23-noop-rejects-missing-source-body", apC1m.verdict != 0 and apC1m.promoted is False)
+
+        # R3-C1: a source body overwritten with bytes that do NOT match its content-address filename.
+        rC1b, prC1b, _ap0C1b, ap1C1b = _fresh_promoted_d23("apply-d23c1b")
+        check("D23-c1-corrupt-body-baseline-clean", ap1C1b.verdict == 0 and ap1C1b.promoted is True)
+        for _b in (_arch_d23(rC1b, prC1b) / "sources").iterdir():
+            _b.write_bytes(b"tampered body bytes")
+        apC1b = apply_import(rC1b, prC1b.run_id, now=NOW)
+        check("D23-noop-rejects-corrupt-source-body", apC1b.verdict != 0 and apC1b.promoted is False)
+
+        # R3-C2: a completed record for run A whose txn_id names run B's COMPLETE journal. Build two real
+        # promotes A and B, copy B's terminal journal into A's store, and point A's record txn_id at it. A's
+        # own archive is left INTACT, so ONLY the journal-identity binding (INTENT header unit != A) rejects
+        # it; without the binding the projection read as a false promoted no-op.
+        rFa, prFa, _ap0Fa, ap1Fa = _fresh_promoted_d23("apply-d23f-a")
+        rFb, prFb, _ap0Fb, ap1Fb = _fresh_promoted_d23("apply-d23f-b")
+        check("D23-foreign-baseline-clean",
+              ap1Fa.verdict == 0 and ap1Fa.promoted is True and ap1Fb.verdict == 0 and ap1Fb.promoted is True)
+        txnFa_path = rFa / ".aiqt" / "import" / (prFa.run_id or "X") / "transaction.toml"
+        recFa = tomllib.loads(txnFa_path.read_text())
+        recFb = tomllib.loads((rFb / ".aiqt" / "import" / (prFb.run_id or "X")
+                               / "transaction.toml").read_text())
+        txnB_id = recFb.get("txn_id")
+        shutil.copytree(rFb / ".aiqt" / "import" / "journal" / txnB_id,
+                        rFa / ".aiqt" / "import" / "journal" / txnB_id)   # B's terminal journal into A's store
+        recFa["txn_id"] = txnB_id                                        # A's record now names B's journal
+        txnFa_path.write_text(_opf_emit.emit(recFa), encoding="utf-8")
+        apFor = apply_import(rFa, prFa.run_id, now=NOW)
+        check("D23-noop-rejects-foreign-journal", apFor.verdict != 0 and apFor.promoted is False)
 
         # A3 (acceptance required): a planned-but-UNREVIEWED run is not promotion-ready -> exit 2, and the
         # aborted apply releases the writer lock (a following good apply is not blocked). Mutates nothing.
