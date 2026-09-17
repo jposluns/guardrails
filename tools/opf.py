@@ -2193,11 +2193,16 @@ def _import_read_set(path):
     directly; a missing, unreadable, or malformed manifest is a ValueError (the caller maps it to a
     cannot-evaluate exit 2, never a silent nothing-to-do). Shape (surfaced for maintainer sign-off,
     PD-OPF-IMPORT-VERB-APPLY-SEAMS): `schema = 1`, `source = ["rel/path", ...]`, optional `[[proposal]]`
-    rows in the _opf_import proposal keyset {source_path, span, suggested_state, note}. Each proposal row's
-    own shape is validated at the operation layer (`_validate_proposals`), never here; each source path is
-    validated by the operation layer's existing contained-relpath discipline. Proposals are consumed only by
-    `--plan` (they are recorded verbatim in the review surface); `--scan` enumerates sources and ignores
-    any proposal rows."""
+    rows in the _opf_import proposal keyset {source_path, span, suggested_state, note}. This reader
+    validates each proposal row's STRUCTURE fail-closed (a closed keyset, a non-empty str source_path, a
+    two-int span, a str suggested_state, an optional str note); a structurally-malformed row is a ValueError
+    the caller maps to exit 2, consistently for `--scan` and `--plan`, so a malformed --set FILE cannot be
+    silently ignored by one mode and forwarded by the other. The operation layer (`_validate_proposals`)
+    still owns the SEMANTICS as a finding (exit 1): source_path must name a scanned source (the
+    contained-relpath / confinement discipline), span must lie within [0, size], and suggested_state must be
+    a mapping-state member; those checks are not duplicated here. Proposals are consumed only by `--plan`
+    (they are recorded verbatim in the review surface); `--scan` enumerates sources and ignores any proposal
+    rows, but still rejects a structurally-malformed --set FILE at read time."""
     import tomllib
     try:
         with open(path, "rb") as fh:
@@ -2206,8 +2211,9 @@ def _import_read_set(path):
         raise ValueError("--set manifest not found: {}".format(path))
     except (OSError, ValueError, RecursionError) as exc:
         raise ValueError("--set manifest unreadable or malformed ({}): {}".format(path, exc))
-    if not (isinstance(doc, dict) and doc.get("schema") == 1):
-        raise ValueError("--set manifest must be a TOML table carrying `schema = 1`")
+    if not (isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 1):
+        raise ValueError("--set manifest must be a TOML table carrying `schema = 1` (an integer 1, not a "
+                         "bool or float)")
     extra = set(doc) - {"schema", "source", "proposal"}
     if extra:
         raise ValueError("--set manifest carries unknown key(s): {} (a set is a closed {{schema, source, "
@@ -2218,6 +2224,29 @@ def _import_read_set(path):
     proposals = doc.get("proposal")
     if proposals is not None and not isinstance(proposals, list):
         raise ValueError("--set manifest `proposal` must be an array of proposal tables when present")
+    # Validate each proposal row's STRUCTURE fail-closed (a malformed --set FILE is exit 2, consistently for
+    # scan and plan). The operation layer (`_validate_proposals`) still owns the SEMANTICS: source_path names
+    # a scanned source, span lies within [0, size], suggested_state is a mapping-state member (each a
+    # finding, exit 1). Row shape here is the _opf_import proposal keyset {source_path, span,
+    # suggested_state, note}: a closed keyset, a non-empty str source_path, a two-int span, a str
+    # suggested_state, and an optional str note. The semantic checks are NOT duplicated here.
+    for idx, row in enumerate(proposals or []):
+        where = "--set manifest `proposal`[{}]".format(idx)
+        if not isinstance(row, dict):
+            raise ValueError("{} must be a table".format(where))
+        extra_row = set(row) - {"source_path", "span", "suggested_state", "note"}
+        if extra_row:
+            raise ValueError("{} carries unknown key(s): {} (a proposal row is a closed {{source_path, "
+                             "span, suggested_state, note}})".format(where, ", ".join(sorted(extra_row))))
+        if not (isinstance(row.get("source_path"), str) and row.get("source_path")):
+            raise ValueError("{} `source_path` must be a non-empty string".format(where))
+        span = row.get("span")
+        if not (isinstance(span, list) and len(span) == 2 and all(type(x) is int for x in span)):
+            raise ValueError("{} `span` must be a list of exactly two integers".format(where))
+        if not isinstance(row.get("suggested_state"), str):
+            raise ValueError("{} `suggested_state` must be a string".format(where))
+        if "note" in row and not isinstance(row.get("note"), str):
+            raise ValueError("{} `note` must be a string when present".format(where))
     return sources, proposals
 
 
@@ -2233,14 +2262,19 @@ def _import_read_decisions(path, run_id):
     try:
         with open(path, "rb") as fh:
             raw = fh.read()
-    except (OSError, ValueError) as exc:
-        raise ValueError("--decisions file unreadable ({}): {}".format(path, exc))
+    except (OSError, ValueError, RecursionError) as exc:
+        raise ValueError("--decisions file unreadable or malformed ({}): {}".format(path, exc))
     try:
         doc = json.loads(raw)
-    except ValueError as exc:
-        raise ValueError("--decisions file is not valid JSON ({}): {}".format(path, exc))
-    if not (isinstance(doc, dict) and doc.get("schema") == 1):
-        raise ValueError("--decisions file must be a JSON object carrying \"schema\": 1")
+    except (ValueError, RecursionError) as exc:
+        # A deeply-nested --decisions JSON raises RecursionError from json.loads (not fh.read); catch it at
+        # the reader so it fails closed with a LOCATED message (R8-F1 read-boundary parity with
+        # _import_read_set's tomllib.load guard), never only at _cmd_import's outer backstop.
+        raise ValueError("--decisions file is not valid JSON or is too deeply nested ({}): {}".format(
+            path, exc))
+    if not (isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 1):
+        raise ValueError("--decisions file must be a JSON object carrying \"schema\": 1 (an integer 1, not "
+                         "a bool or float)")
     if doc.get("run_id") != run_id:
         raise ValueError("--decisions file run_id {!r} does not match the --review run-id {!r}; the "
                          "decisions file is bound to the exact run under review".format(
@@ -2446,7 +2480,17 @@ def _cmd_import(rest):
             for f in res.findings:
                 print("opf import: {}".format(f), file=sys.stderr)
             return _import_exit(res.verdict)
-        # mode == "apply": wires onto the STILL-DEFERRED apply_import stub (exit 2, mutates nothing).
+        # mode == "apply": every import mode requires a RESOLVED, initialized store (D7). Resolve first via
+        # the operation layer's shared init-first precondition (single-sourced; the message is NOT
+        # re-authored here) so a NOT-ADOPTED root reports "run `opf init` first" at exit 2, consistent with
+        # scan / plan / review, rather than the deferred-promotion stub's message. An adopted store still
+        # forwards to the STILL-DEFERRED apply_import stub (exit 2, mutates nothing): the PR-C promotion pin
+        # is intact.
+        try:
+            _opf_import._resolve_store_for_review(root_abs)
+        except _opf_import._StageError as exc:
+            print("opf import: {}".format(exc.message), file=sys.stderr)
+            return _import_exit(exc.verdict)
         res = _opf_import.apply_import(root_abs, run_id, now=now)
         if res.verdict == _opf_import.CLEAN:
             print("opf import: promotion {}: run {}".format(res.outcome, run_id))
@@ -2762,6 +2806,102 @@ def _cli_self_test():
                 expect(["import", "--apply", rid, "--root", store], EXIT_MALFORMED)
                 if tree_snapshot(store) != store_before:
                     failures.append("import --apply (deferred stub) mutated the store (must mutate nothing)")
+
+                # 8 (F1 schema bool/float-slip, R5-F2 class at the new CLI readers): a --set whose schema is
+                # a bool (True == 1) or a float (1.0 == 1) is a MALFORMED file -> exit 2, never accepted.
+                # Flip: dropping the `type(...) is int` guard accepts both and --scan returns 0.
+                set_true = os.path.join(ibase, "set-schema-true.toml")
+                with open(set_true, "w", encoding="utf-8") as fh:
+                    fh.write('schema = true\nsource = ["a.txt"]\n')
+                expect(["import", "--scan", "--set", set_true, "--root", store], EXIT_MALFORMED)
+                set_float = os.path.join(ibase, "set-schema-float.toml")
+                with open(set_float, "w", encoding="utf-8") as fh:
+                    fh.write('schema = 1.0\nsource = ["a.txt"]\n')
+                expect(["import", "--scan", "--set", set_float, "--root", store], EXIT_MALFORMED)
+                # The --decisions reader carries the same class: a bool schema is malformed -> exit 2.
+                dec_true = os.path.join(ibase, "dec-schema-true.json")
+                with open(dec_true, "w", encoding="utf-8") as fh:
+                    json.dump({"schema": True, "run_id": rid, "decisions": []}, fh)
+                expect(["import", "--review", rid, "--actor", "tester", "--decisions", dec_true,
+                        "--root", store], EXIT_MALFORMED)
+
+                # 9 (F2 --set proposal-row STRUCTURE, fail-closed consistently for scan AND plan): a
+                # structurally-malformed --set is exit 2 for BOTH modes. Flip: without the row-structure
+                # validation, --scan silently ignores the proposal (0) while --plan forwards it to
+                # _validate_proposals as a finding (1) -- the exit-code inconsistency this closes.
+                set_badprop = os.path.join(ibase, "set-badprop.toml")   # scalars where tables are required
+                with open(set_badprop, "w", encoding="utf-8") as fh:
+                    fh.write('schema = 1\nsource = ["a.txt"]\nproposal = [5, 7]\n')
+                expect(["import", "--scan", "--set", set_badprop, "--root", store], EXIT_MALFORMED)
+                expect(["import", "--plan", "--set", set_badprop, "--root", store], EXIT_MALFORMED)
+                set_misskey = os.path.join(ibase, "set-misskey.toml")   # a row missing source_path
+                with open(set_misskey, "w", encoding="utf-8") as fh:
+                    fh.write('schema = 1\nsource = ["a.txt"]\n\n[[proposal]]\n'
+                             'span = [0, 1]\nsuggested_state = "mapped"\n')
+                expect(["import", "--scan", "--set", set_misskey, "--root", store], EXIT_MALFORMED)
+                expect(["import", "--plan", "--set", set_misskey, "--root", store], EXIT_MALFORMED)
+                set_badspan = os.path.join(ibase, "set-badspan.toml")   # span not a two-int list
+                with open(set_badspan, "w", encoding="utf-8") as fh:
+                    fh.write('schema = 1\nsource = ["a.txt"]\n\n[[proposal]]\n'
+                             'source_path = "a.txt"\nspan = [0, 1, 2]\nsuggested_state = "mapped"\n')
+                expect(["import", "--plan", "--set", set_badspan, "--root", store], EXIT_MALFORMED)
+
+                # 10 (F2 reader/op-layer SPLIT proof): a STRUCTURALLY-valid proposal that is SEMANTICALLY
+                # invalid (span beyond the source size) passes the reader and is a _validate_proposals
+                # FINDING -> exit 1 via --plan, NEVER a reader exit 2. This proves the reader owns STRUCTURE
+                # while the operation layer still owns SEMANTICS (span bounds, state vocab, confinement).
+                set_oob = os.path.join(ibase, "set-oob-span.toml")
+                with open(set_oob, "w", encoding="utf-8") as fh:
+                    fh.write('schema = 1\nsource = ["a.txt"]\n\n[[proposal]]\n'
+                             'source_path = "a.txt"\nspan = [0, 100000]\nsuggested_state = "mapped"\n')
+                expect(["import", "--plan", "--set", set_oob, "--root", store], EXIT_FINDING)
+
+                # 11 (F3 --apply init-first parity, D7): --apply <valid-rid> on a NOT-ADOPTED root reports the
+                # init-first message at exit 2, not the deferred-promotion stub message. Flip: without the
+                # CLI-side store resolution, --apply calls the stub unconditionally and a NOT-ADOPTED root
+                # gets the deferred message with no "opf init".
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    rc = main(["import", "--apply", _VALID_RID, "--root", not_adopted])
+                if rc != EXIT_MALFORMED or "opf init" not in buf.getvalue():
+                    failures.append("import --apply over a NOT-ADOPTED root: rc={!r} (expected 2 + an "
+                                    "init-first message)".format(rc))
+                # On an ADOPTED store naming no staged run, --apply still forwards to the DEFERRED stub ->
+                # exit 2 (deferred) AND mutates nothing (the PR-C promotion pin holds for an unknown run too).
+                store_before_apply = tree_snapshot(store)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    rc = main(["import", "--apply", _VALID_RID, "--root", store])
+                if rc != EXIT_MALFORMED or "deferred" not in buf.getvalue():
+                    failures.append("import --apply over an ADOPTED store (unknown run): rc={!r} (expected "
+                                    "2 + the deferred-stub message)".format(rc))
+                if tree_snapshot(store) != store_before_apply:
+                    failures.append("import --apply (adopted, deferred stub) mutated the store")
+
+                # 12 (F4 read-boundary RecursionError parity, R8-F1 class): a deeply-nested --decisions JSON
+                # raises RecursionError from json.loads (not fh.read). The reader catches it and fails closed
+                # AT THE reader with a LOCATED message -> exit 2, never escaping only to _cmd_import's outer
+                # backstop. The C json scanner's nesting depth is a platform constant, so the property is
+                # driven HERMETICALLY by patching json.loads to raise RecursionError for one call (restored in
+                # a finally; the same stdlib-injection idiom as _expect_harness below). Flip: dropping
+                # RecursionError from the parse except lets it escape and the located "--decisions file"
+                # reader message is absent from the output.
+                real_loads = json.loads
+
+                def _boom_loads(*_a, **_k):
+                    raise RecursionError("maximum recursion depth exceeded (simulated deep --decisions JSON)")
+
+                json.loads = _boom_loads
+                try:
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        rc = main(["import", "--review", rid, "--actor", "tester", "--decisions", complete,
+                                   "--root", store])
+                finally:
+                    json.loads = real_loads
+                if rc != EXIT_MALFORMED or "--decisions file" not in buf.getvalue():
+                    failures.append("import --review with a RecursionError-raising decisions JSON: rc={!r} "
+                                    "(expected 2 + a located reader message)".format(rc))
             finally:
                 shutil.rmtree(ibase, ignore_errors=True)
             return None
