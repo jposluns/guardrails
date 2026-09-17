@@ -2311,7 +2311,6 @@ def _gather_review_context(resolution):
     never enter the canonical-JSON record."""
     import getpass
     import socket
-    import _opf_observe   # lazy: avoids a module-top circular import through _opf_check (see the import block)
     ctx = {"os_user": "", "git_identity": "", "hostname": ""}
     try:
         ctx["os_user"] = getpass.getuser()
@@ -2322,6 +2321,7 @@ def _gather_review_context(resolution):
     except Exception:  # noqa: BLE001  opportunistic
         pass
     try:
+        import _opf_observe   # lazy: avoids a module-top circular import through _opf_check (see the import block); INSIDE this try so a broken/absent first-party _opf_observe degrades git_identity to "" per the best-effort contract
         git = _opf_observe._git_path()
         if git:
             name = _opf_observe._run_git_config_discovery(git, resolution.store_root,
@@ -2595,18 +2595,23 @@ def review_import(product_root, run_id, *, actor, decisions, now):
         # States: on a first review acceptance.json is absent, so the gate's acceptance-* checks pass "not yet
         # reviewed"; on a re-review a prior valid acceptance is present and its acceptance-* checks pass. Any
         # FINDING is a CANNOT-EVALUATE naming the failing check(s), and NO acceptance is written.
-        import check_opf_import   # lazy: avoids a module-top circular import (see _gather_review_context)
         run_dir_path = os.path.join(resolution.store_root, run_rel)
-        # Defence-in-depth (R5-F1): the gate is fail-closed for a malformed staged run, but should it ever
-        # RAISE (a shape the gate does not yet guard), review must return CANNOT-EVALUATE (verdict 2)
-        # rather than propagate the exception. Catch Exception only, so KeyboardInterrupt/SystemExit stay
-        # uncaught; the resulting _cannot is handled by the outer _StageError branch.
+        # Defence-in-depth (R5-F1, widened R7-F1): the WHOLE gate-delegation step (load + call + result-read)
+        # is fail-closed to CANNOT-EVALUATE (verdict 2); it must never propagate. R5-F1 originally guarded only
+        # the call; R7-F1 widens the guard to the lazy import and the result-read too, the class-siblings it
+        # missed. So a broken/absent gate module (ImportError/SyntaxError on the lazy import), a raise inside
+        # check_staged_run (a shape the gate does not yet guard), OR a contract violation returning a non-dict
+        # (an AttributeError from gate_results.items()) each become verdict 2 rather than an uncaught
+        # exception. Catch Exception only, so KeyboardInterrupt/SystemExit stay uncaught; the resulting _cannot
+        # is handled by the outer _StageError branch. The import stays lazy (a module-top import would form a
+        # circular import: check_opf_import imports _opf_import), now inside the guard.
         try:
+            import check_opf_import   # lazy: avoids a module-top circular import (see _gather_review_context)
             gate_results = check_opf_import.check_staged_run(run_dir_path)
+            gate_findings = sorted(cid for cid, (ok, _detail) in gate_results.items() if not ok)
         except Exception as exc:
-            raise _cannot("the import-operation gate raised evaluating the staged run ({!r}); "
-                          "cannot review".format(exc))
-        gate_findings = sorted(cid for cid, (ok, _detail) in gate_results.items() if not ok)
+            raise _cannot("the import-operation gate could not be loaded, raised, or returned a malformed "
+                          "result evaluating the staged run ({!r}); cannot review".format(exc))
         if gate_findings:
             raise _cannot("staged run fails the import-operation gate; not reviewable until it is a coherent, "
                           "promotion-ready run (failing gate checks: {})".format(", ".join(gate_findings)))
@@ -4814,6 +4819,69 @@ def self_test():
         check("G5-gate-raise-cannot-eval", rrg5.verdict == 2)
         check("G5-gate-raise-no-acceptance", not (g5_dir / "acceptance.json").is_file())
         check("G5-gate-restored", _chk_g5.check_staged_run is _orig_g5)
+        # (f) R7-F1 widened defence-in-depth: the WHOLE gate-delegation step (load + call + result-read) is
+        #     fail-closed, not just the call G5 covers. Here the gate RETURNS a NON-DICT (a contract
+        #     violation) instead of raising: the result-read `gate_results.items()` would raise an uncaught
+        #     AttributeError if it sat OUTSIDE the widened try, so review must still return CANNOT-EVALUATE
+        #     (verdict 2) with NO acceptance and no propagated exception. Both a None and an empty-list return
+        #     are exercised; restore in a finally so the patch cannot leak to later checks. FLIP: move the
+        #     gate_findings result-read back outside the try and these G6 checks crash with an uncaught
+        #     AttributeError instead of returning verdict 2.
+        for _g6_tag, _g6_ret in (("none", None), ("list", [])):
+            rootG6, mG6 = build_store(sources={"a.txt": "aaaa"})
+            prg6 = plan_import(rootG6, ["a.txt"], now=NOW, run_nonce=NONCE)
+            g6_dir = mG6.parent / "imports" / (prg6.run_id or "MISSING")
+            g6_decs = all_decisions(g6_dir)
+            import check_opf_import as _chk_g6
+            _orig_g6 = _chk_g6.check_staged_run
+            _chk_g6.check_staged_run = lambda _run_dir, _r=_g6_ret: _r
+            try:
+                rrg6 = review_import(rootG6, prg6.run_id, actor="R", decisions=g6_decs, now=NOW)
+            finally:
+                _chk_g6.check_staged_run = _orig_g6
+            check("G6-{}-gate-nondict-cannot-eval".format(_g6_tag), rrg6.verdict == 2)
+            check("G6-{}-gate-nondict-no-acceptance".format(_g6_tag),
+                  not (g6_dir / "acceptance.json").is_file())
+            check("G6-{}-gate-restored".format(_g6_tag), _chk_g6.check_staged_run is _orig_g6)
+        # (g) R7-F2 best-effort-import contract: _gather_review_context promises every field is best-effort
+        #     and NEVER required (any failure records ""). Its lazy `import _opf_observe` must sit INSIDE the
+        #     git-discovery try, so a broken/absent first-party _opf_observe degrades git_identity to ""
+        #     rather than propagating. Force that import to fail (sys.modules[...] = None makes
+        #     `import _opf_observe` raise ImportError) and assert the helper RETURNS with git_identity "" while
+        #     os_user/hostname stay best-effort populated. Restore sys.modules in a finally. FLIP: move the
+        #     import back OUTSIDE the try and this call raises an uncaught ImportError, crashing the self-test
+        #     (rc=1) instead of degrading.
+        rootG7, mG7 = build_store(sources={"a.txt": "aaaa"})
+        resolG7 = _opf_store.resolve_store(rootG7)
+
+        def _norm_g7(v):  # mirror _gather_review_context's control-char strip + length cap
+            return "".join(ch for ch in v if ord(ch) >= 0x20 and ord(ch) != 0x7f)[:256]
+
+        import getpass as _getpass_g7
+        import socket as _socket_g7
+        try:
+            _user_g7 = _norm_g7(_getpass_g7.getuser())
+        except Exception:  # noqa: BLE001  mirror the helper's best-effort degrade
+            _user_g7 = ""
+        try:
+            _host_g7 = _norm_g7(_socket_g7.gethostname())
+        except Exception:  # noqa: BLE001
+            _host_g7 = ""
+        _missing_g7 = object()
+        _saved_observe_g7 = sys.modules.get("_opf_observe", _missing_g7)
+        sys.modules["_opf_observe"] = None  # makes `import _opf_observe` raise ImportError
+        try:
+            ctxG7 = _gather_review_context(resolG7)
+        finally:
+            if _saved_observe_g7 is _missing_g7:
+                del sys.modules["_opf_observe"]
+            else:
+                sys.modules["_opf_observe"] = _saved_observe_g7
+        check("G7-observe-import-fail-returns-three-keys",
+              set(ctxG7) == {"os_user", "git_identity", "hostname"})
+        check("G7-observe-import-fail-git-identity-degraded-empty", ctxG7["git_identity"] == "")
+        check("G7-observe-import-fail-os-user-best-effort", ctxG7["os_user"] == _user_g7)
+        check("G7-observe-import-fail-hostname-best-effort", ctxG7["hostname"] == _host_g7)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
