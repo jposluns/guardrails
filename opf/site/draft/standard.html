@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The standard | OPFiles</title>
+<meta name="description" content="How to read the OPFiles specification and quickstart, with links to the canonical source. A rendered web version is coming; today the raw source is the accurate reference.">
+<!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
+<meta name="robots" content="noindex">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="The standard | OPFiles">
+<meta property="og:description" content="How to read the OPFiles specification and quickstart, with links to the canonical source. A rendered web version is coming; today the raw source is the accurate reference.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink active" href="./standard" aria-current="page">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">The specification</p>
+  <h1>The standard</h1>
+  <p class="lead">OPFiles is defined by a written specification and a short quickstart. The
+    specification is the canonical reference; this page tells you how to read it, links the raw
+    source, and is honest about what is not yet published as a rendered web version.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>Status of this page</h2>
+    <p>A rendered, web-readable version of the specification and the quickstart is not published
+      yet. It depends on a source-to-HTML render step so that the web pages cannot drift from the
+      canonical Markdown; until that render step ships, this page links the raw source directly
+      rather than a hand-copied duplicate that could fall out of step. Reading the raw source is the
+      accurate path today.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails/blob/main/.aiqt/core/opf/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">Read OPF-SPEC.md (raw source)</a>
+      <a class="btn ghost" href="https://github.com/jposluns/guardrails/blob/main/.aiqt/core/opf/OPF-QUICKSTART.md" target="_blank" rel="noopener noreferrer">Read the quickstart (raw source)</a>
+    </div>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>How to read the specification</h2>
+    <p>The specification is a draft. It defines the store layout and naming, the pointer and
+      discovery model, the git-repository and migration rules, the release triad and its gates, the
+      record model and status grammar, views and the closed transform vocabulary, the enforcement
+      posture, rotation and archive, import, the genericization boundary, the conformance vocabulary,
+      and the residual-coverage disclosures.</p>
+    <p>Conformance language follows common standards practice: MUST is an absolute requirement,
+      SHOULD is a strong recommendation departed from only for a recorded reason, and MAY is
+      genuinely optional. Statements without these keywords are descriptive.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Draft status and self-asserted conformance</h2>
+    <p>The specification is a working draft and the reference tooling lands verb by verb. Until the
+      validation tooling covers a given claim, conformance to that claim is self-asserted, and a
+      report says so: an unqualified "conformant" claim is never emitted, by tooling or by prose.
+      See the <a href="./disclosure">disclosure page</a> for what the standard and its tooling do and
+      do not establish.</p>
+  </div>
+</section>
+
+</main>
+
+</div>
+</div>
+</body>
+</html>

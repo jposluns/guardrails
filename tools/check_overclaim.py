@@ -24,9 +24,11 @@ signing. The whole tamper-* family and any FORWARD promise about it are banned o
 is no future-tense exception; integrity is described only in plain validation language).
 
 THREE SURFACE COLLECTORS (VER-CORE 4.4c; replaces the former site-only scan):
-  1. site/*.html: visible-text + meta scanning, SITE_PATTERNS + RELEASE_PATTERNS. site/ is a REQUIRED
-     surface: an absent, unwalkable, or non-directory site/ is a fail-closed exit 2, never a silent PASS
-     (the 4.4c correction of the old "no site/ directory -> PASS" shape).
+  1. the site HTML surfaces' *.html (SITE_HTML_ROOTS: site/ for aiqt.ai and opf/site/ for opfiles.ai,
+     the latter covering the opf/site/index.html placeholder plus the opf/site/draft staging tree):
+     visible-text + meta scanning, SITE_PATTERNS + RELEASE_PATTERNS. Each is a REQUIRED surface: an absent,
+     unwalkable, or non-directory root is a fail-closed exit 2, never a silent PASS (the 4.4c correction of
+     the old "no site/ directory -> PASS" shape).
   2. The hand-authored repo prose roster (README.md, SCOPE.md, SYSTEM-HARDENING.md, aiqt-barebones.md):
      RELEASE_PATTERNS. The spec's other named prose surfaces (DISCLOSURE.md, CHANGELOG.md, ROADMAP.md,
      CLAUDE.md) are gensrc-REGISTERED generated outputs and so arrive through collector 3; the roster
@@ -761,6 +763,12 @@ def scan(text, site=True):
     return findings
 
 
+# The site HTML marketing surfaces scanned by Collector 1 with SITE_PATTERNS. site/ is the aiqt.ai site;
+# opf/site is the opfiles.ai site (opf/site/index.html placeholder plus the opf/site/draft staging tree).
+# Both are required; the guarantee-flavoured deny-list applies identically to both public web copies.
+SITE_HTML_ROOTS = ("site", "opf/site")
+
+
 class _FailClosed(Exception):
     """A required surface is absent, unwalkable, or of the wrong type; the caller maps this to exit 2."""
 
@@ -786,29 +794,32 @@ def _collect(root, registry, binary_set):
     findings = []
     scanned = set()
 
-    # Collector 1: site/*.html visible text + meta (SITE_PATTERNS + RELEASE_PATTERNS). site/ is REQUIRED.
-    site = root / "site"
-    if not site.is_dir():
-        raise _FailClosed("site/ is a required surface but is absent or not a directory")
-    for f in sorted(walk_files(site, suffixes={".html"})):
-        rel = f.relative_to(root)
-        scanned.add(f.resolve())
-        try:
-            raw = f.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            findings.append("{}: could not read as UTF-8".format(rel))
-            continue
-        parser = VisibleText()
-        try:
-            parser.feed(raw)
-        except (ValueError, AssertionError):
-            findings.append("{}: could not parse as HTML".format(rel))
-            continue
-        for name, snip in scan(parser.text(), site=True):
-            findings.append("{}: overclaim [{}] -> {}".format(rel, name, snip))
-        for meta in parser.meta:
-            for name, snip in scan(meta, site=True):
-                findings.append("{} (meta): overclaim [{}] -> {}".format(rel, name, snip))
+    # Collector 1: the site HTML surfaces' visible text + meta (SITE_PATTERNS + RELEASE_PATTERNS). Both
+    # site/ (aiqt.ai) and opf/site/ (opfiles.ai: the index.html placeholder plus the opf/site/draft
+    # staging tree) are REQUIRED marketing surfaces, scanned with the same guarantee-flavoured deny-list.
+    for subdir in SITE_HTML_ROOTS:
+        site = root / subdir
+        if not site.is_dir():
+            raise _FailClosed("{}/ is a required surface but is absent or not a directory".format(subdir))
+        for f in sorted(walk_files(site, suffixes={".html"})):
+            rel = f.relative_to(root)
+            scanned.add(f.resolve())
+            try:
+                raw = f.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                findings.append("{}: could not read as UTF-8".format(rel))
+                continue
+            parser = VisibleText()
+            try:
+                parser.feed(raw)
+            except (ValueError, AssertionError):
+                findings.append("{}: could not parse as HTML".format(rel))
+                continue
+            for name, snip in scan(parser.text(), site=True):
+                findings.append("{}: overclaim [{}] -> {}".format(rel, name, snip))
+            for meta in parser.meta:
+                for name, snip in scan(meta, site=True):
+                    findings.append("{} (meta): overclaim [{}] -> {}".format(rel, name, snip))
 
     # Collector 2: the hand-authored repo prose roster (RELEASE_PATTERNS). Every path REQUIRED.
     for name in REPO_PROSE_ROSTER:
@@ -1094,9 +1105,13 @@ def _collector_self_test():
     except OSError as exc:
         return ["COLLECTOR: no writable temporary directory: {}".format(exc)]
 
-    def _make_root(name, with_site=True, with_roster=True):
+    def _make_root(name, with_site=True, with_opf_site=True, with_roster=True):
         r = tmp / name
-        (r / "site").mkdir(parents=True) if with_site else r.mkdir(parents=True)
+        r.mkdir(parents=True)
+        if with_site:
+            (r / "site").mkdir(parents=True)
+        if with_opf_site:  # the second required site HTML surface (opfiles.ai); a dir suffices
+            (r / "opf" / "site").mkdir(parents=True)
         if with_roster:
             for f in REPO_PROSE_ROSTER:
                 (r / f).parent.mkdir(parents=True, exist_ok=True)  # a roster path may be nested (e.g. .aiqt/core/gates/)
@@ -1111,6 +1126,23 @@ def _collector_self_test():
             failures.append("COLLECTOR: absent site/ should fail closed (_FailClosed)")
         except _FailClosed:
             pass
+
+        # (a2) opf/site absent -> _FailClosed (the second required site HTML surface).
+        r = _make_root("noopfsite", with_opf_site=False)
+        try:
+            _collect(r, [], set())
+            failures.append("COLLECTOR: absent opf/site should fail closed (_FailClosed)")
+        except _FailClosed:
+            pass
+
+        # (a3) an overclaim on an opf/site page is a finding (SITE_PATTERNS cover opf/site too).
+        r = _make_root("opfoverclaim")
+        (r / "opf" / "site" / "draft").mkdir(parents=True)
+        (r / "opf" / "site" / "draft" / "x.html").write_text(
+            "<p>This is unbreakable and guaranteed.</p>", encoding="utf-8")
+        f = _collect(r, [], set())
+        if not any("opf/site/draft/x.html" in x for x in f):
+            failures.append("COLLECTOR: an overclaim on an opf/site page should be a finding")
 
         # (b) a required roster surface absent -> _FailClosed.
         r = _make_root("noroster")

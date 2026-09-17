@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About and licence | OPFiles</title>
+<meta name="description" content="OPFiles is a neutral operational-files standard owned by AIQT and published under CC BY-SA 4.0. Ownership, attribution, and the standard versus the reference suite.">
+<!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
+<meta name="robots" content="noindex">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="About and licence | OPFiles">
+<meta property="og:description" content="OPFiles is a neutral operational-files standard owned by AIQT and published under CC BY-SA 4.0. Ownership, attribution, and the standard versus the reference suite.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink active" href="./about" aria-current="page">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">About and licence</p>
+  <h1>About OPFiles</h1>
+  <p class="lead">OPFiles is a neutral, self-contained operational-files standard. Its formal name is
+    the AIQT Development Operational Standard; OPFiles is the public brand. It is owned by AIQT and
+    published under CC BY-SA 4.0.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>Ownership</h2>
+    <p>AIQT owns the standard and is named in its title and brand. That is ownership, not a requirement
+      dependency: nothing in the base-required vocabulary names AIQT or any other adopter, and a project
+      conforms with the specification and its own checks. AIQT is also one profile,
+      <code>[profiles.aiqt]</code>, cited only as the reference enforcement suite and a consumer of the
+      standard. See <a href="./aiqt">OPFiles and AIQT</a> for that relationship.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Licence</h2>
+    <p>OPFiles is published under the Creative Commons Attribution-ShareAlike 4.0 International licence
+      (CC BY-SA 4.0). You are free to share and adapt the material for any purpose, including
+      commercially, on two conditions: you give appropriate credit (attribution), and if you remix,
+      transform, or build upon the material, you distribute your contributions under a qualifying
+      ShareAlike licence (CC BY-SA 4.0 or later, or a BY-SA Compatible License). The full terms are
+      published by Creative Commons.</p>
+    <div class="cta">
+      <a class="btn ghost" href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener noreferrer">Read CC BY-SA 4.0</a>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>The standard and the reference suite</h2>
+    <p>The standard is the specification and quickstart. The reference enforcement suite is
+      <a href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>, one
+      consumer of the standard, whose source is on
+      <a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">GitHub</a>.
+      A base adopter need not adopt the suite.</p>
+    <p class="lead" style="margin-top:1rem">TODO(verify): confirm the trademark and owning-entity name
+      and any preferred attribution string with the owner before the public flip.</p>
+  </div>
+</section>
+
+</main>
+
+</div>
+</div>
+</body>
+</html>

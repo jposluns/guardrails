@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DECISIONS.toml: the machine projection | OPFiles</title>
+<meta name="description" content="A deterministic, byte-drift-gated TOML deliverable projecting the four decision types for machine consumers.">
+<!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
+<meta name="robots" content="noindex">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="DECISIONS.toml: the machine projection | OPFiles">
+<meta property="og:description" content="A deterministic, byte-drift-gated TOML deliverable projecting the four decision types for machine consumers.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink active" href="./decisions-projection" aria-current="page">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Generated TOML</p>
+  <h1>DECISIONS.toml</h1>
+  <p class="lead">The machine projection, generated at <code>.working/DECISIONS.toml</code>.
+    Uppercase because it is output: generated, never hand-authored truth.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>About</h2>
+    <p>A machine projection is a third generated-output class beside deterministic views and the
+      curated changelog: a deterministic, byte-drift-gated TOML deliverable. The shipped projection
+      is <code>DECISIONS.toml</code>, the machine counterpart to the composed
+      <code>DECISIONS.md</code> view, projected from <code>pending_decision</code>,
+      <code>autonomous_decision</code>, <code>maintainer_decision</code>, and
+      <code>preference_pattern</code>.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Why</h2>
+    <p>A machine consumer of the decision record should not have to parse Markdown or read four
+      indexes and re-derive the supersession chain itself. The projection gives it one
+      deterministic file with the join already computed, under exactly the same render, drift, and
+      doctor gates as any declared view, with no new gate.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Description</h2>
+    <p>The payload (projection contract v1) carries <code>schema = 1</code> and
+      <code>projection = "decisions"</code>; four arrays of tables, one per source type, each row
+      sorted by numeric ID and projecting the full base record with
+      <code>x-&lt;vendor&gt;</code> extension tables excluded as profile-owned data; and one
+      <code>[derived]</code> table carrying the decision-resolution join's output (the effective
+      and superseded pending-decision IDs, numerically sorted) and nothing beyond the closed
+      transform vocabulary. The do-not-edit header is a leading TOML comment block naming sources,
+      schema and generator versions, a source-set digest, and the regeneration command, with no
+      timestamp.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p>Every determinism requirement applies verbatim: UTF-8, LF, stable ordering, no
+      locale-dependent sorting, no wall-clock content, no network access, and no model involvement.
+      Advisory activity over a projection, an assistant-side prediction, dedup, or
+      pattern-spotting pass, is a read-time activity outside the generator, so no model output can
+      ever be baked into the generated bytes.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Generated view</h2>
+    <p>This file is itself the generated half of its pairs: it is one of the thirteen outputs the
+      scaffolded manifest declares, rendered beside <code>DECISIONS.md</code> from the same four
+      sources.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Value</h2>
+    <p>A stable machine interface to the decision record with the current effective resolution
+      precomputed, which helps prevent each consumer from re-implementing, and diverging on, the
+      supersession walk.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Usage</h2>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Created by:</b> <code>opf render --write</code>, gated on a valid whole-store verdict.</li>
+      <li><b style="color:var(--ink)">Updated by:</b> regeneration only; hand edits are drift, reported by <code>opf render --check</code> and <code>opf doctor</code>.</li>
+      <li><b style="color:var(--ink)">Read by:</b> machine consumers of the decision record; the byte drift gate.</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+</div>
+</div>
+</body>
+</html>

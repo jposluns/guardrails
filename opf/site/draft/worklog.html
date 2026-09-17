@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>worklog.toml: the durable operational record | OPFiles</title>
+<meta name="description" content="One entry per change, appended as the work happens: mutable until release, frozen after it, never deleted.">
+<!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
+<meta name="robots" content="noindex">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="worklog.toml: the durable operational record | OPFiles">
+<meta property="og:description" content="One entry per change, appended as the work happens: mutable until release, frozen after it, never deleted.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink active" href="./worklog" aria-current="page">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Core store file</p>
+  <h1>worklog.toml</h1>
+  <p class="lead">The detailed operational record, at <code>.working/toml/worklog.toml</code>: one
+    entry per change, appended as the work happens.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>About</h2>
+    <p>The worklog is the fact layer of the release triad. Every change gets an entry; every entry
+      stays forever. Entries are mutable until a release freezes their span, immutable after, and
+      never consumed, rolled away, or deleted. Every fact ever recorded stays in the worklog or its
+      archive, and survives store relocation byte for byte.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Why</h2>
+    <p>Durable facts are what make summaries safe. Because the detail beneath a changelog entry is
+      never lost, the public story can be re-worded, re-rolled, and re-told at any depth without
+      risk: editing a summary can never change the facts, which persist here. The freeze-at-release
+      rule draws the line honestly: before release, a mistake is corrected in place through
+      ordinary review; after release, a correction is a new entry that links the one it
+      corrects.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Description</h2>
+    <p>An array of <code>[[entry]]</code> rows using a reduced record envelope: <code>id</code>
+      (namespace WL), <code>date</code>, <code>actor</code>, a change <code>kind</code>
+      (<code>added</code>, <code>changed</code>, <code>fixed</code>, <code>removed</code>,
+      <code>security</code>, <code>docs</code>, or <code>infra</code>; a manifest may register
+      additional kinds), a one-line <code>summary</code>, optional <code>detail</code>, and
+      <code>links</code> and <code>refs</code> to the records and revisions it concerns. Its status
+      is the single state <code>recorded</code>, and it never takes the <code>/proposed</code>
+      qualifier whatever the actor: a worklog entry records a fact, not a proposal awaiting
+      ratification.</p>
+    <div class="tree"><pre>
+schema = 1
+
+[[entry]]
+id = "WL-131"
+date = "2026-08-29T16:22:41Z"
+actor = { kind = "maintainer" }
+kind = "fixed"
+summary = "Close the view generator's stale-output gap on renamed types"
+links = [ { rel = "resolves", id = "BI-42" } ]
+</pre></div>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p>Entry mutability follows the release cut. At release, the release's coverage digest freezes
+      the covered entries; from then on any change to them is a gate failure, and an entry can
+      never be appended into an already-released span, because spans are contiguous frozen ID
+      intervals. Only released, frozen spans may rotate to the archive; the unreleased tail never
+      rotates, whatever its age or size.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Generated view</h2>
+    <p><code>WORKLOG.md</code>, a deterministic, byte-drift-gated render at <code>.working/</code>
+      top level, opening with the standard do-not-edit header.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Value</h2>
+    <p>A complete, append-only change record that a summary can always be rebuilt from. A silent edit
+      to released history breaks a recorded digest and fails the gate, which helps prevent history
+      from being quietly rewritten.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Usage</h2>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code>, empty.</li>
+      <li><b style="color:var(--ink)">Updated by:</b> every change, as an appended entry (IDs allocated through counters.toml); pre-release corrections in place; rotation of released spans into the archive.</li>
+      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (WORKLOG.md); the release cut (span selection and coverage digest); the changelog drafting flow (summaries are drafted from spans); <code>opf doctor</code> (span tiling, frozen digests, ID partition between active and archive).</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+</div>
+</div>
+</body>
+</html>

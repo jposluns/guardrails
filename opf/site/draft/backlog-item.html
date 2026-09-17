@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>backlog_item.index.toml | OPFiles</title>
+<meta name="description" content="The backlog: open, active, done, or dropped, with blocked-ness derived at view time, never stored.">
+<!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
+<meta name="robots" content="noindex">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="backlog_item.index.toml | OPFiles">
+<meta property="og:description" content="The backlog: open, active, done, or dropped, with blocked-ness derived at view time, never stored.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink active" href="./backlog-item" aria-current="page">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Record index</p>
+  <h1>backlog_item.index.toml</h1>
+  <p class="lead">The backlog, namespace <code>BI</code>, at
+    <code>.working/toml/backlog_item.index.toml</code>.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>About</h2>
+    <p>One record per unit of planned work. A backlog item moves <code>open</code> to
+      <code>active</code> to <code>done</code> or <code>dropped</code> (or straight from open to
+      dropped), and a ratified <code>done</code> creates a one-to-one completion receipt in the
+      <a href="./done">done index</a>.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Why</h2>
+    <p>A backlog that lives in prose drifts: items vanish, "done" means different things, and
+      blocked work hides. Typed records give each item a permanent ID, a closed state set, and a
+      ratification step: an assistant or automation finishing an item lands
+      <code>done/proposed</code>, and only a maintainer transition removes the qualifier.
+      Blocked-ness is deliberately never a stored state; it is derived from active blocks at view
+      time, so it can never go stale in the record.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Description</h2>
+    <p>The shared index shape: <code>schema = 1</code> plus an array of <code>[[record]]</code>
+      rows. Each record carries the standard envelope: <code>id</code>, <code>type</code>,
+      <code>status</code>, <code>title</code>, <code>created_at</code> and <code>updated_at</code>
+      (RFC 3339 UTC, read from the clock), <code>actor.kind</code> (maintainer, assistant,
+      automation, or importer), optional <code>summary</code>, <code>links</code> (a closed
+      vocabulary: supersedes, resolves, remediates, receipt_of, corrects, follows, relates,
+      exemplifies, derives_from), <code>refs</code> (captured external sources: path, url, or doc),
+      and registered <code>x-&lt;vendor&gt;</code> extensions. Schemas are closed; an unknown key is
+      a validation failure.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p>States: <code>open</code> (initial), <code>active</code> (working), <code>done</code> and
+      <code>dropped</code> (terminal). No resurrection: a record in an unqualified terminal state
+      never re-enters a working state; a revived concern is a new record linking the old one. An
+      item is actionable when its state is open or active and no unqualified active block scopes
+      it; that block join is the actionability rule every scheduling view renders.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Generated view</h2>
+    <p>Three composed views draw on this index joined against blocks: <code>TODO.md</code>,
+      <code>BACKLOG.md</code>, and <code>PIPELINE.md</code>, all byte-drift-gated. An optional
+      <code>BACKLOG_ITEM-INDEX.md</code> mirror renders the index one-to-one for human reading.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Value</h2>
+    <p>A backlog whose completion claims are gated: "done" is a ratified transition with a durable
+      receipt, not a feeling, which helps prevent silent scope loss and unratified completion from
+      entering the record.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Usage</h2>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code> (empty index); records by process as work is planned.</li>
+      <li><b style="color:var(--ink)">Updated by:</b> state transitions under the status grammar; maintainer ratification of proposed terminals.</li>
+      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (TODO, BACKLOG, PIPELINE, and the mirror); <code>opf doctor</code> (schema validity, ID uniqueness, transition legality, no-resurrection).</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disclosure: what OPFiles claims, and what it does not | OPFiles</title>
+<meta name="description" content="What the OPFiles standard and its reference tooling do and do not establish: draft status, self-asserted conformance, and the residual coverage the gates cannot reach.">
+<!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
+<meta name="robots" content="noindex">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Disclosure: what OPFiles claims, and what it does not | OPFiles">
+<meta property="og:description" content="What the OPFiles standard and its reference tooling do and do not establish: draft status, self-asserted conformance, and the residual coverage the gates cannot reach.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink active" href="./disclosure" aria-current="page">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">What we claim, and what we do not</p>
+  <h1>Disclosure</h1>
+  <p class="lead">OPFiles is a draft standard with a reference implementation that ships
+    incrementally. This page states plainly what the standard and its tooling establish, and the
+    residuals they do not reach, so a reader is never more than one click from the limits.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>Draft status and self-asserted conformance</h2>
+    <p>The specification is a working draft and the reference tooling lands verb by verb. Until the
+      validation tooling covers a given claim, conformance to that claim is self-asserted, and any
+      report says so: an unqualified "conformant" claim is never emitted, by tooling or by prose. A
+      conformance claim names its scope and which profiles were evaluated.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Residual coverage the gates do not reach</h2>
+    <p>Each gate names what it does and does not decide. The residuals below are disclosed as part of
+      the standard, not discovered after a gate fails:</p>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Changelog freeze</b> checks that a published entry's bytes
+        match a recorded digest; it does not judge whether the prose is accurate.</li>
+      <li><b style="color:var(--ink)">Range coverage</b> checks that changelog entries tile every
+        released version with no gap or overlap; it does not judge the quality of what they say.</li>
+      <li><b style="color:var(--ink)">The unreleased worklog tail</b> is reviewed rather than
+        machine-frozen: before a release cut, entries are correctable in place, so review, not a
+        digest, is the control there.</li>
+      <li><b style="color:var(--ink)">Store resolution</b> confirms one declared store resolves; it
+        cannot detect a second, unnamed store a project might also keep.</li>
+      <li><b style="color:var(--ink)">The tracked-store check</b> confirms the store is a tracked git
+        repository; it does not verify that the repository is backed up or hosted anywhere in
+        particular.</li>
+      <li><b style="color:var(--ink)">The single-writer lease</b> leaves a propagation window between
+        taking the lease and its reaching the sync target; the store-consistency divergence check is
+        the overlapping control that catches a collision in that window, and the two together, not the
+        lease alone, are the guard.</li>
+      <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
+        it supports; a profile it does not support is recorded as present-but-unevaluated rather than
+        failing base validation.</li>
+      <li><b style="color:var(--ink)">The discovery token</b> is frozen: a mistyped token is a
+        cannot-evaluate that stops the tool, never a silent empty store.</li>
+      <li><b style="color:var(--ink)">A host provider's conveniences</b> call the external API of the
+        host the target names. The egress bound is that named host and nothing else; the standard
+        cannot vouch for the host's own behaviour beyond that bound.</li>
+      <li><b style="color:var(--ink)">Public deliverables</b> reach the product repository through
+        <code>opf render</code> under that repository's normal review flow; the quality of that review
+        flow is the adopter's own discipline, which the standard requires to exist but does not itself
+        gate.</li>
+    </ul>
+    <p class="lead" style="margin-top:1.2rem">TODO(verify): reconcile every item above against
+      OPF-SPEC section 17 verbatim before publication. This page was drafted by the integrator from
+      the plan's section-17 paraphrase, not by the content author.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Ownership and licence</h2>
+    <p>OPFiles is a neutral standard owned by AIQT and published under CC BY-SA 4.0. AIQT Guardrails is
+      the reference enforcement suite and one consumer of the standard, carried as a single optional
+      profile; a base adopter need not adopt AIQT.</p>
+  </div>
+</section>
+</main>
+
+</div>
+</div>
+</body>
+</html>

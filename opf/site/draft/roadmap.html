@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roadmap | OPFiles</title>
+<meta name="description" content="Where OPFiles is now and the direction it is heading: a slim, forward-looking view of the standard and its reference tooling.">
+<!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
+<meta name="robots" content="noindex">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Roadmap | OPFiles">
+<meta property="og:description" content="Where OPFiles is now and the direction it is heading: a slim, forward-looking view of the standard and its reference tooling.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink active" href="./roadmap" aria-current="page">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Roadmap and status</p>
+  <h1>Roadmap</h1>
+  <p class="lead">Where OPFiles is today and the direction it is heading. This is a slim,
+    forward-looking view of the standard and its reference tooling, not a detailed backlog. Ordering
+    beyond what has landed is indicative, not a commitment.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>Now</h2>
+    <ul class="clean">
+      <li>The specification is a stable draft: the store layout, the release triad, the record model,
+        the enforcement posture, and the residual disclosures are defined.</li>
+      <li>Adopt-by-hand is supported and first-class: you can conform with hand-maintained files and
+        your own checks.</li>
+      <li>Part of the reference tooling has landed: <code>opf init</code>, <code>opf render</code>,
+        <code>opf doctor</code>, and <code>opf upgrade</code>, plus the scan, plan, and review modes of
+        <code>opf import</code>.</li>
+      <li>Conformance is self-asserted and says so; no unqualified conformance claim is emitted.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Next</h2>
+    <ul class="clean">
+      <li>The schema release that follows this specification fixes the normative module schemas and the
+        digest canonicalization the freeze gates depend on.</li>
+      <li>The remaining verbs: import promotion (<code>opf import --apply</code>), store relocation
+        (<code>opf migrate</code>), and the surfaced sync step (<code>opf sync</code>).</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Then</h2>
+    <ul class="clean">
+      <li>Conformance tooling and the conformance-report vocabulary in action, so a claim can be
+        reported against the base and each evaluated profile rather than self-asserted.</li>
+      <li>A rendered, drift-gated web version of the specification and quickstart (see
+        <a href="./standard">the standard</a>).</li>
+    </ul>
+    <p class="lead" style="margin-top:1rem">Ordering among the "next" and "then" items is indicative;
+      the standard fixes the posture each must honour, not a shipping date.</p>
+  </div>
+</section>
+
+</main>
+
+</div>
+</div>
+</body>
+</html>

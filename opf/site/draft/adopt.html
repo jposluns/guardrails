@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adopt by hand | OPFiles</title>
+<meta name="description" content="Conform to OPFiles with hand-maintained files and your own checks: the minimal store, the layout, working records-first, the release triad by hand, and the honest limits.">
+<!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
+<meta name="robots" content="noindex">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Adopt by hand | OPFiles">
+<meta property="og:description" content="Conform to OPFiles with hand-maintained files and your own checks: the minimal store, the layout, working records-first, the release triad by hand, and the honest limits.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink active" href="./adopt" aria-current="page">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Adopt by hand</p>
+  <h1>Adopt OPFiles by hand</h1>
+  <p class="lead">You can conform to OPFiles with hand-maintained files and your own checks. The
+    specification supports this explicitly: the store files are plain TOML, simple enough to keep by
+    hand, and a conformance claim is self-asserted until validation tooling covers it. The reference
+    tooling can scaffold the same store for you (see <a href="./tooling">reference tooling</a>), but
+    nothing about adopting the standard requires it.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>Why by hand is a first-class path</h2>
+    <p>OPFiles specifies formats, layout, naming, lifecycle, and enforcement posture. It does not
+      require any particular tool: the specification states that a project can conform with
+      hand-maintained files and its own checks. Adopting by hand gives you the records-first
+      discipline today, and you can move to the reference tooling later without changing the store
+      format. Conformance you assert by hand is self-asserted, and you should say so wherever you
+      claim it, because no validator has checked it for you yet.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>The minimal store</h2>
+    <p>Create the machine store at <code>.working/toml/</code> in your repository, with these files:</p>
+    <ul class="clean">
+      <li><b style="color:var(--ink)"><code>manifest.toml</code></b>: the control document and
+        discovery marker. It declares <code>standard = "opf"</code> (the exact discovery token) in
+        its <code>[opf]</code> table, along with the base <code>spec_version</code> you conform to,
+        the storage <code>layout</code>, and the enforcement <code>posture</code>.</li>
+      <li><b style="color:var(--ink)"><code>counters.toml</code></b>: the per-namespace ID
+        high-water marks, so an ID is never reused.</li>
+      <li><b style="color:var(--ink)"><code>version.toml</code></b>: the version and release ledger
+        (numbers and digests only, never prose).</li>
+      <li><b style="color:var(--ink)"><code>worklog.toml</code></b>: the durable, append-only
+        operational record. It is the exempt ledger, not a typed index.</li>
+      <li><b style="color:var(--ink)">Eleven typed indexes</b>, one per baseline record type:
+        <code>backlog_item</code>, <code>done</code>, <code>finding</code>,
+        <code>pending_decision</code>, <code>autonomous_decision</code>,
+        <code>maintainer_decision</code>, <code>preference_pattern</code>, <code>block</code>,
+        <code>handoff</code>, <code>reference</code>, and <code>contribution</code>, each as
+        <code>&lt;type&gt;.index.toml</code> (empty to start).</li>
+    </ul>
+    <p>Then write the committed pointer <code>.opf.toml</code> at your product repository root, so
+      the store resolves from a stable location. A <code>[profiles.aiqt]</code> table is optional and
+      is ignored by base-only tooling; a base adopter need not add it.</p>
+    <p>A minimal manifest, illustrative and drawn from the specification's own example (see
+      <a href="./standard">the standard</a> for the normative shape):</p>
+    <div class="tree"><pre>
+<span class="dir"># .working/toml/manifest.toml</span>
+[opf]
+standard = "opf"          <span class="yours"># discovery token; exact value required</span>
+spec_version = "1.1.0"    <span class="yours"># the base spec version this store conforms to</span>
+layout = "inline"         <span class="yours"># "inline" or "per-record"</span>
+posture = "warn"          <span class="yours"># "off", "warn", or "required" (section 11)</span>
+import_status = "none"    <span class="yours"># "none", "partial", or "complete"</span>
+</pre></div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>The layout, and the one rule of thumb</h2>
+    <p>Machine source lives under <code>.working/toml/</code>; generated human-readable views live at
+      <code>.working/</code> top level; the curated <code>CHANGELOG.md</code> and the generated
+      <code>VERSION</code> live at the product repository root.</p>
+    <div class="tree"><pre>
+<span class="dir">&lt;product repository root&gt;/</span>
+  <span class="yours">.opf.toml</span>                 committed store pointer
+  CHANGELOG.md              curated public changelog
+  VERSION                   rendered from version.toml
+  <span class="dir">.working/</span>
+    BACKLOG.md FINDINGS.md DECISIONS.md WORKLOG.md ...   generated views (UPPERCASE)
+    <span class="dir">toml/</span>
+      <span class="yours">manifest.toml counters.toml version.toml worklog.toml</span>
+      <span class="yours">backlog_item.index.toml</span>  and its ten sibling indexes
+</pre></div>
+    <p>One rule of thumb carries the whole convention: lowercase files are machine source you change
+      through tooling or review; UPPERCASE files are generated or published deliverables you read and
+      never hand-edit. The curated <code>CHANGELOG.md</code> is the one you edit, and only through its
+      publish flow.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Working records-first</h2>
+    <p>Treat the store as the source of truth: a decision, finding, or completion that is not
+      recorded did not happen. Append a worklog entry per change; keep the backlog, findings, and
+      decisions in their typed files; and regenerate the views rather than editing them. Records
+      carry a typed envelope (an ID, type, status, title, timestamps read from the clock, an actor,
+      links, and captured references), IDs are never reused, and records are corrected before release
+      and frozen after it, superseded by new records that link the old rather than deleted.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>The release triad by hand</h2>
+    <p>At a release, record the release and the worklog span it covers as a <code>[[release]]</code>
+      row in <code>version.toml</code>; draft the summary from that span; curate it by hand; publish
+      it into <code>CHANGELOG.md</code>; and record the freeze digest for the published entry. Old
+      summaries can be rolled up into range summaries later, because the details always survive in the
+      worklog, so re-rolling or re-wording stays safe.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Bring your own checks</h2>
+    <p>Even before you run the reference validator, you can assert the standard's key invariants
+      yourself. A hand adopter can check that the store is a tracked git repository (an untracked
+      store is a hard failure, not a warning); that generated views match a fresh render; that worklog
+      spans tile the released versions with no gap or overlap; and that the changelog range
+      tiles every released version, with published entries unchanged since their recorded digest. These
+      are the checks the integrity layer performs when the tooling runs; asserting them by hand keeps
+      you honest in the meantime.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Honest limits</h2>
+    <p>Without the validation tooling, your conformance is self-asserted and should say so. Digest
+      freezing and span tiling are your own discipline until a validator checks them. Some residuals
+      are part of the standard itself and no adopter escapes them: the freeze gate cannot judge whether
+      prose is accurate, range coverage cannot judge summary quality, and the unreleased worklog tail
+      rests on review rather than machine freezing. The <a href="./disclosure">disclosure page</a>
+      states these limits plainly.</p>
+  </div>
+</section>
+
+</main>
+
+</div>
+</div>
+</body>
+</html>

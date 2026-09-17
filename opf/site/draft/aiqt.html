@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OPFiles and AIQT | OPFiles</title>
+<meta name="description" content="How AIQT consumes and enforces OPFiles through one optional profile, what the profile adds, and why you can adopt OPFiles without adopting AIQT.">
+<!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
+<meta name="robots" content="noindex">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="OPFiles and AIQT | OPFiles">
+<meta property="og:description" content="How AIQT consumes and enforces OPFiles through one optional profile, what the profile adds, and why you can adopt OPFiles without adopting AIQT.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink active" href="./aiqt" aria-current="page">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">OPFiles and AIQT</p>
+  <h1>OPFiles and AIQT</h1>
+  <p class="lead">OPFiles is a standalone standard, owned by AIQT and published under CC BY-SA 4.0.
+    AIQT consumes and enforces it through one optional profile. You can adopt OPFiles without adopting
+    AIQT; if you do adopt AIQT, you inherit OPFiles as part of it.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>The relationship</h2>
+    <p>AIQT owns the standard and ships <code>[profiles.aiqt]</code> as its reference profile, but the
+      pack is a consumer, not the definition. The base standard is the <code>[opf]</code> table and its
+      rules; base-only tooling reads and validates the base and operates on it alone. AIQT's own
+      requirements ride the profile, and nothing in the base vocabulary names AIQT or any other
+      adopter.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>What the profile adds</h2>
+    <p>A profile may only add requirements; it can never weaken, remove, or override a base
+      requirement, and a profile value that would loosen a base setting is a profile validation
+      failure, surfaced, never applied. The AIQT profile declares a posture floor of
+      <code>required</code>, a set of required modules (governance, operational policy, and concurrent
+      operation), a triple-family verification floor that base tools ignore, and its own
+      <code>x-aiqt</code> record extension namespace. Where a profile setting meets a base setting,
+      they combine toward the stricter value.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>How tools treat the profile</h2>
+    <p>A tool that does not recognize a declared profile, or does not support its major version,
+      ignores it for enforcement and records it as present-but-unevaluated; it does not fail base
+      validation over an unknown profile. A tool that does support the profile enforces its extra
+      requirements as additional gates and fails closed on an unreadable, unparseable, or
+      base-incompatible instance of it. Fail-safe governs a profile outside a tool's coverage;
+      fail-closed governs a profile inside it.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Adopt AIQT and you inherit OPFiles</h2>
+    <p>The records-first discipline AIQT Guardrails enforces is one implementation of this standard, so
+      an AIQT adopter is an OPFiles adopter. If you arrived from
+      <a href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">aiqt.ai</a>, the store and
+      release model described across this site is the same one the pack works.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>You can adopt OPFiles without AIQT</h2>
+    <p>The profile is optional. A base adopter conforms with the specification and their own checks, or
+      with the reference tooling, and need not enable <code>[profiles.aiqt]</code> at all. See
+      <a href="./adopt">adopt by hand</a> for the neutral, tooling-independent path.</p>
+  </div>
+</section>
+
+</main>
+
+</div>
+</div>
+</body>
+</html>

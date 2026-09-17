@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>counters.toml: ID high-water marks | OPFiles</title>
+<meta name="description" content="One monotonic counter per record namespace: IDs are allocated atomically, never reset, and never reused.">
+<!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
+<meta name="robots" content="noindex">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="counters.toml: ID high-water marks | OPFiles">
+<meta property="og:description" content="One monotonic counter per record namespace: IDs are allocated atomically, never reset, and never reused.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink active" href="./counters" aria-current="page">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Core store file</p>
+  <h1>counters.toml</h1>
+  <p class="lead">The ID authority, at <code>.working/toml/counters.toml</code>: one monotonic
+    high-water value per record namespace.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>About</h2>
+    <p>Every record ID has the form <code>&lt;NS&gt;-&lt;n&gt;</code>: a two-letter namespace mapped
+      one-to-one to its type (BI for backlog_item, FN for finding, WL for worklog, and so on) and a
+      positive integer. This file holds the highest integer ever allocated in each namespace. A
+      fresh store starts every counter at zero, covering the twelve baseline namespaces plus LF,
+      the importer's quarantine namespace, so an import can be accepted from day one.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Why</h2>
+    <p>Durable records need permanent names. A backlog number that gets reused after a revert, or a
+      finding ID that means two different things in two eras of the project, quietly corrupts every
+      link and every audit trail that referenced it. A single monotonic counter per namespace,
+      claimed atomically, makes ID permanence structural rather than a policy people must
+      remember.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Description</h2>
+    <p>The smallest schema in the store: a schema marker and one table of namespace-to-integer
+      pairs. The scaffolded document, byte for byte:</p>
+    <div class="tree"><pre>
+schema = 1
+
+[counters]
+AD = 0
+BI = 0
+BL = 0
+CN = 0
+DN = 0
+FN = 0
+HO = 0
+LF = 0
+MD = 0
+PD = 0
+PP = 0
+RF = 0
+WL = 0
+</pre></div>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p>Allocation increments the counter under the store's lock as one atomic claim, so no gap
+      between choosing an ID and reserving it can double-allocate. Counters are never reset and IDs
+      are never reused, even when a record is superseded, refuted, or its work reverted. Rotation,
+      index rewrites, and store relocation never touch this file. The schema upgrade to 1.1.0
+      extends it with the CN, MD, and PP namespaces while preserving every existing high-water.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Generated view</h2>
+    <p>None. Counters are a control ledger, not a record type; no view renders from them.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Value</h2>
+    <p>Permanent IDs make every cross-reference in the store durable: a link written today still
+      resolves years and relocations later. The integrity gate checks that every live ID fits
+      within its counter and that counters only ever grow, which helps prevent silent renumbering
+      from entering the record at all.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Usage</h2>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code>, all namespaces at zero.</li>
+      <li><b style="color:var(--ink)">Updated by:</b> ID allocation, atomically under the store lock, whenever any process creates a record in any type; <code>opf upgrade</code> extends the namespace roster.</li>
+      <li><b style="color:var(--ink)">Read by:</b> <code>opf doctor</code> (counter completeness, monotonicity against a prior committed snapshot, and every live or archived ID within its high-water); record creation, to allocate the next ID.</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+</div>
+</div>
+</body>
+</html>
