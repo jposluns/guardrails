@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Core store files | OPFiles</title>
+<meta name="description" content="The OPF store's control and ledger files: the manifest, the ID counters, the version stamp, the worklog ledger, and the concurrency lease.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260918a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Core store files | OPFiles">
+<meta property="og:description" content="The OPF store's control and ledger files: the manifest, the ID counters, the version stamp, the worklog ledger, and the concurrency lease.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <h4>Reference</h4>
+  <a class="navlink active" href="./core-files" aria-current="page">Core store files</a>
+  <a class="navlink" href="./record-indexes">Record indexes</a>
+  <a class="navlink" href="./store-meta">Pointer, meta &amp; generated</a>
+  <h4>More</h4>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap">
+  <div class="refhead pagehead">
+    <p class="eyebrow">Reference</p>
+    <h1>Core store files</h1>
+    <p class="lead">The store's control and ledger files: the manifest that declares the store, the ID counters, the version stamp, the append-only worklog, and the concurrency lease. Choose a file to see what it holds and what it protects.</p>
+  </div>
+
+  <div class="navtabs" data-reference-hub role="tablist" aria-label="Core store file">
+    <a class="navtab" id="tab-manifest" role="tab" aria-selected="true" aria-controls="manifest" href="#manifest">manifest.toml</a>
+    <a class="navtab" id="tab-counters" role="tab" aria-selected="false" aria-controls="counters" href="#counters">counters.toml</a>
+    <a class="navtab" id="tab-version" role="tab" aria-selected="false" aria-controls="version" href="#version">version.toml</a>
+    <a class="navtab" id="tab-worklog" role="tab" aria-selected="false" aria-controls="worklog" href="#worklog">worklog.toml</a>
+    <a class="navtab" id="tab-lease" role="tab" aria-selected="false" aria-controls="lease" href="#lease">lease.toml</a>
+  </div>
+
+  <button type="button" class="btn ghost showall" data-show-all aria-pressed="false" hidden>
+    Show all files for reading and search
+  </button>
+</div>
+
+<section class="tabpanel" id="manifest" role="tabpanel" aria-labelledby="tab-manifest" tabindex="0">
+  <div class="wrap pagehead refhead">
+    <p class="eyebrow">Core store file</p>
+    <h2 id="manifest-title">The store manifest</h2>
+    <p class="refchips"><code>manifest.toml</code> <code>.working/toml/</code></p>
+    <p class="lead">The store's control document and discovery marker: everything a tool needs to know
+      about a store, it learns here first.</p>
+  </div>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <h3>Template</h3>
+      <p>Closed keysets throughout: an unknown key in any base section is a validation finding. The base
+        <code>[opf]</code> table carries the exact discovery token <code>standard = "opf"</code> and the
+        spec version the store conforms to. The reference scaffold's base:</p>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/manifest.toml</div>
+        <div class="codebody"><span class="tok-tbl">[opf]</span>
+  <span class="tok-key">standard</span> = <span class="tok-str">"opf"</span>
+  <span class="tok-key">spec_version</span> = <span class="tok-str">"1.1.0"</span>
+  <span class="tok-key">layout</span> = <span class="tok-str">"inline"</span>
+  <span class="tok-key">posture</span> = <span class="tok-str">"required"</span>
+  <span class="tok-key">import_status</span> = <span class="tok-str">"none"</span>
+
+  <span class="tok-tbl">[modules]</span>
+  <span class="tok-key">governance</span> = <span class="tok-num">false</span></div>
+      </div>
+      <p>The top-level tables:</p>
+      <div class="tree"><pre>
+  [opf]           standard, spec_version, layout (inline | per-record),
+                  posture (off | warn | required), import_status (none | partial | complete)
+  [store]         sync_target (empty under the in-repo default)
+  [modules]       governance, delivery_assurance, operational_policy, concurrent_operation
+  [profiles.*]    additive requirement bundles (version, base_compat, posture_floor,
+                  required_modules, extension_namespace); may only ADD requirements
+  [types.*]       one table per enabled type, carrying its normative namespace
+  [providers.*]   handler + roles (create, auth, sync); local-directory and
+                  generic-git-remote ship as universal fallbacks
+  [views.*]       kind (deterministic | composed | projection), sources, target
+  [deliverables.*] the curated CHANGELOG.md declaration
+  [archive]       period ("year")
+  [unmanaged]     pre-existing files kept in place, enumerated
+  [vendors]       registered x-&lt;vendor&gt; extension namespaces
+  </pre></div>
+      <p>The reference scaffold writes: every module <code>false</code>, no profile, an empty vendor
+        registry, <code>posture = "required"</code>, <code>import_status = "none"</code>,
+        <code>layout = "inline"</code>, the twelve baseline type bindings, and thirteen declared views
+        (the twelve Markdown views plus the <code>DECISIONS.toml</code> projection), each targeting
+        <code>.working/&lt;name&gt;</code>.</p>
+      <p>Every OPF operation resolves the store through the pointer, then validates the manifest before
+        acting; an unreadable or unparseable manifest is a cannot-evaluate that stops the tool. A profile
+        a tool supports is enforced fail-closed; a profile it does not support is ignored for enforcement
+        and recorded as unevaluated, so an unknown profile does not fail base validation. Weakening the
+        posture (required toward warn or off) is a guardrail-configuration change: it takes effect only
+        through the maintainer's explicit, recorded authorization, and a profile floor can raise, never
+        lower, the effective posture.</p>
+      <p>The manifest is control data, not a record source, so it has no paired Markdown view; it is,
+        however, what declares every other pair, because the <code>[views.*]</code> map is the registry
+        the renderer and the drift gate read. It is created by <code>opf init</code>, validated before a
+        byte is written; updated by <code>opf upgrade</code> (a canonical model regeneration for the
+        1.0.0 to 1.1.0 schema migration, never a textual edit), by the adopter's own reviewed edit to
+        enable a module, register a vendor, or record an unmanaged path, and by <code>opf migrate</code>
+        re-pointing the recorded sync target. It is read by every verb at store
+        resolution, by <code>opf render</code> for the view map, and by <code>opf doctor</code> for
+        posture, types, modules, unmanaged containment, and pointer-to-sync-target agreement.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>The problem it solves</h3>
+      <p class="refpull">A store with no self-declaration forces every tool to assume, and assumptions
+        drift.</p>
+      <p>The manifest makes the store's contract explicit and machine-checkable: a tool validates the
+        base before operating, enforces only what is declared, and records a profile it does not support
+        as present-but-unevaluated rather than failing over it. Because the machine subdirectory is
+        observed at each use rather than declared and trusted, renaming it is a directory move with
+        nothing to go stale. Tooling locates the machine store by finding exactly one immediate
+        subdirectory of <code>.working/</code> whose manifest declares the token; zero matches or more
+        than one stops the tool, never guesses.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <p class="eyebrow">At a glance</p>
+      <dl class="refstrip">
+        <div>
+          <dt>Declares</dt>
+          <dd class="refchips"><code>[opf]</code> <code>[modules]</code> <code>[types.*]</code> <code>[views.*]</code> <code>[providers.*]</code> <code>[profiles.*]</code></dd>
+        </div>
+        <div>
+          <dt>Read by</dt>
+          <dd class="refchips"><code>opf render</code> <code>opf doctor</code> <span>every verb, at store resolution</span></dd>
+        </div>
+        <div>
+          <dt>Written by</dt>
+          <dd class="refchips"><code>opf init</code> <code>opf upgrade</code> <span>a reviewed adopter edit</span> <code>opf migrate</code></dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>What it protects</h3>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 3h7l4.5 4.5V21H6.5z"/><path d="M13.5 3v4.5H18"/><path d="M9 13h6M9 16.5h4"/></svg></span>
+        <h4>One reviewed contract, checked at every load</h4>
+        <p>One reviewed file settles what would otherwise live in tool defaults and tribal knowledge.
+          Because the manifest is validated on every load and its keysets are closed, a misconfiguration
+          surfaces as a named finding at the point of use, which helps prevent a tool from operating on a
+          store it misunderstands.</p>
+      </div>
+    </div>
+  </section>
+</section>
+
+<section class="tabpanel" id="counters" role="tabpanel" aria-labelledby="tab-counters" tabindex="0">
+  <div class="wrap pagehead refhead">
+    <p class="eyebrow">Core store file</p>
+    <h2 id="counters-title">The ID counters</h2>
+    <p class="refchips"><code>counters.toml</code> <code>.working/toml/</code></p>
+    <p class="lead">The ID authority: one monotonic high-water value per record namespace.</p>
+  </div>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <h3>Template</h3>
+      <p>Every record ID has the form <code>&lt;NS&gt;-&lt;n&gt;</code>: a two-letter namespace mapped
+        one-to-one to its type (BI for backlog_item, FN for finding, WL for worklog, and so on) and a
+        positive integer. This file holds the highest integer ever allocated in each namespace. A fresh
+        store starts every counter at zero, covering the twelve baseline namespaces plus LF, the
+        importer's quarantine namespace, so an import can be accepted from day one. It is the smallest
+        schema in the store: a schema marker and one table of namespace-to-integer pairs. The scaffolded
+        document, byte for byte:</p>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/counters.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+
+  <span class="tok-tbl">[counters]</span>
+  <span class="tok-key">AD</span> = <span class="tok-num">0</span>
+  <span class="tok-key">BI</span> = <span class="tok-num">0</span>
+  <span class="tok-key">BL</span> = <span class="tok-num">0</span>
+  <span class="tok-key">CN</span> = <span class="tok-num">0</span>
+  <span class="tok-key">DN</span> = <span class="tok-num">0</span>
+  <span class="tok-key">FN</span> = <span class="tok-num">0</span>
+  <span class="tok-key">HO</span> = <span class="tok-num">0</span>
+  <span class="tok-key">LF</span> = <span class="tok-num">0</span>
+  <span class="tok-key">MD</span> = <span class="tok-num">0</span>
+  <span class="tok-key">PD</span> = <span class="tok-num">0</span>
+  <span class="tok-key">PP</span> = <span class="tok-num">0</span>
+  <span class="tok-key">RF</span> = <span class="tok-num">0</span>
+  <span class="tok-key">WL</span> = <span class="tok-num">0</span></div>
+      </div>
+      <p>Allocation increments the counter under the store's lock as one atomic claim, so no gap between
+        choosing an ID and reserving it can double-allocate. Counters are never reset and IDs are never
+        reused, even when a record is superseded, refuted, or its work reverted. Rotation, index
+        rewrites, and store relocation never touch this file. The schema upgrade to 1.1.0 extends it with
+        the CN, MD, and PP namespaces while preserving every existing high-water. Counters are a control
+        ledger, not a record type, so no view renders from them.</p>
+      <p>It is created by <code>opf init</code> with all namespaces at zero, updated by ID allocation
+        (atomically under the store lock, whenever any process creates a record in any type) and by
+        <code>opf upgrade</code> extending the namespace roster, and read by <code>opf doctor</code> (for
+        counter completeness, monotonicity against a prior committed snapshot, and every live or archived
+        ID within its high-water) and by record creation, to allocate the next ID.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>The problem it solves</h3>
+      <p class="refpull">Durable records need permanent names.</p>
+      <p>A backlog number that gets reused after a revert, or a finding ID that means two different
+        things in two eras of the project, quietly corrupts every link and every audit trail that
+        referenced it. A single monotonic counter per namespace, claimed atomically, makes ID permanence
+        structural rather than a policy people must remember.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <p class="eyebrow">At a glance</p>
+      <dl class="refstrip">
+        <div>
+          <dt>Tracks</dt>
+          <dd class="refchips"><code>&lt;NS&gt;-&lt;n&gt;</code> <span>12 baseline namespaces + LF</span> <span>monotonic high-water</span></dd>
+        </div>
+        <div>
+          <dt>Written by</dt>
+          <dd class="refchips"><code>opf init</code> <span>ID allocation, atomic</span> <code>opf upgrade</code></dd>
+        </div>
+        <div>
+          <dt>Read by</dt>
+          <dd class="refchips"><code>opf doctor</code> <span>record creation</span></dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>What it protects</h3>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4h10v16l-5-3.4L7 20z"/></svg></span>
+        <h4>Permanent names that still resolve later</h4>
+        <p>Permanent IDs make every cross-reference in the store durable: a link written today still
+          resolves years and relocations later. The integrity gate checks that every live ID fits within
+          its counter and that counters only ever grow, which helps prevent silent renumbering from
+          entering the record at all.</p>
+      </div>
+    </div>
+  </section>
+</section>
+
+<section class="tabpanel" id="version" role="tabpanel" aria-labelledby="tab-version" tabindex="0">
+  <div class="wrap pagehead refhead">
+    <p class="eyebrow">Core store file</p>
+    <h2 id="version-title">The version ledger</h2>
+    <p class="refchips"><code>version.toml</code> <code>.working/toml/</code></p>
+    <p class="lead">The version and release ledger: numbers, dates, spans, and digests, never prose.</p>
+  </div>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <h3>Template</h3>
+      <p>Two arrays of rows. Each <code>[[release]]</code> row records the SemVer <code>version</code>
+        (unique in the ledger), the RFC 3339 UTC <code>date</code> read from the clock at the release
+        event, the <code>worklog_span</code> (the inclusive, contiguous span of worklog entry IDs the
+        release covers), and a <code>coverage_digest</code> over the covered entries, computed at release
+        cut. Spans must tile: contiguous, non-overlapping, in ID order, so the unreleased tail is
+        everything after the last span. Each <code>[[summary]]</code> row backs one public changelog
+        entry: <code>covers</code> (a version, a range like <code>1.0.0..1.2.3</code>, or
+        <code>unreleased</code>), <code>status</code> (working, published, or superseded), the freeze
+        <code>digest</code> once published, and <code>superseded_by</code> when a range rollup replaced
+        it. Summary rows hold digests and ranges only; prose lives in exactly one place, the root
+        <code>CHANGELOG.md</code>.</p>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/version.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+
+  <span class="tok-tbl">[[release]]</span>
+  <span class="tok-key">version</span> = <span class="tok-str">"1.3.0"</span>
+  <span class="tok-key">date</span> = <span class="tok-str">"2026-08-30T00:00:00Z"</span>
+  <span class="tok-key">worklog_span</span> = [<span class="tok-str">"WL-89"</span>, <span class="tok-str">"WL-131"</span>]
+  <span class="tok-key">coverage_digest</span> = <span class="tok-str">"sha256:..."</span>
+
+  <span class="tok-tbl">[[summary]]</span>
+  <span class="tok-key">covers</span> = <span class="tok-str">"1.2.3..1.3.0"</span>
+  <span class="tok-key">status</span> = <span class="tok-str">"published"</span>
+  <span class="tok-key">digest</span> = <span class="tok-str">"sha256:..."</span></div>
+      </div>
+      <p>A release cut appends a row and freezes the covered worklog span; from then on any change to
+        those entries breaks the recorded digest and fails the gate. Publishing a changelog summary
+        records its freeze digest here; editing a published entry is therefore never silent, because the
+        changed bytes break the digest and the edit is structurally a re-publication. A fresh store
+        scaffolds an empty ledger (<code>release = []</code>, <code>summary = []</code>).</p>
+      <p>It renders two deterministic views: the root <code>VERSION</code> file (the latest release's
+        version as exact bytes, the one generated file that carries no header) and the optional human view
+        <code>VERSION.md</code>. Both are byte-drift-gated. The reference scaffold's pinned initial view
+        set declares <code>VERSION.md</code>; the root <code>VERSION</code> view row joins the manifest
+        where the adopter's release flow requires it (see the site note on tooling status). The ledger is
+        created by <code>opf init</code> (empty), updated by the release cut (a new append-only release
+        row) and the changelog publish and rollup flow (summary rows and their digests), and read by
+        <code>opf render</code> (the VERSION and VERSION.md renders), the changelog range-coverage and
+        freeze gates, <code>opf doctor</code> (span tiling, frozen coverage digests, append-only
+        history), and release-delta tooling in the AIQT reference suite, as a consumer of the ledger.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>The problem it solves</h3>
+      <p class="refpull">When the version anchor, the detailed record, and the public story share a file,
+        they tangle.</p>
+      <p>Editing the story risks the facts, and cutting a release risks the prose. Splitting them means
+        each can be gated on what it actually is. This ledger is one of three deliberately separated
+        release artefacts: it anchors the versioning, the worklog holds every fact, and
+        <code>CHANGELOG.md</code> tells the public story. The ledger is the single source for the
+        project's version; the root <code>VERSION</code> file is deterministically generated from its
+        latest release, as exact bytes, so the version can never live in two hand-maintained places. Its
+        rows are append-only and immutable, so a release, once cut, is a fixed point everything else
+        reconciles against.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <p class="eyebrow">At a glance</p>
+      <dl class="refstrip">
+        <div>
+          <dt>Records</dt>
+          <dd class="refchips"><code>[[release]]</code> <code>[[summary]]</code> <span>SemVer, dates, spans, digests</span></dd>
+        </div>
+        <div>
+          <dt>Feeds</dt>
+          <dd class="refchips"><code>VERSION</code> <code>VERSION.md</code> <code>CHANGELOG.md</code></dd>
+        </div>
+        <div>
+          <dt>Read by</dt>
+          <dd class="refchips"><code>opf render</code> <code>opf doctor</code> <span>changelog gates</span> <span>release-delta tooling</span></dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>What it protects</h3>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12.5 11.5 5H19v7.5L11.5 20z"/><circle cx="15.3" cy="8.7" r="1.3"/></svg></span>
+        <h4>One ledger, one version, everywhere</h4>
+        <p>The drift gate makes a stale <code>VERSION</code> file a reported failure, and the span-tiling
+          rule means late attribution to a published release cannot pass the gate, rather than being
+          forbidden by policy.</p>
+      </div>
+    </div>
+  </section>
+</section>
+
+<section class="tabpanel" id="worklog" role="tabpanel" aria-labelledby="tab-worklog" tabindex="0">
+  <div class="wrap pagehead refhead">
+    <p class="eyebrow">Core store file</p>
+    <h2 id="worklog-title">The worklog</h2>
+    <p class="refchips"><code>worklog.toml</code> <code>WL</code> <code>.working/toml/</code></p>
+    <p class="lead">The detailed operational record: one entry per change, appended as the work
+      happens.</p>
+  </div>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <h3>Template</h3>
+      <p>An array of <code>[[entry]]</code> rows using a reduced record envelope: <code>id</code>
+        (namespace WL), <code>date</code>, <code>actor</code>, a change <code>kind</code>
+        (<code>added</code>, <code>changed</code>, <code>fixed</code>, <code>removed</code>,
+        <code>security</code>, <code>docs</code>, or <code>infra</code>; a manifest may register
+        additional kinds), a one-line <code>summary</code>, optional <code>detail</code>, and
+        <code>links</code> and <code>refs</code> to the records and revisions it concerns. Its status is
+        the single state <code>recorded</code>, and it never takes the <code>/proposed</code> qualifier
+        whatever the actor: a worklog entry records a fact, not a proposal awaiting ratification.</p>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/worklog.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+
+  <span class="tok-tbl">[[entry]]</span>
+  <span class="tok-key">id</span> = <span class="tok-str">"WL-131"</span>
+  <span class="tok-key">date</span> = <span class="tok-str">"2026-08-29T16:22:41Z"</span>
+  <span class="tok-key">actor</span> = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }
+  <span class="tok-key">kind</span> = <span class="tok-str">"fixed"</span>
+  <span class="tok-key">summary</span> = <span class="tok-str">"Close the view generator's stale-output gap on renamed types"</span>
+  <span class="tok-key">links</span> = [ { <span class="tok-key">rel</span> = <span class="tok-str">"resolves"</span>, <span class="tok-key">id</span> = <span class="tok-str">"BI-42"</span> } ]</div>
+      </div>
+      <p>The worklog is the fact layer of the release triad. Every change gets an entry; every entry
+        stays forever. Entries are mutable until a release freezes their span, immutable after, and never
+        consumed, rolled away, or deleted. Every fact ever recorded stays in the worklog or its archive,
+        and survives store relocation byte for byte. At release, the release's coverage digest freezes
+        the covered entries; from then on any change to them is a gate failure, and an entry can never be
+        appended into an already-released span, because spans are contiguous frozen ID intervals. Only
+        released, frozen spans may rotate to the archive; the unreleased tail never rotates, whatever its
+        age or size.</p>
+      <p>It renders <code>WORKLOG.md</code>, a deterministic, byte-drift-gated view at
+        <code>.working/</code> top level, opening with the standard do-not-edit header. The worklog is
+        created by <code>opf init</code> (empty), updated by every change as an appended entry (IDs
+        allocated through counters.toml), by pre-release corrections in place, and by rotation of
+        released spans into the archive; it is read by <code>opf render</code> (WORKLOG.md), the release
+        cut (span selection and coverage digest), the changelog drafting flow (summaries are drafted from
+        spans), and <code>opf doctor</code> (span tiling, frozen digests, ID partition between active and
+        archive).</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>The problem it solves</h3>
+      <p class="refpull">Durable facts are what make summaries safe.</p>
+      <p>Because the detail beneath a changelog entry is never lost, the public story can be re-worded,
+        re-rolled, and re-told at any depth without risk: editing a summary can never change the facts,
+        which persist here. The freeze-at-release rule draws the line honestly: before release, a mistake
+        is corrected in place through ordinary review; after release, a correction is a new entry that
+        links the one it corrects.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <p class="eyebrow">At a glance</p>
+      <dl class="refstrip">
+        <div>
+          <dt>Records</dt>
+          <dd class="refchips"><code>[[entry]]</code> <span>one per change</span> <span>append-only, never deleted</span></dd>
+        </div>
+        <div>
+          <dt>Renders</dt>
+          <dd class="refchips"><code>WORKLOG.md</code></dd>
+        </div>
+        <div>
+          <dt>Read by</dt>
+          <dd class="refchips"><code>opf render</code> <code>opf doctor</code> <span>release cut</span> <span>changelog drafting</span></dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>What it protects</h3>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 20.5 8 12 12.5 3.5 8z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/><path d="m3.5 16.5 8.5 4.5 8.5-4.5"/></svg></span>
+        <h4>A complete record a summary can be rebuilt from</h4>
+        <p>A complete, append-only change record that a summary can always be rebuilt from. A silent edit
+          to released history breaks a recorded digest and fails the gate, which helps prevent history
+          from being quietly rewritten.</p>
+      </div>
+    </div>
+  </section>
+</section>
+
+<section class="tabpanel" id="lease" role="tabpanel" aria-labelledby="tab-lease" tabindex="0">
+  <div class="wrap pagehead refhead">
+    <p class="eyebrow">Core store file</p>
+    <h2 id="lease-title">The single-writer lease</h2>
+    <p class="refchips"><code>lease.toml</code> <code>.working/toml/</code></p>
+    <p class="lead">Present only while a run holds the store's single-writer lease; its absence is the
+      normal state.</p>
+  </div>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <h3>Template</h3>
+      <p>Before mutating the store, a run takes the lease. The standard requires it to be made observable
+        at the store's sync target before writes begin, so a second system's reconciliation sees the held
+        lease and refuses. It leaves a window in which a second system can begin before it observes
+        the held lease, and the divergence check detects the collision afterward. The file carries the holder, the operation, and
+        an acquired-at timestamp read from the clock at acquisition: a closed four-key shape,
+        <code>schema</code>, <code>holder</code>, <code>operation</code>, and <code>acquired_at</code>.
+        Where the concurrent-operation module is enabled, the lease is additionally recorded as a
+        <code>session_lease</code> record (namespace SL) with the states held, released, or
+        reconciled.</p>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/lease.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-key">holder</span> = <span class="tok-str">"opf@host-a/pid-8412"</span>
+  <span class="tok-key">operation</span> = <span class="tok-str">"upgrade"</span>
+  <span class="tok-key">acquired_at</span> = <span class="tok-str">"2026-08-29T16:22:41Z"</span></div>
+      </div>
+      <p>A lease is never seized from a live holder. It is reconciled against recorded state on resume or
+        close, and a leftover lease from a dead run is released only through that reconciliation. The
+        standard discloses the residual honestly: between taking the lease and its reaching the sync
+        target there is a propagation window in which two systems can both begin; the divergence check is
+        the overlapping control that catches that collision, and the two layers together, not the lease
+        alone, are the guard. The lease is transient operational state, not a record source, so no view
+        renders from it.</p>
+      <p>It is created by any mutating operation at lease acquisition (a fresh store has no lease, so it
+        is not scaffolded), removed by the holding run at clean close or by reconciliation after a dead
+        run, and read by every operation's consistency check before it acts, by <code>opf doctor</code>
+        (which validates the closed shape), and by a second system's reconciliation, which refuses while
+        the lease is held.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>The problem it solves</h3>
+      <p class="refpull">Two runs writing the same store at once can each produce a locally consistent
+        state that cannot merge.</p>
+      <p>A textual merge of TOML records can silently mangle the very records the standard exists to
+        protect. An observable held lease reduces the opportunity for concurrent writes up front, and the
+        consistency contract's divergence check detects, after the fact, a collision that begins inside
+        the propagation window the lease does not cover.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <p class="eyebrow">At a glance</p>
+      <dl class="refstrip">
+        <div>
+          <dt>Held during</dt>
+          <dd class="refchips"><span>any mutating operation</span> <span>the single-writer window</span></dd>
+        </div>
+        <div>
+          <dt>Contains</dt>
+          <dd class="refchips"><code>schema</code> <code>holder</code> <code>operation</code> <code>acquired_at</code></dd>
+        </div>
+        <div>
+          <dt>Enforced by</dt>
+          <dd class="refchips"><span>every op's consistency check</span> <code>opf doctor</code> <span>a second system's reconciliation</span></dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>What it protects</h3>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="9.5" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg></span>
+        <h4>Concurrency safety that is honest about its bounds</h4>
+        <p>The lease plus the divergence check helps prevent two-writer corruption of the store, and the
+          standard names the window it cannot close rather than implying a promise the mechanism cannot
+          honour.</p>
+      </div>
+    </div>
+  </section>
+</section>
+
+</main>
+
+</div>
+</div>
+</body>
+</html>

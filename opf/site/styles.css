@@ -40,7 +40,7 @@ body{
 }
 a{color:var(--accent); text-decoration:none}
 a:hover{text-decoration:underline}
-.wrap{max-width:1040px; margin:0 auto; padding:0 1.5rem}
+.wrap{margin:0 auto; padding:0 1.5rem}
 
 section{padding:1.75rem 0}
 h1,h2,h3{line-height:1.12; letter-spacing:-.025em; font-weight:750; text-wrap:pretty}
@@ -277,7 +277,7 @@ a:focus-visible,button:focus-visible,summary:focus-visible,.navtab:focus-visible
   box-shadow:inset 3px 0 0 var(--accent)}
 .sidebar .sb-theme{margin-top:auto; align-self:flex-start}
 .content{flex:1 1 auto; min-width:0}
-.whatis{color:var(--ink); font-size:1.05rem; line-height:1.55; margin:.2rem 0 0; max-width:880px}
+.whatis{color:var(--ink); font-size:1.05rem; line-height:1.55; margin:.2rem 0 0}
 .navtoggle{display:none}
 .navbackdrop{display:none}
 @media (max-width:900px){
@@ -331,7 +331,6 @@ section{padding:3.25rem 0}
 
 /* sharper eyebrow (main engine of the repetition) + readable measure */
 .eyebrow{font-size:.84rem; letter-spacing:.16em}
-.lead{max-width:74ch}
 
 
 /* ================= persistent top bar + 2x2 logo ================= */
@@ -455,11 +454,7 @@ a{color:var(--link)}
 /* section rhythm: generous, responsive vertical padding drawn from the spacing ramp */
 section{padding:clamp(var(--sp-8),5vw,var(--sp-24)) 0}
 
-/* ---- hero: asymmetric two-column layout (copy left, paired-panel mock right) ---- */
-.hero-grid{display:grid; grid-template-columns:1.15fr .85fr; gap:var(--sp-12); align-items:center; text-align:left}
 .hero-copy{min-width:0}
-.hero-mock{min-width:0}
-@media (max-width:900px){ .hero-grid{grid-template-columns:1fr; gap:var(--sp-8)} }
 
 /* ---- landing sub-nav: a sticky anchor row of pill links ---- */
 .anchornav{position:sticky; top:3.6rem; z-index:40; display:flex; flex-wrap:wrap; gap:var(--sp-2);
@@ -508,8 +503,8 @@ section{padding:clamp(var(--sp-8),5vw,var(--sp-24)) 0}
 /* faux window chrome: a three-dot cluster rendered from one pseudo-element */
 .codecard-bar::before{content:""; flex:0 0 auto; width:.62rem; height:.62rem; border-radius:50%;
   background:var(--faint); box-shadow:1rem 0 0 var(--faint), 2rem 0 0 var(--faint); margin-right:2.4rem}
-.codebody{margin:0; padding:var(--sp-6); overflow-x:auto; font-family:var(--font-mono);
-  font-size:var(--fs-small); line-height:1.7; color:var(--ink); white-space:pre}
+.codebody{margin:0; padding:var(--sp-6); font-family:var(--font-mono);
+  font-size:var(--fs-small); line-height:1.7; color:var(--ink); white-space:pre-wrap; overflow-wrap:anywhere}
 .tok-tbl{color:var(--accent)}     /* the [[table]] header */
 .tok-key{color:var(--ink)}        /* a key name */
 .tok-str{color:var(--accent-2)}   /* a string value (source tone) */
@@ -593,3 +588,40 @@ section{padding:clamp(var(--sp-8),5vw,var(--sp-24)) 0}
   .benefit,.persona,.door,.codecard{transition:none}
   .benefit:hover,.persona:hover,.door:hover,.codecard:hover{transform:none}
 }
+
+/* ---- reference-hub tab strip + panels (progressive enhancement) ---- */
+.navtabs{display:flex; flex-wrap:wrap; gap:var(--sp-2); margin:var(--sp-6) 0 var(--sp-4);
+  border-bottom:1px solid var(--line); padding-bottom:var(--sp-4)}
+/* JS-on active tab. JS-off leaves every .navtab in its resting pill state. */
+.navtab[aria-selected="true"]{background:var(--accent); border-color:transparent; color:var(--on-accent)}
+/* Panel-hiding applies ONLY once theme.js sets data-tabs-js on <html>; without JS all panels stay visible. */
+html[data-tabs-js] .tabpanel[hidden]{display:none}
+html[data-tabs-js] .navtabs{gap:var(--sp-2) 0}          /* tabs abut as a real tablist when enhanced */
+.tabpanel{scroll-margin-top:4.5rem}                     /* clear the sticky topbar on a hash jump */
+.tabpanel[id]{scroll-margin-top:4.5rem}
+.tabpanel:focus-visible{outline:3px solid var(--accent); outline-offset:4px}
+.showall{margin:0 0 var(--sp-8)}
+.showall[hidden]{display:none}                          /* .btn is inline-block, which outranks UA [hidden] */
+@media print{
+  html[data-tabs-js] .tabpanel[hidden]{display:block}   /* print the whole document, all panels */
+  .navtabs,.showall{display:none}
+}
+
+/* ---- rendered-markdown view body: proportional, real block elements, no monospace, no forced scrollbar ---- */
+.codeview{margin:0; padding:var(--sp-6); color:var(--ink); font-size:var(--fs-body); line-height:1.6;
+  overflow-wrap:anywhere}
+.codeview-genhdr{margin:0 0 var(--sp-4); padding-bottom:var(--sp-3); border-bottom:1px solid var(--line);
+  color:var(--faint); font-size:var(--fs-small)}          /* the do-not-edit header, subtle */
+.codeview-h1{margin:0 0 var(--sp-3); font-size:1.05rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted)}
+.codeview h4,.codeview h5{color:var(--ink)}
+.codeview-list{margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:var(--sp-2)}
+.codeview-list li{display:flex; align-items:baseline; flex-wrap:wrap; gap:var(--sp-2); color:var(--ink)}
+.codeview-id{font-family:var(--font-mono); color:var(--accent)}
+.codeview-tag{color:var(--faint); font-size:var(--fs-small)}
+.codeview table{width:100%; border-collapse:collapse; font-size:var(--fs-small)}   /* tables wrap, no h-scroll */
+.codeview th,.codeview td{padding:var(--sp-2) var(--sp-3); border-bottom:1px solid var(--line);
+  text-align:left; vertical-align:top; overflow-wrap:anywhere}
+.codeview th{color:var(--muted); font-weight:700}
+
+/* ---- full-width vertically-stacked code pair (landing hero + "see it in one file") ---- */
+.codepair.stack{grid-template-columns:1fr}

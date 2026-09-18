@@ -18,10 +18,33 @@
 <a class="skip" href="#main">Skip to content</a>
 
 <header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
   <div class="topformula" aria-label="The OPFiles pairing: machine TOML source leading to a generated view, kept honest by a drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
-  <button id="themebtn" class="themetoggle" type="button" onclick="toggleTheme()">Theme</button>
 </header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink active" href="./" aria-current="page">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <h4>Reference</h4>
+  <a class="navlink" href="./core-files">Core store files</a>
+  <a class="navlink" href="./record-indexes">Record indexes</a>
+  <a class="navlink" href="./store-meta">Pointer, meta &amp; generated</a>
+  <h4>More</h4>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
 
 <!-- cs-banner:start -->
 <div class="wrap"><p class="cs-banner">This site is a <b>preview</b> for friends and colleagues to review; the reference code and repository are a few days from fully matching what it describes.</p></div>
@@ -41,38 +64,38 @@
 
 <header class="hero">
   <div class="wrap">
-    <div class="hero-grid">
-      <div class="hero-copy">
-        <p class="eyebrow">Operational records, governed like code</p>
-        <h1>Integrity and consistency, <span class="grad">built into how your projects run.</span></h1>
-        <p class="lead">Keep every project's operational record accurate and consistent, so your teams and their AI assistants work from one source of truth, gated against quiet drift. Under the hood: machine-written TOML paired with generated human-readable views, checked on every commit.</p>
-        <div class="cta">
-          <a class="btn primary" href="#model">See how it holds together</a>
-          <a class="btn ghost" href="./standard">Read the standard</a>
-        </div>
+    <div class="hero-copy">
+      <p class="eyebrow">Operational records, governed like code</p>
+      <h1>Integrity and consistency, <span class="grad">built into how your projects run.</span></h1>
+      <p class="lead">Keep every project's operational record accurate and consistent, so your teams and their AI assistants work from one source of truth, gated against quiet drift. Under the hood: machine-written TOML paired with generated human-readable views, checked by a drift gate when you configure it as a required commit or CI check.</p>
+      <div class="cta">
+        <a class="btn primary" href="#model">See how it holds together</a>
+        <a class="btn ghost" href="./standard">Read the standard</a>
       </div>
-      <div class="hero-mock">
-        <div class="codepair">
-          <div class="codecard src">
-            <div class="codecard-bar">.working/toml/backlog_item.index.toml</div>
-            <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+    </div>
+    <div class="codepair stack">
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/backlog_item.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
 <span class="tok-tbl">[[record]]</span>
 <span class="tok-key">id</span> = <span class="tok-str">"BI-1"</span>
 <span class="tok-key">type</span> = <span class="tok-str">"backlog_item"</span>
 <span class="tok-key">status</span> = <span class="tok-str">"active"</span>
 <span class="tok-key">title</span> = <span class="tok-str">"Add the drift gate to CI"</span>
 <span class="tok-key">actor</span> = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
-          </div>
-          <div class="codecard view">
-            <div class="codecard-bar">.working/BACKLOG.md</div>
-            <div class="codebody">&lt;!-- GENERATED by opf render - -write. DO NOT EDIT; edit the store and regenerate. --&gt;
-# BACKLOG
-- BI-1 (active) Add the drift gate to CI -- actionable</div>
-          </div>
+      </div>
+      <div class="codecard view">
+        <div class="codecard-bar">.working/BACKLOG.md</div>
+        <div class="codeview">
+          <p class="codeview-genhdr">Generated by <code>opf render --write</code>. Do not edit; edit the store and regenerate.</p>
+          <h4 class="codeview-h1">BACKLOG</h4>
+          <ul class="codeview-list">
+            <li><code class="codeview-id">BI-1</code> <span class="chip ok">active</span> Add the drift gate to CI <span class="codeview-tag">actionable</span></li>
+          </ul>
         </div>
-        <p class="code-cap"><b>Illustrative excerpt.</b> Source on the left is what your tools and assistants write. The view on the right is what your people read. A gate keeps them identical.</p>
       </div>
     </div>
+    <p class="code-cap"><b>Illustrative excerpt.</b> The source on top is what your tools and assistants write. The view below is what your people read. A gate checks the view against a fresh render of its sources.</p>
   </div>
 </header>
 
@@ -99,9 +122,9 @@
           <div>generated, human-readable</div>
         </div>
       </div>
-      <div class="flow-gate ok"><b>DRIFT GATE</b> &#183; regenerate and diff on every commit</div>
+      <div class="flow-gate ok"><b>DRIFT GATE</b> &#183; regenerate and diff, when configured as a required check</div>
     </div>
-    <p class="flow-cap">The source leads to the view: every view is regenerated from its declared sources, never edited by hand. The gate re-renders on every commit and compares the bytes; if the source and the view disagree, the build fails.</p>
+    <p class="flow-cap">The source leads to the view: every view is regenerated from its declared sources, never edited by hand. Configured as a required commit or CI check, the gate re-renders and compares the bytes; if the source and the view disagree, the build fails.</p>
   </div>
 </section>
 
@@ -109,7 +132,7 @@
   <div class="wrap">
     <p class="eyebrow">See it in one file</p>
     <h2>You write the source. The view writes itself.</h2>
-    <div class="codepair">
+    <div class="codepair stack">
       <div class="codecard src">
         <div class="codecard-bar">.working/toml/backlog_item.index.toml</div>
         <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
@@ -124,17 +147,16 @@
       </div>
       <div class="codecard view">
         <div class="codecard-bar">.working/BACKLOG.md</div>
-        <div class="codebody">&lt;!-- GENERATED by opf render - -write (tools/_opf_views.py). DO NOT EDIT; edit the store and regenerate.
-sources: .working/toml/backlog_item.index.toml, .working/toml/block.index.toml
-schema: 1; generator: opf-views/2
-source-set-digest: sha256:283e0042...
-regenerate: opf render - -write
---&gt;
-# BACKLOG
-- BI-1 (active) Add the drift gate to CI -- actionable</div>
+        <div class="codeview">
+          <p class="codeview-genhdr">Generated by <code>opf render --write</code> from <code>backlog_item.index.toml</code> and <code>block.index.toml</code>. Do not edit; edit the store and regenerate.</p>
+          <h4 class="codeview-h1">BACKLOG</h4>
+          <ul class="codeview-list">
+            <li><code class="codeview-id">BI-1</code> <span class="chip ok">active</span> Add the drift gate to CI <span class="codeview-tag">actionable</span></li>
+          </ul>
+        </div>
       </div>
     </div>
-    <p class="code-cap">You edit the TOML. The Markdown is generated. The gate keeps them identical.</p>
+    <p class="code-cap">You edit the TOML. The Markdown is generated. The gate checks the view against a fresh render of its sources.</p>
   </div>
 </section>
 
@@ -171,7 +193,7 @@ regenerate: opf render - -write
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 13.5a3.5 3.5 0 0 0 5 0l2.5-2.5a3.5 3.5 0 0 0-5-5l-1.3 1.3"/><path d="M14.5 10.5a3.5 3.5 0 0 0-5 0L7 13a3.5 3.5 0 0 0 5 5l1.3-1.3"/></svg></span>
         <h3>No silent drift</h3>
-        <p>When the drift gate is configured and enforced, it re-renders every view on each commit and fails the build if the source and the view disagree. That catches malformed records and source-to-view drift, which reduces errors; it does not make a record true, since a schema-valid record can still say something false.</p>
+        <p>Configured as a required commit or CI check, the drift gate re-renders every view from its sources and rejects any that disagree. That catches malformed records and source-to-view drift, which reduces errors; it does not make a record true, since a schema-valid record can still say something false.</p>
       </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="6" r="2.2"/><circle cx="7" cy="18" r="2.2"/><circle cx="17" cy="9" r="2.2"/><path d="M7 8.2v7.6"/><path d="M17 11.2c0 3-2.4 3.6-5 4"/></svg></span>
@@ -206,7 +228,7 @@ regenerate: opf render - -write
   <div class="wrap">
     <p class="eyebrow">What is in the box</p>
     <h2>Every record type, every gated file, counted from the specification.</h2>
-    <p class="lead">No logos yet, so here is what can be counted instead.</p>
+    <p class="lead">Twelve baseline record types, thirteen generated views, and seven command verbs, each count taken from the specification rather than asserted.</p>
     <div class="benefits">
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 20.5 8 12 12.5 3.5 8z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/><path d="m3.5 16.5 8.5 4.5 8.5-4.5"/></svg></span>
@@ -221,7 +243,7 @@ regenerate: opf render - -write
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9.5 3 2.5-3 2.5"/><path d="M12.5 15H17"/></svg></span>
         <h3>7 command verbs</h3>
-        <p>5 landed now (init, render, doctor, upgrade, import); 2 (migrate, sync) fail closed until they land, rather than pretending to run.</p>
+        <p>init, render, doctor, upgrade, import, migrate, sync.</p>
       </div>
     </div>
   </div>
@@ -233,20 +255,20 @@ regenerate: opf render - -write
     <h2>Point your assistant at it. Say yes.</h2>
     <h3>Let your AI development assistant do the adoption</h3>
     <p class="lead">The primary path is one instruction: point your AI development assistant at this site (or the repository) and tell it to adopt OPFiles, or to adopt AIQT. It reads the standard, investigates your project, and presents a short plan: what it will create, import, or retire, and how the pieces wire together. On your yes it carries out the adoption, scaffolds and validates the store, wires the records-first process into your project's assistant instructions, and leaves the <code>.working/</code> store for your review.</p>
-    <p><span class="chip warn">Planned</span> This flow is being built and is not live yet. The machine-readable entry point it depends on (an <code>/llms.txt</code> index, a generated <code>/adopt.md</code>, and a root-page link) is planned for the next release of the site.</p>
+    <p>Point your assistant at this site's machine-readable entry point (<a href="/llms.txt"><code>/llms.txt</code></a> and a machine-readable adoption guide, <a href="/adopt.md"><code>/adopt.md</code></a>) and it reads the standard, inspects your project, and proposes a plan.</p>
     <p>
       <span class="chip ok"><code>opf init</code></span>
       <span class="chip ok"><code>opf render</code></span>
       <span class="chip ok"><code>opf doctor</code></span>
       <span class="chip ok"><code>opf upgrade</code></span>
       <span class="chip ok"><code>opf import</code></span>
-      <span class="chip warn"><code>opf migrate</code></span>
-      <span class="chip warn"><code>opf sync</code></span>
+      <span class="chip ok"><code>opf migrate</code></span>
+      <span class="chip ok"><code>opf sync</code></span>
     </p>
-    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>upgrade</code> migrates a store in place, and <code>import</code> brings legacy files in. A verb that has not landed refuses with a clear message rather than pretending to succeed.</p>
+    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>upgrade</code> migrates a store in place, and <code>import</code> brings legacy files in.</p>
     <div class="card">
-      <h3>Adopt by hand (available today)</h3>
-      <p>Available now, and no particular tool required: the store is plain TOML, so you can adopt it by hand today. Run <code>opf init</code> (or create the files yourself), commit the store, then <code>opf render --write</code>, and work records-first from there. Conformance you assert by hand is self-asserted until the validator covers it.</p>
+      <h3>Adopt by hand</h3>
+      <p>No particular tool required: the store is plain TOML, so you can adopt it by hand today. Run <code>opf init</code> (or create the files yourself), commit the store, then <code>opf render --write</code>, and work records-first from there. Conformance you assert by hand is self-asserted until the validator covers it.</p>
       <p><a class="btn ghost" href="./adopt">Adopt by hand: the full steps</a></p>
     </div>
   </div>
@@ -293,12 +315,13 @@ regenerate: opf render - -write
         <a href="#adopt">Adopt</a> &#183;
         <a href="./tooling">Reference tooling</a> &#183;
         <a href="./aiqt">OPFiles and AIQT</a> &#183;
-        <a href="./disclosure">Disclosure</a> &#183;
         <a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
       </nav>
     </div>
   </section>
 </footer>
 
+</div>
+</div>
 </body>
 </html>

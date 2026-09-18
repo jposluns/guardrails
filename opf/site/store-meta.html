@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pointer, meta and generated | OPFiles</title>
+<meta name="description" content="The store pointer, the calendar-year archive, and the generated DECISIONS.toml projection.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260918a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Pointer, meta and generated | OPFiles">
+<meta property="og:description" content="The store pointer, the calendar-year archive, and the generated DECISIONS.toml projection.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <h4>Reference</h4>
+  <a class="navlink" href="./core-files">Core store files</a>
+  <a class="navlink" href="./record-indexes">Record indexes</a>
+  <a class="navlink active" href="./store-meta" aria-current="page">Pointer, meta &amp; generated</a>
+  <h4>More</h4>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap">
+  <div class="refhead pagehead">
+    <p class="eyebrow">Reference</p>
+    <h1>Pointer, meta and generated</h1>
+    <p class="lead">The files around the record set: the pointer that resolves the store, the calendar-year archive that holds rotated records, and the generated DECISIONS.toml projection. Choose one to see what it holds.</p>
+  </div>
+
+  <div class="navtabs" data-reference-hub role="tablist" aria-label="Pointer, meta and generated">
+    <a class="navtab" id="tab-pointer" role="tab" aria-selected="true" aria-controls="pointer" href="#pointer">pointer</a>
+    <a class="navtab" id="tab-archive" role="tab" aria-selected="false" aria-controls="archive" href="#archive">archive.toml</a>
+    <a class="navtab" id="tab-decisions-projection" role="tab" aria-selected="false" aria-controls="decisions-projection" href="#decisions-projection">DECISIONS.toml</a>
+  </div>
+
+  <button type="button" class="btn ghost showall" data-show-all aria-pressed="false" hidden>
+    Show all files for reading and search
+  </button>
+</div>
+
+<section class="tabpanel" id="pointer" role="tabpanel" aria-labelledby="tab-pointer" tabindex="0">
+  <div class="wrap">
+    <div class="refhead pagehead">
+      <p class="eyebrow">Pointer</p>
+      <h2 id="pointer-title">The store pointer</h2>
+      <div class="refchips">
+        <code>.opf.toml</code>
+        <span>committed</span>
+        <code>product repository root</code>
+      </div>
+      <p class="lead">The committed pointer that names where the store repository lives: the one file whose content legitimately differs between store topologies.</p>
+    </div>
+
+    <h3>Template</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.opf.toml</div>
+      <div class="codebody"><span class="tok-tbl">[store]</span>
+  <span class="tok-key">target</span> = <span class="tok-str">"dir:."</span></div>
+    </div>
+    <p>A single <code>[store]</code> table. <code>target = "dir:."</code> is the default written by <code>opf init</code>. A target names the store repository in one of four forms: <code>dir:&lt;path&gt;</code> or a bare path (a directory that is, or will be, its own git repository); <code>git:&lt;url&gt;</code> or a bare git URL (any git remote on any host); <code>github:&lt;owner/repo&gt;</code> (a creation convenience that resolves to an ordinary git URL); and <code>gitlab:&lt;owner/repo&gt;</code> (the same, for GitLab). A relative <code>dir:</code> path resolves against the product repository root, the named fixed root for this file; any other path in a pointer must be absolute.</p>
+    <p>Resolution takes the local override first, then the committed pointer, then, where neither exists, the default location, where a valid manifest resolves as the store. No pointer and no default store is the not-adopted state, and <code>opf init</code> is the remedy. Store relocation re-points the committed pointer and the manifest's recorded sync target in the same change, so the pointer, the manifest, and the actual remote never disagree across a landed state; the integrity layer checks that agreement. The pointer has no generated view of its own: it is lowercase machine source, never a deliverable and never hand-authored truth a human is meant to read first.</p>
+
+    <h3>The problem it solves</h3>
+    <blockquote class="refpull">The store's location is configuration, not architecture.</blockquote>
+    <p>A stale pointer aimed at the wrong store would be worse than no pointer, so resolution is validated every time and fails closed: a pointer that does not resolve stops the tool and never falls back silently to the default location.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Declares</dt>
+        <dd>
+          <p>Where the store repository lives: a <code>[store]</code> table whose <code>target</code> is <code>dir:.</code> by default (the store rides this repository at <code>.working/</code>), or any location a target can name after relocation.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Read by</dt>
+        <dd>
+          <span class="chip"><code>opf init</code></span>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p>Created by <code>opf init</code> with <code>target = "dir:."</code> (it refuses to run where any pointer already exists); updated by <code>opf migrate</code>, as part of the single recorded relocation change; read by every verb at every store resolution, and by <code>opf doctor</code> for pointer and sync-target agreement.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Committed</dt>
+        <dd>
+          <p>Yes: this is the one tracked marker. Because the committed pointer must be safe to publish, anything machine-local or private-only belongs in the uncommitted <code>.opf.local.toml</code> override, which is resolved first and never committed.</p>
+        </dd>
+      </div>
+    </dl>
+
+    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s6-5.2 6-10a6 6 0 1 0-12 0c0 4.8 6 10 6 10z"/><circle cx="12" cy="11" r="2.4"/></svg></span>
+      <h4>The right store, every time</h4>
+      <p>A store that can live anywhere, resolved the same way by every tool, with private topologies possible without weakening tracking. Fail-closed resolution helps prevent a tool from operating on a different store than the one intended.</p>
+    </div>
+  </div>
+</section>
+
+<section class="tabpanel" id="archive" role="tabpanel" aria-labelledby="tab-archive" tabindex="0">
+  <div class="wrap">
+    <div class="refhead pagehead">
+      <p class="eyebrow">Archive</p>
+      <h2 id="archive-title">The archive</h2>
+      <div class="refchips">
+        <code>archive.toml</code>
+        <span>one per calendar year</span>
+        <code>.working/toml/archive/&lt;YYYY&gt;/</code>
+      </div>
+      <p class="lead">One rotation manifest per calendar-year bucket: rotation is relocation, never deletion, and never ID reuse.</p>
+    </div>
+
+    <h3>Template</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/archive/2026/archive.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+
+  <span class="tok-tbl">[[moved]]</span>
+  <span class="tok-key">id</span>          = <span class="tok-str">"BI-7"</span>
+  <span class="tok-key">type</span>        = <span class="tok-str">"backlog_item"</span>
+  <span class="tok-key">destination</span> = <span class="tok-str">"archive/2026/backlog_item.index.toml"</span>
+
+  <span class="tok-tbl">[[worklog_moved]]</span>
+  <span class="tok-key">span</span>        = <span class="tok-str">"2026"</span>
+  <span class="tok-key">destination</span> = <span class="tok-str">"archive/2026/worklog.toml"</span></div>
+    </div>
+    <p>A closed three-key shape: <code>schema</code>, <code>moved</code> (rows of <code>{id, type, destination}</code>), and <code>worklog_moved</code> (rows of <code>{span, destination}</code>). The archive directory also carries the rotated record and worklog files themselves, preserved byte for byte. Coverage gates read active and archive together, so rotation never changes any gate's answer, and <code>counters.toml</code> is untouched, preserving ID permanence. Retention is indefinite by default; an adopter bound by a retention policy applies it as a recorded maintainer decision governing archival, never as deletion of a record. Archived records have no generated view of their own; they surface through the same gates and coverage checks as active ones, read together.</p>
+
+    <h3>The problem it solves</h3>
+    <blockquote class="refpull">Active indexes should stay small without history getting quietly thinner.</blockquote>
+    <p>The enumeration is what makes a silent removal detectable: every movement is recorded, so a record cannot vanish under the name of rotation, and validation can confirm that every ID exists in exactly one active or archived location.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Records</dt>
+        <dd>
+          <p>Every rotated ID as a row of <code>{id, type, destination}</code>, and every moved worklog span as a row of <code>{span, destination}</code>, each carrying where it went.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Written by</dt>
+        <dd>
+          <p>Created by the first rotation into a year bucket (never scaffolded); updated by the rotation process, appending the moved IDs and spans.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Validated by</dt>
+        <dd>
+          <span class="chip"><code>opf doctor</code></span>
+          <p>Read by <code>opf doctor</code> for archive integrity, the exactly-one-location rule, and ID partition, and by every coverage gate, which reads active and archive together.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Invariant</dt>
+        <dd>
+          <p>Rotation is enumerated relocation, never deletion and never ID reuse. Records in unqualified terminal states may rotate on manifest-declared age or size thresholds; open records, active blocks, unresolved decisions and fragments, unexpired waivers, the current handoff, and the unreleased worklog tail never rotate, and worklog spans rotate only under the release rule, once released and frozen.</p>
+        </dd>
+      </div>
+    </dl>
+
+    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16v3.2H4z"/><path d="M5.4 10.4v8.1h13.2v-8.1"/><path d="M9.8 14h4.4"/></svg></span>
+      <h4>History that stays fast, and never forgets</h4>
+      <p>A store that stays fast to read without ever forgetting, with rotation that is provably lossless: the enumeration plus the one-location invariant helps prevent quiet disappearance of history.</p>
+    </div>
+  </div>
+</section>
+
+<section class="tabpanel" id="decisions-projection" role="tabpanel" aria-labelledby="tab-decisions-projection" tabindex="0">
+  <div class="wrap">
+    <div class="refhead pagehead">
+      <p class="eyebrow">Generated projection</p>
+      <h2 id="decisions-projection-title">The decisions projection</h2>
+      <div class="refchips">
+        <code>DECISIONS.toml</code>
+        <span>generated, machine-readable</span>
+        <code>.working/</code>
+      </div>
+      <p class="lead">The machine projection, generated at <code>.working/DECISIONS.toml</code> and rendered from the four decision types: uppercase because it is output, never hand-authored truth.</p>
+    </div>
+
+    <h3>Template</h3>
+    <div class="codecard view">
+      <div class="codecard-bar">.working/DECISIONS.toml</div>
+      <div class="codebody"><span class="tok-str"># generated, do not edit</span>
+  <span class="tok-str"># sources: pending_decision, autonomous_decision, maintainer_decision, preference_pattern</span>
+  <span class="tok-str"># regenerate with: opf render --write</span>
+  <span class="tok-key">schema</span>     = <span class="tok-num">1</span>
+  <span class="tok-key">projection</span> = <span class="tok-str">"decisions"</span>
+
+  <span class="tok-tbl">[[pending_decision]]</span>
+  <span class="tok-key">id</span>     = <span class="tok-str">"PD-3"</span>
+  <span class="tok-key">type</span>   = <span class="tok-str">"pending_decision"</span>
+  <span class="tok-key">status</span> = <span class="tok-str">"open"</span>
+
+  <span class="tok-str"># ... one array of tables per decision type ...</span>
+
+  <span class="tok-tbl">[derived]</span>
+  <span class="tok-str"># effective and superseded pending-decision IDs, numerically sorted</span></div>
+    </div>
+    <p>The payload (projection contract v1) carries <code>schema = 1</code> and <code>projection = "decisions"</code>; four arrays of tables, one per source type, each row sorted by numeric ID and projecting the full base record with <code>x-&lt;vendor&gt;</code> extension tables excluded as profile-owned data; and one <code>[derived]</code> table carrying the decision-resolution join's output (the effective and superseded pending-decision IDs, numerically sorted) and nothing beyond the closed transform vocabulary. The do-not-edit header is a leading TOML comment block naming sources, schema and generator versions, a source-set digest, and the regeneration command, with no timestamp.</p>
+    <p>The determinism requirements apply verbatim: UTF-8, LF, stable ordering, no locale-dependent sorting, no wall-clock content, no network access, and no model involvement. Advisory activity over a projection, an assistant-side prediction, dedup, or pattern-spotting pass, is a read-time activity outside the generator: the generator invokes no model and adds no model-generated interpretation. The views it renders reproduce the declared source records, so content those records carry, including assistant-authored text, still needs review.</p>
+
+    <h3>The problem it solves</h3>
+    <blockquote class="refpull">A machine consumer of the decision record should not have to parse Markdown, read four indexes, and re-derive the supersession chain itself.</blockquote>
+    <p>The projection gives it one deterministic file with the join already computed, under exactly the same render, drift, and doctor gates as any declared view, with no new gate. It is a third generated-output class beside the deterministic views and the curated changelog.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Rendered from</dt>
+        <dd>
+          <span class="chip"><code>pending_decision</code></span>
+          <span class="chip"><code>autonomous_decision</code></span>
+          <span class="chip"><code>maintainer_decision</code></span>
+          <span class="chip"><code>preference_pattern</code></span>
+          <p>Projected from the four decision source types, one array of tables per type, with the decision-resolution join already computed. Never hand-edited: it is generated output, not a source.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Kind</dt>
+        <dd>
+          <p>A machine projection: a deterministic, byte-drift-gated TOML deliverable, the machine counterpart to the composed <span class="chip view"><code>DECISIONS.md</code></span> view. It is one of the thirteen outputs the scaffolded manifest declares, rendered beside that view from the same four sources.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Gated by</dt>
+        <dd>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p>Created by <code>opf render --write</code>, gated on a valid whole-store verdict; regenerated only, so hand edits are drift, reported by <code>opf render --check</code> and <code>opf doctor</code>; read by machine consumers of the decision record and by the byte drift gate.</p>
+        </dd>
+      </div>
+    </dl>
+
+    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="m10.5 12.5-2 2 2 2"/><path d="m13.5 12.5 2 2-2 2"/></svg></span>
+      <h4>One resolution, not many divergent ones</h4>
+      <p>A stable machine interface to the decision record with the current effective resolution precomputed, which helps prevent each consumer from re-implementing, and diverging on, the supersession walk.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# OPFiles
+
+OPFiles is a neutral operational-files standard: lowercase TOML sources paired with generated uppercase views, drift-gated. The machine source is the truth, the human-readable views are regenerated from it, and the drift gate rejects any view that no longer matches its source.
+
+## Key pages
+
+- [The standard](/standard): what OPFiles specifies, its formats, layout, naming, record lifecycle, and enforcement posture.
+- [Adopt](/adopt): adopt with your AI development assistant, or create the plain-TOML store and wire its checks by hand.
+- [Adopt, machine-readable](/adopt.md): the machine-readable adoption guide an assistant follows, including the digest-verification and scaffolding steps.
+- [Reference tooling](/tooling): the opf command line that scaffolds, renders, checks, and upgrades a store.
+- [Core store files](/core-files): the manifest, the ID counters, the version ledger, the append-only worklog, and the single-writer lease.
+- [Record indexes](/record-indexes): the baseline typed indexes, one schema-validated TOML source per record type, each paired with a generated view.
+- [Pointer, meta and generated](/store-meta): the committed store pointer, the calendar-year archive, and the generated DECISIONS.toml projection.
+- [OPFiles and AIQT](/aiqt): how OPFiles relates to the AIQT Guardrails pack that adopts it.
+- [Roadmap](/roadmap): what has shipped and what is coming next.
+- [About and licence](/about): what OPFiles is, who maintains it, and the licence it ships under.
