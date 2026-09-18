@@ -6,7 +6,7 @@
 <title>block.index.toml | OPFiles</title>
 <meta name="description" content="Blocks scope enumerated records and feed actionability; only a maintainer-ratified active block hides work.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,80 +66,75 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
-  <p class="eyebrow">Record index</p>
-  <h1>block.index.toml</h1>
-  <p class="lead">Blocks, namespace <code>BL</code>, at
-    <code>.working/toml/block.index.toml</code>.</p>
+<div class="wrap">
+  <div class="refhead pagehead">
+    <p class="eyebrow">Record index</p>
+    <h1>Blocks</h1>
+    <div class="refchips">
+      <code>block.index.toml</code>
+      <span>namespace BL</span>
+      <code>.working/toml/</code>
+    </div>
+    <p class="lead">A record that named work cannot proceed: it <code>scopes</code> an enumerated list of record IDs and feeds the actionability rule, so only a maintainer-ratified active block hides work.</p>
+  </div>
+
+  <h2>The problem it solves</h2>
+  <blockquote class="refpull">"Blocked" is one of the easiest states to abuse: it can park inconvenient work indefinitely.</blockquote>
+  <p>The standard makes a block a scoped, auditable record rather than a mood, and gates its creation: a block created by an assistant or automation is <code>active/proposed</code>, a proposal that hides nothing and justifies no stop until a maintainer ratifies it. Moving work to blocked is the maintainer's decision, structurally.</p>
+
+  <dl class="refstrip">
+    <div>
+      <dt>Pairs with</dt>
+      <dd>
+        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>BLOCKS.md</code></span>
+        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>TODO.md</code></span>
+        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>BACKLOG.md</code></span>
+        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>PIPELINE.md</code></span>
+        <p><code>BLOCKS.md</code> is composed from this index, and the block join renders inside <code>TODO.md</code>, <code>BACKLOG.md</code>, and <code>PIPELINE.md</code>; an optional <code>BLOCK-INDEX.md</code> mirror completes the set. All byte-drift-gated.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Lifecycle</dt>
+      <dd>
+        <p><code>active</code> (gated) &#8594; <code>released</code> | <code>expired</code></p>
+        <p>An unqualified active block hides the records it scopes from actionable views; a proposed or terminal block hides nothing. The block-actionability join is one of exactly two named joins in the closed transform vocabulary. Active blocks never rotate to the archive.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Referenced by</dt>
+      <dd>
+        <span class="chip"><code>opf init</code></span>
+        <span class="chip"><code>opf render</code></span>
+        <span class="chip"><code>opf doctor</code></span>
+        <p>Created by <code>opf init</code> (empty index), by maintainers directly, and by assistants as gated proposals; updated by ratification, release, or expiry transitions; read by <code>opf render</code> (BLOCKS.md and the actionability join in the three backlog views) and validated by <code>opf doctor</code> (schema, gated-state legality, scoped-ID resolution).</p>
+      </dd>
+    </div>
+  </dl>
+
+  <h2 style="margin-top:var(--sp-12)">What a record carries</h2>
+  <div class="codecard src">
+    <div class="codecard-bar">.working/toml/block.index.toml</div>
+    <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+<span class="tok-tbl">[[record]]</span>
+<span class="tok-key">id</span>     = <span class="tok-str">"BL-42"</span>
+<span class="tok-key">type</span>   = <span class="tok-str">"block"</span>
+<span class="tok-key">status</span> = <span class="tok-str">"active"</span>
+<span class="tok-key">scopes</span> = [<span class="tok-str">"BI-42"</span>, <span class="tok-str">"BI-43"</span>]</div>
+  </div>
+  <p>The shared index shape with the standard envelope plus <code>scopes</code>, the enumerated record IDs the block covers. States: <code>active</code> (initial, gated) to <code>released</code> or <code>expired</code> (terminal). Blocked-ness is never stored on the scoped records; it is derived at view time through the block join.</p>
+
+  <h2 style="margin-top:var(--sp-12)">What it protects</h2>
+  <div class="benefit">
+    <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+    <h3>Blocks you can audit</h3>
+    <p>Blocks that are visible, scoped, and ratified, which helps prevent manufactured stops: work reads as blocked only on a grant the record can show.</p>
+  </div>
+
+  <nav class="refseq" aria-label="Reference sequence" style="display:flex; justify-content:space-between; gap:var(--sp-4); margin-top:var(--sp-12); font-weight:650">
+    <a href="./preference-pattern">&#8592; preference_pattern</a>
+    <a href="./handoff">handoff &#8594;</a>
+  </nav>
 </div>
-
-<section>
-  <div class="wrap">
-    <h2>About</h2>
-    <p>A block records that named work cannot proceed. It <code>scopes</code> an enumerated list of
-      record IDs, is <code>active</code> until <code>released</code> or <code>expired</code>, and
-      feeds the actionability rule: a backlog item is actionable when it is open or active and no
-      unqualified active block scopes it.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Why</h2>
-    <p>"Blocked" is one of the easiest states to abuse: it can park inconvenient work indefinitely.
-      The standard makes a block a scoped, auditable record rather than a mood, and gates its
-      creation: a block created by an assistant or automation is <code>active/proposed</code>, a
-      proposal that hides nothing and justifies no stop until a maintainer ratifies it. Moving work
-      to blocked is the maintainer's decision, structurally.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Description</h2>
-    <p>The shared index shape with the standard envelope plus <code>scopes</code>, the enumerated
-      record IDs the block covers. States: <code>active</code> (initial, gated) to
-      <code>released</code> or <code>expired</code> (terminal). Blocked-ness is never stored on the
-      scoped records; it is derived at view time through the block join.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>How it works</h2>
-    <p>The block-actionability join is one of exactly two named joins in the closed transform
-      vocabulary: an unqualified active block hides the records it scopes from actionable views; a
-      proposed or terminal block hides nothing. Active blocks never rotate to the archive.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Generated view</h2>
-    <p><code>BLOCKS.md</code>, composed from this index, plus the block join rendered inside
-      <code>TODO.md</code>, <code>BACKLOG.md</code>, and <code>PIPELINE.md</code>; optional
-      <code>BLOCK-INDEX.md</code> mirror. All byte-drift-gated.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>Blocks that are visible, scoped, and ratified, which helps prevent
-      manufactured stops: work reads as blocked only on a grant the record can show.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code> (empty index); maintainers directly; assistants as gated proposals.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> ratification, release, or expiry transitions.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (BLOCKS.md and the actionability join in the three backlog views); <code>opf doctor</code> (schema, gated-state legality, scoped-ID resolution).</li>
-    </ul>
-  </div>
-</section>
 </main>
 
 </div>

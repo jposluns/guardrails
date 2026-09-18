@@ -6,7 +6,7 @@
 <title>done.index.toml | OPFiles</title>
 <meta name="description" content="Durable completion receipts, created terminal and immutable, linked one-to-one to a ratified backlog item.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,79 +66,71 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
-  <p class="eyebrow">Record index</p>
-  <h1>done.index.toml</h1>
-  <p class="lead">Completion receipts, namespace <code>DN</code>, at
-    <code>.working/toml/done.index.toml</code>.</p>
+<div class="wrap">
+  <div class="refhead pagehead">
+    <p class="eyebrow">Record index</p>
+    <h1>Completion receipts</h1>
+    <div class="refchips">
+      <code>done.index.toml</code>
+      <span>namespace DN</span>
+      <code>.working/toml/</code>
+    </div>
+    <p class="lead">A durable completion receipt, created in its single terminal state and immutable from birth, linked one-to-one to the backlog item whose ratified completion it witnesses.</p>
+  </div>
+
+  <h2>The problem it solves</h2>
+  <blockquote class="refpull">Completion needs its own artefact.</blockquote>
+  <p>If "done" were only a state flag on the backlog item, the moment of completion, who ratified it, and what it covered would be reconstructable only from history. A separate immutable receipt makes each completion a first-class, linkable fact.</p>
+
+  <dl class="refstrip">
+    <div>
+      <dt>Pairs with</dt>
+      <dd>
+        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>DONE.md</code></span>
+        <p>Composed from this index, plus the optional <code>DONE-INDEX.md</code> mirror; both byte-drift-gated.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Lifecycle</dt>
+      <dd>
+        <p><code>recorded</code> (terminal only)</p>
+        <p>A single state, no transitions, and never proposable: a factual receipt awaits no ratification, so it carries no <code>/proposed</code> qualifier. A ratified <code>done</code> on a backlog item creates the receipt in the same act, one to one. Like all records in unqualified terminal states other than the worklog, receipts may rotate to the calendar-year archive on manifest-declared thresholds; rotation is enumerated relocation, never deletion, so every receipt remains resolvable forever.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Referenced by</dt>
+      <dd>
+        <span class="chip"><code>opf init</code></span>
+        <span class="chip"><code>opf render</code></span>
+        <span class="chip"><code>opf doctor</code></span>
+        <p>Created by <code>opf init</code> (empty index), by the ratified-done transition, and by the importer for migrated history with provenance; never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by <code>opf render</code> (DONE.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, the one-to-one receipt link).</p>
+      </dd>
+    </div>
+  </dl>
+
+  <h2 style="margin-top:var(--sp-12)">What a record carries</h2>
+  <div class="codecard src">
+    <div class="codecard-bar">.working/toml/done.index.toml</div>
+    <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+<span class="tok-tbl">[[record]]</span>
+<span class="tok-key">id</span>     = <span class="tok-str">"DN-42"</span>
+<span class="tok-key">type</span>   = <span class="tok-str">"done"</span>
+<span class="tok-key">status</span> = <span class="tok-str">"recorded"</span></div>
+  </div>
+  <p>The shared index shape (<code>schema = 1</code> plus <code>[[record]]</code> rows) with the standard envelope and no type-specific extra fields. The single state is <code>recorded</code>, with no transitions and never proposable: a factual receipt awaits no ratification, so it carries no <code>/proposed</code> qualifier. It links <code>receipt_of</code> to the backlog item it witnesses; a standalone receipt is legal only for imported history with provenance.</p>
+
+  <h2 style="margin-top:var(--sp-12)">What it protects</h2>
+  <div class="benefit">
+    <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+    <h3>An audit-ready record of completion</h3>
+    <p>An audit-ready record of what was finished, when, and on whose ratification. Because a receipt exists only for a ratified completion, the DONE view helps prevent proposed or asserted completion from reading as settled fact.</p>
+  </div>
+
+  <nav class="refseq" aria-label="Reference sequence" style="display:flex; justify-content:space-between; gap:var(--sp-4); margin-top:var(--sp-12); font-weight:650">
+    <a href="./backlog-item">&#8592; backlog_item</a>
+    <a href="./finding">finding &#8594;</a>
+  </nav>
 </div>
-
-<section>
-  <div class="wrap">
-    <h2>About</h2>
-    <p>A <code>done</code> record is a durable completion receipt, created in its single terminal
-      state <code>recorded</code> and immutable from birth. It links <code>receipt_of</code> to the
-      backlog item whose ratified completion it witnesses; a standalone receipt is legal only for
-      imported history with provenance.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Why</h2>
-    <p>Completion needs its own artifact. If "done" were only a state flag on the backlog item, the
-      moment of completion, who ratified it, and what it covered would be reconstructable only from
-      history. A separate immutable receipt makes each completion a first-class, linkable fact.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Description</h2>
-    <p>The shared index shape (<code>schema = 1</code> plus <code>[[record]]</code> rows) with the
-      standard envelope and no type-specific extra fields. Single state <code>recorded</code>, no
-      transitions, and never proposable: a factual receipt awaits no ratification, so it carries no
-      <code>/proposed</code> qualifier.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>How it works</h2>
-    <p>A ratified <code>done</code> on a backlog item creates the receipt in the same act, one to
-      one. Receipts, like all records in unqualified terminal states other than the worklog, may
-      rotate to the calendar-year archive on manifest-declared thresholds; rotation is enumerated
-      relocation, never deletion, so every receipt remains resolvable forever.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Generated view</h2>
-    <p><code>DONE.md</code>, composed from this index, plus the optional
-      <code>DONE-INDEX.md</code> mirror; both byte-drift-gated.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>An audit-ready record of what was finished, when, and on whose ratification. Because a
-      receipt exists only for a ratified completion, the DONE view helps prevent proposed or
-      asserted completion from reading as settled fact.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code> (empty index); receipts by the ratified-done transition; the importer for migrated history, with provenance.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> nothing; records are immutable. Rotation relocates aged receipts to the archive.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (DONE.md and the mirror); <code>opf doctor</code> (schema, uniqueness, the one-to-one receipt link).</li>
-    </ul>
-  </div>
-</section>
 </main>
 
 </div>

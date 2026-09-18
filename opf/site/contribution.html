@@ -6,7 +6,7 @@
 <title>contribution.index.toml | OPFiles</title>
 <meta name="description" content="What this project sent to a peer project, with a delivery receipt: the outward counterpart to reference.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,85 +66,107 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
+<div class="wrap refhead">
   <p class="eyebrow">Record index</p>
-  <h1>contribution.index.toml</h1>
-  <p class="lead">Contributions, namespace <code>CN</code>, at
-    <code>.working/toml/contribution.index.toml</code>.</p>
+  <h1>Work sent to a peer project</h1>
+  <div class="refchips">
+    <code>contribution.index.toml</code>
+    <span>namespace CN</span>
+    <span>.working/toml/</span>
+  </div>
+  <p class="lead">An artifact, fix, or proposal this project sent to a peer project, with a delivery receipt: the outward counterpart to <a href="./reference">reference</a>, which records what comes in.</p>
 </div>
 
 <section>
   <div class="wrap">
-    <h2>About</h2>
-    <p>A contribution records an artifact, fix, or proposal this project sent to a peer project,
-      with a delivery receipt: the outward counterpart to <a href="./reference">reference</a>,
-      which records what comes in. It moves <code>proposed</code> to <code>sent</code> to
-      <code>acknowledged</code> or <code>superseded</code>, or from proposed to
-      <code>withdrawn</code>.</p>
+    <blockquote class="refpull">Outbound work is an external action, so its claim, "we sent this", is gated.</blockquote>
+    <h2>The problem it solves</h2>
+    <p>An assistant lands <code>sent/proposed</code>, awaiting a maintainer's ratification that it
+      was genuinely sent, unless the adopter has declared a standing authorization for that named
+      recipient. An absent or malformed declaration fails closed, so gating stays on by default.</p>
   </div>
 </section>
 
 <section class="section-alt">
   <div class="wrap">
-    <h2>Why</h2>
-    <p>Outbound work is an external action, so its claim ("we sent this") is gated: an assistant
-      lands <code>sent/proposed</code>, awaiting a maintainer's ratification that it was genuinely
-      sent, unless the adopter has declared a standing authorization for that named recipient. An
-      absent or malformed declaration fails closed, so gating stays on by default.</p>
+    <dl class="refstrip">
+      <div>
+        <dt>Pairs with</dt>
+        <dd>
+          <span class="chip"><code>CONTRIBUTIONS.md</code></span>
+          <span class="chip"><code>CONTRIBUTION-INDEX.md</code></span>
+          <p>The composed contributions view and the optional one-to-one mirror, both byte-drift-gated.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Lifecycle</dt>
+        <dd>
+          <span class="chip"><code>proposed</code></span> &#8594; <span class="chip"><code>sent</code></span> &#8594; <span class="chip"><code>acknowledged</code></span> | <span class="chip"><code>superseded</code></span>
+          <p>Or from <code>proposed</code> straight to <code>withdrawn</code>. Entering the gated
+            <code>sent</code> state as an assistant or automation takes <code>/proposed</code>, the
+            same mechanism as block and preference-pattern gating; a re-send is a new record linking
+            <code>supersedes</code>.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Referenced by</dt>
+        <dd>
+          <span class="chip"><code>opf init</code></span>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p><code>init</code> scaffolds the empty index; <code>render</code> composes the view;
+            <code>doctor</code> checks schema, the delivery-bundle completeness rules, and
+            gated-state legality. Updated by the send transition, acknowledgement, supersession, or
+            withdrawal.</p>
+        </dd>
+      </div>
+    </dl>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <h2>Description</h2>
+    <h2>What a record carries</h2>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/contribution.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+<span class="tok-tbl">[[record]]</span>
+<span class="tok-key">id</span>          = <span class="tok-str">"CN-1"</span>
+<span class="tok-key">type</span>        = <span class="tok-str">"contribution"</span>
+<span class="tok-key">status</span>      = <span class="tok-str">"sent/proposed"</span>
+<span class="tok-key">title</span>       = <span class="tok-str">"Drift-gate fix sent upstream"</span>
+<span class="tok-key">recipient</span>   = <span class="tok-str">"peer-project"</span>
+<span class="tok-key">dedup_class</span> = <span class="tok-str">"drift-gate-fix"</span>
+<span class="tok-key">delivery</span>    = { <span class="tok-key">channel</span> = <span class="tok-str">"pr"</span>, <span class="tok-key">ref</span> = <span class="tok-str">"peer/repo#128"</span>, <span class="tok-key">sent_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span> }
+<span class="tok-key">actor</span>       = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
+    </div>
     <p>The shared index shape with the standard envelope plus <code>recipient</code>,
       <code>dedup_class</code>, <code>content_digest</code>, and the <code>delivery</code> bundle
       <code>{channel, ref, sent_at, receipt_ref?, receipted_at?}</code>: channel, ref, and sent_at
       are required once sent and forbidden before, and the receipt fields are legal only at
       acknowledged. <code>acknowledged</code> is the single positive terminal (responded, adopted,
       reshaped, or declined); the outcome lives in <code>summary</code> or an extension, never as a
-      state. A re-send is a new record linking <code>supersedes</code>. A contribution typically
-      links <code>derives_from</code> the internal finding, decision, or backlog item that
-      motivated it.</p>
+      state. A contribution typically links <code>derives_from</code> the internal finding,
+      decision, or backlog item that motivated it, and carries no fleet-specific semantics; those
+      ride a registered <code>x-&lt;vendor&gt;</code> extension.</p>
   </div>
 </section>
 
 <section class="section-alt">
   <div class="wrap">
-    <h2>How it works</h2>
-    <p>The <code>sent</code> gating rides the same single mechanism as block and preference-pattern
-      gating: an assistant or automation entering the gated state takes <code>/proposed</code>, and
-      only a maintainer, or a valid standing authorization for the declared recipient, lands the
-      bare grant. It carries no fleet-specific semantics; those ride a registered
-      <code>x-&lt;vendor&gt;</code> extension.</p>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+      <h3>What it protects</h3>
+      <p>An auditable record of the project's recorded outbound actions, with delivery evidence
+        attached, which helps prevent an asserted send from reading as a settled fact before it is
+        ratified or receipted.</p>
+    </div>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <h2>Generated view</h2>
-    <p><code>CONTRIBUTIONS.md</code>, composed from this index, plus the optional
-      <code>CONTRIBUTION-INDEX.md</code> mirror; both byte-drift-gated.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>An auditable record of the project's recorded outbound actions, with delivery evidence attached,
-      which helps prevent an asserted send from reading as a settled fact before it is ratified or
-      receipted.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code> (empty index); a record per outbound artifact or proposal.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> the send transition (gated), acknowledgement with its receipt fields, supersession on re-send, or withdrawal.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (CONTRIBUTIONS.md and the mirror); <code>opf doctor</code> (schema, the delivery-bundle completeness rules, gated-state legality).</li>
-    </ul>
+    <p><a href="./reference">&#8592; reference</a> &#183; <a href="./modules">Module and importer types &#8594;</a></p>
   </div>
 </section>
 </main>

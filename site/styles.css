@@ -383,3 +383,203 @@ html[data-family="other"] section[data-family-section="other"]{display:block}
 .verified{margin:-.4rem 0 1.1rem; font-size:.92rem; color:var(--faint)}
 .section-links{font-size:1.02rem}
 .section-links a{font-weight:650}
+
+/* ===== design system v2 (2026-09-18 redesign) ===== */
+/* This layer is purely additive. It leaves every selector, token, and behaviour above
+   untouched, so the existing pages render as before, and adds an explicit type and spacing
+   scale, elevation and status tokens, and the redesign components. Overriding is limited to
+   the type scale and the section rhythm the redesign brief calls for.
+   Semantic accent roles, applied consistently below:
+     --accent-2 (teal, #7ee0c8)  = SOURCE, the eyebrow kicker, and the "generate" step.
+     --accent   (blue, #5eb0ef)  = the generated VIEW, the primary CTA, and inline links.
+   Contrast note: #5eb0ef and #7ee0c8 are low-contrast on the light theme for small text, so
+   they are used for large text, borders, icons, and fills only; body-size inline links use
+   --link, a darker blue on light that clears WCAG AA. */
+
+/* theme-independent scale tokens: type, spacing, radii, and the monospace family */
+:root{
+  --fs-hero:clamp(2.5rem,5vw,3.9rem); --fs-h2:clamp(1.8rem,3vw,2.4rem); --fs-h3:1.4rem;
+  --fs-lead:1.2rem; --fs-body:1.06rem; --fs-small:.9rem;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-6:24px; --sp-8:32px;
+  --sp-12:48px; --sp-16:64px; --sp-24:96px;
+  --radius:14px; --radius-sm:10px;
+  --font-mono:ui-monospace,"JetBrains Mono",SFMono-Regular,Menlo,monospace;
+}
+
+/* status, link, and elevation tokens, dark values (default plus explicit dark).
+   --warn / --warn-tint / --warn-line are already defined above in the visual-refresh block
+   (amber, dark and light); this layer reuses them and adds --ok, --danger, --link, shadows. */
+:root, :root[data-theme="dark"]{
+  --ok:#3fbf8f; --ok-tint:rgba(63,191,143,.14); --ok-line:rgba(63,191,143,.35);
+  --danger:#f2645a; --danger-tint:rgba(242,100,90,.12); --danger-line:rgba(242,100,90,.38);
+  --link:#5eb0ef;
+  --shadow-1:0 1px 2px rgba(0,0,0,.32), 0 4px 12px rgba(0,0,0,.22);
+  --shadow-2:0 6px 16px rgba(0,0,0,.34), 0 16px 40px rgba(0,0,0,.28);
+}
+:root[data-theme="light"]{
+  --ok:#0f7a52; --ok-tint:rgba(15,122,82,.10); --ok-line:rgba(15,122,82,.30);
+  --danger:#c23b32; --danger-tint:rgba(194,59,50,.09); --danger-line:rgba(194,59,50,.30);
+  --link:#1552a6;
+  --shadow-1:0 1px 2px rgba(16,24,40,.06), 0 4px 12px rgba(16,24,40,.06);
+  --shadow-2:0 8px 20px rgba(16,24,40,.10), 0 16px 40px rgba(16,24,40,.10);
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme]){
+    --ok:#0f7a52; --ok-tint:rgba(15,122,82,.10); --ok-line:rgba(15,122,82,.30);
+    --danger:#c23b32; --danger-tint:rgba(194,59,50,.09); --danger-line:rgba(194,59,50,.30);
+    --link:#1552a6;
+    --shadow-1:0 1px 2px rgba(16,24,40,.06), 0 4px 12px rgba(16,24,40,.06);
+    --shadow-2:0 8px 20px rgba(16,24,40,.10), 0 16px 40px rgba(16,24,40,.10);
+  }
+}
+
+/* type scale applied to the shared elements (a refinement of the existing sizes) */
+body{font-size:var(--fs-body)}
+header.hero h1{font-size:var(--fs-hero)}
+h2{font-size:var(--fs-h2)}
+h3{font-size:var(--fs-h3)}
+.lead{font-size:var(--fs-lead)}
+/* body-size inline links use the AA-safe --link token (identical to --accent on dark) */
+a{color:var(--link)}
+
+/* section rhythm: generous, responsive vertical padding drawn from the spacing ramp */
+section{padding:clamp(var(--sp-8),5vw,var(--sp-24)) 0}
+
+/* ---- hero: asymmetric two-column layout (copy left, paired-panel mock right) ---- */
+.hero-grid{display:grid; grid-template-columns:1.15fr .85fr; gap:var(--sp-12); align-items:center; text-align:left}
+.hero-copy{min-width:0}
+.hero-mock{min-width:0}
+@media (max-width:900px){ .hero-grid{grid-template-columns:1fr; gap:var(--sp-8)} }
+
+/* ---- landing sub-nav: a sticky anchor row of pill links ---- */
+.anchornav{position:sticky; top:3.6rem; z-index:40; display:flex; flex-wrap:wrap; gap:var(--sp-2);
+  padding:var(--sp-3) 0; background:color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter:saturate(1.1) blur(6px); border-bottom:1px solid var(--line)}
+.anchornav a{display:inline-flex; align-items:center; padding:var(--sp-2) var(--sp-4); border-radius:999px;
+  border:1px solid var(--line); background:var(--panel); color:var(--ink); font-weight:650;
+  font-size:var(--fs-small); text-decoration:none; white-space:nowrap}
+.anchornav a:hover{border-color:var(--accent); color:var(--accent); text-decoration:none}
+
+/* ---- the source -> view -> gate flow diagram (grid plus inline SVG connectors) ---- */
+.flow{margin:var(--sp-6) 0 0}
+.flow-row{display:grid; grid-template-columns:1fr auto 1fr; gap:var(--sp-4); align-items:stretch}
+@media (max-width:720px){ .flow-row{grid-template-columns:1fr; gap:var(--sp-6)} }
+.flow-node{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+  border-top:3px solid var(--line); padding:var(--sp-6); box-shadow:var(--shadow-1); min-width:0}
+.flow-node.src{border-top-color:var(--accent-2)}   /* teal: the machine-written source */
+.flow-node.view{border-top-color:var(--accent)}     /* blue: the generated, human-read view */
+.flow-arrow{display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:var(--sp-2); color:var(--muted)}
+.flow-arrow svg{display:block; width:56px; height:24px}
+@media (max-width:720px){ .flow-arrow svg{transform:rotate(90deg)} }
+.flow-arrow .lbl{display:inline-flex; align-items:center; padding:var(--sp-1) var(--sp-3); border-radius:999px;
+  background:var(--accent-2); color:var(--on-accent-2); font-family:var(--font-mono);
+  font-size:var(--fs-small); font-weight:700; white-space:nowrap}
+/* the gate bar sits after the row inside .flow, so it spans the full width of both columns */
+.flow-gate{margin-top:var(--sp-4); display:flex; align-items:center; justify-content:center; gap:var(--sp-3);
+  padding:var(--sp-3) var(--sp-6); border-radius:var(--radius-sm); border:1px solid var(--line);
+  background:var(--panel-2); font-weight:700; color:var(--ink)}
+.flow-gate.ok{border-color:var(--ok-line); background:var(--ok-tint)}
+.flow-gate.ok::before{content:"\2713"; color:var(--ok); font-weight:800}
+.flow-gate.warn{border-color:var(--danger-line); background:var(--danger-tint)}
+.flow-gate.warn::before{content:"\26A0"; color:var(--danger); font-weight:800}
+.flow-cap{margin:var(--sp-3) 0 0; color:var(--muted); font-size:var(--fs-small); text-align:center}
+
+/* ---- paired TOML-beside-Markdown code showcase (also reused small as the hero mock) ---- */
+.codepair{display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4)}
+@media (max-width:720px){ .codepair{grid-template-columns:1fr} }
+.codecard{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+  border-top:3px solid var(--line); overflow:hidden; box-shadow:var(--shadow-1); min-width:0}
+.codecard.src{border-top-color:var(--accent-2)}    /* teal: the .toml source panel */
+.codecard.view{border-top-color:var(--accent)}      /* blue: the generated .md view panel */
+.codecard-bar{display:flex; align-items:center; gap:var(--sp-2); padding:var(--sp-3) var(--sp-4);
+  border-bottom:1px solid var(--line); background:var(--panel-2); font-family:var(--font-mono);
+  font-size:var(--fs-small); color:var(--muted)}
+/* faux window chrome: a three-dot cluster rendered from one pseudo-element */
+.codecard-bar::before{content:""; flex:0 0 auto; width:.62rem; height:.62rem; border-radius:50%;
+  background:var(--faint); box-shadow:1rem 0 0 var(--faint), 2rem 0 0 var(--faint); margin-right:2.4rem}
+.codebody{margin:0; padding:var(--sp-6); overflow-x:auto; font-family:var(--font-mono);
+  font-size:var(--fs-small); line-height:1.7; color:var(--ink); white-space:pre}
+.tok-tbl{color:var(--accent)}     /* the [[table]] header */
+.tok-key{color:var(--ink)}        /* a key name */
+.tok-str{color:var(--accent-2)}   /* a string value (source tone) */
+.tok-num{color:var(--warn)}       /* a number or bare scalar */
+.code-cap{margin:var(--sp-4) 0 0; color:var(--muted); text-align:center}
+
+/* ---- benefit grid (icon-led claim cards, three-up on desktop) ---- */
+.benefits{display:grid; grid-template-columns:repeat(3,1fr); gap:var(--sp-4)}
+@media (max-width:900px){ .benefits{grid-template-columns:repeat(2,1fr)} }
+@media (max-width:640px){ .benefits{grid-template-columns:1fr} }
+.benefit{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+  padding:var(--sp-6); box-shadow:var(--shadow-1)}
+.benefit-ico{display:grid; place-items:center; width:44px; height:44px; border-radius:var(--radius-sm);
+  color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, transparent); margin-bottom:var(--sp-4)}
+.benefit-ico svg{width:28px; height:28px}
+.benefit h3{margin:0 0 var(--sp-2); color:var(--ink)}
+.benefit p{margin:0; color:var(--muted)}
+
+/* ---- persona cards (leaders first; three-up) ---- */
+.personas{display:grid; grid-template-columns:repeat(3,1fr); gap:var(--sp-4)}
+@media (max-width:900px){ .personas{grid-template-columns:1fr} }
+.persona{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+  padding:var(--sp-6); box-shadow:var(--shadow-1)}
+.persona-ico{display:grid; place-items:center; width:44px; height:44px; border-radius:var(--radius-sm);
+  color:var(--accent-2); background:color-mix(in srgb, var(--accent-2) 16%, transparent); margin-bottom:var(--sp-4)}
+.persona-ico svg{width:28px; height:28px}
+.persona h3{margin:0 0 var(--sp-2); color:var(--ink)}
+.persona p{margin:0; color:var(--muted)}
+/* leaders come first, so the leaders card carries a subtly stronger border and resting elevation */
+.persona.lead{border-color:var(--accent-2); box-shadow:var(--shadow-2)}
+
+/* ---- status chips (rounded pills using the status tints) ---- */
+.chip{display:inline-flex; align-items:center; gap:var(--sp-1); padding:var(--sp-1) var(--sp-3);
+  border-radius:999px; font-size:var(--fs-small); font-weight:700; letter-spacing:.02em;
+  border:1px solid var(--line); background:var(--panel-2); color:var(--muted)}
+.chip.ok{background:var(--ok-tint); border-color:var(--ok-line); color:var(--ok)}
+.chip.warn{background:var(--warn-tint); border-color:var(--warn-line); color:var(--warn)}
+.chip.view{border-color:var(--accent); color:var(--accent)}   /* blue: a generated-view chip */
+
+/* ---- entry-points router (grid of hover-lift link-cards) ---- */
+.doors{display:grid; grid-template-columns:repeat(2,1fr); gap:var(--sp-4)}
+@media (max-width:640px){ .doors{grid-template-columns:1fr} }
+.door{display:block; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+  padding:var(--sp-6); box-shadow:var(--shadow-1); text-decoration:none; color:inherit}
+.door:hover{text-decoration:none}
+.door-ico{display:grid; place-items:center; width:44px; height:44px; border-radius:var(--radius-sm);
+  color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, transparent); margin-bottom:var(--sp-4)}
+.door-ico svg{width:28px; height:28px}
+.door h3{margin:0 0 var(--sp-2); color:var(--ink)}
+.door p{margin:0; color:var(--muted)}
+
+/* ---- removable coming-soon banner: delete the whole block between the markers to remove ---- */
+/* cs-banner:start */
+.cs-banner{margin:0 0 var(--sp-6); padding:var(--sp-3) var(--sp-6); border-radius:var(--radius-sm);
+  border:1px solid var(--warn-line); background:var(--warn-tint); color:var(--muted);
+  text-align:center; font-size:var(--fs-small)}
+.cs-banner b{color:var(--warn)}
+/* cs-banner:end */
+
+/* ---- reference-page appeal pattern (per-file pages) ---- */
+.refhead{margin:0 0 var(--sp-6)}
+.refchips{display:flex; flex-wrap:wrap; gap:var(--sp-2); margin:var(--sp-3) 0 0}
+.refchips span, .refchips code{display:inline-flex; align-items:center; padding:var(--sp-1) var(--sp-3);
+  border-radius:var(--radius-sm); border:1px solid var(--line); background:var(--panel-2);
+  font-family:var(--font-mono); font-size:var(--fs-small); color:var(--muted)}
+/* the "problem it solves" pull-quote, with a teal (source-tone) left accent bar */
+.refpull{margin:var(--sp-6) 0; padding:var(--sp-2) 0 var(--sp-2) var(--sp-6);
+  border-left:3px solid var(--accent-2); color:var(--ink); font-size:var(--fs-lead); line-height:1.5}
+/* the Pairs-with / Lifecycle / Referenced-by mini definition-list strip */
+.refstrip{display:grid; grid-template-columns:repeat(3,1fr); gap:var(--sp-4); margin:var(--sp-6) 0}
+@media (max-width:720px){ .refstrip{grid-template-columns:1fr} }
+.refstrip dt{margin:0 0 var(--sp-2); color:var(--accent-2); font-size:var(--fs-small); font-weight:800;
+  letter-spacing:.08em; text-transform:uppercase}
+.refstrip dd{margin:0; color:var(--muted)}
+
+/* ---- card hover polish: resting --shadow-1 lifts to --shadow-2 with a 1px rise ---- */
+.benefit,.persona,.door,.codecard{transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease}
+.benefit:hover,.persona:hover,.door:hover,.codecard:hover{transform:translateY(-1px); box-shadow:var(--shadow-2)}
+.door:hover,.codecard:hover{border-color:var(--accent)}
+@media (prefers-reduced-motion: reduce){
+  .benefit,.persona,.door,.codecard{transition:none}
+  .benefit:hover,.persona:hover,.door:hover,.codecard:hover{transform:none}
+}

@@ -6,7 +6,7 @@
 <title>backlog_item.index.toml | OPFiles</title>
 <meta name="description" content="The backlog: open, active, done, or dropped, with blocked-ness derived at view time, never stored.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,89 +66,74 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
-  <p class="eyebrow">Record index</p>
-  <h1>backlog_item.index.toml</h1>
-  <p class="lead">The backlog, namespace <code>BI</code>, at
-    <code>.working/toml/backlog_item.index.toml</code>.</p>
+<div class="wrap">
+  <div class="refhead pagehead">
+    <p class="eyebrow">Record index</p>
+    <h1>The backlog</h1>
+    <div class="refchips">
+      <code>backlog_item.index.toml</code>
+      <span>namespace BI</span>
+      <code>.working/toml/</code>
+    </div>
+    <p class="lead">One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified, not felt.</p>
+  </div>
+
+  <h2>The problem it solves</h2>
+  <blockquote class="refpull">A backlog that lives in prose drifts: items vanish, "done" means different things, and blocked work hides.</blockquote>
+  <p>Typed records give each item a permanent ID, a closed state set, and a ratification step: an assistant or automation finishing an item lands <code>done/proposed</code>, and only a maintainer transition removes the qualifier. Blocked-ness is deliberately never a stored state; it is derived from active blocks at view time, so it can never go stale in the record.</p>
+
+  <dl class="refstrip">
+    <div>
+      <dt>Pairs with</dt>
+      <dd>
+        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>TODO.md</code></span>
+        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>BACKLOG.md</code></span>
+        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>PIPELINE.md</code></span>
+        <p>Three composed views draw on this index joined against blocks, all byte-drift-gated and rendering the actionability join. An optional <code>BACKLOG_ITEM-INDEX.md</code> mirror renders the index one-to-one for human reading.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Lifecycle</dt>
+      <dd>
+        <p><code>open</code> &#8594; <code>active</code> &#8594; <code>done</code> | <code>dropped</code></p>
+        <p>Open may go straight to dropped. No resurrection: a record in an unqualified terminal state never re-enters a working state, so a revived concern is a new record linking the old one. A ratified <code>done</code> creates a one-to-one completion receipt in the <a href="./done">done index</a>, and an item is actionable while open or active with no unqualified active block scoping it.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Referenced by</dt>
+      <dd>
+        <span class="chip"><code>opf init</code></span>
+        <span class="chip"><code>opf render</code></span>
+        <span class="chip"><code>opf doctor</code></span>
+        <p>Created by <code>opf init</code> (empty index), then records by process as work is planned; updated by state transitions under the status grammar and maintainer ratification of proposed terminals; read by <code>opf render</code> and validated by <code>opf doctor</code> (schema validity, ID uniqueness, transition legality, no-resurrection).</p>
+      </dd>
+    </div>
+  </dl>
+
+  <h2 style="margin-top:var(--sp-12)">What a record carries</h2>
+  <div class="codecard src">
+    <div class="codecard-bar">.working/toml/backlog_item.index.toml</div>
+    <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+<span class="tok-tbl">[[record]]</span>
+<span class="tok-key">id</span>     = <span class="tok-str">"BI-42"</span>
+<span class="tok-key">type</span>   = <span class="tok-str">"backlog_item"</span>
+<span class="tok-key">status</span> = <span class="tok-str">"active"</span>
+<span class="tok-key">title</span>  = <span class="tok-str">"Add the drift gate to CI"</span></div>
+  </div>
+  <p>The shared index shape: <code>schema = 1</code> plus an array of <code>[[record]]</code> rows. Each record carries the standard envelope: <code>id</code>, <code>type</code>, <code>status</code>, <code>title</code>, <code>created_at</code> and <code>updated_at</code> (RFC 3339 UTC, read from the clock), <code>actor.kind</code> (maintainer, assistant, automation, or importer), optional <code>summary</code>, <code>links</code> (a closed vocabulary: supersedes, resolves, remediates, receipt_of, corrects, follows, relates, exemplifies, derives_from), <code>refs</code> (captured external sources: path, url, or doc), and registered <code>x-&lt;vendor&gt;</code> extensions. Schemas are closed; an unknown key is a validation failure.</p>
+
+  <h2 style="margin-top:var(--sp-12)">What it protects</h2>
+  <div class="benefit">
+    <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+    <h3>A ratified "done", not a felt one</h3>
+    <p>A backlog whose completion claims are gated: "done" is a ratified transition with a durable receipt, not a feeling, which helps prevent silent scope loss and unratified completion from entering the record.</p>
+  </div>
+
+  <nav class="refseq" aria-label="Reference sequence" style="display:flex; justify-content:space-between; gap:var(--sp-4); margin-top:var(--sp-12); font-weight:650">
+    <a href="./lease">&#8592; lease.toml</a>
+    <a href="./done">done &#8594;</a>
+  </nav>
 </div>
-
-<section>
-  <div class="wrap">
-    <h2>About</h2>
-    <p>One record per unit of planned work. A backlog item moves <code>open</code> to
-      <code>active</code> to <code>done</code> or <code>dropped</code> (or straight from open to
-      dropped), and a ratified <code>done</code> creates a one-to-one completion receipt in the
-      <a href="./done">done index</a>.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Why</h2>
-    <p>A backlog that lives in prose drifts: items vanish, "done" means different things, and
-      blocked work hides. Typed records give each item a permanent ID, a closed state set, and a
-      ratification step: an assistant or automation finishing an item lands
-      <code>done/proposed</code>, and only a maintainer transition removes the qualifier.
-      Blocked-ness is deliberately never a stored state; it is derived from active blocks at view
-      time, so it can never go stale in the record.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Description</h2>
-    <p>The shared index shape: <code>schema = 1</code> plus an array of <code>[[record]]</code>
-      rows. Each record carries the standard envelope: <code>id</code>, <code>type</code>,
-      <code>status</code>, <code>title</code>, <code>created_at</code> and <code>updated_at</code>
-      (RFC 3339 UTC, read from the clock), <code>actor.kind</code> (maintainer, assistant,
-      automation, or importer), optional <code>summary</code>, <code>links</code> (a closed
-      vocabulary: supersedes, resolves, remediates, receipt_of, corrects, follows, relates,
-      exemplifies, derives_from), <code>refs</code> (captured external sources: path, url, or doc),
-      and registered <code>x-&lt;vendor&gt;</code> extensions. Schemas are closed; an unknown key is
-      a validation failure.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>How it works</h2>
-    <p>States: <code>open</code> (initial), <code>active</code> (working), <code>done</code> and
-      <code>dropped</code> (terminal). No resurrection: a record in an unqualified terminal state
-      never re-enters a working state; a revived concern is a new record linking the old one. An
-      item is actionable when its state is open or active and no unqualified active block scopes
-      it; that block join is the actionability rule every scheduling view renders.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Generated view</h2>
-    <p>Three composed views draw on this index joined against blocks: <code>TODO.md</code>,
-      <code>BACKLOG.md</code>, and <code>PIPELINE.md</code>, all byte-drift-gated. An optional
-      <code>BACKLOG_ITEM-INDEX.md</code> mirror renders the index one-to-one for human reading.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>A backlog whose completion claims are gated: "done" is a ratified transition with a durable
-      receipt, not a feeling, which helps prevent silent scope loss and unratified completion from
-      entering the record.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code> (empty index); records by process as work is planned.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> state transitions under the status grammar; maintainer ratification of proposed terminals.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (TODO, BACKLOG, PIPELINE, and the mirror); <code>opf doctor</code> (schema validity, ID uniqueness, transition legality, no-resurrection).</li>
-    </ul>
-  </div>
-</section>
 </main>
 
 </div>

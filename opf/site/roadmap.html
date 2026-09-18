@@ -6,7 +6,7 @@
 <title>Roadmap | OPFiles</title>
 <meta name="description" content="Where OPFiles is now and the direction it is heading: a slim, forward-looking view of the standard and its reference tooling.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: machine TOML source leading to a generated view, kept honest by a drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink active" href="./roadmap" aria-current="page">Roadmap</a>
@@ -66,25 +66,31 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
+<div class="wrap pagehead refhead">
   <p class="eyebrow">Roadmap and status</p>
   <h1>Roadmap</h1>
-  <p class="lead">Where OPFiles is today and the direction it is heading. This is a slim,
-    forward-looking view of the standard and its reference tooling, not a detailed backlog. Ordering
-    beyond what has landed is indicative, not a commitment.</p>
+  <p class="lead">Where OPFiles is today and the direction it is heading, as a slim, forward-looking
+    view of the standard and its reference tooling. Ordering beyond what has landed is indicative, not
+    a commitment.</p>
+  <p class="refchips"><span class="chip ok">Now: landed</span><span class="chip warn">Next: planned</span><span class="chip">Then: later</span></p>
 </div>
 
 <section>
   <div class="wrap">
-    <h2>Now</h2>
+    <p class="eyebrow">Landed</p>
+    <h2>Now <span class="chip ok">Available</span></h2>
     <ul class="clean">
       <li>The specification is a stable draft: the store layout, the release triad, the record model,
         the enforcement posture, and the residual disclosures are defined.</li>
-      <li>Adopt-by-hand is supported and first-class: you can conform with hand-maintained files and
-        your own checks.</li>
-      <li>Part of the reference tooling has landed: <code>opf init</code>, <code>opf render</code>,
-        <code>opf doctor</code>, and <code>opf upgrade</code>, plus <code>opf import</code> with its
-        scan, plan, review, and apply modes.</li>
+      <li>Adopt-by-hand works today: you can conform with hand-maintained files and your own checks.
+        It is the fallback path; assistant-driven adoption is the recommended path and is planned.</li>
+      <li>Part of the reference tooling has landed:
+        <span class="chip ok"><code>opf init</code></span>
+        <span class="chip ok"><code>opf render</code></span>
+        <span class="chip ok"><code>opf doctor</code></span>
+        <span class="chip ok"><code>opf upgrade</code></span>
+        <span class="chip ok"><code>opf import</code></span>
+        (import with its scan, plan, review, and apply modes).</li>
       <li>Conformance is self-asserted and says so; no unqualified conformance claim is emitted.</li>
     </ul>
   </div>
@@ -92,15 +98,17 @@
 
 <section class="section-alt">
   <div class="wrap">
-    <h2>Next</h2>
+    <p class="eyebrow">Planned</p>
+    <h2>Next <span class="chip warn">Planned</span></h2>
     <ul class="clean">
       <li>The schema release that follows this specification fixes the normative module schemas and the
         digest canonicalization the freeze gates depend on.</li>
-      <li>The remaining verbs: store relocation (<code>opf migrate</code>) and the surfaced sync step
-        (<code>opf sync</code>).</li>
-      <li>The assistant-driven adoption flow: pointing an AI development assistant at the site to
-        investigate, plan, and, on your yes, carry out and merge the adoption, with the
-        <code>.working/</code> store left for your review.</li>
+      <li>The remaining verbs: store relocation
+        (<span class="chip warn"><code>opf migrate</code></span>) and the surfaced sync step
+        (<span class="chip warn"><code>opf sync</code></span>).</li>
+      <li>The assistant-driven adoption flow, the recommended path: pointing an AI development
+        assistant at the site to investigate, plan, and, on your yes, carry out and merge the
+        adoption, with the <code>.working/</code> store left for your review.</li>
       <li>The machine-readable discovery entry point for assistants: an <code>/llms.txt</code> index
         plus a generated <code>/adopt.md</code> and a root-page link an assistant can follow.</li>
     </ul>
@@ -109,7 +117,8 @@
 
 <section>
   <div class="wrap">
-    <h2>Then</h2>
+    <p class="eyebrow">Later</p>
+    <h2>Then <span class="chip">Later</span></h2>
     <ul class="clean">
       <li>Conformance tooling and the conformance-report vocabulary in action, so a claim can be
         reported against the base and each evaluated profile rather than self-asserted.</li>
