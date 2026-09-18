@@ -6,7 +6,7 @@
 <title>reference.index.toml | OPFiles</title>
 <meta name="description" content="Immutable captured references: the external sources claims rest on, captured at the moment they are made.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,36 +66,77 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
+<div class="wrap refhead">
   <p class="eyebrow">Record index</p>
-  <h1>reference.index.toml</h1>
-  <p class="lead">Captured references, namespace <code>RF</code>, at
-    <code>.working/toml/reference.index.toml</code>.</p>
+  <h1>Sources, captured at the claim</h1>
+  <div class="refchips">
+    <code>reference.index.toml</code>
+    <span>namespace RF</span>
+    <span>.working/toml/</span>
+  </div>
+  <p class="lead">An immutable captured source, a repository path (with a line where applicable), a URL, or a document and section, recorded at the moment a claim or artefact that rests on it is produced.</p>
 </div>
 
 <section>
   <div class="wrap">
-    <h2>About</h2>
-    <p>A reference is an immutable captured source: a repository path (with a line where
-      applicable), a URL, or a document and section, recorded at the moment a claim or artifact
-      that rests on it is produced. It is created terminal in its single state
-      <code>recorded</code>.</p>
+    <blockquote class="refpull">A reference reconstructed later from memory is a guess wearing a citation's clothes.</blockquote>
+    <h2>The problem it solves</h2>
+    <p>The standard's rule is capture-at-claim: a record whose claims rest on an external source
+      without a captured reference is unsourced, whatever confidence backs it. Making references a
+      first-class immutable type lets many records share one captured source.</p>
   </div>
 </section>
 
 <section class="section-alt">
   <div class="wrap">
-    <h2>Why</h2>
-    <p>A reference reconstructed later from memory is a guess wearing a citation's clothes. The
-      standard's rule is capture-at-claim: a record whose claims rest on an external source without
-      a captured reference is unsourced, whatever confidence backs it. Making references a
-      first-class immutable type lets many records share one captured source.</p>
+    <dl class="refstrip">
+      <div>
+        <dt>Pairs with</dt>
+        <dd>
+          <span class="chip view"><code>REFERENCES.md</code></span>
+          <span class="chip view"><code>REFERENCE-INDEX.md</code></span>
+          <p>The composed references view and the optional one-to-one mirror, both byte-drift-gated.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Lifecycle</dt>
+        <dd>
+          <span class="chip"><code>recorded</code></span>
+          <p>A single state, created terminal, immutable, and never proposable: a captured fact
+            awaits no ratification. Records link toward references rather than editing them, so a
+            source, once captured, stays exactly what was captured.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Referenced by</dt>
+        <dd>
+          <span class="chip"><code>opf init</code></span>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p><code>init</code> scaffolds the empty index; <code>render</code> composes the view;
+            <code>doctor</code> checks schema and uniqueness; and any record that links to its
+            captured sources reads it. Nothing updates it; it is immutable.</p>
+        </dd>
+      </div>
+    </dl>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <h2>Description</h2>
+    <h2>What a record carries</h2>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/reference.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+<span class="tok-tbl">[[record]]</span>
+<span class="tok-key">id</span>     = <span class="tok-str">"RF-1"</span>
+<span class="tok-key">type</span>   = <span class="tok-str">"reference"</span>
+<span class="tok-key">status</span> = <span class="tok-str">"recorded"</span>
+<span class="tok-key">title</span>  = <span class="tok-str">"OPF spec, the record envelope"</span>
+<span class="tok-key">refs</span>   = [{ <span class="tok-key">kind</span> = <span class="tok-str">"doc"</span>, <span class="tok-key">locator</span> = <span class="tok-str">"OPF-SPEC.md#8"</span>, <span class="tok-key">note</span> = <span class="tok-str">"envelope fields"</span> }]
+<span class="tok-key">actor</span>  = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
     <p>The shared index shape with the standard envelope and no type-specific extra fields; the
       captured sources themselves ride the envelope's <code>refs</code> array, each entry
       <code>{kind, locator, note}</code> with <code>kind</code> one of <code>path</code>,
@@ -106,38 +147,19 @@
 
 <section class="section-alt">
   <div class="wrap">
-    <h2>How it works</h2>
-    <p>Created terminal, immutable, never proposable: a captured fact awaits no ratification.
-      Records link toward references rather than editing them, so a source, once captured, stays
-      exactly what was captured.</p>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+      <h3>What it protects</h3>
+      <p>Claims with their evidence attached at birth, which helps reduce the likelihood of
+        unsourced assertions hardening into recorded fact, and makes every load-bearing claim
+        re-checkable at its source.</p>
+    </div>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <h2>Generated view</h2>
-    <p><code>REFERENCES.md</code>, composed from this index, plus the optional
-      <code>REFERENCE-INDEX.md</code> mirror; both byte-drift-gated.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>Claims with their evidence attached at birth, which helps reduce the likelihood of
-      unsourced assertions hardening into recorded fact, and makes every load-bearing claim
-      re-checkable at its source.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code> (empty index); a record at each captured source.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> nothing; immutable.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (REFERENCES.md and the mirror); <code>opf doctor</code> (schema, uniqueness); any record that links to its captured sources.</li>
-    </ul>
+    <p><a href="./handoff">&#8592; handoff</a> &#183; <a href="./contribution">contribution &#8594;</a></p>
   </div>
 </section>
 </main>

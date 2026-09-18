@@ -6,7 +6,7 @@
 <title>The standard | OPFiles</title>
 <meta name="description" content="How to read the OPFiles specification and quickstart, with links to the canonical source. A rendered web version is coming; today the raw source is the accurate reference.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink active" href="./standard" aria-current="page">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -69,14 +69,14 @@
 <div class="wrap pagehead">
   <p class="eyebrow">The specification</p>
   <h1>The standard</h1>
-  <p class="lead">OPFiles is defined by a written specification and a short quickstart. The
-    specification is the canonical reference; this page tells you how to read it, links the raw
-    source, and is honest about what is not yet published as a rendered web version.</p>
+  <p class="lead">OPFiles is defined by a written specification; this page tells you how to read it, links the canonical source, and is honest about what is not yet rendered for the web.</p>
 </div>
 
 <section>
   <div class="wrap">
+    <p class="eyebrow">Status</p>
     <h2>Status of this page</h2>
+    <p><span class="chip warn">Rendered web version: planned</span></p>
     <p>A rendered, web-readable version of the specification and the quickstart is not published
       yet. It depends on a source-to-HTML render step so that the web pages cannot drift from the
       canonical Markdown; until that render step ships, this page links the raw source directly
@@ -91,20 +91,55 @@
 
 <section class="section-alt">
   <div class="wrap">
+    <p class="eyebrow">Coverage</p>
     <h2>How to read the specification</h2>
-    <p>The specification is a draft. It defines the store layout and naming, the pointer and
-      discovery model, the git-repository and migration rules, the release triad and its gates, the
-      record model and status grammar, views and the closed transform vocabulary, the enforcement
-      posture, rotation and archive, import, the genericization boundary, the conformance vocabulary,
-      and the residual-coverage disclosures.</p>
-    <p>Conformance language follows common standards practice: MUST is an absolute requirement,
-      SHOULD is a strong recommendation departed from only for a recorded reason, and MAY is
-      genuinely optional. Statements without these keywords are descriptive.</p>
+    <p>The specification is a draft. It defines:</p>
+    <p>
+      <span class="chip">Store layout and naming</span>
+      <span class="chip">Pointer and discovery model</span>
+      <span class="chip">Git-repository and migration rules</span>
+      <span class="chip">Release triad and its gates</span>
+      <span class="chip">Record model and status grammar</span>
+      <span class="chip">Views and the closed transform vocabulary</span>
+      <span class="chip">Enforcement posture</span>
+      <span class="chip">Rotation and archive</span>
+      <span class="chip">Import</span>
+      <span class="chip">The genericization boundary</span>
+      <span class="chip">The conformance vocabulary</span>
+      <span class="chip">Residual-coverage disclosures</span>
+    </p>
   </div>
 </section>
 
 <section>
   <div class="wrap">
+    <p class="eyebrow">Conformance</p>
+    <h2>Conformance language</h2>
+    <p>Conformance language follows common standards practice; statements without these keywords are
+      descriptive.</p>
+    <div class="benefits">
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+        <h3>MUST</h3>
+        <p>An absolute requirement.</p>
+      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.7-4.9"/></svg></span>
+        <h3>SHOULD</h3>
+        <p>A strong recommendation, departed from only for a recorded reason.</p>
+      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.4"/></svg></span>
+        <h3>MAY</h3>
+        <p>Genuinely optional.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">Draft status</p>
     <h2>Draft status and self-asserted conformance</h2>
     <p>The specification is a working draft and the reference tooling lands verb by verb. Until the
       validation tooling covers a given claim, conformance to that claim is self-asserted, and a
