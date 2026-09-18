@@ -32,7 +32,7 @@ sidebar-active = "learn"
       </div>
       <div class="card">
         <h3>How it works</h3>
-        <p>The development assistant's mechanics (1.1.0, in development): the directory it creates,
+        <p>The development assistant's mechanics: the directory it creates,
           the config you own, the guardrails, and how quality assurance runs.</p>
         <div class="cta" style="justify-content:flex-start; margin-top:.6rem"><a class="btn primary" href="/tech-details">Technical details</a></div>
       </div>

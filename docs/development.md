@@ -1,9 +1,9 @@
 +++
-title = "AIQT Development Assistant (1.1.0, in development): governance that installs into your project"
-description = "In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
+title = "The AIQT development assistant: governance that installs into your project"
+description = "The AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
 canonical = "https://aiqt.ai/development"
-og-title = "AIQT Development Assistant (1.1.0, in development): governance that installs into your project"
-og-description = "In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
+og-title = "The AIQT development assistant: governance that installs into your project"
+og-description = "The AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
 og-url = "https://aiqt.ai/development"
 sidebar-active = "development"
 +++
@@ -12,11 +12,10 @@ sidebar-active = "development"
     <p class="eyebrow">The development assistant</p>
     <h1>Governance that installs into your project.</h1>
     <p class="lead">Every coding agent in your project follows its own rules, drifts its own way, and you
-      find out in review. AIQT 1.1.0 puts one governance core where coding agents read their instructions,
-      in the repository itself. One wizard sets it
+      find out in review. The AIQT development assistant puts one governance core where coding agents read
+      their instructions, in the repository itself. One wizard sets it
       up, one doctor verifies it, and a write guard keeps every update inside a single directory
-      you can inspect. 1.1.0 is in development; the pack it installs is source-available and
-      readable today.</p>
+      you can inspect. The pack it installs is source-available and readable today.</p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub</a>
       <a class="btn ghost" href="/tech-details">Technical details</a>
@@ -61,8 +60,8 @@ sidebar-active = "development"
     <p class="eyebrow">The five rules</p>
     <h2>How the five rules operate while you work</h2>
     <p class="lead">A standard you cannot see being applied is a promise, not a standard. The
-      five rules are how the assistant applies the ordering, change by change, in the 1.1.0
-      design, and each one produces something you can see in the console. They are scoped to
+      five rules are how the assistant applies the ordering, change by change, and each one
+      produces something you can see in the console. They are scoped to
       issues the active work detects or causes, not to your whole backlog, so following them
       never turns one change into a cleanup crusade. The first two rules echo a famous pair on
       purpose: you talk about AIQT.</p>
@@ -94,16 +93,16 @@ sidebar-active = "development"
 
 <section id="self-learning">
   <div class="wrap">
-    <p class="eyebrow">Self-learning</p>
-    <h2>It self-learns: new guardrails, created as it goes</h2>
-    <p class="lead">The fifth rule is where AIQT gets better on its own. When a gap lets an
-      issue through, the assistant fixes it and writes a new
-      guardrail so that shape of issue is caught from then on. Your setup self-learns: every
-      gap it hits becomes a guard it keeps. No model is retrained: a new guardrail is a local
+    <p class="eyebrow">What comes next</p>
+    <h2>Where it goes next: self-learning guardrails</h2>
+    <p class="lead">The fifth rule is where AIQT is designed to get better on its own. When a gap
+      lets an issue through, the assistant will fix it and write a new
+      guardrail so that shape of issue is caught from then on. Your setup is designed to self-learn:
+      every gap it hits becomes a guard it keeps. No model is retrained: a new guardrail is a local
       rule file, listed in your config, and yours to disable or delete.</p>
-    <p>Everything it learns stays yours by default. A new guardrail is created and runs locally
-      the moment the gap is found; sharing it back to every other developer is a separate,
-      opt-in step, covered under <a href="/tech-details#seeds">seed PRs</a>.</p>
+    <p>Everything it learns is designed to stay yours by default. A new guardrail will be created
+      and run locally the moment the gap is found; sharing it back to every other developer is a
+      separate, opt-in step, covered under <a href="/tech-details#seeds">seed PRs</a>.</p>
   </div>
 </section>
 
@@ -159,7 +158,7 @@ sidebar-active = "development"
     <div class="card">
       <span class="pill next">In development</span>
       <h3>The development assistant (1.1.0)</h3>
-      <p>In development. The wizard, the doctor, the write guard, the generated agent files,
+      <p>The wizard, the doctor, the write guard, the generated agent files,
         the CI integration, the findings loop, the five-rule workflow, the per-guardrail
         configuration, and seed PRs described here and on the technical details page are the 1.1.0
         design, and we ship it when it does what these pages say it does. Until then, the
