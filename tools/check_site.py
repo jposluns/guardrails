@@ -336,11 +336,11 @@ def _self_test():
     return 0
 
 
-# Coverage roots: site/ (aiqt.ai) and opf/site/ (opfiles.ai: the index.html placeholder plus the
-# opf/site/draft staging tree). Matching this gate's existing site/ idiom, each root is OPTIONAL: an
-# absent root is skipped (not fail-closed), so a vendored pack with neither still passes; a present root
-# is scanned, and an unreadable present root fails closed. Each root is its own link-containment boundary,
-# so opf/site/draft's relative links (./manifest, ./disclosure) resolve within opf/site and never escape.
+# Coverage roots: site/ (aiqt.ai) and opf/site/ (opfiles.ai: the served site pages). Matching this gate's
+# existing site/ idiom, each root is OPTIONAL: an absent root is skipped (not fail-closed), so a vendored
+# pack with neither still passes; a present root is scanned, and an unreadable present root fails closed.
+# Each root is its own link-containment boundary, so a page's relative links (./manifest, ./disclosure)
+# resolve within opf/site and never escape.
 COVERAGE_ROOTS = ("site", "opf/site")
 
 

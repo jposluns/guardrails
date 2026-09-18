@@ -48,13 +48,12 @@ ALLOWLIST = frozenset()
 # Coverage roots, each (subdir, disclosure_href, allowlist). Both are REQUIRED inputs (an absent,
 # unreadable, or page-less root is fail-closed exit 2, never a clean pass over nothing). site/ is the
 # aiqt.ai site, served at root, so its nav disclosure link is the absolute /disclosure. opf/site is the
-# opfiles.ai site whose live content is staged under opf/site/draft (publicly viewable at /draft and
-# flipped to root on launch), so its pages link the disclosure page RELATIVE (./disclosure): a relative
-# link resolves under /draft AND rewrites to root at the flip with no per-page edit. The opf/site/index.html
-# placeholder is a minimal "coming soon" splash that carries no nav, so it is allowlisted as nav-exempt.
+# opfiles.ai site, served from opf/site as its own root (Cloudflare Pages builds opf/site), so its pages
+# link the disclosure page RELATIVE (./disclosure): a relative link resolves within opf/site whatever the
+# mount point. Every opf/site page carries the nav, so the allowlist is empty (like site/).
 COVERAGE_ROOTS = (
     ("site", "/disclosure", frozenset()),
-    ("opf/site", "./disclosure", frozenset({"index.html"})),
+    ("opf/site", "./disclosure", frozenset()),
 )
 
 
@@ -267,9 +266,9 @@ def _self_test():
         os.symlink(str(root3 / "realsite"), str(root3 / "site"))  # site/ itself a symlink -> rejected
         if quiet_one(root3) != 2:
             failures.append("a symlinked site/ root did not fail closed (expected exit 2)")
-    # opf/site coverage: the relative ./disclosure nav link is tree-appropriate, the index.html
-    # placeholder is nav-exempt (allowlist), a draft page missing the link is a finding, and an absent
-    # opf/site root fails closed. run() requires BOTH roots, so it is exercised over a two-root tree.
+    # opf/site coverage: the relative ./disclosure nav link is tree-appropriate (opf/site is served as its
+    # own root), every page carries the nav (empty allowlist), a page missing the link is a finding, and an
+    # absent opf/site root fails closed. run() requires BOTH roots, so it is exercised over a two-root tree.
     rel_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
     with tempfile.TemporaryDirectory() as d4:
         root4 = Path(d4)
@@ -277,20 +276,15 @@ def _self_test():
         (root4 / "site" / "about.html").write_text(nav, encoding="utf-8")
         if quiet_run(root4) != 2:
             failures.append("run() with site/ present but opf/site absent did not fail closed (expected 2)")
-        (root4 / "opf" / "site" / "draft").mkdir(parents=True)
-        (root4 / "opf" / "site" / "index.html").write_text("<h1>coming soon</h1>", encoding="utf-8")
-        (root4 / "opf" / "site" / "draft" / "manifest.html").write_text(rel_nav, encoding="utf-8")
-        if quiet_run(root4) != 0:
-            failures.append("a covered two-root tree (placeholder exempt, relative ./disclosure) did not pass")
-        # the relative-href engine rejects a page that carries only the absolute /disclosure link
-        (root4 / "opf" / "site" / "draft" / "stale.html").write_text(nav, encoding="utf-8")
-        if quiet_run(root4) != 1:
-            failures.append("a draft page missing the ./disclosure nav link was not reported (expected 1)")
-        # the placeholder is nav-exempt: adding the nav link to it is allowlist drift
-        (root4 / "opf" / "site" / "draft" / "stale.html").write_text(rel_nav, encoding="utf-8")
+        (root4 / "opf" / "site").mkdir(parents=True)
         (root4 / "opf" / "site" / "index.html").write_text(rel_nav, encoding="utf-8")
+        (root4 / "opf" / "site" / "manifest.html").write_text(rel_nav, encoding="utf-8")
+        if quiet_run(root4) != 0:
+            failures.append("a covered two-root tree (opf/site pages carry the relative ./disclosure) did not pass")
+        # the relative-href engine rejects a page that carries only the absolute /disclosure link
+        (root4 / "opf" / "site" / "stale.html").write_text(nav, encoding="utf-8")
         if quiet_run(root4) != 1:
-            failures.append("the placeholder carrying the nav link was not flagged as allowlist drift")
+            failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
     if failures:
         print("FAIL: check_footer self-test")
         for f in failures:

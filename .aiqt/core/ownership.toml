@@ -318,12 +318,11 @@ path = "site/js/install.js"
 class = "pack-immutable"
 
 # --- concern-1: the opfiles.ai site subtree (opf/site) -------------------------------------------------
-# The opfiles.ai website: opf/site/index.html is the live-root "coming soon" placeholder and
-# opf/site/draft/** is the full staging tree (publicly viewable at opfiles.ai/draft, flipped to root on
-# launch). Hand-authored shippable site content, same class as the site/ pages above. A single directory
-# prefix (like site/downloads/**) rather than per-file literals: opf/site is one coherent pack-immutable
-# subtree with no internal class split, and the prefix keeps the launch draft->root flip a pure content
-# move with no ownership churn. Disjoint from every other selector (no other selector matches opf/).
+# The opfiles.ai website: the served site pages live directly under opf/site (Cloudflare Pages builds
+# opf/site as the site root). Hand-authored shippable site content, same class as the site/ pages above.
+# A single directory prefix (like site/downloads/**) rather than per-file literals: opf/site is one
+# coherent pack-immutable subtree with no internal class split. Disjoint from every other selector (no
+# other selector matches opf/).
 [[release-class]]
 pattern = "opf/site/**"
 class = "pack-immutable"
