@@ -491,10 +491,11 @@ section{padding:clamp(var(--sp-8),5vw,var(--sp-24)) 0}
 .flow-cap{margin:var(--sp-3) 0 0; color:var(--muted); font-size:var(--fs-small); text-align:center}
 
 /* ---- paired TOML-beside-Markdown code showcase (also reused small as the hero mock) ---- */
-.codepair{display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4)}
+.codepair{display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4); width:fit-content; max-width:100%}
 @media (max-width:720px){ .codepair{grid-template-columns:1fr} }
 .codecard{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
-  border-top:3px solid var(--line); overflow:hidden; box-shadow:var(--shadow-1); min-width:0}
+  border-top:3px solid var(--line); overflow:hidden; box-shadow:var(--shadow-1); min-width:0; width:fit-content; max-width:100%}
+.codepair .codecard{width:auto; max-width:none}
 .codecard.src{border-top-color:var(--accent-2)}    /* teal: the .toml source panel */
 .codecard.view{border-top-color:var(--accent)}      /* blue: the generated .md view panel */
 .codecard-bar{display:flex; align-items:center; gap:var(--sp-2); padding:var(--sp-3) var(--sp-4);
