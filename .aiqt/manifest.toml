@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "e69721fd24bfe17802fcfbbc21d398d5453318b805868eab14ce20ac31bdbcfb"
+tree-sha256 = "ba19f511ef2b1feb00acb2337595f12a46e32bdd2ae7c978b71d5118ca96d085"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2421,8 +2421,8 @@ sha256 = "9c5662d38bc9a25d75b79dd0d3ee2c3c119f15c3cfba084f0b890605d56ca2b6"
 
 [[sources]]
 path = "opf/site/draft/index.html"
-bytes = 21059
-sha256 = "37158e59e8b58590afcb5299498a05b0aee602841924ede5f41aa3c32718b00a"
+bytes = 24196
+sha256 = "b4a452c6803e4faa6581c1e08da2b7d631dd78e4c4e03615cbbb4c69acbc80e2"
 
 [[sources]]
 path = "opf/site/draft/lease.html"

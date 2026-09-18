@@ -75,18 +75,70 @@
 
 <header class="hero">
   <div class="wrap">
-    <h1>Machines write the record. <span class="grad">Humans read the view.</span></h1>
-    <p class="lead">OPFiles (OPF, the operational-files standard) keeps a project's operational
-      records, its backlog, worklog, findings, decisions, blocks, handoffs, and references, in one
-      machine-readable store of versioned TOML, paired with generated, human-readable views. The
-      TOML is the source of truth, updated only through process; every view is regenerated, never
-      hand-edited; and drift gates keep each pair in lockstep. Open and free under CC BY-SA 4.0.</p>
+    <h1>Fewer AI errors. Durable records. <span class="grad">The same process on every project.</span></h1>
+    <p class="lead">OPFiles (OPF, the operational-files standard) gives your teams one disciplined
+      way to run AI-assisted work: every backlog item, decision, finding, and handoff lives in a
+      versioned, machine-written record that carries all the input a process needs. The same
+      correct process runs the same way every time, on every project, regardless of which AI
+      assistant or which developer is doing the work, so fewer errors and omissions enter the
+      record, the work costs less to run, and a durable, reviewable trail is left behind by
+      default. Under the hood it is one machine-readable store of TOML, paired with generated,
+      human-readable views and kept in lockstep by drift gates. Open and free under CC BY-SA 4.0.</p>
     <div class="cta">
-      <a class="btn primary" href="#files">See the standard files</a>
+      <a class="btn primary" href="#outcomes">Why teams adopt it</a>
+      <a class="btn ghost" href="#files">See the standard files</a>
       <a class="btn ghost" href="#how">How the pairing works</a>
     </div>
   </div>
 </header>
+
+<section id="outcomes" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">Why teams adopt it</p>
+    <h2>Five outcomes, on every project</h2>
+    <p class="lead">Mandate one operational standard and every project inherits the same
+      discipline: the record is written by process, not by habit, and the results below follow
+      from the mechanism, not from trusting any one tool or developer.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Fewer AI errors, omissions, and hallucinations</h3>
+        <p>The record an assistant works from is versioned TOML that carries all the input a
+          process needs, so it is not reconstructing context from memory or guessing at a missing
+          field, and the schema refuses what does not fit. This lowers the opportunity for errors,
+          omissions, and hallucinations to enter the record; it does not remove it entirely, and
+          the standard says so plainly.</p>
+      </div>
+      <div class="card">
+        <h3>Consistency and repeatability</h3>
+        <p>The same records-first discipline holds across teams, projects, and assistants, because
+          the schemas, status grammar, and gates are the standard's, not any one vendor's or any
+          one developer's habits. Switching an assistant, a contractor, or a team does not change
+          how the work is recorded.</p>
+      </div>
+      <div class="card">
+        <h3>Compliance built into the work</h3>
+        <p>The operational record is structured and enforceable: closed schemas refuse malformed
+          records and gates fail closed on anything they cannot evaluate. Adherence is produced by
+          the same process every time, as the work happens, rather than reconstructed at audit
+          time.</p>
+      </div>
+      <div class="card">
+        <h3>Lower cost for the same work</h3>
+        <p>Complete, structured input means less back-and-forth inference and fewer tokens spent
+          reconstructing context, so the same work costs less to run. The saving repeats on every
+          project that runs the same process.</p>
+      </div>
+      <div class="card">
+        <h3>A durable, reviewable trail</h3>
+        <p>Every decision, finding, and change is captured in a versioned, git-backed store with
+          generated human-readable views, and released history is frozen by recorded digests. There
+          is always a durable, reviewable trail of what was decided, by whom, and when.</p>
+      </div>
+    </div>
+    <p>The mechanism behind these outcomes is the rest of this page: one machine-written source of
+      truth, generated views that are never hand-edited, and gates that fail closed.</p>
+  </div>
+</section>
 
 <section id="pairs">
   <div class="wrap">
@@ -165,9 +217,9 @@
   <div class="wrap">
     <p class="eyebrow">Why it works</p>
     <h2>Complete input, deterministic process</h2>
-    <p class="lead">The design bet is simple: when the TOML carries all the input a process needs,
-      the same process runs the same way every time. Determinism plus completeness reduces variance
-      and ambiguity.</p>
+    <p class="lead">The outcomes above are not aspiration; they follow from two properties the
+      standard enforces. When the TOML carries all the input a process needs, the same process runs
+      the same way every time: determinism plus completeness reduces variance and ambiguity.</p>
     <p>A process that reads a complete, structured record does not have to reconstruct context from
       memory, guess at a missing field, or interpret free-form prose. The closed schemas mean a
       malformed input is refused rather than silently misread; the closed transform vocabulary means
