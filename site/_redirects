@@ -5,3 +5,8 @@
 /install-gemini /install 301
 /install-copilot /install 301
 /install-other /install 301
+/rule1 /rules#rule1 301
+/rule2 /rules#rule2 301
+/rule3 /rules#rule3 301
+/rule4 /rules#rule4 301
+/rule5 /rules#rule5 301

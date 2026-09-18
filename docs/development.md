@@ -1,9 +1,9 @@
 +++
-title = "AIQT Development Assistant (1.1.0, in development): governance that installs into your project"
-description = "In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
+title = "The AIQT development assistant: governance that installs into your project"
+description = "The AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
 canonical = "https://aiqt.ai/development"
-og-title = "AIQT Development Assistant (1.1.0, in development): governance that installs into your project"
-og-description = "In development: AIQT 1.1.0, the development assistant, installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
+og-title = "The AIQT development assistant: governance that installs into your project"
+og-description = "The AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
 og-url = "https://aiqt.ai/development"
 sidebar-active = "development"
 +++
@@ -12,11 +12,10 @@ sidebar-active = "development"
     <p class="eyebrow">The development assistant</p>
     <h1>Governance that installs into your project.</h1>
     <p class="lead">Every coding agent in your project follows its own rules, drifts its own way, and you
-      find out in review. AIQT 1.1.0 puts one governance core where coding agents read their instructions,
-      in the repository itself. One wizard sets it
+      find out in review. The AIQT development assistant puts one governance core where coding agents read
+      their instructions, in the repository itself. One wizard sets it
       up, one doctor verifies it, and a write guard keeps every update inside a single directory
-      you can inspect. 1.1.0 is in development; the pack it installs is source-available and
-      readable today.</p>
+      you can inspect. The pack it installs is source-available and readable today.</p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub</a>
       <a class="btn ghost" href="/tech-details">Technical details</a>
@@ -61,8 +60,9 @@ sidebar-active = "development"
     <p class="eyebrow">The five rules</p>
     <h2>How the five rules operate while you work</h2>
     <p class="lead">A standard you cannot see being applied is a promise, not a standard. The
-      five rules are how the assistant applies the ordering, change by change, in the 1.1.0
-      design, and each one produces something you can see in the console. They are scoped to
+      five rules are how the assistant applies the ordering, change by change, and most of them
+      produce something you can see in the console, while the self-check stays an internal
+      discipline that never enters the visible answer. They are scoped to
       issues the active work detects or causes, not to your whole backlog, so following them
       never turns one change into a cleanup crusade. The first two rules echo a famous pair on
       purpose: you talk about AIQT.</p>
@@ -71,22 +71,24 @@ sidebar-active = "development"
         <p>When a guardrail catches something (it blocks, flags, or refuses an action), the
           assistant surfaces it in the console: which guardrail, and what it caught. Silent
           passes are not surfaced, so the console carries signal, not a firehose.</p></li>
-      <li><b>The standard is visibly re-anchored.</b>
-        <p>The assistant reminds itself that it must always follow AIQT: a short "AIQT check"
-          self-reminder, at least once per change, self-acknowledged, so that the standard was
-          applied is itself something you can see.</p></li>
+      <li><b>Each change gets an internal self-check.</b>
+        <p>At least once per change, the assistant runs a substantive self-check, recapping how it
+          followed AIQT since the last one. It happens in the assistant's reasoning or thinking
+          channel where the platform provides one, so it stays an internal discipline and never
+          enters the visible answer or a produced deliverable.</p></li>
       <li><b>Issues in scope are fixed before the change ships.</b>
         <p>An issue detected or caused by the active work, and within the current change's
           scope, is fixed before that change merges.</p></li>
-      <li><b>Issues out of scope are fixed next.</b>
+      <li><b>Out-of-scope issues are surfaced, not silently acted on.</b>
         <p>An issue detected or caused by the active work but outside the current change's
-          scope is fixed in the next change (the current change finishes first).</p></li>
+          scope is named plainly; the assistant asks before doing additional work rather than
+          expanding scope on its own.</p></li>
       <li><b>Underlying gaps become guardrails, and the fix can be shared.</b>
-        <p>When the assistant caused the issue through a guardrail gap, it also creates or fixes
-          a guardrail so it should not recur, additive to rules three and four: the instance is
-          still fixed. Then, if your configuration permits and with your permission, the new
-          guardrail can go back to the AIQT project as a seed PR, so every developer's assistant
-          improves. Sharing is opt-in; the details are on the
+        <p>When the assistant caused the issue through a guardrail gap, it also proposes (and, if asked, drafts)
+          a guardrail so it should not recur, additive to rules three and four: the instance
+          itself is still handled under them. Then, if your configuration permits and with your
+          permission, the new guardrail can go back to the AIQT project as a seed PR, so every
+          developer's assistant improves. Sharing is opt-in; the details are on the
           <a href="/tech-details#seeds">technical details</a> page.</p></li>
     </ol>
   </div>
@@ -94,16 +96,16 @@ sidebar-active = "development"
 
 <section id="self-learning">
   <div class="wrap">
-    <p class="eyebrow">Self-learning</p>
-    <h2>It self-learns: new guardrails, created as it goes</h2>
-    <p class="lead">The fifth rule is where AIQT gets better on its own. When a gap lets an
-      issue through, the assistant fixes it and writes a new
-      guardrail so that shape of issue is caught from then on. Your setup self-learns: every
-      gap it hits becomes a guard it keeps. No model is retrained: a new guardrail is a local
+    <p class="eyebrow">What comes next</p>
+    <h2>Where it goes next: self-learning guardrails</h2>
+    <p class="lead">The fifth rule is where AIQT is designed to get better on its own. When a gap
+      lets an issue through, the assistant will fix it and write a new
+      guardrail so that shape of issue is caught from then on. Your setup is designed to self-learn:
+      every gap it hits becomes a guard it keeps. No model is retrained: a new guardrail is a local
       rule file, listed in your config, and yours to disable or delete.</p>
-    <p>Everything it learns stays yours by default. A new guardrail is created and runs locally
-      the moment the gap is found; sharing it back to every other developer is a separate,
-      opt-in step, covered under <a href="/tech-details#seeds">seed PRs</a>.</p>
+    <p>Everything it learns is designed to stay yours by default. A new guardrail will be created
+      and run locally the moment the gap is found; sharing it back to every other developer is a
+      separate, opt-in step, covered under <a href="/tech-details#seeds">seed PRs</a>.</p>
   </div>
 </section>
 
@@ -123,7 +125,7 @@ sidebar-active = "development"
       <li><b>The doctor verifies it.</b> It confirms that the install is present and consistent.
         That is what the doctor proves: the files exist, agree with each other, and are current.
         It does not prove that a given agent loaded them in a given session; the running evidence
-        for that is the visible AIQT check and the named catches while you work.
+        for that is the named catches you see while you work.
         This is the ordering applied to the tool itself: "installed" means a check actually
         ran, and the doctor is that check.</li>
     </ol>
@@ -159,7 +161,7 @@ sidebar-active = "development"
     <div class="card">
       <span class="pill next">In development</span>
       <h3>The development assistant (1.1.0)</h3>
-      <p>In development. The wizard, the doctor, the write guard, the generated agent files,
+      <p>The wizard, the doctor, the write guard, the generated agent files,
         the CI integration, the findings loop, the five-rule workflow, the per-guardrail
         configuration, and seed PRs described here and on the technical details page are the 1.1.0
         design, and we ship it when it does what these pages say it does. Until then, the

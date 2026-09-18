@@ -6,7 +6,7 @@
 <title>AIQT Guardrails: rules your AI follows</title>
 <meta name="description" content="AIQT Guardrails holds your AI assistant to one standard: Accuracy, Integrity, Quality, and Trust, ahead of Progress, Speed, and Cost. In chat, your assistant answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes they are built to catch. Source-available.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260811za">
+<link rel="stylesheet" href="/styles.css?v=20260918a">
 <script src="/theme.js"></script>
 <link rel="canonical" href="https://aiqt.ai/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -58,11 +58,7 @@
   <a class="navlink" href="/roadmap">Roadmap</a>
   <a class="navlink" href="/evidence">Evidence</a>
   <h4>The five rules</h4>
-  <a class="navlink" href="/rule1">Rule 1</a>
-  <a class="navlink" href="/rule2">Rule 2</a>
-  <a class="navlink" href="/rule3">Rule 3</a>
-  <a class="navlink" href="/rule4">Rule 4</a>
-  <a class="navlink" href="/rule5">Rule 5</a>
+  <a class="navlink" href="/rules">The five rules</a>
   <h4>Project</h4>
   <a class="navlink" href="/about">About</a>
   <a class="navlink" href="/disclosure">Disclosure</a>
@@ -70,6 +66,10 @@
   <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
 </nav>
 <div class="content">
+
+<!-- cs-banner:start -->
+<div class="wrap"><p class="cs-banner">This site is a <b>preview</b> for friends and colleagues to review; it describes the AIQT launch product, and the repository is a short way from fully matching what it describes.</p></div>
+<!-- cs-banner:end -->
 
 <main id="main">
 
@@ -92,31 +92,31 @@
   <div class="wrap">
     <p class="eyebrow">Who it helps</p>
     <h2>One standard, three reasons to use it</h2>
-    <p class="lead">AIQT is designed to reduce the time you spend putting AI work right.
-      The source-available rules give your chat assistant a standard to follow today;
-      codebase enforcement controls for 1.1.0 are in development.</p>
+    <p class="lead">AIQT holds your assistant to one standard and cuts the time you spend putting
+      AI work right. The source-available rules give your chat assistant a standard to follow, and
+      in your codebase the enforcement controls block, flag, or refuse the mistakes they are built
+      to catch.</p>
     <div class="grid">
       <div class="card">
         <h3>For executives and team leads</h3>
-        <p>Give your team a shared standard to work from. The aim is fewer AI errors,
-          omissions, and hallucinations, with more consistent, repeatable work aligned
-          with your standards and compliance requirements. Less time correcting work
-          could mean more efficient delivery and lower token and inference costs.</p>
+        <p>Give your team a shared standard to work from: fewer AI errors, omissions, and
+          hallucinations, and more consistent, repeatable work aligned with your standards and
+          compliance requirements. Less time correcting work means more efficient delivery and
+          lower token and inference costs.</p>
       </div>
       <div class="card">
         <h3>For individual developers</h3>
         <p>Spend less time retracing your steps. The rules give your assistant a standard
-          for checking its work before calling it done, so the aim is less rework and
-          fewer wrong turns. The 1.1.0 codebase release, in development, is designed to
-          carry your decisions and working context in operational files from one session
-          to the next.</p>
+          for checking its work before calling it done, so you rework less and take fewer
+          wrong turns. The developer release carries your decisions and working context in
+          operational files from one session to the next.</p>
       </div>
       <div class="card">
         <h3>For vibe coders</h3>
-        <p>Building with AI should feel less like an argument. The aim is less repeating
-          yourself, fewer forgotten instructions and made-up answers, and work that stays
-          closer to what you meant. More room to develop your idea, with less time spent
-          coaxing the assistant back on track.</p>
+        <p>Building with AI should feel less like an argument. You repeat yourself less, lose
+          fewer instructions, encounter fewer made-up answers, and stay closer to what you meant.
+          More room to develop your idea, with less time spent coaxing the assistant back on
+          track.</p>
       </div>
     </div>
   </div>
@@ -143,7 +143,7 @@
         <p>The governance core is here to inspect today, and you can use the rules as preview
           instructions in Claude Code, Codex, Cursor, or Copilot in the editor. The developer release,
           1.1.0, adds the guided install, the setup doctor, and the enforcement controls that block,
-          flag, or refuse the mistakes they are built to catch - it is in development.</p>
+          flag, or refuse the mistakes they are built to catch.</p>
         <a class="btn primary" href="/development">See the 1.1.0 developer plan</a>
       </div>
     </div>
