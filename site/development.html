@@ -112,8 +112,9 @@
     <p class="eyebrow">The five rules</p>
     <h2>How the five rules operate while you work</h2>
     <p class="lead">A standard you cannot see being applied is a promise, not a standard. The
-      five rules are how the assistant applies the ordering, change by change, and each one
-      produces something you can see in the console. They are scoped to
+      five rules are how the assistant applies the ordering, change by change, and most of them
+      produce something you can see in the console, while the self-check stays an internal
+      discipline that never enters the visible answer. They are scoped to
       issues the active work detects or causes, not to your whole backlog, so following them
       never turns one change into a cleanup crusade. The first two rules echo a famous pair on
       purpose: you talk about AIQT.</p>
@@ -122,16 +123,18 @@
         <p>When a guardrail catches something (it blocks, flags, or refuses an action), the
           assistant surfaces it in the console: which guardrail, and what it caught. Silent
           passes are not surfaced, so the console carries signal, not a firehose.</p></li>
-      <li><b>The standard is visibly re-anchored.</b>
-        <p>The assistant reminds itself that it must always follow AIQT: a short "AIQT check"
-          self-reminder, at least once per change, self-acknowledged, so that the standard was
-          applied is itself something you can see.</p></li>
+      <li><b>Each change gets an internal self-check.</b>
+        <p>At least once per change, the assistant runs a substantive self-check, recapping how it
+          followed AIQT since the last one. It happens in the assistant's reasoning or thinking
+          channel where the platform provides one, so it stays an internal discipline and never
+          enters the visible answer or a produced deliverable.</p></li>
       <li><b>Issues in scope are fixed before the change ships.</b>
         <p>An issue detected or caused by the active work, and within the current change's
           scope, is fixed before that change merges.</p></li>
-      <li><b>Issues out of scope are fixed next.</b>
+      <li><b>Out-of-scope issues are surfaced, not silently acted on.</b>
         <p>An issue detected or caused by the active work but outside the current change's
-          scope is fixed in the next change (the current change finishes first).</p></li>
+          scope is named plainly; the assistant asks before doing additional work rather than
+          expanding scope on its own.</p></li>
       <li><b>Underlying gaps become guardrails, and the fix can be shared.</b>
         <p>When the assistant caused the issue through a guardrail gap, it also creates or fixes
           a guardrail so it should not recur, additive to rules three and four: the instance is

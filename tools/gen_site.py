@@ -952,12 +952,12 @@ def _self_test():
     # 13. sidebar_active slug marks the shell's link active.
     slug_shell = tiny_shell.replace(
         '<body>{{content}}</body>',
-        '<body><a class="navlink" href="/rule1">Rule 1</a>{{content}}</body>')
-    fm_slug = frontmatter.replace('sidebar-active = ""', 'sidebar-active = "rule1"')
+        '<body><a class="navlink" href="/rules">Rules</a>{{content}}</body>')
+    fm_slug = frontmatter.replace('sidebar-active = ""', 'sidebar-active = "rules"')
     case_count += 1
     try:
         rendered = render_page(slug_shell, fm_slug + '<p>ok</p>\n', "test.md")
-        needle = '<a class="navlink active" href="/rule1" aria-current="page">Rule 1</a>'
+        needle = '<a class="navlink active" href="/rules" aria-current="page">Rules</a>'
         if needle not in rendered:
             failures.append("sidebar active: expected {!r} in rendered".format(needle))
     except SchemaError as exc:
@@ -965,8 +965,8 @@ def _self_test():
     # 14. sidebar_active slug whose href is not in the shell fails closed.
     _expect_error(
         "sidebar link absent",
-        frontmatter.replace('sidebar-active = ""', 'sidebar-active = "rule1"'),
-        "no `<a class=\"navlink\" href=\"/rule1\">` link")
+        frontmatter.replace('sidebar-active = ""', 'sidebar-active = "rules"'),
+        "no `<a class=\"navlink\" href=\"/rules\">` link")
 
     # ---- Frontmatter escaping (BLOCKER-1) --------------------------------------------------------
     # 15. Title containing `&<>` is text-escaped in <title>, not injected as markup.
@@ -1073,30 +1073,30 @@ def _self_test():
     _expect_render("tab-only blank splits para", tab_blank_src, "<p>Two</p>")
 
     # ---- Sidebar reconciliation (MAJOR-8) ------------------------------------------------------
-    # 30. A shell with duplicated internal navlink (two `/rule1`) fails closed at load time.
+    # 30. A shell with duplicated internal navlink (two `/rules`) fails closed at load time.
     dup_nav_shell = tiny_shell.replace(
         '<body>{{content}}</body>',
         '<body>'
-        '<a class="navlink" href="/rule1">A</a>'
-        '<a class="navlink" href="/rule1">B</a>'
+        '<a class="navlink" href="/rules">A</a>'
+        '<a class="navlink" href="/rules">B</a>'
         + ''.join('<a class="navlink" href="{}">L</a>'.format(h)
-                  for slug, h in SIDEBAR_SLUG_TO_HREF.items() if slug != "rule1")
+                  for slug, h in SIDEBAR_SLUG_TO_HREF.items() if slug != "rules")
         + '{{content}}</body>')
     _expect_raises(
         "shell duplicated navlink",
         lambda: _validate_shell_sidebar(dup_nav_shell, "shell.html"),
-        SchemaError, "2 navlinks for slug 'rule1'")
+        SchemaError, "2 navlinks for slug 'rules'")
     # 31. A shell missing a mapped navlink fails closed at load time.
-    missing_rule2 = tiny_shell.replace(
+    missing_about = tiny_shell.replace(
         '<body>{{content}}</body>',
         '<body>'
         + ''.join('<a class="navlink" href="{}">L</a>'.format(h)
-                  for slug, h in SIDEBAR_SLUG_TO_HREF.items() if slug != "rule2")
+                  for slug, h in SIDEBAR_SLUG_TO_HREF.items() if slug != "about")
         + '{{content}}</body>')
     _expect_raises(
         "shell missing mapped navlink",
-        lambda: _validate_shell_sidebar(missing_rule2, "shell.html"),
-        SchemaError, "no navlink for mapped slug 'rule2'")
+        lambda: _validate_shell_sidebar(missing_about, "shell.html"),
+        SchemaError, "no navlink for mapped slug 'about'")
     # 32. A shell with an unknown INTERNAL navlink fails closed at load time.
     extra_internal = tiny_shell.replace(
         '<body>{{content}}</body>',
@@ -1210,15 +1210,15 @@ def _self_test():
         "navlink alt-layout duplicate",
         lambda: _validate_shell_sidebar(
             nav_base.replace('{{content}}',
-                             '<a href="/rule1" class="navlink">Dup</a>{{content}}'), "shell.html"),
-        SchemaError, "2 navlinks for slug 'rule1'")
+                             '<a href="/rules" class="navlink">Dup</a>{{content}}'), "shell.html"),
+        SchemaError, "2 navlinks for slug 'rules'")
     # A duplicate navlink using single-quoted attributes is caught.
     _expect_raises(
         "navlink single-quote duplicate",
         lambda: _validate_shell_sidebar(
             nav_base.replace('{{content}}',
-                             "<a class='navlink' href='/rule2'>Dup</a>{{content}}"), "shell.html"),
-        SchemaError, "2 navlinks for slug 'rule2'")
+                             "<a class='navlink' href='/about'>Dup</a>{{content}}"), "shell.html"),
+        SchemaError, "2 navlinks for slug 'about'")
     # A navlink with no href is caught (not silently ignored).
     _expect_raises(
         "navlink missing href",
