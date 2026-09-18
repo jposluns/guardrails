@@ -74,7 +74,7 @@
     <span>namespace CN</span>
     <span>.working/toml/</span>
   </div>
-  <p class="lead">An artifact, fix, or proposal this project sent to a peer project, with a delivery receipt: the outward counterpart to <a href="./reference">reference</a>, which records what comes in.</p>
+  <p class="lead">An artefact, fix, or proposal this project sent to a peer project, with a delivery receipt: the outward counterpart to <a href="./reference">reference</a>, which records what comes in.</p>
 </div>
 
 <section>
@@ -93,8 +93,8 @@
       <div>
         <dt>Pairs with</dt>
         <dd>
-          <span class="chip"><code>CONTRIBUTIONS.md</code></span>
-          <span class="chip"><code>CONTRIBUTION-INDEX.md</code></span>
+          <span class="chip view"><code>CONTRIBUTIONS.md</code></span>
+          <span class="chip view"><code>CONTRIBUTION-INDEX.md</code></span>
           <p>The composed contributions view and the optional one-to-one mirror, both byte-drift-gated.</p>
         </dd>
       </div>
@@ -131,15 +131,17 @@
       <div class="codecard-bar">.working/toml/contribution.index.toml</div>
       <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
 <span class="tok-tbl">[[record]]</span>
-<span class="tok-key">id</span>          = <span class="tok-str">"CN-1"</span>
-<span class="tok-key">type</span>        = <span class="tok-str">"contribution"</span>
-<span class="tok-key">status</span>      = <span class="tok-str">"sent/proposed"</span>
-<span class="tok-key">title</span>       = <span class="tok-str">"Drift-gate fix sent upstream"</span>
-<span class="tok-key">recipient</span>   = <span class="tok-str">"peer-project"</span>
-<span class="tok-key">dedup_class</span> = <span class="tok-str">"drift-gate-fix"</span>
-<span class="tok-key">delivery</span>    = { <span class="tok-key">channel</span> = <span class="tok-str">"pr"</span>, <span class="tok-key">ref</span> = <span class="tok-str">"peer/repo#128"</span>, <span class="tok-key">sent_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span> }
-<span class="tok-key">actor</span>       = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
+<span class="tok-key">id</span>             = <span class="tok-str">"CN-1"</span>
+<span class="tok-key">type</span>           = <span class="tok-str">"contribution"</span>
+<span class="tok-key">status</span>         = <span class="tok-str">"sent/proposed"</span>
+<span class="tok-key">title</span>          = <span class="tok-str">"Drift-gate fix sent upstream"</span>
+<span class="tok-key">recipient</span>      = <span class="tok-str">"peer-project"</span>
+<span class="tok-key">dedup_class</span>    = <span class="tok-str">"drift-gate-fix"</span>
+<span class="tok-key">content_digest</span> = <span class="tok-str">"sha256:..."</span>
+<span class="tok-key">delivery</span>       = { <span class="tok-key">channel</span> = <span class="tok-str">"pr"</span>, <span class="tok-key">ref</span> = <span class="tok-str">"peer/repo#128"</span>, <span class="tok-key">sent_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span> }
+<span class="tok-key">actor</span>          = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
     </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
     <p>The shared index shape with the standard envelope plus <code>recipient</code>,
       <code>dedup_class</code>, <code>content_digest</code>, and the <code>delivery</code> bundle
       <code>{channel, ref, sent_at, receipt_ref?, receipted_at?}</code>: channel, ref, and sent_at

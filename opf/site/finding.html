@@ -86,7 +86,7 @@
     <div>
       <dt>Pairs with</dt>
       <dd>
-        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>FINDINGS.md</code></span>
+        <span class="chip view"><code>FINDINGS.md</code></span>
         <p>Composed from this index, plus the optional <code>FINDING-INDEX.md</code> mirror; both byte-drift-gated.</p>
       </dd>
     </div>
@@ -118,6 +118,7 @@
 <span class="tok-key">status</span>   = <span class="tok-str">"fixed"</span>
 <span class="tok-key">severity</span> = <span class="tok-str">"major"</span></div>
   </div>
+  <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
   <p>The shared index shape with the standard envelope plus one type-specific field, <code>severity</code>. Links typically carry <code>remediates</code> toward the backlog item or change that fixes the finding; refs capture the evidence (a path and line, a URL, or a document and section) at the moment the claim is made.</p>
 
   <h2 style="margin-top:var(--sp-12)">What it protects</h2>

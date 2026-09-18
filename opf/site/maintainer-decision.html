@@ -94,9 +94,9 @@
       <div>
         <dt>Pairs with</dt>
         <dd>
-          <span class="chip"><code>DECISIONS.md</code></span>
-          <a class="chip" href="./decisions-projection"><code>DECISIONS.toml</code></a>
-          <span class="chip"><code>MAINTAINER_DECISION-INDEX.md</code></span>
+          <span class="chip view"><code>DECISIONS.md</code></span>
+          <a class="chip view" href="./decisions-projection"><code>DECISIONS.toml</code></a>
+          <span class="chip view"><code>MAINTAINER_DECISION-INDEX.md</code></span>
           <p>The composed decisions view, its TOML projection, and the optional one-to-one mirror.</p>
         </dd>
       </div>
@@ -137,6 +137,7 @@
 <span class="tok-key">decision</span> = <span class="tok-str">"yes; the gate blocks merge on any view drift"</span>
 <span class="tok-key">actor</span>    = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
     </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
     <p>The shared index shape with the standard envelope plus <code>decision</code>. A ruling may
       link <code>exemplifies</code> to the <a href="./preference-pattern">preference pattern</a> it
       instantiates, feeding the distillation of standing preferences from individual rulings. It is

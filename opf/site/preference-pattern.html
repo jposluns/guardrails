@@ -93,9 +93,9 @@
       <div>
         <dt>Pairs with</dt>
         <dd>
-          <span class="chip"><code>DECISIONS.md</code></span>
-          <a class="chip" href="./decisions-projection"><code>DECISIONS.toml</code></a>
-          <span class="chip"><code>PREFERENCE_PATTERN-INDEX.md</code></span>
+          <span class="chip view"><code>DECISIONS.md</code></span>
+          <a class="chip view" href="./decisions-projection"><code>DECISIONS.toml</code></a>
+          <span class="chip view"><code>PREFERENCE_PATTERN-INDEX.md</code></span>
           <p>The composed decisions view, its TOML projection, and the optional one-to-one mirror.</p>
         </dd>
       </div>
@@ -139,6 +139,7 @@
 <span class="tok-key">rationale</span> = <span class="tok-str">"scope creep is where regressions and review cost hide"</span>
 <span class="tok-key">actor</span>     = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
     </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
     <p>The shared index shape with the standard envelope plus <code>context</code> and
       <code>rationale</code>. <a href="./maintainer-decision">Maintainer decisions</a> may link
       <code>exemplifies</code> toward the pattern they instantiate, so the evidence for a pattern
@@ -152,7 +153,7 @@
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h3>What it protects</h3>
-      <p>Standing preferences that are explicit, ratified, and retireable, which helps reduce
+      <p>Standing preferences that are explicit, ratified, and able to be retired, which helps reduce
         repeated clarification and helps prevent an assistant's own inference about "what the
         maintainer wants" from hardening into unratified policy.</p>
     </div>

@@ -86,10 +86,10 @@
     <div>
       <dt>Pairs with</dt>
       <dd>
-        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>BLOCKS.md</code></span>
-        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>TODO.md</code></span>
-        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>BACKLOG.md</code></span>
-        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>PIPELINE.md</code></span>
+        <span class="chip view"><code>BLOCKS.md</code></span>
+        <span class="chip view"><code>TODO.md</code></span>
+        <span class="chip view"><code>BACKLOG.md</code></span>
+        <span class="chip view"><code>PIPELINE.md</code></span>
         <p><code>BLOCKS.md</code> is composed from this index, and the block join renders inside <code>TODO.md</code>, <code>BACKLOG.md</code>, and <code>PIPELINE.md</code>; an optional <code>BLOCK-INDEX.md</code> mirror completes the set. All byte-drift-gated.</p>
       </dd>
     </div>
@@ -121,6 +121,7 @@
 <span class="tok-key">status</span> = <span class="tok-str">"active"</span>
 <span class="tok-key">scopes</span> = [<span class="tok-str">"BI-42"</span>, <span class="tok-str">"BI-43"</span>]</div>
   </div>
+  <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
   <p>The shared index shape with the standard envelope plus <code>scopes</code>, the enumerated record IDs the block covers. States: <code>active</code> (initial, gated) to <code>released</code> or <code>expired</code> (terminal). Blocked-ness is never stored on the scoped records; it is derived at view time through the block join.</p>
 
   <h2 style="margin-top:var(--sp-12)">What it protects</h2>

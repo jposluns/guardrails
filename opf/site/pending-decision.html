@@ -86,8 +86,8 @@
     <div>
       <dt>Pairs with</dt>
       <dd>
-        <span class="chip" style="border-color:var(--accent); color:var(--accent)"><code>DECISIONS.md</code></span>
-        <a class="chip" style="border-color:var(--accent); color:var(--accent)" href="./decisions-projection"><code>DECISIONS.toml</code></a>
+        <span class="chip view"><code>DECISIONS.md</code></span>
+        <a class="chip view" href="./decisions-projection"><code>DECISIONS.toml</code></a>
         <p>The composed <code>DECISIONS.md</code> (drawing on all four decision types) and the machine projection <code>DECISIONS.toml</code>, both byte-drift-gated, plus the optional <code>PENDING_DECISION-INDEX.md</code> mirror.</p>
       </dd>
     </div>
@@ -118,8 +118,10 @@
 <span class="tok-key">type</span>       = <span class="tok-str">"pending_decision"</span>
 <span class="tok-key">status</span>     = <span class="tok-str">"decided"</span>
 <span class="tok-key">decision</span>   = <span class="tok-str">"Ship the drift gate in 1.1.0"</span>
+<span class="tok-key">decided_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span>
 <span class="tok-key">decided_by</span> = <span class="tok-str">"maintainer"</span></div>
   </div>
+  <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
   <p>The shared index shape with the standard envelope plus the resolution bundle fields: <code>decision</code>, <code>decided_at</code>, and <code>decided_by</code>. An open decision carries none of the three; a decided one carries all three. A decided record may be superseded by a new decision linking <code>supersedes</code>; the decision-resolution join walks that chain to find the current effective resolution.</p>
 
   <h2 style="margin-top:var(--sp-12)">What it protects</h2>
