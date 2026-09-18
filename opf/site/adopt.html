@@ -109,7 +109,11 @@
     <p>Every command shares one exit contract, which is what makes it usable as a commit or CI check:
       <b style="color:var(--ink)">0</b> clean, <b style="color:var(--ink)">1</b> a finding or drift, and
       <b style="color:var(--ink)">2</b> cannot-evaluate, a fail-closed "I could not tell" that is never
-      read as a pass. Where a command is aimed at a directory that has not adopted OPFiles, the
+      read as a pass. One command-specific exception sits on top of this: <code>render --write</code>
+      refuses a source-integrity violation with exit 2 and writes nothing, so a source defect that
+      <code>doctor</code> reports as a finding (exit 1) makes <code>render --write</code> exit 2, declining
+      to write over an unsound source rather than exiting 1. Where a command is aimed at a directory that
+      has not adopted OPFiles, the
       applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>) report NOT
       APPLICABLE and exit 0. The seven commands, documented one by one below, are <code>init</code>,
       <code>render</code>, <code>doctor</code>, <code>import</code>, <code>upgrade</code>,
@@ -138,13 +142,15 @@
       <code>--write</code> is required, so a preview never turns itself into a write; a bare
       <code>opf render</code> is a usage error. <code>--check</code> is read-only: it re-renders every
       declared view from its sources and compares the bytes, reporting whether the store is clean, has
-      drifted, or cannot be evaluated, and writing nothing. <code>--write</code> composes the whole-store
-      integrity gate: it gathers the git-derived observations and writes the regenerated views only when
-      the store verdict is valid, printing the findings and writing nothing otherwise, so a write never
-      reads as a silent no-op.</p>
+      drifted, or cannot be evaluated, and writing nothing. <code>--write</code> gates on source integrity, not
+      on the whole-store verdict: it gathers the git-derived observations, and a drifted or missing view is
+      its output to regenerate rather than a reason to refuse, so it rewrites the declared views from their
+      sources. Only a source violation (a duplicate id, an untracked store, missing or malformed
+      observations, or an unreadable required input) refuses with exit 2 and writes nothing, printing the
+      source-attributed findings, so a write never reads as a silent no-op.</p>
     <p><b style="color:var(--ink)">Result.</b> Under <code>--check</code>, a verdict and no change; under
-      <code>--write</code>, the regenerated view files on disk when the store validates, or no change and
-      a report of why it withheld.</p>
+      <code>--write</code>, the regenerated view files on disk when source integrity holds, or no change
+      and a source-attributed report of why it withheld.</p>
     <p class="refchips"><code>opf render --check</code> <code>opf render --write</code></p>
 
     <h3 id="cmd-doctor"><code>opf doctor</code></h3>
@@ -199,7 +205,11 @@
       commits: you review and merge. A store already at the target version is a byte no-op, still
       requiring doctor-valid.</p>
     <p><b style="color:var(--ink)">Result.</b> The upgraded store staged in your working tree and left
-      uncommitted for your branch-and-merge, or a fail-closed refusal that changed nothing.</p>
+      uncommitted for your branch-and-merge; a preflight refusal (the fail-closed checks above: a store above
+      the tooling's spec, a hand-edited or comment-bearing manifest or counters, a held lease, or a store
+      unclean over the paths it writes) stops before any write and changes nothing, while a failure once the
+      additive rewrite has begun (at the render or the final doctor) leaves the staged changes in place for a
+      recorded, store-subtree-scoped recovery against the committed HEAD, not a no-op.</p>
     <p class="refchips"><code>opf upgrade</code> <code>opf upgrade --root .</code></p>
 
     <h3 id="cmd-migrate"><code>opf migrate</code></h3>
