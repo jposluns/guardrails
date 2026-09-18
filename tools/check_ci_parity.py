@@ -164,7 +164,7 @@ JOB_PROPERTY_KEYS = frozenset({
     "environment",
 })
 
-TOOL_RE = re.compile(r"\b(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)\b")  # opf/ accepted toward OPF-SELF-CONTAIN; inert until an opf/tools path exists
+TOOL_RE = re.compile(r"(?<![A-Za-z0-9_-]/)(?<![A-Za-z0-9_-])(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)\b")  # opf/ accepted toward OPF-SELF-CONTAIN; anchored to a PATH boundary (a path-start tools/ or opf/tools/, optionally ./-prefixed), so a mid-path segment like evil/tools/ or evil/opf/tools/ does not over-match
 PY_TARGET_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_.-]+\.py$")
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 YAML_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*:\s*.*$")
@@ -2298,9 +2298,11 @@ def self_test():
 
     # OPF-SELF-CONTAIN grammar-widening (change-carries-check): the widened PY_TARGET_RE/TOOL_RE
     # must treat an opf/tools/*.py gate as a first-class member. Recognized on both sides parity
-    # holds; recognized on one side only parity still fails. An UNWIDENED regex would drop the
-    # moved line from both parses and pass silently (the fail-open hazard this widening forecloses),
-    # so both vectors fail without the change.
+    # holds; recognized on one side only parity still fails. Without the widening an opf/tools/*.py
+    # path is not a valid gate target and is not extracted as a member, so both vectors return code 2
+    # (cannot-evaluate) with gate-target and shadow-miss diagnostics rather than a silent pass; the
+    # widening turns that cannot-evaluate into a real parity success or a real mismatch. Both vectors
+    # therefore fail without the change.
     case(
         "23 opf/tools recognized, parity holds both sides",
         evaluate(
@@ -2322,6 +2324,29 @@ def self_test():
         ("opf/tools/b.py",),
         (),
     )
+
+    # OPF-SELF-CONTAIN anchoring (change-carries-check): TOOL_RE is anchored to a path
+    # boundary, so a mid-path segment must not over-match. This vector fails if the anchor
+    # is reverted to the loose \b form, which extracts a path from evil/tools/x.py and
+    # evil/opf/tools/x.py; the anchored form must still accept a legitimate path-start reference.
+    count += 1
+    for midpath in ("evil/tools/x.py", "evil/opf/tools/x.py"):
+        extracted = TOOL_RE.findall(midpath)
+        if extracted:
+            failures.append(
+                "25 anchored TOOL_RE must not extract from mid-path "
+                "{!r}, got {!r}".format(midpath, extracted)
+            )
+    for good, want in (
+            ("tools/x.py", "tools/x.py"),
+            ("opf/tools/x.sh", "opf/tools/x.sh"),
+            ("./opf/tools/x.py", "opf/tools/x.py")):
+        extracted = TOOL_RE.findall(good)
+        if extracted != [want]:
+            failures.append(
+                "25 anchored TOOL_RE must still accept {!r} as {!r}, "
+                "got {!r}".format(good, want, extracted)
+            )
 
     if failures:
         print("SELF-TEST FAIL:")
