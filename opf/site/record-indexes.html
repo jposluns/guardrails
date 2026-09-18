@@ -993,35 +993,7 @@
       <p class="lead">Beyond the twelve baseline types, eight record types ship in four optional modules, one type belongs to the importer alone, and two names are reserved. Modules are default-off, each enabled by one manifest edit.</p>
     </div>
 
-    <h3>The problem it solves</h3>
-    <blockquote class="refpull">Not every project needs delivery assurance or operational-policy records on day one.</blockquote>
-    <p>Default-off modules keep the baseline small while keeping the extended vocabulary standard: when a project grows into a capability, the types, namespaces, and states are already defined, so no adopter invents an incompatible local variant. Enabling a module makes its types valid to declare, each with its normative namespace; a module-tier type declared without its module enabled is a validation failure.</p>
-
-    <dl class="refstrip">
-      <div>
-        <dt>Enabled by</dt>
-        <dd>
-          <span class="chip"><code>manifest.toml</code></span>
-          <p>One manifest edit per module, under the adopter's own review flow.</p>
-        </dd>
-      </div>
-      <div>
-        <dt>Created by</dt>
-        <dd>
-          <span class="chip"><code>opf import</code></span>
-          <p>By process, once a module is enabled; <code>legacy_fragment</code> by <code>opf import</code> alone.</p>
-        </dd>
-      </div>
-      <div>
-        <dt>Read by</dt>
-        <dd>
-          <span class="chip"><code>opf doctor</code></span>
-          <p><code>opf doctor</code> for module-toggle validity (a declared module type requires its enabled module); the AIQT profile, which requires the governance, operational-policy, and concurrent-operation modules.</p>
-        </dd>
-      </div>
-    </dl>
-
-    <h3 style="margin-top:var(--sp-12)">The optional modules</h3>
+    <h3>The module and importer types</h3>
     <div class="benefits">
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/></svg></span>
@@ -1073,6 +1045,34 @@
   </pre></div>
     <p>These are outline state sets; the full module record schemas ship with the module schemas release. The delivery-assurance <code>release</code> record, where enabled, references a <code>version.toml</code> release row by version string: the ledger row is the fact, the record is the delivery-assurance envelope around it.</p>
     <p><code>legacy_fragment</code> is created only by an importer, never scaffolded: everything an import cannot confidently map becomes quarantined fragment data with source path, digest, span, and run ID, so nothing is dropped. The scaffolded counters file already carries the LF namespace at zero, so a fresh store can accept quarantine imports without a schema change. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
+
+    <h3 style="margin-top:var(--sp-12)">The problem it solves</h3>
+    <blockquote class="refpull">Not every project needs delivery assurance or operational-policy records on day one.</blockquote>
+    <p>Default-off modules keep the baseline small while keeping the extended vocabulary standard: when a project grows into a capability, the types, namespaces, and states are already defined, so no adopter invents an incompatible local variant. Enabling a module makes its types valid to declare, each with its normative namespace; a module-tier type declared without its module enabled is a validation failure.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Enabled by</dt>
+        <dd>
+          <span class="chip"><code>manifest.toml</code></span>
+          <p>One manifest edit per module, under the adopter's own review flow.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Created by</dt>
+        <dd>
+          <span class="chip"><code>opf import</code></span>
+          <p>By process, once a module is enabled; <code>legacy_fragment</code> by <code>opf import</code> alone.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Read by</dt>
+        <dd>
+          <span class="chip"><code>opf doctor</code></span>
+          <p><code>opf doctor</code> for module-toggle validity (a declared module type requires its enabled module); the AIQT profile, which requires the governance, operational-policy, and concurrent-operation modules.</p>
+        </dd>
+      </div>
+    </dl>
 
     <h3 style="margin-top:var(--sp-12)">What it protects</h3>
     <div class="benefit">

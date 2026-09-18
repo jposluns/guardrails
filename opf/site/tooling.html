@@ -131,8 +131,8 @@
     <h2>Trust and integrity</h2>
     <p>The release digests are published now, independently of artefact delivery, at
       posluns.dev/hashes.txt, so you can confirm that the tooling you downloaded matches the one we
-      intended to publish. The adoption flow runs that digest check before applying anything to your
-      project.</p>
+      intended to publish. Before applying anything, verify the pack's published digest against the
+      authoritative reference on posluns.dev, and refuse on a mismatch or missing evidence.</p>
     <p>Publishing a verifiable signature alongside releases is a roadmap item.</p>
   </div>
 </section>
@@ -142,7 +142,7 @@
     <p class="eyebrow">Discovery</p>
     <h2>How an assistant finds the standard</h2>
     <p>The site exposes a machine-readable entry point for AI assistants: an
-      <code>/llms.txt</code> index, a generated <code>/adopt.md</code>, and a plain link on the root
+      <code>/llms.txt</code> index, a machine-readable <code>/adopt.md</code>, and a plain link on the root
       page an assistant can follow, so pointing an assistant at the site is enough for it to find
       and follow the adoption steps.</p>
   </div>

@@ -6,6 +6,7 @@ OPFiles is a neutral operational-files standard: lowercase TOML sources paired w
 
 - [The standard](/standard): what OPFiles specifies, its formats, layout, naming, record lifecycle, and enforcement posture.
 - [Adopt](/adopt): adopt with your AI development assistant, or create the plain-TOML store and wire its checks by hand.
+- [Adopt, machine-readable](/adopt.md): the machine-readable adoption guide an assistant follows, including the digest-verification and scaffolding steps.
 - [Reference tooling](/tooling): the opf command line that scaffolds, renders, checks, and upgrades a store.
 - [Core store files](/core-files): the manifest, the ID counters, the version ledger, the append-only worklog, and the single-writer lease.
 - [Record indexes](/record-indexes): the baseline typed indexes, one schema-validated TOML source per record type, each paired with a generated view.

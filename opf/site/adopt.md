@@ -8,6 +8,10 @@ OPFiles is an operational-files standard: a `.working/` store of lowercase TOML 
 
 The store lives in your product repository. Lowercase files under `.working/toml/` are machine source you change through tooling or review. Uppercase files at the `.working/` top level are generated views you read and never hand-edit. A committed pointer `.opf.toml` at the repository root names where the store lives, and the curated `CHANGELOG.md` and the generated `VERSION` sit at the repository root.
 
+## Before you apply: verify the artifact digest
+
+Before scaffolding or applying anything to your project, obtain the pack's artifact digest and compare it against the published hashes at posluns.dev/hashes.txt. Proceed only on a match; refuse if the digest differs or the reference evidence is unavailable. This is a required adopter action on both paths below, not an automatic step that something else performs for you.
+
 ## The recommended path: assistant-guided adoption
 
 Point your AI development assistant at this site or the repository and tell it to adopt OPFiles, or to adopt AIQT, which brings OPFiles with it. It reads the standard, inspects your project, and proposes a short plan: what it will create, import, or retire, and how the pieces wire together. On your approval it scaffolds and validates the store, wires the records-first process into your project's assistant instructions, and leaves the `.working/` store for your review.

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "30afbec8cb8821f5980e7822ef929cb4e8d6f0c8f317081d11b9ff14f922da53"
+tree-sha256 = "1c08d5f73fba336d25a2255acf3ef24e4b776e09b3dd6cbdce19e10a4f2fe3ec"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2356,13 +2356,13 @@ sha256 = "e9f6788bc65fb0ad098ba0b2d2450e504c7a9c523963a4913bdd0a3306286e5c"
 
 [[sources]]
 path = "opf/site/adopt.html"
-bytes = 13393
-sha256 = "e0024f2360d963398c4416b2931cddde6de3ccab6c1ec0f3a4d80117cdd73527"
+bytes = 13400
+sha256 = "e713df6e1935ad7326bece33215549a1192a4c5f06b93ce87c97df65c6288a1c"
 
 [[sources]]
 path = "opf/site/adopt.md"
-bytes = 2666
-sha256 = "840baf2727614e2776874a2af8e680f83ddf07ccafa6cc1c08f33a8e94ab85ed"
+bytes = 3089
+sha256 = "c0bb6529ed977e02dd1015392579163c0354772641f8ac569c3f441ce90f247f"
 
 [[sources]]
 path = "opf/site/aiqt.html"
@@ -2386,18 +2386,18 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "opf/site/index.html"
-bytes = 23930
-sha256 = "db7ed0dd39acafbaa93d3c143adc26309728303bfeee06fe778f7ac1288d9b04"
+bytes = 24183
+sha256 = "cd3f0594e6cbd29c70192fcf805e1275982e62dc898a81b2a03e19c09d97c4cd"
 
 [[sources]]
 path = "opf/site/llms.txt"
-bytes = 1352
-sha256 = "734a611ff7591d7310f8e9b2359c17cb6d94d2a687fa1102f67560133de33f0c"
+bytes = 1507
+sha256 = "a0c914107ecd9bb7a3d7e4320e42bd282b07edfa147b7579e80ec23bc203a25f"
 
 [[sources]]
 path = "opf/site/record-indexes.html"
-bytes = 68639
-sha256 = "9be56a67c7dfd341da93d681e7f9cdfb0aab73adf54e1b984b5eb9b0838a501b"
+bytes = 68648
+sha256 = "1a770cb592a14d5503cfb8ab8397eaf5f7e4e9c760e1ee63900f788d3146a72a"
 
 [[sources]]
 path = "opf/site/roadmap.html"
@@ -2411,8 +2411,8 @@ sha256 = "ee36742f5396a19ed1359eaa5898be31d612d26f68e1ba7157c2bad90df578fb"
 
 [[sources]]
 path = "opf/site/standard.html"
-bytes = 7538
-sha256 = "ce18ae6a861a0b3d327d758a76e0ba2176bd6b4fbac5e6968fecb6c6d2ad75b8"
+bytes = 7374
+sha256 = "73e1ede599c690f21465aa69435c50de68a884e1f9cc7c4516447b1637c03033"
 
 [[sources]]
 path = "opf/site/store-meta.html"
@@ -2431,8 +2431,8 @@ sha256 = "5d851e2475c950d412335fe8e302dc4b1c864ee98885ff4f137965d3f19f7956"
 
 [[sources]]
 path = "opf/site/tooling.html"
-bytes = 10594
-sha256 = "bc99fc3895314d090dc014288e090bf64ca05b02289e7aacbe5e26e726c4aef0"
+bytes = 10677
+sha256 = "ad0188495aacca89fb0929bf42026fbc689ca2426f5e5de22fc9550d2bf8d25e"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
