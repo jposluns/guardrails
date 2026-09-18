@@ -132,7 +132,7 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h4>A ratified "done", not a felt one</h4>
@@ -197,7 +197,7 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h4>An audit-ready record of completion</h4>
@@ -262,7 +262,7 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h4>A register that cannot quietly shrink</h4>
@@ -330,7 +330,7 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h4>Decisions with provenance</h4>
@@ -699,7 +699,7 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h4>Blocks you can audit</h4>
@@ -764,7 +764,7 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h4>Continuity across sessions</h4>
@@ -1022,7 +1022,7 @@
       </div>
     </div>
 
-    <h3 style="margin-top:var(--sp-12)">The full type list</h3>
+    <h3>The full type list</h3>
     <div class="tree"><pre>
   Governance module
     maintainer_action   MA   open &#8594; done | dropped
@@ -1046,7 +1046,7 @@
     <p>These are outline state sets; the full module record schemas ship with the module schemas release. The delivery-assurance <code>release</code> record, where enabled, references a <code>version.toml</code> release row by version string: the ledger row is the fact, the record is the delivery-assurance envelope around it.</p>
     <p><code>legacy_fragment</code> is created only by an importer, never scaffolded: everything an import cannot confidently map becomes quarantined fragment data with source path, digest, span, and run ID, so nothing is dropped. The scaffolded counters file already carries the LF namespace at zero, so a fresh store can accept quarantine imports without a schema change. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
 
-    <h3 style="margin-top:var(--sp-12)">The problem it solves</h3>
+    <h3>The problem it solves</h3>
     <blockquote class="refpull">Not every project needs delivery assurance or operational-policy records on day one.</blockquote>
     <p>Default-off modules keep the baseline small while keeping the extended vocabulary standard: when a project grows into a capability, the types, namespaces, and states are already defined, so no adopter invents an incompatible local variant. Enabling a module makes its types valid to declare, each with its normative namespace; a module-tier type declared without its module enabled is a validation failure.</p>
 
@@ -1074,7 +1074,7 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><path d="M16.5 13.5v6M13.5 16.5h6"/></svg></span>
       <h4>Growth without fragmentation</h4>

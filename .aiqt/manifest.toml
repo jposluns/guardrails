@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "492598d04b6fce0c4de2c50bca66aa3dead0352354f673556d7e51b629afc856"
+tree-sha256 = "136d13450978d6d75e11a46e19e537f10f82782d39d8875a2922ee889e81d4a5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2376,8 +2376,8 @@ sha256 = "a0c914107ecd9bb7a3d7e4320e42bd282b07edfa147b7579e80ec23bc203a25f"
 
 [[sources]]
 path = "opf/site/record-indexes.html"
-bytes = 68648
-sha256 = "1a770cb592a14d5503cfb8ab8397eaf5f7e4e9c760e1ee63900f788d3146a72a"
+bytes = 68360
+sha256 = "30f8d8ef1a78484772d572cedd0260599dc99dcdcf7a81bbd638e7ade7c78c1a"
 
 [[sources]]
 path = "opf/site/roadmap.html"
@@ -2396,13 +2396,13 @@ sha256 = "73e1ede599c690f21465aa69435c50de68a884e1f9cc7c4516447b1637c03033"
 
 [[sources]]
 path = "opf/site/store-meta.html"
-bytes = 19294
-sha256 = "3de58ac01f973e69df136d5cf389bd4bcf616f31f20e7bf49f9bd1cfd4ad0b1d"
+bytes = 19198
+sha256 = "960f88d3ef0775b769c16eb89e5476d56b8392583006a6fd0b5b631943efbe37"
 
 [[sources]]
 path = "opf/site/styles.css"
-bytes = 38641
-sha256 = "18e7deefc84e88df246095454f10d7b2bb02887f13412a7da905bb0860f29b51"
+bytes = 39148
+sha256 = "d186455dc4d6b1766715ba95265c824c3befa2c94ed1b256b3c1297c3e1ef825"
 
 [[sources]]
 path = "opf/site/theme.js"
