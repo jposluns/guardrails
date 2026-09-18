@@ -138,7 +138,7 @@ ul.clean li{margin:.35rem 0; color:var(--muted)}
 
 /* directory tree (development page) */
 .tree{background:var(--panel-2); border:1px solid var(--line); border-radius:14px;
-  padding:1.3rem 1.5rem; overflow-x:auto; margin:1.5rem 0 1rem}
+  padding:1.3rem 1.5rem; overflow-x:auto; margin:1.5rem 0 1rem; width:fit-content; max-width:100%}
 .tree pre{margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:1.06rem; line-height:1.8; color:var(--muted)}
 .tree .dir{color:var(--ink); font-weight:600}
