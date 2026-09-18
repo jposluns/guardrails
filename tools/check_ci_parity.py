@@ -164,8 +164,29 @@ JOB_PROPERTY_KEYS = frozenset({
     "environment",
 })
 
-TOOL_RE = re.compile(r"\btools/[A-Za-z0-9_.-]+\.(?:py|sh)\b")
-PY_TARGET_RE = re.compile(r"^tools/[A-Za-z0-9_.-]+\.py$")
+# opf/ accepted toward OPF-SELF-CONTAIN. The path boundary is an ALLOWLIST anchor
+# (correct-by-construction), not a denylist lookbehind: the match must be preceded by
+# start-of-string or one delimiter character that legitimately precedes a tool reference
+# in the scanned shell/YAML (whitespace, quotes, ( ) , : = backtick ; [ ] { }), with an
+# optional non-consumed leading "./". Because the allowlist admits only real delimiters,
+# a mid-path segment is closed BY CONSTRUCTION: a parent leaves either a word char or a
+# "/" before the match (evil/tools/, a/opf/tools/, xopf/tools/), and a dotted parent
+# leaves a word char or "/" before the "./" (evil./tools/, evil/./tools/) -- none is a
+# delimiter, so all are rejected. Two earlier denylist-lookbehind forms each leaked a new
+# mid-path edge (the dot before "/"); the allowlist has no such gap to patch.
+# DISCLOSED RESIDUAL: by construction a genuine tools/ or opf/tools/ reference glued
+# behind a NON-delimiter prefix -- including a shell expansion such as ${DIR}/tools/x.py
+# or a quote-glued "$ROOT"/tools/x.py -- stays OUTSIDE this shadow-scan net, because it
+# is textually indistinguishable from the mid-path over-match class above, so no anchor
+# can admit it while still rejecting evil/tools/; the covering control is that an actual
+# gate invocation through such a value still fails closed at extraction (an unresolved
+# command value / unclassified line), never a silent clean pass.
+_TOOL_NONDELIM = r"[^\s'\"(),:=`;{}\[\]]"  # a char that is NOT a legitimate delimiter
+TOOL_RE = re.compile(
+    r"(?:(?<!" + _TOOL_NONDELIM + r")|(?<=(?<!" + _TOOL_NONDELIM + r")\./))"
+    r"(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)\b"
+)
+PY_TARGET_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_.-]+\.py$")
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 YAML_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*:\s*.*$")
 
@@ -2295,6 +2316,65 @@ def self_test():
             "fail-without-the-change vector did not produce "
             "its required failure"
         )
+
+    # OPF-SELF-CONTAIN grammar-widening (change-carries-check): the widened PY_TARGET_RE/TOOL_RE
+    # must treat an opf/tools/*.py gate as a first-class member. Recognized on both sides parity
+    # holds; recognized on one side only parity still fails. Without the widening an opf/tools/*.py
+    # path is not a valid gate target and is not extracted as a member, so both vectors return code 2
+    # (cannot-evaluate) with gate-target and shadow-miss diagnostics rather than a silent pass; the
+    # widening turns that cannot-evaluate into a real parity success or a real mismatch. Both vectors
+    # therefore fail without the change.
+    case(
+        "23 opf/tools recognized, parity holds both sides",
+        evaluate(
+            local_fixture(both + ("python3 -I -B opf/tools/b.py",)),
+            ci_fixture(both + ("python3 -I -B opf/tools/b.py",)),
+            (),
+        ),
+        0,
+    )
+    case(
+        "24 opf/tools one-sided mismatch still fails",
+        evaluate(
+            local_fixture(common + ("python3 -I -B opf/tools/b.py",)),
+            ci_fixture(common),
+            (),
+        ),
+        1,
+        ("local-only",),
+        ("opf/tools/b.py",),
+        (),
+    )
+
+    # OPF-SELF-CONTAIN anchoring (change-carries-check): TOOL_RE uses an ALLOWLIST path
+    # boundary, so a mid-path segment must not over-match, including a dotted parent or a
+    # nested "./". This vector fails if the anchor is reverted to the loose \b form or to
+    # either earlier denylist-lookbehind form, both of which extract a path from a dotted
+    # parent such as evil./tools/x.py; the allowlist form must still accept a legitimate
+    # path-start reference.
+    count += 1
+    for midpath in (
+            "evil/tools/x.py", "evil/opf/tools/x.py",
+            "evil./tools/x.py", "evil./opf/tools/x.py",
+            "evil/./tools/x.py", "a/opf/tools/x.py",
+            "opf/opf/tools/x.py", "xopf/tools/x.py",
+            "dir.name/tools/x.py"):
+        extracted = TOOL_RE.findall(midpath)
+        if extracted:
+            failures.append(
+                "25 anchored TOOL_RE must not extract from mid-path "
+                "{!r}, got {!r}".format(midpath, extracted)
+            )
+    for good, want in (
+            ("tools/x.py", "tools/x.py"),
+            ("opf/tools/x.sh", "opf/tools/x.sh"),
+            ("./opf/tools/x.py", "opf/tools/x.py")):
+        extracted = TOOL_RE.findall(good)
+        if extracted != [want]:
+            failures.append(
+                "25 anchored TOOL_RE must still accept {!r} as {!r}, "
+                "got {!r}".format(good, want, extracted)
+            )
 
     if failures:
         print("SELF-TEST FAIL:")
