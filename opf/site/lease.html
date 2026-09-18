@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lease.toml: the single-writer lease | OPFiles</title>
+<meta name="description" content="Present only while a run holds the store's single-writer lease: holder, operation, and an acquired-at timestamp read from the clock.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="lease.toml: the single-writer lease | OPFiles">
+<meta property="og:description" content="Present only while a run holds the store's single-writer lease: holder, operation, and an acquired-at timestamp read from the clock.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink active" href="./lease" aria-current="page">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Core store file</p>
+  <h1>lease.toml</h1>
+  <p class="lead">The single-writer lease, at <code>.working/toml/lease.toml</code>. Present only
+    while held; its absence is the normal state.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>About</h2>
+    <p>Before mutating the store, a run takes the lease. The standard requires it to be made
+      observable at the store's sync target before writes begin, so a second system's reconciliation
+      sees the held lease and refuses; in this build there is no sync runtime (opf sync has not yet
+      landed), so the lease is enforced single-host single-writer only. The file carries the holder,
+      the operation, and an acquired-at timestamp read from the clock at acquisition.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Why</h2>
+    <p>Two runs writing the same store at once can each produce a locally consistent state that
+      cannot merge: a textual merge of TOML records can silently mangle the very records the
+      standard exists to protect. An observable held lease reduces the opportunity for concurrent
+      writes up front, and the consistency contract's divergence check detects, after the fact, a
+      collision that begins inside the propagation window the lease does not cover.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Description</h2>
+    <p>A closed four-key shape: <code>schema</code>, <code>holder</code>, <code>operation</code>,
+      and <code>acquired_at</code>. Where the concurrent-operation module is enabled, the lease is
+      additionally recorded as a <code>session_lease</code> record (namespace SL) with the states
+      held, released, or reconciled.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p>A lease is never seized from a live holder. It is reconciled against recorded state on
+      resume or close, and a leftover lease from a dead run is released only through that
+      reconciliation. The standard discloses the residual honestly: between taking the lease and
+      its reaching the sync target there is a propagation window in which two systems can both
+      begin; the divergence check is the overlapping control that catches that collision, and the
+      two layers together, not the lease alone, are the guard.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Generated view</h2>
+    <p>None. The lease is transient operational state, not a record source; no view renders from
+      it.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Value</h2>
+    <p>Concurrency safety that is honest about its bounds. The lease plus the divergence check
+      helps prevent two-writer corruption of the store, and the standard names the window it cannot
+      close rather than implying a promise the mechanism cannot honour.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Usage</h2>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Created by:</b> any mutating operation, at lease acquisition; not scaffolded (a fresh store has no lease).</li>
+      <li><b style="color:var(--ink)">Removed by:</b> the holding run at clean close, or reconciliation after a dead run.</li>
+      <li><b style="color:var(--ink)">Read by:</b> every operation's consistency check before it acts; <code>opf doctor</code> validates the closed shape; a second system's reconciliation, which refuses while the lease is held.</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+</div>
+</div>
+</body>
+</html>

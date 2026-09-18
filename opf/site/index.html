@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OPFiles: the operational-files standard</title>
+<meta name="description" content="OPFiles (OPF) is a neutral, open standard for a project's operational records: machine-written TOML sources paired with generated human-readable views, kept in lockstep by drift gates. Determinism plus structured, schema-validated input helps reduce the likelihood of AI errors, omissions, and hallucinations.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="OPFiles: the operational-files standard">
+<meta property="og:description" content="Machine-written TOML sources paired with generated human-readable views, kept in lockstep by drift gates. Open, portable, fail-closed.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink active" href="./" aria-current="page">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+
+<header class="hero">
+  <div class="wrap">
+    <h1>Fewer AI errors. Durable records. <span class="grad">The same process on every project.</span></h1>
+    <p class="lead">OPFiles (OPF, the operational-files standard) gives your teams one disciplined
+      way to run AI-assisted work: each backlog item, decision, finding, and handoff lives in a
+      versioned, machine-written record that captures the declared operational context. Structured
+      records and deterministic views reduce ambiguity and the opportunity for errors
+      and omissions, and the schemas and gates that enforce them are the standard's own, not any
+      one assistant's or developer's. Structured input can also reduce the repeated context
+      reconstruction that drives token spend, and a durable, reviewable trail is left behind by
+      default. Under the hood it is one machine-readable store of TOML, paired with generated,
+      human-readable views and kept in lockstep by drift gates. Source-available under the
+      Elastic License 2.0 (ELv2).</p>
+    <div class="cta">
+      <a class="btn primary" href="#outcomes">Why teams adopt it</a>
+      <a class="btn ghost" href="#files">See the standard files</a>
+      <a class="btn ghost" href="#how">How the pairing works</a>
+    </div>
+  </div>
+</header>
+
+<section id="outcomes" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">Why teams adopt it</p>
+    <h2>Five potential benefits, on every project</h2>
+    <p class="lead">Mandate one operational standard and each project inherits the same
+      discipline: the record is written by process, not by habit, and the benefits below rest on
+      that mechanism rather than on trust in any one tool or developer.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Fewer AI errors, omissions, and hallucinations</h3>
+        <p>The record an assistant works from is versioned TOML that captures the declared
+          operational context, so it is not reconstructing that context from memory or guessing at
+          a missing field, and the schema refuses what does not fit. This can reduce reconstruction
+          and the opportunity for errors, omissions, and hallucinations to enter the record; it does
+          not remove them entirely, and completeness and accuracy of that context still require
+          review, as the standard says plainly.</p>
+      </div>
+      <div class="card">
+        <h3>Consistency and repeatability</h3>
+        <p>The records-first discipline is defined by the standard, not by any one vendor's tool or
+          any one developer's habits: the schemas, status grammar, and gates stay the same across
+          teams and projects. Deterministic rendering means the same sources produce the same views
+          wherever they are rendered, so switching an assistant, a contractor, or a team leaves the
+          recording contract unchanged.</p>
+      </div>
+      <div class="card">
+        <h3>Support for operational compliance</h3>
+        <p>The operational record is structured and enforceable: closed schemas refuse malformed
+          records, and, at required enforcement posture, the integrity gates fail closed on inputs
+          they cannot evaluate. The record
+          is produced as the work happens rather than reconstructed at audit time, which supports
+          compliance review within the standard's declared scope; it does not by itself establish
+          broader organizational or regulatory compliance.</p>
+      </div>
+      <div class="card">
+        <h3>Less repeated context reconstruction</h3>
+        <p>Structured, schema-validated input can reduce the back-and-forth inference and token spend that
+          go into reconstructing context, and the effect can repeat on each project that runs the
+          same process. Structured recording and review carry their own overhead, so net savings
+          depend on the workflow and should be measured, not assumed.</p>
+      </div>
+      <div class="card">
+        <h3>A durable, reviewable trail</h3>
+        <p>Recorded decisions, findings, and changes live in a versioned, git-backed store with
+          generated human-readable views, and released history is frozen by recorded digests. The
+          trail reflects what was captured: attribution and timestamps are as complete as the
+          recorded fields, and retention and backups remain the adopter's responsibility.</p>
+      </div>
+    </div>
+    <p>The mechanism behind these benefits is the rest of this page: one machine-written source of
+      truth, generated views that are never hand-edited, and gates that fail closed.</p>
+  </div>
+</section>
+
+<section id="pairs">
+  <div class="wrap">
+    <p class="eyebrow">What it is</p>
+    <h2>Every file is half of a pair</h2>
+    <p class="lead">One rule of thumb carries the whole convention: lowercase files are machine
+      source you change only through tooling or review; UPPERCASE files are generated or published
+      deliverables you read and never hand-edit.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>The machine side</h3>
+        <p>Structured, versioned TOML under <code>.working/toml/</code>: a manifest, an ID counter
+          ledger, a version ledger, a durable worklog, and one typed index per record type. Schemas
+          are closed: an unknown key is a validation failure, so a record either fits the contract
+          exactly or is refused.</p>
+      </div>
+      <div class="card">
+        <h3>The human side</h3>
+        <p>Generated views at <code>.working/</code> top level: <code>BACKLOG.md</code>,
+          <code>FINDINGS.md</code>, <code>DECISIONS.md</code>, <code>WORKLOG.md</code>, and their
+          siblings, each rendered from its declared sources. Every generated view opens with a
+          do-not-edit header naming its sources, the schema and generator versions, a digest of the
+          source set, and the exact regeneration command.</p>
+      </div>
+      <div class="card">
+        <h3>The lockstep</h3>
+        <p>A deterministic render is byte-reproducible: same sources, same bytes, every time, with
+          no wall-clock content, no network access, and no model involvement. A byte drift gate
+          compares the on-disk view against a fresh render, so a hand edit or a stale view is a
+          reported failure, not a quiet divergence.</p>
+      </div>
+      <div class="card">
+        <h3>The exception, named</h3>
+        <p>Exactly one deliverable is curated rather than deterministic: the public
+          <code>CHANGELOG.md</code>. Its prose is human-written, so it is never byte-gated; instead
+          two fact gates protect it: coverage (its entries tile every released version, no gap, no
+          overlap) and freeze (a published entry changes only through a recorded re-publish).</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">How it works</p>
+    <h2>Single source, generated views, fail-closed gates</h2>
+    <ol class="steps">
+      <li><b>The store is the source of truth.</b>
+        <p>A decision, finding, or completion that is not recorded did not happen. Records carry a
+          typed envelope (ID, type, status, title, timestamps read from the clock, actor, links,
+          captured references), IDs are never reused, and records are never deleted: they are
+          corrected before release, frozen after it, and superseded by new records that link the
+          old.</p></li>
+      <li><b>Views are regenerated, never edited.</b>
+        <p><code>opf render</code> rebuilds every declared view from the store through a closed,
+          versioned transform vocabulary: filter, sort, group, and project on declared names only,
+          plus exactly two named joins. A transform outside the vocabulary is refused; ad hoc logic
+          never enters a generator.</p></li>
+      <li><b>Everything validates on load, and fails closed.</b>
+        <p>Every read is schema-validated. An unreadable, unparseable, or unresolvable input is a
+          reported cannot-evaluate that stops the tool; it is never treated as an empty store or a
+          clean pass. The integrity validator (<code>opf doctor</code>) checks schema validity, ID
+          uniqueness and counter monotonicity, transition legality, view byte drift, worklog span
+          tiling and frozen digests, changelog coverage and freeze, archive integrity, and
+          pointer-to-remote agreement.</p></li>
+      <li><b>Writes are gated end to end.</b>
+        <p>A mutating render first validates the whole store and refuses to write anything on a
+          failure; it regenerates only on a valid verdict and re-validates afterwards. A
+          single-writer lease and a store consistency contract (nothing stale, nothing ahead,
+          divergence halts for a human) are the standard's contract for guarding the store across
+          systems; in this build the lease is enforced on a single host, because the cross-system
+          sync step (opf sync) has not yet landed.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <p class="eyebrow">Why it works</p>
+    <h2>Structured input, deterministic process</h2>
+    <p class="lead">The benefits above rest on two properties the standard enforces: deterministic
+      rendering, same sources to the same bytes, and structured, schema-validated input. Together they
+      reduce variance, ambiguity, and the opportunity for errors; they discipline the record the
+      work runs on, not the judgment of whichever assistant runs it.</p>
+    <p>A process that reads a structured, schema-validated record does not have to reconstruct context from
+      memory, guess at a missing field, or interpret free-form prose. The closed schemas mean a
+      malformed input is refused rather than silently misread; the closed transform vocabulary means
+      a view can only be composed in reviewed, versioned ways; and the byte-reproducible render
+      means two runs over the same store produce the same bytes, so the views agree about what the
+      record says. Determinism covers the rendering; the source records are authored content that
+      review keeps correct.</p>
+    <p>For teams working with AI assistants, this structure helps reduce the likelihood of errors,
+      omissions, and hallucinations in the operational record: the assistant writes into a schema
+      that refuses what does not fit and reads from a store that carries the declared context, and the
+      generator itself invokes no model and adds no model-generated interpretation, reproducing the
+      declared source records, so assistant-authored content in those records still needs review.
+      These mechanisms reduce the opportunity for a confident guess to enter the record; they do not
+      remove it entirely, and the standard says so plainly in its own residual-coverage
+      disclosures.</p>
+    <p>Captured context can also be an efficiency gain. Because the TOML carries the declared
+      operational context, an assistant spends less of its run reconstructing it, which can reduce
+      back-and-forth inference and token use, alongside a reduced likelihood of errors, omissions,
+      and hallucinations. Structured recording adds its own overhead, so the net saving depends on
+      the workflow and is worth measuring.</p>
+  </div>
+</section>
+
+<section id="value" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">What you get</p>
+    <h2>Consistent records, honest gates, portable process</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Consistency</h3>
+        <p>The same records-first discipline, whatever tool or assistant is doing the writing. The
+          store's schemas, status grammar, and ID rules are the standard's, not any one vendor's.</p>
+      </div>
+      <div class="card">
+        <h3>Digest-guarded history</h3>
+        <p>The store is always a git repository; released worklog spans and published changelog
+          entries are frozen by recorded digests; rotation is enumerated relocation, never deletion.
+          A silent edit breaks a digest and fails the gate.</p>
+      </div>
+      <div class="card">
+        <h3>A process that travels</h3>
+        <p>The store's location is configuration, not architecture: in your repository by default,
+          or relocated to a private companion repository, a local directory, or a per-project store
+          in a monorepo, with history preserved and the public deliverables byte-for-byte identical
+          wherever it lives.</p>
+      </div>
+      <div class="card">
+        <h3>Honest claims</h3>
+        <p>Integrity gates fail closed at required posture, reports name their scope and their cannot-evaluate results, and an
+          unqualified "conformant" claim is never emitted, by tooling or by prose. Until validation
+          tooling covers a claim, it is self-asserted and must say so.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="files">
+  <div class="wrap">
+    <p class="eyebrow">The standard files</p>
+    <h2>Every standard TOML file, and what pairs with it</h2>
+    <p class="lead">The complete roster, enumerated from the specification and the reference
+      scaffolder. Each file has its own page: purpose, schema shape, lifecycle, and the processes
+      that reference, update, and consume it.</p>
+    <div class="tree"><pre>
+<span class="dir">&lt;product repository root&gt;/</span>
+  <span class="yours">.opf.toml</span>                 committed store pointer            <a href="./pointer">details</a>
+  CHANGELOG.md              curated public changelog (gated on facts, not bytes)
+  VERSION                   deterministic render of version.toml
+  <span class="dir">.working/</span>                 the store (default in-repo location)
+    TODO.md BACKLOG.md PIPELINE.md DONE.md FINDINGS.md DECISIONS.md
+    BLOCKS.md HANDOFF.md REFERENCES.md CONTRIBUTIONS.md WORKLOG.md VERSION.md
+    DECISIONS.toml          machine projection (generated TOML)  <a href="./decisions-projection">details</a>
+    <span class="dir">toml/</span>
+      <span class="yours">manifest.toml</span>         store manifest and discovery marker  <a href="./manifest">details</a>
+      <span class="yours">counters.toml</span>         per-namespace ID high-water marks    <a href="./counters">details</a>
+      <span class="yours">version.toml</span>          version and release ledger           <a href="./version">details</a>
+      <span class="yours">worklog.toml</span>          durable operational record           <a href="./worklog">details</a>
+      <span class="yours">lease.toml</span>            single-writer lease (only while held) <a href="./lease">details</a>
+      <span class="yours">backlog_item.index.toml</span>       and ten sibling typed indexes  <a href="./backlog-item">details</a>
+      <span class="dir">archive/&lt;YYYY&gt;/</span>
+        <span class="yours">archive.toml</span>        enumerates every rotated ID and span <a href="./archive">details</a>
+</pre></div>
+    <p>The eleven scaffolded record indexes are <code>backlog_item</code>, <code>done</code>,
+      <code>finding</code>, <code>pending_decision</code>, <code>autonomous_decision</code>,
+      <code>maintainer_decision</code>, <code>preference_pattern</code>, <code>block</code>,
+      <code>handoff</code>, <code>reference</code>, and <code>contribution</code>; the
+      <code>worklog</code> type lives in its own ledger, <code>worklog.toml</code>, rather than an
+      index. Eight further record types ship in optional, default-off modules, and one
+      (<code>legacy_fragment</code>) is created only by the importer:
+      <a href="./modules">module and importer types</a>.</p>
+  </div>
+</section>
+
+<section id="tooling" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">Reference tooling</p>
+    <h2>One command vocabulary, honest about what has landed</h2>
+    <p class="lead">The standard names seven verbs; the reference implementation ships them
+      incrementally, and a verb that has not landed fails closed rather than pretending to run.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Available now</h3>
+        <p><code>opf init</code> scaffolds validated store sources and the pointer.
+          <code>opf render --check</code> reports view drift read-only; <code>opf render --write</code>
+          regenerates the declared views, gated on a full store validation before and after.
+          <code>opf doctor</code> runs the whole-store integrity layer. <code>opf upgrade</code>
+          migrates a 1.0.0 store to 1.1.0 in place, additively and idempotently.
+          <code>opf import</code> scans, plans, captures attributed reviews of legacy content, and
+          promotes a reviewed import with <code>opf import --apply</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Fails closed until it lands</h3>
+        <p><code>opf migrate</code> (history-preserving store relocation) and <code>opf sync</code>
+          (the surfaced pull and push step of the consistency contract) are recognized verbs that
+          refuse with a clear message and a nonzero exit. A stub is never mistaken for a completed
+          operation.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <p class="eyebrow">Getting started</p>
+    <h2>Adopt it</h2>
+    <h3>Assistant-driven adoption</h3>
+    <p>The primary path is coming: point your AI development assistant at this site root and tell it to
+      adopt OPF (or adopt AIQT). It reads the standard, plans the store, and, on your yes, carries out
+      and merges the adoption, leaving the <code>.working/</code> store for your review. This is the
+      interface we are building; it is not live yet.</p>
+    <h3>Manual adoption, available today</h3>
+    <ol class="steps">
+      <li><b>Scaffold.</b>
+        <p>Run <code>opf init</code> at your project root. It creates the store sources
+          (<code>.working/toml/</code> with the manifest, counters, the two ledgers, and eleven
+          empty typed indexes), writes the committed pointer <code>.opf.toml</code>, and adds a
+          placeholder <code>CHANGELOG.md</code> only when you have none. Anything already sitting in
+          <code>.working/</code> is surfaced, never absorbed or overwritten.</p></li>
+      <li><b>Commit, then render.</b>
+        <p>Review the created files, stage and commit them (init prints the exact command), and
+          confirm nothing under <code>.working/</code> is ignored: an untracked store is a hard
+          failure, not a warning. Then <code>opf render --write</code> materializes the Markdown
+          views.</p></li>
+      <li><b>Work records-first.</b>
+        <p>Append a worklog entry per change, keep the backlog, findings, and decisions in their
+          typed files, and regenerate views rather than editing them. At release, record the release
+          and its worklog span in <code>version.toml</code>, curate the summary, and publish it into
+          <code>CHANGELOG.md</code> with its freeze digest recorded.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="aiqt" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">OPFiles and AIQT</p>
+    <h2>A standalone standard, shipped as part of AIQT</h2>
+    <p>OPFiles is a neutral, self-contained standard, source-available under the Elastic License 2.0
+      (ELv2), and it also ships as part of <a href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT
+      Guardrails</a>. Adopting AIQT brings OPFiles with it; the planned assistant-driven adoption
+      flow will also migrate your existing operational files into the store, and reviewed manual
+      import is available now through <code>opf import --apply</code>. A project that wants only the
+      standard can take OPFiles on its own. One repository holds both: its root is AIQT, which
+      includes OPFiles, and standalone OPFiles lives at the opf path within it. aiqt.ai maps to the
+      repository root and opfiles.ai maps to the opf path, so the two sites are two views of one
+      source.</p>
+    <p>The separation of concerns is unchanged by the bundling. Nothing in the base vocabulary names
+      any particular adopter or operator; AIQT-specific requirements ride a single optional profile,
+      <code>[profiles.aiqt]</code>, and a base adopter need not adopt AIQT. A profile may only add
+      requirements; it can never weaken, remove, or override a base requirement.</p>
+  </div>
+</section>
+
+</main>
+
+</div>
+</div>
+</body>
+</html>

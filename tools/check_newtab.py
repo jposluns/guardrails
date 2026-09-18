@@ -14,7 +14,8 @@ surfaces (for example script-driven navigation, or link elements outside the set
 none of those today; this is a mistake-catcher for a forgotten new-tab attribute, not an adversarial
 validator of attacker-controlled hrefs.
 
-site/ is a REQUIRED coverage input: absent, unreadable, or page-less site/ fails closed (exit 2), never a
+Coverage spans site/ (aiqt.ai) and opf/site/ (opfiles.ai). Each is a REQUIRED coverage input: an absent,
+unreadable, or page-less coverage root fails closed (exit 2), never a
 clean pass over nothing. A page opened symlink-safe is not needed here (read-only text scan of tracked
 pages); this gate reads the same files the site drift gates already cover.
 
@@ -80,36 +81,50 @@ def page_findings(name, text):
     return out
 
 
-def run(root):
-    site = root / "site"
+# Coverage roots: site/ (aiqt.ai) and opf/site/ (opfiles.ai: the index.html placeholder plus the
+# opf/site/draft staging tree). Each is a REQUIRED input; the new-tab rule is identical on both.
+COVERAGE_ROOTS = ("site", "opf/site")
+
+
+def _run_one(root, subdir):
+    site = root / subdir
     if site.is_symlink() or not site.is_dir():
-        print("error: site/ absent or a symlink; the new-tab gate cannot evaluate; fail-closed",
+        print("error: {}/ absent or a symlink; the new-tab gate cannot evaluate; fail-closed".format(subdir),
               file=sys.stderr)
         return 2
     try:
         html_files = sorted(walk_files(site, suffixes={".html"}))
     except OSError as exc:
-        print("error: cannot scan site/ ({}); fail-closed".format(exc), file=sys.stderr)
+        print("error: cannot scan {}/ ({}); fail-closed".format(subdir, exc), file=sys.stderr)
         return 2
     if not html_files:
-        print("error: site/ contains no .html pages; a page-less required input is fail-closed",
+        print("error: {}/ contains no .html pages; a page-less required input is fail-closed".format(subdir),
               file=sys.stderr)
         return 2
     findings = []
     for f in html_files:
-        name = str(f.relative_to(site))
+        name = str(f.relative_to(root))
         try:
             findings += page_findings(name, f.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError) as exc:
             print("error: cannot load {} ({}); fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
     if findings:
-        print("FAIL: {} external link(s) not opening safely in a new tab".format(len(findings)))
+        print("FAIL: {} external link(s) under {}/ not opening safely in a new tab".format(len(findings), subdir))
         for x in sorted(set(findings)):
             print("  " + x)
         return 1
-    print("PASS: every external site link opens in a new tab with a noopener rel")
+    print("PASS: every external {}/ link opens in a new tab with a noopener rel".format(subdir))
     return 0
+
+
+def run(root):
+    """Scan every coverage root (site/ and opf/site/). Return the worst per-root exit code; each root is
+    required (absent/unreadable/page-less is fail-closed exit 2)."""
+    worst = 0
+    for subdir in COVERAGE_ROOTS:
+        worst = max(worst, _run_one(root, subdir))
+    return worst
 
 
 def _self_test():
@@ -222,22 +237,44 @@ def _self_test():
     import contextlib
     import io
 
+    def quiet_one(r, subdir="site"):
+        # single-root engine, so the site/-tree legs stay independent of the opf/site required root
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return _run_one(r, subdir)
+
     def quiet(r):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return run(r)
     with tempfile.TemporaryDirectory() as d:
         r = Path(d)
-        if quiet(r) != 2:
+        if quiet_one(r) != 2:
             failures.append("absent site/ did not fail closed")
         (r / "site").mkdir()
-        if quiet(r) != 2:
+        if quiet_one(r) != 2:
             failures.append("page-less site/ did not fail closed")
         (r / "site" / "a.html").write_text(ext_ok, encoding="utf-8")
-        if quiet(r) != 0:
+        if quiet_one(r) != 0:
             failures.append("a covered page did not pass")
         (r / "site" / "b.html").write_text('<a href="https://x.com/y">y</a>', encoding="utf-8")
-        if quiet(r) != 1:
+        if quiet_one(r) != 1:
             failures.append("an uncovered external link did not report a finding")
+    # opf/site is a second required root: run() fails closed when it is absent, covers its pages when
+    # present, and flags an unsafe external link there too.
+    with tempfile.TemporaryDirectory() as d2:
+        r = Path(d2)
+        (r / "site").mkdir()
+        (r / "site" / "a.html").write_text(ext_ok, encoding="utf-8")
+        if quiet(r) != 2:
+            failures.append("run() with opf/site absent did not fail closed")
+        (r / "opf" / "site" / "draft").mkdir(parents=True)
+        (r / "opf" / "site" / "index.html").write_text(ext_ok, encoding="utf-8")
+        (r / "opf" / "site" / "draft" / "p.html").write_text(ext_ok, encoding="utf-8")
+        if quiet(r) != 0:
+            failures.append("a covered two-root tree did not pass")
+        (r / "opf" / "site" / "draft" / "bad.html").write_text(
+            '<a href="https://x.com/y">y</a>', encoding="utf-8")
+        if quiet(r) != 1:
+            failures.append("an unsafe external link under opf/site was not reported")
     if failures:
         print("FAIL: check_newtab self-test")
         for x in failures:

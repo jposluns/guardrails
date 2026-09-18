@@ -12,8 +12,10 @@ so an anchor is attributed to the nav only while one is open.
 (Historically this gate required the link in the <footer>; B-10 moved the canonical disclosure link
 into the site nav and repurposed this gate accordingly. The filename is retained as its gate identity.)
 
-The site/ tree is a REQUIRED coverage input: if it is absent, unreadable, or carries no .html pages,
-the gate fails closed (exit 2) rather than reporting a clean pass over nothing. A page must be a REGULAR
+Coverage spans TWO required roots: site/ (the aiqt.ai site, absolute /disclosure) and opf/site/ (the
+opfiles.ai site, served from opf/site as its own root, whose pages link ./disclosure relative so it
+resolves within opf/site; every opf/site page carries the nav, so nothing is exempt). Each tree is a REQUIRED
+coverage input: if a root is absent, unreadable, or carries no .html pages, the gate fails closed (exit 2) rather than reporting a clean pass over nothing. A page must be a REGULAR
 file, opened O_NOFOLLOW and confirmed regular via fstat on the opened fd, so a symlink/FIFO/socket/device
 .html (or site/ itself as a symlink) is fail-closed and never read or followed, and the check-then-read
 TOCTOU on the final path component is closed (the fd type-checked is the fd read). THREAT-MODEL BOUNDARY
@@ -43,6 +45,17 @@ DISCLOSURE_HREF = "/disclosure"
 # Pages exempt from the nav-link requirement, relative to site/. Empty: every page carries the nav.
 ALLOWLIST = frozenset()
 
+# Coverage roots, each (subdir, disclosure_href, allowlist). Both are REQUIRED inputs (an absent,
+# unreadable, or page-less root is fail-closed exit 2, never a clean pass over nothing). site/ is the
+# aiqt.ai site, served at root, so its nav disclosure link is the absolute /disclosure. opf/site is the
+# opfiles.ai site, served from opf/site as its own root (Cloudflare Pages builds opf/site), so its pages
+# link the disclosure page RELATIVE (./disclosure): a relative link resolves within opf/site whatever the
+# mount point. Every opf/site page carries the nav, so the allowlist is empty (like site/).
+COVERAGE_ROOTS = (
+    ("site", "/disclosure", frozenset()),
+    ("opf/site", "./disclosure", frozenset()),
+)
+
 
 class _Anchors(HTMLParser):
     """Collect the href of every <a> that sits INSIDE a <nav> element. <nav> nesting is tracked so an
@@ -66,34 +79,35 @@ class _Anchors(HTMLParser):
             self._nav_depth -= 1
 
 
-def disclosure_link_count(text):
-    """Number of <a href="/disclosure"> links nested inside a <nav> in one page's HTML."""
+def disclosure_link_count(text, href=DISCLOSURE_HREF):
+    """Number of <a href="{href}"> links nested inside a <nav> in one page's HTML. The href is
+    tree-appropriate: absolute /disclosure for site/, relative ./disclosure for the opf/site tree."""
     parser = _Anchors()
     parser.feed(text)
-    return sum(1 for href in parser.hrefs if href == DISCLOSURE_HREF)
+    return sum(1 for h in parser.hrefs if h == href)
 
 
-def check_pages(pages, allowlist):
-    """pages: {name: html_text}. Return a sorted list of findings. Enforces exactly one /disclosure link
-    in the nav on every page not in allowlist, and treats a missing or newly-linking allowlisted page as
-    drift. Callers guarantee pages is non-empty; emptiness is a fail-closed input error handled in run()."""
+def check_pages(pages, allowlist, href=DISCLOSURE_HREF):
+    """pages: {name: html_text}. Return a sorted list of findings. Enforces exactly one `href` disclosure
+    link in the nav on every page not in allowlist, and treats a missing or newly-linking allowlisted page
+    as drift. Callers guarantee pages is non-empty; emptiness is a fail-closed input error handled in run()."""
     findings = []
     for name in sorted(allowlist):
         if name not in pages:
             findings.append(
                 "{}: allowlisted for the nav link but no such page exists (allowlist drift)".format(name))
     for name in sorted(pages):
-        count = disclosure_link_count(pages[name])
+        count = disclosure_link_count(pages[name], href)
         if name in allowlist:
             if count:
                 findings.append(
                     "{}: allowlisted as nav-exempt but now carries {} {} link(s); "
-                    "remove it from the allowlist (allowlist drift)".format(name, count, DISCLOSURE_HREF))
+                    "remove it from the allowlist (allowlist drift)".format(name, count, href))
         elif count == 0:
-            findings.append("{}: missing the {} nav link".format(name, DISCLOSURE_HREF))
+            findings.append("{}: missing the {} nav link".format(name, href))
         elif count > 1:
             findings.append(
-                "{}: carries {} {} links (expected exactly one)".format(name, count, DISCLOSURE_HREF))
+                "{}: carries {} {} links (expected exactly one)".format(name, count, href))
     return findings
 
 
@@ -115,27 +129,27 @@ def _read_regular_page(path):
             os.close(fd)
 
 
-def run(root):
-    """Scan root/site. Return an exit code: 0 clean, 1 a coverage finding, 2 a missing/unreadable/empty
-    required input (fail-closed). site/ is a required coverage input: absent, unreadable, or page-less
-    site/ is exit 2, never a clean pass over nothing."""
-    site = root / "site"
+def _run_one(root, subdir, href, allowlist):
+    """Scan one coverage root (root/subdir). Return an exit code: 0 clean, 1 a coverage finding, 2 a
+    missing/unreadable/empty required input (fail-closed). The root is a required coverage input: absent,
+    unreadable, or page-less is exit 2, never a clean pass over nothing."""
+    site = root / subdir
     if site.is_symlink():
-        print("error: site/ is a symlink; the coverage root must be a real directory in the tree; "
-              "fail-closed", file=sys.stderr)
+        print("error: {}/ is a symlink; the coverage root must be a real directory in the tree; "
+              "fail-closed".format(subdir), file=sys.stderr)
         return 2
     if not site.is_dir():
-        print("error: required input site/ is absent under {}; the nav-coverage gate cannot evaluate; "
-              "fail-closed".format(root), file=sys.stderr)
+        print("error: required input {}/ is absent under {}; the nav-coverage gate cannot evaluate; "
+              "fail-closed".format(subdir, root), file=sys.stderr)
         return 2
     try:
         html_files = sorted(walk_files(site, suffixes={".html"}))
     except OSError as exc:
-        print("error: cannot scan site/ ({}); fail-closed".format(exc), file=sys.stderr)
+        print("error: cannot scan {}/ ({}); fail-closed".format(subdir, exc), file=sys.stderr)
         return 2
     if not html_files:
-        print("error: site/ contains no .html pages to cover; a page-less required input is fail-closed",
-              file=sys.stderr)
+        print("error: {}/ contains no .html pages to cover; a page-less required input is fail-closed"
+              .format(subdir), file=sys.stderr)
         return 2
     pages = {}
     for f in html_files:
@@ -148,15 +162,24 @@ def run(root):
             print("error: cannot load {} ({}); a symlink, non-regular, unreadable, or undecodable page is "
                   "fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
-    findings = check_pages(pages, ALLOWLIST)
+    findings = check_pages(pages, allowlist, href)
     if findings:
-        print("FAIL: {} nav-coverage issue(s)".format(len(findings)))
+        print("FAIL: {} nav-coverage issue(s) under {}/".format(len(findings), subdir))
         for finding in sorted(set(findings)):
-            print("  " + finding)
+            print("  {}/{}".format(subdir, finding))
         return 1
-    allow_str = ", ".join(sorted(ALLOWLIST)) or "none"
-    print("PASS: every site page carries the /disclosure nav link (allowlist: {})".format(allow_str))
+    allow_str = ", ".join(sorted(allowlist)) or "none"
+    print("PASS: every {}/ page carries the {} nav link (allowlist: {})".format(subdir, href, allow_str))
     return 0
+
+
+def run(root):
+    """Scan every coverage root (site/ and opf/site/). Return the worst per-root exit code: 0 clean, 1 a
+    coverage finding, 2 a missing/unreadable/empty required input (fail-closed). Each root is required."""
+    worst = 0
+    for subdir, href, allowlist in COVERAGE_ROOTS:
+        worst = max(worst, _run_one(root, subdir, href, allowlist))
+    return worst
 
 
 def _self_test():
@@ -198,35 +221,42 @@ def _self_test():
     import contextlib
     import io
 
+    def quiet_one(r, subdir="site", href=DISCLOSURE_HREF, allow=frozenset()):
+        # Exercise the single-root engine directly, so the site/-tree exit-code legs stay independent of
+        # the opf/site coverage root (which run() also requires). run() itself is exercised by the
+        # two-root legs below.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return _run_one(r, subdir, href, allow)
+
     def quiet_run(r):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return run(r)
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
-        if quiet_run(root) != 2:
+        if quiet_one(root) != 2:
             failures.append("absent site/ did not fail closed (expected exit 2)")
         (root / "site").mkdir()
-        if quiet_run(root) != 2:
+        if quiet_one(root) != 2:
             failures.append("page-less site/ did not fail closed (expected exit 2)")
         (root / "site" / "about.html").write_text(nav, encoding="utf-8")
-        if quiet_run(root) != 0:
+        if quiet_one(root) != 0:
             failures.append("a covered site/ did not pass (expected exit 0)")
         (root / "site" / "bad.html").write_text("<nav></nav>", encoding="utf-8")
-        if quiet_run(root) != 1:
+        if quiet_one(root) != 1:
             failures.append("an uncovered page did not report a finding (expected exit 1)")
         (root / "site" / "zz-undecodable.html").write_bytes(b"\xff\xfe<nav></nav>")
-        if quiet_run(root) != 2:
+        if quiet_one(root) != 2:
             failures.append("an undecodable page did not fail closed (expected exit 2, not a traceback)")
     with tempfile.TemporaryDirectory() as d2:
         root2 = Path(d2)
         (root2 / "site").mkdir()
         (root2 / "site" / "ok.html").write_text(nav, encoding="utf-8")
         os.symlink("/etc/hostname", str(root2 / "site" / "link.html"))  # a non-regular page object
-        if quiet_run(root2) != 2:
+        if quiet_one(root2) != 2:
             failures.append("a non-regular (symlink) page did not fail closed (expected exit 2, no follow)")
         os.remove(str(root2 / "site" / "link.html"))
         os.mkfifo(str(root2 / "site" / "pipe.html"))  # a FIFO must not hang the open; fstat rejects it
-        if quiet_run(root2) != 2:
+        if quiet_one(root2) != 2:
             failures.append("a FIFO page did not fail closed (expected exit 2, no hang)")
         os.remove(str(root2 / "site" / "pipe.html"))
     with tempfile.TemporaryDirectory() as d3:
@@ -234,8 +264,27 @@ def _self_test():
         (root3 / "realsite").mkdir()
         (root3 / "realsite" / "ok.html").write_text(nav, encoding="utf-8")
         os.symlink(str(root3 / "realsite"), str(root3 / "site"))  # site/ itself a symlink -> rejected
-        if quiet_run(root3) != 2:
+        if quiet_one(root3) != 2:
             failures.append("a symlinked site/ root did not fail closed (expected exit 2)")
+    # opf/site coverage: the relative ./disclosure nav link is tree-appropriate (opf/site is served as its
+    # own root), every page carries the nav (empty allowlist), a page missing the link is a finding, and an
+    # absent opf/site root fails closed. run() requires BOTH roots, so it is exercised over a two-root tree.
+    rel_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
+    with tempfile.TemporaryDirectory() as d4:
+        root4 = Path(d4)
+        (root4 / "site").mkdir()
+        (root4 / "site" / "about.html").write_text(nav, encoding="utf-8")
+        if quiet_run(root4) != 2:
+            failures.append("run() with site/ present but opf/site absent did not fail closed (expected 2)")
+        (root4 / "opf" / "site").mkdir(parents=True)
+        (root4 / "opf" / "site" / "index.html").write_text(rel_nav, encoding="utf-8")
+        (root4 / "opf" / "site" / "manifest.html").write_text(rel_nav, encoding="utf-8")
+        if quiet_run(root4) != 0:
+            failures.append("a covered two-root tree (opf/site pages carry the relative ./disclosure) did not pass")
+        # the relative-href engine rejects a page that carries only the absolute /disclosure link
+        (root4 / "opf" / "site" / "stale.html").write_text(nav, encoding="utf-8")
+        if quiet_run(root4) != 1:
+            failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
     if failures:
         print("FAIL: check_footer self-test")
         for f in failures:

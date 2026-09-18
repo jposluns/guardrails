@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>autonomous_decision.index.toml | OPFiles</title>
+<meta name="description" content="Immutable records of decisions an assistant was authorized to make itself: the classification basis, the action, and links.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="autonomous_decision.index.toml | OPFiles">
+<meta property="og:description" content="Immutable records of decisions an assistant was authorized to make itself: the classification basis, the action, and links.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink active" href="./autonomous-decision" aria-current="page">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Record index</p>
+  <h1>autonomous_decision.index.toml</h1>
+  <p class="lead">Autonomous decisions, namespace <code>AD</code>, at
+    <code>.working/toml/autonomous_decision.index.toml</code>.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>About</h2>
+    <p>An autonomous decision records a call an actor was authorized to make itself: the
+      classification basis that put the decision inside its authority, the action taken, and links
+      to what it affected. It is created terminal in its single state <code>recorded</code> and is
+      immutable; it awaits no ratification and carries no <code>/proposed</code> qualifier.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Why</h2>
+    <p>Autonomy without a trail erodes oversight. Recording every self-made call with its basis
+      makes autonomous operation reviewable after the fact: a maintainer can audit what was decided
+      under standing authority and overturn anything, not by editing the record, but by a new
+      record or a maintainer decision that links the old one.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Description</h2>
+    <p>The shared index shape with the standard envelope plus two type-specific fields:
+      <code>classification</code> (the basis that classified the decision as the actor's to make)
+      and <code>action</code> (what was done). No transitions; overturning is always a new linking
+      record.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p>The record is written at the moment the decision is enacted, as a fact. Because it is
+      immutable, the trail cannot be tidied retroactively; because it is typed and linked, views
+      and audits can walk from any action back to the authority claim beneath it.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Generated view</h2>
+    <p>Surfaced in the composed <code>DECISIONS.md</code> and the
+      <a href="./decisions-projection"><code>DECISIONS.toml</code></a> projection, plus the optional
+      <code>AUTONOMOUS_DECISION-INDEX.md</code> mirror.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Value</h2>
+    <p>Reviewable autonomy: standing authority comes with a recorded, immutable trail, which helps
+      prevent quiet scope creep in what an assistant decides for itself.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Usage</h2>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code> (empty index); records at each enacted autonomous decision.</li>
+      <li><b style="color:var(--ink)">Updated by:</b> nothing; immutable. Overturned only by a new linking record.</li>
+      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (DECISIONS.md, DECISIONS.toml, the mirror); <code>opf doctor</code> (schema, uniqueness).</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+</div>
+</div>
+</body>
+</html>

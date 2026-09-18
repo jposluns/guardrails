@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference tooling | OPFiles</title>
+<meta name="description" content="The OPFiles command vocabulary and what ships when: opf init, render, doctor, and upgrade have landed; migrate and sync fail closed until they land. No fabricated tool output.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Reference tooling | OPFiles">
+<meta property="og:description" content="The OPFiles command vocabulary and what ships when: opf init, render, doctor, and upgrade have landed; migrate and sync fail closed until they land. No fabricated tool output.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink active" href="./tooling" aria-current="page">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Reference tooling</p>
+  <h1>Reference tooling</h1>
+  <p class="lead">OPFiles names a standard command vocabulary; the reference implementation ships it
+    incrementally as part of the AIQT Guardrails reference suite. A verb that has not landed fails
+    closed with a clear message rather than pretending to run, so a stub can never read as a completed
+    operation. A base adopter can use their own tooling instead, or adopt by hand.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>Status</h2>
+    <p>The standard is a draft, and so is the tooling roster below. The verbs that have landed are
+      usable now; the rest are recognized names that refuse with a nonzero exit until their unit
+      ships. The turnkey walkthrough, a start-to-finish sequence with real command output, is a
+      future section of this page: it will be written only once the verbs it shows can be run and
+      their behaviour observed, never transcribed from design intent.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>The command vocabulary</h2>
+    <div class="tablewrap"><table class="dtable">
+      <thead>
+        <tr><th>Verb</th><th>What it does</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>opf init</code></td><td>Scaffolds validated store sources and the committed pointer; surfaces, never absorbs, anything already at the store location.</td><td>Available now</td></tr>
+        <tr><td><code>opf render</code></td><td>Regenerates the declared views; <code>--check</code> reports drift read-only, <code>--write</code> writes only on a full store validation before and after.</td><td>Available now</td></tr>
+        <tr><td><code>opf doctor</code></td><td>Runs the whole-store integrity layer read-only and returns a valid, invalid, or cannot-evaluate verdict.</td><td>Available now</td></tr>
+        <tr><td><code>opf upgrade</code></td><td>Applies the in-place, additive, idempotent base-schema upgrade, staged for your own review and merge; it never commits.</td><td>Available now</td></tr>
+        <tr><td><code>opf import</code></td><td>Scans, plans, captures attributed reviews of legacy content, and promotes a reviewed import with <code>--apply</code>; scan, plan, review, and apply have all landed.</td><td>Available now</td></tr>
+        <tr><td><code>opf migrate</code></td><td>Relocates the whole store, git history and worklog preserved, to any location a target can name.</td><td>Fails closed until it lands</td></tr>
+        <tr><td><code>opf sync</code></td><td>The surfaced pull and push step of the store consistency contract.</td><td>Fails closed until it lands</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>What the tooling checks</h2>
+    <p>When it runs, <code>opf doctor</code> covers the integrity layer: schema validity, ID
+      uniqueness and counter monotonicity, bidirectional index reconciliation, transition legality,
+      the all-or-none resolution bundle, byte drift for every deterministic view, worklog span tiling
+      and frozen digests, changelog coverage and freeze, archive integrity, the tracked-store
+      requirement, pointer and sync-target agreement, and path containment. At the strictest posture,
+      an unreadable, unparseable, or unresolvable declared input is a failure, never an empty or clean
+      result.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Trust and integrity</h2>
+    <p>The release digests are published now, independently of artefact delivery, at
+      posluns.dev/hashes.txt, so you can confirm that the tooling you downloaded matches the one we
+      intended to publish. The planned adoption flow will run that digest check before applying
+      anything to your project; today the comparison is yours to run.</p>
+    <p>Publishing a verifiable signature alongside releases is a roadmap item.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>How an assistant finds the standard</h2>
+    <p>The site is intended to expose a machine-readable entry point for AI assistants: an
+      <code>/llms.txt</code> index, a generated <code>/adopt.md</code>, and a plain link on the root
+      page an assistant can follow, so that pointing an assistant at the site is enough for it to find
+      and follow the adoption steps. This is the planned entry point; none of these files is published
+      yet.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Relationship to the reference suite</h2>
+    <p>This tooling is part of the <a href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT
+      Guardrails</a> reference enforcement suite. It is a consumer of the standard, not its definition:
+      a base adopter can use their own tooling, or adopt by hand (see
+      <a href="./adopt">adopt by hand</a>), and still conform. The standard defines the store and the
+      command vocabulary; the reference implementation is one way to work them.</p>
+  </div>
+</section>
+
+</main>
+
+</div>
+</div>
+</body>
+</html>

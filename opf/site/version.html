@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>version.toml: the version and release ledger | OPFiles</title>
+<meta name="description" content="The machine ledger of versions, dates, release spans, and digests. It generates the root VERSION file and anchors the changelog gates.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="version.toml: the version and release ledger | OPFiles">
+<meta property="og:description" content="The machine ledger of versions, dates, release spans, and digests. It generates the root VERSION file and anchors the changelog gates.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink active" href="./version" aria-current="page">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink" href="./modules">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Core store file</p>
+  <h1>version.toml</h1>
+  <p class="lead">The version and release ledger, at <code>.working/toml/version.toml</code>:
+    numbers, dates, spans, and digests, never prose.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>About</h2>
+    <p>One of three deliberately separated release artifacts: this ledger anchors the versioning,
+      the worklog holds every fact, and <code>CHANGELOG.md</code> tells the public story. The
+      ledger is the single source for the project's version; the root <code>VERSION</code> file is
+      deterministically generated from its latest release, as exact bytes, so the version can never
+      live in two hand-maintained places.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Why</h2>
+    <p>When the version anchor, the detailed record, and the public story share a file, they
+      tangle: editing the story risks the facts, and cutting a release risks the prose. Splitting
+      them means each can be gated on what it actually is. The ledger's rows are append-only and
+      immutable, so a release, once cut, is a fixed point everything else reconciles against.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Description</h2>
+    <p>Two arrays of rows. Each <code>[[release]]</code> row records the SemVer <code>version</code>
+      (unique in the ledger), the RFC 3339 UTC <code>date</code> read from the clock at the release
+      event, the <code>worklog_span</code> (the inclusive, contiguous span of worklog entry IDs the
+      release covers), and a <code>coverage_digest</code> over the covered entries, computed at
+      release cut. Spans must tile: contiguous, non-overlapping, in ID order, so the unreleased
+      tail is everything after the last span. Each <code>[[summary]]</code> row backs one public
+      changelog entry: <code>covers</code> (a version, a range like <code>1.0.0..1.2.3</code>, or
+      <code>unreleased</code>), <code>status</code> (working, published, or superseded), the freeze
+      <code>digest</code> once published, and <code>superseded_by</code> when a range rollup
+      replaced it. Summary rows hold digests and ranges only; prose lives in exactly one place, the
+      root <code>CHANGELOG.md</code>.</p>
+    <div class="tree"><pre>
+schema = 1
+
+[[release]]
+version = "1.3.0"
+date = "2026-08-30T00:00:00Z"
+worklog_span = ["WL-89", "WL-131"]
+coverage_digest = "sha256:..."
+
+[[summary]]
+covers = "1.2.3..1.3.0"
+status = "published"
+digest = "sha256:..."
+</pre></div>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p>A release cut appends a row and freezes the covered worklog span; from then on any change to
+      those entries breaks the recorded digest and fails the gate. Publishing a changelog summary
+      records its freeze digest here; editing a published entry is therefore never silent, because
+      the changed bytes break the digest and the edit is structurally a re-publication. A fresh
+      store scaffolds an empty ledger (<code>release = []</code>, <code>summary = []</code>).</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Generated view</h2>
+    <p>Two deterministic renders: the root <code>VERSION</code> file (the latest release's version
+      as exact bytes, the one generated file that carries no header) and the optional human view
+      <code>VERSION.md</code>. Both are byte-drift-gated. The reference scaffold's pinned initial
+      view set declares <code>VERSION.md</code>; the root <code>VERSION</code> view row joins the
+      manifest where the adopter's release flow requires it (see the site note on tooling
+      status).</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Value</h2>
+    <p>One ledger, one version, everywhere: the drift gate makes a stale <code>VERSION</code> file a
+      reported failure, and the span-tiling rule means late attribution to a published release cannot
+      pass the gate, rather than being forbidden by policy.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Usage</h2>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code>, empty.</li>
+      <li><b style="color:var(--ink)">Updated by:</b> the release cut (a new append-only release row) and the changelog publish and rollup flow (summary rows and their digests).</li>
+      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (the VERSION and VERSION.md renders); the changelog range-coverage and freeze gates; <code>opf doctor</code> (span tiling, frozen coverage digests, append-only history); release-delta tooling in the AIQT reference suite, as a consumer of the ledger.</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+</div>
+</div>
+</body>
+</html>

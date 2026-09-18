@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Module and importer record types | OPFiles</title>
+<meta name="description" content="Eight optional module-tier record types, the importer-only quarantine type, and the reserved names.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260917a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Module and importer record types | OPFiles">
+<meta property="og:description" content="Eight optional module-tier record types, the importer-only quarantine type, and the reserved names.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Core store files</h4>
+  <a class="navlink" href="./manifest">manifest.toml</a>
+  <a class="navlink" href="./counters">counters.toml</a>
+  <a class="navlink" href="./version">version.toml</a>
+  <a class="navlink" href="./worklog">worklog.toml</a>
+  <a class="navlink" href="./lease">lease.toml</a>
+  <h4>Record indexes</h4>
+  <a class="navlink" href="./backlog-item">backlog_item</a>
+  <a class="navlink" href="./done">done</a>
+  <a class="navlink" href="./finding">finding</a>
+  <a class="navlink" href="./pending-decision">pending_decision</a>
+  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
+  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
+  <a class="navlink" href="./preference-pattern">preference_pattern</a>
+  <a class="navlink" href="./block">block</a>
+  <a class="navlink" href="./handoff">handoff</a>
+  <a class="navlink" href="./reference">reference</a>
+  <a class="navlink" href="./contribution">contribution</a>
+  <a class="navlink active" href="./modules" aria-current="page">Module &amp; importer types</a>
+  <h4>Pointer &amp; meta</h4>
+  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
+  <a class="navlink" href="./archive">archive.toml</a>
+  <h4>Generated TOML</h4>
+  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap pagehead">
+  <p class="eyebrow">Record indexes</p>
+  <h1>Module and importer record types</h1>
+  <p class="lead">Beyond the twelve baseline types, eight record types ship in four optional
+    modules, one type belongs to the importer alone, and two names are reserved.</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>About</h2>
+    <p>Modules are base-level optional capability bundles, default-off, each enabled by one
+      manifest edit. Enabling a module makes its types valid to declare, each with its normative
+      namespace; a module-tier type declared without its module enabled is a validation
+      failure.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Why</h2>
+    <p>Not every project needs delivery assurance or operational-policy records on day one.
+      Default-off modules keep the baseline small while keeping the extended vocabulary standard:
+      when a project grows into a capability, the types, namespaces, and states are already
+      defined, so no adopter invents an incompatible local variant.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Description</h2>
+    <div class="tree"><pre>
+Governance module
+  maintainer_action   MA   open &gt; done | dropped
+Delivery-assurance module
+  artifact            AR   staged &gt; promoted | rejected
+  gate_run            GR   recorded, with a three-valued verdict field
+                           (pass | fail | cannot_evaluate), never folded into status
+  release             RL   planned &gt; published | abandoned
+  waiver              WV   active &gt; expired | revoked; expiry required at creation
+Operational-policy module
+  mode                MO   active &gt; retired
+  tier_assessment     TA   recorded
+Concurrent-operation module
+  session_lease       SL   held &gt; released | reconciled
+Importer-only (no module toggle)
+  legacy_fragment     LF   quarantined &gt; resolved | ignored
+Reserved
+  transaction         TX   excluded from the adopter standard; name and namespace reserved
+  (none)              CL   reserved unassigned, so it can never half-collide with "changelog"
+</pre></div>
+    <p>These are outline state sets; the full module record schemas ship with the module schemas
+      release. The delivery-assurance <code>release</code> record, where enabled, references a
+      <code>version.toml</code> release row by version string: the ledger row is the fact, the
+      record is the delivery-assurance envelope around it.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p><code>legacy_fragment</code> is created only by an importer, never scaffolded: everything an
+      import cannot confidently map becomes quarantined fragment data with source path, digest,
+      span, and run ID, so nothing is dropped. The scaffolded counters file already carries the LF
+      namespace at zero, so a fresh store can accept quarantine imports without a schema
+      change.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Generated view</h2>
+    <p>Module-type index mirrors are deferred until the module record schemas ship; the reference
+      renderer covers the baseline types today and reports a per-record layout or an unknown view
+      as a clear cannot-evaluate rather than guessing.</p>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>Value</h2>
+    <p>Growth without fragmentation: capability arrives as a reviewed manifest edit with standard
+      semantics, which helps prevent per-project dialects of the same operational ideas.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Usage</h2>
+    <ul class="clean">
+      <li><b style="color:var(--ink)">Enabled by:</b> one manifest edit per module, under the adopter's own review flow.</li>
+      <li><b style="color:var(--ink)">Created by:</b> process, once enabled; <code>legacy_fragment</code> by <code>opf import</code> alone.</li>
+      <li><b style="color:var(--ink)">Read by:</b> <code>opf doctor</code> (module-toggle validity: a declared module type requires its enabled module); the AIQT profile, which requires the governance, operational-policy, and concurrent-operation modules.</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+</div>
+</div>
+</body>
+</html>

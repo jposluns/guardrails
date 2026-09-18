@@ -60,6 +60,10 @@ from _gen_common import load_toml  # noqa: E402
 SKIP_DIRS = set()  # scan the whole of site/ (matching check_newtab); skipping no content directory means a
 # page under a node_modules/, __pycache__/, or similar cannot escape the currency check.
 
+# Coverage roots: site/ (aiqt.ai) and opf/site/ (opfiles.ai: the index.html placeholder plus the
+# opf/site/draft staging tree). Each is a REQUIRED input; the version-currency rule is identical on both.
+COVERAGE_ROOTS = ("site", "opf/site")
+
 # Product-version token: the literal `AIQT ` prefix (one or more spaces or tabs) then a bare 3-segment
 # X.Y.Z. The prefix scopes this gate to the product version and away from bare numbers, "the 1.0.0
 # release", and framework versions like "CSA AICM v1.1.0" (no `AIQT ` prefix, so unmatched). The trailing
@@ -151,27 +155,36 @@ def run(root):
             return 2
     valid = {version, *IN_DEVELOPMENT_VERSIONS}
 
-    site = root / "site"
+    worst = 0
+    for subdir in COVERAGE_ROOTS:
+        worst = max(worst, _scan_root(root, subdir, valid))
+    return worst
+
+
+def _scan_root(root, subdir, valid):
+    """Scan one coverage root (root/subdir) for stale AIQT X.Y.Z tokens against `valid`. Return an exit
+    code: 0 clean, 1 a stale/unknown token, 2 a missing/symlinked/unreadable/page-less required input."""
+    site = root / subdir
     if site.is_symlink() or not site.is_dir():
-        print("error: site/ absent or a symlink; the version-currency gate cannot evaluate; fail-closed",
-              file=sys.stderr)
+        print("error: {}/ absent or a symlink; the version-currency gate cannot evaluate; fail-closed"
+              .format(subdir), file=sys.stderr)
         return 2
     try:
         html_files = sorted(walk_files(site, SKIP_DIRS, suffixes={".html"}))
     except OSError as exc:
-        print("error: cannot scan site/ ({}); fail-closed".format(exc), file=sys.stderr)
+        print("error: cannot scan {}/ ({}); fail-closed".format(subdir, exc), file=sys.stderr)
         return 2
     if not html_files:
-        print("error: site/ contains no .html pages; a page-less required input is fail-closed",
+        print("error: {}/ contains no .html pages; a page-less required input is fail-closed".format(subdir),
               file=sys.stderr)
         return 2
 
     findings = []
     for f in html_files:
         if f.is_symlink():
-            print("error: {} is a symlink; a symlinked site page cannot be scoped to site/ and should not "
+            print("error: {} is a symlink; a symlinked site page cannot be scoped to {}/ and should not "
                   "exist (the manifest gate rejects committed symlinks repo-wide); fail-closed".format(
-                      f.relative_to(root)), file=sys.stderr)
+                      f.relative_to(root), subdir), file=sys.stderr)
             return 2
         try:
             text = f.read_text(encoding="utf-8")
@@ -187,12 +200,13 @@ def run(root):
                         name, number, ver, sorted(valid)))
 
     if findings:
-        print("FAIL: {} stale/unknown product-version token(s) on the site".format(len(findings)))
+        print("FAIL: {} stale/unknown product-version token(s) under {}/".format(len(findings), subdir))
         for finding in findings:
             print("  " + finding)
         print("update the site to the current version, or reconcile IN_DEVELOPMENT_VERSIONS")
         return 1
-    print("PASS: every AIQT X.Y.Z token on the site is a current version (valid: {})".format(sorted(valid)))
+    print("PASS: every AIQT X.Y.Z token under {}/ is a current version (valid: {})".format(
+        subdir, sorted(valid)))
     return 0
 
 
@@ -220,6 +234,12 @@ def _self_test():
                 p.write_bytes(content)
             else:
                 p.write_text(content, encoding="utf-8")
+        # opf/site is a second required coverage root. Give it one benign, version-token-free page so the
+        # existing site/-driven cases exercise the two-root run() without opf/site contributing a verdict;
+        # the opf/site-specific behaviour is covered by its own legs below.
+        opf_site = root / "opf" / "site"
+        opf_site.mkdir(parents=True)
+        (opf_site / "index.html").write_text("<p>coming soon</p>", encoding="utf-8")
         return root
 
     def run_quiet(root):
@@ -310,6 +330,22 @@ def _self_test():
                 failures.append("w: symlinked changelog.toml expected exit 2")
         except (OSError, NotImplementedError):
             pass
+
+    # opf/site is a second required coverage root: a stale token in an opf/site page is a finding, and an
+    # absent opf/site root fails closed.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = build(tmp, good_toml, {"i.html": "<p>AIQT 1.0.0</p>"})
+        (root / "opf" / "site" / "draft").mkdir(parents=True)
+        (root / "opf" / "site" / "draft" / "stale.html").write_text("<p>AIQT 9.9.9</p>", encoding="utf-8")
+        if run_quiet(root) != 1:
+            failures.append("bb: a stale token in an opf/site page expected exit 1")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "changelog.toml").write_bytes(good_toml)
+        (root / "site").mkdir()
+        (root / "site" / "i.html").write_text("<p>AIQT 1.0.0</p>", encoding="utf-8")  # no opf/site
+        if run_quiet(root) != 2:
+            failures.append("cc: an absent opf/site coverage root expected exit 2 (fail-closed)")
 
     # a non-iterable in-development allowlist fails closed (guard-input-soundness), not a traceback.
     saved = IN_DEVELOPMENT_VERSIONS

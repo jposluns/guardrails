@@ -1,0 +1,385 @@
+/* AIQT site: shared stylesheet.
+   AIQT palette (dark default + light) with a cleanlanguage.ai-scale type system:
+   Inter + system fallback, large headings, wide hero, generous whitespace, and a
+   teal "eyebrow" kicker above every section. */
+
+/* dark is the default; a [data-theme] attribute (set by the toggle) beats the OS setting */
+:root{
+  --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
+  --ink:#e6edf3; --muted:#9fb0c3; --faint:#7488a1;
+  --line:#1e2c44; --accent:#5eb0ef; --accent-2:#7ee0c8;
+  --on-accent:#08111f; --on-accent-2:#08111f;
+}
+:root[data-theme="dark"]{
+  --bg:#0b1220; --panel:#111b2e; --panel-2:#0e1728;
+  --ink:#e6edf3; --muted:#9fb0c3; --faint:#7488a1;
+  --line:#1e2c44; --accent:#5eb0ef; --accent-2:#7ee0c8;
+  --on-accent:#08111f; --on-accent-2:#08111f;
+}
+:root[data-theme="light"]{
+  --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
+  --ink:#101828; --muted:#41506a; --faint:#54637a;
+  --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0f766e;
+  --on-accent:#ffffff; --on-accent-2:#ffffff;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme]){
+    --bg:#f7f9fc; --panel:#ffffff; --panel-2:#f0f4fa;
+    --ink:#101828; --muted:#41506a; --faint:#54637a;
+    --line:#e2e8f2; --accent:#1d6fd0; --accent-2:#0f766e;
+    --on-accent:#ffffff; --on-accent-2:#ffffff;
+  }
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:auto}
+body{
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  margin:0; background:var(--bg); color:var(--ink);
+  font-size:1.19rem; line-height:1.6; -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent); text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:1040px; margin:0 auto; padding:0 1.5rem}
+
+section{padding:1.75rem 0}
+h1,h2,h3{line-height:1.12; letter-spacing:-.025em; font-weight:750; text-wrap:pretty}
+h1{font-size:clamp(2.1rem,4vw,3.2rem)}
+h2{font-size:clamp(1.85rem,3.2vw,2.75rem); margin:0 0 1.15rem}
+h3{font-size:1.42rem; margin:0 0 .5rem}
+p{color:var(--muted); margin:0 0 1.05rem; text-wrap:pretty}
+.lead{font-size:clamp(1.24rem,1.7vw,1.42rem); color:var(--ink); line-height:1.55; text-wrap:pretty}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
+
+/* the teal kicker above every section */
+.eyebrow{color:var(--accent-2); font-weight:800; letter-spacing:.12em;
+  text-transform:uppercase; font-size:1.02rem; margin:0 0 .95rem}
+
+/* top navigation */
+.topnav{padding:.9rem 0; border-bottom:1px solid var(--line)}
+.navrow{display:flex; justify-content:space-between; align-items:center;
+  flex-wrap:wrap; gap:.7rem}
+.brand{font-weight:800; font-size:1.15rem; color:var(--ink); letter-spacing:.02em}
+.brand:hover{text-decoration:none}
+.navlinks{display:flex; flex-wrap:wrap; gap:.7rem; align-items:center}
+.navlinks a{color:var(--muted); font-size:1.08rem}
+.navlinks a.plain:hover{color:var(--ink); text-decoration:none}
+/* the two divergent-path links rendered as buttons */
+.navlinks a.navbtn{color:var(--accent); font-weight:700; font-size:1.02rem; padding:.5rem 1.1rem;
+    border:1px solid var(--accent); border-radius:999px; background:var(--panel)}
+.navlinks a.navbtn:hover{background:var(--accent); color:var(--on-accent); border-color:transparent; text-decoration:none}
+
+/* hero */
+header.hero{padding:6rem 0 4.5rem; text-align:center; background:
+  radial-gradient(1200px 420px at 50% -10%, rgba(94,176,239,.14), transparent 70%)}
+header.hero h1{font-size:clamp(2.5rem,4.8vw,3.95rem); margin:0 auto 1.4rem}
+header.hero .lead{max-width:62ch; margin:0 auto 1.7rem}
+.ordering{display:inline-block; max-width:100%; overflow-x:auto; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  background:var(--panel); border:1px solid var(--line); border-radius:12px;
+  padding:.85rem 1.2rem; color:var(--ink); font-size:1.14rem; margin-top:.4rem}
+.ordering .tier{color:var(--accent-2); font-weight:700}
+.orderingnote{font-size:1.02rem; color:var(--faint); margin-top:.7rem}
+.cta{margin-top:2.1rem; display:flex; gap:.85rem; justify-content:center; flex-wrap:wrap}
+.btn{display:inline-block; padding:.8rem 1.5rem; border-radius:10px; font-weight:650;
+  border:1px solid var(--line); font-size:1.14rem}
+.btn.primary{background:var(--accent); color:var(--on-accent); border-color:transparent}
+.btn.primary:hover{text-decoration:none; filter:brightness(1.08)}
+.btn.ghost{background:transparent; color:var(--accent); border-color:var(--accent)}
+.btn.ghost:hover{text-decoration:none; background:var(--accent); color:var(--on-accent); border-color:transparent}
+
+/* internal page header (install, roadmap, developers, teams) */
+.pagehead{padding-top:3.75rem; padding-bottom:1.25rem}
+.pagehead h1{margin:.2rem 0 1.15rem}
+
+/* generic two-column grid of cards */
+.grid{display:grid; grid-template-columns:repeat(2,1fr); gap:1.1rem}
+@media (max-width:640px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:1.5rem 1.6rem}
+.card h3{color:var(--ink)}
+.card p{margin:0}
+
+/* three divergent paths */
+.paths{display:grid; grid-template-columns:repeat(3,1fr); gap:1.1rem}
+@media (max-width:760px){.paths{grid-template-columns:1fr}}
+.path{background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:1.5rem 1.6rem; display:flex; flex-direction:column; gap:.6rem}
+.path h3{margin:0}
+.path p{margin:0; flex:1}
+.path .btn{align-self:flex-start; margin-top:.3rem; padding:.65rem 1.25rem; font-size:1.08rem}
+
+/* platform quick-start (install page) */
+.platforms{display:grid; grid-template-columns:repeat(3,1fr); gap:1.1rem}
+@media (max-width:760px){.platforms{grid-template-columns:1fr}}
+.platform{background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:1.5rem 1.6rem; display:flex; flex-direction:column; gap:.7rem}
+.platform h3{margin:0}
+.platform p{margin:0; flex:1}
+.platform .btn{align-self:flex-start; padding:.6rem 1.15rem; font-size:1.06rem}
+.installlinks{margin-top:1.4rem; display:flex; gap:1.8rem; flex-wrap:wrap}
+.installlinks a{font-weight:650}
+
+/* numbered lists: rules and setup steps */
+ol.rules,ol.steps{counter-reset:r; list-style:none; padding:0; margin:0}
+ol.rules li,ol.steps li{background:var(--panel-2); border:1px solid var(--line);
+  border-radius:12px; padding:1.1rem 1.2rem 1.1rem 3.5rem; position:relative; margin:.75rem 0}
+ol.rules li::before,ol.steps li::before{counter-increment:r; content:counter(r);
+  position:absolute; left:1.05rem; top:1.05rem; width:1.7rem; height:1.7rem; border-radius:50%;
+  color:var(--on-accent); font-weight:700; font-size:.92rem; display:flex; align-items:center;
+  justify-content:center}
+ol.rules li::before{background:var(--accent)}
+ol.steps li::before{background:var(--accent-2); color:var(--on-accent-2)}
+ol.rules b,ol.steps b{color:var(--ink)}
+ol.rules p,ol.steps li{color:var(--muted)}
+ol.rules p{margin:.3rem 0 0}
+
+ul.clean{margin:.5rem 0 0; padding-left:1.2rem}
+ul.clean li{margin:.35rem 0; color:var(--muted)}
+
+/* directory tree (development page) */
+.tree{background:var(--panel-2); border:1px solid var(--line); border-radius:14px;
+  padding:1.3rem 1.5rem; overflow-x:auto; margin:1.5rem 0 1rem}
+.tree pre{margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:1.06rem; line-height:1.8; color:var(--muted)}
+.tree .dir{color:var(--ink); font-weight:600}
+.tree .yours{color:var(--accent-2); font-weight:600}
+.tree .updater{color:var(--accent); font-weight:600}
+.tree .note{color:var(--faint)}
+
+/* status pills */
+.pill{display:inline-block; font-size:.88rem; font-weight:700; letter-spacing:.04em;
+  text-transform:uppercase; padding:.26rem .75rem; border-radius:999px; margin-bottom:.2rem;
+  align-self:flex-start}
+.pill.now{background:rgba(126,224,200,.16); color:var(--accent-2)}
+.pill.next{background:rgba(94,176,239,.16); color:var(--accent)}
+.pill.idea{background:rgba(155,176,195,.14); color:var(--muted)}
+.idea-note{font-size:1.02rem; color:var(--faint)}
+
+#main{padding-bottom:4rem}
+
+/* dark/light toggle */
+.themetoggle{font:inherit; cursor:pointer; color:var(--muted); background:var(--panel);
+  border:1px solid var(--line); border-radius:999px; padding:.42rem .9rem; font-size:1rem;
+  font-weight:650; margin-left:.35rem}
+.themetoggle:hover{border-color:var(--accent); color:var(--accent)}
+
+/* examples: without/with comparison (linear, one example per row) */
+.example{margin:0 0 1.9rem}
+.example h3{font-size:1.42rem; margin:0 0 .7rem}
+.compare{display:grid; grid-template-columns:1fr 1fr; gap:1rem}
+@media (max-width:640px){.compare{grid-template-columns:1fr}}
+.compare .col{border:1px solid var(--line); border-radius:14px; padding:1.4rem 1.5rem}
+.compare .without{background:var(--panel-2)}
+.compare .with{background:rgba(126,224,200,.10); border-color:var(--accent-2)}
+.compare .lbl{font-size:.9rem; font-weight:800; letter-spacing:.06em; text-transform:uppercase; margin:0 0 .55rem}
+.compare .without .lbl{color:var(--faint)}
+.compare .with .lbl{color:var(--accent-2)}
+.compare .col p:last-child{margin:0}
+
+/* cleanlanguage-style platform install buttons (welcoming, non-technical) */
+.platform-actions{margin:1.9rem 0 0; display:grid; grid-template-columns:repeat(12,1fr); gap:.9rem}
+.platform-button{grid-column:span 4; display:flex; align-items:center; gap:.95rem; min-height:86px;
+  padding:1.1rem 1.25rem; border:1px solid var(--line); border-radius:16px; background:var(--panel);
+  text-align:left; text-decoration:none;
+  transition:transform .16s ease, border-color .16s ease, box-shadow .16s ease}
+.platform-button:hover{transform:translateY(-3px); border-color:var(--accent); text-decoration:none;
+  box-shadow:0 12px 30px rgba(0,0,0,.16)}
+.platform-button.wide{grid-column:span 6}
+@media (max-width:760px){.platform-button,.platform-button.wide{grid-column:span 12}}
+.platform-button strong,.platform-button small{display:block}
+.platform-button strong{font-size:1.1rem; line-height:1.2; color:var(--ink)}
+.platform-button small{margin-top:.25rem; color:var(--muted); font-size:.98rem; line-height:1.35}
+.platform-icon{flex:0 0 48px; width:48px; height:48px; display:grid; place-items:center;
+  border-radius:13px; color:#fff; font-size:1.1rem; font-weight:800; letter-spacing:-.03em}
+.platform-icon.claude{background:#c15f3c}
+.platform-icon.chatgpt{background:#10a37f}
+.platform-icon.copilot{background:linear-gradient(135deg,#0a6ed1,#2ec6c2)}
+.platform-icon.copilotstudio{background:linear-gradient(135deg,#8b5cf6,#0a6ed1)}
+.platform-icon.guide{background:var(--accent)}
+.platform-icon.source{background:#4a5568; font-size:.92rem}
+.platform-icon.gemini{background:linear-gradient(135deg,#4285f4,#9b72cb)}
+
+/* secondary content-tab bar (row 2, cleanlanguage-style pills) */
+.subnav{border-bottom:1px solid var(--line); padding:.3rem 0 .7rem}
+.subrow{display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; justify-content:center}
+.subnav a{display:inline-flex; align-items:center; padding:.5rem 1.1rem; border-radius:999px;
+  border:1px solid var(--line); background:var(--panel); color:var(--ink); font-weight:650;
+  font-size:1.02rem; text-decoration:none}
+.subnav a:hover{border-color:var(--accent); color:var(--accent); text-decoration:none}
+.subnav a.active,.subnav a.active:hover{background:var(--accent); border-color:transparent; color:var(--on-accent)}
+
+/* evidence-status label under an example title */
+.evidence-label{display:inline-block; font-size:.82rem; font-weight:700; letter-spacing:.05em;
+  text-transform:uppercase; color:var(--faint); margin:.1rem 0 .55rem}
+
+/* one status model: the available/in-development/ideas strip */
+.statusstrip{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:1.1rem 1.4rem}
+.statusstrip p{margin:.55rem 0; color:var(--muted)}
+.statusstrip p:first-child{margin-top:0}
+.statusstrip p:last-child{margin-bottom:0}
+.statusstrip .pill{margin-right:.55rem}
+
+/* precision tables (permissions, data-flow), pending-marked */
+.tablewrap{overflow-x:auto; margin:1.2rem 0}
+.dtable{width:100%; border-collapse:collapse; font-size:1rem}
+.dtable th,.dtable td{border:1px solid var(--line); padding:.6rem .8rem; text-align:left; vertical-align:top; color:var(--muted)}
+.dtable th{color:var(--ink); font-weight:700; background:var(--panel-2)}
+.dtable .pending{color:var(--faint); font-style:italic}
+
+/* skip-to-content link (visible on focus) */
+.skip{position:absolute; left:-9999px; top:0; z-index:100; background:var(--accent); color:var(--on-accent);
+  padding:.6rem 1rem; border-radius:0 0 8px 0; font-weight:700}
+.skip:focus{left:0; text-decoration:none}
+
+/* progressive-disclosure expander */
+details.more{border:1px solid var(--line); border-radius:12px; background:var(--panel-2); margin:1.3rem 0}
+details.more>summary{cursor:pointer; padding:1rem 1.2rem; font-weight:700; color:var(--ink); list-style:none}
+details.more>summary::-webkit-details-marker{display:none}
+details.more>summary::after{content:" \25B8"; color:var(--accent); font-weight:700}
+details.more[open]>summary::after{content:" \25BE"}
+details.more .inner{padding:0 1.2rem 1.2rem}
+
+/* examples audience filter (centered pills, distinct from body text) */
+.jumpfilter{text-align:center; margin:.4rem 0 1.4rem}
+.jumpfilter span{color:var(--faint); margin-right:.4rem}
+.jumpfilter a{display:inline-block; padding:.4rem .95rem; margin:.2rem; border-radius:999px;
+  border:1px solid var(--line); background:var(--panel); color:var(--ink); font-weight:650; text-decoration:none}
+.jumpfilter a:hover{border-color:var(--accent); color:var(--accent); text-decoration:none}
+
+/* per-example one-line summary (a mobile aid below the pair) */
+.diff{margin:.9rem 0 0; color:var(--muted)}
+.diff b{color:var(--accent-2)}
+
+/* single-line nav tabs (content sections + roadmap/about as buttons) */
+.navtab{display:inline-flex; align-items:center; padding:.5rem 1.05rem; border-radius:999px;
+  border:1px solid var(--accent); background:var(--panel); color:var(--accent); font-weight:700;
+  font-size:1.02rem; text-decoration:none}
+.navtab:hover{background:var(--accent); color:var(--on-accent); border-color:transparent; text-decoration:none}
+.navtab.active,.navtab.active:hover{background:var(--accent); border-color:transparent; color:var(--on-accent)}
+
+/* visually-hidden (for table captions/labels) + visible focus */
+.vh{position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0}
+a:focus-visible,button:focus-visible,summary:focus-visible,.navtab:focus-visible,.btn:focus-visible,input:focus-visible{outline:3px solid var(--accent); outline-offset:2px; border-radius:6px}
+
+/* ---- sidebar navigation ---- */
+.layout{display:flex; align-items:flex-start}
+.sidebar{position:sticky; top:0; height:100vh; overflow-y:auto; flex:0 0 auto; width:max-content;
+  background:var(--panel); border-right:1px solid var(--line); padding:1.5rem 1rem 1.2rem;
+  display:flex; flex-direction:column}
+.sidebar .brand{font-size:1.35rem; font-weight:800; color:var(--ink); text-decoration:none;
+  letter-spacing:.02em; margin:0 0 .4rem .2rem}
+.sidebar h4{font-size:.7rem; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--faint); margin:1.05rem 0 .3rem; padding:0 .6rem}
+.sidebar a.navlink{display:block; padding:.4rem .6rem; border-radius:8px; color:var(--muted);
+  text-decoration:none; font-size:1rem; line-height:1.3; white-space:nowrap}
+.sidebar a.navlink:hover{background:var(--panel-2); color:var(--ink)}
+.sidebar a.navlink.active{background:var(--panel-2); color:var(--accent); font-weight:600;
+  box-shadow:inset 3px 0 0 var(--accent)}
+.sidebar .sb-theme{margin-top:auto; align-self:flex-start}
+.content{flex:1 1 auto; min-width:0}
+.whatis{color:var(--ink); font-size:1.05rem; line-height:1.55; margin:.2rem 0 0; max-width:880px}
+.navtoggle{display:none}
+.navbackdrop{display:none}
+@media (max-width:900px){
+  .layout{display:block}
+  .sidebar{position:fixed; top:0; left:0; width:max-content; min-width:13rem;
+    transform:translateX(-100%); transition:transform .22s ease; box-shadow:0 0 40px rgba(0,0,0,.45); z-index:50}
+  .sidebar.open{transform:none}
+  .content{padding-top:3.3rem}
+  .navtoggle{display:inline-flex; align-items:center; gap:.4rem; position:fixed; top:.6rem; left:.6rem;
+    z-index:60; background:var(--panel); color:var(--ink); border:1px solid var(--line);
+    border-radius:8px; padding:.45rem .7rem; font-size:.95rem; cursor:pointer}
+  .navbackdrop.open{display:block; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:40}
+}
+
+@media (prefers-reduced-motion: no-preference){ html{scroll-behavior:smooth} }
+
+/* ================= visual refresh (UI/UX review) ================= */
+:root, :root[data-theme="dark"]{ --warn:#f2a35c; --warn-tint:rgba(242,163,92,.07); --warn-line:rgba(242,163,92,.30); }
+:root[data-theme="light"]{ --warn:#b45309; --warn-tint:rgba(180,83,9,.06); --warn-line:rgba(180,83,9,.28); }
+@media (prefers-color-scheme: light){ :root:not([data-theme]){ --warn:#b45309; --warn-tint:rgba(180,83,9,.06); --warn-line:rgba(180,83,9,.28); } }
+
+/* gradient brand text (hero payoff line) */
+.grad{background:linear-gradient(90deg,var(--accent) 10%,var(--accent-2) 90%); -webkit-background-clip:text; background-clip:text; color:transparent}
+
+/* hero: bigger type + two-colour atmosphere + faint graph-paper grid (no mask; grid is scoped to the hero) */
+header.hero h1{font-size:clamp(2.6rem,5.4vw,4.4rem); font-weight:800; letter-spacing:-.03em; line-height:1.06}
+header.hero{ padding:5.5rem 0 4rem;
+  background:
+    radial-gradient(900px 380px at 22% -8%, rgba(94,176,239,.16), transparent 70%),
+    radial-gradient(900px 380px at 78% -8%, rgba(126,224,200,.12), transparent 70%),
+    repeating-linear-gradient(90deg, rgba(159,176,195,.05) 0 1px, transparent 1px 72px),
+    repeating-linear-gradient(0deg,  rgba(159,176,195,.05) 0 1px, transparent 1px 72px); }
+:root[data-theme="light"] header.hero{
+  background:
+    radial-gradient(900px 380px at 22% -8%, rgba(29,111,208,.10), transparent 70%),
+    radial-gradient(900px 380px at 78% -8%, rgba(15,118,110,.08), transparent 70%),
+    repeating-linear-gradient(90deg, rgba(65,80,106,.05) 0 1px, transparent 1px 72px),
+    repeating-linear-gradient(0deg,  rgba(65,80,106,.05) 0 1px, transparent 1px 72px); }
+
+/* warm 'Without AIQT' columns (one change transforms every compare pair) */
+.compare .without{ background:var(--warn-tint); border-color:var(--warn-line) }
+.compare .without .lbl{ color:var(--warn) }
+
+/* card hover life + section rhythm */
+.card,.path,.platform{transition:border-color .18s ease, transform .18s ease, box-shadow .18s ease}
+.card:hover,.path:hover,.platform:hover{border-color:var(--accent); transform:translateY(-2px); box-shadow:0 10px 28px rgba(0,0,0,.18)}
+:root[data-theme="light"] .card:hover,:root[data-theme="light"] .path:hover,:root[data-theme="light"] .platform:hover{box-shadow:0 10px 28px rgba(16,24,40,.08)}
+@media (prefers-reduced-motion: reduce){ .card,.path,.platform,.platform-button{transition:none} .card:hover,.path:hover,.platform:hover,.platform-button:hover{transform:none} }
+section{padding:3.25rem 0}
+.section-alt{background:var(--panel-2); border-top:1px solid var(--line); border-bottom:1px solid var(--line)}
+
+/* sharper eyebrow (main engine of the repetition) + readable measure */
+.eyebrow{font-size:.84rem; letter-spacing:.16em}
+.lead{max-width:74ch}
+
+
+/* ================= persistent top bar + 2x2 logo ================= */
+.topbar{position:sticky; top:0; z-index:60; display:flex; align-items:center; gap:.9rem;
+  height:3.6rem; padding:0 1rem; background:var(--panel); border-bottom:1px solid var(--line)}
+.topbar .navtoggle{display:none; position:static; align-items:center; background:none;
+  border:1px solid var(--line); border-radius:8px; color:var(--ink); padding:.3rem .55rem;
+  font-size:1.1rem; line-height:1; cursor:pointer}
+.topbar .logo{display:flex; align-items:center; gap:.5rem; text-decoration:none}
+.topbar .logomark{display:block; flex:0 0 auto}
+.topbar .logotext{color:var(--ink); font-weight:800; font-size:1.22rem; letter-spacing:.04em}
+.topbar .topformula{margin-left:auto; min-width:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.9rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.topbar .topformula .tier{background:linear-gradient(90deg,var(--accent),var(--accent-2));
+  -webkit-background-clip:text; background-clip:text; color:transparent; font-weight:700}
+.topbar .topformula .t2{color:var(--ink)}
+.topbar .topformula .t3{color:var(--muted)}
+.topbar .topformula .t4{color:var(--faint)}
+/* the sidebar now sits below the top bar */
+.sidebar{top:3.6rem; height:calc(100vh - 3.6rem)}
+@media (max-width:860px){ .topbar .topformula{display:none} }
+@media (max-width:900px){ .topbar .navtoggle{display:inline-flex} }
+
+/* ================= consolidated install page: platform picker + in-place filter ================= */
+/* The picker cards double as filter controls. Only /js/install.js sets data-family on the root, so every
+   hiding rule below is inert when scripts are blocked, fail, or are disabled, and the whole page stays
+   visible (progressive enhancement). Reuses AIQT's own .platform-actions / .platform-button / .card tokens;
+   no new palette. */
+html[data-family] section[data-family-section]{display:none}
+html[data-family="claude"] section[data-family-section="claude"],
+html[data-family="chatgpt"] section[data-family-section="chatgpt"],
+html[data-family="gemini"] section[data-family-section="gemini"],
+html[data-family="copilot"] section[data-family-section="copilot"],
+html[data-family="copilotstudio"] section[data-family-section="copilotstudio"],
+html[data-family="other"] section[data-family-section="other"]{display:block}
+
+/* the selected card, marked with aria-current by the script (accent border + faint accent tint) */
+.platform-button[aria-current="true"]{border-color:var(--accent); background:rgba(94,176,239,.14)}
+:root[data-theme="light"] .platform-button[aria-current="true"]{background:rgba(29,111,208,.10)}
+@media (prefers-color-scheme: light){ :root:not([data-theme]) .platform-button[aria-current="true"]{background:rgba(29,111,208,.10)} }
+.platform-button[aria-current="true"] strong{text-decoration:underline; text-underline-offset:3px; text-decoration-thickness:2px}
+
+/* the "show all" reset lives under the picker; hidden until the script reveals it. .btn sets
+   display:inline-block, which outranks the UA [hidden] rule, so a hidden .btn needs this to stay hidden. */
+.family-reset{margin:1.1rem 0 0}
+#family-reset[hidden]{display:none}
+
+/* per-section "last verified" stamp and the section jump-links */
+.verified{margin:-.4rem 0 1.1rem; font-size:.92rem; color:var(--faint)}
+.section-links{font-size:1.02rem}
+.section-links a{font-weight:650}
