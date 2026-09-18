@@ -2822,6 +2822,83 @@ def git_explicit_binding(data):
     return _allow()
 
 
+def _stash_pop_apply_bare(sub, args):
+    """Whether stash pop/apply has no positional operand; presence is not ref validation."""
+    if sub != "stash":
+        return False
+    first = next((a for a in args if not a.startswith("-")), None)
+    if first not in ("pop", "apply"):
+        return False
+    rest = args[args.index(first) + 1:]
+    pre, post, _had_sep = _split_pre_post(rest)
+    return not any(not a.startswith("-") for a in pre) and not post
+
+
+def git_stash_ref(data):
+    """expbnd (integ/explicit-binding-over-ambient-context), PreToolUse/Bash. A bare stash pop/apply
+    ALLOWS with one informational note; a positional operand silently allows. NO-ASK posture.
+
+    HONEST RESIDUAL: presence is not identity, well-formedness, existence, or intent. A SHA-shaped
+    token is not object validation, and stash@{N} can shift between listing and execution. Dynamic
+    operands, including variable/command substitutions and an empty quoted operand, count as present
+    even if empty at runtime. Aliases, functions, eval, unknown wrappers, and wrappers with their own
+    options or assignments are not resolved. Simple quote fragments ARE decoded by the shared lexer;
+    fragmentation/obfuscation that does not resolve to recognized command/verb tokens is not covered.
+    The shared segmenter splits ordinary separators (`;`, `|`, `&&`, `||`, newlines) and `(...)`
+    subshells but does NOT structurally parse `{...}` brace groups or shell control-flow
+    constructs, so a bare pop/apply is missed only when an UNPEELED brace or shell-keyword token
+    occupies the command-word position of `git`'s segment: for example a `{` group opener, or a
+    control keyword such as `if`, `elif`, `else`, `while`, `until`, `then`, or `do` immediately
+    preceding `git` in the same segment (these examples are illustrative, not exhaustive); a `git
+    stash pop` that a `;` or newline delimits into its own segment IS seen and warns. git_discard's
+    generic fallback may still note the missed same-segment form, and extending the shared segmenter
+    to those forms is a family-wide follow-on.
+    Only the current no-value pop/apply option grammar (-q/--quiet/--index) is modelled: a future
+    value-taking option can make its value look like an operand and falsely allow; re-validate on a
+    git upgrade. No git calls or filesystem probes: every recognized bare pop/apply warns regardless
+    of stack state, with no escalation for a dangerous stack. Bash PreToolUse only; no prior-turn
+    shell-state resolution. Other stash verbs, including bare stash (push), are outside this guard;
+    drop/clear/export belong to git_discard. Unparseable text silently allows. An absent/unreadable
+    command gets the sibling's convention note.
+    This note can co-occur with git_discard's raw/pristine fallback note on a wrapped or compound
+    pop/apply, and with git_explicit_binding's note on a relocated form (e.g. `cd /x && git stash
+    pop`); such sibling notes are consistent, never conflicting.
+    Only missing tool_name produces a structured deny;
+    a miswired event hard-blocks and dispatcher errors retain the manifest's fail-closed posture."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: git_stash_ref wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if tool is None:
+        return _deny_missing_tool_name("expbnd")
+    if tool != "Bash":
+        return _allow()
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or not command:
+        return _allow_note(
+            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
+            "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
+            "it is allowed; prefer an explicit '-C' target and enumerated scope.")
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return _allow()
+
+    for tokens, _sep in segments:
+        eff = _expbnd_effective_tokens(tokens)
+        if _command_word(eff) != "git":
+            continue
+        sub, args = _git_sub_and_args(eff)
+        if _stash_pop_apply_bare(sub, args):
+            return _allow_note(
+                "AIQT expbnd (explicit-binding-over-ambient-context): a bare git stash pop/apply acts on "
+                "the top of the stash stack, ambient shared state that may not be the entry you mean. "
+                "Run 'git stash list', then name the entry explicitly, for example "
+                "\"git stash apply 'stash@{2}'\".")
+    return _allow()
+
+
 def _has_short(tokens, ch):
     """True when a clustered short-flag token (a single '-' then letters, e.g. '-fd') carries the letter
     ch. Spots '-f' inside a cluster (checkout '-f', clean '-fd'), '-p', '-S'/'-W' (restore)."""
@@ -11043,6 +11120,7 @@ HANDLERS = {
     "absolute_paths": absolute_paths,
     "bash_absolute_paths": bash_absolute_paths,
     "git_explicit_binding": git_explicit_binding,
+    "git_stash_ref": git_stash_ref,
     "git_discard": git_discard,
     "protected_line": protected_line,
     "branch_root": branch_root,
@@ -11078,6 +11156,7 @@ HANDLER_EVENT = {
     "absolute_paths": PRETOOL,
     "bash_absolute_paths": PRETOOL,
     "git_explicit_binding": PRETOOL,
+    "git_stash_ref": PRETOOL,
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
     "branch_root": PRETOOL,

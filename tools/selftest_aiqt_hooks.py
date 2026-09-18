@@ -184,6 +184,161 @@ def _init_repo(path):
     return path
 
 
+def _test_git_stash_ref(failures):
+    """Direct, warn-distinct checks; no submitted Bash command is executed."""
+    handler = aiqt_hooks.git_stash_ref
+
+    def run(label, data):
+        result = handler(data)
+        _code, stdout_obj, _stderr = result
+        if isinstance(stdout_obj, dict):
+            specific = stdout_obj.get("hookSpecificOutput")
+            if (stdout_obj.get("permissionDecision") == "ask" or
+                    isinstance(specific, dict) and specific.get("permissionDecision") == "ask"):
+                failures.append("{}: permissionDecision ask is forbidden".format(label))
+        return result
+
+    def payload(command):
+        return {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                "tool_input": {"command": command}}
+
+    def expect_warn(label, command):
+        code, stdout_obj, stderr = run(label, payload(command))
+        if not (code == 0 and isinstance(stdout_obj, dict) and
+                isinstance(stdout_obj.get("systemMessage"), str) and
+                "stash@{" in stdout_obj["systemMessage"] and
+                "hookSpecificOutput" not in stdout_obj and
+                "permissionDecision" not in stdout_obj and stderr is None):
+            failures.append("{}: expected stash warning only, got {!r}"
+                            .format(label, (code, stdout_obj, stderr)))
+
+    def expect_silent(label, command):
+        code, stdout_obj, stderr = run(label, payload(command))
+        if not (code == 0 and stdout_obj is None and stderr is None):
+            failures.append("{}: expected silent allow, got {!r}"
+                            .format(label, (code, stdout_obj, stderr)))
+
+    for label, command in (
+            ("(sr-w1) bare pop", "git stash pop"),
+            ("(sr-w2) bare apply", "git stash apply"),
+            ("(sr-w3) quiet pop", "git stash pop -q"),
+            ("(sr-w4) index pop", "git stash pop --index"),
+            ("(sr-w5) quiet index apply", "git stash apply --quiet --index"),
+            ("(sr-w6) global option arity", "git -C /tmp/repo stash pop -q"),
+            ("(sr-w7) trailing redirect", "git stash pop --index > /dev/shm/out.txt"),
+            ("(sr-w8) apply redirect", "git stash apply > output.txt"),
+            ("(sr-w9) interspersed redirect", "git >x.txt stash pop"),
+            ("(sr-w10) empty separator tail", "git stash pop --"),
+            ("(sr-w11) later segment", "true && git stash apply"),
+            ("(sr-w12) group", "(git stash pop)"),
+            ("(sr-w13) comment is not operand", "git stash pop # stash@{2}"),
+            ("(sr-w14) command wrapper", "command git stash pop"),
+            ("(sr-w15) sudo wrapper", "sudo git stash apply"),
+            ("(sr-w16) exec wrapper", "exec git stash pop"),
+            ("(sr-w17) builtin wrapper", "builtin git stash pop"),
+            ("(sr-w18) env wrapper", "env git stash apply"),
+            ("(sr-w19) assignment and wrapper chain",
+             "FOO=x command env git -C /tmp/repo stash pop"),
+            ("(sr-w20) several bare segments", "git stash pop; git stash apply"),
+            ("(sr-w21) quote-decoded command and verb", "g'it' stash p'op'"),
+            ("(sr-w22) brace group with a separated git segment warns", "{ true; git stash pop; }")):
+        expect_warn(label, command)
+
+    for label, command in (
+            ("(sr-a1) unquoted opaque ref", "git stash pop stash@{2}"),
+            ("(sr-a2) explicit stack top", "git stash apply stash@{0}"),
+            ("(sr-a3) index and ref", "git stash pop --index stash@{1}"),
+            ("(sr-a4) quoted ref", 'git stash pop "stash@{1}"'),
+            ("(sr-a5) short object name", "git stash apply 9fceb02"),
+            ("(sr-a6) full object name",
+             "git stash apply 0123456789abcdef0123456789abcdef01234567"),
+            ("(sr-a7) ref after separator", "git stash pop -- stash@{2}"),
+            ("(sr-a8) quoted dynamic operand", 'git stash apply "$STASH"'),
+            ("(sr-a9) unquoted dynamic operand", "git stash apply $STASH"),
+            ("(sr-a10) bare stash", "git stash"),
+            ("(sr-a11) push", "git stash push"),
+            ("(sr-a12) push message is not verb", 'git stash push -m "pop"'),
+            ("(sr-a13) list", "git stash list"),
+            ("(sr-a14) show", "git stash show"),
+            ("(sr-a15) drop belongs to git_discard", "git stash drop"),
+            ("(sr-a16) clear belongs to git_discard", "git stash clear"),
+            ("(sr-a17) echo words", "echo git stash pop"),
+            ("(sr-a18) echo quoted prose", 'echo "git stash pop"'),
+            ("(sr-a19) decoded subcommand with ref", "git 'st''ash' pop stash@{1}"),
+            ("(sr-a20) unrelated command", "ls -la"),
+            ("(sr-a21) unbalanced quote", 'git stash pop "unbalanced'),
+            ("(sr-a22) wrapper option", "env -i git stash pop"),
+            ("(sr-a23) sudo option", "sudo -u u git stash apply"),
+            ("(sr-a24) wrapper assignment", "env FOO=x git stash pop"),
+            ("(sr-a25) export belongs to git_discard", "git stash export --print"),
+            ("(sr-a26) save", "git stash save"),
+            ("(sr-a27) branch", "git stash branch topic"),
+            ("(sr-a28) create", "git stash create"),
+            ("(sr-a29) store", "git stash store deadbeef"),
+            ("(sr-a30) presence without validation", "git stash apply not-a-ref"),
+            ("(sr-a31) empty quoted operand", 'git stash apply ""'),
+            ("(sr-a32) dash operand after separator", "git stash apply -- -ref"),
+            ("(sr-a33) command substitution operand", "git stash apply $(printf x)"),
+            ("(sr-a34) parse failure with visible relocation",
+             'cd /abs && git stash pop "unbalanced'),
+            ("(sr-a35) parse failure with sibling hazard",
+             'git add -A && git push "unbalanced'),
+            ("(sr-a36) brace group is a disclosed lexical bound", "{ git stash pop; }"),
+            ("(sr-a37) brace group with option", "{ git stash apply --index; }"),
+            ("(sr-a38) shell-keyword block is a disclosed bound", "if true; then git stash pop; fi"),
+            ("(sr-a39) shell-keyword condition position is a disclosed bound", "if git stash pop; then :; fi")):
+        expect_silent(label, command)
+
+    # The shared lexer keeps an unquoted brace-bearing ref as one positional token.
+    segments = aiqt_hooks._lex_command("git stash pop stash@{2}")
+    if (len(segments) != 1 or
+            segments[0].argv != ["git", "stash", "pop", "stash@{2}"]):
+        failures.append("(sr-lex) unquoted stash@{2} did not survive as one operand")
+
+    # Missing/None tool_name is the shared structured-deny contract.
+    for label, data in (
+            ("(sr-m1) missing tool_name",
+             {"hook_event_name": aiqt_hooks.PRETOOL,
+              "tool_input": {"command": "git stash pop"}}),
+            ("(sr-m2) None tool_name",
+             {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": None,
+              "tool_input": {"command": "git stash pop"}})):
+        result = run(label, data)
+        if result != aiqt_hooks._deny_missing_tool_name("expbnd"):
+            failures.append("{}: expected shared missing-tool deny, got {!r}".format(label, result))
+
+    # These payloads take the sibling's exact unreadable-command note path.
+    for tool_input in (None, [], {}, {"command": None}, {"command": 42}, {"command": ""}):
+        data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                "tool_input": tool_input}
+        result = run("(sr-unreadable)", data)
+        code, stdout_obj, stderr = result
+        if not (result == aiqt_hooks.git_explicit_binding(data) and code == 0 and
+                isinstance(stdout_obj, dict) and
+                isinstance(stdout_obj.get("systemMessage"), str) and
+                stdout_obj["systemMessage"] and
+                "hookSpecificOutput" not in stdout_obj and
+                "permissionDecision" not in stdout_obj and stderr is None):
+            failures.append("(sr-unreadable) expected sibling note for {!r}, got {!r}"
+                            .format(tool_input, result))
+
+    data = payload("git stash pop")
+    data["tool_name"] = "Read"
+    if run("(sr-other-tool)", data) != (0, None, None):
+        failures.append("(sr-other-tool) a different tool must silently allow")
+
+    data = payload("git stash pop")
+    data["hook_event_name"] = "Stop"
+    code, stdout_obj, stderr = run("(sr-event)", data)
+    if not (code == 2 and stdout_obj is None and isinstance(stderr, str) and
+            "git_stash_ref wired to unexpected event" in stderr):
+        failures.append("(sr-event) unexpected event must use the sibling hard-block contract")
+
+    if (aiqt_hooks.HANDLERS.get("git_stash_ref") is not aiqt_hooks.git_stash_ref or
+            aiqt_hooks.HANDLER_EVENT.get("git_stash_ref") != aiqt_hooks.PRETOOL):
+        failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
+
+
 def main():
     handler = aiqt_hooks.git_discard
     try:
@@ -387,7 +542,8 @@ def main():
                cwd=rp)
         expect("(st-a) stash drop asks", "git stash drop", "allow", cwd=rp)
         expect("(st-b) stash clear asks", "git stash clear", "allow", cwd=rp)
-        expect("(st-c) stash pop allows (out of scope)", "git stash pop", "allow", cwd=rp)
+        expect("(st-c) stash pop allows (out of scope for git_discard; covered by git-stash-ref)",
+               "git stash pop", "allow", cwd=rp)
         expect("(br-a) branch -D asks", "git branch -D other", "allow", cwd=rp)
         expect("(br-b) branch -d allows (git refuses unmerged)", "git branch -d other", "allow", cwd=rp)
 
@@ -6029,6 +6185,8 @@ def main():
         if (aiqt_hooks.HANDLERS.get("git_explicit_binding") is not aiqt_hooks.git_explicit_binding or
                 aiqt_hooks.HANDLER_EVENT.get("git_explicit_binding") != "PreToolUse"):
             failures.append("(eb-e22) git_explicit_binding handler/event wiring is missing or wrong")
+
+        _test_git_stash_ref(failures)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
