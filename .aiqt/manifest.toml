@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "800cbbfab3028c3a2b4decbc2e2a1f865bd38443dcec2e05a338ef4df756dadb"
+tree-sha256 = "615e5ef94525b950bfa9e606a8b94102d6f46df830dbd12ed9cebb1319726baf"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2351,13 +2351,13 @@ sha256 = "fed9fd1b98bb49d87db98c68cefb2c4554615d02dbd92294a30d5e9945ef0a94"
 
 [[sources]]
 path = "opf/site/draft/adopt.html"
-bytes = 12434
-sha256 = "003d0502761db3c1b85abeac86f3a21ad218c724dff634354ac33e8ab728d484"
+bytes = 13665
+sha256 = "588c0d762d5e50c99d5239086d5b3c852a96576008b0930f0644c3436660a1c6"
 
 [[sources]]
 path = "opf/site/draft/aiqt.html"
-bytes = 7738
-sha256 = "42d9013706c1690e65e70492bee5dca84364802bdc4776b0f00f7185d1c26568"
+bytes = 8792
+sha256 = "3951a7682079cfbe2cb0a2a3388f5a508f9037bb8ddc31d670741ad4cabdf960"
 
 [[sources]]
 path = "opf/site/draft/archive.html"
@@ -2421,8 +2421,8 @@ sha256 = "9c5662d38bc9a25d75b79dd0d3ee2c3c119f15c3cfba084f0b890605d56ca2b6"
 
 [[sources]]
 path = "opf/site/draft/index.html"
-bytes = 19732
-sha256 = "6f0a778846454e678bbc93e288a0d3078f959f84efd7770bff73bdff6e6b25d8"
+bytes = 20411
+sha256 = "94e0641861367fa654781d803b7b07a75a69c5142f016d4b19a602243cee22dc"
 
 [[sources]]
 path = "opf/site/draft/lease.html"
@@ -2466,8 +2466,8 @@ sha256 = "87b52c6ef1f615d614c70fa48bf54a307f39a37472dc5a4a9c9caee295b09b9f"
 
 [[sources]]
 path = "opf/site/draft/roadmap.html"
-bytes = 6808
-sha256 = "81858223778df5cc4e2fbeff4b79625a21225710f11c09009fcc8bfd47ba43ec"
+bytes = 7258
+sha256 = "310b182a93889d1abb0790126a01acd8618ca4eacfe7b31fb8bc16cca370d5b6"
 
 [[sources]]
 path = "opf/site/draft/standard.html"
@@ -2486,8 +2486,8 @@ sha256 = "c57746b75ebb827bbf7eaa8d876aabef23c3ee347c373a60df5a13cc80ee4358"
 
 [[sources]]
 path = "opf/site/draft/tooling.html"
-bytes = 8932
-sha256 = "10d62a0cddf052b74df2ee8d1196ffe57cbc1602a710e830dd7c5c25641046c8"
+bytes = 9862
+sha256 = "9d58831c3061ab9e373f06e09db774ee42798e6245e78b4e9f350e1b2bdb4499"
 
 [[sources]]
 path = "opf/site/draft/version.html"
@@ -3086,8 +3086,8 @@ sha256 = "fd0870da82995a1914dcf46b05c742c81856be03633c0ca4edcbc35361aadee0"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 93046
-sha256 = "7bba1b2b95bd8447b023e5a6efc7746fd2f8a5c9617a18276e45182fc8c0d1df"
+bytes = 93233
+sha256 = "32b5b7b33989217aae88b2c109c03c6b273937dfcd4d50a1557d6eeb98c43540"
 
 [[sources]]
 path = "tools/check_portability.py"

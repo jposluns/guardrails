@@ -177,6 +177,10 @@
       outside the generator. These mechanisms reduce the opportunity for a confident guess to enter
       the record; they reduce that opportunity; they do not remove it entirely, and the standard says so plainly in its own
       residual-coverage disclosures.</p>
+    <p>Completeness is also an efficiency gain. Because the TOML carries all the input a process needs,
+      the same process runs the same way every time, with less back-and-forth inference and fewer
+      tokens spent reconstructing context, and a reduced likelihood of errors, omissions, and
+      hallucinations along the way.</p>
   </div>
 </section>
 
@@ -305,15 +309,18 @@
 <section id="aiqt" class="section-alt">
   <div class="wrap">
     <p class="eyebrow">OPFiles and AIQT</p>
-    <h2>A standalone standard, with AIQT as its first profile</h2>
-    <p>OPFiles is a neutral, self-contained standard, owned by AIQT and published under CC BY-SA
-      4.0. A project conforms with this specification and its own checks; nothing in the base
-      vocabulary names any particular adopter or operator. <a href="https://aiqt.ai/" target="_blank"
-      rel="noopener noreferrer">AIQT Guardrails</a> is the reference enforcement suite and one
-      consumer of the standard, not its definition: AIQT-specific requirements ride a single
-      optional profile, <code>[profiles.aiqt]</code>, and a base adopter need not adopt AIQT. A
-      profile may only add requirements; it can never weaken, remove, or override a base
-      requirement.</p>
+    <h2>A standalone standard, shipped as part of AIQT</h2>
+    <p>OPFiles is a neutral, self-contained standard, published under CC BY-SA 4.0, and it also ships
+      as part of <a href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT
+      Guardrails</a>. Adopting AIQT brings OPFiles with it and migrates your existing operational
+      files into the store; a project that wants only the standard can take OPFiles on its own. One
+      repository holds both: its root is AIQT, which includes OPFiles, and standalone OPFiles lives at
+      the opf path within it. aiqt.ai maps to the repository root and opfiles.ai maps to the opf path,
+      so the two sites are two views of one source.</p>
+    <p>The separation of concerns is unchanged by the bundling. Nothing in the base vocabulary names
+      any particular adopter or operator; AIQT-specific requirements ride a single optional profile,
+      <code>[profiles.aiqt]</code>, and a base adopter need not adopt AIQT. A profile may only add
+      requirements; it can never weaken, remove, or override a base requirement.</p>
   </div>
 </section>
 

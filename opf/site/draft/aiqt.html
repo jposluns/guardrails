@@ -71,9 +71,11 @@
 <div class="wrap pagehead">
   <p class="eyebrow">OPFiles and AIQT</p>
   <h1>OPFiles and AIQT</h1>
-  <p class="lead">OPFiles is a standalone standard, owned by AIQT and published under CC BY-SA 4.0.
-    AIQT consumes and enforces it through one optional profile. You can adopt OPFiles without adopting
-    AIQT; if you do adopt AIQT, you inherit OPFiles as part of it.</p>
+  <p class="lead">OPFiles is a standalone standard, owned by AIQT and published under CC BY-SA 4.0, and
+    it ships as part of AIQT: adopting AIQT brings OPFiles with it and migrates your existing
+    operational files into the store, while OPFiles remains available on its own. AIQT consumes and
+    enforces the standard through one optional profile, and a base adopter need not adopt AIQT at
+    all.</p>
 </div>
 
 <section>
@@ -123,6 +125,21 @@
 </section>
 
 <section>
+  <div class="wrap">
+    <h2>One repository, two entry points</h2>
+    <p>A single repository, <code>github.com/jposluns/guardrails</code>, holds both. Its root is AIQT,
+      which includes OPFiles, and standalone OPFiles lives at the <code>opf</code> path within it.
+      aiqt.ai maps to the repository root and opfiles.ai maps to the opf path, so the two sites are two
+      views of one source, not two products maintained apart.</p>
+    <p>Adopting OPFiles is what lets the guardrails run better and more efficiently, with less
+      inference and fewer tokens: the structured TOML carries the input each process needs, so the same
+      process runs the same way every time, which reduces the likelihood of errors, omissions, and
+      hallucinations. AIQT can be adopted without OPFiles, but an adopter who takes that path misses
+      these capabilities.</p>
+  </div>
+</section>
+
+<section class="section-alt">
   <div class="wrap">
     <h2>You can adopt OPFiles without AIQT</h2>
     <p>The profile is optional. A base adopter conforms with the specification and their own checks, or
