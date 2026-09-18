@@ -491,7 +491,7 @@ section{padding:clamp(var(--sp-8),5vw,var(--sp-24)) 0}
 .flow-cap{margin:var(--sp-3) 0 0; color:var(--muted); font-size:var(--fs-small); text-align:center}
 
 /* ---- paired TOML-beside-Markdown code showcase (also reused small as the hero mock) ---- */
-.codepair{display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4); width:fit-content; max-width:100%}
+.codepair{display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4); align-items:start; margin-top:var(--sp-6)}
 @media (max-width:720px){ .codepair{grid-template-columns:1fr} }
 .codecard{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   border-top:3px solid var(--line); overflow:hidden; box-shadow:var(--shadow-1); min-width:0; width:fit-content; max-width:100%}
@@ -623,6 +623,3 @@ html[data-tabs-js] .navtabs{gap:var(--sp-2) 0}          /* tabs abut as a real t
 .codeview th,.codeview td{padding:var(--sp-2) var(--sp-3); border-bottom:1px solid var(--line);
   text-align:left; vertical-align:top; overflow-wrap:anywhere}
 .codeview th{color:var(--muted); font-weight:700}
-
-/* ---- full-width vertically-stacked code pair (landing hero + "see it in one file") ---- */
-.codepair.stack{grid-template-columns:1fr}
