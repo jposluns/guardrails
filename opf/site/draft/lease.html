@@ -78,10 +78,11 @@
 <section>
   <div class="wrap">
     <h2>About</h2>
-    <p>Before mutating the store, a run takes the lease and makes it observable at the store's sync
-      target before its writes begin, so a second system's reconciliation sees the held lease and
-      refuses. The file carries the holder, the operation, and an acquired-at timestamp read from
-      the clock at acquisition.</p>
+    <p>Before mutating the store, a run takes the lease. The standard requires it to be made
+      observable at the store's sync target before writes begin, so a second system's reconciliation
+      sees the held lease and refuses; in this build there is no sync runtime (opf sync has not yet
+      landed), so the lease is enforced single-host single-writer only. The file carries the holder,
+      the operation, and an acquired-at timestamp read from the clock at acquisition.</p>
   </div>
 </section>
 

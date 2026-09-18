@@ -93,26 +93,29 @@
       the standard, not discovered after a gate fails:</p>
     <ul class="clean">
       <li><b style="color:var(--ink)">Changelog freeze</b> checks that a published entry's bytes
-        match a recorded digest; it does not judge whether the prose is accurate.</li>
+        match a recorded digest; it does not judge whether the prose is accurate or complete.</li>
       <li><b style="color:var(--ink)">Range coverage</b> checks that changelog entries tile every
         released version with no gap or overlap; it does not judge the quality of what they say.</li>
       <li><b style="color:var(--ink)">The unreleased worklog tail</b> is reviewed rather than
-        machine-frozen: before a release cut, entries are correctable in place, so review, not a
-        digest, is the control there.</li>
+        machine-frozen: before a release cut, entries are correctable in place, so review and
+        version-control history, not a digest, are the control there.</li>
       <li><b style="color:var(--ink)">Store resolution</b> confirms one declared store resolves; it
         cannot detect a second, unnamed store a project might also keep.</li>
       <li><b style="color:var(--ink)">The tracked-store check</b> confirms the store is a tracked git
-        repository; it does not verify that the repository is backed up or hosted anywhere in
-        particular.</li>
+        repository whose pointer, recorded sync target, and actual remote agree; it does not verify
+        that the repository is backed up, accessible, or hosted anywhere in particular.</li>
       <li><b style="color:var(--ink)">The single-writer lease</b> leaves a propagation window between
         taking the lease and its reaching the sync target; the store-consistency divergence check is
         the overlapping control that catches a collision in that window, and the two together, not the
-        lease alone, are the guard.</li>
+        lease alone, are the guard. In this build the cross-system sync step (opf sync) has not
+        landed, so the lease is enforced single-host single-writer; cross-system enforcement arrives
+        with sync.</li>
       <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
         it supports; a profile it does not support is recorded as present-but-unevaluated rather than
         failing base validation.</li>
-      <li><b style="color:var(--ink)">The discovery token</b> is frozen: a mistyped token is a
-        cannot-evaluate that stops the tool, never a silent empty store.</li>
+      <li><b style="color:var(--ink)">The discovery token</b> is a single exact string, stable
+        within a base-schema major line: a mistyped or altered token is a cannot-evaluate that stops
+        the tool, never a silent empty store.</li>
       <li><b style="color:var(--ink)">A host provider's conveniences</b> call the external API of the
         host the target names. The egress bound is that named host and nothing else; the standard
         cannot vouch for the host's own behaviour beyond that bound.</li>
@@ -121,9 +124,6 @@
         flow is the adopter's own discipline, which the standard requires to exist but does not itself
         gate.</li>
     </ul>
-    <p class="lead" style="margin-top:1.2rem">TODO(verify): reconcile every item above against
-      OPF-SPEC section 17 verbatim before publication. This page was drafted by the integrator from
-      the plan's section-17 paraphrase, not by the content author.</p>
   </div>
 </section>
 

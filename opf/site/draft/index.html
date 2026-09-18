@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OPFiles: the operational-files standard</title>
-<meta name="description" content="OPFiles (OPF) is a neutral, open standard for a project's operational records: machine-written TOML sources paired with generated human-readable views, kept in lockstep by drift gates. Determinism plus complete structured input helps reduce the likelihood of AI errors, omissions, and hallucinations.">
+<meta name="description" content="OPFiles (OPF) is a neutral, open standard for a project's operational records: machine-written TOML sources paired with generated human-readable views, kept in lockstep by drift gates. Determinism plus structured, schema-validated input helps reduce the likelihood of AI errors, omissions, and hallucinations.">
 <!-- Staging tree: remove the noindex line at the public flip (Architect-owned). -->
 <meta name="robots" content="noindex">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
@@ -78,8 +78,8 @@
     <h1>Fewer AI errors. Durable records. <span class="grad">The same process on every project.</span></h1>
     <p class="lead">OPFiles (OPF, the operational-files standard) gives your teams one disciplined
       way to run AI-assisted work: each backlog item, decision, finding, and handoff lives in a
-      versioned, machine-written record that carries all the input a process needs. Complete,
-      structured records and deterministic views reduce ambiguity and the opportunity for errors
+      versioned, machine-written record that captures the declared operational context. Structured
+      records and deterministic views reduce ambiguity and the opportunity for errors
       and omissions, and the schemas and gates that enforce them are the standard's own, not any
       one assistant's or developer's. Structured input can also reduce the repeated context
       reconstruction that drives token spend, and a durable, reviewable trail is left behind by
@@ -96,18 +96,19 @@
 <section id="outcomes" class="section-alt">
   <div class="wrap">
     <p class="eyebrow">Why teams adopt it</p>
-    <h2>Five outcomes, on every project</h2>
+    <h2>Five potential benefits, on every project</h2>
     <p class="lead">Mandate one operational standard and each project inherits the same
-      discipline: the record is written by process, not by habit, and the outcomes below rest on
+      discipline: the record is written by process, not by habit, and the benefits below rest on
       that mechanism rather than on trust in any one tool or developer.</p>
     <div class="grid">
       <div class="card">
         <h3>Fewer AI errors, omissions, and hallucinations</h3>
-        <p>The record an assistant works from is versioned TOML that carries all the input a
-          process needs, so it is not reconstructing context from memory or guessing at a missing
-          field, and the schema refuses what does not fit. This lowers the opportunity for errors,
-          omissions, and hallucinations to enter the record; it does not remove it entirely, and
-          the standard says so plainly.</p>
+        <p>The record an assistant works from is versioned TOML that captures the declared
+          operational context, so it is not reconstructing that context from memory or guessing at
+          a missing field, and the schema refuses what does not fit. This can reduce reconstruction
+          and the opportunity for errors, omissions, and hallucinations to enter the record; it does
+          not remove them entirely, and completeness and accuracy of that context still require
+          review, as the standard says plainly.</p>
       </div>
       <div class="card">
         <h3>Consistency and repeatability</h3>
@@ -120,14 +121,15 @@
       <div class="card">
         <h3>Support for operational compliance</h3>
         <p>The operational record is structured and enforceable: closed schemas refuse malformed
-          records, and the integrity gates fail closed on anything they cannot evaluate. The record
+          records, and, at required enforcement posture, the integrity gates fail closed on inputs
+          they cannot evaluate. The record
           is produced as the work happens rather than reconstructed at audit time, which supports
           compliance review within the standard's declared scope; it does not by itself establish
           broader organizational or regulatory compliance.</p>
       </div>
       <div class="card">
         <h3>Less repeated context reconstruction</h3>
-        <p>Complete, structured input can reduce the back-and-forth inference and token spend that
+        <p>Structured, schema-validated input can reduce the back-and-forth inference and token spend that
           go into reconstructing context, and the effect can repeat on each project that runs the
           same process. Structured recording and review carry their own overhead, so net savings
           depend on the workflow and should be measured, not assumed.</p>
@@ -140,7 +142,7 @@
           recorded fields, and retention and backups remain the adopter's responsibility.</p>
       </div>
     </div>
-    <p>The mechanism behind these outcomes is the rest of this page: one machine-written source of
+    <p>The mechanism behind these benefits is the rest of this page: one machine-written source of
       truth, generated views that are never hand-edited, and gates that fail closed.</p>
   </div>
 </section>
@@ -213,7 +215,9 @@
         <p>A mutating render first validates the whole store and refuses to write anything on a
           failure; it regenerates only on a valid verdict and re-validates afterwards. A
           single-writer lease and a store consistency contract (nothing stale, nothing ahead,
-          divergence halts for a human) guard the store across systems.</p></li>
+          divergence halts for a human) are the standard's contract for guarding the store across
+          systems; in this build the lease is enforced on a single host, because the cross-system
+          sync step (opf sync) has not yet landed.</p></li>
     </ol>
   </div>
 </section>
@@ -221,12 +225,12 @@
 <section id="why">
   <div class="wrap">
     <p class="eyebrow">Why it works</p>
-    <h2>Complete input, deterministic process</h2>
-    <p class="lead">The outcomes above rest on two properties the standard enforces: deterministic
-      rendering, same sources to the same bytes, and complete, structured input. Together they
+    <h2>Structured input, deterministic process</h2>
+    <p class="lead">The benefits above rest on two properties the standard enforces: deterministic
+      rendering, same sources to the same bytes, and structured, schema-validated input. Together they
       reduce variance, ambiguity, and the opportunity for errors; they discipline the record the
       work runs on, not the judgment of whichever assistant runs it.</p>
-    <p>A process that reads a complete, structured record does not have to reconstruct context from
+    <p>A process that reads a structured, schema-validated record does not have to reconstruct context from
       memory, guess at a missing field, or interpret free-form prose. The closed schemas mean a
       malformed input is refused rather than silently misread; the closed transform vocabulary means
       a view can only be composed in reviewed, versioned ways; and the byte-reproducible render
@@ -235,14 +239,14 @@
       review keeps correct.</p>
     <p>For teams working with AI assistants, this structure helps reduce the likelihood of errors,
       omissions, and hallucinations in the operational record: the assistant writes into a schema
-      that refuses what does not fit and reads from a store that carries the full context, and the
+      that refuses what does not fit and reads from a store that carries the declared context, and the
       generator itself invokes no model and adds no model-generated interpretation, reproducing the
       declared source records, so assistant-authored content in those records still needs review.
       These mechanisms reduce the opportunity for a confident guess to enter the record; they do not
       remove it entirely, and the standard says so plainly in its own residual-coverage
       disclosures.</p>
-    <p>Completeness can also be an efficiency gain. Because the TOML carries the input a process
-      needs, an assistant spends less of its run reconstructing context, which can reduce
+    <p>Captured context can also be an efficiency gain. Because the TOML carries the declared
+      operational context, an assistant spends less of its run reconstructing it, which can reduce
       back-and-forth inference and token use, alongside a reduced likelihood of errors, omissions,
       and hallucinations. Structured recording adds its own overhead, so the net saving depends on
       the workflow and is worth measuring.</p>
@@ -274,7 +278,7 @@
       </div>
       <div class="card">
         <h3>Honest claims</h3>
-        <p>Gates fail closed, reports name their scope and their cannot-evaluate results, and an
+        <p>Integrity gates fail closed at required posture, reports name their scope and their cannot-evaluate results, and an
           unqualified "conformant" claim is never emitted, by tooling or by prose. Until validation
           tooling covers a claim, it is self-asserted and must say so.</p>
       </div>
