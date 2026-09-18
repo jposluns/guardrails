@@ -71,7 +71,7 @@ a named acceptance actor (actor impersonation, review-time backdating, or fabric
 write access to the run dir) are gate-blind: the gate guards the review-to-promotion BINDING, not identity
 authenticity (the reserved signature seam is the upgrade path). A passing gate proves nothing about those.
 
-This repository is not a DevProcess adopter (it has no store to import into), so even though the `opf
+This repository is not an OPFiles adopter (it has no store to import into), so even though the `opf
 import` verb is now wired (OPF-IMPORT-VERB, opf.py `_cmd_import`) there is no staged import run to check
 live: the live leg prints NOT APPLICABLE and exits 0, spec-honest like the doctor/drift legs in
 run_all_checks.sh; the assurance rides the --self-test leg over synthetic staged runs. Offline, stdlib
@@ -1271,9 +1271,9 @@ def main(argv=None):
             print("check_opf_import: unexpected argument(s): {}".format(" ".join(args)), file=sys.stderr)
             return EXIT_ERROR
         # Live leg: the `opf import` verb is now wired (opf.py `_cmd_import`), but this repo is not a
-        # DevProcess adopter and has no staged import run to check live. NOT APPLICABLE, exit 0 (the
+        # OPFiles adopter and has no staged import run to check live. NOT APPLICABLE, exit 0 (the
         # doctor/drift non-adopter posture); the assurance rides the --self-test leg over synthetic runs.
-        print("check_opf_import: NOT APPLICABLE (this repository is not a DevProcess adopter, so there is "
+        print("check_opf_import: NOT APPLICABLE (this repository is not an OPFiles adopter, so there is "
               "no staged `opf import` run to check live; the --self-test leg carries the assurance)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false-0 or uncaught exit-1

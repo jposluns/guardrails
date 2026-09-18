@@ -1,14 +1,14 @@
-# DevProcess: the operational-files standard
+# OPFiles: the operational-files standard
 
-Formal name: AIQT Development Operational Standard. Public brand: DevProcess
-(devprocess.ai). Base discovery token: `opf`. Status: draft (specification only;
+Formal name: AIQT Development Operational Standard. Public brand: OPFiles
+(opfiles.ai). Base discovery token: `opf`. Status: draft (specification only;
 schemas and the reference tooling, the scaffolder `opf init`, the importer `opf import`, the
 validator `opf doctor`, the renderer `opf render`, the relocator `opf migrate`, the
 synchronizer `opf sync`, and the schema-upgrader `opf upgrade`, ship in later releases).
 Date: 2026-09-14 (UTC).
 
-DevProcess is a neutral, self-contained operational-files standard, owned by AIQT and
-published under the Elastic License 2.0. A project conforms to DevProcess with this specification and
+OPFiles is a neutral, self-contained operational-files standard, owned by AIQT and
+published under the Elastic License 2.0. A project conforms to OPFiles with this specification and
 its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer
 of the standard, not its definition. AIQT-specific requirements are layered as one optional
 profile, `[profiles.aiqt]` (section 9), and a base adopter need not adopt AIQT.
@@ -777,11 +777,11 @@ shape (the schema release that follows this specification is normative):
 
 ```toml
 # .working/toml/manifest.toml
-# DevProcess (AIQT Development Operational Standard) store manifest and discovery marker.
+# OPFiles (AIQT Development Operational Standard) store manifest and discovery marker.
 
 [opf]
 standard = "opf"               # discovery token; exact value required
-spec_version = "1.1.0"         # DevProcess base spec version this store conforms to
+spec_version = "1.1.0"         # OPFiles base spec version this store conforms to
 layout = "inline"              # storage layout: "inline" or "per-record" (was layout_profile)
 posture = "required"           # "off", "warn", or "required" (section 11)
 import_status = "none"         # "none", "partial", or "complete"
@@ -1231,11 +1231,11 @@ carries an adopter's own additional requirements without the base ever depending
 
 Conformance is reported against the base and, separately, against each declared profile a tool
 evaluated. A report speaks in `conformant_for_declared_scope`, `nonconformant`, `indeterminate`, or
-`migration_incomplete`, each qualified by whether it concerns the DevProcess **base** or a named
+`migration_incomplete`, each qualified by whether it concerns the OPFiles **base** or a named
 **profile**. Every report names its scope, its exclusions, and its cannot-evaluate results. A
 base-conformant store may declare a profile the reporting tool did not evaluate; the report names
 that profile as unevaluated rather than implying whole-store coverage. An unqualified claim of
-"DevProcess conformant" or "AIQT conformant" is never emitted, by tooling or by prose: a
+"OPFiles conformant" or "AIQT conformant" is never emitted, by tooling or by prose: a
 conformance claim is a completeness claim over a declared set, and it enumerates that set, including
 which profiles were and were not evaluated. Until validation tooling ships, a conformance claim is
 self-asserted and MUST say so.

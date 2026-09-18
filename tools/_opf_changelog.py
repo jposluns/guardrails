@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF (DevProcess) changelog gates: range coverage + freeze over version.toml + CHANGELOG.md (U5).
+"""OPF (OPFiles) changelog gates: range coverage + freeze over version.toml + CHANGELOG.md (U5).
 
 Offline, stdlib only, fail-closed. This is the FACTS layer over the release triad U3 (`_opf_release`)
 carries: U3 validates version.toml / worklog.toml structurally (SemVer, span tiling, the coverage-digest
@@ -28,7 +28,7 @@ carries NO do-not-edit header and is never reconciled byte-for-byte. These two g
 
 Adopter-rooted, exactly like doctor.py / migrate.py (and the rest of the OPF tooling): the gates operate
 against a PRODUCT repository root named by --root (default: the cwd), resolving the store through
-`_opf_store` discovery, NEVER through `_gen_common.repo_root()`. This pack is not a DevProcess adopter,
+`_opf_store` discovery, NEVER through `_gen_common.repo_root()`. This pack is not an OPFiles adopter,
 so a live `--root .` here resolves NOT-ADOPTED and reports NOT APPLICABLE (exit 0); the assurance rides
 the `--self-test` leg over synthetic stores, reached through `tools/opf.py --self-test` as the changelog
 leg (mirroring how `_opf_store` / `_opf_schema` / `_opf_release` / `_opf_emit` register their legs).
@@ -115,7 +115,7 @@ CHANGELOG_REL = "CHANGELOG.md"            # the curated public changelog, at the
 # Store-level outcomes (the doctor.py PASS/FAIL/NA/MALFORMED idiom, named for this gate; exit 0/0/1/2).
 PASS = "PASS"
 FINDING = "FINDING"                       # a gate finding -> exit 1
-NOT_APPLICABLE = "NOT-APPLICABLE"         # not a DevProcess adopter -> degrade, never fake a pass (exit 0)
+NOT_APPLICABLE = "NOT-APPLICABLE"         # not an OPFiles adopter -> degrade, never fake a pass (exit 0)
 # CANNOT_EVALUATE (imported) -> exit 2: unreadable / unparseable / unresolvable / inconsistent carriers.
 
 EXIT = {PASS: 0, NOT_APPLICABLE: 0, FINDING: 1, CANNOT_EVALUATE: 2}
@@ -551,7 +551,7 @@ def _load_inputs(resolution, product_root):
 
 def evaluate(product_root):
     """Resolve the store at `product_root` and run both changelog gates. Returns a ChangelogResult:
-    NOT-APPLICABLE when the root is not a DevProcess adopter (like doctor.py / migrate.py; this pack's own
+    NOT-APPLICABLE when the root is not an OPFiles adopter (like doctor.py / migrate.py; this pack's own
     `--root .` lands here); CANNOT-EVALUATE (fail closed) when the store cannot resolve or a required input
     is unreadable, unparseable, or structurally inconsistent; FINDING on a coverage or freeze violation;
     PASS otherwise."""
@@ -570,7 +570,7 @@ def evaluate(product_root):
     res = _opf_store.resolve_store(product_root)
     if res.status == NOT_ADOPTED:
         return ChangelogResult(NOT_APPLICABLE,
-                               ["not a DevProcess adopter ({}); the changelog gates do not apply".format(
+                               ["not an OPFiles adopter ({}); the changelog gates do not apply".format(
                                    res.detail)])
     if res.status != RESOLVED:
         return ChangelogResult(CANNOT_EVALUATE, [res.detail])
@@ -1004,7 +1004,7 @@ def self_test():
         return root
 
     try:
-        # NOT a DevProcess adopter (no .working, no pointer) -> NOT APPLICABLE.
+        # NOT an OPFiles adopter (no .working, no pointer) -> NOT APPLICABLE.
         na_root = base_dir / "not-adopted"
         na_root.mkdir()
         check("disk-not-applicable", evaluate(na_root).status == NOT_APPLICABLE)

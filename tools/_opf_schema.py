@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF (DevProcess) record envelope + baseline type schemas + status/transition grammar + counters (U2).
+"""OPF (OPFiles) record envelope + baseline type schemas + status/transition grammar + counters (U2).
 
 Offline, stdlib only, fail-closed. This is the CORE VALIDATOR the later OPF units (doctor, views,
 import) build on: given a parsed record it decides whether the record is a well-formed instance of its

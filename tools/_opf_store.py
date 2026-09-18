@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF (DevProcess) store resolution + manifest base/profile schema + discovery (OPF core-tooling U1).
+"""OPF (OPFiles) store resolution + manifest base/profile schema + discovery (OPF core-tooling U1).
 
 Offline, stdlib only, fail-closed. This is the FOUNDATION module the later OPF units build on: it sets
 the schema conventions and the resolution/discovery contract they follow, so it is deliberately strict
@@ -7,11 +7,11 @@ and idiomatic.
 
 Two things live here, both from OPF-SPEC.md sections 4, 5, and 9:
 
-  1. STORE RESOLUTION + DISCOVERY (spec 4.3 to 4.5). A DevProcess store is resolved from a PRODUCT
+  1. STORE RESOLUTION + DISCOVERY (spec 4.3 to 4.5). An OPFiles store is resolved from a PRODUCT
      REPOSITORY ROOT (the tool is aimed at one via --root, defaulting to the cwd) through a committed
      pointer `.opf.toml` (with an uncommitted `.opf.local.toml` override), NOT through a hardcoded path
      and NOT through `_gen_common.repo_root()`: an OPF store roots via the pointer or --root, not via a
-     `.git` walk, because this repo is not itself a DevProcess adopter and an adopter store need not sit
+     `.git` walk, because this repo is not itself an OPFiles adopter and an adopter store need not sit
      at a repo root the walk would find. Within the resolved STORE REPOSITORY ROOT the machine store is
      DISCOVERED as the single immediate subdirectory of `.working/` whose `manifest.toml` declares
      `standard = "opf"` in its `[opf]` base table (the standard name is `toml`, tried
@@ -96,7 +96,7 @@ PRIOR_STANDARD_TOKEN = "devprocess"    # the RETIRED 1.0.0 discovery token (base
                                        # token the base declares, so acceptance is expressed as a token set.
 MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (manifest/pointer); a larger
                                        # store input is refused rather than read unboundedly (SECA)
-SUPPORTED_SPEC_VERSION = "1.1.0"       # the DevProcess base spec_version this tooling implements; a store
+SUPPORTED_SPEC_VERSION = "1.1.0"       # the OPFiles base spec_version this tooling implements; a store
                                        # declaring an OLDER spec_version is fail-closed with a distinct
                                        # migration-needed finding naming the `opf upgrade` remedy (spec 9.x)
 

@@ -19,7 +19,7 @@ the WRONG root, a guard-input-soundness regression). A run whose root cannot be 
 launch failure, an invalid/garbage gitfile, or a toplevel that does not contain the gate) fails closed
 (exit 2) rather than returning a false 0.
 
-This repository is not a DevProcess adopter, so the live leg prints doctor's own NOT APPLICABLE and exits 0,
+This repository is not an OPFiles adopter, so the live leg prints doctor's own NOT APPLICABLE and exits 0,
 spec-honest like the render-drift/crosswalk/doctor legs in run_all_checks.sh; the day this repo adopts, the
 same leg gates real store integrity with no change.
 
