@@ -85,10 +85,10 @@ sidebar-active = "development"
           expanding scope on its own.</p></li>
       <li><b>Underlying gaps become guardrails, and the fix can be shared.</b>
         <p>When the assistant caused the issue through a guardrail gap, it also creates or fixes
-          a guardrail so it should not recur, additive to rules three and four: the instance is
-          still fixed. Then, if your configuration permits and with your permission, the new
-          guardrail can go back to the AIQT project as a seed PR, so every developer's assistant
-          improves. Sharing is opt-in; the details are on the
+          a guardrail so it should not recur, additive to rules three and four: the instance
+          itself is still handled under them. Then, if your configuration permits and with your
+          permission, the new guardrail can go back to the AIQT project as a seed PR, so every
+          developer's assistant improves. Sharing is opt-in; the details are on the
           <a href="/tech-details#seeds">technical details</a> page.</p></li>
     </ol>
   </div>
@@ -125,7 +125,7 @@ sidebar-active = "development"
       <li><b>The doctor verifies it.</b> It confirms that the install is present and consistent.
         That is what the doctor proves: the files exist, agree with each other, and are current.
         It does not prove that a given agent loaded them in a given session; the running evidence
-        for that is the visible AIQT check and the named catches while you work.
+        for that is the named catches you see while you work.
         This is the ordering applied to the tool itself: "installed" means a check actually
         ran, and the doctor is that check.</li>
     </ol>
