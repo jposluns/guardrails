@@ -19,6 +19,10 @@
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
+<!-- PREVIEW-BANNER (remove at go-live) -->
+<div class="preview-banner">This site previews what OPFiles and AIQT will release in the coming days. It is under review by a small group testing the tooling.</div>
+<!-- /PREVIEW-BANNER -->
+
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
@@ -175,7 +179,7 @@
       bake its own output into a generated view, because deterministic renders exclude model
       involvement by definition and advisory activity over a projection happens at read time,
       outside the generator. These mechanisms reduce the opportunity for a confident guess to enter
-      the record; they reduce that opportunity; they do not remove it entirely, and the standard says so plainly in its own
+      the record; they do not remove it entirely, and the standard says so plainly in its own
       residual-coverage disclosures.</p>
     <p>Completeness is also an efficiency gain. Because the TOML carries all the input a process needs,
       the same process runs the same way every time, with less back-and-forth inference and fewer
@@ -268,14 +272,15 @@
           regenerates the declared views, gated on a full store validation before and after.
           <code>opf doctor</code> runs the whole-store integrity layer. <code>opf upgrade</code>
           migrates a 1.0.0 store to 1.1.0 in place, additively and idempotently.
-          <code>opf import</code> scans, plans, and captures attributed reviews of legacy content.</p>
+          <code>opf import</code> scans, plans, captures attributed reviews of legacy content, and
+          promotes a reviewed import with <code>opf import --apply</code>.</p>
       </div>
       <div class="card">
         <h3>Fails closed until it lands</h3>
-        <p><code>opf import --apply</code> (promotion of a reviewed import), <code>opf migrate</code>
-          (history-preserving store relocation), and <code>opf sync</code> (the surfaced pull and
-          push step of the consistency contract) are recognized verbs that refuse with a clear
-          message and a nonzero exit. A stub is never mistaken for a completed operation.</p>
+        <p><code>opf migrate</code> (history-preserving store relocation) and <code>opf sync</code>
+          (the surfaced pull and push step of the consistency contract) are recognized verbs that
+          refuse with a clear message and a nonzero exit. A stub is never mistaken for a completed
+          operation.</p>
       </div>
     </div>
   </div>
@@ -284,7 +289,13 @@
 <section id="start">
   <div class="wrap">
     <p class="eyebrow">Getting started</p>
-    <h2>Adopt it in three moves</h2>
+    <h2>Adopt it</h2>
+    <h3>Assistant-driven adoption</h3>
+    <p>The primary path is coming: point your AI development assistant at this site root and tell it to
+      adopt OPF (or adopt AIQT). It reads the standard, plans the store, and, on your yes, carries out
+      and merges the adoption, leaving the <code>.working/</code> store for your review. This is the
+      interface we are building; it is not live yet.</p>
+    <h3>Manual adoption, available today</h3>
     <ol class="steps">
       <li><b>Scaffold.</b>
         <p>Run <code>opf init</code> at your project root. It creates the store sources

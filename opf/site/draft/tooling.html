@@ -100,13 +100,11 @@
         <tr><td><code>opf render</code></td><td>Regenerates the declared views; <code>--check</code> reports drift read-only, <code>--write</code> writes only on a full store validation before and after.</td><td>Available now</td></tr>
         <tr><td><code>opf doctor</code></td><td>Runs the whole-store integrity layer read-only and returns a validate, invalid, or cannot-evaluate verdict.</td><td>Available now</td></tr>
         <tr><td><code>opf upgrade</code></td><td>Applies the in-place, additive, idempotent base-schema upgrade, staged for your own review and merge; it never commits.</td><td>Available now</td></tr>
-        <tr><td><code>opf import</code></td><td>Scans, plans, and captures attributed reviews of legacy content; the scan and plan and review modes are usable, and promotion is deferred.</td><td>Partly available</td></tr>
+        <tr><td><code>opf import</code></td><td>Scans, plans, captures attributed reviews of legacy content, and promotes a reviewed import with <code>--apply</code>; scan, plan, review, and apply have all landed.</td><td>Available now</td></tr>
         <tr><td><code>opf migrate</code></td><td>Relocates the whole store, git history and worklog preserved, to any location a target can name.</td><td>Fails closed until it lands</td></tr>
         <tr><td><code>opf sync</code></td><td>The surfaced pull and push step of the store consistency contract.</td><td>Fails closed until it lands</td></tr>
       </tbody>
     </table></div>
-    <p class="lead" style="margin-top:1rem">TODO(verify): confirm each status line against the shipped
-      dispatcher before the public flip, since the roster advances verb by verb.</p>
   </div>
 </section>
 
