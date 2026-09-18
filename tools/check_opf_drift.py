@@ -18,7 +18,7 @@ confirmed (git missing, a launch failure, an invalid/garbage gitfile, or a tople
 the gate) fails closed (exit 2) rather than silently checking the WRONG root and returning a false 0
 (guard-input-soundness).
 
-This repository is not a DevProcess adopter, so the live leg prints render's own NOT APPLICABLE and exits 0,
+This repository is not an OPFiles adopter, so the live leg prints render's own NOT APPLICABLE and exits 0,
 spec-honest like the crosswalk/doctor legs in run_all_checks.sh; the day this repo adopts, the same leg
 gates real view drift with no change. The gate's verdict uses render's own 0/1/2 vocabulary (0 clean, 1
 drift, 2 cannot-evaluate) but is assigned from the drift MARKER, not the bare child exit code. The mapping is

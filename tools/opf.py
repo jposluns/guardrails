@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""opf: the DevProcess (OPF) reference-tooling dispatcher (OPF core-tooling, skeleton from U1).
+"""opf: the OPFiles (OPF) reference-tooling dispatcher (OPF core-tooling, skeleton from U1).
 
   opf.py --self-test                run every registered OPF helper self-test (the CI leg)
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)

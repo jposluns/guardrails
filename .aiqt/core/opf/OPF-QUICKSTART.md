@@ -1,12 +1,12 @@
-# DevProcess at a glance
+# OPFiles at a glance
 
-Date: 2026-09-07 (UTC). The two-minute version of the DevProcess standard; the full specification
+Date: 2026-09-07 (UTC). The two-minute version of the OPFiles standard; the full specification
 lives in OPF-SPEC.md beside this file.
 
 ## What it is
 
-DevProcess is a neutral operational-files standard; AIQT layers its own requirements as one optional
-`[profiles.aiqt]` profile, and a project can adopt DevProcess without adopting AIQT.
+OPFiles is a neutral operational-files standard; AIQT layers its own requirements as one optional
+`[profiles.aiqt]` profile, and a project can adopt OPFiles without adopting AIQT.
 
 OPF standardizes a project's operational files: backlog, worklog, findings, decisions, blocks,
 handoffs, references. Machines write versioned TOML in one store; humans read generated views. The
@@ -124,7 +124,7 @@ Additions the decisions imply but do not literally specify, flagged for ratifica
 - Integrity-layer roster grew three checks: pointer and sync-target agreement, unmanaged-path
   containment, and the tracked-store check now running against the resolved store.
 
-Superseded by the DevProcess identity fold (this revision):
+Superseded by the OPFiles identity fold (this revision):
 
 - The base discovery token is `opf`, carried in the `[opf]` base manifest table. This supersedes the
   earlier `aiqt-opf` token; the interim `devprocess` token and `[devprocess]` table are retired by the

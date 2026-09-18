@@ -1,4 +1,4 @@
-"""Deterministic view generators and the closed transform vocabulary for the DevProcess (OPF) store
+"""Deterministic view generators and the closed transform vocabulary for the OPFiles (OPF) store
 (OPF core-tooling, unit U4). Stdlib only; adopter-rooted; byte-reproducible.
 
 This is the multi-source render side of `opf render`. Where the shared driver in `opf_render.py`
@@ -1418,7 +1418,7 @@ def render(argv, observations=None):
 
     res = _opf_store.resolve_store(product_root)
     if res.status == _opf_store.NOT_ADOPTED:
-        print("opf render: NOT APPLICABLE ({} is not a DevProcess adopter root; {})".format(
+        print("opf render: NOT APPLICABLE ({} is not an OPFiles adopter root; {})".format(
             product_root, res.detail))
         return EXIT_OK
     if res.status != _opf_store.RESOLVED:
