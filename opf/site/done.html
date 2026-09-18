@@ -116,7 +116,7 @@
 <span class="tok-key">id</span>         = <span class="tok-str">"DN-42"</span>
 <span class="tok-key">type</span>       = <span class="tok-str">"done"</span>
 <span class="tok-key">status</span>     = <span class="tok-str">"recorded"</span>
-<span class="tok-key">receipt_of</span> = <span class="tok-str">"BI-42"</span></div>
+<span class="tok-key">links</span>      = [{ <span class="tok-key">rel</span> = <span class="tok-str">"receipt_of"</span>, <span class="tok-key">id</span> = <span class="tok-str">"BI-42"</span> }]</div>
   </div>
   <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
   <p>The shared index shape (<code>schema = 1</code> plus <code>[[record]]</code> rows) with the standard envelope and no type-specific extra fields. The single state is <code>recorded</code>, with no transitions and never proposable: a factual receipt awaits no ratification, so it carries no <code>/proposed</code> qualifier. It links <code>receipt_of</code> to the backlog item it witnesses; a standalone receipt is legal only for imported history with provenance.</p>

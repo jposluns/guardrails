@@ -433,6 +433,16 @@ html[data-family="other"] section[data-family-section="other"]{display:block}
   }
 }
 
+/* light-theme: darken the small-text accent foregrounds that fall just below WCAG AA.
+   .pill.next and .sidebar a.navlink.active render --accent on a light fill (~4.4:1);
+   scope the darker blue to light only, leaving the dark-theme --accent untouched. */
+:root[data-theme="light"] .pill.next{color:#1b52a0}
+:root[data-theme="light"] .sidebar a.navlink.active{color:#1552a6}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme]) .pill.next{color:#1b52a0}
+  :root:not([data-theme]) .sidebar a.navlink.active{color:#1552a6}
+}
+
 /* type scale applied to the shared elements (a refinement of the existing sizes) */
 body{font-size:var(--fs-body)}
 header.hero h1{font-size:var(--fs-hero)}

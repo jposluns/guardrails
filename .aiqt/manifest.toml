@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "308d253f1c1f8a0b4ba80f6f353de87cf759458244bf523f22df128cdc286292"
+tree-sha256 = "1aae72f3e8e611fa0c4134dfcee1d4cf754a92465ae7cfd2046fd857b6c139a3"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2346,8 +2346,8 @@ sha256 = "b5b650a1ed9f002c3387c228af1c25d987227b933d6ba3ebed5ff1024a122077"
 
 [[sources]]
 path = "opf/site/about.html"
-bytes = 7339
-sha256 = "ebfc6016bad86cfaa399947fc26f90b74c1a74b0dccd508b944d18058790e4b8"
+bytes = 7342
+sha256 = "1297c255004f40251772bb61c65af4c6d14fc4aa4fa71636729bf381c55f91e7"
 
 [[sources]]
 path = "opf/site/adopt.html"
@@ -2356,8 +2356,8 @@ sha256 = "e935e2b1a2a883de595861a453793e23f98856662af7b9b5e2305da608987006"
 
 [[sources]]
 path = "opf/site/aiqt.html"
-bytes = 11550
-sha256 = "04bfba206b79d84c9d3c424cdd7c4a5ad2ca0b8c7bd2923c18e4febd15356b69"
+bytes = 11548
+sha256 = "846d617195e52ecdb4471571493ec33ff8ce101d8a04532bf7e74e6e5ea36fee"
 
 [[sources]]
 path = "opf/site/archive.html"
@@ -2401,8 +2401,8 @@ sha256 = "0f7036d01c5027493cda56348660acc1984d5b9a358b928098cb64112a6411d0"
 
 [[sources]]
 path = "opf/site/done.html"
-bytes = 9016
-sha256 = "9b9d259dd3357084abb531c8eca3ea2b3377960a0f33d21cab570bf238917ba4"
+bytes = 9134
+sha256 = "770dfc441b9f29bb6f637e76b6f8a89c07c38271e7becf8b54c4184b563c372c"
 
 [[sources]]
 path = "opf/site/favicon.svg"
@@ -2421,8 +2421,8 @@ sha256 = "59469cfdccf9a0aba7c3f1d8445b1b367a4a50035fae20f837f700e898f5466c"
 
 [[sources]]
 path = "opf/site/index.html"
-bytes = 22644
-sha256 = "c5ca8fe01f90433e88ab6a991365c5911609c3f766c3acb0e96d6de8f896113d"
+bytes = 22639
+sha256 = "eeb3ecfe55ca24b000079cb141d033dd4f019c4a83bef20d6b73b3aea8270640"
 
 [[sources]]
 path = "opf/site/lease.html"
@@ -2481,8 +2481,8 @@ sha256 = "440d6ec540efa60f6a88ffffe40611c63fcd1807a79b146ef3f2655ad775d0ac"
 
 [[sources]]
 path = "opf/site/styles.css"
-bytes = 35774
-sha256 = "6a26b57828cdc938da127775d6828ab813a0d406e3d39487a517571765e2234b"
+bytes = 36312
+sha256 = "e3d7326f2d36133bed44f5206aa75cf6ad352d0d26524c2d85ea4d5753fad39f"
 
 [[sources]]
 path = "opf/site/theme.js"
@@ -2491,8 +2491,8 @@ sha256 = "c57746b75ebb827bbf7eaa8d876aabef23c3ee347c373a60df5a13cc80ee4358"
 
 [[sources]]
 path = "opf/site/tooling.html"
-bytes = 12705
-sha256 = "efc290ab83a88bc2722dd50a82379e3c9c812a2c99bca04bab0879c96d58265e"
+bytes = 12749
+sha256 = "9bbe7b702341291e73ecd8c3c77b37b3f15ee1effb645039b4b62a05122dd75c"
 
 [[sources]]
 path = "opf/site/version.html"
@@ -2686,8 +2686,8 @@ sha256 = "4b9bded23b95d6f6250ca2da5c288626111ba82a3ea99da26556cbb832ff2a86"
 
 [[sources]]
 path = "site/styles.css"
-bytes = 35774
-sha256 = "6a26b57828cdc938da127775d6828ab813a0d406e3d39487a517571765e2234b"
+bytes = 36312
+sha256 = "e3d7326f2d36133bed44f5206aa75cf6ad352d0d26524c2d85ea4d5753fad39f"
 
 [[sources]]
 path = "site/teams.html"
