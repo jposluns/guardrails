@@ -83,7 +83,7 @@ GATE_KEYS = {"id", "script", "rules", "platform", "default", "class", "residue"}
 PLATFORMS = {"ci"}
 DEFAULTS = {"block"}
 CLASSES = {"a", "c"}   # b is the hook axis; d is never authored on a control (see the rubric)
-SCRIPT_RE = re.compile(r"^tools/[A-Za-z0-9_]+\.py$")
+SCRIPT_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_]+\.py$")  # opf/ accepted toward OPF-SELF-CONTAIN; inert until an opf/tools path exists
 # Matches the isolated python3 -I -B tools/*.py roster steps (the house launcher grammar the
 # check_python_launcher_isolation gate enforces), so the inverse roster check sees exactly those steps:
 # the gitleaks binary step is a shell step, invisible to this regex, and carries no manifest entry by
@@ -93,7 +93,7 @@ SCRIPT_RE = re.compile(r"^tools/[A-Za-z0-9_]+\.py$")
 # lexical scan of trusted, controlled roster files, so a `python3 -I -B tools/*.py` token embedded in a
 # quoted argument, a heredoc, or an eval string may still be miscounted. The authoritative single-source
 # of the roster (generating both runners from this manifest) is deferred.
-ROSTER_RE = re.compile(r"python3 -I -B (tools/[A-Za-z0-9_]+\.py)")
+ROSTER_RE = re.compile(r"python3 -I -B ((?:opf/)?tools/[A-Za-z0-9_]+\.py)")  # opf/ accepted toward OPF-SELF-CONTAIN; inert until an opf/tools path exists
 
 # The BOUNDARY string carried at the ledger top level: the honest half of the artefact, in the file.
 BOUNDARY = (
@@ -529,6 +529,22 @@ def self_test_main():
     failures = []
     skipped = []
     unread_manifest = None
+
+    # (opf) OPF-SELF-CONTAIN grammar-widening (change-carries-check): SCRIPT_RE and ROSTER_RE now
+    # accept an opf/tools/*.py path as well as the current tools/*.py, while staying anchored so a
+    # path under any other parent is still rejected. These module-level assertions fail without the
+    # widening and are independent of the synthetic-tree cases below.
+    if not SCRIPT_RE.match("tools/g_alpha.py"):
+        failures.append("opf: SCRIPT_RE must still accept a current tools/*.py script")
+    if not SCRIPT_RE.match("opf/tools/g_alpha.py"):
+        failures.append("opf: SCRIPT_RE must accept an opf/tools/*.py script (grammar-widening)")
+    if SCRIPT_RE.match("evil/tools/g_alpha.py"):
+        failures.append("opf: SCRIPT_RE must stay anchored (no parent prefix other than opf/)")
+    if ROSTER_RE.findall("python3 -I -B tools/g_alpha.py --check") != ["tools/g_alpha.py"]:
+        failures.append("opf: ROSTER_RE must still extract a current tools/*.py roster step")
+    if ROSTER_RE.findall("python3 -I -B opf/tools/g_alpha.py --check") != ["opf/tools/g_alpha.py"]:
+        failures.append("opf: ROSTER_RE must extract an opf/tools/*.py roster step (grammar-widening)")
+
     try:
         # (a) Conformant tree: generate, re-check drift-clean, statuses correct, boundary present.
         good = tmp / "good"

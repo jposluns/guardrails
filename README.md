@@ -5,7 +5,7 @@
 AIQT Guardrails holds your assistant to one standard: **A**ccuracy, **I**ntegrity, **Q**uality, and
 **T**rust. More than guidance: these principles outrank progress, speed, and cost. In chat, your assistant
 answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes they are built to
-catch. Free and open.
+catch. Source-available.
 
 The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 
@@ -32,7 +32,7 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 ## Better with every release
 
 AIQT catches the mistakes that align to the rules and process we have built so far, and improves with every
-release. The pack is open, so you can contribute your own guardrails today. Opt-in tools coming in an upcoming
+release. The pack is source-available, so you can contribute your own guardrails today. Opt-in tools coming in an upcoming
 release will let you automatically share the comments, improvements, and guardrails you have added, so the
 community's contributions feed future versions.
 
@@ -44,9 +44,9 @@ we intended you to have.
 
 ## Licence and trademarks
 
-Published under the Creative Commons Attribution-ShareAlike 4.0 International License
-([CC BY-SA 4.0](LICENSE)); see [NOTICE](NOTICE) for attribution and third-party notices. The licence covers
-the pack's content and grants no trademark rights: AIQT™ and AIQT Guardrails™ are trademarks of Jeff Posluns.
+Published under the [Elastic License 2.0](LICENSE), a source-available licence; see [NOTICE](NOTICE) for
+attribution and third-party notices. The licence covers the pack's content and grants no trademark rights:
+AIQT™ and AIQT Guardrails™ are trademarks of Jeff Posluns.
 
 ## More
 

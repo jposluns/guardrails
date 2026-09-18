@@ -5,7 +5,7 @@ note = "What you can use today, what is being built, and what is only an idea, e
 pill_class = "now"
 pill_label = "Available now"
 heading = "The chat assistant"
-body = 'You can have this today. AIQT 1.0.0 packages the governance core for a chat assistant: a Skill you upload to Claude, or a portable instruction file for other assistants (ChatGPT, Copilot, Gemini). It guides that assistant toward a stated standard: claims matched to their sources, checks kept at full strength, and "finished" verified before it is said.'
+body = 'You can have this today. AIQT 1.0.5 packages the governance core for a chat assistant: a Skill you upload to Claude, or a portable instruction file for other assistants (ChatGPT, Copilot, Gemini). It guides that assistant toward a stated standard: claims matched to their sources, checks kept at full strength, and "finished" verified before it is said.'
 links = [
   { text = "See what has been tested on each platform.", href = "/evidence" },
   { text = "Add it to your assistant.", href = "/install" },

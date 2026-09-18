@@ -10,11 +10,11 @@ description: >-
 
 # AIQT™
 
-Version: 1.0.4  
+Version: 1.0.5  
 Author: Jeff Posluns  
 Website: https://aiqt.ai  
 GitHub: https://github.com/jposluns/guardrails  
-Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)
+Licence: Elastic License 2.0 (https://www.elastic.co/licensing/elastic-license)
 
 The one priority ordering, decided in advance:
 
@@ -243,4 +243,4 @@ scope for a chat assistant that changes no files, and load with the development 
 
 ---
 
-AIQT Guardrails by Jeff Posluns, https://github.com/jposluns/guardrails, CC BY-SA 4.0
+AIQT Guardrails by Jeff Posluns, https://github.com/jposluns/guardrails, Elastic License 2.0
