@@ -6,7 +6,7 @@
 <title>About and licence | OPFiles</title>
 <meta name="description" content="OPFiles is a neutral operational-files standard authored and maintained by Jeff Posluns, source-available under the Elastic License 2.0 (ELv2).">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: machine TOML source leading to a generated view, kept honest by a drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,21 +66,23 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
+<div class="wrap pagehead refhead">
   <p class="eyebrow">About and licence</p>
   <h1>About OPFiles</h1>
   <p class="lead">OPFiles is a neutral, self-contained operational-files standard. Its formal name is
     the AIQT Development Operational Standard; OPFiles is the public brand. It is authored and
     maintained by Jeff Posluns and is source-available under the Elastic License 2.0 (ELv2).</p>
+  <p class="refchips"><span>Neutral standard</span><span>Elastic License 2.0</span><span>Source-available</span></p>
 </div>
 
 <section>
   <div class="wrap">
+    <p class="eyebrow">Authorship</p>
     <h2>Authorship and trademarks</h2>
     <p>OPFiles is authored and maintained by Jeff Posluns. AIQT and AIQT Guardrails are trademarks of
       Jeff Posluns; AIQT is a brand, not a legal entity. The standard's formal name uses the AIQT
       trademark. Nothing in the base-required vocabulary names AIQT or any other adopter, and a project
-      conforms with the specification and its own checks. AIQT Guardrails is one reference enforcement
+      can align with the specification using its own checks. AIQT Guardrails is one reference enforcement
       suite and one consumer of the standard, with <code>[profiles.aiqt]</code> as its optional reference
       profile. A base adopter need not adopt the suite.
       See <a href="./aiqt">OPFiles and AIQT</a> for that relationship.</p>
@@ -89,7 +91,8 @@
 
 <section class="section-alt">
   <div class="wrap">
-    <h2>Licence</h2>
+    <p class="eyebrow">Licence</p>
+    <h2>Source-available under ELv2</h2>
     <p>The whole OPFiles project is source-available under the Elastic License 2.0 (ELv2). You may use,
       copy, adapt, distribute, and prepare derivative works of it freely, subject to the licence terms,
       and you keep your changes. The main restriction is that you may not offer it to others as a
@@ -104,6 +107,7 @@
 
 <section>
   <div class="wrap">
+    <p class="eyebrow">The standard and the suite</p>
     <h2>The standard and the reference suite</h2>
     <p>The standard is the specification and quickstart. The reference enforcement suite is
       <a href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>, one

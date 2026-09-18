@@ -6,7 +6,7 @@
 <title>OPFiles and AIQT | OPFiles</title>
 <meta name="description" content="How AIQT consumes and enforces OPFiles through one optional profile, what the profile adds, and why you can adopt OPFiles without adopting AIQT.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink active" href="./aiqt" aria-current="page">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -69,17 +69,12 @@
 <div class="wrap pagehead">
   <p class="eyebrow">OPFiles and AIQT</p>
   <h1>OPFiles and AIQT</h1>
-  <p class="lead">OPFiles is a standalone standard, authored and maintained by Jeff Posluns and
-    source-available under the Elastic License 2.0 (ELv2). It ships as part of AIQT: adopting AIQT
-    brings OPFiles with it, and the planned assistant-driven adoption flow will also migrate your
-    existing operational files into the store; reviewed manual import is available now through
-    <code>opf import --apply</code>. OPFiles remains available on its own: AIQT Guardrails consumes
-    and enforces the standard through one optional profile, and a base adopter need not adopt
-    AIQT Guardrails at all.</p>
+  <p class="lead">OPFiles is a standalone standard, authored and maintained by Jeff Posluns and source-available under the Elastic License 2.0 (ELv2); AIQT Guardrails consumes and enforces it through one optional profile, so adopting AIQT brings OPFiles, yet a base adopter need not adopt AIQT at all.</p>
 </div>
 
 <section>
   <div class="wrap">
+    <p class="eyebrow">The relationship</p>
     <h2>The relationship</h2>
     <p>Jeff Posluns authors and maintains the standard. AIQT and AIQT Guardrails are his trademarks;
       the standard's formal name, the AIQT Development Operational Standard, uses the AIQT trademark.
@@ -93,19 +88,48 @@
 
 <section class="section-alt">
   <div class="wrap">
+    <p class="eyebrow">The profile</p>
     <h2>What the profile adds</h2>
     <p>A profile may only add requirements; it can never weaken, remove, or override a base
       requirement, and a profile value that would loosen a base setting is a profile validation
-      failure, surfaced, never applied. The AIQT profile declares a posture floor of
-      <code>required</code>, a set of required modules (governance, operational policy, and concurrent
-      operation), a triple-family verification floor that base tools ignore, and its own
-      <code>x-aiqt</code> record extension namespace. Where a profile setting meets a base setting,
-      they combine toward the stricter value.</p>
+      failure, surfaced, never applied. Where a profile setting meets a base setting, they combine
+      toward the stricter value.</p>
+    <div class="benefits">
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/></svg></span>
+        <h3>Posture floor</h3>
+        <p>A floor of <code>required</code>.</p>
+      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4.5" width="7" height="7" rx="1.3"/><rect x="13" y="4.5" width="7" height="7" rx="1.3"/><rect x="4" y="13.5" width="7" height="7" rx="1.3"/><rect x="13" y="13.5" width="7" height="7" rx="1.3"/></svg></span>
+        <h3>Required modules</h3>
+        <p>Governance, operational policy, and concurrent operation.</p>
+      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.7-4.9"/></svg></span>
+        <h3>Triple-family verification</h3>
+        <p>A verification floor that base tools ignore.</p>
+      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4c-2 0-3 1-3 3v2c0 1-1 2-2 2 1 0 2 1 2 2v2c0 2 1 3 3 3"/><path d="M16 4c2 0 3 1 3 3v2c0 1 1 2 2 2-1 0-2 1-2 2v2c0 2-1 3-3 3"/></svg></span>
+        <h3>The <code>x-aiqt</code> namespace</h3>
+        <p>Its own record extension namespace.</p>
+      </div>
+    </div>
+    <div class="codecard src">
+      <div class="codecard-bar">profile example</div>
+      <div class="codebody"><span class="tok-tbl">[opf]</span>            <span class="tok-key"># the base standard: rules every adopter follows</span>
+
+<span class="tok-tbl">[profiles.aiqt]</span>  <span class="tok-key"># one optional profile: may only add, never loosen</span>
+<span class="tok-key">posture_floor</span> = <span class="tok-str">"required"</span></div>
+    </div>
+    <p class="code-cap">Illustrative: the base <code>[opf]</code> table is what every adopter follows; the <code>[profiles.aiqt]</code> table only tightens it.</p>
   </div>
 </section>
 
 <section>
   <div class="wrap">
+    <p class="eyebrow">Tool behaviour</p>
     <h2>How tools treat the profile</h2>
     <p>A tool that does not recognize a declared profile, or does not support its major version,
       ignores it for enforcement and records it as present-but-unevaluated; it does not fail base
@@ -118,16 +142,20 @@
 
 <section class="section-alt">
   <div class="wrap">
+    <p class="eyebrow">Inheritance</p>
     <h2>Adopt AIQT and you inherit OPFiles</h2>
     <p>The records-first discipline AIQT Guardrails enforces is one implementation of this standard, so
       by default an AIQT adopter is an OPFiles adopter. If you arrived from
       <a href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">aiqt.ai</a>, the store and
       release model described across this site is the same one the pack works.</p>
+    <p>The planned assistant-driven adoption flow will also migrate your existing operational files
+      into the store; reviewed manual import is available now through <code>opf import --apply</code>.</p>
   </div>
 </section>
 
 <section>
   <div class="wrap">
+    <p class="eyebrow">One source</p>
     <h2>One repository, two entry points</h2>
     <p>A single repository, <code>github.com/jposluns/guardrails</code>, holds both. Its root is AIQT,
       which includes OPFiles, and standalone OPFiles lives at the <code>opf</code> path within it.
@@ -144,9 +172,10 @@
 
 <section class="section-alt">
   <div class="wrap">
+    <p class="eyebrow">Standalone</p>
     <h2>You can adopt OPFiles without AIQT</h2>
-    <p>The profile is optional. A base adopter conforms with the specification and their own checks, or
-      with the reference tooling, and need not enable <code>[profiles.aiqt]</code> at all. See
+    <p>The profile is optional. A base adopter can align with the specification using their own checks, or
+      the reference tooling, and need not enable <code>[profiles.aiqt]</code> at all. See
       <a href="./adopt">adopt by hand</a> for the neutral, tooling-independent path.</p>
   </div>
 </section>

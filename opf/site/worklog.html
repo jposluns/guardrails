@@ -6,7 +6,7 @@
 <title>worklog.toml: the durable operational record | OPFiles</title>
 <meta name="description" content="One entry per change, appended as the work happens: mutable until release, frozen after it, never deleted.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,99 +66,107 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
+<div class="wrap pagehead refhead">
   <p class="eyebrow">Core store file</p>
-  <h1>worklog.toml</h1>
-  <p class="lead">The detailed operational record, at <code>.working/toml/worklog.toml</code>: one
-    entry per change, appended as the work happens.</p>
+  <h1>The worklog</h1>
+  <p class="refchips"><code>worklog.toml</code> <code>WL</code> <code>.working/toml/</code></p>
+  <p class="lead">The detailed operational record: one entry per change, appended as the work
+    happens.</p>
 </div>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>The problem it solves</h2>
+    <p class="refpull">Durable facts are what make summaries safe.</p>
+    <p>Because the detail beneath a changelog entry is never lost, the public story can be re-worded,
+      re-rolled, and re-told at any depth without risk: editing a summary can never change the facts,
+      which persist here. The freeze-at-release rule draws the line honestly: before release, a mistake
+      is corrected in place through ordinary review; after release, a correction is a new entry that
+      links the one it corrects.</p>
+  </div>
+</section>
 
 <section>
   <div class="wrap">
-    <h2>About</h2>
-    <p>The worklog is the fact layer of the release triad. Every change gets an entry; every entry
-      stays forever. Entries are mutable until a release freezes their span, immutable after, and
-      never consumed, rolled away, or deleted. Every fact ever recorded stays in the worklog or its
-      archive, and survives store relocation byte for byte.</p>
+    <p class="eyebrow">At a glance</p>
+    <dl class="refstrip">
+      <div>
+        <dt>Records</dt>
+        <dd class="refchips"><code>[[entry]]</code> <span>one per change</span> <span>append-only, never deleted</span></dd>
+      </div>
+      <div>
+        <dt>Renders</dt>
+        <dd class="refchips"><code>WORKLOG.md</code></dd>
+      </div>
+      <div>
+        <dt>Read by</dt>
+        <dd class="refchips"><code>opf render</code> <code>opf doctor</code> <span>release cut</span> <span>changelog drafting</span></dd>
+      </div>
+    </dl>
   </div>
 </section>
 
 <section class="section-alt">
   <div class="wrap">
-    <h2>Why</h2>
-    <p>Durable facts are what make summaries safe. Because the detail beneath a changelog entry is
-      never lost, the public story can be re-worded, re-rolled, and re-told at any depth without
-      risk: editing a summary can never change the facts, which persist here. The freeze-at-release
-      rule draws the line honestly: before release, a mistake is corrected in place through
-      ordinary review; after release, a correction is a new entry that links the one it
-      corrects.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Description</h2>
+    <h2>What it holds</h2>
     <p>An array of <code>[[entry]]</code> rows using a reduced record envelope: <code>id</code>
       (namespace WL), <code>date</code>, <code>actor</code>, a change <code>kind</code>
       (<code>added</code>, <code>changed</code>, <code>fixed</code>, <code>removed</code>,
       <code>security</code>, <code>docs</code>, or <code>infra</code>; a manifest may register
       additional kinds), a one-line <code>summary</code>, optional <code>detail</code>, and
-      <code>links</code> and <code>refs</code> to the records and revisions it concerns. Its status
-      is the single state <code>recorded</code>, and it never takes the <code>/proposed</code>
-      qualifier whatever the actor: a worklog entry records a fact, not a proposal awaiting
-      ratification.</p>
-    <div class="tree"><pre>
-schema = 1
+      <code>links</code> and <code>refs</code> to the records and revisions it concerns. Its status is
+      the single state <code>recorded</code>, and it never takes the <code>/proposed</code> qualifier
+      whatever the actor: a worklog entry records a fact, not a proposal awaiting ratification.</p>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/worklog.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
 
-[[entry]]
-id = "WL-131"
-date = "2026-08-29T16:22:41Z"
-actor = { kind = "maintainer" }
-kind = "fixed"
-summary = "Close the view generator's stale-output gap on renamed types"
-links = [ { rel = "resolves", id = "BI-42" } ]
-</pre></div>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>How it works</h2>
-    <p>Entry mutability follows the release cut. At release, the release's coverage digest freezes
-      the covered entries; from then on any change to them is a gate failure, and an entry can
-      never be appended into an already-released span, because spans are contiguous frozen ID
-      intervals. Only released, frozen spans may rotate to the archive; the unreleased tail never
-      rotates, whatever its age or size.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Generated view</h2>
-    <p><code>WORKLOG.md</code>, a deterministic, byte-drift-gated render at <code>.working/</code>
-      top level, opening with the standard do-not-edit header.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>A complete, append-only change record that a summary can always be rebuilt from. A silent edit
-      to released history breaks a recorded digest and fails the gate, which helps prevent history
-      from being quietly rewritten.</p>
+<span class="tok-tbl">[[entry]]</span>
+<span class="tok-key">id</span> = <span class="tok-str">"WL-131"</span>
+<span class="tok-key">date</span> = <span class="tok-str">"2026-08-29T16:22:41Z"</span>
+<span class="tok-key">actor</span> = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }
+<span class="tok-key">kind</span> = <span class="tok-str">"fixed"</span>
+<span class="tok-key">summary</span> = <span class="tok-str">"Close the view generator's stale-output gap on renamed types"</span>
+<span class="tok-key">links</span> = [ { <span class="tok-key">rel</span> = <span class="tok-str">"resolves"</span>, <span class="tok-key">id</span> = <span class="tok-str">"BI-42"</span> } ]</div>
+    </div>
+    <p>The worklog is the fact layer of the release triad. Every change gets an entry; every entry
+      stays forever. Entries are mutable until a release freezes their span, immutable after, and never
+      consumed, rolled away, or deleted. Every fact ever recorded stays in the worklog or its archive,
+      and survives store relocation byte for byte. At release, the release's coverage digest freezes
+      the covered entries; from then on any change to them is a gate failure, and an entry can never be
+      appended into an already-released span, because spans are contiguous frozen ID intervals. Only
+      released, frozen spans may rotate to the archive; the unreleased tail never rotates, whatever its
+      age or size.</p>
+    <p>It renders <code>WORKLOG.md</code>, a deterministic, byte-drift-gated view at
+      <code>.working/</code> top level, opening with the standard do-not-edit header. The worklog is
+      created by <code>opf init</code> (empty), updated by every change as an appended entry (IDs
+      allocated through counters.toml), by pre-release corrections in place, and by rotation of
+      released spans into the archive; it is read by <code>opf render</code> (WORKLOG.md), the release
+      cut (span selection and coverage digest), the changelog drafting flow (summaries are drafted from
+      spans), and <code>opf doctor</code> (span tiling, frozen digests, ID partition between active and
+      archive).</p>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code>, empty.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> every change, as an appended entry (IDs allocated through counters.toml); pre-release corrections in place; rotation of released spans into the archive.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (WORKLOG.md); the release cut (span selection and coverage digest); the changelog drafting flow (summaries are drafted from spans); <code>opf doctor</code> (span tiling, frozen digests, ID partition between active and archive).</li>
-    </ul>
+    <h2>What it protects</h2>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 20.5 8 12 12.5 3.5 8z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/><path d="m3.5 16.5 8.5 4.5 8.5-4.5"/></svg></span>
+      <h3>A complete record a summary can be rebuilt from</h3>
+      <p>A complete, append-only change record that a summary can always be rebuilt from. A silent edit
+        to released history breaks a recorded digest and fails the gate, which helps prevent history
+        from being quietly rewritten.</p>
+    </div>
   </div>
 </section>
+
+<nav class="wrap" aria-label="Core store files">
+  <div class="cta">
+    <a class="btn ghost" href="./version">&#8592; version.toml</a>
+    <a class="btn ghost" href="./lease">lease.toml &#8594;</a>
+  </div>
+</nav>
 </main>
 
 </div>

@@ -6,7 +6,7 @@
 <title>maintainer_decision.index.toml | OPFiles</title>
 <meta name="description" content="Immutable maintainer rulings: answer plus rationale, maintainer or importer attribution only.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,77 +66,100 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
+<div class="wrap refhead">
   <p class="eyebrow">Record index</p>
-  <h1>maintainer_decision.index.toml</h1>
-  <p class="lead">Maintainer rulings, namespace <code>MD</code>, at
-    <code>.working/toml/maintainer_decision.index.toml</code>.</p>
+  <h1>Rulings the maintainer made</h1>
+  <div class="refchips">
+    <code>maintainer_decision.index.toml</code>
+    <span>namespace MD</span>
+    <span>.working/toml/</span>
+  </div>
+  <p class="lead">A created-terminal, immutable ruling carrying its <code>decision</code>, the answer plus its rationale. Its actor kind is restricted to <code>maintainer</code> or <code>importer</code> alone.</p>
 </div>
 
 <section>
   <div class="wrap">
-    <h2>About</h2>
-    <p>A maintainer decision is a created-terminal, immutable ruling carrying its
-      <code>decision</code> (the answer plus its rationale). Its actor kind is restricted to
-      <code>maintainer</code> or <code>importer</code> only: a maintainer ruling with assistant
-      attribution is a contradiction the schema refuses, and importer covers migrated history.</p>
+    <blockquote class="refpull">The record, not the conversation, is the source of truth: a ruling made in chat and never recorded did not happen.</blockquote>
+    <h2>The problem it solves</h2>
+    <p>Making rulings a distinct immutable type separates what the maintainer decided from what
+      anyone proposed, and the attribution restriction makes that separation structural: a
+      maintainer ruling with assistant attribution is a contradiction the schema refuses, and
+      importer attribution covers migrated history.</p>
   </div>
 </section>
 
 <section class="section-alt">
   <div class="wrap">
-    <h2>Why</h2>
-    <p>The record, not the conversation, is the source of truth: a ruling made in chat and never
-      recorded did not happen. Making rulings a distinct immutable type separates what the
-      maintainer decided from what anyone proposed, and the attribution restriction makes that
-      separation structural.</p>
+    <dl class="refstrip">
+      <div>
+        <dt>Pairs with</dt>
+        <dd>
+          <span class="chip view"><code>DECISIONS.md</code></span>
+          <a class="chip view" href="./decisions-projection"><code>DECISIONS.toml</code></a>
+          <span class="chip view"><code>MAINTAINER_DECISION-INDEX.md</code></span>
+          <p>The composed decisions view, its TOML projection, and the optional one-to-one mirror.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Lifecycle</dt>
+        <dd>
+          <span class="chip"><code>recorded</code></span>
+          <p>A single state, created terminal and never proposable: recorded the session it is made,
+            with no transitions. Overturning is a new record linking the old one.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Referenced by</dt>
+        <dd>
+          <span class="chip"><code>opf init</code></span>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p><code>init</code> scaffolds the empty index, the importer fills migrated history;
+            <code>render</code> composes the views; <code>doctor</code> checks schema, the actor-kind
+            restriction, and uniqueness. Nothing updates it; it is immutable.</p>
+        </dd>
+      </div>
+    </dl>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <h2>Description</h2>
-    <p>The shared index shape with the standard envelope plus <code>decision</code>. Single state
-      <code>recorded</code>, no transitions, never proposable. A ruling may link
-      <code>exemplifies</code> to the <a href="./preference-pattern">preference pattern</a> it
-      instantiates, feeding the distillation of standing preferences from individual rulings.</p>
+    <h2>What a record carries</h2>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/maintainer_decision.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+<span class="tok-tbl">[[record]]</span>
+<span class="tok-key">id</span>       = <span class="tok-str">"MD-1"</span>
+<span class="tok-key">type</span>     = <span class="tok-str">"maintainer_decision"</span>
+<span class="tok-key">status</span>   = <span class="tok-str">"recorded"</span>
+<span class="tok-key">title</span>    = <span class="tok-str">"Ship the drift gate in 1.1.0"</span>
+<span class="tok-key">decision</span> = <span class="tok-str">"yes; the gate blocks merge on any view drift"</span>
+<span class="tok-key">actor</span>    = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape with the standard envelope plus <code>decision</code>. A ruling may
+      link <code>exemplifies</code> to the <a href="./preference-pattern">preference pattern</a> it
+      instantiates, feeding the distillation of standing preferences from individual rulings. It is
+      baseline as of spec 1.1.0 (it was module-tier in 1.0.0); the additive schema upgrade carries a
+      populated 1.0.0 governance-module index forward byte for byte.</p>
   </div>
 </section>
 
 <section class="section-alt">
   <div class="wrap">
-    <h2>How it works</h2>
-    <p>Recorded the session it is made; overturning is a new record linking the old. Baseline as of
-      spec 1.1.0 (it was module-tier in 1.0.0); the additive schema upgrade carries a populated
-      1.0.0 governance-module index forward byte for byte.</p>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+      <h3>What it protects</h3>
+      <p>An authoritative, immutable register of the human's rulings, which helps prevent a decision
+        from being re-litigated, mis-remembered, or silently reattributed.</p>
+    </div>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <h2>Generated view</h2>
-    <p>Surfaced in the composed <code>DECISIONS.md</code> and the
-      <a href="./decisions-projection"><code>DECISIONS.toml</code></a> projection, plus the optional
-      <code>MAINTAINER_DECISION-INDEX.md</code> mirror.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>An authoritative, immutable register of the human's rulings, which helps prevent a decision
-      from being re-litigated, mis-remembered, or silently reattributed.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code> (empty index); records at each maintainer ruling; the importer for migrated history.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> nothing; immutable.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (DECISIONS.md, DECISIONS.toml, the mirror); <code>opf doctor</code> (schema, the actor-kind restriction, uniqueness).</li>
-    </ul>
+    <p><a href="./autonomous-decision">&#8592; autonomous_decision</a> &#183; <a href="./preference-pattern">preference_pattern &#8594;</a></p>
   </div>
 </section>
 </main>

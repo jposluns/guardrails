@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Adopt by hand | OPFiles</title>
-<meta name="description" content="Conform to OPFiles with hand-maintained files and your own checks: the minimal store, the layout, working records-first, the release triad by hand, and the honest limits.">
+<title>Adopt OPFiles | OPFiles</title>
+<meta name="description" content="Adopt OPFiles: the primary path is to point your AI development assistant at the standard (planned, not live yet); adopting by hand is the fallback and works today with plain TOML files and your own checks.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Adopt by hand | OPFiles">
-<meta property="og:description" content="Conform to OPFiles with hand-maintained files and your own checks: the minimal store, the layout, working records-first, the release triad by hand, and the honest limits.">
+<meta property="og:title" content="Adopt OPFiles | OPFiles">
+<meta property="og:description" content="Adopt OPFiles: the primary path is to point your AI development assistant at the standard (planned, not live yet); adopting by hand is the fallback and works today with plain TOML files and your own checks.">
 <meta name="twitter:card" content="summary">
 </head>
 <body>
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: machine TOML source leading to a generated view, kept honest by a drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink active" href="./adopt" aria-current="page">Adopt by hand</a>
+  <a class="navlink active" href="./adopt" aria-current="page">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,49 +66,64 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
-  <p class="eyebrow">Adopt by hand</p>
+<div class="wrap pagehead refhead">
+  <p class="eyebrow">Adopt it</p>
   <h1>Adopt OPFiles</h1>
-  <p class="lead">There are two paths to adoption. The model we are building toward is a single
-    instruction: point your AI development assistant at this site and ask it to adopt OPFiles; that
-    assistant-driven flow is described below as the direction, not a finished tool. Adopting by hand is
-    a first-class path you can take today: the store files are plain TOML, simple enough to keep by
-    hand, and a conformance claim is self-asserted until validation tooling covers it (the
-    <a href="./tooling">reference tooling</a> can scaffold the same store for you, but nothing about
-    adopting the standard requires it).</p>
+  <p class="lead">The recommended path is to let your AI development assistant do the adoption; adopting
+    by hand is the fallback for when you cannot. Both reach the same gated store. The assistant-driven
+    flow is being built and is not live yet; the manual steps below work today and need no particular
+    tool.</p>
+  <p class="refchips"><span class="chip warn">Assistant-driven: planned</span><span class="chip ok">By hand: available today</span></p>
 </div>
 
 <section class="section-alt">
   <div class="wrap">
-    <h2>How adoption will work</h2>
-    <p>The adopter interface we are building toward is one instruction. You point your AI development
-      assistant at the site root and tell it to adopt OPFiles, or to adopt AIQT, and nothing more is
-      meant to be asked of you up front.</p>
-    <p>The assistant then investigates your project and presents a short plan: which files it will
-      import, retire, or create, and how they are wired together. It asks a single question, yes, no,
-      or let us discuss. On yes it carries out the change and merges it, and you review the resulting
-      <code>.working/</code> store at the end. Adopting AIQT this way brings OPFiles with it and
-      migrates your existing operational files into the store; adopting OPFiles alone is also
-      supported.</p>
-    <p>This hands-free flow is the model we are building toward, not a finished feature, and this page
-      does not ask you to run it. Adopting by hand, described below, works today.</p>
+    <p class="eyebrow">The primary path</p>
+    <h2>Let your AI development assistant do the adoption</h2>
+    <p class="lead">Point your AI development assistant at this site (or the repository) and tell it to
+      adopt OPFiles, or to adopt AIQT. It reads the standard, investigates your project, and presents a
+      short plan: what it will create, import, or retire, and how the pieces wire together. It asks one
+      question: yes, no, or let us discuss. On your yes it carries out the adoption, scaffolds and
+      validates the store, wires the records-first process into your project's assistant instructions,
+      and leaves the <code>.working/</code> store for your review.</p>
+    <p><span class="chip warn">Planned</span> This flow is being built and is not live yet. The
+      machine-readable entry point it depends on (an <code>/llms.txt</code> index, a generated
+      <code>/adopt.md</code>, and a root-page link) is planned for the next release of the site.</p>
+    <p>Adopting AIQT this way brings OPFiles with it and migrates your existing operational files into
+      the store; adopting OPFiles alone is also supported.</p>
+    <p>
+      <span class="chip ok"><code>opf init</code></span>
+      <span class="chip ok"><code>opf render</code></span>
+      <span class="chip ok"><code>opf doctor</code></span>
+      <span class="chip ok"><code>opf upgrade</code></span>
+      <span class="chip ok"><code>opf import</code></span>
+      <span class="chip warn"><code>opf migrate</code></span>
+      <span class="chip warn"><code>opf sync</code></span>
+    </p>
+    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code>
+      verifies, <code>upgrade</code> migrates a store in place, and <code>import</code> brings legacy
+      files in. A verb that has not landed refuses with a clear message rather than pretending to
+      succeed.</p>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <h2>Why by hand is a first-class path</h2>
+    <p class="eyebrow">The fallback</p>
+    <h2>Adopt by hand, if you cannot use an assistant</h2>
     <p>OPFiles specifies formats, layout, naming, lifecycle, and enforcement posture. It does not
       require any particular tool: the specification states that a project can conform with
-      hand-maintained files and its own checks. Adopting by hand gives you the records-first
-      discipline today, and you can move to the reference tooling later without changing the store
-      format. Conformance you assert by hand is self-asserted, and you should say so wherever you
-      claim it, because no validator has checked it for you yet.</p>
+      hand-maintained files and its own checks. Adopting by hand gives you the records-first discipline
+      today, and you can move to the reference tooling later without changing the store format.
+      Conformance you assert by hand is self-asserted, and you should say so wherever you claim it,
+      because no validator has checked it for you yet. The remaining sections are that manual path,
+      step by step.</p>
   </div>
 </section>
 
 <section class="section-alt">
   <div class="wrap">
+    <p class="eyebrow">Step 1</p>
     <h2>The minimal store</h2>
     <p>Create the machine store at <code>.working/toml/</code> in your repository, with these files:</p>
     <ul class="clean">
@@ -134,20 +149,21 @@
       is ignored by base-only tooling; a base adopter need not add it.</p>
     <p>A minimal manifest, illustrative and drawn from the specification's own example (see
       <a href="./standard">the standard</a> for the normative shape):</p>
-    <div class="tree"><pre>
-<span class="dir"># .working/toml/manifest.toml</span>
-[opf]
-standard = "opf"          <span class="yours"># discovery token; exact value required</span>
-spec_version = "1.1.0"    <span class="yours"># the base spec version this store conforms to</span>
-layout = "inline"         <span class="yours"># "inline" or "per-record"</span>
-posture = "warn"          <span class="yours"># "off", "warn", or "required" (section 11)</span>
-import_status = "none"    <span class="yours"># "none", "partial", or "complete"</span>
-</pre></div>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/manifest.toml</div>
+      <div class="codebody"><span class="tok-tbl">[opf]</span>
+<span class="tok-key">standard</span> = <span class="tok-str">"opf"</span>          # discovery token; exact value required
+<span class="tok-key">spec_version</span> = <span class="tok-str">"1.1.0"</span>    # the base spec version this store conforms to
+<span class="tok-key">layout</span> = <span class="tok-str">"inline"</span>         # "inline" or "per-record"
+<span class="tok-key">posture</span> = <span class="tok-str">"warn"</span>          # "off", "warn", or "required" (section 11)
+<span class="tok-key">import_status</span> = <span class="tok-str">"none"</span>    # "none", "partial", or "complete"</div>
+    </div>
   </div>
 </section>
 
 <section>
   <div class="wrap">
+    <p class="eyebrow">Step 2</p>
     <h2>The layout, and the one rule of thumb</h2>
     <p>Machine source lives under <code>.working/toml/</code>; generated human-readable views live at
       <code>.working/</code> top level; the curated <code>CHANGELOG.md</code> and the generated
@@ -172,6 +188,7 @@ import_status = "none"    <span class="yours"># "none", "partial", or "complete"
 
 <section class="section-alt">
   <div class="wrap">
+    <p class="eyebrow">Step 3</p>
     <h2>Working records-first</h2>
     <p>Treat the store as the source of truth: a decision, finding, or completion that is not
       recorded did not happen. Append a worklog entry per change; keep the backlog, findings, and
@@ -184,6 +201,7 @@ import_status = "none"    <span class="yours"># "none", "partial", or "complete"
 
 <section>
   <div class="wrap">
+    <p class="eyebrow">Step 4</p>
     <h2>The release triad by hand</h2>
     <p>At a release, record the release and the worklog span it covers as a <code>[[release]]</code>
       row in <code>version.toml</code>; draft the summary from that span; curate it by hand; publish
@@ -195,6 +213,7 @@ import_status = "none"    <span class="yours"># "none", "partial", or "complete"
 
 <section class="section-alt">
   <div class="wrap">
+    <p class="eyebrow">Step 5</p>
     <h2>Bring your own checks</h2>
     <p>Even before you run the reference validator, you can assert the standard's key invariants
       yourself. A hand adopter can check that the store is a tracked git repository (an untracked
@@ -208,7 +227,8 @@ import_status = "none"    <span class="yours"># "none", "partial", or "complete"
 
 <section>
   <div class="wrap">
-    <h2>Honest limits</h2>
+    <p class="eyebrow">The honest limits</p>
+    <h2>What by-hand adoption does not give you</h2>
     <p>Without the validation tooling, your conformance is self-asserted and should say so. Digest
       freezing and span tiling are your own discipline until a validator checks them. Some residuals
       are part of the standard itself and no adopter escapes them: the freeze gate cannot judge whether

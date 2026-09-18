@@ -6,7 +6,7 @@
 <title>counters.toml: ID high-water marks | OPFiles</title>
 <meta name="description" content="One monotonic counter per record namespace: IDs are allocated atomically, never reset, and never reused.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,99 +66,107 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
+<div class="wrap pagehead refhead">
   <p class="eyebrow">Core store file</p>
-  <h1>counters.toml</h1>
-  <p class="lead">The ID authority, at <code>.working/toml/counters.toml</code>: one monotonic
-    high-water value per record namespace.</p>
+  <h1>The ID counters</h1>
+  <p class="refchips"><code>counters.toml</code> <code>.working/toml/</code></p>
+  <p class="lead">The ID authority: one monotonic high-water value per record namespace.</p>
 </div>
 
+<section class="section-alt">
+  <div class="wrap">
+    <h2>The problem it solves</h2>
+    <p class="refpull">Durable records need permanent names.</p>
+    <p>A backlog number that gets reused after a revert, or a finding ID that means two different
+      things in two eras of the project, quietly corrupts every link and every audit trail that
+      referenced it. A single monotonic counter per namespace, claimed atomically, makes ID permanence
+      structural rather than a policy people must remember.</p>
+  </div>
+</section>
+
 <section>
   <div class="wrap">
-    <h2>About</h2>
+    <p class="eyebrow">At a glance</p>
+    <dl class="refstrip">
+      <div>
+        <dt>Tracks</dt>
+        <dd class="refchips"><code>&lt;NS&gt;-&lt;n&gt;</code> <span>12 baseline namespaces + LF</span> <span>monotonic high-water</span></dd>
+      </div>
+      <div>
+        <dt>Written by</dt>
+        <dd class="refchips"><code>opf init</code> <span>ID allocation, atomic</span> <code>opf upgrade</code></dd>
+      </div>
+      <div>
+        <dt>Read by</dt>
+        <dd class="refchips"><code>opf doctor</code> <span>record creation</span></dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<section class="section-alt">
+  <div class="wrap">
+    <h2>What it holds</h2>
     <p>Every record ID has the form <code>&lt;NS&gt;-&lt;n&gt;</code>: a two-letter namespace mapped
       one-to-one to its type (BI for backlog_item, FN for finding, WL for worklog, and so on) and a
-      positive integer. This file holds the highest integer ever allocated in each namespace. A
-      fresh store starts every counter at zero, covering the twelve baseline namespaces plus LF,
-      the importer's quarantine namespace, so an import can be accepted from day one.</p>
-  </div>
-</section>
+      positive integer. This file holds the highest integer ever allocated in each namespace. A fresh
+      store starts every counter at zero, covering the twelve baseline namespaces plus LF, the
+      importer's quarantine namespace, so an import can be accepted from day one. It is the smallest
+      schema in the store: a schema marker and one table of namespace-to-integer pairs. The scaffolded
+      document, byte for byte:</p>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/counters.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
 
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Why</h2>
-    <p>Durable records need permanent names. A backlog number that gets reused after a revert, or a
-      finding ID that means two different things in two eras of the project, quietly corrupts every
-      link and every audit trail that referenced it. A single monotonic counter per namespace,
-      claimed atomically, makes ID permanence structural rather than a policy people must
-      remember.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Description</h2>
-    <p>The smallest schema in the store: a schema marker and one table of namespace-to-integer
-      pairs. The scaffolded document, byte for byte:</p>
-    <div class="tree"><pre>
-schema = 1
-
-[counters]
-AD = 0
-BI = 0
-BL = 0
-CN = 0
-DN = 0
-FN = 0
-HO = 0
-LF = 0
-MD = 0
-PD = 0
-PP = 0
-RF = 0
-WL = 0
-</pre></div>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>How it works</h2>
-    <p>Allocation increments the counter under the store's lock as one atomic claim, so no gap
-      between choosing an ID and reserving it can double-allocate. Counters are never reset and IDs
-      are never reused, even when a record is superseded, refuted, or its work reverted. Rotation,
-      index rewrites, and store relocation never touch this file. The schema upgrade to 1.1.0
-      extends it with the CN, MD, and PP namespaces while preserving every existing high-water.</p>
+<span class="tok-tbl">[counters]</span>
+<span class="tok-key">AD</span> = <span class="tok-num">0</span>
+<span class="tok-key">BI</span> = <span class="tok-num">0</span>
+<span class="tok-key">BL</span> = <span class="tok-num">0</span>
+<span class="tok-key">CN</span> = <span class="tok-num">0</span>
+<span class="tok-key">DN</span> = <span class="tok-num">0</span>
+<span class="tok-key">FN</span> = <span class="tok-num">0</span>
+<span class="tok-key">HO</span> = <span class="tok-num">0</span>
+<span class="tok-key">LF</span> = <span class="tok-num">0</span>
+<span class="tok-key">MD</span> = <span class="tok-num">0</span>
+<span class="tok-key">PD</span> = <span class="tok-num">0</span>
+<span class="tok-key">PP</span> = <span class="tok-num">0</span>
+<span class="tok-key">RF</span> = <span class="tok-num">0</span>
+<span class="tok-key">WL</span> = <span class="tok-num">0</span></div>
+    </div>
+    <p>Allocation increments the counter under the store's lock as one atomic claim, so no gap between
+      choosing an ID and reserving it can double-allocate. Counters are never reset and IDs are never
+      reused, even when a record is superseded, refuted, or its work reverted. Rotation, index
+      rewrites, and store relocation never touch this file. The schema upgrade to 1.1.0 extends it with
+      the CN, MD, and PP namespaces while preserving every existing high-water. Counters are a control
+      ledger, not a record type, so no view renders from them.</p>
+    <p>It is created by <code>opf init</code> with all namespaces at zero, updated by ID allocation
+      (atomically under the store lock, whenever any process creates a record in any type) and by
+      <code>opf upgrade</code> extending the namespace roster, and read by <code>opf doctor</code> (for
+      counter completeness, monotonicity against a prior committed snapshot, and every live or archived
+      ID within its high-water) and by record creation, to allocate the next ID.</p>
   </div>
 </section>
 
 <section>
   <div class="wrap">
-    <h2>Generated view</h2>
-    <p>None. Counters are a control ledger, not a record type; no view renders from them.</p>
+    <h2>What it protects</h2>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4h10v16l-5-3.4L7 20z"/></svg></span>
+      <h3>Permanent names that still resolve later</h3>
+      <p>Permanent IDs make every cross-reference in the store durable: a link written today still
+        resolves years and relocations later. The integrity gate checks that every live ID fits within
+        its counter and that counters only ever grow, which helps prevent silent renumbering from
+        entering the record at all.</p>
+    </div>
   </div>
 </section>
 
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>Permanent IDs make every cross-reference in the store durable: a link written today still
-      resolves years and relocations later. The integrity gate checks that every live ID fits
-      within its counter and that counters only ever grow, which helps prevent silent renumbering
-      from entering the record at all.</p>
+<nav class="wrap" aria-label="Core store files">
+  <div class="cta">
+    <a class="btn ghost" href="./manifest">&#8592; manifest.toml</a>
+    <a class="btn ghost" href="./version">version.toml &#8594;</a>
   </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code>, all namespaces at zero.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> ID allocation, atomically under the store lock, whenever any process creates a record in any type; <code>opf upgrade</code> extends the namespace roster.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf doctor</code> (counter completeness, monotonicity against a prior committed snapshot, and every live or archived ID within its high-water); record creation, to allocate the next ID.</li>
-    </ul>
-  </div>
-</section>
+</nav>
 </main>
 
 </div>

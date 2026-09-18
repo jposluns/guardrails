@@ -6,7 +6,7 @@
 <title>Module and importer record types | OPFiles</title>
 <meta name="description" content="Eight optional module-tier record types, the importer-only quarantine type, and the reserved names.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,101 +66,111 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
-  <p class="eyebrow">Record indexes</p>
-  <h1>Module and importer record types</h1>
-  <p class="lead">Beyond the twelve baseline types, eight record types ship in four optional
-    modules, one type belongs to the importer alone, and two names are reserved.</p>
-</div>
-
-<section>
-  <div class="wrap">
-    <h2>About</h2>
-    <p>Modules are base-level optional capability bundles, default-off, each enabled by one
-      manifest edit. Enabling a module makes its types valid to declare, each with its normative
-      namespace; a module-tier type declared without its module enabled is a validation
-      failure.</p>
+<div class="wrap">
+  <div class="refhead pagehead">
+    <p class="eyebrow">Modules</p>
+    <h1>Optional modules and importer types</h1>
+    <div class="refchips">
+      <span>4 optional modules</span>
+      <span>8 record types</span>
+      <span>+ 1 importer-only</span>
+    </div>
+    <p class="lead">Beyond the twelve baseline types, eight record types ship in four optional modules, one type belongs to the importer alone, and two names are reserved. Modules are default-off, each enabled by one manifest edit.</p>
   </div>
-</section>
 
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Why</h2>
-    <p>Not every project needs delivery assurance or operational-policy records on day one.
-      Default-off modules keep the baseline small while keeping the extended vocabulary standard:
-      when a project grows into a capability, the types, namespaces, and states are already
-      defined, so no adopter invents an incompatible local variant.</p>
+  <h2>The problem it solves</h2>
+  <blockquote class="refpull">Not every project needs delivery assurance or operational-policy records on day one.</blockquote>
+  <p>Default-off modules keep the baseline small while keeping the extended vocabulary standard: when a project grows into a capability, the types, namespaces, and states are already defined, so no adopter invents an incompatible local variant. Enabling a module makes its types valid to declare, each with its normative namespace; a module-tier type declared without its module enabled is a validation failure.</p>
+
+  <dl class="refstrip">
+    <div>
+      <dt>Enabled by</dt>
+      <dd>
+        <span class="chip"><code>manifest.toml</code></span>
+        <p>One manifest edit per module, under the adopter's own review flow.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Created by</dt>
+      <dd>
+        <span class="chip"><code>opf import</code></span>
+        <p>By process, once a module is enabled; <code>legacy_fragment</code> by <code>opf import</code> alone.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Read by</dt>
+      <dd>
+        <span class="chip"><code>opf doctor</code></span>
+        <p><code>opf doctor</code> for module-toggle validity (a declared module type requires its enabled module); the AIQT profile, which requires the governance, operational-policy, and concurrent-operation modules.</p>
+      </dd>
+    </div>
+  </dl>
+
+  <h2 style="margin-top:var(--sp-12)">The optional modules</h2>
+  <div class="benefits">
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/></svg></span>
+      <h3>Governance</h3>
+      <p>One type: <code>maintainer_action</code> (<code>MA</code>), moving <code>open &#8594; done | dropped</code>.</p>
+    </div>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 7.5 12 3l8.5 4.5v9L12 21l-8.5-4.5z"/><path d="M3.5 7.5 12 12l8.5-4.5M12 12v9"/></svg></span>
+      <h3>Delivery assurance</h3>
+      <p>Four types: <code>artifact</code> (<code>AR</code>, <code>staged &#8594; promoted | rejected</code>), <code>gate_run</code> (<code>GR</code>, a recorded three-valued verdict of <code>pass | fail | cannot_evaluate</code> never folded into status), <code>release</code> (<code>RL</code>, <code>planned &#8594; published | abandoned</code>), and <code>waiver</code> (<code>WV</code>, <code>active &#8594; expired | revoked</code>, expiry required at creation).</p>
+    </div>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h7l4 4v14a0 0 0 0 1 0 0H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M14 3v4h4M8.5 12h7M8.5 16h7"/></svg></span>
+      <h3>Operational policy</h3>
+      <p>Two types: <code>mode</code> (<code>MO</code>, <code>active &#8594; retired</code>) and <code>tier_assessment</code> (<code>TA</code>, recorded).</p>
+    </div>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10.5" width="14" height="9" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg></span>
+      <h3>Concurrent operation</h3>
+      <p>One type: <code>session_lease</code> (<code>SL</code>), moving <code>held &#8594; released | reconciled</code>.</p>
+    </div>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13h4l1.5 3h5L16 13h4"/><path d="M4 13 6 5h12l2 8v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg></span>
+      <h3>Importer-only</h3>
+      <p>No module toggle: <code>legacy_fragment</code> (<code>LF</code>, <code>quarantined &#8594; resolved | ignored</code>) is created only by <code>opf import</code>, never scaffolded, holding whatever an import cannot confidently map.</p>
+    </div>
   </div>
-</section>
 
-<section>
-  <div class="wrap">
-    <h2>Description</h2>
-    <div class="tree"><pre>
+  <h2 style="margin-top:var(--sp-12)">The full type list</h2>
+  <div class="tree"><pre>
 Governance module
-  maintainer_action   MA   open &gt; done | dropped
+  maintainer_action   MA   open &#8594; done | dropped
 Delivery-assurance module
-  artifact            AR   staged &gt; promoted | rejected
+  artifact            AR   staged &#8594; promoted | rejected
   gate_run            GR   recorded, with a three-valued verdict field
                            (pass | fail | cannot_evaluate), never folded into status
-  release             RL   planned &gt; published | abandoned
-  waiver              WV   active &gt; expired | revoked; expiry required at creation
+  release             RL   planned &#8594; published | abandoned
+  waiver              WV   active &#8594; expired | revoked; expiry required at creation
 Operational-policy module
-  mode                MO   active &gt; retired
+  mode                MO   active &#8594; retired
   tier_assessment     TA   recorded
 Concurrent-operation module
-  session_lease       SL   held &gt; released | reconciled
+  session_lease       SL   held &#8594; released | reconciled
 Importer-only (no module toggle)
-  legacy_fragment     LF   quarantined &gt; resolved | ignored
+  legacy_fragment     LF   quarantined &#8594; resolved | ignored
 Reserved
   transaction         TX   excluded from the adopter standard; name and namespace reserved
   (none)              CL   reserved unassigned, so it can never half-collide with "changelog"
 </pre></div>
-    <p>These are outline state sets; the full module record schemas ship with the module schemas
-      release. The delivery-assurance <code>release</code> record, where enabled, references a
-      <code>version.toml</code> release row by version string: the ledger row is the fact, the
-      record is the delivery-assurance envelope around it.</p>
-  </div>
-</section>
+  <p>These are outline state sets; the full module record schemas ship with the module schemas release. The delivery-assurance <code>release</code> record, where enabled, references a <code>version.toml</code> release row by version string: the ledger row is the fact, the record is the delivery-assurance envelope around it.</p>
+  <p><code>legacy_fragment</code> is created only by an importer, never scaffolded: everything an import cannot confidently map becomes quarantined fragment data with source path, digest, span, and run ID, so nothing is dropped. The scaffolded counters file already carries the LF namespace at zero, so a fresh store can accept quarantine imports without a schema change. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
 
-<section class="section-alt">
-  <div class="wrap">
-    <h2>How it works</h2>
-    <p><code>legacy_fragment</code> is created only by an importer, never scaffolded: everything an
-      import cannot confidently map becomes quarantined fragment data with source path, digest,
-      span, and run ID, so nothing is dropped. The scaffolded counters file already carries the LF
-      namespace at zero, so a fresh store can accept quarantine imports without a schema
-      change.</p>
+  <h2 style="margin-top:var(--sp-12)">What it protects</h2>
+  <div class="benefit">
+    <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><path d="M16.5 13.5v6M13.5 16.5h6"/></svg></span>
+    <h3>Growth without fragmentation</h3>
+    <p>Capability arrives as a reviewed manifest edit with standard semantics, which helps prevent per-project dialects of the same operational ideas.</p>
   </div>
-</section>
 
-<section>
-  <div class="wrap">
-    <h2>Generated view</h2>
-    <p>Module-type index mirrors are deferred until the module record schemas ship; the reference
-      renderer covers the baseline types today and reports a per-record layout or an unknown view
-      as a clear cannot-evaluate rather than guessing.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>Growth without fragmentation: capability arrives as a reviewed manifest edit with standard
-      semantics, which helps prevent per-project dialects of the same operational ideas.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Enabled by:</b> one manifest edit per module, under the adopter's own review flow.</li>
-      <li><b style="color:var(--ink)">Created by:</b> process, once enabled; <code>legacy_fragment</code> by <code>opf import</code> alone.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf doctor</code> (module-toggle validity: a declared module type requires its enabled module); the AIQT profile, which requires the governance, operational-policy, and concurrent-operation modules.</li>
-    </ul>
-  </div>
-</section>
+  <nav class="refseq" aria-label="Reference sequence" style="display:flex; justify-content:space-between; gap:var(--sp-4); margin-top:var(--sp-12); font-weight:650">
+    <a href="./contribution">&#8592; contribution</a>
+    <a href="./pointer">.opf.toml &#8594;</a>
+  </nav>
+</div>
 </main>
 
 </div>
