@@ -73,17 +73,18 @@ run_gate "newtab" python3 -I -B tools/check_newtab.py
 run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --self-test
 run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
-run_gate "opf-tooling-selftest" python3 -I -B tools/opf.py --self-test
-run_gate "opf-drift-selftest" python3 -I -B tools/check_opf_drift.py --self-test
-run_gate "opf-drift" python3 -I -B tools/check_opf_drift.py
-run_gate "opf-doctor-selftest" python3 -I -B tools/check_opf_doctor.py --self-test
-run_gate "opf-doctor" python3 -I -B tools/check_opf_doctor.py
-run_gate "opf-init-selftest" python3 -I -B tools/check_opf_init.py --self-test
-run_gate "opf-init" python3 -I -B tools/check_opf_init.py
-run_gate "opf-upgrade-selftest" python3 -I -B tools/check_opf_upgrade.py --self-test
-run_gate "opf-upgrade" python3 -I -B tools/check_opf_upgrade.py
-run_gate "opf-import-selftest" python3 -I -B tools/check_opf_import.py --self-test
-run_gate "opf-import" python3 -I -B tools/check_opf_import.py
+run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
+run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
+run_gate "opf-drift" python3 -I -B opf/tools/check_opf_drift.py
+run_gate "opf-doctor-selftest" python3 -I -B opf/tools/check_opf_doctor.py --self-test
+run_gate "opf-doctor" python3 -I -B opf/tools/check_opf_doctor.py
+run_gate "opf-init-selftest" python3 -I -B opf/tools/check_opf_init.py --self-test
+run_gate "opf-init" python3 -I -B opf/tools/check_opf_init.py
+run_gate "opf-upgrade-selftest" python3 -I -B opf/tools/check_opf_upgrade.py --self-test
+run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
+run_gate "opf-import-selftest" python3 -I -B opf/tools/check_opf_import.py --self-test
+run_gate "opf-import" python3 -I -B opf/tools/check_opf_import.py
+run_gate "opf-standalone-closure" python3 -I -B tools/check_opf_standalone_closure.py
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
@@ -173,8 +174,8 @@ run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
 run_gate "conformance-selftest" python3 -I -B tools/conformance.py --self-test
 run_gate "conformance"    python3 -I -B tools/conformance.py --root .
-run_gate "commonmark-headings-selftest" python3 -I -B tools/selftest_commonmark_headings.py
-run_gate "commonmark-conformance" python3 -I -B tools/selftest_commonmark_conformance.py
+run_gate "commonmark-headings-selftest" python3 -I -B opf/tools/selftest_commonmark_headings.py
+run_gate "commonmark-conformance" python3 -I -B opf/tools/selftest_commonmark_conformance.py
 run_gate "currency-selftest" python3 -I -B tools/check_standards_currency.py --self-test
 
 run_gate "ci-parity-selftest" python3 -I -B tools/check_ci_parity.py --self-test

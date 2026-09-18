@@ -30,7 +30,7 @@ Adopter-rooted, exactly like doctor.py / migrate.py (and the rest of the OPF too
 against a PRODUCT repository root named by --root (default: the cwd), resolving the store through
 `_opf_store` discovery, NEVER through `_gen_common.repo_root()`. This pack is not an OPFiles adopter,
 so a live `--root .` here resolves NOT-ADOPTED and reports NOT APPLICABLE (exit 0); the assurance rides
-the `--self-test` leg over synthetic stores, reached through `tools/opf.py --self-test` as the changelog
+the `--self-test` leg over synthetic stores, reached through `opf/tools/opf.py --self-test` as the changelog
 leg (mirroring how `_opf_store` / `_opf_schema` / `_opf_release` / `_opf_emit` register their legs).
 
 Fail-closed everywhere (spec 3 "Fail closed"; the check-fails-closed-on-unreadable rule): an unresolvable
@@ -49,7 +49,7 @@ way and named so the choice is reviewable, per disclose-guard-residuals):
     digest already takes (U3's `_valid_digest`, Appendix B). The finalizer may re-fix it in one place.
   - ENTRY-HEADING RECOGNITION. Spec 6.3 says an entry begins with `## <covers>` optionally followed by
     parenthesized dates. Heading recognition is delegated to the vendored Marko 2.2.4 CommonMark parser
-    through the narrow, parse-only `_commonmark_headings` adapter (tools/_vendor/marko/, import-pinned and
+    through the narrow, parse-only `_commonmark_headings` adapter (opf/tools/_vendor/marko/, import-pinned and
     fail-closed): an entry heading is a DIRECT-child-of-Document level-2 heading, ATX (`## covers`) or
     setext (`covers\n---`). Because recognition is over the parsed AST, a `## ` inside a fenced or indented
     code block, an HTML block, a block quote, or a list is NOT a boundary, and a deeper `### ` sub-heading

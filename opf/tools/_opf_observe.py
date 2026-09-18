@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the guarded sibl
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: tools/_opf_observe.py requires Python 3.11+ (tomllib).")
+    sys.exit("error: opf/tools/_opf_observe.py requires Python 3.11+ (tomllib).")
 
 import _opf_check   # noqa: E402  the store-integrity engine: its _record_digest + observation-key roster
 import _opf_emit    # noqa: E402  the canonical emitter: EmitError, raised by an out-of-subset record body

@@ -121,7 +121,7 @@ import _opf_emit       # noqa: E402  U8: the constrained-subset canonical emitte
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: tools/_opf_import.py requires Python 3.11+ (tomllib).")
+    sys.exit("error: opf/tools/_opf_import.py requires Python 3.11+ (tomllib).")
 
 
 # --- fixed names, vocabularies, and the outcome model ------------------------------------------------

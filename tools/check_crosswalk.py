@@ -38,6 +38,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: check_crosswalk.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 from _gen_common import repo_root  # noqa: E402
 import _journal  # noqa: E402
 # the SAME 9.1 component computation the engine binds cutovers to, and the SAME validated terminal

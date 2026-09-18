@@ -15,7 +15,7 @@ adopter-experience hook drops in the staged unit) and the OFF-PATH placement of 
 here: the staged tree must resolve outside the adopter root, so a cutover can never stage into a location
 that auto-loads). It also fails closed before the lock on a platform without the race-free containment
 primitive (3.6b). The 9.3 crash-safety model, the seven normative steps, and the recovery election live
-in tools/_journal.py; this CLI wires the staged-unit contract, the lock reconcile, and the self-test.
+in opf/tools/_journal.py; this CLI wires the staged-unit contract, the lock reconcile, and the self-test.
 
 Staged-unit contract (the off-path tree a verified, green step-2/3 build produced, 9.2):
   <staged>/quiescence.ok        the adopter-experience quiescence evidence (its presence is required)
@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402
 
 try:

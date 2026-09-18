@@ -34,9 +34,17 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# opf/tools/ carries the ONE shared pure byte-canon scanner (_byte_canon) and the relocated containment
+# probe, moved there for OPF self-containment; this gate reaches DOWN into them (a permitted downward edge).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))
 from _gen_common import repo_root, load_toml  # noqa: E402
 import _containment  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated scope loader; never a second parser
+# The pure byte legs and forbidden-codepoint sets are the ONE shared source in _byte_canon; re-imported
+# here so this gate and the OPF tooling scan identical bytes and cannot fork (OPF-SELF-CONTAIN).
+from _byte_canon import (  # noqa: E402
+    ZERO_WIDTH, BIDI, FORBIDDEN, FORBIDDEN_RE, BOM, scan_bytes, _is_two_space_break,
+)
 
 POLICY_REL = ".aiqt/core/gates/byte-canon.toml"
 VECTORS_REL = ".aiqt/core/gates/canon-vectors/vectors.toml"
@@ -69,63 +77,11 @@ CLASS_FINDING = {
     "empty": "empty file",
 }
 
-# The forbidden codepoints (3.1), built via chr() so this source file never carries one itself.
-# ZERO_WIDTH: U+200B, U+200C, U+200D, U+2060 (WORD JOINER), U+FEFF. BIDI: the complete Unicode
-# Bidi_Control set (U+061C, U+200E, U+200F, U+202A..U+202E, U+2066..U+2069).
-ZERO_WIDTH = tuple(chr(c) for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF))
-BIDI = tuple(chr(c) for c in (0x061C, 0x200E, 0x200F)
-             + tuple(range(0x202A, 0x202F)) + tuple(range(0x2066, 0x206A)))
-FORBIDDEN = {ch.encode("utf-8"): ch for ch in ZERO_WIDTH + BIDI}
-FORBIDDEN_RE = re.compile(b"|".join(re.escape(b) for b in sorted(FORBIDDEN)))
-BOM = b"\xef\xbb\xbf"
-
-
 class GateError(Exception):
     """An input the gate cannot read, parse, or trust. Caught at run() and reported as exit 2."""
 
 
-# --- pure legs (always exercised by --self-test) ----------------------------------------------------
-
-def scan_bytes(data, allowances=(), hardbreak=False):
-    """The 3.1 legs over one file's raw bytes. allowances is a tuple of (start, end, codepoint-set)
-    byte-range rows already validated for this file. hardbreak, when True, permits an EXACTLY-two-trailing-
-    space CommonMark hard break on any non-blank line (markdownlint MD009 br_spaces=2) for this path, and
-    nothing else; every other trailing-whitespace vector still fails. Returns a list of finding
-    strings. A file that does not decode as UTF-8 yields a finding (the thing asserted against), never an
-    error."""
-    findings = []
-    has_bom = data.startswith(BOM)
-    if has_bom:
-        findings.append("leading UTF-8 BOM")
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        return findings + ["not valid UTF-8 ({})".format(exc)]
-    if b"\r" in data:
-        findings.append("carriage return present; line endings must be LF only")
-    if not data:
-        findings.append("empty file; a released text file ends with exactly one newline")
-    elif not data.endswith(b"\n"):
-        findings.append("no trailing newline; exactly one is required")
-    elif data.endswith(b"\n\n"):
-        findings.append("more than one trailing newline; exactly one is required")
-    lines = text.split("\n")[:-1] if text.endswith("\n") else text.split("\n")
-    for lineno, line in enumerate(lines, start=1):
-        body = line[:-1] if line.endswith("\r") else line  # CR is reported once, above
-        if body != body.rstrip():
-            if hardbreak and _is_two_space_break(body):
-                continue  # a permitted CommonMark two-space hard break on a hardbreak-allowed path
-            findings.append("line {}: trailing whitespace".format(lineno))
-    for m in FORBIDDEN_RE.finditer(data):
-        if has_bom and m.start() == 0:
-            continue  # the BOM is already reported as a BOM, not double-reported as U+FEFF
-        ch = FORBIDDEN[m.group(0)]
-        if any(s <= m.start() < e and ch in cps for s, e, cps in allowances):
-            continue
-        kind = "zero-width" if ch in ZERO_WIDTH else "bidirectional control"
-        findings.append("byte offset {}: {} character U+{:04X} outside any allowance".format(
-            m.start(), kind, ord(ch)))
-    return findings
+# --- pure legs (scan_bytes / _is_two_space_break and the forbidden sets are imported from _byte_canon) --
 
 
 def coverage_findings(scope_paths, binary_set, effective):
@@ -246,15 +202,6 @@ def validate_allowances(root, rows, scope_paths):
         out.setdefault(path, ())
         out[path] = out[path] + ((start, end, cpset),)
     return out
-
-
-def _is_two_space_break(body):
-    """True iff `body` (one line, any trailing CR already removed) ends in EXACTLY two spaces after
-    non-space content: the CommonMark / markdownlint MD009 two-space hard break. A single space, three
-    or more spaces, a tab or other whitespace, and an all-whitespace line are all False, so nothing but
-    the exact hard break is ever permitted."""
-    stripped = body.rstrip()
-    return bool(stripped) and body[len(stripped):] == "  "
 
 
 def _has_two_space_break(data):
@@ -436,6 +383,15 @@ def _load_vectors(root):
 
 def self_test_main():
     failures = []
+    # Single-source pin (OPF-SELF-CONTAIN, c.1 risk 2): the pure byte legs and forbidden sets this gate
+    # uses ARE the _byte_canon objects, never a second copy. A future re-implementation that shadowed the
+    # import with a local definition would fork silently; this identity check fails closed if it ever does.
+    import _byte_canon as _bc
+    if not (scan_bytes is _bc.scan_bytes and FORBIDDEN is _bc.FORBIDDEN
+            and FORBIDDEN_RE is _bc.FORBIDDEN_RE and BOM is _bc.BOM
+            and ZERO_WIDTH is _bc.ZERO_WIDTH and BIDI is _bc.BIDI
+            and _is_two_space_break is _bc._is_two_space_break):
+        failures.append("byte-canon primitives are not the single _byte_canon source (a silent fork)")
     # Pure 3.1 cases: (name, bytes, expect_finding).
     cases = [
         ("clean", b"a\n", False),

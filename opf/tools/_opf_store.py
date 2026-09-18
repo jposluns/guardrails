@@ -35,8 +35,8 @@ Path-root convention (spec 4.1): the pointer `.opf.toml`/`.opf.local.toml` and t
 are relative to the PRODUCT repository root; `.working/` and everything under it is relative to the
 STORE repository root. The two roots coincide under the in-repo default.
 
-House SemVer parsing (`check_versions._parse`) is reused so the OPF tooling grades versions exactly as
-the release gates do.
+House SemVer parsing (`_semver._parse`, the ONE shared source that AIQT's `check_versions` also imports)
+is reused so the OPF tooling grades versions exactly as the release gates do.
 
 Reference-tooling / spec ambiguities recorded for the finalizer (this unit resolves each the
 fail-closed way and names it so the choice is reviewable, per disclose-guard-residuals):
@@ -72,12 +72,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal        # noqa: E402  contained (dir-fd, no-follow) readers + JournalError + containment probe
 import _containment    # noqa: E402  the single race-free-primitive probe
-from check_versions import _parse  # noqa: E402  the shipped bare-SemVer parser (major, minor, patch) or None
+from _semver import _parse  # noqa: E402  the shipped bare-SemVer parser (major, minor, patch) or None
 
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
-    sys.exit("error: tools/_opf_store.py requires Python 3.11+ (tomllib).")
+    sys.exit("error: opf/tools/_opf_store.py requires Python 3.11+ (tomllib).")
 
 
 # --- fixed names and vocabularies (spec 4) ------------------------------------------------------------

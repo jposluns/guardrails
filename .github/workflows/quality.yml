@@ -122,37 +122,40 @@ jobs:
         run: python3 -I -B tools/selftest_opf_render.py
 
       - name: OPF tooling self-test
-        run: python3 -I -B tools/opf.py --self-test
+        run: python3 -I -B opf/tools/opf.py --self-test
 
       - name: OPF render-drift gate self-test
-        run: python3 -I -B tools/check_opf_drift.py --self-test
+        run: python3 -I -B opf/tools/check_opf_drift.py --self-test
 
       - name: OPF render-drift gate
-        run: python3 -I -B tools/check_opf_drift.py
+        run: python3 -I -B opf/tools/check_opf_drift.py
 
       - name: OPF store-integrity gate self-test
-        run: python3 -I -B tools/check_opf_doctor.py --self-test
+        run: python3 -I -B opf/tools/check_opf_doctor.py --self-test
 
       - name: OPF store-integrity gate
-        run: python3 -I -B tools/check_opf_doctor.py
+        run: python3 -I -B opf/tools/check_opf_doctor.py
 
       - name: OPF source-only init gate self-test
-        run: python3 -I -B tools/check_opf_init.py --self-test
+        run: python3 -I -B opf/tools/check_opf_init.py --self-test
 
       - name: OPF source-only init gate
-        run: python3 -I -B tools/check_opf_init.py
+        run: python3 -I -B opf/tools/check_opf_init.py
 
       - name: OPF store-schema upgrade gate self-test
-        run: python3 -I -B tools/check_opf_upgrade.py --self-test
+        run: python3 -I -B opf/tools/check_opf_upgrade.py --self-test
 
       - name: OPF store-schema upgrade gate
-        run: python3 -I -B tools/check_opf_upgrade.py
+        run: python3 -I -B opf/tools/check_opf_upgrade.py
 
       - name: OPF import operation-layer gate self-test
-        run: python3 -I -B tools/check_opf_import.py --self-test
+        run: python3 -I -B opf/tools/check_opf_import.py --self-test
 
       - name: OPF import operation-layer gate
-        run: python3 -I -B tools/check_opf_import.py
+        run: python3 -I -B opf/tools/check_opf_import.py
+
+      - name: OPF standalone-closure gate
+        run: python3 -I -B tools/check_opf_standalone_closure.py
 
       - name: Corpus-core library self-test
         run: python3 -I -B tools/selftest_aiqt_corpus.py
@@ -413,10 +416,10 @@ jobs:
         run: python3 -I -B tools/conformance.py --root .
 
       - name: CommonMark heading adapter self-test
-        run: python3 -I -B tools/selftest_commonmark_headings.py
+        run: python3 -I -B opf/tools/selftest_commonmark_headings.py
 
       - name: CommonMark conformance replay
-        run: python3 -I -B tools/selftest_commonmark_conformance.py
+        run: python3 -I -B opf/tools/selftest_commonmark_conformance.py
 
       # Only the deterministic self-test runs here; the real time-dependent staleness audit lives in
       # the scheduled currency.yml, never on the PR path (see that workflow's header).

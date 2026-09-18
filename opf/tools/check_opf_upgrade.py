@@ -15,7 +15,7 @@ index files), derived by explicit canonical string operations and RE-VERIFIED ca
 canonical emitter (the same precondition `opf upgrade` enforces), so an emitter change that would invalidate
 any frozen fixture is caught HERE rather than in the field. The genuine-1.0.0-store shape of each module-
 enabled variant was additionally graded doctor-VALID at authoring time by the actual merge-base 1.0.0 tooling
-(commit 1c90fbb, `tools/opf.py doctor`); at 1.0.0 the module-tier records (maintainer_decision /
+(commit 1c90fbb, `tools/opf.py doctor`, its pre-move path at that commit); at 1.0.0 the module-tier records (maintainer_decision /
 preference_pattern) are schema-DEFERRED by the baseline validator and become fully-validated baseline records
 only at 1.1.0, so a POPULATED module-tier fixture's records are validated at run time by the actual
 upgrade -> 1.1.0 doctor leg here rather than by the 1.0.0 baseline. In-gate re-verification is canonicity-only;

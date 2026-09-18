@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Project-owned CommonMark heading recognition for the OPF changelog gate (U5).
 
-This is the NARROW adapter over the vendored Marko 2.2.4 parser (tools/_vendor/marko/). It answers exactly
+This is the NARROW adapter over the vendored Marko 2.2.4 parser (opf/tools/_vendor/marko/). It answers exactly
 one question for `_opf_changelog._changelog_entries`: which top-level (direct-child-of-Document) CommonMark
 level-2 headings does a changelog carry, and where does each begin. It replaces the bespoke line scanner and
 its documented incomplete fenced-code approximation that used to live in `_opf_changelog.py`, so a `## ` that
@@ -11,12 +11,12 @@ or a list, is no longer mistaken for an entry boundary, and a real top-level H2 
 Design (from the settled tri-family plan; parse-only, import-pinned, fail-closed):
 
   - Marko is imported ONLY from the vendored tree. At first use the adapter asserts the resolved marko module
-    path is under tools/_vendor/ (an absolute-path containment check, not a name check) AND that
+    path is under opf/tools/_vendor/ (an absolute-path containment check, not a name check) AND that
     marko.__version__ is exactly 2.2.4, and it applies the same absolute-path check to the two submodules it
     explicitly imports (marko.block, marko.parser). The check validates each module's REPORTED file path
     (module.__file__), so an ambient install taking precedence over the root package, and an import hook that
     supplies one of those three checked modules from an external true path, are caught: a mismatch is a
-    fail-closed HeadingScanError, never a silent fallback. tools/_vendor is made importable deterministically
+    fail-closed HeadingScanError, never a silent fallback. opf/tools/_vendor is made importable deterministically
     from THIS file's own location (an explicit front-inserted absolute path derived from __file__, never the
     CWD). Coverage is BOUNDED to those three modules: the other parse-path submodules (marko.inline,
     inline_parser, patterns, element, helpers, source) are not individually origin-checked; absent an
@@ -69,7 +69,7 @@ Design (from the settled tri-family plan; parse-only, import-pinned, fail-closed
 
   - CommonMark conformance is exactly Marko 2.2.4's. The adapter recognizes headings by what MARKO parses, so
     it inherits Marko's conformance boundary: about 97.5% of the CommonMark 0.31.2 spec example suite renders
-    identically (636 of 652; see tools/selftest_commonmark_conformance.py), and on rare adversarial edge inputs
+    identically (636 of 652; see opf/tools/selftest_commonmark_conformance.py), and on rare adversarial edge inputs
     Marko diverges from the spec's block/inline grammar (for instance a non-breaking space accepted where an
     ATX heading requires an ASCII space, a form feed treated as a line ending, or a malformed `<!` opening a
     spurious HTML block), so a hand-crafted line can be recognized or missed against a strict reading of the
@@ -110,7 +110,7 @@ REASON_VENDOR_UNREADABLE = "vendor-unreadable"   # the vendored marko cannot be 
 REASON_MANIFEST_DRIFT = "manifest-drift"  # a vendored file differs from, or is missing/extra against, the manifest
 REASON_INVALID_INPUT = "invalid-input"    # the content handed to the adapter is not text
 
-# tools/_vendor, derived from THIS file's own absolute location (never the CWD): consistent with the repo's
+# opf/tools/_vendor, derived from THIS file's own absolute location (never the CWD): consistent with the repo's
 # absolute-paths rule and stable across working directories, subprocesses, and sessions.
 _VENDOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
 
@@ -203,7 +203,7 @@ def _verify_marko_provenance(module, vendor_dir):
 
 
 def _load_marko():
-    """Import the vendored marko once, verify its provenance, and cache it. Front-inserts tools/_vendor on
+    """Import the vendored marko once, verify its provenance, and cache it. Front-inserts opf/tools/_vendor on
     sys.path (only the marko package and the vendored licences live there, so no standard-library module is
     shadowed) and fails closed if the vendored tree cannot be imported or does not pass the provenance
     check. Never falls back to an ambient install."""
@@ -405,11 +405,12 @@ def verify_vendor_manifest(vendor_dir=None, manifest_path=None, root=None):
     once-per-push byte-integrity gate, deliberately kept off the per-parse path (which does no filesystem
     access). Returns the number of files verified on success."""
     vendor_dir = os.path.abspath(vendor_dir) if vendor_dir else _VENDOR_DIR
-    # The committed manifest records REPOSITORY-ROOT-relative paths (tools/_vendor/marko/...), so `sha256sum
-    # -c` from the repo root verifies it directly; `root` is that base. It defaults to the directory two
-    # levels above the vendored tree (the repo root). A synthetic self-test whose manifest is laid out
-    # vendor-relative passes root=vendor_dir.
-    root = os.path.abspath(root) if root else os.path.dirname(os.path.dirname(vendor_dir))
+    # The committed manifest records REPOSITORY-ROOT-relative paths (opf/tools/_vendor/marko/...), so `sha256sum
+    # -c` from the repo root verifies it directly; `root` is that base. It defaults to the directory three
+    # levels above the vendored tree (opf/tools/_vendor -> opf/tools -> opf -> the repo root); OPF-SELF-CONTAIN
+    # moved the vendored tree under opf/tools/, adding the extra level. A synthetic self-test whose manifest
+    # is laid out vendor-relative passes root=vendor_dir.
+    root = os.path.abspath(root) if root else os.path.dirname(os.path.dirname(os.path.dirname(vendor_dir)))
     manifest_path = manifest_path or os.path.join(vendor_dir, MANIFEST_NAME)
     try:
         with open(manifest_path, "r", encoding="utf-8") as handle:

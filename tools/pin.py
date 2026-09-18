@@ -21,7 +21,7 @@ requires wholesale anchored validation of the target release PLUS explicit recor
 (10.4); the pin-history match only classifies and locates. Defeating truncation and splice needs an
 authenticated external append-only head ledger, a deferred ceiling-raiser recorded with the 5.6 deferrals.
 
-CONTAINMENT: every privileged path open uses the fd-bound, no-follow discipline of tools/_journal.py
+CONTAINMENT: every privileged path open uses the fd-bound, no-follow discipline of opf/tools/_journal.py
 (dir-fd-relative open with O_NOFOLLOW), reused here rather than forked. The ordinary re-pin preimage copy
 and contained swap use those shared low-level helpers and NO part of the 9.3 journal transaction (no
 INTENT/COMPLETE framing, no lock); the onboarding un-adopt and the recover reversal are the SAME CONTAINED
@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402  the 9.3 engine: contained fd-bound helpers (open/read/lstat/apply/is_terminal)
 
 try:
