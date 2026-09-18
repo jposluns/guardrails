@@ -174,6 +174,13 @@ JOB_PROPERTY_KEYS = frozenset({
 # leaves a word char or "/" before the "./" (evil./tools/, evil/./tools/) -- none is a
 # delimiter, so all are rejected. Two earlier denylist-lookbehind forms each leaked a new
 # mid-path edge (the dot before "/"); the allowlist has no such gap to patch.
+# DISCLOSED RESIDUAL: by construction a genuine tools/ or opf/tools/ reference glued
+# behind a NON-delimiter prefix -- including a shell expansion such as ${DIR}/tools/x.py
+# or a quote-glued "$ROOT"/tools/x.py -- stays OUTSIDE this shadow-scan net, because it
+# is textually indistinguishable from the mid-path over-match class above, so no anchor
+# can admit it while still rejecting evil/tools/; the covering control is that an actual
+# gate invocation through such a value still fails closed at extraction (an unresolved
+# command value / unclassified line), never a silent clean pass.
 _TOOL_NONDELIM = r"[^\s'\"(),:=`;{}\[\]]"  # a char that is NOT a legitimate delimiter
 TOOL_RE = re.compile(
     r"(?:(?<!" + _TOOL_NONDELIM + r")|(?<=(?<!" + _TOOL_NONDELIM + r")\./))"
