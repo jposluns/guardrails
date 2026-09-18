@@ -55,10 +55,6 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em}
 .eyebrow{color:var(--accent-2); font-weight:800; letter-spacing:.12em;
   text-transform:uppercase; font-size:1.02rem; margin:0 0 .95rem}
 
-/* PREVIEW-BANNER (remove at go-live): subtle full-width strip above the header. */
-.preview-banner{background:var(--panel-2); color:var(--muted); border-bottom:1px solid var(--line);
-  font-size:.95rem; line-height:1.45; text-align:center; padding:.55rem 1.5rem}
-
 /* top navigation */
 .topnav{padding:.9rem 0; border-bottom:1px solid var(--line)}
 .navrow{display:flex; justify-content:space-between; align-items:center;

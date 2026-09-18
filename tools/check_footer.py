@@ -13,8 +13,8 @@ so an anchor is attributed to the nav only while one is open.
 into the site nav and repurposed this gate accordingly. The filename is retained as its gate identity.)
 
 Coverage spans TWO required roots: site/ (the aiqt.ai site, absolute /disclosure) and opf/site/ (the
-opfiles.ai site, whose draft pages link ./disclosure relative so they resolve under /draft and rewrite
-to root at the launch flip; the opf/site/index.html placeholder is nav-exempt). Each tree is a REQUIRED
+opfiles.ai site, served from opf/site as its own root, whose pages link ./disclosure relative so it
+resolves within opf/site; every opf/site page carries the nav, so nothing is exempt). Each tree is a REQUIRED
 coverage input: if a root is absent, unreadable, or carries no .html pages, the gate fails closed (exit 2) rather than reporting a clean pass over nothing. A page must be a REGULAR
 file, opened O_NOFOLLOW and confirmed regular via fstat on the opened fd, so a symlink/FIFO/socket/device
 .html (or site/ itself as a symlink) is fail-closed and never read or followed, and the check-then-read
