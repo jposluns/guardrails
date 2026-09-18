@@ -1,0 +1,1091 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Record indexes | OPFiles</title>
+<meta name="description" content="The twelve typed record indexes: one schema-validated TOML source per record type, each paired with a generated, byte-gated view.">
+<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
+<link rel="stylesheet" href="./styles.css?v=20260918a">
+<script src="./theme.js"></script>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Record indexes | OPFiles">
+<meta property="og:description" content="The twelve typed record indexes: one schema-validated TOML source per record type, each paired with a generated, byte-gated view.">
+<meta name="twitter:card" content="summary">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
+  <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
+</header>
+<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
+<div class="layout">
+<nav class="sidebar" id="sidebar" aria-label="Main navigation">
+  <h4>Start</h4>
+  <a class="navlink" href="./">Home: the pairs model</a>
+  <a class="navlink" href="./standard">The standard</a>
+  <a class="navlink" href="./adopt">Adopt</a>
+  <a class="navlink" href="./tooling">Reference tooling</a>
+  <h4>Reference</h4>
+  <a class="navlink" href="./core-files">Core store files</a>
+  <a class="navlink active" href="./record-indexes" aria-current="page">Record indexes</a>
+  <a class="navlink" href="./store-meta">Pointer, meta &amp; generated</a>
+  <h4>More</h4>
+  <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
+  <a class="navlink" href="./roadmap">Roadmap</a>
+  <a class="navlink" href="./about">About and licence</a>
+  <h4>Project</h4>
+  <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
+  <a class="navlink" href="./disclosure">Disclosure</a>
+  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
+</nav>
+<div class="content">
+
+<main id="main">
+<div class="wrap">
+  <div class="refhead pagehead">
+    <p class="eyebrow">Reference</p>
+    <h1>Record indexes</h1>
+    <p class="lead">Twelve typed indexes: one schema-validated TOML source per record type, each paired with a generated, byte-gated view. Choose a type to see what it carries and what it protects.</p>
+  </div>
+
+  <div class="navtabs" data-reference-hub role="tablist" aria-label="Record type">
+    <a class="navtab" id="tab-backlog-item" role="tab" aria-controls="backlog-item" href="#backlog-item">backlog_item</a>
+    <a class="navtab" id="tab-done" role="tab" aria-controls="done" href="#done">done</a>
+    <a class="navtab" id="tab-finding" role="tab" aria-controls="finding" href="#finding">finding</a>
+    <a class="navtab" id="tab-pending-decision" role="tab" aria-controls="pending-decision" href="#pending-decision">pending_decision</a>
+    <a class="navtab" id="tab-autonomous-decision" role="tab" aria-controls="autonomous-decision" href="#autonomous-decision">autonomous_decision</a>
+    <a class="navtab" id="tab-maintainer-decision" role="tab" aria-controls="maintainer-decision" href="#maintainer-decision">maintainer_decision</a>
+    <a class="navtab" id="tab-preference-pattern" role="tab" aria-controls="preference-pattern" href="#preference-pattern">preference_pattern</a>
+    <a class="navtab" id="tab-block" role="tab" aria-controls="block" href="#block">block</a>
+    <a class="navtab" id="tab-handoff" role="tab" aria-controls="handoff" href="#handoff">handoff</a>
+    <a class="navtab" id="tab-reference" role="tab" aria-controls="reference" href="#reference">reference</a>
+    <a class="navtab" id="tab-contribution" role="tab" aria-controls="contribution" href="#contribution">contribution</a>
+    <a class="navtab" id="tab-modules" role="tab" aria-controls="modules" href="#modules">modules</a>
+  </div>
+
+  <button type="button" class="btn ghost showall" data-show-all aria-pressed="false" hidden>
+    Show all files for reading and search
+  </button>
+</div>
+
+<section class="tabpanel" id="backlog-item" role="tabpanel" aria-labelledby="tab-backlog-item" tabindex="0">
+  <div class="wrap">
+    <div class="refhead pagehead">
+      <p class="eyebrow">Record index</p>
+      <h2 id="backlog-item-title">The backlog</h2>
+      <div class="refchips">
+        <code>backlog_item.index.toml</code>
+        <span>namespace BI</span>
+        <code>.working/toml/</code>
+      </div>
+      <p class="lead">One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified, not felt.</p>
+    </div>
+
+    <h3>The problem it solves</h3>
+    <blockquote class="refpull">A backlog that lives in prose drifts: items vanish, "done" means different things, and blocked work hides.</blockquote>
+    <p>Typed records give each item a permanent ID, a closed state set, and a ratification step: an assistant or automation finishing an item lands <code>done/proposed</code>, and only a maintainer transition removes the qualifier. Blocked-ness is deliberately never a stored state; it is derived from active blocks at view time, so it can never go stale in the record.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Pairs with</dt>
+        <dd>
+          <span class="chip view"><code>TODO.md</code></span>
+          <span class="chip view"><code>BACKLOG.md</code></span>
+          <span class="chip view"><code>PIPELINE.md</code></span>
+          <p>Three composed views draw on this index joined against blocks, all byte-drift-gated and rendering the actionability join. An optional <code>BACKLOG_ITEM-INDEX.md</code> mirror renders the index one-to-one for human reading.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Lifecycle</dt>
+        <dd>
+          <p><code>open</code> &#8594; <code>active</code> &#8594; <code>done</code> | <code>dropped</code></p>
+          <p>Open may go straight to dropped. No resurrection: a record in an unqualified terminal state never re-enters a working state, so a revived concern is a new record linking the old one. A ratified <code>done</code> creates a one-to-one completion receipt in the <a href="./record-indexes#done">done index</a>, and an item is actionable while open or active with no unqualified active block scoping it.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Referenced by</dt>
+        <dd>
+          <span class="chip"><code>opf init</code></span>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p>Created by <code>opf init</code> (empty index), then records by process as work is planned; updated by state transitions under the status grammar and maintainer ratification of proposed terminals; read by <code>opf render</code> and validated by <code>opf doctor</code> (schema validity, ID uniqueness, transition legality, no-resurrection).</p>
+        </dd>
+      </div>
+    </dl>
+
+    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/backlog_item.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>     = <span class="tok-str">"BI-42"</span>
+  <span class="tok-key">type</span>   = <span class="tok-str">"backlog_item"</span>
+  <span class="tok-key">status</span> = <span class="tok-str">"active"</span>
+  <span class="tok-key">title</span>  = <span class="tok-str">"Add the drift gate to CI"</span></div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape: <code>schema = 1</code> plus an array of <code>[[record]]</code> rows. Each record carries the standard envelope: <code>id</code>, <code>type</code>, <code>status</code>, <code>title</code>, <code>created_at</code> and <code>updated_at</code> (RFC 3339 UTC, read from the clock), <code>actor.kind</code> (maintainer, assistant, automation, or importer), optional <code>summary</code>, <code>links</code> (a closed vocabulary: supersedes, resolves, remediates, receipt_of, corrects, follows, relates, exemplifies, derives_from), <code>refs</code> (captured external sources: path, url, or doc), and registered <code>x-&lt;vendor&gt;</code> extensions. Schemas are closed; an unknown key is a validation failure.</p>
+
+    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+      <h4>A ratified "done", not a felt one</h4>
+      <p>A backlog whose completion claims are gated: "done" is a ratified transition with a durable receipt, not a feeling, which helps prevent silent scope loss and unratified completion from entering the record.</p>
+    </div>
+  </div>
+</section>
+
+<section class="tabpanel" id="done" role="tabpanel" aria-labelledby="tab-done" tabindex="0">
+  <div class="wrap">
+    <div class="refhead pagehead">
+      <p class="eyebrow">Record index</p>
+      <h2 id="done-title">Completion receipts</h2>
+      <div class="refchips">
+        <code>done.index.toml</code>
+        <span>namespace DN</span>
+        <code>.working/toml/</code>
+      </div>
+      <p class="lead">A durable completion receipt, created in its single terminal state and immutable from birth, linked one-to-one to the backlog item whose ratified completion it witnesses.</p>
+    </div>
+
+    <h3>The problem it solves</h3>
+    <blockquote class="refpull">Completion needs its own artefact.</blockquote>
+    <p>If "done" were only a state flag on the backlog item, the moment of completion, who ratified it, and what it covered would be reconstructable only from history. A separate immutable receipt makes each completion a first-class, linkable fact.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Pairs with</dt>
+        <dd>
+          <span class="chip view"><code>DONE.md</code></span>
+          <p>Composed from this index, plus the optional <code>DONE-INDEX.md</code> mirror; both byte-drift-gated.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Lifecycle</dt>
+        <dd>
+          <p><code>recorded</code> (terminal only)</p>
+          <p>A single state, no transitions, and never proposable: a factual receipt awaits no ratification, so it carries no <code>/proposed</code> qualifier. A ratified <code>done</code> on a backlog item creates the receipt in the same act, one to one. Like all records in unqualified terminal states other than the worklog, receipts may rotate to the calendar-year archive on manifest-declared thresholds; rotation is enumerated relocation, never deletion, so every receipt remains resolvable forever.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Referenced by</dt>
+        <dd>
+          <span class="chip"><code>opf init</code></span>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p>Created by <code>opf init</code> (empty index), by the ratified-done transition, and by the importer for migrated history with provenance; never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by <code>opf render</code> (DONE.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, the one-to-one receipt link).</p>
+        </dd>
+      </div>
+    </dl>
+
+    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/done.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span>     = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>         = <span class="tok-str">"DN-42"</span>
+  <span class="tok-key">type</span>       = <span class="tok-str">"done"</span>
+  <span class="tok-key">status</span>     = <span class="tok-str">"recorded"</span>
+  <span class="tok-key">links</span>      = [{ <span class="tok-key">rel</span> = <span class="tok-str">"receipt_of"</span>, <span class="tok-key">id</span> = <span class="tok-str">"BI-42"</span> }]</div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape (<code>schema = 1</code> plus <code>[[record]]</code> rows) with the standard envelope and no type-specific extra fields. The single state is <code>recorded</code>, with no transitions and never proposable: a factual receipt awaits no ratification, so it carries no <code>/proposed</code> qualifier. It links <code>receipt_of</code> to the backlog item it witnesses; a standalone receipt is legal only for imported history with provenance.</p>
+
+    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+      <h4>An audit-ready record of completion</h4>
+      <p>An audit-ready record of what was finished, when, and on whose ratification. Because a receipt exists only for a ratified completion, the DONE view helps prevent proposed or asserted completion from reading as settled fact.</p>
+    </div>
+  </div>
+</section>
+
+<section class="tabpanel" id="finding" role="tabpanel" aria-labelledby="tab-finding" tabindex="0">
+  <div class="wrap">
+    <div class="refhead pagehead">
+      <p class="eyebrow">Record index</p>
+      <h2 id="finding-title">The finding register</h2>
+      <div class="refchips">
+        <code>finding.index.toml</code>
+        <span>namespace FN</span>
+        <code>.working/toml/</code>
+      </div>
+      <p class="lead">An observation worth acting on: something wrong, suspicious, or worth noting, that links its remediation rather than containing it and leaves <code>open</code> for exactly one of fixed, routed, refuted, or accepted.</p>
+    </div>
+
+    <h3>The problem it solves</h3>
+    <blockquote class="refpull">Defects argued about in chat disappear; defects recorded with permanent IDs get resolved or explicitly accepted.</blockquote>
+    <p>Two rules keep the record honest: severity is graded at or after the fix decision, never before, so triage pressure cannot downgrade a defect to avoid fixing it; and an assistant or automation closing a finding lands <code>fixed/proposed</code>, awaiting maintainer ratification.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Pairs with</dt>
+        <dd>
+          <span class="chip view"><code>FINDINGS.md</code></span>
+          <p>Composed from this index, plus the optional <code>FINDING-INDEX.md</code> mirror; both byte-drift-gated.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Lifecycle</dt>
+        <dd>
+          <p><code>open</code> &#8594; <code>fixed</code> | <code>routed</code> | <code>refuted</code> | <code>accepted</code></p>
+          <p>Four terminal outcomes, all proposable: fixed (remediated), routed (sent to its real owner), refuted (the observation did not hold), accepted (a recorded decision to live with it). No resurrection: a concern that returns is a new finding linking the old one.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Referenced by</dt>
+        <dd>
+          <span class="chip"><code>opf init</code></span>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p>Created by <code>opf init</code> (empty index) and by whoever observes a defect, human or assistant; updated by resolution transitions, maintainer ratification, and severity grading at or after the fix decision; read by <code>opf render</code> (FINDINGS.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, transition legality).</p>
+        </dd>
+      </div>
+    </dl>
+
+    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/finding.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>       = <span class="tok-str">"FN-42"</span>
+  <span class="tok-key">type</span>     = <span class="tok-str">"finding"</span>
+  <span class="tok-key">status</span>   = <span class="tok-str">"fixed"</span>
+  <span class="tok-key">severity</span> = <span class="tok-str">"major"</span></div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape with the standard envelope plus one type-specific field, <code>severity</code>. Links typically carry <code>remediates</code> toward the backlog item or change that fixes the finding; refs capture the evidence (a path and line, a URL, or a document and section) at the moment the claim is made.</p>
+
+    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+      <h4>A register that cannot quietly shrink</h4>
+      <p>A defect register that cannot quietly shrink: every confirmed observation has a permanent row that leaves only through a named, ratified outcome. This helps prevent the silent disappearance of inconvenient findings.</p>
+    </div>
+  </div>
+</section>
+
+<section class="tabpanel" id="pending-decision" role="tabpanel" aria-labelledby="tab-pending-decision" tabindex="0">
+  <div class="wrap">
+    <div class="refhead pagehead">
+      <p class="eyebrow">Record index</p>
+      <h2 id="pending-decision-title">Pending decisions</h2>
+      <div class="refchips">
+        <code>pending_decision.index.toml</code>
+        <span>namespace PD</span>
+        <code>.working/toml/</code>
+      </div>
+      <p class="lead">A question that must be answered before dependent work settles: <code>open</code> until decided or withdrawn, with an all-or-none resolution bundle.</p>
+    </div>
+
+    <h3>The problem it solves</h3>
+    <blockquote class="refpull">Half-recorded decisions are worse than none.</blockquote>
+    <p>A decision with no decider, or a decider with no decision text, cannot be audited or relied on. The all-or-none bundle makes a partial resolution a validation failure rather than a lurking ambiguity, and the supersession chain keeps exactly one current effective resolution per question.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Pairs with</dt>
+        <dd>
+          <span class="chip view"><code>DECISIONS.md</code></span>
+          <a class="chip view" href="./store-meta#decisions-projection"><code>DECISIONS.toml</code></a>
+          <p>The composed <code>DECISIONS.md</code> (drawing on all four decision types) and the machine projection <code>DECISIONS.toml</code>, both byte-drift-gated, plus the optional <code>PENDING_DECISION-INDEX.md</code> mirror.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Lifecycle</dt>
+        <dd>
+          <p><code>open</code> &#8594; <code>decided</code> | <code>withdrawn</code></p>
+          <p>Both terminal states are proposable: an assistant-recorded resolution lands with the <code>/proposed</code> qualifier until a maintainer ratifies it. Overturning a decided question is a new record that supersedes the old; the old record is never edited back to open.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Referenced by</dt>
+        <dd>
+          <span class="chip"><code>opf init</code></span>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p>Created by <code>opf init</code> (empty index) and whenever a question is parked for decision; updated by the deciding transition with its full bundle and by supersession from later decisions; read by <code>opf render</code> (DECISIONS.md, DECISIONS.toml, the mirror) and validated by <code>opf doctor</code> (schema, the all-or-none bundle, exactly one effective resolution per chain).</p>
+        </dd>
+      </div>
+    </dl>
+
+    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/pending_decision.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span>     = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>         = <span class="tok-str">"PD-42"</span>
+  <span class="tok-key">type</span>       = <span class="tok-str">"pending_decision"</span>
+  <span class="tok-key">status</span>     = <span class="tok-str">"decided"</span>
+  <span class="tok-key">decision</span>   = <span class="tok-str">"Ship the drift gate in 1.1.0"</span>
+  <span class="tok-key">decided_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span>
+  <span class="tok-key">decided_by</span> = <span class="tok-str">"maintainer"</span></div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape with the standard envelope plus the resolution bundle fields: <code>decision</code>, <code>decided_at</code>, and <code>decided_by</code>. An open decision carries none of the three; a decided one carries all three. A decided record may be superseded by a new decision linking <code>supersedes</code>; the decision-resolution join walks that chain to find the current effective resolution.</p>
+
+    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+      <h4>Decisions with provenance</h4>
+      <p>Decisions with provenance: who decided, when, and what exactly, with the current answer always derivable by machine. This helps prevent stale or contradictory decision records from steering later work.</p>
+    </div>
+  </div>
+</section>
+
+<section class="tabpanel" id="autonomous-decision" role="tabpanel" aria-labelledby="tab-autonomous-decision" tabindex="0">
+  <div class="wrap refhead">
+    <p class="eyebrow">Record index</p>
+    <h2 id="autonomous-decision-title">Self-made decisions, on the record</h2>
+    <div class="refchips">
+      <code>autonomous_decision.index.toml</code>
+      <span>namespace AD</span>
+      <span>.working/toml/</span>
+    </div>
+    <p class="lead">A call an actor was authorized to make itself: the classification basis that put it inside that authority, the action taken, and links to what it affected. Created terminal, immutable, and awaiting no ratification.</p>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <blockquote class="refpull">Autonomy without a trail erodes oversight.</blockquote>
+      <h3>The problem it solves</h3>
+      <p>Recording every self-made call with its basis makes autonomous operation reviewable after
+        the fact: a maintainer can audit what was decided under standing authority and overturn
+        anything, not by editing the record, but by a new record or a
+        <a href="./record-indexes#maintainer-decision">maintainer decision</a> that links the old one.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <dl class="refstrip">
+        <div>
+          <dt>Pairs with</dt>
+          <dd>
+            <span class="chip view"><code>DECISIONS.md</code></span>
+            <a class="chip view" href="./store-meta#decisions-projection"><code>DECISIONS.toml</code></a>
+            <span class="chip view"><code>AUTONOMOUS_DECISION-INDEX.md</code></span>
+            <p>The composed decisions view, its TOML projection, and the optional one-to-one mirror.</p>
+          </dd>
+        </div>
+        <div>
+          <dt>Lifecycle</dt>
+          <dd>
+            <span class="chip"><code>recorded</code></span>
+            <p>A single state, created terminal and immutable: written at the moment the decision is
+              enacted, awaiting no ratification and carrying no <code>/proposed</code> qualifier. The
+              trail cannot be tidied retroactively; it is overturned only by a new linking record.</p>
+          </dd>
+        </div>
+        <div>
+          <dt>Referenced by</dt>
+          <dd>
+            <span class="chip"><code>opf init</code></span>
+            <span class="chip"><code>opf render</code></span>
+            <span class="chip"><code>opf doctor</code></span>
+            <p><code>init</code> scaffolds the empty index; <code>render</code> composes the views;
+              <code>doctor</code> checks schema and ID uniqueness. Nothing updates it; it is immutable.</p>
+          </dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>What a record carries</h3>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/autonomous_decision.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>             = <span class="tok-str">"AD-1"</span>
+  <span class="tok-key">type</span>           = <span class="tok-str">"autonomous_decision"</span>
+  <span class="tok-key">status</span>         = <span class="tok-str">"recorded"</span>
+  <span class="tok-key">title</span>          = <span class="tok-str">"Retry the flaky fixture on timeout"</span>
+  <span class="tok-key">classification</span> = <span class="tok-str">"within standing authority: reversible, internal"</span>
+  <span class="tok-key">action</span>         = <span class="tok-str">"added a bounded retry to the fixture setup"</span>
+  <span class="tok-key">actor</span>          = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
+      </div>
+      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p>The shared index shape with the standard envelope plus two type-specific fields:
+        <code>classification</code> (the basis that classified the decision as the actor's to make)
+        and <code>action</code> (what was done). There are no transitions; overturning is always a new
+        linking record. Because each record is typed and linked, views and audits can walk from any
+        action back to the authority claim beneath it.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+        <h4>What it protects</h4>
+        <p>Reviewable autonomy: standing authority comes with a recorded, immutable trail, which helps
+          prevent quiet scope creep in what an assistant decides for itself.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <p><a href="./record-indexes#pending-decision">&#8592; pending_decision</a> &#183; <a href="./record-indexes#maintainer-decision">maintainer_decision &#8594;</a></p>
+    </div>
+  </section>
+</section>
+
+<section class="tabpanel" id="maintainer-decision" role="tabpanel" aria-labelledby="tab-maintainer-decision" tabindex="0">
+  <div class="wrap refhead">
+    <p class="eyebrow">Record index</p>
+    <h2 id="maintainer-decision-title">Rulings the maintainer made</h2>
+    <div class="refchips">
+      <code>maintainer_decision.index.toml</code>
+      <span>namespace MD</span>
+      <span>.working/toml/</span>
+    </div>
+    <p class="lead">A created-terminal, immutable ruling carrying its <code>decision</code>, the answer plus its rationale. Its actor kind is restricted to <code>maintainer</code> or <code>importer</code> alone.</p>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <blockquote class="refpull">The record, not the conversation, is the source of truth: a ruling made in chat and never recorded did not happen.</blockquote>
+      <h3>The problem it solves</h3>
+      <p>Making rulings a distinct immutable type separates what the maintainer decided from what
+        anyone proposed, and the attribution restriction makes that separation structural: a
+        maintainer ruling with assistant attribution is a contradiction the schema refuses, and
+        importer attribution covers migrated history.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <dl class="refstrip">
+        <div>
+          <dt>Pairs with</dt>
+          <dd>
+            <span class="chip view"><code>DECISIONS.md</code></span>
+            <a class="chip view" href="./store-meta#decisions-projection"><code>DECISIONS.toml</code></a>
+            <span class="chip view"><code>MAINTAINER_DECISION-INDEX.md</code></span>
+            <p>The composed decisions view, its TOML projection, and the optional one-to-one mirror.</p>
+          </dd>
+        </div>
+        <div>
+          <dt>Lifecycle</dt>
+          <dd>
+            <span class="chip"><code>recorded</code></span>
+            <p>A single state, created terminal and never proposable: recorded the session it is made,
+              with no transitions. Overturning is a new record linking the old one.</p>
+          </dd>
+        </div>
+        <div>
+          <dt>Referenced by</dt>
+          <dd>
+            <span class="chip"><code>opf init</code></span>
+            <span class="chip"><code>opf render</code></span>
+            <span class="chip"><code>opf doctor</code></span>
+            <p><code>init</code> scaffolds the empty index, the importer fills migrated history;
+              <code>render</code> composes the views; <code>doctor</code> checks schema, the actor-kind
+              restriction, and uniqueness. Nothing updates it; it is immutable.</p>
+          </dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>What a record carries</h3>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/maintainer_decision.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>       = <span class="tok-str">"MD-1"</span>
+  <span class="tok-key">type</span>     = <span class="tok-str">"maintainer_decision"</span>
+  <span class="tok-key">status</span>   = <span class="tok-str">"recorded"</span>
+  <span class="tok-key">title</span>    = <span class="tok-str">"Ship the drift gate in 1.1.0"</span>
+  <span class="tok-key">decision</span> = <span class="tok-str">"yes; the gate blocks merge on any view drift"</span>
+  <span class="tok-key">actor</span>    = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
+      </div>
+      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p>The shared index shape with the standard envelope plus <code>decision</code>. A ruling may
+        link <code>exemplifies</code> to the <a href="./record-indexes#preference-pattern">preference pattern</a> it
+        instantiates, feeding the distillation of standing preferences from individual rulings. It is
+        baseline as of spec 1.1.0 (it was module-tier in 1.0.0); the additive schema upgrade carries a
+        populated 1.0.0 governance-module index forward byte for byte.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+        <h4>What it protects</h4>
+        <p>An authoritative, immutable register of the human's rulings, which helps prevent a decision
+          from being re-litigated, mis-remembered, or silently reattributed.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <p><a href="./record-indexes#autonomous-decision">&#8592; autonomous_decision</a> &#183; <a href="./record-indexes#preference-pattern">preference_pattern &#8594;</a></p>
+    </div>
+  </section>
+</section>
+
+<section class="tabpanel" id="preference-pattern" role="tabpanel" aria-labelledby="tab-preference-pattern" tabindex="0">
+  <div class="wrap refhead">
+    <p class="eyebrow">Record index</p>
+    <h2 id="preference-pattern-title">Standing preferences, distilled</h2>
+    <div class="refchips">
+      <code>preference_pattern.index.toml</code>
+      <span>namespace PP</span>
+      <span>.working/toml/</span>
+    </div>
+    <p class="lead">The reusable rule beneath a family of individual rulings, carrying its <code>context</code> and <code>rationale</code> with the envelope's title. It is <code>active</code> until <code>retired</code>.</p>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <blockquote class="refpull">Individual rulings answer individual questions; patterns keep the maintainer from answering the same question forever.</blockquote>
+      <h3>The problem it solves</h3>
+      <p>Distillation is useful and risky in equal measure, so the standard gates it: an
+        assistant-distilled pattern lands <code>active/proposed</code> and steers nothing until a
+        maintainer ratifies it to the unqualified <code>active</code>.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <dl class="refstrip">
+        <div>
+          <dt>Pairs with</dt>
+          <dd>
+            <span class="chip view"><code>DECISIONS.md</code></span>
+            <a class="chip view" href="./store-meta#decisions-projection"><code>DECISIONS.toml</code></a>
+            <span class="chip view"><code>PREFERENCE_PATTERN-INDEX.md</code></span>
+            <p>The composed decisions view, its TOML projection, and the optional one-to-one mirror.</p>
+          </dd>
+        </div>
+        <div>
+          <dt>Lifecycle</dt>
+          <dd>
+            <span class="chip"><code>active</code></span> &#8594; <span class="chip"><code>retired</code></span>
+            <p><code>active</code> is the initial, gated state; <code>retired</code> is terminal when a
+              preference no longer holds. Entering the gated state as an assistant or automation takes
+              <code>/proposed</code> until a maintainer ratifies, the same gating mechanism as block and
+              contribution.</p>
+          </dd>
+        </div>
+        <div>
+          <dt>Referenced by</dt>
+          <dd>
+            <span class="chip"><code>opf init</code></span>
+            <span class="chip"><code>opf render</code></span>
+            <span class="chip"><code>opf doctor</code></span>
+            <p><code>init</code> scaffolds the empty index; maintainers record patterns directly and
+              assistants as gated proposals; <code>render</code> composes the views; <code>doctor</code>
+              checks schema and gated-state legality.</p>
+          </dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>What a record carries</h3>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/preference_pattern.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>        = <span class="tok-str">"PP-1"</span>
+  <span class="tok-key">type</span>      = <span class="tok-str">"preference_pattern"</span>
+  <span class="tok-key">status</span>    = <span class="tok-str">"active"</span>
+  <span class="tok-key">title</span>     = <span class="tok-str">"Prefer the smallest correct change"</span>
+  <span class="tok-key">context</span>   = <span class="tok-str">"when a change could be broadened past its requirement"</span>
+  <span class="tok-key">rationale</span> = <span class="tok-str">"scope creep is where regressions and review cost hide"</span>
+  <span class="tok-key">actor</span>     = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
+      </div>
+      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p>The shared index shape with the standard envelope plus <code>context</code> and
+        <code>rationale</code>. <a href="./record-indexes#maintainer-decision">Maintainer decisions</a> may link
+        <code>exemplifies</code> toward the pattern they instantiate, so the evidence for a pattern
+        accumulates as links. It is baseline as of spec 1.1.0 (module-tier in 1.0.0); a populated
+        1.0.0 decision-support index is preserved as is by the schema upgrade.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+        <h4>What it protects</h4>
+        <p>Standing preferences that are explicit, ratified, and able to be retired, which helps reduce
+          repeated clarification and helps prevent an assistant's own inference about "what the
+          maintainer wants" from hardening into unratified policy.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <p><a href="./record-indexes#maintainer-decision">&#8592; maintainer_decision</a> &#183; <a href="./record-indexes#block">block &#8594;</a></p>
+    </div>
+  </section>
+</section>
+
+<section class="tabpanel" id="block" role="tabpanel" aria-labelledby="tab-block" tabindex="0">
+  <div class="wrap">
+    <div class="refhead pagehead">
+      <p class="eyebrow">Record index</p>
+      <h2 id="block-title">Blocks</h2>
+      <div class="refchips">
+        <code>block.index.toml</code>
+        <span>namespace BL</span>
+        <code>.working/toml/</code>
+      </div>
+      <p class="lead">A record that named work cannot proceed: it <code>scopes</code> an enumerated list of record IDs and feeds the actionability rule, so only a maintainer-ratified active block hides work.</p>
+    </div>
+
+    <h3>The problem it solves</h3>
+    <blockquote class="refpull">"Blocked" is one of the easiest states to abuse: it can park inconvenient work indefinitely.</blockquote>
+    <p>The standard makes a block a scoped, auditable record rather than a mood, and gates its creation: a block created by an assistant or automation is <code>active/proposed</code>, a proposal that hides nothing and justifies no stop until a maintainer ratifies it. Moving work to blocked is the maintainer's decision, structurally.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Pairs with</dt>
+        <dd>
+          <span class="chip view"><code>BLOCKS.md</code></span>
+          <span class="chip view"><code>TODO.md</code></span>
+          <span class="chip view"><code>BACKLOG.md</code></span>
+          <span class="chip view"><code>PIPELINE.md</code></span>
+          <p><code>BLOCKS.md</code> is composed from this index, and the block join renders inside <code>TODO.md</code>, <code>BACKLOG.md</code>, and <code>PIPELINE.md</code>; an optional <code>BLOCK-INDEX.md</code> mirror completes the set. All byte-drift-gated.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Lifecycle</dt>
+        <dd>
+          <p><code>active</code> (gated) &#8594; <code>released</code> | <code>expired</code></p>
+          <p>An unqualified active block hides the records it scopes from actionable views; a proposed or terminal block hides nothing. The block-actionability join is one of exactly two named joins in the closed transform vocabulary. Active blocks never rotate to the archive.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Referenced by</dt>
+        <dd>
+          <span class="chip"><code>opf init</code></span>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p>Created by <code>opf init</code> (empty index), by maintainers directly, and by assistants as gated proposals; updated by ratification, release, or expiry transitions; read by <code>opf render</code> (BLOCKS.md and the actionability join in the three backlog views) and validated by <code>opf doctor</code> (schema, gated-state legality, scoped-ID resolution).</p>
+        </dd>
+      </div>
+    </dl>
+
+    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/block.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>     = <span class="tok-str">"BL-42"</span>
+  <span class="tok-key">type</span>   = <span class="tok-str">"block"</span>
+  <span class="tok-key">status</span> = <span class="tok-str">"active"</span>
+  <span class="tok-key">scopes</span> = [<span class="tok-str">"BI-42"</span>, <span class="tok-str">"BI-43"</span>]</div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape with the standard envelope plus <code>scopes</code>, the enumerated record IDs the block covers. States: <code>active</code> (initial, gated) to <code>released</code> or <code>expired</code> (terminal). Blocked-ness is never stored on the scoped records; it is derived at view time through the block join.</p>
+
+    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+      <h4>Blocks you can audit</h4>
+      <p>Blocks that are visible, scoped, and ratified, which helps prevent manufactured stops: work reads as blocked only on a grant the record can show.</p>
+    </div>
+  </div>
+</section>
+
+<section class="tabpanel" id="handoff" role="tabpanel" aria-labelledby="tab-handoff" tabindex="0">
+  <div class="wrap">
+    <div class="refhead pagehead">
+      <p class="eyebrow">Record index</p>
+      <h2 id="handoff-title">The session handoff</h2>
+      <div class="refchips">
+        <code>handoff.index.toml</code>
+        <span>namespace HO</span>
+        <code>.working/toml/</code>
+      </div>
+      <p class="lead">The durable state snapshot a session resumes from, <code>current</code> until superseded, with at most one current handoff at any time.</p>
+    </div>
+
+    <h3>The problem it solves</h3>
+    <blockquote class="refpull">Sessions end, contexts truncate, and whatever lived only in conversation is gone.</blockquote>
+    <p>A records-first discipline resumes from the durable handoff rather than starting cold, and the single-current rule means there is never ambiguity about which snapshot is authoritative. A handoff records where the work stands, what is in flight, and what comes next.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Pairs with</dt>
+        <dd>
+          <span class="chip view"><code>HANDOFF.md</code></span>
+          <p>Composed from this index, plus the optional <code>HANDOFF-INDEX.md</code> mirror; both byte-drift-gated.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Lifecycle</dt>
+        <dd>
+          <p><code>current</code> &#8594; <code>superseded</code></p>
+          <p>Posting a new handoff supersedes the previous one in the same act, so at most one current handoff exists; supersession is atomic with posting, the new handoff and the old one's terminal transition landing together. The current handoff never rotates to the archive, and the chain of superseded handoffs remains a readable history of how the work's state evolved.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Referenced by</dt>
+        <dd>
+          <span class="chip"><code>opf init</code></span>
+          <span class="chip"><code>opf render</code></span>
+          <span class="chip"><code>opf doctor</code></span>
+          <p>Created by <code>opf init</code> (empty index) and by a new record at each session close or state checkpoint; updated only by supersession, in the same act as the next handoff's posting; read by session resume, by <code>opf render</code> (HANDOFF.md and the mirror), and validated by <code>opf doctor</code> (schema, the at-most-one-current invariant).</p>
+        </dd>
+      </div>
+    </dl>
+
+    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/handoff.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span>  = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>      = <span class="tok-str">"HO-42"</span>
+  <span class="tok-key">type</span>    = <span class="tok-str">"handoff"</span>
+  <span class="tok-key">status</span>  = <span class="tok-str">"current"</span>
+  <span class="tok-key">summary</span> = <span class="tok-str">"Drift gate merged; OPF verbs next"</span></div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape with the standard envelope and no type-specific extra fields; the handoff's content rides <code>summary</code>, <code>links</code>, and <code>refs</code>. States: <code>current</code> (initial) to <code>superseded</code> (terminal).</p>
+
+    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+      <h4>Continuity across sessions</h4>
+      <p>Continuity across sessions and machines: resuming from the recorded handoff helps reduce cold-start reconstruction and helps prevent constraints and in-flight state from lapsing when a context is lost.</p>
+    </div>
+  </div>
+</section>
+
+<section class="tabpanel" id="reference" role="tabpanel" aria-labelledby="tab-reference" tabindex="0">
+  <div class="wrap refhead">
+    <p class="eyebrow">Record index</p>
+    <h2 id="reference-title">Sources, captured at the claim</h2>
+    <div class="refchips">
+      <code>reference.index.toml</code>
+      <span>namespace RF</span>
+      <span>.working/toml/</span>
+    </div>
+    <p class="lead">An immutable captured source, a repository path (with a line where applicable), a URL, or a document and section, recorded at the moment a claim or artefact that rests on it is produced.</p>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <blockquote class="refpull">A reference reconstructed later from memory is a guess wearing a citation's clothes.</blockquote>
+      <h3>The problem it solves</h3>
+      <p>The standard's rule is capture-at-claim: a record whose claims rest on an external source
+        without a captured reference is unsourced, whatever confidence backs it. Making references a
+        first-class immutable type lets many records share one captured source.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <dl class="refstrip">
+        <div>
+          <dt>Pairs with</dt>
+          <dd>
+            <span class="chip view"><code>REFERENCES.md</code></span>
+            <span class="chip view"><code>REFERENCE-INDEX.md</code></span>
+            <p>The composed references view and the optional one-to-one mirror, both byte-drift-gated.</p>
+          </dd>
+        </div>
+        <div>
+          <dt>Lifecycle</dt>
+          <dd>
+            <span class="chip"><code>recorded</code></span>
+            <p>A single state, created terminal, immutable, and never proposable: a captured fact
+              awaits no ratification. Records link toward references rather than editing them, so a
+              source, once captured, stays exactly what was captured.</p>
+          </dd>
+        </div>
+        <div>
+          <dt>Referenced by</dt>
+          <dd>
+            <span class="chip"><code>opf init</code></span>
+            <span class="chip"><code>opf render</code></span>
+            <span class="chip"><code>opf doctor</code></span>
+            <p><code>init</code> scaffolds the empty index; <code>render</code> composes the view;
+              <code>doctor</code> checks schema and uniqueness; and any record that links to its
+              captured sources reads it. Nothing updates it; it is immutable.</p>
+          </dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>What a record carries</h3>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/reference.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>     = <span class="tok-str">"RF-1"</span>
+  <span class="tok-key">type</span>   = <span class="tok-str">"reference"</span>
+  <span class="tok-key">status</span> = <span class="tok-str">"recorded"</span>
+  <span class="tok-key">title</span>  = <span class="tok-str">"OPF spec, the record envelope"</span>
+  <span class="tok-key">refs</span>   = [{ <span class="tok-key">kind</span> = <span class="tok-str">"doc"</span>, <span class="tok-key">locator</span> = <span class="tok-str">"OPF-SPEC.md#8"</span>, <span class="tok-key">note</span> = <span class="tok-str">"envelope fields"</span> }]
+  <span class="tok-key">actor</span>  = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
+      </div>
+      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p>The shared index shape with the standard envelope and no type-specific extra fields; the
+        captured sources themselves ride the envelope's <code>refs</code> array, each entry
+        <code>{kind, locator, note}</code> with <code>kind</code> one of <code>path</code>,
+        <code>url</code>, or <code>doc</code>. This type is the inward counterpart of
+        <a href="./record-indexes#contribution">contribution</a>, which records what the project sends out.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+        <h4>What it protects</h4>
+        <p>Claims with their evidence attached at birth, which helps reduce the likelihood of
+          unsourced assertions hardening into recorded fact, and makes every load-bearing claim
+          re-checkable at its source.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <p><a href="./record-indexes#handoff">&#8592; handoff</a> &#183; <a href="./record-indexes#contribution">contribution &#8594;</a></p>
+    </div>
+  </section>
+</section>
+
+<section class="tabpanel" id="contribution" role="tabpanel" aria-labelledby="tab-contribution" tabindex="0">
+  <div class="wrap refhead">
+    <p class="eyebrow">Record index</p>
+    <h2 id="contribution-title">Work sent to a peer project</h2>
+    <div class="refchips">
+      <code>contribution.index.toml</code>
+      <span>namespace CN</span>
+      <span>.working/toml/</span>
+    </div>
+    <p class="lead">An artefact, fix, or proposal this project sent to a peer project, with a delivery receipt: the outward counterpart to <a href="./record-indexes#reference">reference</a>, which records what comes in.</p>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <blockquote class="refpull">Outbound work is an external action, so its claim, "we sent this", is gated.</blockquote>
+      <h3>The problem it solves</h3>
+      <p>An assistant lands <code>sent/proposed</code>, awaiting a maintainer's ratification that it
+        was genuinely sent, unless the adopter has declared a standing authorization for that named
+        recipient. An absent or malformed declaration fails closed, so gating stays on by default.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <dl class="refstrip">
+        <div>
+          <dt>Pairs with</dt>
+          <dd>
+            <span class="chip view"><code>CONTRIBUTIONS.md</code></span>
+            <span class="chip view"><code>CONTRIBUTION-INDEX.md</code></span>
+            <p>The composed contributions view and the optional one-to-one mirror, both byte-drift-gated.</p>
+          </dd>
+        </div>
+        <div>
+          <dt>Lifecycle</dt>
+          <dd>
+            <span class="chip"><code>proposed</code></span> &#8594; <span class="chip"><code>sent</code></span> &#8594; <span class="chip"><code>acknowledged</code></span> | <span class="chip"><code>superseded</code></span>
+            <p>Or from <code>proposed</code> straight to <code>withdrawn</code>. Entering the gated
+              <code>sent</code> state as an assistant or automation takes <code>/proposed</code>, the
+              same mechanism as block and preference-pattern gating; a re-send is a new record linking
+              <code>supersedes</code>.</p>
+          </dd>
+        </div>
+        <div>
+          <dt>Referenced by</dt>
+          <dd>
+            <span class="chip"><code>opf init</code></span>
+            <span class="chip"><code>opf render</code></span>
+            <span class="chip"><code>opf doctor</code></span>
+            <p><code>init</code> scaffolds the empty index; <code>render</code> composes the view;
+              <code>doctor</code> checks schema, the delivery-bundle completeness rules, and
+              gated-state legality. Updated by the send transition, acknowledgement, supersession, or
+              withdrawal.</p>
+          </dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h3>What a record carries</h3>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/contribution.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>             = <span class="tok-str">"CN-1"</span>
+  <span class="tok-key">type</span>           = <span class="tok-str">"contribution"</span>
+  <span class="tok-key">status</span>         = <span class="tok-str">"sent/proposed"</span>
+  <span class="tok-key">title</span>          = <span class="tok-str">"Drift-gate fix sent upstream"</span>
+  <span class="tok-key">recipient</span>      = <span class="tok-str">"peer-project"</span>
+  <span class="tok-key">dedup_class</span>    = <span class="tok-str">"drift-gate-fix"</span>
+  <span class="tok-key">content_digest</span> = <span class="tok-str">"sha256:..."</span>
+  <span class="tok-key">delivery</span>       = { <span class="tok-key">channel</span> = <span class="tok-str">"pr"</span>, <span class="tok-key">ref</span> = <span class="tok-str">"peer/repo#128"</span>, <span class="tok-key">sent_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span> }
+  <span class="tok-key">actor</span>          = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
+      </div>
+      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p>The shared index shape with the standard envelope plus <code>recipient</code>,
+        <code>dedup_class</code>, <code>content_digest</code>, and the <code>delivery</code> bundle
+        <code>{channel, ref, sent_at, receipt_ref?, receipted_at?}</code>: channel, ref, and sent_at
+        are required once sent and forbidden before, and the receipt fields are legal only at
+        acknowledged. <code>acknowledged</code> is the single positive terminal (responded, adopted,
+        reshaped, or declined); the outcome lives in <code>summary</code> or an extension, never as a
+        state. A contribution typically links <code>derives_from</code> the internal finding,
+        decision, or backlog item that motivated it, and carries no fleet-specific semantics; those
+        ride a registered <code>x-&lt;vendor&gt;</code> extension.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+        <h4>What it protects</h4>
+        <p>An auditable record of the project's recorded outbound actions, with delivery evidence
+          attached, which helps prevent an asserted send from reading as a settled fact before it is
+          ratified or receipted.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <p><a href="./record-indexes#reference">&#8592; reference</a> &#183; <a href="./record-indexes#modules">Module and importer types &#8594;</a></p>
+    </div>
+  </section>
+</section>
+
+<section class="tabpanel" id="modules" role="tabpanel" aria-labelledby="tab-modules" tabindex="0">
+  <div class="wrap">
+    <div class="refhead pagehead">
+      <p class="eyebrow">Modules</p>
+      <h2 id="modules-title">Optional modules and importer types</h2>
+      <div class="refchips">
+        <span>4 optional modules</span>
+        <span>8 record types</span>
+        <span>+ 1 importer-only</span>
+      </div>
+      <p class="lead">Beyond the twelve baseline types, eight record types ship in four optional modules, one type belongs to the importer alone, and two names are reserved. Modules are default-off, each enabled by one manifest edit.</p>
+    </div>
+
+    <h3>The problem it solves</h3>
+    <blockquote class="refpull">Not every project needs delivery assurance or operational-policy records on day one.</blockquote>
+    <p>Default-off modules keep the baseline small while keeping the extended vocabulary standard: when a project grows into a capability, the types, namespaces, and states are already defined, so no adopter invents an incompatible local variant. Enabling a module makes its types valid to declare, each with its normative namespace; a module-tier type declared without its module enabled is a validation failure.</p>
+
+    <dl class="refstrip">
+      <div>
+        <dt>Enabled by</dt>
+        <dd>
+          <span class="chip"><code>manifest.toml</code></span>
+          <p>One manifest edit per module, under the adopter's own review flow.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Created by</dt>
+        <dd>
+          <span class="chip"><code>opf import</code></span>
+          <p>By process, once a module is enabled; <code>legacy_fragment</code> by <code>opf import</code> alone.</p>
+        </dd>
+      </div>
+      <div>
+        <dt>Read by</dt>
+        <dd>
+          <span class="chip"><code>opf doctor</code></span>
+          <p><code>opf doctor</code> for module-toggle validity (a declared module type requires its enabled module); the AIQT profile, which requires the governance, operational-policy, and concurrent-operation modules.</p>
+        </dd>
+      </div>
+    </dl>
+
+    <h3 style="margin-top:var(--sp-12)">The optional modules</h3>
+    <div class="benefits">
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/></svg></span>
+        <h4>Governance</h4>
+        <p>One type: <code>maintainer_action</code> (<code>MA</code>), moving <code>open &#8594; done | dropped</code>.</p>
+      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 7.5 12 3l8.5 4.5v9L12 21l-8.5-4.5z"/><path d="M3.5 7.5 12 12l8.5-4.5M12 12v9"/></svg></span>
+        <h4>Delivery assurance</h4>
+        <p>Four types: <code>artifact</code> (<code>AR</code>, <code>staged &#8594; promoted | rejected</code>), <code>gate_run</code> (<code>GR</code>, a recorded three-valued verdict of <code>pass | fail | cannot_evaluate</code> never folded into status), <code>release</code> (<code>RL</code>, <code>planned &#8594; published | abandoned</code>), and <code>waiver</code> (<code>WV</code>, <code>active &#8594; expired | revoked</code>, expiry required at creation).</p>
+      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h7l4 4v14a0 0 0 0 1 0 0H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M14 3v4h4M8.5 12h7M8.5 16h7"/></svg></span>
+        <h4>Operational policy</h4>
+        <p>Two types: <code>mode</code> (<code>MO</code>, <code>active &#8594; retired</code>) and <code>tier_assessment</code> (<code>TA</code>, recorded).</p>
+      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10.5" width="14" height="9" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg></span>
+        <h4>Concurrent operation</h4>
+        <p>One type: <code>session_lease</code> (<code>SL</code>), moving <code>held &#8594; released | reconciled</code>.</p>
+      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13h4l1.5 3h5L16 13h4"/><path d="M4 13 6 5h12l2 8v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg></span>
+        <h4>Importer-only</h4>
+        <p>No module toggle: <code>legacy_fragment</code> (<code>LF</code>, <code>quarantined &#8594; resolved | ignored</code>) is created only by <code>opf import</code>, never scaffolded, holding whatever an import cannot confidently map.</p>
+      </div>
+    </div>
+
+    <h3 style="margin-top:var(--sp-12)">The full type list</h3>
+    <div class="tree"><pre>
+  Governance module
+    maintainer_action   MA   open &#8594; done | dropped
+  Delivery-assurance module
+    artifact            AR   staged &#8594; promoted | rejected
+    gate_run            GR   recorded, with a three-valued verdict field
+                             (pass | fail | cannot_evaluate), never folded into status
+    release             RL   planned &#8594; published | abandoned
+    waiver              WV   active &#8594; expired | revoked; expiry required at creation
+  Operational-policy module
+    mode                MO   active &#8594; retired
+    tier_assessment     TA   recorded
+  Concurrent-operation module
+    session_lease       SL   held &#8594; released | reconciled
+  Importer-only (no module toggle)
+    legacy_fragment     LF   quarantined &#8594; resolved | ignored
+  Reserved
+    transaction         TX   excluded from the adopter standard; name and namespace reserved
+    (none)              CL   reserved unassigned, so it can never half-collide with "changelog"
+  </pre></div>
+    <p>These are outline state sets; the full module record schemas ship with the module schemas release. The delivery-assurance <code>release</code> record, where enabled, references a <code>version.toml</code> release row by version string: the ledger row is the fact, the record is the delivery-assurance envelope around it.</p>
+    <p><code>legacy_fragment</code> is created only by an importer, never scaffolded: everything an import cannot confidently map becomes quarantined fragment data with source path, digest, span, and run ID, so nothing is dropped. The scaffolded counters file already carries the LF namespace at zero, so a fresh store can accept quarantine imports without a schema change. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
+
+    <h3 style="margin-top:var(--sp-12)">What it protects</h3>
+    <div class="benefit">
+      <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><path d="M16.5 13.5v6M13.5 16.5h6"/></svg></span>
+      <h4>Growth without fragmentation</h4>
+      <p>Capability arrives as a reviewed manifest edit with standard semantics, which helps prevent per-project dialects of the same operational ideas.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+</div>
+</div>
+</body>
+</html>

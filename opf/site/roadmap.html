@@ -30,33 +30,14 @@
   <a class="navlink" href="./standard">The standard</a>
   <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
+  <h4>Reference</h4>
+  <a class="navlink" href="./core-files">Core store files</a>
+  <a class="navlink" href="./record-indexes">Record indexes</a>
+  <a class="navlink" href="./store-meta">Pointer, meta &amp; generated</a>
+  <h4>More</h4>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink active" href="./roadmap" aria-current="page">Roadmap</a>
   <a class="navlink" href="./about">About and licence</a>
-  <h4>Core store files</h4>
-  <a class="navlink" href="./manifest">manifest.toml</a>
-  <a class="navlink" href="./counters">counters.toml</a>
-  <a class="navlink" href="./version">version.toml</a>
-  <a class="navlink" href="./worklog">worklog.toml</a>
-  <a class="navlink" href="./lease">lease.toml</a>
-  <h4>Record indexes</h4>
-  <a class="navlink" href="./backlog-item">backlog_item</a>
-  <a class="navlink" href="./done">done</a>
-  <a class="navlink" href="./finding">finding</a>
-  <a class="navlink" href="./pending-decision">pending_decision</a>
-  <a class="navlink" href="./autonomous-decision">autonomous_decision</a>
-  <a class="navlink" href="./maintainer-decision">maintainer_decision</a>
-  <a class="navlink" href="./preference-pattern">preference_pattern</a>
-  <a class="navlink" href="./block">block</a>
-  <a class="navlink" href="./handoff">handoff</a>
-  <a class="navlink" href="./reference">reference</a>
-  <a class="navlink" href="./contribution">contribution</a>
-  <a class="navlink" href="./modules">Module &amp; importer types</a>
-  <h4>Pointer &amp; meta</h4>
-  <a class="navlink" href="./pointer">.opf.toml (pointer)</a>
-  <a class="navlink" href="./archive">archive.toml</a>
-  <h4>Generated TOML</h4>
-  <a class="navlink" href="./decisions-projection">DECISIONS.toml</a>
   <h4>Project</h4>
   <a class="navlink" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT Guardrails</a>
   <a class="navlink" href="./disclosure">Disclosure</a>
@@ -72,24 +53,26 @@
   <p class="lead">Where OPFiles is today and the direction it is heading, as a slim, forward-looking
     view of the standard and its reference tooling. Ordering beyond what has landed is indicative, not
     a commitment.</p>
-  <p class="refchips"><span class="chip ok">Now: landed</span><span class="chip warn">Next: planned</span><span class="chip">Then: later</span></p>
+  <p class="refchips"><span class="chip ok">Available now</span><span class="chip">What comes next</span></p>
 </div>
 
 <section>
   <div class="wrap">
     <p class="eyebrow">Landed</p>
-    <h2>Now <span class="chip ok">Available</span></h2>
+    <h2>Available now</h2>
     <ul class="clean">
       <li>The specification is a stable draft: the store layout, the release triad, the record model,
         the enforcement posture, and the residual disclosures are defined.</li>
       <li>Adopt-by-hand works today: you can conform with hand-maintained files and your own checks.
-        It is the fallback path; assistant-driven adoption is the recommended path and is planned.</li>
-      <li>Part of the reference tooling has landed:
+        Assistant-driven adoption is the recommended path; adopt-by-hand is the fallback.</li>
+      <li>The reference tooling:
         <span class="chip ok"><code>opf init</code></span>
         <span class="chip ok"><code>opf render</code></span>
         <span class="chip ok"><code>opf doctor</code></span>
         <span class="chip ok"><code>opf upgrade</code></span>
         <span class="chip ok"><code>opf import</code></span>
+        <span class="chip ok"><code>opf migrate</code></span>
+        <span class="chip ok"><code>opf sync</code></span>
         (import with its scan, plan, review, and apply modes).</li>
       <li>Conformance is self-asserted and says so; no unqualified conformance claim is emitted.</li>
     </ul>
@@ -98,19 +81,11 @@
 
 <section class="section-alt">
   <div class="wrap">
-    <p class="eyebrow">Planned</p>
-    <h2>Next <span class="chip warn">Planned</span></h2>
+    <p class="eyebrow">What comes next</p>
+    <h2>What comes next</h2>
     <ul class="clean">
       <li>The schema release that follows this specification fixes the normative module schemas and the
         digest canonicalization the freeze gates depend on.</li>
-      <li>The remaining verbs: store relocation
-        (<span class="chip warn"><code>opf migrate</code></span>) and the surfaced sync step
-        (<span class="chip warn"><code>opf sync</code></span>).</li>
-      <li>The assistant-driven adoption flow, the recommended path: pointing an AI development
-        assistant at the site to investigate, plan, and, on your yes, carry out and merge the
-        adoption, with the <code>.working/</code> store left for your review.</li>
-      <li>The machine-readable discovery entry point for assistants: an <code>/llms.txt</code> index
-        plus a generated <code>/adopt.md</code> and a root-page link an assistant can follow.</li>
     </ul>
   </div>
 </section>
@@ -118,7 +93,7 @@
 <section>
   <div class="wrap">
     <p class="eyebrow">Later</p>
-    <h2>Then <span class="chip">Later</span></h2>
+    <h2>Later</h2>
     <ul class="clean">
       <li>Conformance tooling and the conformance-report vocabulary in action, so a claim can be
         reported against the base and each evaluated profile rather than self-asserted.</li>
