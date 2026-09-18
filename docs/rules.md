@@ -1,9 +1,9 @@
 +++
 title = "The five rules of AIQT"
-description = "The five working rules of AIQT: surface what a guardrail catches, re-anchor the standard with a self-check, fix in-scope issues before shipping, fix out-of-scope issues next, and propose an underlying guardrail."
+description = "The five working rules of AIQT: surface what a guardrail catches, re-anchor the standard with a self-check, fix in-scope issues before shipping, surface out-of-scope issues, and propose an underlying guardrail."
 canonical = "https://aiqt.ai/rules"
 og-title = "The five rules of AIQT"
-og-description = "The five working rules of AIQT, one per tab: catch surfacing, standard re-anchoring, in-scope fix, out-of-scope fix, and the guardrail give-back."
+og-description = "The five working rules of AIQT, one per tab: catch surfacing, standard re-anchoring, in-scope fix, out-of-scope surfacing, and the guardrail give-back."
 og-url = "https://aiqt.ai/rules"
 sidebar-active = "rules"
 +++
@@ -21,7 +21,7 @@ sidebar-active = "rules"
     <a class="navtab" id="tab-rule4" role="tab" aria-selected="false" aria-controls="rule4" href="#rule4">Rule 4</a>
     <a class="navtab" id="tab-rule5" role="tab" aria-selected="false" aria-controls="rule5" href="#rule5">Rule 5</a>
   </div>
-  <button type="button" class="btn ghost showall" data-show-all aria-pressed="false" hidden>Show all rules for reading and search</button>
+  <button type="button" class="btn ghost showall" data-show-all data-showall-label="Show all rules for reading and search" data-showone-label="Return to one rule at a time" aria-pressed="false" hidden>Show all rules for reading and search</button>
 </div>
 
 <section class="tabpanel" id="rule1" role="tabpanel" aria-labelledby="tab-rule1" tabindex="0">
@@ -33,7 +33,7 @@ sidebar-active = "rules"
   </div>
   <section>
     <div class="wrap">
-      <h2>What it means</h2>
+      <h3>What it means</h3>
       <p>When a guardrail actually intervenes, blocking an action, flagging a risk, or refusing a
         request, the assistant names which guardrail fired and what it caught. This follows directly
         from the AIQT apex: Integrity means nothing changes silently, and Trust means a claim of
@@ -44,7 +44,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>Why it matters</h2>
+      <h3>Why it matters</h3>
       <p>A user who never sees an intervention has no way to know the assistant held back or redirected
         an action, and no way to check whether that call was the right one. At the same time, an
         assistant that narrates every check it ran, whether or not anything was caught, trains its own
@@ -54,7 +54,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>In practice</h2>
+      <h3>In practice</h3>
       <p>Asked to run a command that a standing gate refuses because it would overwrite an unbacked
         file, the assistant states plainly that the gate held, names it, and says what it caught, then
         proposes a safe alternative. It does not quietly try a different command and say nothing about
@@ -81,7 +81,7 @@ sidebar-active = "rules"
   </div>
   <section>
     <div class="wrap">
-      <h2>What it means</h2>
+      <h3>What it means</h3>
       <p>At least once per change, the assistant reviews its own recent work against the four AIQT
         facets: did a claim rest on an observation, did anything change without being surfaced, did the
         work meet the requirements, is the trust it is asking for actually warranted. Where the platform
@@ -93,7 +93,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>Why it matters</h2>
+      <h3>Why it matters</h3>
       <p>Across a longer piece of work, early commitments and constraints are easy to lose track of as
         the conversation moves on. A recurring, substantive self-check catches that drift before it
         reaches the user. Keeping it out of the visible answer matters just as much: a self-check
@@ -103,7 +103,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>In practice</h2>
+      <h3>In practice</h3>
       <p>Midway through a multi-step change, the assistant privately reviews whether it verified the
         claims it is about to make, whether anything it changed needs to be flagged, and whether the
         requirements are actually met, then continues. None of that review appears in what is shown to
@@ -127,7 +127,7 @@ sidebar-active = "rules"
   </div>
   <section>
     <div class="wrap">
-      <h2>What it means</h2>
+      <h3>What it means</h3>
       <p>When the work in front of the assistant turns up a problem inside the scope of what it is
         already changing, whether the assistant caused it or simply noticed it along the way, that
         problem is fixed before the change ships, not deferred or left as a known issue in a result
@@ -138,7 +138,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>Why it matters</h2>
+      <h3>Why it matters</h3>
       <p>A change that ships with a known, in-scope defect looks done without being done. Presenting it
         as finished anyway misrepresents its state, and leaves a problem the assistant already knows
         about for someone else to rediscover later, at greater cost than fixing it now, while the
@@ -147,7 +147,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>In practice</h2>
+      <h3>In practice</h3>
       <p>While editing a function, the assistant notices a bug in the exact code path it is touching. It
         fixes that bug as part of the same change rather than shipping the edit with a comment noting
         the bug for later. The anti-pattern is the comment left in its place: a defect named but not
@@ -172,7 +172,7 @@ sidebar-active = "rules"
   </div>
   <section>
     <div class="wrap">
-      <h2>What it means</h2>
+      <h3>What it means</h3>
       <p>An issue outside the scope of what the assistant was asked to do is named plainly, whatever it
         means for the result. It is not fixed on the assistant's own initiative, which would expand the
         task beyond what was authorized, and it is not left unmentioned, which would hide a known
@@ -183,7 +183,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>Why it matters</h2>
+      <h3>Why it matters</h3>
       <p>Silently expanding scope means the assistant is now doing work no one asked for, without the
         authorization that work should have. Silently dropping the issue means a known problem reaches
         the user disguised as a clean result. Naming it plainly and asking before acting on it avoids
@@ -192,7 +192,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>In practice</h2>
+      <h3>In practice</h3>
       <p>Asked to fix a typo in a document, the assistant notices an unrelated broken link elsewhere in
         the same file. It fixes the typo, then names the broken link and asks whether to fix that too,
         rather than quietly fixing both or saying nothing about the second problem. When the task is to
@@ -216,7 +216,7 @@ sidebar-active = "rules"
   </div>
   <section>
     <div class="wrap">
-      <h2>What Rule 5 is</h2>
+      <h3>What Rule 5 is</h3>
       <p>It is the fifth of the five working rules of AIQT. It fires when the assistant's own gap let
         an issue through: not every problem, but the ones its own reasoning, habit, or blind spot
         allowed. Instead of quietly recovering and moving on, the assistant turns that one-off mistake
@@ -225,7 +225,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>Giving the lesson back</h2>
+      <h3>Giving the lesson back</h3>
       <p>Rule 5 improves your own project first: the guardrail lands in your workspace and protects
         your work. The Guardrail-Seed contribution is a separate, optional step that lets you send the
         lesson back to AIQT, so a fix discovered in your project can help every other adopter.</p>
@@ -236,7 +236,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>What a Guardrail Seed contains</h2>
+      <h3>What a Guardrail Seed contains</h3>
       <ol class="steps">
         <li><b>The observed issue:</b> what the AI did, attempted, or failed to do.</li>
         <li><b>The risk or consequence:</b> why it matters.</li>
@@ -250,7 +250,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>What a Guardrail Seed must never contain</h2>
+      <h3>What a Guardrail Seed must never contain</h3>
       <ul class="clean">
         <li>Source code</li>
         <li>Prompts or full conversations</li>
@@ -268,7 +268,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>How a Guardrail Seed travels</h2>
+      <h3>How a Guardrail Seed travels</h3>
       <ol class="steps">
         <li>Your assistant discovers a lesson under Rule 5.</li>
         <li>It generates a local seed.</li>
@@ -284,7 +284,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>Rule 5 in action: an example seed</h2>
+      <h3>Rule 5 in action: an example seed</h3>
       <p>The following illustrates the format.</p>
       <div class="card">
         <ul class="clean">
@@ -310,7 +310,7 @@ sidebar-active = "rules"
   </section>
   <section>
     <div class="wrap">
-      <h2>Contributing</h2>
+      <h3>Contributing</h3>
       <p>Contributions are welcome. The contribution terms are separate from the software licence and
         are shown before you submit, and seeds are accepted under a broad open grant so a lesson can be
         freely reused. The pack's licensing model is documented separately.</p>

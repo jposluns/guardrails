@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "327b6ae60d60054d95ddea9d7befa635d169588a5a7432e3ce7588d1e5d27db7"
+tree-sha256 = "84a9b76712e4052b6b3e86baedad1885b594eb99b84e9864fdd7f8fea8868ab2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2311,8 +2311,8 @@ sha256 = "0b2293fc5e5bdf00c04d76e35a678e823c10b548c671674537f69f8a3a87f8d6"
 
 [[sources]]
 path = "docs/rules.md"
-bytes = 16934
-sha256 = "7773fc2567002a898a0b8ba21cade0755b7e37fa42852e2792eefa045ae285f0"
+bytes = 17048
+sha256 = "6174dd46c9f69f1e623c621e0ed955775b944acee6484b5f4b6580bccfcaf8b7"
 
 [[sources]]
 path = "docs/standard.md"
@@ -2406,8 +2406,8 @@ sha256 = "d4ec175a4eabb84b6c239658c24a100e1d15f63baded573314942f5f8fcd8781"
 
 [[sources]]
 path = "opf/site/theme.js"
-bytes = 4404
-sha256 = "5d851e2475c950d412335fe8e302dc4b1c864ee98885ff4f137965d3f19f7956"
+bytes = 4433
+sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
 path = "opf/site/tooling.html"
@@ -2566,8 +2566,8 @@ sha256 = "4af241b735cd232d6d688a808865a2448d90a47dce196d956aa026063fdd27ac"
 
 [[sources]]
 path = "site/rules.html"
-bytes = 20789
-sha256 = "acd25b1ea0ced7eb5ecbad996896d44a6dba2d13820f50a9e7a629ee9239af8f"
+bytes = 20903
+sha256 = "dd63419c679abf2811723c3c9e3dd71a98133d2f48aabb1c8ae90ae3f072c183"
 
 [[sources]]
 path = "site/standard.html"
@@ -2591,8 +2591,8 @@ sha256 = "1d7958586cef45b60409ffa7875431d80381eb7c391b2ea6c37eab9cc9d3ff18"
 
 [[sources]]
 path = "site/theme.js"
-bytes = 4404
-sha256 = "5d851e2475c950d412335fe8e302dc4b1c864ee98885ff4f137965d3f19f7956"
+bytes = 4433
+sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
 path = "tools/_commonmark_headings.py"

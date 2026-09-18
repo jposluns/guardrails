@@ -52,8 +52,7 @@ document.addEventListener('DOMContentLoaded', function () {
       });
       if (allBtn) {
         allBtn.setAttribute('aria-pressed', String(showAll));
-        allBtn.textContent = showAll ? 'Return to one file at a time'
-                                     : 'Show all files for reading and search';
+        allBtn.textContent = showAll ? (allBtn.dataset.showoneLabel || 'Return to one file at a time') : (allBtn.dataset.showallLabel || 'Show all files for reading and search');
       }
     }
     function indexForHash() {                              // matches a panel id OR an id inside a panel
