@@ -1270,7 +1270,7 @@ def main(argv=None):
         if args:
             print("check_opf_import: unexpected argument(s): {}".format(" ".join(args)), file=sys.stderr)
             return EXIT_ERROR
-        # Live leg: the `opf import` verb is now wired (opf.py `_cmd_import`), but this repo is not a
+        # Live leg: the `opf import` verb is now wired (opf.py `_cmd_import`), but this repo is not an
         # OPFiles adopter and has no staged import run to check live. NOT APPLICABLE, exit 0 (the
         # doctor/drift non-adopter posture); the assurance rides the --self-test leg over synthetic runs.
         print("check_opf_import: NOT APPLICABLE (this repository is not an OPFiles adopter, so there is "

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF (OPFiles) store resolution + manifest base/profile schema + discovery (OPF core-tooling U1).
+"""OPFiles (OPF) store resolution + manifest base/profile schema + discovery (OPF core-tooling U1).
 
 Offline, stdlib only, fail-closed. This is the FOUNDATION module the later OPF units build on: it sets
 the schema conventions and the resolution/discovery contract they follow, so it is deliberately strict

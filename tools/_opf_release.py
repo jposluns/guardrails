@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF (OPFiles) release triad: version.toml + worklog.toml + span tiling + coverage digests (U3).
+"""OPFiles (OPF) release triad: version.toml + worklog.toml + span tiling + coverage digests (U3).
 
 Offline, stdlib only, fail-closed. This is the DELICATE release-triad manager the later OPF units
 (changelog gates U5, doctor U6) build on. It validates the two machine ledgers of the release triad and

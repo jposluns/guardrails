@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF (OPFiles) store-level integrity validator: the reusable `opf doctor` engine (OPF core-tooling U6).
+"""OPFiles (OPF) store-level integrity validator: the reusable `opf doctor` engine (OPF core-tooling U6).
 
 Offline, stdlib only, fail-closed, parse-only and read-only over the store. U2 (`_opf_schema`) validates
 ONE record at a time and U3 (`_opf_release`) validates ONE ledger at a time; neither can see the whole

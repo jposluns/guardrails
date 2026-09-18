@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OPF (OPFiles) changelog gates: range coverage + freeze over version.toml + CHANGELOG.md (U5).
+"""OPFiles (OPF) changelog gates: range coverage + freeze over version.toml + CHANGELOG.md (U5).
 
 Offline, stdlib only, fail-closed. This is the FACTS layer over the release triad U3 (`_opf_release`)
 carries: U3 validates version.toml / worklog.toml structurally (SemVer, span tiling, the coverage-digest
