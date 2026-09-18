@@ -6,7 +6,7 @@
 <title>.opf.toml: the committed store pointer | OPFiles</title>
 <meta name="description" content="The committed pointer that says where the store lives, and the uncommitted local override for machine-local targets.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,93 +66,67 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
-  <p class="eyebrow">Pointer &amp; meta</p>
-  <h1>.opf.toml</h1>
-  <p class="lead">The committed store pointer, at the product repository root. The one file whose
-    content legitimately differs between store topologies.</p>
+<div class="wrap">
+  <div class="refhead pagehead">
+    <p class="eyebrow">Pointer</p>
+    <h1>The store pointer</h1>
+    <div class="refchips">
+      <code>.opf.toml</code>
+      <span>committed</span>
+      <code>product repository root</code>
+    </div>
+    <p class="lead">The committed pointer that names where the store repository lives: the one file whose content legitimately differs between store topologies.</p>
+  </div>
+
+  <h2>The problem it solves</h2>
+  <blockquote class="refpull">The store's location is configuration, not architecture.</blockquote>
+  <p>A stale pointer aimed at the wrong store would be worse than no pointer, so resolution is validated every time and fails closed: a pointer that does not resolve stops the tool and never falls back silently to the default location.</p>
+
+  <dl class="refstrip">
+    <div>
+      <dt>Declares</dt>
+      <dd>
+        <p>Where the store repository lives: a <code>[store]</code> table whose <code>target</code> is <code>dir:.</code> by default (the store rides this repository at <code>.working/</code>), or any location a target can name after relocation.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Read by</dt>
+      <dd>
+        <span class="chip"><code>opf init</code></span>
+        <span class="chip"><code>opf render</code></span>
+        <span class="chip"><code>opf doctor</code></span>
+        <p>Created by <code>opf init</code> with <code>target = "dir:."</code> (it refuses to run where any pointer already exists); updated by <code>opf migrate</code> when it ships, as part of the single recorded relocation change; read by every verb at every store resolution, and by <code>opf doctor</code> for pointer and sync-target agreement.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Committed</dt>
+      <dd>
+        <p>Yes: this is the one tracked marker. Because the committed pointer must be safe to publish, anything machine-local or private-only belongs in the uncommitted <code>.opf.local.toml</code> override, which is resolved first and never committed.</p>
+      </dd>
+    </div>
+  </dl>
+
+  <h2 style="margin-top:var(--sp-12)">What it holds</h2>
+  <div class="codecard src">
+    <div class="codecard-bar">.opf.toml</div>
+    <div class="codebody"><span class="tok-tbl">[store]</span>
+<span class="tok-key">target</span> = <span class="tok-str">"dir:."</span></div>
+  </div>
+  <p>A single <code>[store]</code> table. <code>target = "dir:."</code> is the default written by <code>opf init</code>. A target names the store repository in one of four forms: <code>dir:&lt;path&gt;</code> or a bare path (a directory that is, or will be, its own git repository); <code>git:&lt;url&gt;</code> or a bare git URL (any git remote on any host); <code>github:&lt;owner/repo&gt;</code> (a creation convenience that resolves to an ordinary git URL); and <code>gitlab:&lt;owner/repo&gt;</code> (the same, for GitLab). A relative <code>dir:</code> path resolves against the product repository root, the named fixed root for this file; any other path in a pointer must be absolute.</p>
+  <p>Resolution takes the local override first, then the committed pointer, then, where neither exists, the default location, where a valid manifest resolves as the store. No pointer and no default store is the not-adopted state, and <code>opf init</code> is the remedy. Store relocation re-points the committed pointer and the manifest's recorded sync target in the same change, so the pointer, the manifest, and the actual remote never disagree across a landed state; the integrity layer checks that agreement. The pointer has no generated view of its own: it is lowercase machine source, never a deliverable and never hand-authored truth a human is meant to read first.</p>
+
+  <h2 style="margin-top:var(--sp-12)">What it protects</h2>
+  <div class="benefit">
+    <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s6-5.2 6-10a6 6 0 1 0-12 0c0 4.8 6 10 6 10z"/><circle cx="12" cy="11" r="2.4"/></svg></span>
+    <h3>The right store, every time</h3>
+    <p>A store that can live anywhere, resolved the same way by every tool, with private topologies possible without weakening tracking. Fail-closed resolution helps prevent a tool from operating on a different store than the one intended.</p>
+  </div>
+
+  <nav class="refseq" aria-label="Reference sequence" style="display:flex; justify-content:space-between; gap:var(--sp-4); margin-top:var(--sp-12); font-weight:650">
+    <a href="./modules">&#8592; module &amp; importer types</a>
+    <a href="./archive">archive.toml &#8594;</a>
+  </nav>
 </div>
-
-<section>
-  <div class="wrap">
-    <h2>About</h2>
-    <p>The pointer carries a <code>[store]</code> table whose <code>target</code> names where the
-      store repository lives: <code>dir:.</code> by default (the store rides this repository at
-      <code>.working/</code>), or any location a target can name after relocation. An uncommitted,
-      machine-local override, <code>.opf.local.toml</code>, may override or complete the pointer on
-      one system, for targets that only make sense there; it is resolved first and never
-      committed.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Why</h2>
-    <p>The store's location is configuration, not architecture. Because the committed pointer must
-      be safe to publish, anything machine-local or private-only belongs in the override; and
-      because a stale pointer aimed at the wrong store would be worse than no pointer, resolution
-      is validated every time and fails closed: a pointer that does not resolve stops the tool and
-      never falls back silently to the default location.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Description</h2>
-    <div class="tree"><pre>
-[store]
-target = "dir:."      the default written by opf init
-
-Target syntax:
-  dir:&lt;path&gt; or a bare path      a directory that is, or will be, its own git repository
-  git:&lt;url&gt; or a bare git URL    any git remote on any host
-  github:&lt;owner/repo&gt;            creation convenience; resolves to an ordinary git URL
-  gitlab:&lt;owner/repo&gt;            same, for GitLab
-</pre></div>
-    <p>Relative <code>dir:</code> paths resolve against the product repository root, the named
-      fixed root for this file; any other path in a pointer must be absolute.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>How it works</h2>
-    <p>Resolution order: the local override first, then the committed pointer, then (where neither
-      exists) the default location, where a valid manifest resolves as the store. No pointer and no
-      default store is the not-adopted state, and <code>opf init</code> is the remedy. Store
-      relocation re-points the committed pointer and the manifest's recorded sync target in the
-      same change, so the pointer, the manifest, and the actual remote never disagree across a
-      landed state; the integrity layer checks that agreement.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Generated view</h2>
-    <p>None. The pointer is lowercase machine source on the same casing contract as the store's own
-      files: never a deliverable, never hand-authored truth a human is meant to read first.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>A store that can live anywhere, resolved the same way by every tool, with private topologies
-      possible without weakening tracking. Fail-closed resolution helps prevent a tool from
-      operating on a different store than the one intended.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code>, with <code>target = "dir:."</code>; init refuses to run where any pointer already exists.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> <code>opf migrate</code> (when it ships), as part of the single recorded relocation change.</li>
-      <li><b style="color:var(--ink)">Read by:</b> every verb, at every store resolution; <code>opf doctor</code>, for pointer and sync-target agreement.</li>
-    </ul>
-  </div>
-</section>
 </main>
 
 </div>

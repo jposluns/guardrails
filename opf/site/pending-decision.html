@@ -6,7 +6,7 @@
 <title>pending_decision.index.toml | OPFiles</title>
 <meta name="description" content="Open questions awaiting a decision, with an all-or-none resolution bundle and a supersession chain.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,81 +66,76 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
-  <p class="eyebrow">Record index</p>
-  <h1>pending_decision.index.toml</h1>
-  <p class="lead">Pending decisions, namespace <code>PD</code>, at
-    <code>.working/toml/pending_decision.index.toml</code>.</p>
+<div class="wrap">
+  <div class="refhead pagehead">
+    <p class="eyebrow">Record index</p>
+    <h1>Pending decisions</h1>
+    <div class="refchips">
+      <code>pending_decision.index.toml</code>
+      <span>namespace PD</span>
+      <code>.working/toml/</code>
+    </div>
+    <p class="lead">A question that must be answered before dependent work settles: <code>open</code> until decided or withdrawn, with an all-or-none resolution bundle.</p>
+  </div>
+
+  <h2>The problem it solves</h2>
+  <blockquote class="refpull">Half-recorded decisions are worse than none.</blockquote>
+  <p>A decision with no decider, or a decider with no decision text, cannot be audited or relied on. The all-or-none bundle makes a partial resolution a validation failure rather than a lurking ambiguity, and the supersession chain keeps exactly one current effective resolution per question.</p>
+
+  <dl class="refstrip">
+    <div>
+      <dt>Pairs with</dt>
+      <dd>
+        <span class="chip view"><code>DECISIONS.md</code></span>
+        <a class="chip view" href="./decisions-projection"><code>DECISIONS.toml</code></a>
+        <p>The composed <code>DECISIONS.md</code> (drawing on all four decision types) and the machine projection <code>DECISIONS.toml</code>, both byte-drift-gated, plus the optional <code>PENDING_DECISION-INDEX.md</code> mirror.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Lifecycle</dt>
+      <dd>
+        <p><code>open</code> &#8594; <code>decided</code> | <code>withdrawn</code></p>
+        <p>Both terminal states are proposable: an assistant-recorded resolution lands with the <code>/proposed</code> qualifier until a maintainer ratifies it. Overturning a decided question is a new record that supersedes the old; the old record is never edited back to open.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Referenced by</dt>
+      <dd>
+        <span class="chip"><code>opf init</code></span>
+        <span class="chip"><code>opf render</code></span>
+        <span class="chip"><code>opf doctor</code></span>
+        <p>Created by <code>opf init</code> (empty index) and whenever a question is parked for decision; updated by the deciding transition with its full bundle and by supersession from later decisions; read by <code>opf render</code> (DECISIONS.md, DECISIONS.toml, the mirror) and validated by <code>opf doctor</code> (schema, the all-or-none bundle, exactly one effective resolution per chain).</p>
+      </dd>
+    </div>
+  </dl>
+
+  <h2 style="margin-top:var(--sp-12)">What a record carries</h2>
+  <div class="codecard src">
+    <div class="codecard-bar">.working/toml/pending_decision.index.toml</div>
+    <div class="codebody"><span class="tok-key">schema</span>     = <span class="tok-num">1</span>
+<span class="tok-tbl">[[record]]</span>
+<span class="tok-key">id</span>         = <span class="tok-str">"PD-42"</span>
+<span class="tok-key">type</span>       = <span class="tok-str">"pending_decision"</span>
+<span class="tok-key">status</span>     = <span class="tok-str">"decided"</span>
+<span class="tok-key">decision</span>   = <span class="tok-str">"Ship the drift gate in 1.1.0"</span>
+<span class="tok-key">decided_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span>
+<span class="tok-key">decided_by</span> = <span class="tok-str">"maintainer"</span></div>
+  </div>
+  <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+  <p>The shared index shape with the standard envelope plus the resolution bundle fields: <code>decision</code>, <code>decided_at</code>, and <code>decided_by</code>. An open decision carries none of the three; a decided one carries all three. A decided record may be superseded by a new decision linking <code>supersedes</code>; the decision-resolution join walks that chain to find the current effective resolution.</p>
+
+  <h2 style="margin-top:var(--sp-12)">What it protects</h2>
+  <div class="benefit">
+    <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
+    <h3>Decisions with provenance</h3>
+    <p>Decisions with provenance: who decided, when, and what exactly, with the current answer always derivable by machine. This helps prevent stale or contradictory decision records from steering later work.</p>
+  </div>
+
+  <nav class="refseq" aria-label="Reference sequence" style="display:flex; justify-content:space-between; gap:var(--sp-4); margin-top:var(--sp-12); font-weight:650">
+    <a href="./finding">&#8592; finding</a>
+    <a href="./autonomous-decision">autonomous_decision &#8594;</a>
+  </nav>
 </div>
-
-<section>
-  <div class="wrap">
-    <h2>About</h2>
-    <p>A pending decision is a question that must be answered before dependent work settles. It is
-      <code>open</code> until <code>decided</code> or <code>withdrawn</code>, and its resolution is
-      an all-or-none bundle: an open decision carries none of <code>decision</code>,
-      <code>decided_at</code>, <code>decided_by</code>; a decided one carries all three.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Why</h2>
-    <p>Half-recorded decisions are worse than none: a decision with no decider, or a decider with
-      no decision text, cannot be audited or relied on. The all-or-none bundle makes a partial
-      resolution a validation failure rather than a lurking ambiguity, and the supersession chain
-      keeps exactly one current effective resolution per question.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Description</h2>
-    <p>The shared index shape with the standard envelope plus the resolution bundle fields:
-      <code>decision</code>, <code>decided_at</code>, and <code>decided_by</code>. A decided record
-      may be superseded by a new decision linking <code>supersedes</code>; the decision-resolution
-      join walks that chain to find the current effective resolution.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>How it works</h2>
-    <p>States: <code>open</code> to <code>decided</code> or <code>withdrawn</code>, both terminal
-      and both proposable (an assistant-recorded resolution lands with the <code>/proposed</code>
-      qualifier until a maintainer ratifies it). Overturning a decided question is a new record
-      that supersedes the old; the old record is never edited back to open.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Generated view</h2>
-    <p>Two: the composed <code>DECISIONS.md</code> (drawing on all four decision types) and the
-      machine projection <a href="./decisions-projection"><code>DECISIONS.toml</code></a>, both
-      byte-drift-gated, plus the optional <code>PENDING_DECISION-INDEX.md</code> mirror.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>Decisions with provenance: who decided, when, and what exactly, with the current answer
-      always derivable by machine. This helps prevent stale or contradictory decision records from
-      steering later work.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> <code>opf init</code> (empty index); records whenever a question is parked for decision.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> the deciding transition with its full bundle; supersession by later decisions.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf render</code> (DECISIONS.md, DECISIONS.toml, the mirror); <code>opf doctor</code> (schema, the all-or-none bundle, exactly one effective resolution per chain).</li>
-    </ul>
-  </div>
-</section>
 </main>
 
 </div>

@@ -6,7 +6,7 @@
 <title>archive.toml: the rotation manifest | OPFiles</title>
 <meta name="description" content="Every rotated record and worklog span, enumerated per calendar year: rotation is relocation, never deletion.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="./styles.css?v=20260917a">
+<link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
@@ -20,7 +20,7 @@
 <header class="topbar">
   <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
   <a class="logo" href="./" aria-label="OPFiles home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="50" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent)" text-anchor="middle">OP</text><text x="50" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="40" fill="var(--accent-2)" text-anchor="middle">F</text></svg><span class="logotext">OPFiles</span></a>
-  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &gt; <span class="t2">generated view</span> &gt; <span class="t3">drift gate</span></div>
+  <div class="topformula" aria-label="The OPFiles pairing: lowercase machine TOML source, generated uppercase view, drift gate"><span class="tier">machine .toml source</span> &#8594; <span class="t2">generated view</span> &#8594; <span class="t3">drift gate</span></div>
 </header>
 <div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
 <div class="layout">
@@ -28,7 +28,7 @@
   <h4>Start</h4>
   <a class="navlink" href="./">Home: the pairs model</a>
   <a class="navlink" href="./standard">The standard</a>
-  <a class="navlink" href="./adopt">Adopt by hand</a>
+  <a class="navlink" href="./adopt">Adopt</a>
   <a class="navlink" href="./tooling">Reference tooling</a>
   <a class="navlink" href="./aiqt">OPFiles and AIQT</a>
   <a class="navlink" href="./roadmap">Roadmap</a>
@@ -66,83 +66,78 @@
 <div class="content">
 
 <main id="main">
-<div class="wrap pagehead">
-  <p class="eyebrow">Pointer &amp; meta</p>
-  <h1>archive.toml</h1>
-  <p class="lead">The rotation manifest, at
-    <code>.working/toml/archive/&lt;YYYY&gt;/archive.toml</code>, one per calendar-year bucket.</p>
+<div class="wrap">
+  <div class="refhead pagehead">
+    <p class="eyebrow">Archive</p>
+    <h1>The archive</h1>
+    <div class="refchips">
+      <code>archive.toml</code>
+      <span>one per calendar year</span>
+      <code>.working/toml/archive/&lt;YYYY&gt;/</code>
+    </div>
+    <p class="lead">One rotation manifest per calendar-year bucket: rotation is relocation, never deletion, and never ID reuse.</p>
+  </div>
+
+  <h2>The problem it solves</h2>
+  <blockquote class="refpull">Active indexes should stay small without history getting quietly thinner.</blockquote>
+  <p>The enumeration is what makes a silent removal detectable: every movement is recorded, so a record cannot vanish under the name of rotation, and validation can confirm that every ID exists in exactly one active or archived location.</p>
+
+  <dl class="refstrip">
+    <div>
+      <dt>Records</dt>
+      <dd>
+        <p>Every rotated ID as a row of <code>{id, type, destination}</code>, and every moved worklog span as a row of <code>{span, destination}</code>, each carrying where it went.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Written by</dt>
+      <dd>
+        <p>Created by the first rotation into a year bucket (never scaffolded); updated by the rotation process, appending the moved IDs and spans.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Validated by</dt>
+      <dd>
+        <span class="chip"><code>opf doctor</code></span>
+        <p>Read by <code>opf doctor</code> for archive integrity, the exactly-one-location rule, and ID partition, and by every coverage gate, which reads active and archive together.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>Invariant</dt>
+      <dd>
+        <p>Rotation is enumerated relocation, never deletion and never ID reuse. Records in unqualified terminal states may rotate on manifest-declared age or size thresholds; open records, active blocks, unresolved decisions and fragments, unexpired waivers, the current handoff, and the unreleased worklog tail never rotate, and worklog spans rotate only under the release rule, once released and frozen.</p>
+      </dd>
+    </div>
+  </dl>
+
+  <h2 style="margin-top:var(--sp-12)">What it holds</h2>
+  <div class="codecard src">
+    <div class="codecard-bar">.working/toml/archive/2026/archive.toml</div>
+    <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+
+<span class="tok-tbl">[[moved]]</span>
+<span class="tok-key">id</span>          = <span class="tok-str">"BI-7"</span>
+<span class="tok-key">type</span>        = <span class="tok-str">"backlog_item"</span>
+<span class="tok-key">destination</span> = <span class="tok-str">"archive/2026/backlog_item.index.toml"</span>
+
+<span class="tok-tbl">[[worklog_moved]]</span>
+<span class="tok-key">span</span>        = <span class="tok-str">"2026"</span>
+<span class="tok-key">destination</span> = <span class="tok-str">"archive/2026/worklog.toml"</span></div>
+  </div>
+  <p>A closed three-key shape: <code>schema</code>, <code>moved</code> (rows of <code>{id, type, destination}</code>), and <code>worklog_moved</code> (rows of <code>{span, destination}</code>). The archive directory also carries the rotated record and worklog files themselves, preserved byte for byte. Coverage gates read active and archive together, so rotation never changes any gate's answer, and <code>counters.toml</code> is untouched, preserving ID permanence. Retention is indefinite by default; an adopter bound by a retention policy applies it as a recorded maintainer decision governing archival, never as deletion of a record. Archived records have no generated view of their own; they surface through the same gates and coverage checks as active ones, read together.</p>
+
+  <h2 style="margin-top:var(--sp-12)">What it protects</h2>
+  <div class="benefit">
+    <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16v3.2H4z"/><path d="M5.4 10.4v8.1h13.2v-8.1"/><path d="M9.8 14h4.4"/></svg></span>
+    <h3>History that stays fast, and never forgets</h3>
+    <p>A store that stays fast to read without ever forgetting, with rotation that is provably lossless: the enumeration plus the one-location invariant helps prevent quiet disappearance of history.</p>
+  </div>
+
+  <nav class="refseq" aria-label="Reference sequence" style="display:flex; justify-content:space-between; gap:var(--sp-4); margin-top:var(--sp-12); font-weight:650">
+    <a href="./pointer">&#8592; .opf.toml</a>
+    <a href="./decisions-projection">DECISIONS.toml &#8594;</a>
+  </nav>
 </div>
-
-<section>
-  <div class="wrap">
-    <h2>About</h2>
-    <p>Rotation is relocation, never deletion, and never ID reuse. Records in unqualified terminal
-      states may rotate into calendar-year buckets on manifest-declared age or size thresholds, and
-      each rotation writes the year's <code>archive.toml</code>, enumerating every moved ID (and,
-      for the worklog, every moved span) with its destination.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Why</h2>
-    <p>Active indexes should stay small without history getting quietly thinner. The enumeration is
-      what makes a silent removal detectable: every movement is recorded, so a record cannot vanish
-      under the name of rotation, and validation can confirm that every ID exists in exactly one active or
-      archived location.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Description</h2>
-    <p>A closed three-key shape: <code>schema</code>, <code>moved</code> (rows of
-      <code>{id, type, destination}</code>), and <code>worklog_moved</code> (rows of
-      <code>{span, destination}</code>). The archive directory also carries the rotated record and
-      worklog files themselves, preserved byte for byte.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>How it works</h2>
-    <p>Open records, active blocks, unresolved decisions, unresolved fragments, unexpired waivers,
-      the current handoff, and the unreleased worklog tail never rotate; worklog records rotate
-      solely under the release rule (only released, frozen spans). Coverage gates read active and
-      archive together, so rotation never changes any gate's answer, and <code>counters.toml</code>
-      is untouched, preserving ID permanence. Retention is indefinite by default; an adopter bound
-      by a retention policy applies it as a recorded maintainer decision governing archival, never
-      as deletion of a record.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Generated view</h2>
-    <p>None of its own; archived records surface through the same gates and coverage checks as
-      active ones, read together.</p>
-  </div>
-</section>
-
-<section class="section-alt">
-  <div class="wrap">
-    <h2>Value</h2>
-    <p>A store that stays fast to read without ever forgetting, with rotation that is provably
-      lossless: the enumeration plus the one-location invariant helps prevent quiet disappearance
-      of history.</p>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <h2>Usage</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Created by:</b> the first rotation into a year bucket; not scaffolded.</li>
-      <li><b style="color:var(--ink)">Updated by:</b> each rotation, appending the moved IDs and spans.</li>
-      <li><b style="color:var(--ink)">Read by:</b> <code>opf doctor</code> (archive integrity, the exactly-one-location rule, ID partition); every coverage gate, which reads active and archive together.</li>
-    </ul>
-  </div>
-</section>
 </main>
 
 </div>
