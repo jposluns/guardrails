@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "5180e12b6bf24b2d9cba73b28f97c56d99563ca80a39d2130cd71e9b4670e8ed"
+tree-sha256 = "c4eff13157f4e0e610520612a28247e2f515cc20fad97f1365e43af6099f141b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2821,8 +2821,8 @@ sha256 = "e098814bcc06b5f4789dc87a83675c97fe1c166658ce6564bfc51f057f58d41e"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 71239
-sha256 = "d432a33008744f490980c562890992cd8c1deaf4aee19de44cb84709f3fbe3c7"
+bytes = 72337
+sha256 = "c707613bfebe2f0d0473b4baa2406d8a64392bfcb7558ef936ed1e83e72fce60"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -3066,8 +3066,8 @@ sha256 = "f68d246fb296fa6f3bd5a09cbf321f059759f15cc7472d8c8937e1531f53de4a"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
-bytes = 41246
-sha256 = "49171ec182291d2dcd0192d7d941f697df6c3b2d9e76c461e60bf2ce96f59a9b"
+bytes = 42612
+sha256 = "83d83418f800350147d842304e168f41249faff506199bdd2862d208877e80b7"
 
 [[sources]]
 path = "tools/gen_gensrc.py"

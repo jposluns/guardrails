@@ -164,8 +164,8 @@ JOB_PROPERTY_KEYS = frozenset({
     "environment",
 })
 
-TOOL_RE = re.compile(r"\btools/[A-Za-z0-9_.-]+\.(?:py|sh)\b")
-PY_TARGET_RE = re.compile(r"^tools/[A-Za-z0-9_.-]+\.py$")
+TOOL_RE = re.compile(r"\b(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)\b")  # opf/ accepted toward OPF-SELF-CONTAIN; inert until an opf/tools path exists
+PY_TARGET_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_.-]+\.py$")
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 YAML_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*:\s*.*$")
 
@@ -2295,6 +2295,33 @@ def self_test():
             "fail-without-the-change vector did not produce "
             "its required failure"
         )
+
+    # OPF-SELF-CONTAIN grammar-widening (change-carries-check): the widened PY_TARGET_RE/TOOL_RE
+    # must treat an opf/tools/*.py gate as a first-class member. Recognized on both sides parity
+    # holds; recognized on one side only parity still fails. An UNWIDENED regex would drop the
+    # moved line from both parses and pass silently (the fail-open hazard this widening forecloses),
+    # so both vectors fail without the change.
+    case(
+        "23 opf/tools recognized, parity holds both sides",
+        evaluate(
+            local_fixture(both + ("python3 -I -B opf/tools/b.py",)),
+            ci_fixture(both + ("python3 -I -B opf/tools/b.py",)),
+            (),
+        ),
+        0,
+    )
+    case(
+        "24 opf/tools one-sided mismatch still fails",
+        evaluate(
+            local_fixture(common + ("python3 -I -B opf/tools/b.py",)),
+            ci_fixture(common),
+            (),
+        ),
+        1,
+        ("local-only",),
+        ("opf/tools/b.py",),
+        (),
+    )
 
     if failures:
         print("SELF-TEST FAIL:")
