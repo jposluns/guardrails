@@ -466,7 +466,7 @@ section{padding:clamp(var(--sp-8),5vw,var(--sp-24)) 0}
 .anchornav a:hover{border-color:var(--accent); color:var(--accent); text-decoration:none}
 
 /* ---- the source -> view -> gate flow diagram (grid plus inline SVG connectors) ---- */
-.flow{margin:var(--sp-6) 0 0}
+.flow{margin:var(--sp-6) auto 0; max-width:52rem}
 .flow-row{display:grid; grid-template-columns:1fr auto 1fr; gap:var(--sp-4); align-items:stretch}
 @media (max-width:720px){ .flow-row{grid-template-columns:1fr; gap:var(--sp-6)} }
 .flow-node{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
@@ -546,7 +546,7 @@ section{padding:clamp(var(--sp-8),5vw,var(--sp-24)) 0}
 .chip.view{border-color:var(--accent); color:var(--accent)}   /* blue: a generated-view chip */
 
 /* ---- entry-points router (grid of hover-lift link-cards) ---- */
-.doors{display:grid; grid-template-columns:repeat(2,1fr); gap:var(--sp-4)}
+.doors{display:grid; grid-template-columns:repeat(2,1fr); gap:var(--sp-4); max-width:56rem; margin-inline:auto}
 @media (max-width:640px){ .doors{grid-template-columns:1fr} }
 .door{display:block; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   padding:var(--sp-6); box-shadow:var(--shadow-1); text-decoration:none; color:inherit}
