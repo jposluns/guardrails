@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Adopt OPFiles | OPFiles</title>
-<meta name="description" content="Adopt OPFiles with your AI development assistant, or by creating the plain-TOML store and configuring its checks by hand.">
+<meta name="description" content="Adopt OPFiles with your AI development assistant or by hand: the two adoption paths, a per-command reference for the opf CLI, and the tooling-independent manual steps.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Adopt OPFiles | OPFiles">
-<meta property="og:description" content="Adopt OPFiles with your AI development assistant, or by creating the plain-TOML store and configuring its checks by hand.">
+<meta property="og:description" content="Adopt OPFiles with your AI development assistant or by hand: the two adoption paths, a per-command reference for the opf CLI, and the tooling-independent manual steps.">
 <meta name="twitter:card" content="summary">
 </head>
 <body>
@@ -50,52 +50,221 @@
 <div class="wrap pagehead refhead">
   <p class="eyebrow">Adopt it</p>
   <h1>Adopt OPFiles</h1>
-  <p class="lead">The recommended path is to let your AI development assistant do the adoption; adopting
-    by hand is the fallback for when you cannot. Both reach the same gated store. The assistant-driven
-    flow needs no particular tool, and the manual steps below are the tooling-independent path.</p>
+  <p class="lead">There are two ways in. The recommended path is to let your AI development assistant do
+    the adoption; adopting by hand is the fallback for when you cannot. Both reach the same gated store:
+    machine-written TOML sources, generated human-readable views, and a drift gate that re-renders the
+    views and compares them. This page walks the paths, then documents each <code>opf</code> command
+    one by one, then lays out the manual steps.</p>
 </div>
 
-<section class="section-alt">
+<div class="wrap">
+  <nav class="anchornav" aria-label="On this page">
+    <a href="#paths">Two paths</a>
+    <a href="#commands">Command reference</a>
+    <a href="#byhand">Adopt by hand</a>
+    <a href="#limits">Honest limits</a>
+    <a href="#next">Where next</a>
+  </nav>
+</div>
+
+<section id="paths" class="section-alt">
   <div class="wrap">
-    <p class="eyebrow">The primary path</p>
-    <h2>Let your AI development assistant do the adoption</h2>
-    <p class="lead">Point your AI development assistant at this site (or the repository) and tell it to
-      adopt OPFiles, or to adopt AIQT. It reads the standard, investigates your project, and presents a
-      short plan: what it will create, import, or retire, and how the pieces wire together. It asks one
-      question: yes, no, or let us discuss. On your yes it carries out the adoption, scaffolds and
-      validates the store, wires the records-first process into your project's assistant instructions,
-      and leaves the <code>.working/</code> store for your review.</p>
-    <p>The machine-readable entry point it uses, an <code>/llms.txt</code> index, a machine-readable
-      <code>/adopt.md</code>, and a root-page link, lets an assistant find and follow the adoption
-      steps.</p>
-    <p>Adopting AIQT this way brings OPFiles with it and migrates your existing operational files into
-      the store; adopting OPFiles alone is also supported.</p>
-    <p>
-      <span class="chip ok"><code>opf init</code></span>
-      <span class="chip ok"><code>opf render</code></span>
-      <span class="chip ok"><code>opf doctor</code></span>
-      <span class="chip ok"><code>opf upgrade</code></span>
-      <span class="chip ok"><code>opf import</code></span>
-      <span class="chip ok"><code>opf migrate</code></span>
-      <span class="chip ok"><code>opf sync</code></span>
-    </p>
-    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code>
-      verifies, <code>upgrade</code> migrates a store in place, and <code>import</code> brings legacy
-      files in.</p>
+    <p class="eyebrow">Two paths</p>
+    <h2>Two ways in, one gated store</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Assistant-driven (recommended)</h3>
+        <p>Point your AI development assistant at this site or the repository and tell it to adopt
+          OPFiles. It reads the standard, inspects your project, proposes a plan, and, on your yes,
+          scaffolds and validates the store for you. This path needs no particular tool.</p>
+      </div>
+      <div class="card">
+        <h3>By hand (fallback)</h3>
+        <p>Create the plain-TOML store, configure your own checks, and work records-first. The standard
+          requires no particular tool, so a hand adopter reaches the same store format and can move to
+          the reference tooling later without changing it.</p>
+      </div>
+    </div>
+    <p>On the assistant-driven path, your assistant reads the standard, investigates your project, and
+      presents a short plan: what it will create, import, or retire, and how the pieces wire together.
+      It asks one question, yes, no, or let us discuss. On your yes it carries out the adoption,
+      scaffolds and validates the store, wires the records-first process into your project's assistant
+      instructions, and leaves the <code>.working/</code> store for your review.</p>
+    <p>The machine-readable entry point it follows, an <a href="/llms.txt"><code>/llms.txt</code></a>
+      index, a machine-readable <a href="/adopt.md"><code>/adopt.md</code></a>, and a link on the root
+      page, lets an assistant find and follow the adoption steps. Adopting AIQT this way brings OPFiles
+      with it and migrates your existing operational files into the store; adopting OPFiles alone is
+      also supported.</p>
   </div>
 </section>
 
-<section>
+<section id="commands">
   <div class="wrap">
-    <p class="eyebrow">The fallback</p>
-    <h2>Adopt by hand, if you cannot use an assistant</h2>
-    <p>OPFiles specifies formats, layout, naming, lifecycle, and enforcement posture. It does not
-      require any particular tool: the specification states that a project can conform with
+    <p class="eyebrow">Command reference</p>
+    <h2>The opf commands, one by one</h2>
+    <p class="lead">OPFiles names a standard command vocabulary; the <code>opf</code> reference CLI is
+      one implementation of it. A base adopter can use their own tooling instead, or adopt by hand. The
+      standard and the reference suite are both a draft, so this reference documents each command by
+      what it does at source today.</p>
+    <p>Every command shares one exit contract, which is what makes it usable as a commit or CI check:
+      <b style="color:var(--ink)">0</b> clean, <b style="color:var(--ink)">1</b> a finding or drift, and
+      <b style="color:var(--ink)">2</b> cannot-evaluate, a fail-closed "I could not tell" that is never
+      read as a pass. One command-specific exception sits on top of this: <code>render --write</code>
+      refuses a source-integrity violation with exit 2 and writes nothing, so a source defect that
+      <code>doctor</code> reports as a finding (exit 1) makes <code>render --write</code> exit 2, declining
+      to write over an unsound source rather than exiting 1. Where a command is aimed at a directory that
+      has not adopted OPFiles, the
+      applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>) report NOT
+      APPLICABLE and exit 0. The seven commands, documented one by one below, are <code>init</code>,
+      <code>render</code>, <code>doctor</code>, <code>import</code>, <code>upgrade</code>,
+      <code>migrate</code>, and <code>sync</code>.</p>
+
+    <h3 id="cmd-init"><code>opf init</code></h3>
+    <p><b style="color:var(--ink)">Purpose.</b> Create a fresh, validated store and its committed
+      pointer in a project that has none, without any git write and without rendering.</p>
+    <p><b style="color:var(--ink)">How it works.</b> A read-only preflight runs first: it inspects the
+      target for an existing store, an existing pointer, or foreign content already under
+      <code>.working/</code>, and refuses rather than absorbing what it finds. It then builds the machine
+      sources in memory (the manifest, the ID counters, the version ledger, the worklog, and the eleven
+      typed indexes), writes them under <code>.working/toml/</code>, writes the <code>.opf.toml</code>
+      pointer at the product root, and creates a <code>CHANGELOG.md</code> if none exists. Publication is
+      create-only: it writes new paths and does not overwrite an existing one.</p>
+    <p><b style="color:var(--ink)">Result.</b> A scaffolded store, a committed-store pointer, and a
+      starter changelog if you had none, all left untracked for your review; <code>init</code> does not
+      stage or commit them. See <a href="./core-files">core store files</a> for what the scaffold writes
+      into the manifest.</p>
+    <p class="refchips"><code>opf init</code> <code>opf init --root .</code></p>
+
+    <h3 id="cmd-render"><code>opf render</code></h3>
+    <p><b style="color:var(--ink)">Purpose.</b> Regenerate the store's declared views and check them
+      against their sources, in one of two modes.</p>
+    <p><b style="color:var(--ink)">How it works.</b> Exactly one of <code>--check</code> or
+      <code>--write</code> is required, so a preview never turns itself into a write; a bare
+      <code>opf render</code> is a usage error. <code>--check</code> is read-only: it re-renders every
+      declared view from its sources and compares the bytes, reporting whether the store is clean, has
+      drifted, or cannot be evaluated, and writing nothing. <code>--write</code> gates on source integrity, not
+      on the whole-store verdict: it gathers the git-derived observations, and a drifted or missing view is
+      its output to regenerate rather than a reason to refuse, so it rewrites the declared views from their
+      sources. Only a source violation (a duplicate id, an untracked store, missing or malformed
+      observations, or an unreadable required input) refuses with exit 2 and writes nothing, printing the
+      source-attributed findings, so a write never reads as a silent no-op.</p>
+    <p><b style="color:var(--ink)">Result.</b> Under <code>--check</code>, a verdict and no change; under
+      <code>--write</code>, the regenerated view files on disk when source integrity holds, or no change
+      and a source-attributed report of why it withheld.</p>
+    <p class="refchips"><code>opf render --check</code> <code>opf render --write</code></p>
+
+    <h3 id="cmd-doctor"><code>opf doctor</code></h3>
+    <p><b style="color:var(--ink)">Purpose.</b> Run the whole-store integrity layer read-only and return
+      a single verdict.</p>
+    <p><b style="color:var(--ink)">How it works.</b> It resolves the store at the product root (or at
+      <code>--root DIR</code>), gathers the git-derived observations, and runs the integrity engine over
+      them. It makes no store change, and its report is a structured per-check verdict map, the findings
+      and cannot-evaluates, and a residual count, never a wall of diff lines. Its coverage spans schema
+      validity, ID uniqueness and counter monotonicity, bidirectional index reconciliation, transition
+      legality, the all-or-none resolution bundle, byte drift for every deterministic view, worklog span
+      tiling and frozen digests, changelog coverage and freeze, archive integrity, the tracked-store
+      requirement, pointer and sync-target agreement, and path containment.</p>
+    <p><b style="color:var(--ink)">Result.</b> A valid, invalid, or cannot-evaluate verdict with the
+      per-check breakdown, exiting 0, 1, or 2 to match.</p>
+    <p class="refchips"><code>opf doctor</code> <code>opf doctor --root .</code></p>
+
+    <h3 id="cmd-import"><code>opf import</code></h3>
+    <p><b style="color:var(--ink)">Purpose.</b> Bring an existing project's operational content into the
+      store through a staged, reviewed, attributed flow, rather than a silent absorb.</p>
+    <p><b style="color:var(--ink)">How it works.</b> Exactly one of four modes runs, and each requires an
+      already-initialized store (an unresolved root is a cannot-evaluate that asks you to run
+      <code>opf init</code> first). The modes chain in order:</p>
+    <ul class="clean">
+      <li><b style="color:var(--ink)"><code>--scan --set FILE</code></b>: reads a declared set of sources
+        and prints a canonical inventory to stdout; zero writes.</li>
+      <li><b style="color:var(--ink)"><code>--plan --set FILE</code></b>: stages a candidate run under
+        <code>.working/imports/&lt;run-id&gt;/</code> and prints the run id and the report path, leaving
+        the originals in place; no live-store write.</li>
+      <li><b style="color:var(--ink)"><code>--review &lt;run-id&gt; --actor NAME</code></b> with
+        <code>--decisions FILE</code> or <code>--interactive</code>: captures an attributed decision on
+        every fragment and writes the acceptance record; no live-store write (a non-TTY
+        <code>--interactive</code> is refused).</li>
+      <li><b style="color:var(--ink)"><code>--apply &lt;run-id&gt;</code></b>: promotes an accepted,
+        reviewed run into the live store through a journaled, verified cutover.</li>
+    </ul>
+    <p><b style="color:var(--ink)">Result.</b> An inventory, a staged run id and report, an acceptance
+      record, or a promoted store, one per mode; everything not confidently mapped is quarantined rather
+      than dropped, and the originals stay in place until an <code>--apply</code> promotes a fully
+      reviewed run.</p>
+    <p class="refchips"><code>opf import --scan --set sources.toml</code> <code>opf import --plan --set sources.toml</code> <code>opf import --review R --actor "you" --decisions d.toml</code> <code>opf import --apply R</code></p>
+
+    <h3 id="cmd-upgrade"><code>opf upgrade</code></h3>
+    <p><b style="color:var(--ink)">Purpose.</b> Apply the in-place base-schema upgrade (from spec 1.0.0
+      to 1.1.0), staged for your own review and merge.</p>
+    <p><b style="color:var(--ink)">How it works.</b> The upgrade is additive and idempotent. It resolves
+      the store and refuses fail-closed on a store above the tooling's spec version, on a hand-edited or
+      comment-bearing manifest or counters, on a held lease, or on a store that is unclean over the paths
+      it will write. Before any write it claims a single-writer lease and holds it across the change,
+      applies exactly the allowed schema delta as a canonical model regeneration (not a textual edit),
+      renders the declared views, and requires a full doctor-valid before offering the change. It never
+      commits: you review and merge. A store already at the target version is a byte no-op, still
+      requiring doctor-valid.</p>
+    <p><b style="color:var(--ink)">Result.</b> The upgraded store staged in your working tree and left
+      uncommitted for your branch-and-merge; a preflight refusal (the fail-closed checks above: a store above
+      the tooling's spec, a hand-edited or comment-bearing manifest or counters, a held lease, or a store
+      unclean over the paths it writes) stops before any write and changes nothing, while a failure once the
+      additive rewrite has begun (at the render or the final doctor) leaves the staged changes in place for a
+      recorded, store-subtree-scoped recovery against the committed HEAD, not a no-op.</p>
+    <p class="refchips"><code>opf upgrade</code> <code>opf upgrade --root .</code></p>
+
+    <h3 id="cmd-migrate"><code>opf migrate</code></h3>
+    <p><b style="color:var(--ink)">Purpose.</b> Relocate the whole tracked store to a target location,
+      its git history and worklog preserved, as one recorded, verified operation.</p>
+    <p><b style="color:var(--ink)">How it works.</b> It runs under the store consistency contract and the
+      single-writer lease, refusing to start from a stale, ahead, or divergent store. It validates the
+      target before any push: the destination is confirmed to be the recorded, intended target rather than
+      inherited from ambient state, so a store is not pushed to an unexpected place. It preserves the
+      store's git history into the destination and the worklog and its archive byte for byte, and keeps the
+      generated public deliverables (<code>CHANGELOG.md</code> and <code>VERSION</code>) in the product
+      repository, rewiring the render targets so future renders keep writing them there. It re-points the
+      committed pointer and the manifest's recorded sync target in the same change, then verifies the
+      destination before retiring the source: the relocated store is cloned back and reconciled (ledgers,
+      indexes, counters, and worklog digests) before the old location is removed or archived, and the
+      removal is recorded.</p>
+    <p><b style="color:var(--ink)">Result.</b> The store at its new location with the pointer, the
+      manifest's sync target, and the actual remote in agreement; the public deliverables still in the
+      product repository; and a worklog entry naming both the old and the new location. Migration is
+      symmetric: in-repo to a companion repository, companion to in-repo, or anywhere to anywhere,
+      repeatably, each move one recorded, verified, history-preserving operation.</p>
+    <p class="refchips"><code>opf migrate --store dir:../product-ops-store</code> <code>opf migrate --store github:acme/product-ops</code></p>
+
+    <h3 id="cmd-sync"><code>opf sync</code></h3>
+    <p><b style="color:var(--ink)">Purpose.</b> Reconcile the store with its sync target, the surfaced
+      pull-and-push step of the store consistency contract.</p>
+    <p><b style="color:var(--ink)">How it works.</b> The consistency contract holds the store
+      nothing-stale, nothing-ahead against its target. Where the local store is behind the target,
+      <code>opf sync</code> fast-forwards it to current; where it is ahead (local commits not yet pushed,
+      the lease still held by the resuming holder, and no divergent remote side), it pushes the pending
+      commits as an authorized reconciliation. It runs as its own surfaced step and is not folded silently
+      into another operation, so a pull or a push is a deliberate act you can see. A divergence (unsynced
+      commits on two systems) is not auto-merged: <code>opf sync</code> surfaces it and halts for you,
+      because a textual merge of the store's TOML records could mangle the very records the standard
+      protects.</p>
+    <p><b style="color:var(--ink)">Result.</b> The store reconciled to a known-consistent state with its
+      target, fast-forwarded to current or with its pending local commits pushed, or a surfaced halt on a
+      divergence for you to resolve by hand.</p>
+    <p class="refchips"><code>opf sync</code> <code>opf sync --root .</code></p>
+  </div>
+</section>
+
+<section id="byhand">
+  <div class="wrap">
+    <p class="eyebrow">Adopt by hand</p>
+    <h2>The manual path, step by step</h2>
+    <p class="lead">OPFiles specifies formats, layout, naming, lifecycle, and enforcement posture, and
+      requires no particular tool: the specification states that a project can conform with
       hand-maintained files and its own checks. Adopting by hand gives you the records-first discipline
-      today, and you can move to the reference tooling later without changing the store format.
-      Conformance you assert by hand is self-asserted, and you should say so wherever you claim it,
-      because no validator has checked it for you yet. The remaining sections are that manual path,
-      step by step.</p>
+      today, and you can move to the reference tooling later without changing the store format.</p>
+    <p>The shape of the manual path is short: create the store (either run <code>opf init</code> to
+      scaffold it, or write the files by hand from the templates below), commit it, run
+      <code>opf render --write</code> to generate the views, and then work records-first. Conformance you
+      assert by hand is self-asserted, and you should say so wherever you claim it, because no validator
+      has checked it for you yet. The steps below fill that in.</p>
   </div>
 </section>
 
@@ -126,7 +295,8 @@
       the store resolves from a stable location. A <code>[profiles.aiqt]</code> table is optional and
       is ignored by base-only tooling; a base adopter need not add it.</p>
     <p>A minimal manifest, illustrative and drawn from the specification's own example (see
-      <a href="./standard">the standard</a> for the normative shape):</p>
+      <a href="./standard">the standard</a> for the normative shape, and
+      <a href="./core-files">core store files</a> for every table it can carry):</p>
     <div class="codecard src">
       <div class="codecard-bar">.working/toml/manifest.toml</div>
       <div class="codebody"><span class="tok-tbl">[opf]</span>
@@ -160,7 +330,8 @@
     <p>One rule of adoption carries the whole convention: lowercase files are machine source you change
       through tooling or review; UPPERCASE files are generated or published deliverables you read and
       never hand-edit. The curated <code>CHANGELOG.md</code> is the one you edit, and only through its
-      publish flow.</p>
+      publish flow. Once the files exist, commit them, then run <code>opf render --write</code> (or your
+      own generator) to produce the views from their sources.</p>
   </div>
 </section>
 
@@ -203,7 +374,7 @@
   </div>
 </section>
 
-<section>
+<section id="limits">
   <div class="wrap">
     <p class="eyebrow">The honest limits</p>
     <h2>What by-hand adoption does not give you</h2>
@@ -213,6 +384,35 @@
       prose is accurate, range coverage cannot judge summary quality, and the unreleased worklog tail
       rests on review rather than machine freezing. The <a href="./disclosure">disclosure page</a>
       states these limits plainly.</p>
+  </div>
+</section>
+
+<section id="next" class="section-alt">
+  <div class="wrap">
+    <p class="eyebrow">Where next</p>
+    <h2>Keep going</h2>
+    <div class="doors">
+      <a class="door" href="./standard">
+        <span class="door-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4a2 2 0 0 1 2-2h12v18H7a2 2 0 0 0-2 2z"/><path d="M19 18H7a2 2 0 0 0-2 2"/></svg></span>
+        <h3>Read the standard</h3>
+        <p>Store layout, the record model, the gates, and what they do and do not establish.</p>
+      </a>
+      <a class="door" href="./tooling">
+        <span class="door-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9.5 3 2.5-3 2.5"/><path d="M12.5 15H17"/></svg></span>
+        <h3>Reference tooling</h3>
+        <p>The command vocabulary, its status, and how an assistant finds the standard.</p>
+      </a>
+      <a class="door" href="./core-files">
+        <span class="door-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 3h7l4.5 4.5V21H6.5z"/><path d="M13.5 3v4.5H18"/><path d="M9 13h6M9 16.5h4"/></svg></span>
+        <h3>Core store files</h3>
+        <p>What the manifest, counters, version, worklog, and lease hold, and what each protects.</p>
+      </a>
+      <a class="door" href="./disclosure">
+        <span class="door-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 8h.01"/><path d="M11 12h1v4h1"/></svg></span>
+        <h3>Disclosure</h3>
+        <p>The residual limits the standard names plainly, so you know what it does not establish.</p>
+      </a>
+    </div>
   </div>
 </section>
 

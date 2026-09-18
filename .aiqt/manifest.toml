@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "4a8890df34042f7760d4f09ba56e0ff8d15532c7b329df7279d27f84256144b0"
+tree-sha256 = "492598d04b6fce0c4de2c50bca66aa3dead0352354f673556d7e51b629afc856"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2336,8 +2336,8 @@ sha256 = "e9f6788bc65fb0ad098ba0b2d2450e504c7a9c523963a4913bdd0a3306286e5c"
 
 [[sources]]
 path = "opf/site/adopt.html"
-bytes = 13400
-sha256 = "e713df6e1935ad7326bece33215549a1192a4c5f06b93ce87c97df65c6288a1c"
+bytes = 29409
+sha256 = "3e68b03f2ce938fa65e2a0d8093a6c2923f3ee6e4e74008200c10074de438b11"
 
 [[sources]]
 path = "opf/site/adopt.md"
