@@ -98,6 +98,11 @@ REQUIRED_DIR_ROOTS = [
     ".cursor/rules/aiqt-guardrails",     # the generated Cursor tree
     "plugin/aiqt-guardrails-hooks",      # the shipped plugin surface
     "site/downloads",                    # the published artefacts (skill dir, instructions, zip, mappings)
+    "opf/spec",                          # the OPF specification pair, relocated from .aiqt/core/opf/ (OPF-SELF-CONTAIN)
+    # NOTE: opf/tools is NOT a portability root, mirroring tools/. Both are the pack's AUTHOR-SIDE tooling
+    # (generators, gates, vendored provenance), not the adopter-installed portable surface this gate policies;
+    # they legitimately carry operational domain vocabulary and vendored .sha256/.typed binaries. The spec
+    # pair WAS portability-scanned under .aiqt/core/opf/, so opf/spec is added to preserve that coverage.
 ]
 REQUIRED_FILE_ROOTS = [
     "AGENTS.md",                         # generated adapter

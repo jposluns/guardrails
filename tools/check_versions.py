@@ -26,43 +26,26 @@ Exit convention (matches the repo's gates):
   1  a real finding (drift, non-increasing sequence, VERSION mismatch)
   2  malformed input or a read error (fail-closed)
 """
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# opf/tools/ carries the ONE shared bare-SemVer parser (_semver), extracted there for OPF self-containment.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))
 from _gen_common import repo_root, load_toml  # noqa: E402
-
-# Bare SemVer only: no leading zeros, no pre-release/build identifiers (policy R5). The digit class is the
-# explicit ASCII [0-9], never `\d`, and the pattern is compiled with re.ASCII (belt-and-suspenders): `\d`
-# matches Unicode decimal digits, so `1٢.0.0` (an Arabic-Indic two) matched `[1-9]\d*` and int() then
-# read it as 12, letting a non-ASCII-digit version pass every SemVer parse path. ASCII-only closes that gap.
-SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$", re.ASCII)
-
-
-def _parse(version):
-    """Return the (major, minor, patch) int tuple for a well-formed version, or None if malformed. Uses
-    fullmatch, not match: the `$`-anchored SEMVER pattern otherwise accepts a trailing newline (Python's
-    `$` matches before a final newline), so `_parse("1.0.0\\n")` was truthy. fullmatch requires the whole
-    string to match, closing that trailing-whitespace acceptance. This helper feeds every version
-    comparison the release gates make, so the tightening is load-bearing; no legitimate caller passes
-    trailing whitespace.
-
-    The int() conversions are guarded: a component within the SemVer grammar can still exceed CPython's
-    integer-string-conversion digit limit (default 4300) and raise ValueError. An oversized component is
-    malformed input, so it returns None (a cannot-evaluate that every caller already handles as a
-    fail-closed malformation) rather than propagating a ValueError up through the release gates."""
-    m = SEMVER.fullmatch(version)
-    if m is None:
-        return None
-    try:
-        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    except ValueError:
-        return None
-
+from _semver import SEMVER, _parse  # noqa: E402  re-exported so `from check_versions import _parse` callers are unchanged
 
 def main():
     root = repo_root()
+    # Single-source pin (OPF-SELF-CONTAIN): the bare-SemVer grammar and parser this gate uses ARE the
+    # _semver objects, never a second copy. A future re-implementation that shadowed the import with a local
+    # definition would fork the grammar silently; this identity check fails closed if it ever does. It runs
+    # here, in the gate's own executed path, so run_all_checks exercises it on every run.
+    import _semver  # noqa: E402
+    if not (_parse is _semver._parse and SEMVER is _semver.SEMVER):
+        print("error: SemVer primitives are not the single _semver source (a silent fork); fail-closed",
+              file=sys.stderr)
+        return 2
     try:
         data = load_toml(root / "changelog.toml")
     except (OSError, ValueError) as exc:

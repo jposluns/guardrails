@@ -35,7 +35,7 @@ re-emitting a model-equal input yields byte-identical output. Signed zero is can
 (-0.0 emits as 0.0), so the two model-equal float inputs 0.0 and -0.0 emit byte-identically. No
 wall-clock content, no network, no model involvement.
 
-Byte-canon (check_byte_canon.py, VER-CORE 3.1): the output is byte-canonical by construction. Every
+Byte-canon (_byte_canon.py scanner, VER-CORE 3.1): the output is byte-canonical by construction. Every
 string value and quoted key is rendered as an escaped basic string, so a body carrying a carriage
 return, a trailing space, a control character, or a zero-width / bidirectional control codepoint is
 represented by an escape sequence and never reaches the file bytes literally, where it would trip the
@@ -43,9 +43,9 @@ byte-canon gate. This is why a value that contains newlines is emitted as an esc
 string rather than a literal `\"\"\"` multi-line string: a literal multi-line string cannot satisfy
 byte-canon for an arbitrary captured body (a CRLF, a line with trailing whitespace, or a forbidden
 codepoint would land in the bytes verbatim). The subset supports strings of any content, including
-newlines; the canonical FORM of that support is escaping. check_byte_canon is the authority for the
+newlines; the canonical FORM of that support is escaping. _byte_canon is the authority for the
 byte rules; the self-test reconciles this module's forbidden-codepoint set against it and runs every
-emitted vector through check_byte_canon.scan_bytes, so the two cannot drift. The en dash (U+2013) and em
+emitted vector through _byte_canon.scan_bytes, so the two cannot drift. The en dash (U+2013) and em
 dash (U+2014) escaping is a SEPARATE house-style no-dash guarantee, not part of the byte_canon forbidden
 set, so the emitted bytes are dash-free by construction independent of what byte_canon covers.
 
@@ -60,7 +60,7 @@ resident model, and this bounds that output rather than the structure.
 
   _opf_emit.py --self-test    round-trip fuzz, canonical-form determinism, subset coverage, byte-canon
 
-The live leg is folded into `tools/opf.py --self-test` (build plan section 3); this module is a library
+The live leg is folded into `opf/tools/opf.py --self-test` (build plan section 3); this module is a library
 consumed by U7 (import) and `opf init`, with no live/standalone mode beyond the self-test.
 
 Exit convention (matches the repo's gates): 0 clean, 1 a self-test finding, 2 misuse.
@@ -86,10 +86,10 @@ class EmitError(Exception):
 # rendered as a quoted basic-string key instead.
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
-# Codepoints the byte-canon gate forbids anywhere in a released text file (check_byte_canon.py 3.1):
+# Codepoints the byte-canon scanner forbids anywhere in a released text file (_byte_canon.py, VER-CORE 3.1):
 # zero-width (U+200B..U+200D, U+2060 word joiner, U+FEFF) and the Unicode Bidi_Control set. They are
 # escaped in emitted strings so they never appear literally. This constant is the authority's set; the
-# self-test asserts it equals check_byte_canon.FORBIDDEN, so a change there cannot silently pass here.
+# self-test asserts it equals _byte_canon.FORBIDDEN, so a change there cannot silently pass here.
 _ZERO_WIDTH = frozenset(chr(c) for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF))
 _BIDI = frozenset(chr(c) for c in (0x061C, 0x200E, 0x200F)
                   + tuple(range(0x202A, 0x202F)) + tuple(range(0x2066, 0x206A)))
@@ -556,15 +556,15 @@ def emit_checked(document):
 # --- self-test --------------------------------------------------------------------------------------
 
 def _load_byte_canon_authority():
-    """Load check_byte_canon from its pinned sibling FILE by explicit path, never via a bare `import`
-    (which trusts sys.path) or the ambient sys.modules cache (which a poisoned entry could substitute
-    with an always-clean scanner that would falsely certify the emitted bytes). module_from_spec +
-    exec_module loads the real file without consulting or registering in sys.modules, so the authority
+    """Load the _byte_canon scanner from its pinned sibling FILE by explicit path, never via a bare
+    `import` (which trusts sys.path) or the ambient sys.modules cache (which a poisoned entry could
+    substitute with an always-clean scanner that would falsely certify the emitted bytes). module_from_spec
+    + exec_module loads the real file without consulting or registering in sys.modules, so the authority
     is bound by file identity. sys.path is snapshotted and restored around the load (the authority
     inserts its own directory for its transitive imports). Any failure propagates so the caller fails
     closed; byte-canon cleanliness cannot be asserted without the genuine authority."""
     import importlib.util
-    path = Path(__file__).resolve().parent / "check_byte_canon.py"
+    path = Path(__file__).resolve().parent / "_byte_canon.py"
     spec = importlib.util.spec_from_file_location("_opf_emit_byte_canon_authority", path)
     if spec is None or spec.loader is None:
         raise ImportError("no import spec for the byte-canon authority at {}".format(path))
@@ -733,49 +733,49 @@ def _bounded_child_result(data, wstatus):
 
 def self_test():
     """Round-trip fuzz over adversarial bodies, canonical-form determinism, constrained-subset coverage
-    (accepted and rejected), and byte-canon cleanliness verified against check_byte_canon itself."""
+    (accepted and rejected), and byte-canon cleanliness verified against _byte_canon itself."""
     failures = []
 
-    # check_byte_canon is the authority for the byte rules; reuse it rather than re-implement (a stale
+    # _byte_canon is the authority for the byte rules; reuse it rather than re-implement (a stale
     # duplicate is the guard-input-soundness failure this avoids). It is loaded from its pinned sibling
     # FILE by explicit identity (_load_byte_canon_authority), never a bare `import` that the ambient
     # sys.modules cache could satisfy with a substituted always-clean scanner. Fail closed if it cannot
     # be loaded, or if it lacks the expected interface: cleanliness cannot be asserted without it.
     try:
-        check_byte_canon = _load_byte_canon_authority()
+        byte_canon = _load_byte_canon_authority()
     except (KeyboardInterrupt, SystemExit, GeneratorExit):
         raise
     except BaseException as exc:  # noqa: BLE001 - any load failure is fail-closed here
-        print("error: cannot load check_byte_canon for the byte-canon leg ({}); fail-closed".format(exc),
+        print("error: cannot load _byte_canon for the byte-canon leg ({}); fail-closed".format(exc),
               file=sys.stderr)
         return 2
-    if not (isinstance(getattr(check_byte_canon, "FORBIDDEN", None), dict)
-            and callable(getattr(check_byte_canon, "scan_bytes", None))):
+    if not (isinstance(getattr(byte_canon, "FORBIDDEN", None), dict)
+            and callable(getattr(byte_canon, "scan_bytes", None))):
         print("error: the byte-canon authority lacks the expected FORBIDDEN/scan_bytes interface; "
               "fail-closed", file=sys.stderr)
         return 2
 
     # The forbidden-codepoint set MUST match the authority's, so a body carrying any of them is escaped.
-    authority = set(check_byte_canon.FORBIDDEN.values())
+    authority = set(byte_canon.FORBIDDEN.values())
     if set(_FORBIDDEN_CODEPOINTS) != authority:
-        failures.append("forbidden-codepoint set disagrees with check_byte_canon.FORBIDDEN "
+        failures.append("forbidden-codepoint set disagrees with _byte_canon.FORBIDDEN "
                         "(missing {}, extra {})".format(sorted(authority - set(_FORBIDDEN_CODEPOINTS)),
                                                         sorted(set(_FORBIDDEN_CODEPOINTS) - authority)))
 
     # sys.modules-substitution pin: the authority is loaded from its pinned sibling FILE, not the ambient
-    # sys.modules cache, so a poisoned check_byte_canon entry cannot substitute an always-clean scanner
+    # sys.modules cache, so a poisoned _byte_canon entry cannot substitute an always-clean scanner
     # and falsely certify the emitted bytes. Poison sys.modules with such a substitute, reload via the
     # loader, and require the reload to still flag a known-forbidden codepoint (U+200B); a bare-import
     # mutant would return the poison and report clean. sys.modules is restored in finally.
     class _AlwaysCleanCanon:
-        FORBIDDEN = dict(check_byte_canon.FORBIDDEN)
+        FORBIDDEN = dict(byte_canon.FORBIDDEN)
 
         @staticmethod
         def scan_bytes(data):
             return []
 
-    _saved_canon = sys.modules.get("check_byte_canon")
-    sys.modules["check_byte_canon"] = _AlwaysCleanCanon
+    _saved_canon = sys.modules.get("_byte_canon")
+    sys.modules["_byte_canon"] = _AlwaysCleanCanon
     try:
         _reloaded = _load_byte_canon_authority()
         if not any("U+200B" in f for f in _reloaded.scan_bytes(chr(0x200B).encode("utf-8"))):
@@ -787,12 +787,12 @@ def self_test():
         failures.append("authority-substitution: loading the pinned authority raised {!r}".format(exc))
     finally:
         if _saved_canon is None:
-            sys.modules.pop("check_byte_canon", None)
+            sys.modules.pop("_byte_canon", None)
         else:
-            sys.modules["check_byte_canon"] = _saved_canon
+            sys.modules["_byte_canon"] = _saved_canon
 
     def _byte_canon_clean(text, label):
-        findings = check_byte_canon.scan_bytes(text.encode("utf-8"))
+        findings = byte_canon.scan_bytes(text.encode("utf-8"))
         if findings:
             failures.append("{}: emitted bytes are not byte-canonical: {}".format(label, findings))
 
@@ -1885,7 +1885,7 @@ def self_test():
         return 1
     print("SELF-TEST PASS: round-trip fuzz over adversarial bodies, canonical-form determinism, the "
           "constrained-subset accepted and rejected shapes, byte-canon cleanliness (verified against "
-          "check_byte_canon), arbitrary-depth iterative emission and equality (depth {}), cyclic-"
+          "_byte_canon), arbitrary-depth iterative emission and equality (depth {}), cyclic-"
           "reference rejection, shared-DAG acceptance, the output-ceiling bound, and the golden byte "
           "vector all hold".format(iterative_depth))
     return 0

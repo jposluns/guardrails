@@ -9,7 +9,7 @@ Defaults follow OPF-SPEC section 9, with optional modules disabled and no profil
 The initial Markdown view set is pinned; future registry additions do not expand it.
 Validation here covers individual bootstrap documents, not whole-store or publication integrity.
 
-Run: python3 tools/_opf_init.py --self-test
+Run: python3 opf/tools/_opf_init.py --self-test
 """
 
 import sys

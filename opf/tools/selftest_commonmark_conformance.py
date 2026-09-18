@@ -12,10 +12,10 @@ harness FAILS CLOSED (never skips) if the fixture is absent, unreadable, malform
 (check-fails-closed-on-unreadable; guard-input-soundness).
 
 Usage:
-    python3 -I -B tools/selftest_commonmark_conformance.py
+    python3 -I -B opf/tools/selftest_commonmark_conformance.py
         Run the replay under the CURRENT interpreter. Exit 0 clean, 1 on a divergence outside the recorded
         baseline, 2 on a fail-closed harness error (missing fixture, wrong vendored bytes, etc.).
-    python3 -I -B tools/selftest_commonmark_conformance.py --interpreters <interp> [<interp> ...]
+    python3 -I -B opf/tools/selftest_commonmark_conformance.py --interpreters <interp> [<interp> ...]
         OPTIONAL maintainer facility (NOT gate-wired): re-spawn this same harness under each NAMED interpreter
         and aggregate. A named interpreter that is absent is a fail-closed error, not a skip. The pack is
         standardized on CPython 3.14 and the gate uses the single-interpreter form above; a cross-version
@@ -35,7 +35,7 @@ SPEC_FIXTURE = os.path.join(ch._VENDOR_DIR, "commonmark-spec-0.31.2", "spec-0.31
 # The set of spec example numbers marko 2.2.4 is known to render differently from the 0.31.2 expected HTML.
 # ORCHESTRATOR-FILLED after MEASURING the replay against the real vendored bytes. Measured on CPython 3.14.4
 # (the host interpreter) against the vendored marko 2.2.4 bytes: 16 render divergences out of 652 examples,
-# none heading-related. The OPF changelog adapter (tools/_commonmark_headings.py) uses marko's PARSER only,
+# none heading-related. The OPF changelog adapter (opf/tools/_commonmark_headings.py) uses marko's PARSER only,
 # never its renderer, so none of these divergences touches OPF heading extraction; they are recorded here to
 # keep the conformance replay honest rather than presenting an unmeasured 100%-pass claim as fact. This
 # baseline is verified on CPython 3.14 ONLY: the host and the quality CI workflow that gates U5 both run it on

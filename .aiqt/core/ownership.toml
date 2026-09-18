@@ -98,6 +98,16 @@ class = "pack-immutable"
 note = "Shipped pack tooling, byte-exact; explicitly NOT dev-only (Section 12 step 2)."
 
 [[release-class]]
+pattern = "opf/tools/**"
+class = "pack-immutable"
+note = "The dependency-closed OPF tooling subtree (OPF-SELF-CONTAIN). Shipped pack tooling, byte-exact, mirroring tools/**; disjoint from it. H-1 ratified: no new class family."
+
+[[release-class]]
+pattern = "opf/spec/**"
+class = "pack-immutable"
+note = "The OPF specification pair (OPF-SPEC.md, OPF-QUICKSTART.md) relocated under opf/ (OPF-SELF-CONTAIN). Shipped pack content, byte-exact. H-1 ratified: no new class family."
+
+[[release-class]]
 pattern = "docs/**"
 class = "pack-immutable"
 note = "Documentation Markdown sources (docs/<name>.md) and the shared shell template (docs/_shell.html) that tools/gen_site.py composes into site/<name>.html. Byte-exact shipped pack content; the site pages remain the byte-parity target of the drift gate."
@@ -362,11 +372,11 @@ note = "The documented adopter vendoring location; reserved, never a pack-immuta
 # newline would diverge from the pinned wheel bytes and the adapter manifest sha256), and the CommonMark
 # 0.31.2 spec-examples fixture ships upstream with no trailing newline (the conformance replay pins its exact
 # bytes). They are marked binary so git preserves their bytes verbatim and byte-canon does not canonicalize
-# them; their integrity stays pinned by tools/_vendor/marko-2.2.4.manifest.sha256 and the release manifest.
+# them; their integrity stays pinned by opf/tools/_vendor/marko-2.2.4.manifest.sha256 and the release manifest.
 # The remaining vendored files are canonical text and stay text eol=lf.
 
 [checkout]
-binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.5.zip", "tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "tools/_vendor/marko/py.typed"]
+binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.5.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed"]
 
 # --- concern-3 hook: the adopter-installed extent is defined in the adopter-experience spec -------------
 
