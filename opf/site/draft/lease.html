@@ -90,9 +90,9 @@
     <h2>Why</h2>
     <p>Two runs writing the same store at once can each produce a locally consistent state that
       cannot merge: a textual merge of TOML records can silently mangle the very records the
-      standard exists to protect. The lease prevents the collision up front, and the consistency
-      contract's divergence check catches, after the fact, the residual case the lease alone cannot
-      cover.</p>
+      standard exists to protect. An observable held lease reduces the opportunity for concurrent
+      writes up front, and the consistency contract's divergence check detects, after the fact, a
+      collision that begins inside the propagation window the lease does not cover.</p>
   </div>
 </section>
 

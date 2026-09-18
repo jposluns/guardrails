@@ -72,10 +72,11 @@
   <p class="eyebrow">OPFiles and AIQT</p>
   <h1>OPFiles and AIQT</h1>
   <p class="lead">OPFiles is a standalone standard, owned by AIQT and published under CC BY-SA 4.0, and
-    it ships as part of AIQT: adopting AIQT brings OPFiles with it and migrates your existing
-    operational files into the store, while OPFiles remains available on its own. AIQT consumes and
-    enforces the standard through one optional profile, and a base adopter need not adopt AIQT at
-    all.</p>
+    it ships as part of AIQT: adopting AIQT brings OPFiles with it, and the planned assistant-driven
+    adoption flow will also migrate your existing operational files into the store; reviewed manual
+    import is available now through <code>opf import --apply</code>. OPFiles remains available on its
+    own: AIQT consumes and enforces the standard through one optional profile, and a base adopter
+    need not adopt AIQT at all.</p>
 </div>
 
 <section>
@@ -131,12 +132,12 @@
       which includes OPFiles, and standalone OPFiles lives at the <code>opf</code> path within it.
       aiqt.ai maps to the repository root and opfiles.ai maps to the opf path, so the two sites are two
       views of one source, not two products maintained apart.</p>
-    <p>Adopting OPFiles is what lets the guardrails run better and more efficiently, with less
-      inference and fewer tokens: the structured TOML carries the input each process needs, so the same
-      process runs the same way every time, which reduces the likelihood of errors, omissions, and
-      hallucinations. Adopting AIQT brings the OPFiles store by default; an adopter can instead take
-      just the guardrail rules without the OPFiles store, but that rules-only path misses these
-      capabilities.</p>
+    <p>Adopting OPFiles is what lets the guardrails run on structured records: the TOML carries the
+      input each process declares, which reduces ambiguity and the likelihood of errors, omissions,
+      and hallucinations, and can reduce the inference and token spend that go into reconstructing
+      context; net savings depend on the workflow and should be measured. Adopting AIQT brings the
+      OPFiles store by default; an adopter can instead take just the guardrail rules without the
+      OPFiles store, but that rules-only path misses these capabilities.</p>
   </div>
 </section>
 

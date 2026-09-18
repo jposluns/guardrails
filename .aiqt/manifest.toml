@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.0"
 genesis = true
-tree-sha256 = "ba19f511ef2b1feb00acb2337595f12a46e32bdd2ae7c978b71d5118ca96d085"
+tree-sha256 = "77a2893b7f024289424b24ffd43567ef54df9aca31f0dd30fd0bbff9d6f2ea4a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2356,8 +2356,8 @@ sha256 = "588c0d762d5e50c99d5239086d5b3c852a96576008b0930f0644c3436660a1c6"
 
 [[sources]]
 path = "opf/site/draft/aiqt.html"
-bytes = 8893
-sha256 = "a88cb7eff57a4d4e620c737ef3ea82114ebdab19301237b959f092684aa10d9d"
+bytes = 9078
+sha256 = "604641b873f448894a0de99ed62469632cd6946ca45041acad792b0532e1626a"
 
 [[sources]]
 path = "opf/site/draft/archive.html"
@@ -2391,8 +2391,8 @@ sha256 = "b25d033af835ab397ca30b34c37c2fe3960099260b1bbc6bc147db563381dc09"
 
 [[sources]]
 path = "opf/site/draft/decisions-projection.html"
-bytes = 8350
-sha256 = "d417365d3955474973ddb3b9e85c09c7b60e8e477e478a8afc2a26fb9c997773"
+bytes = 8518
+sha256 = "4a16a15160a5cc40becf514968357617e164c5a4cf1d60d69516224bca60304c"
 
 [[sources]]
 path = "opf/site/draft/disclosure.html"
@@ -2421,13 +2421,13 @@ sha256 = "9c5662d38bc9a25d75b79dd0d3ee2c3c119f15c3cfba084f0b890605d56ca2b6"
 
 [[sources]]
 path = "opf/site/draft/index.html"
-bytes = 24196
-sha256 = "b4a452c6803e4faa6581c1e08da2b7d631dd78e4c4e03615cbbb4c69acbc80e2"
+bytes = 25224
+sha256 = "e4235dcf96c4a1841c72410187fb26f2ec07c60642da6368272a9e9c018e868d"
 
 [[sources]]
 path = "opf/site/draft/lease.html"
-bytes = 8028
-sha256 = "1ca9cc985fbdbdcc85d621371e6b9b9ac49626be3f11a966a2307641a0983d5a"
+bytes = 8098
+sha256 = "f298f1f0a4aa5830dcb998b3623df1584620c64dc1ea35cd4e289e3542756a02"
 
 [[sources]]
 path = "opf/site/draft/maintainer-decision.html"
@@ -2486,8 +2486,8 @@ sha256 = "c57746b75ebb827bbf7eaa8d876aabef23c3ee347c373a60df5a13cc80ee4358"
 
 [[sources]]
 path = "opf/site/draft/tooling.html"
-bytes = 9698
-sha256 = "c0499ae02e6f15e226acc45e9290f5949a76bca5405ea51e1226ae21f6244c39"
+bytes = 9825
+sha256 = "88bfe20e1c1e646c974a86e03c3ceeee9523062eaaa91b6b7cb4c150d7fc55ee"
 
 [[sources]]
 path = "opf/site/draft/version.html"

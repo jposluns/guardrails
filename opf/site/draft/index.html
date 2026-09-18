@@ -77,11 +77,12 @@
   <div class="wrap">
     <h1>Fewer AI errors. Durable records. <span class="grad">The same process on every project.</span></h1>
     <p class="lead">OPFiles (OPF, the operational-files standard) gives your teams one disciplined
-      way to run AI-assisted work: every backlog item, decision, finding, and handoff lives in a
-      versioned, machine-written record that carries all the input a process needs. The same
-      correct process runs the same way every time, on every project, regardless of which AI
-      assistant or which developer is doing the work, so fewer errors and omissions enter the
-      record, the work costs less to run, and a durable, reviewable trail is left behind by
+      way to run AI-assisted work: each backlog item, decision, finding, and handoff lives in a
+      versioned, machine-written record that carries all the input a process needs. Complete,
+      structured records and deterministic views reduce ambiguity and the opportunity for errors
+      and omissions, and the schemas and gates that enforce them are the standard's own, not any
+      one assistant's or developer's. Structured input can also reduce the repeated context
+      reconstruction that drives token spend, and a durable, reviewable trail is left behind by
       default. Under the hood it is one machine-readable store of TOML, paired with generated,
       human-readable views and kept in lockstep by drift gates. Open and free under CC BY-SA 4.0.</p>
     <div class="cta">
@@ -96,9 +97,9 @@
   <div class="wrap">
     <p class="eyebrow">Why teams adopt it</p>
     <h2>Five outcomes, on every project</h2>
-    <p class="lead">Mandate one operational standard and every project inherits the same
-      discipline: the record is written by process, not by habit, and the results below follow
-      from the mechanism, not from trusting any one tool or developer.</p>
+    <p class="lead">Mandate one operational standard and each project inherits the same
+      discipline: the record is written by process, not by habit, and the outcomes below rest on
+      that mechanism rather than on trust in any one tool or developer.</p>
     <div class="grid">
       <div class="card">
         <h3>Fewer AI errors, omissions, and hallucinations</h3>
@@ -110,29 +111,33 @@
       </div>
       <div class="card">
         <h3>Consistency and repeatability</h3>
-        <p>The same records-first discipline holds across teams, projects, and assistants, because
-          the schemas, status grammar, and gates are the standard's, not any one vendor's or any
-          one developer's habits. Switching an assistant, a contractor, or a team does not change
-          how the work is recorded.</p>
+        <p>The records-first discipline is defined by the standard, not by any one vendor's tool or
+          any one developer's habits: the schemas, status grammar, and gates stay the same across
+          teams and projects. Deterministic rendering means the same sources produce the same views
+          wherever they are rendered, so switching an assistant, a contractor, or a team leaves the
+          recording contract unchanged.</p>
       </div>
       <div class="card">
-        <h3>Compliance built into the work</h3>
+        <h3>Support for operational compliance</h3>
         <p>The operational record is structured and enforceable: closed schemas refuse malformed
-          records and gates fail closed on anything they cannot evaluate. Adherence is produced by
-          the same process every time, as the work happens, rather than reconstructed at audit
-          time.</p>
+          records, and the integrity gates fail closed on anything they cannot evaluate. The record
+          is produced as the work happens rather than reconstructed at audit time, which supports
+          compliance review within the standard's declared scope; it does not by itself establish
+          broader organizational or regulatory compliance.</p>
       </div>
       <div class="card">
-        <h3>Lower cost for the same work</h3>
-        <p>Complete, structured input means less back-and-forth inference and fewer tokens spent
-          reconstructing context, so the same work costs less to run. The saving repeats on every
-          project that runs the same process.</p>
+        <h3>Less repeated context reconstruction</h3>
+        <p>Complete, structured input can reduce the back-and-forth inference and token spend that
+          go into reconstructing context, and the effect can repeat on each project that runs the
+          same process. Structured recording and review carry their own overhead, so net savings
+          depend on the workflow and should be measured, not assumed.</p>
       </div>
       <div class="card">
         <h3>A durable, reviewable trail</h3>
-        <p>Every decision, finding, and change is captured in a versioned, git-backed store with
-          generated human-readable views, and released history is frozen by recorded digests. There
-          is always a durable, reviewable trail of what was decided, by whom, and when.</p>
+        <p>Recorded decisions, findings, and changes live in a versioned, git-backed store with
+          generated human-readable views, and released history is frozen by recorded digests. The
+          trail reflects what was captured: attribution and timestamps are as complete as the
+          recorded fields, and retention and backups remain the adopter's responsibility.</p>
       </div>
     </div>
     <p>The mechanism behind these outcomes is the rest of this page: one machine-written source of
@@ -217,26 +222,30 @@
   <div class="wrap">
     <p class="eyebrow">Why it works</p>
     <h2>Complete input, deterministic process</h2>
-    <p class="lead">The outcomes above are not aspiration; they follow from two properties the
-      standard enforces. When the TOML carries all the input a process needs, the same process runs
-      the same way every time: determinism plus completeness reduces variance and ambiguity.</p>
+    <p class="lead">The outcomes above rest on two properties the standard enforces: deterministic
+      rendering, same sources to the same bytes, and complete, structured input. Together they
+      reduce variance, ambiguity, and the opportunity for errors; they discipline the record the
+      work runs on, not the judgment of whichever assistant runs it.</p>
     <p>A process that reads a complete, structured record does not have to reconstruct context from
       memory, guess at a missing field, or interpret free-form prose. The closed schemas mean a
       malformed input is refused rather than silently misread; the closed transform vocabulary means
       a view can only be composed in reviewed, versioned ways; and the byte-reproducible render
-      means two runs over the same store cannot disagree about what the record says.</p>
+      means two runs over the same store produce the same bytes, so the views agree about what the
+      record says. Determinism covers the rendering; the source records are authored content that
+      review keeps correct.</p>
     <p>For teams working with AI assistants, this structure helps reduce the likelihood of errors,
       omissions, and hallucinations in the operational record: the assistant writes into a schema
-      that refuses what does not fit, reads from a store that carries the full context, and cannot
-      bake its own output into a generated view, because deterministic renders exclude model
-      involvement by definition and advisory activity over a projection happens at read time,
-      outside the generator. These mechanisms reduce the opportunity for a confident guess to enter
-      the record; they do not remove it entirely, and the standard says so plainly in its own
-      residual-coverage disclosures.</p>
-    <p>Completeness is also an efficiency gain. Because the TOML carries all the input a process needs,
-      the same process runs the same way every time, with less back-and-forth inference and fewer
-      tokens spent reconstructing context, and a reduced likelihood of errors, omissions, and
-      hallucinations along the way.</p>
+      that refuses what does not fit and reads from a store that carries the full context, and the
+      generator itself invokes no model and adds no model-generated interpretation, reproducing the
+      declared source records, so assistant-authored content in those records still needs review.
+      These mechanisms reduce the opportunity for a confident guess to enter the record; they do not
+      remove it entirely, and the standard says so plainly in its own residual-coverage
+      disclosures.</p>
+    <p>Completeness can also be an efficiency gain. Because the TOML carries the input a process
+      needs, an assistant spends less of its run reconstructing context, which can reduce
+      back-and-forth inference and token use, alongside a reduced likelihood of errors, omissions,
+      and hallucinations. Structured recording adds its own overhead, so the net saving depends on
+      the workflow and is worth measuring.</p>
   </div>
 </section>
 
@@ -375,11 +384,13 @@
     <h2>A standalone standard, shipped as part of AIQT</h2>
     <p>OPFiles is a neutral, self-contained standard, published under CC BY-SA 4.0, and it also ships
       as part of <a href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">AIQT
-      Guardrails</a>. Adopting AIQT brings OPFiles with it and migrates your existing operational
-      files into the store; a project that wants only the standard can take OPFiles on its own. One
-      repository holds both: its root is AIQT, which includes OPFiles, and standalone OPFiles lives at
-      the opf path within it. aiqt.ai maps to the repository root and opfiles.ai maps to the opf path,
-      so the two sites are two views of one source.</p>
+      Guardrails</a>. Adopting AIQT brings OPFiles with it; the planned assistant-driven adoption
+      flow will also migrate your existing operational files into the store, and reviewed manual
+      import is available now through <code>opf import --apply</code>. A project that wants only the
+      standard can take OPFiles on its own. One repository holds both: its root is AIQT, which
+      includes OPFiles, and standalone OPFiles lives at the opf path within it. aiqt.ai maps to the
+      repository root and opfiles.ai maps to the opf path, so the two sites are two views of one
+      source.</p>
     <p>The separation of concerns is unchanged by the bundling. Nothing in the base vocabulary names
       any particular adopter or operator; AIQT-specific requirements ride a single optional profile,
       <code>[profiles.aiqt]</code>, and a base adopter need not adopt AIQT. A profile may only add
