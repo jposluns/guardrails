@@ -454,11 +454,7 @@ a{color:var(--link)}
 /* section rhythm: generous, responsive vertical padding drawn from the spacing ramp */
 section{padding:clamp(var(--sp-8),5vw,var(--sp-24)) 0}
 
-/* ---- hero: asymmetric two-column layout (copy left, paired-panel mock right) ---- */
-.hero-grid{display:grid; grid-template-columns:1.15fr .85fr; gap:var(--sp-12); align-items:center; text-align:left}
 .hero-copy{min-width:0}
-.hero-mock{min-width:0}
-@media (max-width:900px){ .hero-grid{grid-template-columns:1fr; gap:var(--sp-8)} }
 
 /* ---- landing sub-nav: a sticky anchor row of pill links ---- */
 .anchornav{position:sticky; top:3.6rem; z-index:40; display:flex; flex-wrap:wrap; gap:var(--sp-2);

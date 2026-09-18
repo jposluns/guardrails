@@ -85,9 +85,9 @@
       <li><b style="color:var(--ink)">The single-writer lease</b> leaves a propagation window between
         taking the lease and its reaching the sync target; the store-consistency divergence check is
         the overlapping control that catches a collision in that window, and the two together, not the
-        lease alone, are the guard. In this build the cross-system sync step (opf sync) has not
-        landed, so the lease is enforced single-host single-writer; cross-system enforcement arrives
-        with sync.</li>
+        lease alone, are the guard. The standard-level limit is that cross-system reconciliation
+        (opf sync) leaves a window in which a second system can begin before it observes the held
+        lease, and the divergence check detects the collision afterward.</li>
       <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
         it supports; a profile it does not support is recorded as present-but-unevaluated rather than
         failing base validation.</li>

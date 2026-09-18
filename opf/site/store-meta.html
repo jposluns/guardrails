@@ -55,9 +55,9 @@
   </div>
 
   <div class="navtabs" data-reference-hub role="tablist" aria-label="Pointer, meta and generated">
-    <a class="navtab" id="tab-pointer" role="tab" aria-controls="pointer" href="#pointer">pointer</a>
-    <a class="navtab" id="tab-archive" role="tab" aria-controls="archive" href="#archive">archive.toml</a>
-    <a class="navtab" id="tab-decisions-projection" role="tab" aria-controls="decisions-projection" href="#decisions-projection">DECISIONS.toml</a>
+    <a class="navtab" id="tab-pointer" role="tab" aria-selected="true" aria-controls="pointer" href="#pointer">pointer</a>
+    <a class="navtab" id="tab-archive" role="tab" aria-selected="false" aria-controls="archive" href="#archive">archive.toml</a>
+    <a class="navtab" id="tab-decisions-projection" role="tab" aria-selected="false" aria-controls="decisions-projection" href="#decisions-projection">DECISIONS.toml</a>
   </div>
 
   <button type="button" class="btn ghost showall" data-show-all aria-pressed="false" hidden>
@@ -78,6 +78,15 @@
       <p class="lead">The committed pointer that names where the store repository lives: the one file whose content legitimately differs between store topologies.</p>
     </div>
 
+    <h3>Template</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.opf.toml</div>
+      <div class="codebody"><span class="tok-tbl">[store]</span>
+  <span class="tok-key">target</span> = <span class="tok-str">"dir:."</span></div>
+    </div>
+    <p>A single <code>[store]</code> table. <code>target = "dir:."</code> is the default written by <code>opf init</code>. A target names the store repository in one of four forms: <code>dir:&lt;path&gt;</code> or a bare path (a directory that is, or will be, its own git repository); <code>git:&lt;url&gt;</code> or a bare git URL (any git remote on any host); <code>github:&lt;owner/repo&gt;</code> (a creation convenience that resolves to an ordinary git URL); and <code>gitlab:&lt;owner/repo&gt;</code> (the same, for GitLab). A relative <code>dir:</code> path resolves against the product repository root, the named fixed root for this file; any other path in a pointer must be absolute.</p>
+    <p>Resolution takes the local override first, then the committed pointer, then, where neither exists, the default location, where a valid manifest resolves as the store. No pointer and no default store is the not-adopted state, and <code>opf init</code> is the remedy. Store relocation re-points the committed pointer and the manifest's recorded sync target in the same change, so the pointer, the manifest, and the actual remote never disagree across a landed state; the integrity layer checks that agreement. The pointer has no generated view of its own: it is lowercase machine source, never a deliverable and never hand-authored truth a human is meant to read first.</p>
+
     <h3>The problem it solves</h3>
     <blockquote class="refpull">The store's location is configuration, not architecture.</blockquote>
     <p>A stale pointer aimed at the wrong store would be worse than no pointer, so resolution is validated every time and fails closed: a pointer that does not resolve stops the tool and never falls back silently to the default location.</p>
@@ -95,7 +104,7 @@
           <span class="chip"><code>opf init</code></span>
           <span class="chip"><code>opf render</code></span>
           <span class="chip"><code>opf doctor</code></span>
-          <p>Created by <code>opf init</code> with <code>target = "dir:."</code> (it refuses to run where any pointer already exists); updated by <code>opf migrate</code> when it ships, as part of the single recorded relocation change; read by every verb at every store resolution, and by <code>opf doctor</code> for pointer and sync-target agreement.</p>
+          <p>Created by <code>opf init</code> with <code>target = "dir:."</code> (it refuses to run where any pointer already exists); updated by <code>opf migrate</code>, as part of the single recorded relocation change; read by every verb at every store resolution, and by <code>opf doctor</code> for pointer and sync-target agreement.</p>
         </dd>
       </div>
       <div>
@@ -105,15 +114,6 @@
         </dd>
       </div>
     </dl>
-
-    <h3 style="margin-top:var(--sp-12)">What it holds</h3>
-    <div class="codecard src">
-      <div class="codecard-bar">.opf.toml</div>
-      <div class="codebody"><span class="tok-tbl">[store]</span>
-  <span class="tok-key">target</span> = <span class="tok-str">"dir:."</span></div>
-    </div>
-    <p>A single <code>[store]</code> table. <code>target = "dir:."</code> is the default written by <code>opf init</code>. A target names the store repository in one of four forms: <code>dir:&lt;path&gt;</code> or a bare path (a directory that is, or will be, its own git repository); <code>git:&lt;url&gt;</code> or a bare git URL (any git remote on any host); <code>github:&lt;owner/repo&gt;</code> (a creation convenience that resolves to an ordinary git URL); and <code>gitlab:&lt;owner/repo&gt;</code> (the same, for GitLab). A relative <code>dir:</code> path resolves against the product repository root, the named fixed root for this file; any other path in a pointer must be absolute.</p>
-    <p>Resolution takes the local override first, then the committed pointer, then, where neither exists, the default location, where a valid manifest resolves as the store. No pointer and no default store is the not-adopted state, and <code>opf init</code> is the remedy. Store relocation re-points the committed pointer and the manifest's recorded sync target in the same change, so the pointer, the manifest, and the actual remote never disagree across a landed state; the integrity layer checks that agreement. The pointer has no generated view of its own: it is lowercase machine source, never a deliverable and never hand-authored truth a human is meant to read first.</p>
 
     <h3 style="margin-top:var(--sp-12)">What it protects</h3>
     <div class="benefit">
@@ -136,6 +136,22 @@
       </div>
       <p class="lead">One rotation manifest per calendar-year bucket: rotation is relocation, never deletion, and never ID reuse.</p>
     </div>
+
+    <h3>Template</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/archive/2026/archive.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+
+  <span class="tok-tbl">[[moved]]</span>
+  <span class="tok-key">id</span>          = <span class="tok-str">"BI-7"</span>
+  <span class="tok-key">type</span>        = <span class="tok-str">"backlog_item"</span>
+  <span class="tok-key">destination</span> = <span class="tok-str">"archive/2026/backlog_item.index.toml"</span>
+
+  <span class="tok-tbl">[[worklog_moved]]</span>
+  <span class="tok-key">span</span>        = <span class="tok-str">"2026"</span>
+  <span class="tok-key">destination</span> = <span class="tok-str">"archive/2026/worklog.toml"</span></div>
+    </div>
+    <p>A closed three-key shape: <code>schema</code>, <code>moved</code> (rows of <code>{id, type, destination}</code>), and <code>worklog_moved</code> (rows of <code>{span, destination}</code>). The archive directory also carries the rotated record and worklog files themselves, preserved byte for byte. Coverage gates read active and archive together, so rotation never changes any gate's answer, and <code>counters.toml</code> is untouched, preserving ID permanence. Retention is indefinite by default; an adopter bound by a retention policy applies it as a recorded maintainer decision governing archival, never as deletion of a record. Archived records have no generated view of their own; they surface through the same gates and coverage checks as active ones, read together.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Active indexes should stay small without history getting quietly thinner.</blockquote>
@@ -169,22 +185,6 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What it holds</h3>
-    <div class="codecard src">
-      <div class="codecard-bar">.working/toml/archive/2026/archive.toml</div>
-      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
-
-  <span class="tok-tbl">[[moved]]</span>
-  <span class="tok-key">id</span>          = <span class="tok-str">"BI-7"</span>
-  <span class="tok-key">type</span>        = <span class="tok-str">"backlog_item"</span>
-  <span class="tok-key">destination</span> = <span class="tok-str">"archive/2026/backlog_item.index.toml"</span>
-
-  <span class="tok-tbl">[[worklog_moved]]</span>
-  <span class="tok-key">span</span>        = <span class="tok-str">"2026"</span>
-  <span class="tok-key">destination</span> = <span class="tok-str">"archive/2026/worklog.toml"</span></div>
-    </div>
-    <p>A closed three-key shape: <code>schema</code>, <code>moved</code> (rows of <code>{id, type, destination}</code>), and <code>worklog_moved</code> (rows of <code>{span, destination}</code>). The archive directory also carries the rotated record and worklog files themselves, preserved byte for byte. Coverage gates read active and archive together, so rotation never changes any gate's answer, and <code>counters.toml</code> is untouched, preserving ID permanence. Retention is indefinite by default; an adopter bound by a retention policy applies it as a recorded maintainer decision governing archival, never as deletion of a record. Archived records have no generated view of their own; they surface through the same gates and coverage checks as active ones, read together.</p>
-
     <h3 style="margin-top:var(--sp-12)">What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16v3.2H4z"/><path d="M5.4 10.4v8.1h13.2v-8.1"/><path d="M9.8 14h4.4"/></svg></span>
@@ -206,6 +206,28 @@
       </div>
       <p class="lead">The machine projection, generated at <code>.working/DECISIONS.toml</code> and rendered from the four decision types: uppercase because it is output, never hand-authored truth.</p>
     </div>
+
+    <h3>Template</h3>
+    <div class="codecard view">
+      <div class="codecard-bar">.working/DECISIONS.toml</div>
+      <div class="codebody"><span class="tok-str"># generated, do not edit</span>
+  <span class="tok-str"># sources: pending_decision, autonomous_decision, maintainer_decision, preference_pattern</span>
+  <span class="tok-str"># regenerate with: opf render --write</span>
+  <span class="tok-key">schema</span>     = <span class="tok-num">1</span>
+  <span class="tok-key">projection</span> = <span class="tok-str">"decisions"</span>
+
+  <span class="tok-tbl">[[pending_decision]]</span>
+  <span class="tok-key">id</span>     = <span class="tok-str">"PD-3"</span>
+  <span class="tok-key">type</span>   = <span class="tok-str">"pending_decision"</span>
+  <span class="tok-key">status</span> = <span class="tok-str">"open"</span>
+
+  <span class="tok-str"># ... one array of tables per decision type ...</span>
+
+  <span class="tok-tbl">[derived]</span>
+  <span class="tok-str"># effective and superseded pending-decision IDs, numerically sorted</span></div>
+    </div>
+    <p>The payload (projection contract v1) carries <code>schema = 1</code> and <code>projection = "decisions"</code>; four arrays of tables, one per source type, each row sorted by numeric ID and projecting the full base record with <code>x-&lt;vendor&gt;</code> extension tables excluded as profile-owned data; and one <code>[derived]</code> table carrying the decision-resolution join's output (the effective and superseded pending-decision IDs, numerically sorted) and nothing beyond the closed transform vocabulary. The do-not-edit header is a leading TOML comment block naming sources, schema and generator versions, a source-set digest, and the regeneration command, with no timestamp.</p>
+    <p>The determinism requirements apply verbatim: UTF-8, LF, stable ordering, no locale-dependent sorting, no wall-clock content, no network access, and no model involvement. Advisory activity over a projection, an assistant-side prediction, dedup, or pattern-spotting pass, is a read-time activity outside the generator: the generator invokes no model and adds no model-generated interpretation. The views it renders reproduce the declared source records, so content those records carry, including assistant-authored text, still needs review.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">A machine consumer of the decision record should not have to parse Markdown, read four indexes, and re-derive the supersession chain itself.</blockquote>
@@ -237,28 +259,6 @@
         </dd>
       </div>
     </dl>
-
-    <h3 style="margin-top:var(--sp-12)">What it holds</h3>
-    <div class="codecard view">
-      <div class="codecard-bar">.working/DECISIONS.toml</div>
-      <div class="codebody"><span class="tok-str"># generated, do not edit</span>
-  <span class="tok-str"># sources: pending_decision, autonomous_decision, maintainer_decision, preference_pattern</span>
-  <span class="tok-str"># regenerate with: opf render --write</span>
-  <span class="tok-key">schema</span>     = <span class="tok-num">1</span>
-  <span class="tok-key">projection</span> = <span class="tok-str">"decisions"</span>
-
-  <span class="tok-tbl">[[pending_decision]]</span>
-  <span class="tok-key">id</span>     = <span class="tok-str">"PD-3"</span>
-  <span class="tok-key">type</span>   = <span class="tok-str">"pending_decision"</span>
-  <span class="tok-key">status</span> = <span class="tok-str">"open"</span>
-
-  <span class="tok-str"># ... one array of tables per decision type ...</span>
-
-  <span class="tok-tbl">[derived]</span>
-  <span class="tok-str"># effective and superseded pending-decision IDs, numerically sorted</span></div>
-    </div>
-    <p>The payload (projection contract v1) carries <code>schema = 1</code> and <code>projection = "decisions"</code>; four arrays of tables, one per source type, each row sorted by numeric ID and projecting the full base record with <code>x-&lt;vendor&gt;</code> extension tables excluded as profile-owned data; and one <code>[derived]</code> table carrying the decision-resolution join's output (the effective and superseded pending-decision IDs, numerically sorted) and nothing beyond the closed transform vocabulary. The do-not-edit header is a leading TOML comment block naming sources, schema and generator versions, a source-set digest, and the regeneration command, with no timestamp.</p>
-    <p>The determinism requirements apply verbatim: UTF-8, LF, stable ordering, no locale-dependent sorting, no wall-clock content, no network access, and no model involvement. Advisory activity over a projection, an assistant-side prediction, dedup, or pattern-spotting pass, is a read-time activity outside the generator: the generator invokes no model and adds no model-generated interpretation. The views it renders reproduce the declared source records, so content those records carry, including assistant-authored text, still needs review.</p>
 
     <h3 style="margin-top:var(--sp-12)">What it protects</h3>
     <div class="benefit">

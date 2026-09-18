@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Record indexes | OPFiles</title>
-<meta name="description" content="The twelve typed record indexes: one schema-validated TOML source per record type, each paired with a generated, byte-gated view.">
+<meta name="description" content="The eleven baseline typed record indexes, plus optional module and importer types: one schema-validated TOML source per record type, each paired with a generated, byte-gated view.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Record indexes | OPFiles">
-<meta property="og:description" content="The twelve typed record indexes: one schema-validated TOML source per record type, each paired with a generated, byte-gated view.">
+<meta property="og:description" content="The eleven baseline typed record indexes, plus optional module and importer types: one schema-validated TOML source per record type, each paired with a generated, byte-gated view.">
 <meta name="twitter:card" content="summary">
 </head>
 <body>
@@ -51,22 +51,22 @@
   <div class="refhead pagehead">
     <p class="eyebrow">Reference</p>
     <h1>Record indexes</h1>
-    <p class="lead">Twelve typed indexes: one schema-validated TOML source per record type, each paired with a generated, byte-gated view. Choose a type to see what it carries and what it protects.</p>
+    <p class="lead">Eleven baseline typed indexes, plus optional module and importer types, one schema-validated TOML source per record type, each paired with a generated, byte-gated view. Choose a type to see what it carries and what it protects.</p>
   </div>
 
   <div class="navtabs" data-reference-hub role="tablist" aria-label="Record type">
-    <a class="navtab" id="tab-backlog-item" role="tab" aria-controls="backlog-item" href="#backlog-item">backlog_item</a>
-    <a class="navtab" id="tab-done" role="tab" aria-controls="done" href="#done">done</a>
-    <a class="navtab" id="tab-finding" role="tab" aria-controls="finding" href="#finding">finding</a>
-    <a class="navtab" id="tab-pending-decision" role="tab" aria-controls="pending-decision" href="#pending-decision">pending_decision</a>
-    <a class="navtab" id="tab-autonomous-decision" role="tab" aria-controls="autonomous-decision" href="#autonomous-decision">autonomous_decision</a>
-    <a class="navtab" id="tab-maintainer-decision" role="tab" aria-controls="maintainer-decision" href="#maintainer-decision">maintainer_decision</a>
-    <a class="navtab" id="tab-preference-pattern" role="tab" aria-controls="preference-pattern" href="#preference-pattern">preference_pattern</a>
-    <a class="navtab" id="tab-block" role="tab" aria-controls="block" href="#block">block</a>
-    <a class="navtab" id="tab-handoff" role="tab" aria-controls="handoff" href="#handoff">handoff</a>
-    <a class="navtab" id="tab-reference" role="tab" aria-controls="reference" href="#reference">reference</a>
-    <a class="navtab" id="tab-contribution" role="tab" aria-controls="contribution" href="#contribution">contribution</a>
-    <a class="navtab" id="tab-modules" role="tab" aria-controls="modules" href="#modules">modules</a>
+    <a class="navtab" id="tab-backlog-item" role="tab" aria-selected="true" aria-controls="backlog-item" href="#backlog-item">backlog_item</a>
+    <a class="navtab" id="tab-done" role="tab" aria-selected="false" aria-controls="done" href="#done">done</a>
+    <a class="navtab" id="tab-finding" role="tab" aria-selected="false" aria-controls="finding" href="#finding">finding</a>
+    <a class="navtab" id="tab-pending-decision" role="tab" aria-selected="false" aria-controls="pending-decision" href="#pending-decision">pending_decision</a>
+    <a class="navtab" id="tab-autonomous-decision" role="tab" aria-selected="false" aria-controls="autonomous-decision" href="#autonomous-decision">autonomous_decision</a>
+    <a class="navtab" id="tab-maintainer-decision" role="tab" aria-selected="false" aria-controls="maintainer-decision" href="#maintainer-decision">maintainer_decision</a>
+    <a class="navtab" id="tab-preference-pattern" role="tab" aria-selected="false" aria-controls="preference-pattern" href="#preference-pattern">preference_pattern</a>
+    <a class="navtab" id="tab-block" role="tab" aria-selected="false" aria-controls="block" href="#block">block</a>
+    <a class="navtab" id="tab-handoff" role="tab" aria-selected="false" aria-controls="handoff" href="#handoff">handoff</a>
+    <a class="navtab" id="tab-reference" role="tab" aria-selected="false" aria-controls="reference" href="#reference">reference</a>
+    <a class="navtab" id="tab-contribution" role="tab" aria-selected="false" aria-controls="contribution" href="#contribution">contribution</a>
+    <a class="navtab" id="tab-modules" role="tab" aria-selected="false" aria-controls="modules" href="#modules">modules</a>
   </div>
 
   <button type="button" class="btn ghost showall" data-show-all aria-pressed="false" hidden>
@@ -86,6 +86,19 @@
       </div>
       <p class="lead">One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified, not felt.</p>
     </div>
+
+    <h3>Template</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/backlog_item.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>     = <span class="tok-str">"BI-42"</span>
+  <span class="tok-key">type</span>   = <span class="tok-str">"backlog_item"</span>
+  <span class="tok-key">status</span> = <span class="tok-str">"active"</span>
+  <span class="tok-key">title</span>  = <span class="tok-str">"Add the drift gate to CI"</span></div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape: <code>schema = 1</code> plus an array of <code>[[record]]</code> rows. Each record carries the standard envelope: <code>id</code>, <code>type</code>, <code>status</code>, <code>title</code>, <code>created_at</code> and <code>updated_at</code> (RFC 3339 UTC, read from the clock), <code>actor.kind</code> (maintainer, assistant, automation, or importer), optional <code>summary</code>, <code>links</code> (a closed vocabulary: supersedes, resolves, remediates, receipt_of, corrects, follows, relates, exemplifies, derives_from), <code>refs</code> (captured external sources: path, url, or doc), and registered <code>x-&lt;vendor&gt;</code> extensions. Schemas are closed; an unknown key is a validation failure.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">A backlog that lives in prose drifts: items vanish, "done" means different things, and blocked work hides.</blockquote>
@@ -119,19 +132,6 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
-    <div class="codecard src">
-      <div class="codecard-bar">.working/toml/backlog_item.index.toml</div>
-      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>     = <span class="tok-str">"BI-42"</span>
-  <span class="tok-key">type</span>   = <span class="tok-str">"backlog_item"</span>
-  <span class="tok-key">status</span> = <span class="tok-str">"active"</span>
-  <span class="tok-key">title</span>  = <span class="tok-str">"Add the drift gate to CI"</span></div>
-    </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-    <p>The shared index shape: <code>schema = 1</code> plus an array of <code>[[record]]</code> rows. Each record carries the standard envelope: <code>id</code>, <code>type</code>, <code>status</code>, <code>title</code>, <code>created_at</code> and <code>updated_at</code> (RFC 3339 UTC, read from the clock), <code>actor.kind</code> (maintainer, assistant, automation, or importer), optional <code>summary</code>, <code>links</code> (a closed vocabulary: supersedes, resolves, remediates, receipt_of, corrects, follows, relates, exemplifies, derives_from), <code>refs</code> (captured external sources: path, url, or doc), and registered <code>x-&lt;vendor&gt;</code> extensions. Schemas are closed; an unknown key is a validation failure.</p>
-
     <h3 style="margin-top:var(--sp-12)">What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
@@ -153,6 +153,19 @@
       </div>
       <p class="lead">A durable completion receipt, created in its single terminal state and immutable from birth, linked one-to-one to the backlog item whose ratified completion it witnesses.</p>
     </div>
+
+    <h3>Template</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/done.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span>     = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>         = <span class="tok-str">"DN-42"</span>
+  <span class="tok-key">type</span>       = <span class="tok-str">"done"</span>
+  <span class="tok-key">status</span>     = <span class="tok-str">"recorded"</span>
+  <span class="tok-key">links</span>      = [{ <span class="tok-key">rel</span> = <span class="tok-str">"receipt_of"</span>, <span class="tok-key">id</span> = <span class="tok-str">"BI-42"</span> }]</div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape (<code>schema = 1</code> plus <code>[[record]]</code> rows) with the standard envelope and no type-specific extra fields. The single state is <code>recorded</code>, with no transitions and never proposable: a factual receipt awaits no ratification, so it carries no <code>/proposed</code> qualifier. It links <code>receipt_of</code> to the backlog item it witnesses; a standalone receipt is legal only for imported history with provenance.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Completion needs its own artefact.</blockquote>
@@ -184,19 +197,6 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
-    <div class="codecard src">
-      <div class="codecard-bar">.working/toml/done.index.toml</div>
-      <div class="codebody"><span class="tok-key">schema</span>     = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>         = <span class="tok-str">"DN-42"</span>
-  <span class="tok-key">type</span>       = <span class="tok-str">"done"</span>
-  <span class="tok-key">status</span>     = <span class="tok-str">"recorded"</span>
-  <span class="tok-key">links</span>      = [{ <span class="tok-key">rel</span> = <span class="tok-str">"receipt_of"</span>, <span class="tok-key">id</span> = <span class="tok-str">"BI-42"</span> }]</div>
-    </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-    <p>The shared index shape (<code>schema = 1</code> plus <code>[[record]]</code> rows) with the standard envelope and no type-specific extra fields. The single state is <code>recorded</code>, with no transitions and never proposable: a factual receipt awaits no ratification, so it carries no <code>/proposed</code> qualifier. It links <code>receipt_of</code> to the backlog item it witnesses; a standalone receipt is legal only for imported history with provenance.</p>
-
     <h3 style="margin-top:var(--sp-12)">What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
@@ -218,6 +218,19 @@
       </div>
       <p class="lead">An observation worth acting on: something wrong, suspicious, or worth noting, that links its remediation rather than containing it and leaves <code>open</code> for exactly one of fixed, routed, refuted, or accepted.</p>
     </div>
+
+    <h3>Template</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/finding.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>       = <span class="tok-str">"FN-42"</span>
+  <span class="tok-key">type</span>     = <span class="tok-str">"finding"</span>
+  <span class="tok-key">status</span>   = <span class="tok-str">"fixed"</span>
+  <span class="tok-key">severity</span> = <span class="tok-str">"major"</span></div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape with the standard envelope plus one type-specific field, <code>severity</code>. Links typically carry <code>remediates</code> toward the backlog item or change that fixes the finding; refs capture the evidence (a path and line, a URL, or a document and section) at the moment the claim is made.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Defects argued about in chat disappear; defects recorded with permanent IDs get resolved or explicitly accepted.</blockquote>
@@ -249,19 +262,6 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
-    <div class="codecard src">
-      <div class="codecard-bar">.working/toml/finding.index.toml</div>
-      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>       = <span class="tok-str">"FN-42"</span>
-  <span class="tok-key">type</span>     = <span class="tok-str">"finding"</span>
-  <span class="tok-key">status</span>   = <span class="tok-str">"fixed"</span>
-  <span class="tok-key">severity</span> = <span class="tok-str">"major"</span></div>
-    </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-    <p>The shared index shape with the standard envelope plus one type-specific field, <code>severity</code>. Links typically carry <code>remediates</code> toward the backlog item or change that fixes the finding; refs capture the evidence (a path and line, a URL, or a document and section) at the moment the claim is made.</p>
-
     <h3 style="margin-top:var(--sp-12)">What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
@@ -283,6 +283,21 @@
       </div>
       <p class="lead">A question that must be answered before dependent work settles: <code>open</code> until decided or withdrawn, with an all-or-none resolution bundle.</p>
     </div>
+
+    <h3>Template</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/pending_decision.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span>     = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>         = <span class="tok-str">"PD-42"</span>
+  <span class="tok-key">type</span>       = <span class="tok-str">"pending_decision"</span>
+  <span class="tok-key">status</span>     = <span class="tok-str">"decided"</span>
+  <span class="tok-key">decision</span>   = <span class="tok-str">"Ship the drift gate in 1.1.0"</span>
+  <span class="tok-key">decided_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span>
+  <span class="tok-key">decided_by</span> = <span class="tok-str">"maintainer"</span></div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape with the standard envelope plus the resolution bundle fields: <code>decision</code>, <code>decided_at</code>, and <code>decided_by</code>. An open decision carries none of the three; a decided one carries all three. A decided record may be superseded by a new decision linking <code>supersedes</code>; the decision-resolution join walks that chain to find the current effective resolution.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Half-recorded decisions are worse than none.</blockquote>
@@ -315,21 +330,6 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
-    <div class="codecard src">
-      <div class="codecard-bar">.working/toml/pending_decision.index.toml</div>
-      <div class="codebody"><span class="tok-key">schema</span>     = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>         = <span class="tok-str">"PD-42"</span>
-  <span class="tok-key">type</span>       = <span class="tok-str">"pending_decision"</span>
-  <span class="tok-key">status</span>     = <span class="tok-str">"decided"</span>
-  <span class="tok-key">decision</span>   = <span class="tok-str">"Ship the drift gate in 1.1.0"</span>
-  <span class="tok-key">decided_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span>
-  <span class="tok-key">decided_by</span> = <span class="tok-str">"maintainer"</span></div>
-    </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-    <p>The shared index shape with the standard envelope plus the resolution bundle fields: <code>decision</code>, <code>decided_at</code>, and <code>decided_by</code>. An open decision carries none of the three; a decided one carries all three. A decided record may be superseded by a new decision linking <code>supersedes</code>; the decision-resolution join walks that chain to find the current effective resolution.</p>
-
     <h3 style="margin-top:var(--sp-12)">What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
@@ -353,6 +353,30 @@
 
   <section>
     <div class="wrap">
+      <h3>Template</h3>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/autonomous_decision.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>             = <span class="tok-str">"AD-1"</span>
+  <span class="tok-key">type</span>           = <span class="tok-str">"autonomous_decision"</span>
+  <span class="tok-key">status</span>         = <span class="tok-str">"recorded"</span>
+  <span class="tok-key">title</span>          = <span class="tok-str">"Retry the flaky fixture on timeout"</span>
+  <span class="tok-key">classification</span> = <span class="tok-str">"within standing authority: reversible, internal"</span>
+  <span class="tok-key">action</span>         = <span class="tok-str">"added a bounded retry to the fixture setup"</span>
+  <span class="tok-key">actor</span>          = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
+      </div>
+      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p>The shared index shape with the standard envelope plus two type-specific fields:
+        <code>classification</code> (the basis that classified the decision as the actor's to make)
+        and <code>action</code> (what was done). There are no transitions; overturning is always a new
+        linking record. Because each record is typed and linked, views and audits can walk from any
+        action back to the authority claim beneath it.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
       <blockquote class="refpull">Autonomy without a trail erodes oversight.</blockquote>
       <h3>The problem it solves</h3>
       <p>Recording every self-made call with its basis makes autonomous operation reviewable after
@@ -362,7 +386,7 @@
     </div>
   </section>
 
-  <section class="section-alt">
+  <section>
     <div class="wrap">
       <dl class="refstrip">
         <div>
@@ -397,35 +421,11 @@
     </div>
   </section>
 
-  <section>
-    <div class="wrap">
-      <h3>What a record carries</h3>
-      <div class="codecard src">
-        <div class="codecard-bar">.working/toml/autonomous_decision.index.toml</div>
-        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>             = <span class="tok-str">"AD-1"</span>
-  <span class="tok-key">type</span>           = <span class="tok-str">"autonomous_decision"</span>
-  <span class="tok-key">status</span>         = <span class="tok-str">"recorded"</span>
-  <span class="tok-key">title</span>          = <span class="tok-str">"Retry the flaky fixture on timeout"</span>
-  <span class="tok-key">classification</span> = <span class="tok-str">"within standing authority: reversible, internal"</span>
-  <span class="tok-key">action</span>         = <span class="tok-str">"added a bounded retry to the fixture setup"</span>
-  <span class="tok-key">actor</span>          = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
-      </div>
-      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-      <p>The shared index shape with the standard envelope plus two type-specific fields:
-        <code>classification</code> (the basis that classified the decision as the actor's to make)
-        and <code>action</code> (what was done). There are no transitions; overturning is always a new
-        linking record. Because each record is typed and linked, views and audits can walk from any
-        action back to the authority claim beneath it.</p>
-    </div>
-  </section>
-
   <section class="section-alt">
     <div class="wrap">
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
-        <h4>What it protects</h4>
+        <h3>What it protects</h3>
         <p>Reviewable autonomy: standing authority comes with a recorded, immutable trail, which helps
           prevent quiet scope creep in what an assistant decides for itself.</p>
       </div>
@@ -453,6 +453,29 @@
 
   <section>
     <div class="wrap">
+      <h3>Template</h3>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/maintainer_decision.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>       = <span class="tok-str">"MD-1"</span>
+  <span class="tok-key">type</span>     = <span class="tok-str">"maintainer_decision"</span>
+  <span class="tok-key">status</span>   = <span class="tok-str">"recorded"</span>
+  <span class="tok-key">title</span>    = <span class="tok-str">"Ship the drift gate in 1.1.0"</span>
+  <span class="tok-key">decision</span> = <span class="tok-str">"yes; the gate blocks merge on any view drift"</span>
+  <span class="tok-key">actor</span>    = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
+      </div>
+      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p>The shared index shape with the standard envelope plus <code>decision</code>. A ruling may
+        link <code>exemplifies</code> to the <a href="./record-indexes#preference-pattern">preference pattern</a> it
+        instantiates, feeding the distillation of standing preferences from individual rulings. It is
+        baseline as of spec 1.1.0 (it was module-tier in 1.0.0); the additive schema upgrade carries a
+        populated 1.0.0 governance-module index forward byte for byte.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
       <blockquote class="refpull">The record, not the conversation, is the source of truth: a ruling made in chat and never recorded did not happen.</blockquote>
       <h3>The problem it solves</h3>
       <p>Making rulings a distinct immutable type separates what the maintainer decided from what
@@ -462,7 +485,7 @@
     </div>
   </section>
 
-  <section class="section-alt">
+  <section>
     <div class="wrap">
       <dl class="refstrip">
         <div>
@@ -497,34 +520,11 @@
     </div>
   </section>
 
-  <section>
-    <div class="wrap">
-      <h3>What a record carries</h3>
-      <div class="codecard src">
-        <div class="codecard-bar">.working/toml/maintainer_decision.index.toml</div>
-        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>       = <span class="tok-str">"MD-1"</span>
-  <span class="tok-key">type</span>     = <span class="tok-str">"maintainer_decision"</span>
-  <span class="tok-key">status</span>   = <span class="tok-str">"recorded"</span>
-  <span class="tok-key">title</span>    = <span class="tok-str">"Ship the drift gate in 1.1.0"</span>
-  <span class="tok-key">decision</span> = <span class="tok-str">"yes; the gate blocks merge on any view drift"</span>
-  <span class="tok-key">actor</span>    = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
-      </div>
-      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-      <p>The shared index shape with the standard envelope plus <code>decision</code>. A ruling may
-        link <code>exemplifies</code> to the <a href="./record-indexes#preference-pattern">preference pattern</a> it
-        instantiates, feeding the distillation of standing preferences from individual rulings. It is
-        baseline as of spec 1.1.0 (it was module-tier in 1.0.0); the additive schema upgrade carries a
-        populated 1.0.0 governance-module index forward byte for byte.</p>
-    </div>
-  </section>
-
   <section class="section-alt">
     <div class="wrap">
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
-        <h4>What it protects</h4>
+        <h3>What it protects</h3>
         <p>An authoritative, immutable register of the human's rulings, which helps prevent a decision
           from being re-litigated, mis-remembered, or silently reattributed.</p>
       </div>
@@ -552,6 +552,30 @@
 
   <section>
     <div class="wrap">
+      <h3>Template</h3>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/preference_pattern.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>        = <span class="tok-str">"PP-1"</span>
+  <span class="tok-key">type</span>      = <span class="tok-str">"preference_pattern"</span>
+  <span class="tok-key">status</span>    = <span class="tok-str">"active"</span>
+  <span class="tok-key">title</span>     = <span class="tok-str">"Prefer the smallest correct change"</span>
+  <span class="tok-key">context</span>   = <span class="tok-str">"when a change could be broadened past its requirement"</span>
+  <span class="tok-key">rationale</span> = <span class="tok-str">"scope creep is where regressions and review cost hide"</span>
+  <span class="tok-key">actor</span>     = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
+      </div>
+      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p>The shared index shape with the standard envelope plus <code>context</code> and
+        <code>rationale</code>. <a href="./record-indexes#maintainer-decision">Maintainer decisions</a> may link
+        <code>exemplifies</code> toward the pattern they instantiate, so the evidence for a pattern
+        accumulates as links. It is baseline as of spec 1.1.0 (module-tier in 1.0.0); a populated
+        1.0.0 decision-support index is preserved as is by the schema upgrade.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
       <blockquote class="refpull">Individual rulings answer individual questions; patterns keep the maintainer from answering the same question forever.</blockquote>
       <h3>The problem it solves</h3>
       <p>Distillation is useful and risky in equal measure, so the standard gates it: an
@@ -560,7 +584,7 @@
     </div>
   </section>
 
-  <section class="section-alt">
+  <section>
     <div class="wrap">
       <dl class="refstrip">
         <div>
@@ -597,35 +621,11 @@
     </div>
   </section>
 
-  <section>
-    <div class="wrap">
-      <h3>What a record carries</h3>
-      <div class="codecard src">
-        <div class="codecard-bar">.working/toml/preference_pattern.index.toml</div>
-        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>        = <span class="tok-str">"PP-1"</span>
-  <span class="tok-key">type</span>      = <span class="tok-str">"preference_pattern"</span>
-  <span class="tok-key">status</span>    = <span class="tok-str">"active"</span>
-  <span class="tok-key">title</span>     = <span class="tok-str">"Prefer the smallest correct change"</span>
-  <span class="tok-key">context</span>   = <span class="tok-str">"when a change could be broadened past its requirement"</span>
-  <span class="tok-key">rationale</span> = <span class="tok-str">"scope creep is where regressions and review cost hide"</span>
-  <span class="tok-key">actor</span>     = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
-      </div>
-      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-      <p>The shared index shape with the standard envelope plus <code>context</code> and
-        <code>rationale</code>. <a href="./record-indexes#maintainer-decision">Maintainer decisions</a> may link
-        <code>exemplifies</code> toward the pattern they instantiate, so the evidence for a pattern
-        accumulates as links. It is baseline as of spec 1.1.0 (module-tier in 1.0.0); a populated
-        1.0.0 decision-support index is preserved as is by the schema upgrade.</p>
-    </div>
-  </section>
-
   <section class="section-alt">
     <div class="wrap">
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
-        <h4>What it protects</h4>
+        <h3>What it protects</h3>
         <p>Standing preferences that are explicit, ratified, and able to be retired, which helps reduce
           repeated clarification and helps prevent an assistant's own inference about "what the
           maintainer wants" from hardening into unratified policy.</p>
@@ -652,6 +652,19 @@
       </div>
       <p class="lead">A record that named work cannot proceed: it <code>scopes</code> an enumerated list of record IDs and feeds the actionability rule, so only a maintainer-ratified active block hides work.</p>
     </div>
+
+    <h3>Template</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/block.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>     = <span class="tok-str">"BL-42"</span>
+  <span class="tok-key">type</span>   = <span class="tok-str">"block"</span>
+  <span class="tok-key">status</span> = <span class="tok-str">"active"</span>
+  <span class="tok-key">scopes</span> = [<span class="tok-str">"BI-42"</span>, <span class="tok-str">"BI-43"</span>]</div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape with the standard envelope plus <code>scopes</code>, the enumerated record IDs the block covers. States: <code>active</code> (initial, gated) to <code>released</code> or <code>expired</code> (terminal). Blocked-ness is never stored on the scoped records; it is derived at view time through the block join.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">"Blocked" is one of the easiest states to abuse: it can park inconvenient work indefinitely.</blockquote>
@@ -686,19 +699,6 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
-    <div class="codecard src">
-      <div class="codecard-bar">.working/toml/block.index.toml</div>
-      <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>     = <span class="tok-str">"BL-42"</span>
-  <span class="tok-key">type</span>   = <span class="tok-str">"block"</span>
-  <span class="tok-key">status</span> = <span class="tok-str">"active"</span>
-  <span class="tok-key">scopes</span> = [<span class="tok-str">"BI-42"</span>, <span class="tok-str">"BI-43"</span>]</div>
-    </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-    <p>The shared index shape with the standard envelope plus <code>scopes</code>, the enumerated record IDs the block covers. States: <code>active</code> (initial, gated) to <code>released</code> or <code>expired</code> (terminal). Blocked-ness is never stored on the scoped records; it is derived at view time through the block join.</p>
-
     <h3 style="margin-top:var(--sp-12)">What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
@@ -720,6 +720,19 @@
       </div>
       <p class="lead">The durable state snapshot a session resumes from, <code>current</code> until superseded, with at most one current handoff at any time.</p>
     </div>
+
+    <h3>Template</h3>
+    <div class="codecard src">
+      <div class="codecard-bar">.working/toml/handoff.index.toml</div>
+      <div class="codebody"><span class="tok-key">schema</span>  = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>      = <span class="tok-str">"HO-42"</span>
+  <span class="tok-key">type</span>    = <span class="tok-str">"handoff"</span>
+  <span class="tok-key">status</span>  = <span class="tok-str">"current"</span>
+  <span class="tok-key">summary</span> = <span class="tok-str">"Drift gate merged; OPF verbs next"</span></div>
+    </div>
+    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+    <p>The shared index shape with the standard envelope and no type-specific extra fields; the handoff's content rides <code>summary</code>, <code>links</code>, and <code>refs</code>. States: <code>current</code> (initial) to <code>superseded</code> (terminal).</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Sessions end, contexts truncate, and whatever lived only in conversation is gone.</blockquote>
@@ -751,19 +764,6 @@
       </div>
     </dl>
 
-    <h3 style="margin-top:var(--sp-12)">What a record carries</h3>
-    <div class="codecard src">
-      <div class="codecard-bar">.working/toml/handoff.index.toml</div>
-      <div class="codebody"><span class="tok-key">schema</span>  = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>      = <span class="tok-str">"HO-42"</span>
-  <span class="tok-key">type</span>    = <span class="tok-str">"handoff"</span>
-  <span class="tok-key">status</span>  = <span class="tok-str">"current"</span>
-  <span class="tok-key">summary</span> = <span class="tok-str">"Drift gate merged; OPF verbs next"</span></div>
-    </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-    <p>The shared index shape with the standard envelope and no type-specific extra fields; the handoff's content rides <code>summary</code>, <code>links</code>, and <code>refs</code>. States: <code>current</code> (initial) to <code>superseded</code> (terminal).</p>
-
     <h3 style="margin-top:var(--sp-12)">What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
@@ -787,6 +787,29 @@
 
   <section>
     <div class="wrap">
+      <h3>Template</h3>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/reference.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>     = <span class="tok-str">"RF-1"</span>
+  <span class="tok-key">type</span>   = <span class="tok-str">"reference"</span>
+  <span class="tok-key">status</span> = <span class="tok-str">"recorded"</span>
+  <span class="tok-key">title</span>  = <span class="tok-str">"OPF spec, the record envelope"</span>
+  <span class="tok-key">refs</span>   = [{ <span class="tok-key">kind</span> = <span class="tok-str">"doc"</span>, <span class="tok-key">locator</span> = <span class="tok-str">"OPF-SPEC.md#8"</span>, <span class="tok-key">note</span> = <span class="tok-str">"envelope fields"</span> }]
+  <span class="tok-key">actor</span>  = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
+      </div>
+      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p>The shared index shape with the standard envelope and no type-specific extra fields; the
+        captured sources themselves ride the envelope's <code>refs</code> array, each entry
+        <code>{kind, locator, note}</code> with <code>kind</code> one of <code>path</code>,
+        <code>url</code>, or <code>doc</code>. This type is the inward counterpart of
+        <a href="./record-indexes#contribution">contribution</a>, which records what the project sends out.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
       <blockquote class="refpull">A reference reconstructed later from memory is a guess wearing a citation's clothes.</blockquote>
       <h3>The problem it solves</h3>
       <p>The standard's rule is capture-at-claim: a record whose claims rest on an external source
@@ -795,7 +818,7 @@
     </div>
   </section>
 
-  <section class="section-alt">
+  <section>
     <div class="wrap">
       <dl class="refstrip">
         <div>
@@ -830,34 +853,11 @@
     </div>
   </section>
 
-  <section>
-    <div class="wrap">
-      <h3>What a record carries</h3>
-      <div class="codecard src">
-        <div class="codecard-bar">.working/toml/reference.index.toml</div>
-        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>     = <span class="tok-str">"RF-1"</span>
-  <span class="tok-key">type</span>   = <span class="tok-str">"reference"</span>
-  <span class="tok-key">status</span> = <span class="tok-str">"recorded"</span>
-  <span class="tok-key">title</span>  = <span class="tok-str">"OPF spec, the record envelope"</span>
-  <span class="tok-key">refs</span>   = [{ <span class="tok-key">kind</span> = <span class="tok-str">"doc"</span>, <span class="tok-key">locator</span> = <span class="tok-str">"OPF-SPEC.md#8"</span>, <span class="tok-key">note</span> = <span class="tok-str">"envelope fields"</span> }]
-  <span class="tok-key">actor</span>  = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
-      </div>
-      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-      <p>The shared index shape with the standard envelope and no type-specific extra fields; the
-        captured sources themselves ride the envelope's <code>refs</code> array, each entry
-        <code>{kind, locator, note}</code> with <code>kind</code> one of <code>path</code>,
-        <code>url</code>, or <code>doc</code>. This type is the inward counterpart of
-        <a href="./record-indexes#contribution">contribution</a>, which records what the project sends out.</p>
-    </div>
-  </section>
-
   <section class="section-alt">
     <div class="wrap">
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
-        <h4>What it protects</h4>
+        <h3>What it protects</h3>
         <p>Claims with their evidence attached at birth, which helps reduce the likelihood of
           unsourced assertions hardening into recorded fact, and makes every load-bearing claim
           re-checkable at its source.</p>
@@ -886,6 +886,36 @@
 
   <section>
     <div class="wrap">
+      <h3>Template</h3>
+      <div class="codecard src">
+        <div class="codecard-bar">.working/toml/contribution.index.toml</div>
+        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
+  <span class="tok-tbl">[[record]]</span>
+  <span class="tok-key">id</span>             = <span class="tok-str">"CN-1"</span>
+  <span class="tok-key">type</span>           = <span class="tok-str">"contribution"</span>
+  <span class="tok-key">status</span>         = <span class="tok-str">"sent/proposed"</span>
+  <span class="tok-key">title</span>          = <span class="tok-str">"Drift-gate fix sent upstream"</span>
+  <span class="tok-key">recipient</span>      = <span class="tok-str">"peer-project"</span>
+  <span class="tok-key">dedup_class</span>    = <span class="tok-str">"drift-gate-fix"</span>
+  <span class="tok-key">content_digest</span> = <span class="tok-str">"sha256:..."</span>
+  <span class="tok-key">delivery</span>       = { <span class="tok-key">channel</span> = <span class="tok-str">"pr"</span>, <span class="tok-key">ref</span> = <span class="tok-str">"peer/repo#128"</span>, <span class="tok-key">sent_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span> }
+  <span class="tok-key">actor</span>          = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
+      </div>
+      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p>The shared index shape with the standard envelope plus <code>recipient</code>,
+        <code>dedup_class</code>, <code>content_digest</code>, and the <code>delivery</code> bundle
+        <code>{channel, ref, sent_at, receipt_ref?, receipted_at?}</code>: channel, ref, and sent_at
+        are required once sent and forbidden before, and the receipt fields are legal only at
+        acknowledged. <code>acknowledged</code> is the single positive terminal (responded, adopted,
+        reshaped, or declined); the outcome lives in <code>summary</code> or an extension, never as a
+        state. A contribution typically links <code>derives_from</code> the internal finding,
+        decision, or backlog item that motivated it, and carries no fleet-specific semantics; those
+        ride a registered <code>x-&lt;vendor&gt;</code> extension.</p>
+    </div>
+  </section>
+
+  <section class="section-alt">
+    <div class="wrap">
       <blockquote class="refpull">Outbound work is an external action, so its claim, "we sent this", is gated.</blockquote>
       <h3>The problem it solves</h3>
       <p>An assistant lands <code>sent/proposed</code>, awaiting a maintainer's ratification that it
@@ -894,7 +924,7 @@
     </div>
   </section>
 
-  <section class="section-alt">
+  <section>
     <div class="wrap">
       <dl class="refstrip">
         <div>
@@ -931,41 +961,11 @@
     </div>
   </section>
 
-  <section>
-    <div class="wrap">
-      <h3>What a record carries</h3>
-      <div class="codecard src">
-        <div class="codecard-bar">.working/toml/contribution.index.toml</div>
-        <div class="codebody"><span class="tok-key">schema</span> = <span class="tok-num">1</span>
-  <span class="tok-tbl">[[record]]</span>
-  <span class="tok-key">id</span>             = <span class="tok-str">"CN-1"</span>
-  <span class="tok-key">type</span>           = <span class="tok-str">"contribution"</span>
-  <span class="tok-key">status</span>         = <span class="tok-str">"sent/proposed"</span>
-  <span class="tok-key">title</span>          = <span class="tok-str">"Drift-gate fix sent upstream"</span>
-  <span class="tok-key">recipient</span>      = <span class="tok-str">"peer-project"</span>
-  <span class="tok-key">dedup_class</span>    = <span class="tok-str">"drift-gate-fix"</span>
-  <span class="tok-key">content_digest</span> = <span class="tok-str">"sha256:..."</span>
-  <span class="tok-key">delivery</span>       = { <span class="tok-key">channel</span> = <span class="tok-str">"pr"</span>, <span class="tok-key">ref</span> = <span class="tok-str">"peer/repo#128"</span>, <span class="tok-key">sent_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span> }
-  <span class="tok-key">actor</span>          = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
-      </div>
-      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-      <p>The shared index shape with the standard envelope plus <code>recipient</code>,
-        <code>dedup_class</code>, <code>content_digest</code>, and the <code>delivery</code> bundle
-        <code>{channel, ref, sent_at, receipt_ref?, receipted_at?}</code>: channel, ref, and sent_at
-        are required once sent and forbidden before, and the receipt fields are legal only at
-        acknowledged. <code>acknowledged</code> is the single positive terminal (responded, adopted,
-        reshaped, or declined); the outcome lives in <code>summary</code> or an extension, never as a
-        state. A contribution typically links <code>derives_from</code> the internal finding,
-        decision, or backlog item that motivated it, and carries no fleet-specific semantics; those
-        ride a registered <code>x-&lt;vendor&gt;</code> extension.</p>
-    </div>
-  </section>
-
   <section class="section-alt">
     <div class="wrap">
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
-        <h4>What it protects</h4>
+        <h3>What it protects</h3>
         <p>An auditable record of the project's recorded outbound actions, with delivery evidence
           attached, which helps prevent an asserted send from reading as a settled fact before it is
           ratified or receipted.</p>
