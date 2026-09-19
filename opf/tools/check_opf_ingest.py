@@ -283,6 +283,63 @@ def _self_test():
         r8 = ing.detect(root8, include=["*"])
         expect("clean-worksheet-always-validates",
                r8.verdict == ing.CANNOT_EVALUATE and any("a:b.md" in msg for msg in r8.findings))
+        # discriminator (F-MAJOR premise shift): the store-root control / VCS subtrees (`.aiqt/import`,
+        # `.aiqt/import/journal`, `.aiqt/import-archive`, and `.git`) are OPF-managed / VCS content the
+        # declared product-root scope must neither emit as rows NOR read, exactly as
+        # _opf_import._assemble_preview drops `.git`/`.aiqt` at the store root; the whole `.aiqt` subtree is
+        # excluded, so every apply / migration ops / journal / archive tree nesting under it is covered by
+        # construction. Without the store-root control exclusion they leak as declared rows (content-read).
+        root9 = build_store(product={
+            ".aiqt/import/journal/txn/frames.log": "j", ".aiqt/import-archive/imp-x/acceptance.json": "a",
+            ".git/config": "g", "readme.md": "R"})
+        r9 = ing.detect(root9, include=["*"])
+        ctl9 = {row["source_path"] for row in r9.rows}
+        expect("store-root-control-trees-exclusion",
+               r9.verdict == ing.CLEAN and "readme.md" in ctl9
+               and not any(p == ing._CONTROL_DIRNAME or p.startswith(ing._CONTROL_DIRNAME + "/")
+                           or p == ing._VCS_DIRNAME or p.startswith(ing._VCS_DIRNAME + "/") for p in ctl9))
+        # drift-catcher: the ingest control umbrella is the SAME authority the import layer roots its ops
+        # trees under, so every import-layer ops / journal / archive constant must nest under it and the
+        # imports run tree stay under `.working/`; a relocation out from under `.aiqt` would silently
+        # un-cover it, and this assertion catches that drift at source.
+        expect("covered-derivation-matches-import-authority",
+               all(rel == ing._CONTROL_DIRNAME or rel.startswith(ing._CONTROL_DIRNAME + "/")
+                   for rel in (ing._opf_import.IMPORT_OPS_REL, ing._opf_import.IMPORT_JOURNAL_REL,
+                               ing._opf_import.IMPORT_ARCHIVE_REL))
+               and ing._opf_import.IMPORTS_REL.startswith(_opf_store.WORKING_DIRNAME + "/"))
+        # discriminator (F1: traverse-before-exclude): a covered (excluded) directory is PRUNED before
+        # descent, never entered, so an unreadable / exotic entry inside it cannot block detection with a
+        # spurious CANNOT-EVALUATE. A symlink inside a declared-unmanaged directory makes the pre-fix walk
+        # (which entered then excluded only at the result stage) fail closed; pruning detects the live
+        # sibling CLEAN. Symlink support is platform-gated.
+        root10 = build_store(strays={".working/real.md": "r"},
+                             product={"legacy/keep.md": "k", "live.md": "L"},
+                             manifest_extra='[unmanaged]\npaths = ["legacy"]')
+        try:
+            os.symlink(str(root10 / ".working" / "toml" / "manifest.toml"),
+                       str(root10 / "legacy" / "link.md"))
+            g_sym_ok = True
+        except OSError:
+            g_sym_ok = False   # platform without symlink support: skip this vector, not a failure
+        if g_sym_ok:
+            r10 = ing.detect(root10, include=["legacy/*", "live.md"])
+            p10 = {row["source_path"] for row in r10.rows}
+            expect("excluded-subtree-pruned-before-descent",
+                   r10.verdict == ing.CLEAN and "live.md" in p10
+                   and not any(p.startswith("legacy/") for p in p10))
+        # discriminator (F2): validate_worksheet rejects a source_path the CONTAINED READER
+        # (_journal._check_rel) rejects (a control char slips past _is_contained_relpath), with an HONESTLY
+        # recomputed digest isolating the reader check; dropping it turns this GREEN.
+        ctl_payload = {"format": ws["format"], "schema": ws["schema"],
+                       "row": [dict(ws["row"][0], source_path=".working/x\ty.md")]}
+        ctl_honest = "sha256:" + ing._opf_import._sha256_hex(ing._worksheet_bytes(ctl_payload))
+        expect("validate-reader-unreadable-source-path-flip",
+               ing.validate_worksheet(dict(ctl_payload, worksheet_digest=ctl_honest)) != [])
+        # discriminator (F3): a non-string top-level key is a refusing finding, never a TypeError from
+        # sorting / joining the unknown-key set.
+        nonstr = dict(ws)
+        nonstr[1] = "x"
+        expect("validate-nonstring-key-flip", ing.validate_worksheet(nonstr) != [])
 
         # --- module-self-test delegation -----------------------------------------------------------
         expect("module-self-test", ing.self_test() == 0)
@@ -298,13 +355,16 @@ def _self_test():
             print("check_opf_ingest self-test: FAIL: {}".format(f), file=sys.stderr)
         return EXIT_FINDING
     print("check_opf_ingest self-test: PASS (worksheet-structure/schema-vocab/digest each PASS on a clean "
-          "detection and FINDING on its discriminator, including a type-strict schema flip; "
-          "detection-completeness matches an independent re-enumeration and catches an omitted store-scope "
-          "file; detect-writes-nothing; managed-path exclusion (by subtree containment) catches "
-          "over-detection, a managed path an --include names, a non-canonical managed spelling, a "
-          "declared-unmanaged DIRECTORY's whole subtree unread, a relocated (`dir:`) store's whole resolved "
-          "subtree, and the store pointer control files; a CLEAN detection's worksheet always validates; "
-          "the engine module self-test is green)")
+          "detection and FINDING on its discriminator, including a type-strict schema flip, a source_path "
+          "the contained reader rejects, and a non-string top-level key; detection-completeness matches an "
+          "independent re-enumeration and catches an omitted store-scope file; detect-writes-nothing; "
+          "managed-path exclusion (by subtree containment) catches over-detection, a managed path an "
+          "--include names, a non-canonical managed spelling, a declared-unmanaged DIRECTORY's whole subtree "
+          "unread, a relocated (`dir:`) store's whole resolved subtree, the store pointer control files, and "
+          "the store-root `.aiqt` / `.git` control / VCS trees derived from the import layer's own drop-set "
+          "authority (drift-checked against the import constants); a covered subtree is pruned before "
+          "descent so an unreadable / exotic entry inside an excluded tree never blocks detection; a CLEAN "
+          "detection's worksheet always validates; the engine module self-test is green)")
     return EXIT_OK
 
 

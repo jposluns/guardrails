@@ -175,8 +175,14 @@ def _row(source_path, scope, sha256, size):
 def _walk_regular_files(dfd, prefix, prune, out, budget):
     """Recursively collect the regular-file paths beneath the OPEN directory fd `dfd`, no-follow. `prefix`
     is the POSIX relpath of `dfd` from the walk root ("" for the root). A subdirectory whose relpath is in
-    `prune` is skipped entirely (the machine store subtree and the reserved `.working/imports/` tree, or
-    `.working/` itself for the declared-scope product walk). Fails CLOSED (a refusing CANNOT-EVALUATE
+    `prune` is skipped entirely and NEVER ENTERED, which (because the walk reaches every directory at its own
+    level) skips its whole subtree: the machine store subtree and the reserved `.working/imports/` tree, or
+    `.working/` itself for the declared-scope product walk, PLUS every covered managed directory the caller
+    adds (a declared-unmanaged directory, a view / deliverable target, or the store-root `.aiqt` / `.git`
+    control trees). Pruning a covered directory BEFORE descent is load-bearing: an excluded subtree is
+    neither listed nor read, so an unreadable, symlinked, or exotic entry inside a subtree we would exclude
+    anyway cannot block detection with a spurious CANNOT-EVALUATE (spec 14.2 never reads / enters an
+    unmanaged path). Fails CLOSED (a refusing CANNOT-EVALUATE
     naming the entry) on a symlink, an exotic entry (neither a directory nor a regular file), or an I/O
     error, so a swapped or exotic entry is never silently skipped (check-fails-closed-on-unreadable,
     SECI-symlink-resolution). Bounded by `budget` (a one-element mutable counter) so a runaway or hostile
@@ -235,6 +241,20 @@ def _digest_of(root_fd, rel):
 
 # --- the OPF-managed set (OQ-B: derived from the resolved manifest authorities, never hard-coded) --------
 
+# The store-root control / VCS directory names the import layer's `_opf_import._assemble_preview` drops at
+# the STORE ROOT (its EXACT drop set; see that function's `_ignore`, which drops these at the store root
+# only, never a same-named dir nested deeper). `.aiqt` is the control UMBRELLA: the apply-promotion ops +
+# archive trees (`_opf_import.IMPORT_OPS_REL` / `IMPORT_JOURNAL_REL` / `IMPORT_ARCHIVE_REL`) and migrate's
+# `.aiqt/migration/journal` ALL nest under it, so excluding the whole `.aiqt` SUBTREE covers every control /
+# journal / archive tree BY CONSTRUCTION rather than by re-enumerating each (the F-MAJOR premise shift:
+# derive the exclusion from the same authority the import layer uses, so a new ops tree under `.aiqt` cannot
+# leak). `.git` is the VCS dir. The self-test asserts those import-layer constants stay under `.aiqt`, so
+# relocating an ops tree out from under it is caught as drift.
+_VCS_DIRNAME = ".git"
+_CONTROL_DIRNAME = ".aiqt"
+_STORE_ROOT_CONTROL_DIRS = (_VCS_DIRNAME, _CONTROL_DIRNAME)
+
+
 def _canonical_managed(p):
     """Canonicalize a manifest-declared managed path to the byte-canonical POSIX-relative spelling the
     no-follow walk produces, so a non-canonical BUT VALID declaration (`./x`, `x//y`, `x/./y`) still
@@ -258,6 +278,26 @@ def _under_any(p, prefixes):
     return False
 
 
+def _store_root_control_prefixes(resolution):
+    """The store-root control / VCS subtrees (`.aiqt`, `.git`) as PRODUCT-root-relative POSIX prefixes when
+    the store falls UNDER the product root (`.aiqt` / `.git` inline, `ops/.aiqt` / `ops/.git` for a `dir:ops`
+    relocation), else () (the store resolves OUTSIDE the product root, so the declared product-root walk
+    never reaches it). Anchored at the RESOLVED store root EXACTLY as `_store_working_under_product` anchors
+    `.working`, so a relocated store's control trees are excluded wherever they resolve and ONLY the
+    store-root `.aiqt` / `.git` (never a same-named dir nested deeper, e.g. `.working/.aiqt`) is covered,
+    mirroring `_opf_import._assemble_preview`'s store-root-only drop. These join the `covered` set so the
+    declared scope never reads an apply-promotion ops / journal / archive tree or the VCS dir (spec 14.2
+    never reads a managed path); because the `.aiqt` subtree is a prefix, every tree that nests under it is
+    covered by construction (see `_STORE_ROOT_CONTROL_DIRS`)."""
+    try:
+        rel = Path(os.path.abspath(resolution.store_root)).relative_to(
+            Path(os.path.abspath(resolution.product_root)))
+    except ValueError:
+        return ()
+    base = rel.as_posix()
+    return tuple(posixpath.normpath(posixpath.join(base, d)) for d in _STORE_ROOT_CONTROL_DIRS)
+
+
 def _managed_paths(resolution, manifest_data):
     """The CLOSED "OPF-managed" set, derived FROM the resolved store authorities rather than a parallel
     hand-copied list (guard-input-soundness). Returns (prune_prefixes, covered):
@@ -274,7 +314,11 @@ def _managed_paths(resolution, manifest_data):
         control files, never ingestible). Because membership is by containment, a declared-unmanaged
         DIRECTORY covers its whole subtree so tooling never reads an unmanaged path (spec 14.2), and a
         view / deliverable target is defended the same way should one ever be a directory (single-file
-        today, but subtree-prefix membership is the correct rule, low-cost, and closes the class)."""
+        today, but subtree-prefix membership is the correct rule, low-cost, and closes the class). It also
+        carries the store-root control / VCS subtrees (`.aiqt` / `.git`, product-relative via
+        `_store_root_control_prefixes`), mirroring `_opf_import._assemble_preview`'s store-root drop set so
+        the whole apply / migration control umbrella and the VCS dir are excluded by SUBTREE containment,
+        derived from that shared authority rather than a parallel hand-list (guard-input-soundness)."""
     prune = {resolution.machine_rel, _opf_import.IMPORTS_REL}
     covered = set()
     for section in ("views", "deliverables"):
@@ -294,6 +338,13 @@ def _managed_paths(resolution, manifest_data):
     # and never ingestible, so an `--include` naming one yields no declared row (C1).
     covered.add(_opf_store.POINTER_REL)
     covered.add(_opf_store.LOCAL_POINTER_REL)
+    # The store-root control / VCS subtrees (`.aiqt` / `.git`), product-relative and anchored at the
+    # RESOLVED store root, mirror `_opf_import._assemble_preview`'s store-root drop set so the declared
+    # product-root scope never enumerates or reads an apply-promotion ops / journal / archive tree or the
+    # VCS dir. The whole `.aiqt` subtree is a prefix, so every tree nesting under it (IMPORT_OPS_REL,
+    # IMPORT_ARCHIVE_REL, migrate's `.aiqt/migration/journal`) is covered BY CONSTRUCTION, not by a parallel
+    # hand-list that keeps missing an authority (the F-MAJOR premise shift; guard-input-soundness).
+    covered.update(_store_root_control_prefixes(resolution))
     return prune, covered
 
 
@@ -317,7 +368,11 @@ def _detect_store_scope(store_fd, prune, covered):
         raise _cannot("cannot open {} no-follow ({})".format(_opf_store.WORKING_DIRNAME, exc))
     try:
         files = []
-        _walk_regular_files(working_fd, _opf_store.WORKING_DIRNAME, prune, files, [0])
+        # Prune the machine / imports subtrees AND every covered managed subtree BEFORE descent, so a
+        # declared-unmanaged directory under `.working/` is never entered or read (F1: traverse-before-
+        # exclude). The result-stage `_under_any` below still drops a covered FILE (a directory prune skips
+        # only directories); together an unmanaged path is neither enumerated nor read (spec 14.2).
+        _walk_regular_files(working_fd, _opf_store.WORKING_DIRNAME, prune | covered, files, [0])
     finally:
         os.close(working_fd)
     rows = []
@@ -377,11 +432,17 @@ def _detect_declared_scope(product_root, include, covered, store_working_rel):
     fd = _opf_store._open_root_fd(Path(os.path.abspath(product_root)))
     try:
         files = []
-        _walk_regular_files(fd, "", set(scope_prefixes), files, [0])
+        # Prune the store `.working/` scope AND every covered managed subtree BEFORE descent (F1:
+        # traverse-before-exclude), so a declared-unmanaged directory or the store-root `.aiqt` / `.git`
+        # control trees are never entered or read even when an entry inside them is unreadable / exotic.
+        _walk_regular_files(fd, "", set(scope_prefixes) | covered, files, [0])
         matched = set()
         for pat in include:
             hits = [f for f in files if fnmatch.fnmatchcase(f, pat)]
-            if not hits:
+            # A pattern that names ONLY a covered managed path is NOT a no-match: its target is excluded
+            # (never read), not absent, so `_under_any(pat, covered)` keeps it from a spurious finding now
+            # that the covered subtree is pruned from `files` (it was formerly walked then result-excluded).
+            if not hits and not _under_any(pat, covered):
                 raise _finding("--include pattern {!r} matched no product-root file (a declared input must "
                                "resolve; fail-closed)".format(pat))
             matched.update(hits)
@@ -476,6 +537,19 @@ def detect(product_root, include=None):
 
 # --- worksheet validation (consumed by the gate) -----------------------------------------------------
 
+def _reader_reads(source_path):
+    """True when the CONTAINED READER (`_journal._check_rel`, the predicate `_read_contained` applies via
+    `_open_parent`) would accept `source_path`. The worksheet validator reuses the reader's OWN check so it
+    can never accept a `source_path` (a control character, a backslash, a `.`/`..` segment) the reader then
+    rejects at read time: a valid digest must not make an unreadable path ingestible (guard-input-soundness,
+    validate against the real reader rather than a weaker parallel predicate)."""
+    try:
+        _journal._check_rel(source_path)
+        return True
+    except _journal.JournalError:
+        return False
+
+
 def validate_worksheet(worksheet):
     """Validate a disposition worksheet against its closed schema and vocabulary and recompute its content
     digest. Returns a list of finding strings (empty means valid). A structural or vocabulary violation is
@@ -486,7 +560,11 @@ def validate_worksheet(worksheet):
     findings = []
     extra = set(worksheet) - _WORKSHEET_KEYS
     if extra:
-        findings.append("worksheet carries unknown key(s): {}".format(", ".join(sorted(extra))))
+        # A non-string top-level key is itself an unknown key: render every extra key through str() before
+        # sorting / joining, so a `{1: ...}` key is a refusing finding rather than a TypeError from sorting
+        # or joining a mixed-type set (F3; fail-closed, never crash).
+        findings.append("worksheet carries unknown key(s): {}".format(
+            ", ".join(sorted(str(k) for k in extra))))
     if worksheet.get("format") != WORKSHEET_FORMAT:
         findings.append("worksheet.format is not {!r}".format(WORKSHEET_FORMAT))
     sch = worksheet.get("schema")
@@ -508,6 +586,10 @@ def validate_worksheet(worksheet):
         sp = r.get("source_path")
         if not (isinstance(sp, str) and _opf_store._is_contained_relpath(sp)):
             findings.append("{}: source_path must be a contained root-relative path".format(where))
+        elif not _reader_reads(sp):
+            findings.append("{}: source_path {!r} is not a path the contained reader accepts (a control "
+                            "character or a `.`/`..` segment), so a valid digest cannot make it "
+                            "ingestible".format(where, sp))
         if r.get("scope") not in SCOPES:
             findings.append("{}: scope {!r} is not one of {}".format(where, r.get("scope"), list(SCOPES)))
         if r.get("disposition") not in DISPOSITIONS:
@@ -738,6 +820,66 @@ def self_test():
               and ".working/legacy-dir/sub/deep.md" not in sub_paths
               and "docs/legacy/old.md" not in sub_paths)
 
+        # 8b-control (F-MAJOR premise shift). The store-root control / VCS subtrees (`.aiqt/import`,
+        #     `.aiqt/import/journal`, `.aiqt/import-archive`, and `.git`) are OPF-managed / VCS content, NOT
+        #     ingestible: a broad `--include=["*"]` product-root walk must neither emit them as declared rows
+        #     NOR read them, exactly as `_opf_import._assemble_preview` drops `.git`/`.aiqt` at the store
+        #     root. The exclusion is the whole `.aiqt` subtree + `.git`, so every apply / migration ops /
+        #     journal / archive tree that nests under `.aiqt` is covered BY CONSTRUCTION. Without the
+        #     store-root control exclusion these leak as declared rows and are content-read (the pre-fix
+        #     defect); a live product file still detected alongside is the flip discriminator.
+        root, _m = build_store(product={
+            ".aiqt/import/journal/txn/frames.log": "j", ".aiqt/import/imp-x/transaction.toml": "t",
+            ".aiqt/import-archive/imp-x/acceptance.json": "a", ".git/config": "g", "readme.md": "R"})
+        r = detect(root, include=["*"])
+        ctl_paths = {row["source_path"] for row in r.rows}
+        check("store-root-control-trees-excluded",
+              r.verdict == CLEAN and "readme.md" in ctl_paths
+              and not any(p == _CONTROL_DIRNAME or p.startswith(_CONTROL_DIRNAME + "/")
+                          or p == _VCS_DIRNAME or p.startswith(_VCS_DIRNAME + "/") for p in ctl_paths))
+        # a RELOCATED store carries its control trees at `ops/.aiqt` / `ops/.git`; the exclusion is anchored
+        # at the RESOLVED store root, so they are excluded wherever the store resolves (a product-relative-
+        # `.aiqt`-only rule would leak `ops/.aiqt/...` as declared rows).
+        reloc = build_relocated(product={
+            "ops/.aiqt/import/journal/f.log": "j", "ops/.git/config": "g", "readme.md": "R"})
+        rr = detect(reloc, include=["*"])
+        rr_paths = {row["source_path"] for row in rr.rows if row["scope"] == "declared"}
+        check("relocated-store-root-control-excluded",
+              rr.verdict == CLEAN and "readme.md" in rr_paths
+              and not any(".aiqt" in p or p.startswith("ops/.git") for p in rr_paths))
+        # covered-derivation-matches-import-authority (drift-catcher): the ingest control umbrella
+        #     (`_CONTROL_DIRNAME`) is the SAME authority the import layer roots its ops trees under, so every
+        #     import-layer ops / journal / archive constant must nest under it and the imports run tree stay
+        #     under `.working/`. If the import layer relocated an ops tree out from under `.aiqt`, the ingest
+        #     umbrella exclusion would silently stop covering it; this assertion catches that drift at source.
+        check("covered-derivation-matches-import-authority",
+              all(rel == _CONTROL_DIRNAME or rel.startswith(_CONTROL_DIRNAME + "/")
+                  for rel in (_opf_import.IMPORT_OPS_REL, _opf_import.IMPORT_JOURNAL_REL,
+                              _opf_import.IMPORT_ARCHIVE_REL))
+              and _opf_import.IMPORTS_REL.startswith(_opf_store.WORKING_DIRNAME + "/"))
+
+        # 8b-prune (F1: traverse-before-exclude). A covered (excluded) directory is PRUNED before descent,
+        #     never entered, so an unreadable / exotic entry inside a subtree we would exclude anyway cannot
+        #     block detection with a spurious CANNOT-EVALUATE (spec 14.2 never enters an unmanaged subtree). A
+        #     SYMLINK planted inside a declared-unmanaged directory makes the pre-fix walk (which entered the
+        #     subtree, excluding only at the result stage) fail closed on the symlink; pruning before descent
+        #     detects the live sibling CLEAN and never enters the excluded subtree. Symlink support is
+        #     platform-gated exactly as the symlink-in-scope vector below.
+        root, _m = build_store(strays={".working/real.md": "r"},
+                               product={"legacy/keep.md": "k", "live.md": "L"},
+                               manifest_extra='[unmanaged]\npaths = ["legacy"]')
+        try:
+            os.symlink(str(_m / "manifest.toml"), str(root / "legacy" / "link.md"))
+            prune_sym_ok = True
+        except OSError:
+            prune_sym_ok = False   # platform without symlink support: skip this vector, not a failure
+        if prune_sym_ok:
+            pr = detect(root, include=["legacy/*", "live.md"])
+            pr_paths = {row["source_path"] for row in pr.rows}
+            check("excluded-subtree-pruned-before-descent",
+                  pr.verdict == CLEAN and "live.md" in pr_paths
+                  and not any(p.startswith("legacy/") for p in pr_paths))
+
         # 8c. RELOCATED-store declared-scope exclusion (round-2 F1): a `.opf.toml` -> `dir:ops` relocation
         #     puts the store at `ops/.working/`. The declared-scope exclusion is derived from the RESOLVED
         #     store location, so an --include naming the relocated store scope is a FINDING and the store's
@@ -841,6 +983,24 @@ def self_test():
             _honest = "sha256:" + _opf_import._sha256_hex(_worksheet_bytes(_payload))
             _bad_sch = dict(_payload, worksheet_digest=_honest)
             check("validate-schema-type-strict", validate_worksheet(_bad_sch) != [])
+        # 12a-reader (F2): validate_worksheet must reject a source_path the CONTAINED READER
+        #      (`_journal._check_rel`, the predicate `_read_contained` applies) rejects, so a valid digest
+        #      cannot make an unreadable path ingestible. A control character (TAB) slips past
+        #      `_is_contained_relpath` but the reader rejects it; the payload carries an HONESTLY recomputed
+        #      digest (the emitter escapes the control char, so it round-trips byte-canonically), isolating
+        #      the reader check: dropping it makes `_is_contained_relpath` alone accept the path and the
+        #      discriminator turns GREEN.
+        ctl_payload = {"format": good["format"], "schema": good["schema"],
+                       "row": [dict(good["row"][0], source_path=".working/x\ty.md")]}
+        ctl_honest = "sha256:" + _opf_import._sha256_hex(_worksheet_bytes(ctl_payload))
+        check("validate-rejects-reader-unreadable-source-path",
+              validate_worksheet(dict(ctl_payload, worksheet_digest=ctl_honest)) != [])
+        # 12a-key (F3): a NON-STRING top-level key is a refusing finding (rendered as an unknown key), never
+        #      a TypeError from sorting / joining the unknown-key set; the pre-fix `", ".join(sorted(extra))`
+        #      raises on a non-string key, so this vector CRASHED without the fix and is a clean finding with it.
+        nonstr_key = dict(good)
+        nonstr_key[1] = "x"
+        check("validate-nonstring-key-is-finding", validate_worksheet(nonstr_key) != [])
 
         # 12b. detection-consistent-with-its-validator (round-2 F2): a product-root file whose name the
         #      worksheet validator would reject as non-contained (a `:` in the second character, read as a
@@ -874,13 +1034,18 @@ def self_test():
         return 1
     print("OPF-INGEST SELF-TEST PASS: detect enumerates store scope exactly once, excludes the managed set "
           "by subtree containment (including a managed path an --include names, a non-canonical managed "
-          "spelling, a declared-unmanaged DIRECTORY's whole subtree unread, and the store pointer control "
-          "files), derives the declared-scope exclusion from the RESOLVED store location so "
-          "a relocated (`dir:`) store's own subtree never leaks as declared, honours declared-scope "
-          "--include (glob-no-match/escape/store-scope each a finding), is deterministic + writes nothing, "
-          "fails closed on an unresolved store, a symlink, a non-UTF-8 name, and a non-contained detected "
-          "path (so a CLEAN worksheet always validates), the worksheet validates and catches "
-          "vocab/digest/keyset/schema-type mutations, and `opf adopt` stays unwired.")
+          "spelling, a declared-unmanaged DIRECTORY's whole subtree unread, the store pointer control "
+          "files, and the store-root `.aiqt` / `.git` control / VCS trees derived from the import layer's "
+          "own drop-set authority so every apply / migration ops / journal / archive tree is covered by "
+          "construction, drift-checked against the import constants), PRUNES a covered subtree before "
+          "descent so an unreadable / exotic entry inside an excluded tree never blocks detection, derives "
+          "the declared-scope exclusion from the RESOLVED store location so a relocated (`dir:`) store's "
+          "own subtree never leaks as declared, honours declared-scope --include (glob-no-match/escape/"
+          "store-scope each a finding), is deterministic + writes nothing, fails closed on an unresolved "
+          "store, a symlink, a non-UTF-8 name, and a non-contained detected path (so a CLEAN worksheet "
+          "always validates), the worksheet validates and catches vocab/digest/keyset/schema-type "
+          "mutations, a source_path the contained reader rejects, and a non-string top-level key, and "
+          "`opf adopt` stays unwired.")
     return 0
 
 
