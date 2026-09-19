@@ -324,16 +324,27 @@ def _self_test():
         ctl9 = {row["source_path"] for row in r9.rows}
         expect("store-root-control-trees-exclusion",
                r9.verdict == ing.CLEAN and "readme.md" in ctl9
-               and not any(p == ing._CONTROL_DIRNAME or p.startswith(ing._CONTROL_DIRNAME + "/")
-                           or p == ing._VCS_DIRNAME or p.startswith(ing._VCS_DIRNAME + "/") for p in ctl9))
-        # drift-catcher: the ingest control umbrella is the SAME authority the import layer roots its ops
-        # trees under, so every import-layer ops / journal / archive constant must nest under it and the
-        # imports run tree stay under `.working/`; a relocation out from under `.aiqt` would silently
-        # un-cover it, and this assertion catches that drift at source.
+               and not any(p == d or p.startswith(d + "/")
+                           for d in _opf_store.STORE_ROOT_CONTROL_DIRS for p in ctl9))
+        # single-authority set-equality (G): ingest holds NO control-dir literal of its own and derives the
+        # store-root control exclusion from the ONE authority _opf_store.STORE_ROOT_CONTROL_DIRS, the SAME
+        # tuple _opf_import._assemble_preview drops at the store root. The prefixes ingest actually excludes
+        # for an inline store (product root == store root, so the prefixes are the bare dir names) must EQUAL
+        # that authority as a SET, so a reintroduced or divergent literal fails closed.
+        inline_root = build_store()
+        inline_res = _opf_store.resolve_store(inline_root)
+        expect("control-dirs-single-authority-set-equality",
+               set(ing._store_root_control_prefixes(inline_res)) == set(_opf_store.STORE_ROOT_CONTROL_DIRS))
+        # drift-catcher: `.aiqt` is the control umbrella every import-layer ops / journal / archive constant
+        # must nest under (and the imports run tree stays under `.working/`), so the `.aiqt` subtree exclusion
+        # covers them by construction; a relocation out from under `.aiqt`, or dropping `.aiqt` from the single
+        # authority, silently un-covers it, and this assertion catches that drift at source.
+        umbrella = ".aiqt"
         expect("covered-derivation-matches-import-authority",
-               all(rel == ing._CONTROL_DIRNAME or rel.startswith(ing._CONTROL_DIRNAME + "/")
-                   for rel in (ing._opf_import.IMPORT_OPS_REL, ing._opf_import.IMPORT_JOURNAL_REL,
-                               ing._opf_import.IMPORT_ARCHIVE_REL))
+               umbrella in _opf_store.STORE_ROOT_CONTROL_DIRS
+               and all(rel == umbrella or rel.startswith(umbrella + "/")
+                       for rel in (ing._opf_import.IMPORT_OPS_REL, ing._opf_import.IMPORT_JOURNAL_REL,
+                                   ing._opf_import.IMPORT_ARCHIVE_REL))
                and ing._opf_import.IMPORTS_REL.startswith(_opf_store.WORKING_DIRNAME + "/"))
         # discriminator (F1: traverse-before-exclude): a covered (excluded) directory is PRUNED before
         # descent, never entered, so an unreadable / exotic entry inside it cannot block detection with a

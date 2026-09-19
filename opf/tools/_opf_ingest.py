@@ -157,15 +157,13 @@ def _build_worksheet(rows):
 
 def _row(source_path, scope, sha256, size):
     """One closed-keyset disposition row. Detect always emits `unresolved` / `baseline`; `note` is a
-    present, string-typed, empty field (the closed keyset is fixed so the worksheet shape is stable). A
-    selected path that the worksheet validator's own containment check (`_is_contained_relpath`) would
-    reject (a name whose second character is `:`, or one carrying a backslash, which the validator reads as
-    a drive / UNC path) is a LOCATED refusal here, fail-closed, so a CLEAN detection can never emit a
-    worksheet row that then fails `validate_worksheet` (detection-consistent-with-its-own-validator)."""
-    if not _opf_store._is_contained_relpath(source_path):
-        raise _cannot("detected {} path {!r} is not a contained root-relative path, so it cannot be "
-                      "represented as a worksheet source_path (fail-closed, never a clean row that would "
-                      "fail validation)".format(scope, source_path))
+    present, string-typed, empty field (the closed keyset is fixed so the worksheet shape is stable). This is
+    a pure row constructor: it does NOT re-decide whether `source_path` is a legal worksheet path. That is the
+    SOLE job of `validate_worksheet`, which `detect` runs over the assembled worksheet BEFORE returning CLEAN
+    (single authority: no parallel `_is_contained_relpath` proxy here to drift from the validator), so a
+    source_path detection accepts but the validator rejects (a name whose second character is `:`, which the
+    contained reader accepts but `_is_contained_relpath` reads as a drive path) surfaces as a LOCATED
+    CANNOT-EVALUATE from that one check, never a CLEAN worksheet that then fails its own validator."""
     return {"source_path": source_path, "scope": scope, "disposition": _DETECT_DISPOSITION,
             "origin": _DETECT_ORIGIN, "sha256": sha256, "size": size, "note": ""}
 
@@ -246,18 +244,17 @@ def _digest_of(root_fd, rel):
 
 # --- the OPF-managed set (OQ-B: derived from the resolved manifest authorities, never hard-coded) --------
 
-# The store-root control / VCS directory names the import layer's `_opf_import._assemble_preview` drops at
-# the STORE ROOT (its EXACT drop set; see that function's `_ignore`, which drops these at the store root
-# only, never a same-named dir nested deeper). `.aiqt` is the control UMBRELLA: the apply-promotion ops +
-# archive trees (`_opf_import.IMPORT_OPS_REL` / `IMPORT_JOURNAL_REL` / `IMPORT_ARCHIVE_REL`) and migrate's
-# `.aiqt/migration/journal` ALL nest under it, so excluding the whole `.aiqt` SUBTREE covers every control /
-# journal / archive tree BY CONSTRUCTION rather than by re-enumerating each (the F-MAJOR premise shift:
-# derive the exclusion from the same authority the import layer uses, so a new ops tree under `.aiqt` cannot
-# leak). `.git` is the VCS dir. The self-test asserts those import-layer constants stay under `.aiqt`, so
-# relocating an ops tree out from under it is caught as drift.
-_VCS_DIRNAME = ".git"
-_CONTROL_DIRNAME = ".aiqt"
-_STORE_ROOT_CONTROL_DIRS = (_VCS_DIRNAME, _CONTROL_DIRNAME)
+# The store-root control / VCS directory names are the SINGLE store-topology authority
+# `_opf_store.STORE_ROOT_CONTROL_DIRS`, the EXACT tuple `_opf_import._assemble_preview` drops at the store
+# root (its `_ignore`, which drops these at the store root only, never a same-named dir nested deeper). Ingest
+# holds NO parallel literal of its own and derives its store-root control exclusion from that one constant, so
+# the two can never mirror-drift (the true single-authority premise shift: one source, no mirror). `.aiqt` is
+# the control UMBRELLA: the apply-promotion ops + archive trees (`_opf_import.IMPORT_OPS_REL` /
+# `IMPORT_JOURNAL_REL` / `IMPORT_ARCHIVE_REL`) and migrate's `.aiqt/migration/journal` ALL nest under it, so
+# excluding the whole `.aiqt` SUBTREE covers every control / journal / archive tree BY CONSTRUCTION rather
+# than by re-enumerating each; `.git` is the VCS dir. The self-test asserts SET EQUALITY between the exclusion
+# ingest builds and that authority, and that those import-layer constants stay under `.aiqt`, so a reintroduced
+# literal or an ops tree relocated out from under `.aiqt` is caught as drift.
 
 
 def _canonical_managed(p):
@@ -295,14 +292,14 @@ def _store_root_control_prefixes(resolution):
     scope, whose STORE-relative paths a `.working`-nested store's product-relative prefix could otherwise
     collide with; see `_managed_paths`), so the declared scope never reads an apply-promotion ops / journal /
     archive tree or the VCS dir (spec 14.2 never reads a managed path); because the `.aiqt` subtree is a
-    prefix, every tree that nests under it is covered by construction (see `_STORE_ROOT_CONTROL_DIRS`)."""
+    prefix, every tree nesting under it is covered by construction (see `_opf_store.STORE_ROOT_CONTROL_DIRS`)."""
     try:
         rel = Path(os.path.abspath(resolution.store_root)).relative_to(
             Path(os.path.abspath(resolution.product_root)))
     except ValueError:
         return ()
     base = rel.as_posix()
-    return tuple(posixpath.normpath(posixpath.join(base, d)) for d in _STORE_ROOT_CONTROL_DIRS)
+    return tuple(posixpath.normpath(posixpath.join(base, d)) for d in _opf_store.STORE_ROOT_CONTROL_DIRS)
 
 
 def _managed_paths(resolution, manifest_data):
@@ -554,6 +551,19 @@ def detect(product_root, include=None):
 
         rows = _detect_rows(product_root, resolution, include)
         worksheet, digest = _build_worksheet(rows)
+        # Validate the assembled worksheet against its own validator BEFORE returning CLEAN: `validate_worksheet`
+        # is the SINGLE authority on what is a legal worksheet, so a source_path detection accepted (the
+        # contained reader read it) but the validator rejects (a `:` in its second character, which
+        # `_is_contained_relpath` reads as a drive path) is a LOCATED CANNOT-EVALUATE naming the offending
+        # path, never a CLEAN worksheet that then fails its own validator (guard-input-soundness: detect never
+        # emits a clean result its validator would reject).
+        ws_findings = validate_worksheet(worksheet)
+        if ws_findings:
+            bad = ", ".join(sorted({r["source_path"] for r in rows
+                                    if isinstance(r.get("source_path"), str)})) or "(none)"
+            raise _cannot("the assembled worksheet fails its own validator (fail-closed, never a clean "
+                          "detection whose worksheet is invalid); detected source_path(s): {}; findings: "
+                          "{}".format(bad, "; ".join(ws_findings)))
         return DetectResult(CLEAN, worksheet=worksheet, worksheet_digest=digest, rows=rows)
     except _DetectError as exc:
         return DetectResult(exc.verdict, [exc.message])
@@ -882,8 +892,8 @@ def self_test():
         ctl_paths = {row["source_path"] for row in r.rows}
         check("store-root-control-trees-excluded",
               r.verdict == CLEAN and "readme.md" in ctl_paths
-              and not any(p == _CONTROL_DIRNAME or p.startswith(_CONTROL_DIRNAME + "/")
-                          or p == _VCS_DIRNAME or p.startswith(_VCS_DIRNAME + "/") for p in ctl_paths))
+              and not any(p == d or p.startswith(d + "/")
+                          for d in _opf_store.STORE_ROOT_CONTROL_DIRS for p in ctl_paths))
         # a RELOCATED store carries its control trees at `ops/.aiqt` / `ops/.git`; the exclusion is anchored
         # at the RESOLVED store root, so they are excluded wherever the store resolves (a product-relative-
         # `.aiqt`-only rule would leak `ops/.aiqt/...` as declared rows).
@@ -894,15 +904,28 @@ def self_test():
         check("relocated-store-root-control-excluded",
               rr.verdict == CLEAN and "readme.md" in rr_paths
               and not any(".aiqt" in p or p.startswith("ops/.git") for p in rr_paths))
-        # covered-derivation-matches-import-authority (drift-catcher): the ingest control umbrella
-        #     (`_CONTROL_DIRNAME`) is the SAME authority the import layer roots its ops trees under, so every
-        #     import-layer ops / journal / archive constant must nest under it and the imports run tree stay
-        #     under `.working/`. If the import layer relocated an ops tree out from under `.aiqt`, the ingest
-        #     umbrella exclusion would silently stop covering it; this assertion catches that drift at source.
+        # control-dirs-single-authority-set-equality (single-authority drift-catcher, G): ingest holds NO
+        #     control-dir literal of its own; it derives the store-root control exclusion from the ONE
+        #     authority `_opf_store.STORE_ROOT_CONTROL_DIRS`, the SAME tuple `_opf_import._assemble_preview`
+        #     drops at the store root. The prefixes ingest ACTUALLY excludes for an inline store (product root
+        #     == store root, so the prefixes are the bare dir names) must EQUAL that authority as a SET, so a
+        #     reintroduced or divergent literal fails closed (a presence-only check would miss a superset drift).
+        _inline_root, _im = build_store()
+        _inline_res = _opf_store.resolve_store(_inline_root)
+        check("control-dirs-single-authority-set-equality",
+              set(_store_root_control_prefixes(_inline_res)) == set(_opf_store.STORE_ROOT_CONTROL_DIRS))
+        # covered-derivation-matches-import-authority (drift-catcher): `.aiqt` is the control UMBRELLA every
+        #     import-layer ops / journal / archive constant must nest under (and the imports run tree stays
+        #     under `.working/`), so the `.aiqt` SUBTREE exclusion covers them by construction. If the import
+        #     layer relocated an ops tree out from under `.aiqt`, the umbrella exclusion would silently stop
+        #     covering it; this catches that drift at source. `.aiqt` is asserted to remain a member of the
+        #     single authority, so dropping it from `STORE_ROOT_CONTROL_DIRS` also fails closed here.
+        _umbrella = ".aiqt"
         check("covered-derivation-matches-import-authority",
-              all(rel == _CONTROL_DIRNAME or rel.startswith(_CONTROL_DIRNAME + "/")
-                  for rel in (_opf_import.IMPORT_OPS_REL, _opf_import.IMPORT_JOURNAL_REL,
-                              _opf_import.IMPORT_ARCHIVE_REL))
+              _umbrella in _opf_store.STORE_ROOT_CONTROL_DIRS
+              and all(rel == _umbrella or rel.startswith(_umbrella + "/")
+                      for rel in (_opf_import.IMPORT_OPS_REL, _opf_import.IMPORT_JOURNAL_REL,
+                                  _opf_import.IMPORT_ARCHIVE_REL))
               and _opf_import.IMPORTS_REL.startswith(_opf_store.WORKING_DIRNAME + "/"))
 
         # 8b-prune (F1: traverse-before-exclude). A covered (excluded) directory is PRUNED before descent,
@@ -1058,12 +1081,32 @@ def self_test():
         ctl_honest = "sha256:" + _opf_import._sha256_hex(_worksheet_bytes(ctl_payload))
         check("validate-rejects-reader-unreadable-source-path",
               validate_worksheet(dict(ctl_payload, worksheet_digest=ctl_honest)) != [])
+        # 12a-reader-roundtrip (D): a source_path carrying a NUL or any control character is rejected even
+        #      after a full SERIALIZE + RE-PARSE round trip, so a valid recomputed digest cannot LAUNDER a
+        #      control-char path through TOML: the emitter escapes the char (it round-trips byte-canonically),
+        #      the digest recomputes honestly, and validate_worksheet still rejects it through the SAME
+        #      contained-reader check (`_journal._check_rel`) the reader applies. Each is isolated by the
+        #      honest digest, so the finding is the reader-rejection, not a masking digest mismatch.
+        import tomllib as _tomllib
+        for _ctl in ("\x00", "\t", "\x01"):
+            _rt_payload = {"format": good["format"], "schema": good["schema"],
+                           "row": [dict(good["row"][0], source_path=".working/x{}y.md".format(_ctl))]}
+            _rt_honest = "sha256:" + _opf_import._sha256_hex(_worksheet_bytes(_rt_payload))
+            _rt = _tomllib.loads(_worksheet_bytes(dict(_rt_payload, worksheet_digest=_rt_honest)).decode("utf-8"))
+            check("validate-rejects-control-char-after-roundtrip", validate_worksheet(_rt) != [])
         # 12a-key (F3): a NON-STRING top-level key is a refusing finding (rendered as an unknown key), never
         #      a TypeError from sorting / joining the unknown-key set; the pre-fix `", ".join(sorted(extra))`
         #      raises on a non-string key, so this vector CRASHED without the fix and is a clean finding with it.
         nonstr_key = dict(good)
         nonstr_key[1] = "x"
         check("validate-nonstring-key-is-finding", validate_worksheet(nonstr_key) != [])
+        # 12a-key-mixed (E): a MIXED int/str extra-key set is handled without raising: an int key alongside a
+        #      str key sorts through str() rather than a TypeError in `sorted()` over a mixed-type set, and the
+        #      result is a refusing finding, per the validator's documented contract (fail-closed, never crash).
+        mixed_key = dict(good)
+        mixed_key[1] = "a"
+        mixed_key["zzz-unknown"] = "b"
+        check("validate-mixed-key-set-is-finding", validate_worksheet(mixed_key) != [])
 
         # 12b. detection-consistent-with-its-validator (round-2 F2): a product-root file whose name the
         #      worksheet validator would reject as non-contained (a `:` in the second character, read as a
