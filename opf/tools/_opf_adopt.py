@@ -785,10 +785,15 @@ def validate_event_chain(events, root_digest):
     """Validate an ordered list of outcome events as an append-only chain rooted at `root_digest` (the
     receipt-core digest). Each event must itself be VALID; events[0].previous_event_digest must equal
     root_digest; events[i].previous_event_digest must equal events[i-1].event_digest; all events share the
-    run_id; and the genesis event's kind must be `applied`. A non-list chain, a bad root, or a per-event
-    CANNOT-EVALUATE refuses; an EMPTY chain is INVALID (a chain is a required list and one with no genesis
-    event is a malformed instance, an empty required list per the module outcome model above), as is a
-    linkage break."""
+    run_id; and the chain carries EXACTLY ONE genesis: the first event's kind must be the genesis `applied`
+    and no later event (i>0) may carry that kind (a second `applied` is a second genesis, refused). A
+    non-list chain, a bad root, or a per-event CANNOT-EVALUATE refuses; an EMPTY chain is INVALID (a chain is
+    a required list and one with no genesis event is a malformed instance, an empty required list per the
+    module outcome model above), as is a linkage break. Once an event is itself INVALID its linkage fields
+    cannot be trusted, so downstream linkage findings are suppressed rather than compared against stale prior
+    state (the chain is already INVALID either way); the per-event validity of each later event is still
+    checked and a later CANNOT-EVALUATE still refuses, so this is a finding-quality choice, never a relaxation
+    of the fail-closed verdict."""
     if not _is_digest(root_digest):
         return _cannot("event-chain root_digest is not a well-formed digest")
     if not isinstance(events, list):
@@ -798,6 +803,13 @@ def validate_event_chain(events, root_digest):
     findings = []
     prior_digest = root_digest
     run_id = None
+    # Cleared the moment an event is itself INVALID: from that point the chain is structurally broken, its
+    # subsequent linkage fields (previous_event_digest, event_digest) cannot be trusted, and comparing them
+    # against the stale prior state left behind would spawn misleading, structurally-incorrect linkage
+    # findings. So once it is cleared the linkage checks are skipped; the per-event validity of each later
+    # event is still evaluated above, and the overall verdict stays INVALID (fail-closed), it just stops
+    # emitting linkage noise on an already-INVALID chain.
+    linkage_intact = True
     # Seed the seen-set with the chain root so an event whose event_digest equals the root digest is caught
     # as a cycle (a chain returning to its root), not only a duplicate of a later event's digest.
     seen_digests = {root_digest}       # every event_digest observed in the chain, plus the root (append-only)
@@ -807,12 +819,19 @@ def validate_event_chain(events, root_digest):
             return _cannot("event[{}]: {}".format(i, "; ".join(res.findings)))
         if res.status == INVALID:
             findings.extend("event[{}]: {}".format(i, f) for f in res.findings)
+            linkage_intact = False   # this event's linkage fields are untrustworthy; break the chain here
             continue  # cannot trust this event's linkage fields; keep collecting other findings
+        if not linkage_intact:
+            continue  # a prior event already broke the chain (INVALID); do not compare against stale state
         if i == 0:
             if event["kind"] != "applied":
                 findings.append("event[0] kind is {!r}, not the genesis 'applied'".format(event["kind"]))
             run_id = event["run_id"]
         else:
+            # exactly one genesis: a non-genesis position carrying the genesis kind is a SECOND genesis.
+            if event["kind"] == "applied":
+                findings.append("event[{}] kind is the genesis 'applied' at a non-genesis position (an "
+                                "append-only chain has exactly one genesis)".format(i))
             if event["run_id"] != run_id:
                 findings.append("event[{}] run_id differs from the genesis run_id".format(i))
         if event["previous_event_digest"] != prior_digest:
@@ -1186,6 +1205,37 @@ def self_test():
     check("digest-uppercase-hex-rejected", _is_digest("sha256:" + "A" * 64) is False)
     r_upper = canonical_receipt_core(); r_upper["release"]["manifest_sha256"] = "sha256:" + "A" * 64
     check("receipt-uppercase-digest-invalid", validate_receipt_core(r_upper).status == INVALID)
+
+    # 12: round-7 fix discriminators. Each vector FAILS if its corresponding fix is reverted.
+    # 12a (fix B, second-genesis rejection): an append-only chain has EXACTLY ONE genesis. A non-genesis
+    # position (i>0) carrying the genesis kind `applied` is a second genesis, INVALID, even when it chains
+    # correctly, shares the run_id, and repeats no digest. This vector is a two-event chain whose only defect
+    # is the second `applied`; reverting the non-genesis-position check flips it back to VALID.
+    sg_root = "sha256:" + "7" * 64
+    sg_genesis = canonical_outcome_event(kind="applied", previous_event_digest=sg_root)
+    sg_genesis["event_digest"] = "sha256:" + "b" * 64
+    sg_second = canonical_outcome_event(kind="applied", previous_event_digest=sg_genesis["event_digest"])
+    sg_second["event_digest"] = "sha256:" + "c" * 64
+    check("chain-second-genesis-invalid",
+          validate_event_chain([sg_genesis, sg_second], sg_root).status == INVALID)
+
+    # 12b (fix C, digest PREFIX discriminator): the digest grammar requires the literal `sha256:` prefix, not
+    # merely 64 lowercase-hex characters. A wrong-prefix digest (`sha1:` + 64 hex) and a bare 64-hex with no
+    # prefix are both REJECTED. This flip-guards the PREFIX portion of _DIGEST_RE that the 11d lowercase-hex
+    # vectors do not cover: dropping the `sha256:` prefix (accepting bare hex) or altering it (accepting
+    # `sha1:`) would newly accept these vectors and flip the self-test red.
+    check("digest-wrong-prefix-rejected", _is_digest("sha1:" + "0" * 64) is False)
+    check("digest-no-prefix-rejected", _is_digest("0" * 64) is False)
+    r_wrongpref = canonical_receipt_core(); r_wrongpref["release"]["manifest_sha256"] = "sha1:" + "0" * 64
+    check("receipt-wrong-prefix-digest-invalid", validate_receipt_core(r_wrongpref).status == INVALID)
+
+    # 12c (fix D, event-chain linkage after an INVALID intermediate event): this is a finding-QUALITY change
+    # with NO status transition, so no status-judged vector can discriminate it (the self-test judges on the
+    # returned status, never by grepping finding text, per spec 8). Once an event is itself INVALID its digest
+    # fields cannot be trusted, so validate_event_chain now suppresses downstream linkage findings rather than
+    # comparing later events against stale prior state and emitting misleading, structurally-incorrect
+    # findings; the chain stays INVALID either way. The intact-chain path is unchanged and stays guarded by
+    # the section-6 chain vectors (all built from individually-VALID events), so no new vector is added here.
 
     if failures:
         print("OPF-ADOPT SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
