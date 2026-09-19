@@ -151,6 +151,20 @@ def _self_test():
                 out[str(fp.relative_to(root))] = fp.read_bytes()
         return out
 
+    def symlink_supported():
+        """True when this platform + filesystem can create a symlink, PROBED ONCE with a throwaway dangling
+        link under `base`. A genuinely unsupported platform returns False so a symlink vector is SKIPPED; on a
+        supported platform a later fixture `os.symlink` failure (e.g. EACCES) then RAISES and is caught by the
+        harness-error path (EXIT_ERROR), so a fixture-setup error can never silently skip a symlink
+        discriminator and let it gain zero coverage (codex-8 #3)."""
+        probe = base / ".symlink-probe"
+        try:
+            os.symlink("target", str(probe))
+        except OSError:
+            return False
+        os.unlink(str(probe))
+        return True
+
     try:
         # --- worksheet-structure -------------------------------------------------------------------
         root = build_store(strays={".working/stray.md": "one", ".working/sub/deep.txt": "two"})
@@ -221,18 +235,51 @@ def _self_test():
                and ".working/toml/counters.toml" not in paths3
                and ".working/imports/imp-x/frames.log" not in paths3
                and ".working/declared.md" not in paths3)
-        # discriminator (F1): an --include naming a MANAGED product-root path (a view target, a deliverable
-        # target, or a declared [unmanaged] path) yields NO declared row for it: excluded wherever it falls.
+        # discriminator (F1 + F-8.1): an --include naming a MANAGED product-root path (a declared [unmanaged]
+        # path `keep.md` or a PUBLIC deliverable target `CHANGELOG.md`) yields NO declared row for it. Per
+        # F-8.1 a ROGUE view target (`report.md`, unrecognized name) and a NON-PUBLIC deliverable target
+        # (`out.pdf`) are NOT managed and so ARE detected (agreeing with C-CONTAINMENT, which grades them
+        # strays); reverting F-8.1 (covering the RAW target) would wrongly EXCLUDE `report.md` / `out.pdf`.
         root4 = build_store(
-            strays={"report.md": "R", "out.pdf": "D", "keep.md": "K", "loose.md": "L"},
+            strays={"report.md": "R", "out.pdf": "D", "keep.md": "K", "loose.md": "L", "CHANGELOG.md": "C"},
             manifest_extra=('[views.main]\nkind = "composed"\nsources = ["docs"]\ntarget = "report.md"\n\n'
                             '[deliverables.d1]\nkind = "curated"\ntarget = "out.pdf"\n\n'
+                            '[deliverables."CHANGELOG.md"]\nkind = "curated"\ntarget = "CHANGELOG.md"\n\n'
                             '[unmanaged]\npaths = ["keep.md"]'))
-        r4 = ing.detect(root4, include=["report.md", "out.pdf", "keep.md", "loose.md"])
+        r4 = ing.detect(root4, include=["report.md", "out.pdf", "keep.md", "loose.md", "CHANGELOG.md"])
         decl4 = {row["source_path"] for row in r4.rows if row["scope"] == "declared"}
         expect("declared-scope-managed-exclusion",
                r4.verdict == ing.CLEAN and "loose.md" in decl4
-               and "report.md" not in decl4 and "out.pdf" not in decl4 and "keep.md" not in decl4)
+               and "keep.md" not in decl4 and "CHANGELOG.md" not in decl4
+               and "report.md" in decl4 and "out.pdf" in decl4)
+        # F-8.1 STORE-scope agreement: the view/deliverable covered set mirrors the checker authority, so a
+        # ROGUE view name laundering a store target (`.working/rogue.md`) is DETECTED (not covered), a
+        # WELL-FORMED view (`TODO.md` -> `.working/TODO.md`) is covered, a REBOUND view covers its SPEC
+        # destination while the rebound target is a stray, and a NON-PUBLIC deliverable target is detected.
+        rogue = build_store(strays={".working/rogue.md": "x", ".working/real.md": "r"},
+                            manifest_extra=('[views.rogue]\nkind = "composed"\nsources = ["backlog_item"]\n'
+                                            'target = ".working/rogue.md"'))
+        rr = ing.detect(rogue); rr_p = {row["source_path"] for row in rr.rows}
+        expect("f81-rogue-view-name-launder-detected",
+               rr.verdict == ing.CLEAN and ".working/rogue.md" in rr_p and ".working/real.md" in rr_p)
+        wf = build_store(strays={".working/TODO.md": "t", ".working/real.md": "r"},
+                         manifest_extra=('[views."TODO.md"]\nkind = "composed"\nsources = ["backlog_item"]\n'
+                                         'target = ".working/TODO.md"'))
+        wr = ing.detect(wf); wr_p = {row["source_path"] for row in wr.rows}
+        expect("f81-wellformed-view-target-covered",
+               wr.verdict == ing.CLEAN and ".working/TODO.md" not in wr_p and ".working/real.md" in wr_p)
+        rb = build_store(strays={".working/TODO.md": "t", ".working/evil.md": "e", ".working/real.md": "r"},
+                         manifest_extra=('[views."TODO.md"]\nkind = "composed"\nsources = ["backlog_item"]\n'
+                                         'target = ".working/evil.md"'))
+        rbr = ing.detect(rb); rbr_p = {row["source_path"] for row in rbr.rows}
+        expect("f81-rebound-view-covers-spec-dest-and-rebind-is-stray",
+               rbr.verdict == ing.CLEAN and ".working/TODO.md" not in rbr_p
+               and ".working/evil.md" in rbr_p and ".working/real.md" in rbr_p)
+        nd = build_store(strays={".working/d.md": "d", ".working/real.md": "r"},
+                         manifest_extra='[deliverables.d1]\nkind = "curated"\ntarget = ".working/d.md"')
+        ndr = ing.detect(nd); ndr_p = {row["source_path"] for row in ndr.rows}
+        expect("f81-nonpublic-deliverable-target-detected",
+               ndr.verdict == ing.CLEAN and ".working/d.md" in ndr_p and ".working/real.md" in ndr_p)
         # discriminator (F2): a non-canonical [unmanaged].paths spelling still excludes the store file it
         # names; a literal-string comparison would let the aliased path be detected as a stray.
         root5 = build_store(strays={".working/kept.md": "k", ".working/real.md": "r"},
@@ -332,17 +379,18 @@ def _self_test():
                ru_sup.verdict == ing.CLEAN and "notes/todo.md" in ru_sup_decl
                and ru_read.verdict == ing.CANNOT_EVALUATE
                and not any(row["source_path"] == "ops/notes/legacy.md" for row in ru_read.rows))
+        # F-8.1: a NON-PUBLIC deliverable target covers NOTHING (deliverables have no name authority; the
+        # checker grades a store-scope deliverable target as a stray), so on a `dir:ops` store NEITHER the
+        # product-root `report.md` NOR the store-side `ops/report.md` is suppressed -- both are DETECTED,
+        # agreeing with the checker. Reverting F-8.1 (covering + re-anchoring the raw deliverable target)
+        # would EXCLUDE the store-side `ops/report.md`. The re-anchoring MECHANISM stays exercised by the
+        # [unmanaged] directions above (the surviving store-relative covered set).
         rc_t = build_relocated(manifest_extra='[deliverables.d1]\nkind = "curated"\ntarget = "report.md"',
-                               product={"report.md": "stray", "readme.md": "R"})
-        rt_sup = ing.detect(rc_t, include=["report.md", "readme.md"])
-        rt_sup_decl = {row["source_path"] for row in rt_sup.rows if row["scope"] == "declared"}
-        rc_t2 = build_relocated(manifest_extra='[deliverables.d1]\nkind = "curated"\ntarget = "report.md"',
-                                product={"ops/report.md": "storeside", "readme.md": "R"})
-        rt_read = ing.detect(rc_t2, include=["ops/report.md", "readme.md"])
-        rt_read_decl = {row["source_path"] for row in rt_read.rows if row["scope"] == "declared"}
-        expect("reanchor-target-suppression-and-not-read",
-               rt_sup.verdict == ing.CLEAN and "report.md" in rt_sup_decl
-               and rt_read.verdict == ing.CLEAN and rt_read_decl == {"readme.md"})
+                               product={"report.md": "stray", "ops/report.md": "storeside", "readme.md": "R"})
+        rt = ing.detect(rc_t, include=["report.md", "ops/report.md", "readme.md"])
+        rt_decl = {row["source_path"] for row in rt.rows if row["scope"] == "declared"}
+        expect("nonpublic-deliverable-target-not-covered-reloc",
+               rt.verdict == ing.CLEAN and "report.md" in rt_decl and "ops/report.md" in rt_decl)
         # PUBLIC deliverable target (product-root in every topology, spec 5.8) is NOT re-anchored, so the
         # real product-root `CHANGELOG.md` stays excluded on a relocated store (re-anchoring it would detect
         # it as a stray).
@@ -399,17 +447,15 @@ def _self_test():
         # spurious CANNOT-EVALUATE. A symlink inside a declared-unmanaged directory makes the pre-fix walk
         # (which entered then excluded only at the result stage) fail closed; pruning detects the live
         # sibling CLEAN. The include is `live.md` alone (a covered-subtree pattern like `legacy/*` is now a
-        # CANNOT-EVALUATE, R7-1, masking this DIRECTORY-prune vector). Symlink support is platform-gated.
+        # CANNOT-EVALUATE, R7-1, masking this DIRECTORY-prune vector). Symlink support is platform-gated via
+        # `symlink_supported()`: an unsupported platform skips the vector, but on a supported platform a
+        # fixture-setup os.symlink error RAISES and fails the harness rather than silently skipping (codex-8 #3).
         root10 = build_store(strays={".working/real.md": "r"},
                              product={"legacy/keep.md": "k", "live.md": "L"},
                              manifest_extra='[unmanaged]\npaths = ["legacy"]')
-        try:
+        if symlink_supported():
             os.symlink(str(root10 / ".working" / "toml" / "manifest.toml"),
                        str(root10 / "legacy" / "link.md"))
-            g_sym_ok = True
-        except OSError:
-            g_sym_ok = False   # platform without symlink support: skip this vector, not a failure
-        if g_sym_ok:
             r10 = ing.detect(root10, include=["live.md"])
             p10 = {row["source_path"] for row in r10.rows}
             expect("excluded-subtree-pruned-before-descent",
@@ -418,18 +464,30 @@ def _self_test():
         # discriminator (F2): a covered entry that is ITSELF a symlink (a declared-unmanaged SYMLINK) is
         # pruned BEFORE the exotic-entry refusal, never read and never refused (spec 14.2); the round-7 walk
         # refused it and blocked the whole detect with a spurious CANNOT-EVALUATE. A NON-covered exotic entry
-        # still fails closed. Reverting the pre-refusal prune makes `legacy` fail closed again.
+        # still fails closed. Reverting the pre-refusal prune makes `legacy` fail closed again. A fixture-setup
+        # os.symlink error fails the harness (codex-8 #3), never a silent skip.
         root10b = build_store(product={"live.md": "L"}, manifest_extra='[unmanaged]\npaths = ["legacy"]')
-        try:
+        if symlink_supported():
             os.symlink(str(root10b / ".working" / "toml" / "manifest.toml"), str(root10b / "legacy"))
-            g_csym_ok = True
-        except OSError:
-            g_csym_ok = False
-        if g_csym_ok:
             r10b = ing.detect(root10b, include=["live.md"])
             p10b = {row["source_path"] for row in r10b.rows}
             expect("covered-symlink-entry-pruned-not-refused",
                    r10b.verdict == ing.CLEAN and "live.md" in p10b and "legacy" not in p10b)
+        # discriminator (F-8.2): a PRESENT covered SYMLINK-TO-DIR is recorded as existing, so an --include
+        # BENEATH it is a CANNOT-EVALUATE at PARITY with the real-directory case, never a false no-match
+        # FINDING across the no-read boundary. Reverting F-8.2 makes the symlink case a false FINDING while the
+        # real-dir control stays CANNOT-EVALUATE.
+        root10c = build_store(product={"legacy_real/old.md": "o", "live.md": "L"},
+                              manifest_extra='[unmanaged]\npaths = ["legacy"]')
+        if symlink_supported():
+            os.symlink(str(root10c / "legacy_real"), str(root10c / "legacy"))
+            sb = ing.detect(root10c, include=["legacy/old.md"])
+            root10d = build_store(product={"legacy/old.md": "o", "live.md": "L"},
+                                  manifest_extra='[unmanaged]\npaths = ["legacy"]')
+            rbd = ing.detect(root10d, include=["legacy/old.md"])   # real covered dir control
+            expect("covered-symlink-beneath-cannot-evaluate-parity",
+                   sb.verdict == ing.CANNOT_EVALUATE and any("legacy" in f for f in sb.findings)
+                   and rbd.verdict == ing.CANNOT_EVALUATE and sb.verdict == rbd.verdict)
         # discriminator (F2): validate_worksheet rejects a source_path the CONTAINED READER
         # (_journal._check_rel) rejects (a control char slips past _is_contained_relpath), with an HONESTLY
         # recomputed digest isolating the reader check; dropping it turns this GREEN.
@@ -467,14 +525,18 @@ def _self_test():
           "the store-root `.aiqt` / `.git` control / VCS trees derived from the import layer's own drop-set "
           "authority (drift-checked against the import constants), applied to declared scope only so a store "
           "nested under the product's own `.working/` cannot suppress a store stray, and RE-ANCHORED at the "
-          "resolved store root for declared scope on a relocated store (both unmanaged + target entry types, "
-          "suppression + unmanaged-read directions) while a PUBLIC deliverable target stays product-relative; "
-          "the no-match derivation is THREE-VALUED (an ABSENT covered path and a read-space no-match are "
-          "findings, a pattern that could match within a PRESENT covered subtree detection never reads is "
-          "CANNOT-EVALUATE, never a false clean or a false no-match); a covered DIRECTORY, and a covered entry "
-          "that is ITSELF a symlink, are pruned before "
-          "descent / refusal so an unreadable / exotic entry inside or as an excluded entry never blocks "
-          "detection; a CLEAN detection's worksheet always validates; the engine module self-test is green)")
+          "resolved store root for declared scope on a relocated store (the [unmanaged] entries, suppression "
+          "+ unmanaged-read directions) while a PUBLIC deliverable target stays product-relative; the view / "
+          "deliverable covered set MIRRORS the checker authority so a rogue view NAME cannot launder a store "
+          "path, a REBIND covers the spec destination not the raw target, and a non-public deliverable target "
+          "is a detectable stray (ingest and C-CONTAINMENT agree; F-8.1); the no-match derivation is "
+          "THREE-VALUED (an ABSENT covered path and a read-space no-match are findings, a pattern that could "
+          "match within a PRESENT covered subtree detection never reads is CANNOT-EVALUATE, never a false "
+          "clean or a false no-match); a covered DIRECTORY, and a covered entry that is ITSELF a symlink, are "
+          "pruned before descent / refusal so an unreadable / exotic entry inside or as an excluded entry "
+          "never blocks detection, with a present covered symlink-to-dir yielding a CANNOT-EVALUATE beneath "
+          "it at parity with the real-dir case (F-8.2); a CLEAN detection's worksheet always validates; the "
+          "engine module self-test is green)")
     return EXIT_OK
 
 
