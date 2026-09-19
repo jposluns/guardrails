@@ -84,6 +84,8 @@ run_gate "opf-upgrade-selftest" python3 -I -B opf/tools/check_opf_upgrade.py --s
 run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
 run_gate "opf-import-selftest" python3 -I -B opf/tools/check_opf_import.py --self-test
 run_gate "opf-import" python3 -I -B opf/tools/check_opf_import.py
+run_gate "opf-ingest-selftest" python3 -I -B opf/tools/check_opf_ingest.py --self-test
+run_gate "opf-ingest" python3 -I -B opf/tools/check_opf_ingest.py
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-standalone-closure" python3 -I -B tools/check_opf_standalone_closure.py
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py

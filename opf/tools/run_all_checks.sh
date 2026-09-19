@@ -28,6 +28,7 @@ run_gate "opf-doctor-selftest"         python3 -I -B "$here/check_opf_doctor.py"
 run_gate "opf-init-selftest"           python3 -I -B "$here/check_opf_init.py" --self-test
 run_gate "opf-upgrade-selftest"        python3 -I -B "$here/check_opf_upgrade.py" --self-test
 run_gate "opf-import-selftest"         python3 -I -B "$here/check_opf_import.py" --self-test
+run_gate "opf-ingest-selftest"         python3 -I -B "$here/check_opf_ingest.py" --self-test
 run_gate "commonmark-headings-selftest" python3 -I -B "$here/selftest_commonmark_headings.py"
 run_gate "commonmark-conformance"      python3 -I -B "$here/selftest_commonmark_conformance.py"
 

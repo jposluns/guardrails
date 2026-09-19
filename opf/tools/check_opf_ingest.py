@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""OPF root-ingest detection gate (OPF-MIGRATE MIG-PR1): structural + invariant validation of the
+read-only detection engine and its disposition worksheet.
+
+A thin gate in the check_opf_*.py family (deliberately NOT gen_*.py: root-ingest targets an adopter --root
+with no fixed repo-relative target, so it gates as a --self-test leg over synthetic stores PLUS a
+NOT-APPLICABLE live leg, exactly the posture opf.py / check_opf_doctor.py / check_opf_import.py document).
+It owns an explicit registry of checks over the worksheet `_opf_ingest.detect` produces AND over the
+detector's coverage, and it fails CLOSED on any fixture or artefact it cannot read (an unreadable input is
+a failure, never nothing-to-check). Verdicts are judged by the gate's own termination status, never grepped.
+
+Checks (each with a fail-without-it discriminator exercised by --self-test):
+  - worksheet-structure  : detect over a clean synthetic store returns verdict 0 with a worksheet whose
+                           closed top-level keyset (the opf-ingest-dispositions-v1 format token, the schema
+                           marker, the row array, and the recorded worksheet_digest) holds.
+  - worksheet-schema-vocab : every row is the closed keyset and its disposition / origin / scope are the
+                           closed vocabularies exactly; a vocab or keyset violation is a finding.
+  - worksheet-digest     : the recorded worksheet_digest recomputes over the row set (determinism /
+                           integrity anchor); a mutated payload fails the recompute.
+  - detection-completeness : an INDEPENDENT re-enumeration of the store `.working/` scope confirms every
+                           non-OPF-managed file appears in the worksheet exactly once; a planted store-scope
+                           file the worksheet omits FAILS this check (the load-bearing coverage guarantee).
+  - detect-writes-nothing : the synthetic store is byte-identical after detect (SECI-preview-has-no-side-
+                           effects); detect stages no run and mutates nothing at all.
+  - managed-path-exclusion : an OPF-managed file (the manifest, a control ledger, a file under
+                           `.working/imports/`, an already-declared `[unmanaged]` path) does NOT appear as a
+                           detected row (this catches over-detection, which completeness alone does not).
+  - module-self-test     : _opf_ingest.self_test() == 0 (the engine's own unit invariants run wherever this
+                           CI-registered gate runs).
+
+Disclosed coverage limits (part of the gate, not a footnote, per disclose-guard-residuals): the SEMANTIC
+correctness of a disposition (which files should be kept, migrated, or moved) is a human decision, gate-
+blind; there is no acceptance / actor authenticity in PR1 (review is MIG-PR4); and the importer layer, plan
+composition, apply promotion, and verb wiring that later slices add are out of this gate's scope. The gate
+asserts representative synthetic-store scenarios with exact verdicts, not detect's whole input space.
+
+This repository is not an OPFiles adopter (it has no store), and root-ingest wires no verb in this slice,
+so there is no live detection to run: the live leg prints NOT APPLICABLE and exits 0, spec-honest like the
+doctor / import legs; the assurance rides the --self-test leg over synthetic stores. Offline, stdlib only,
+fail-closed, launched isolated (-I -B). The tempdir is removed in a finally (test-hermeticity).
+"""
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the self-test's sibling imports below
+
+EXIT_OK = 0
+EXIT_FINDING = 1
+EXIT_ERROR = 2
+
+
+def _self_test():
+    """Build synthetic stores and assert every registered check PASSes on a clean detection and FINDINGs on
+    its own discriminator, plus delegate to the engine's own unit suite. Returns 0 clean, 1 on a failing
+    assertion, 2 on a harness error (a fixture could not be built)."""
+    import shutil
+    import tempfile
+
+    import _opf_ingest as ing
+    import _opf_store
+
+    failures = []
+
+    def expect(label, cond):
+        if not cond:
+            failures.append(label)
+
+    def manifest_text(extra_top=""):
+        lines = [
+            "[opf]", 'standard = "opf"',
+            'spec_version = "{}"'.format(_opf_store.SUPPORTED_SPEC_VERSION),
+            'layout = "inline"', 'posture = "required"', 'import_status = "none"',
+            "", "[store]", 'sync_target = ""',
+            "", "[modules]", "governance = true",
+            "", "[types.backlog_item]", 'namespace = "BI"',
+            "", "[vendors]", 'registered = []',
+        ]
+        if extra_top:
+            lines += ["", extra_top]
+        return "\n".join(lines) + "\n"
+
+    base = Path(tempfile.mkdtemp(prefix="opf-ingest-gate-selftest-")).resolve()
+    counter = [0]
+
+    def build_store(strays=None, manifest_extra=""):
+        counter[0] += 1
+        root = base / "case-{:02d}".format(counter[0])
+        machine = root / ".working" / "toml"
+        machine.mkdir(parents=True)
+        (machine / "manifest.toml").write_text(manifest_text(manifest_extra), encoding="utf-8")
+        (machine / "counters.toml").write_text(
+            "schema = 1\n\n[counters]\nBI = 0\nLF = 0\nWL = 0\n", encoding="utf-8")
+        for rel, text in (strays or {}).items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        return root
+
+    def independent_store_files(root):
+        """An INDEPENDENT re-enumeration of the store `.working/` scope (os.walk, NOT detect's contained
+        walk), excluding the machine subdir subtree and the reserved `.working/imports/` tree, returning the
+        set of store-relative regular-file paths. The detection-completeness check rests on this being
+        derived without the detector."""
+        working = root / ".working"
+        machine = working / "toml"
+        imports = working / "imports"
+        out = set()
+        for dirpath, _dirs, names in os.walk(str(working)):
+            dp = Path(dirpath)
+            if dp == machine or machine in dp.parents or dp == imports or imports in dp.parents:
+                continue
+            for name in names:
+                out.add(str((dp / name).relative_to(root)))
+        return out
+
+    def snapshot(root):
+        out = {}
+        for dirpath, _dirs, names in os.walk(str(root)):
+            for name in names:
+                fp = Path(dirpath) / name
+                out[str(fp.relative_to(root))] = fp.read_bytes()
+        return out
+
+    try:
+        # --- worksheet-structure -------------------------------------------------------------------
+        root = build_store(strays={".working/stray.md": "one", ".working/sub/deep.txt": "two"})
+        r = ing.detect(root)
+        ws = r.worksheet
+        expect("worksheet-structure",
+               r.verdict == ing.CLEAN
+               and set(ws) == {"format", "schema", "row", "worksheet_digest"}
+               and ws["format"] == ing.WORKSHEET_FORMAT and ws["schema"] == ing.SCHEMA
+               and isinstance(ws["row"], list) and ws["worksheet_digest"])
+        # discriminator: a worksheet stripped of its format token fails validation.
+        broken = dict(ws)
+        broken["format"] = "wrong"
+        expect("worksheet-structure-flip", ing.validate_worksheet(broken) != [])
+
+        # --- worksheet-schema-vocab ----------------------------------------------------------------
+        expect("worksheet-schema-vocab-clean", ing.validate_worksheet(ws) == [])
+        bad_vocab = {"format": ws["format"], "schema": ws["schema"],
+                     "row": [dict(ws["row"][0], origin="not-an-origin")],
+                     "worksheet_digest": ws["worksheet_digest"]}
+        expect("worksheet-schema-vocab-flip", ing.validate_worksheet(bad_vocab) != [])
+
+        # --- worksheet-digest ----------------------------------------------------------------------
+        drifted = dict(ws)
+        drifted["worksheet_digest"] = "sha256:" + "0" * 64
+        expect("worksheet-digest-clean", ing.validate_worksheet(ws) == [])
+        expect("worksheet-digest-flip", ing.validate_worksheet(drifted) != [])
+
+        # --- detection-completeness (LOAD-BEARING) -------------------------------------------------
+        detected_store = {row["source_path"] for row in r.rows if row["scope"] == "store"}
+        independent = independent_store_files(root)
+        expect("detection-completeness-clean", detected_store == independent and independent)
+        # discriminator: a worksheet that OMITS a planted store-scope file no longer covers the
+        # independent enumeration (an omitted file is caught, not silently absorbed).
+        omitted = {p for p in detected_store if p != ".working/stray.md"}
+        expect("detection-completeness-flip", omitted != independent)
+
+        # --- detect-writes-nothing -----------------------------------------------------------------
+        root2 = build_store(strays={".working/x.md": "x"})
+        before = snapshot(root2)
+        ing.detect(root2)
+        expect("detect-writes-nothing", snapshot(root2) == before)
+
+        # --- managed-path-exclusion ----------------------------------------------------------------
+        root3 = build_store(
+            strays={".working/imports/imp-x/frames.log": "run", ".working/declared.md": "kept",
+                    ".working/real.md": "found"},
+            manifest_extra='[unmanaged]\npaths = [".working/declared.md"]')
+        r3 = ing.detect(root3)
+        paths3 = {row["source_path"] for row in r3.rows}
+        expect("managed-path-exclusion",
+               r3.verdict == ing.CLEAN and ".working/real.md" in paths3
+               and ".working/toml/manifest.toml" not in paths3
+               and ".working/toml/counters.toml" not in paths3
+               and ".working/imports/imp-x/frames.log" not in paths3
+               and ".working/declared.md" not in paths3)
+
+        # --- module-self-test delegation -----------------------------------------------------------
+        expect("module-self-test", ing.self_test() == 0)
+    except OSError as exc:
+        print("check_opf_ingest self-test: harness error: {}".format(exc), file=sys.stderr)
+        shutil.rmtree(str(base), ignore_errors=True)
+        return EXIT_ERROR
+    finally:
+        shutil.rmtree(str(base), ignore_errors=True)
+
+    if failures:
+        for f in failures:
+            print("check_opf_ingest self-test: FAIL: {}".format(f), file=sys.stderr)
+        return EXIT_FINDING
+    print("check_opf_ingest self-test: PASS (worksheet-structure/schema-vocab/digest each PASS on a clean "
+          "detection and FINDING on its discriminator; detection-completeness matches an independent "
+          "re-enumeration and catches an omitted store-scope file; detect-writes-nothing; managed-path "
+          "exclusion catches over-detection; the engine module self-test is green)")
+    return EXIT_OK
+
+
+def main(argv=None):
+    # Final class-width backstop: any residual, unforeseen error routes to a located cannot-evaluate (exit
+    # 2), never a false-0 or an uncaught exit-1 escape. KeyboardInterrupt/SystemExit stay uncaught.
+    try:
+        args = list(sys.argv[1:] if argv is None else argv)
+        if args == ["--self-test"]:
+            return _self_test()
+        if args:
+            print("check_opf_ingest: unexpected argument(s): {}".format(" ".join(args)), file=sys.stderr)
+            return EXIT_ERROR
+        # Live leg: root-ingest wires no verb in this slice (MIG-PR1) and this repository is not an OPFiles
+        # adopter, so there is no store to detect live. NOT APPLICABLE, exit 0 (the doctor/import non-adopter
+        # posture); the assurance rides the --self-test leg over synthetic stores.
+        print("check_opf_ingest: NOT APPLICABLE (this repository is not an OPFiles adopter and root-ingest "
+              "wires no verb in this slice, so there is no live detection to run; the --self-test leg "
+              "carries the assurance)")
+        return EXIT_OK
+    except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false-0 or uncaught exit-1
+        print("check_opf_ingest: cannot evaluate: unexpected error in the detection gate ({!r}); failing "
+              "closed to exit 2".format(exc), file=sys.stderr)
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":
+    sys.exit(main())
