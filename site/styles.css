@@ -516,6 +516,15 @@ section{padding:clamp(var(--sp-8),5vw,var(--sp-24)) 0}
 .benefits{display:grid; grid-template-columns:repeat(3,1fr); gap:var(--sp-4)}
 @media (max-width:900px){ .benefits{grid-template-columns:repeat(2,1fr)} }
 @media (max-width:640px){ .benefits{grid-template-columns:1fr} }
+/* balanced variants: the shared 3-col default strands a lonely single card when the count mod 3 is 1
+   (4 cards read 3+1, 7 read 3+3+1). A scoped modifier picks a column count whose last row keeps at
+   least two cards, without changing the 3-col default other grids depend on. */
+.benefits.two-col{grid-template-columns:repeat(2,1fr)}   /* 4 cards: 2 + 2 */
+.benefits.four-col{grid-template-columns:repeat(4,1fr)}  /* 7 cards: 4 + 3 */
+@media (max-width:900px){ .benefits.four-col{grid-template-columns:repeat(2,1fr)} }
+@media (max-width:640px){ .benefits.two-col, .benefits.four-col{grid-template-columns:1fr} }
+/* a block following a .benefits grid (e.g. the profile-example .codecard) clears the cards above it */
+.benefits + .codecard{margin-top:var(--sp-12)}
 .benefit{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   padding:var(--sp-6); box-shadow:var(--shadow-1)}
 .benefit-ico{display:grid; place-items:center; width:44px; height:44px; border-radius:var(--radius-sm);
