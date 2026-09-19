@@ -254,6 +254,21 @@ def _self_test():
         expect("unmanaged-directory-covers-subtree",
                r5b.verdict == ing.CLEAN and ".working/real.md" in paths5b and "docs/keep.md" in paths5b
                and ".working/legacy-dir/kept.md" not in paths5b and "docs/legacy/old.md" not in paths5b)
+        # discriminator (F2): separate EXISTENCE from exclusion. An --include naming an ABSENT
+        # declared-unmanaged path is STILL a no-match FINDING (a declared input must resolve), while one
+        # under a PRESENT declared-unmanaged directory stays CLEAN (a present-but-excluded subtree, unread).
+        # Both share a covered [unmanaged] path; only filesystem existence distinguishes them, so a round-5
+        # covered==exists conflation (which let the absent case pass CLEAN) fails this discriminator.
+        root5c = build_store(product={"live.md": "L"},
+                             manifest_extra='[unmanaged]\npaths = ["qa-absent-legacy"]')
+        r5c = ing.detect(root5c, include=["qa-absent-legacy/*.md"])
+        root5d = build_store(product={"present-legacy/old.md": "o", "live.md": "L"},
+                             manifest_extra='[unmanaged]\npaths = ["present-legacy"]')
+        r5d = ing.detect(root5d, include=["present-legacy/*.md"])
+        d5d = {row["source_path"] for row in r5d.rows if row["scope"] == "declared"}
+        expect("declared-covered-include-existence",
+               r5c.verdict == ing.FINDING and r5c.rows == []
+               and r5d.verdict == ing.CLEAN and "present-legacy/old.md" not in d5d)
         # discriminator (round-2 F1): a RELOCATED store (`.opf.toml` -> `dir:ops`, so store_root at
         # `ops/.working/`) does not leak its own machine / imports / stray subtree into declared scope; the
         # exclusion is derived from the RESOLVED store location, so naming the relocated store scope via
@@ -276,6 +291,19 @@ def _self_test():
         decl7 = {row["source_path"] for row in r7.rows if row["scope"] == "declared"}
         expect("pointer-control-files-exclusion",
                r7.verdict == ing.CLEAN and decl7 == {"readme.md"})
+        # discriminator (F1: bind each exclusion to its correct resolved root): a store relocated UNDER the
+        # product's own `.working/` (`dir:.working/ops`) resolves (store_root at `.working/ops`), so its
+        # PRODUCT-relative store-root control prefix is `.working/ops/.aiqt`. That prefix must NOT enter the
+        # STORE-scope covered set, or a store stray whose STORE-relative path is `.working/ops/.aiqt/foo.md`
+        # collides with it and is silently suppressed. The fix returns the control prefixes SEPARATELY
+        # (declared scope only); a plain store stray alongside is the live-sibling flip.
+        root7b = build_relocated(subdir=".working/ops",
+                                 strays={".working/ops/.aiqt/foo.md": "collide", ".working/plain.md": "p"})
+        r7b = ing.detect(root7b)
+        store7b = {row["source_path"] for row in r7b.rows if row["scope"] == "store"}
+        expect("nested-store-control-prefix-no-false-suppression",
+               r7b.verdict == ing.CLEAN and ".working/plain.md" in store7b
+               and ".working/ops/.aiqt/foo.md" in store7b)
         # discriminator (round-2 F2): a detected path the worksheet validator would reject as non-contained
         # (a `:` in its second character) is a LOCATED CANNOT-EVALUATE, never a CLEAN worksheet that then
         # fails validate_worksheet, so a CLEAN detection's worksheet ALWAYS validates.
@@ -362,7 +390,10 @@ def _self_test():
           "--include names, a non-canonical managed spelling, a declared-unmanaged DIRECTORY's whole subtree "
           "unread, a relocated (`dir:`) store's whole resolved subtree, the store pointer control files, and "
           "the store-root `.aiqt` / `.git` control / VCS trees derived from the import layer's own drop-set "
-          "authority (drift-checked against the import constants); a covered subtree is pruned before "
+          "authority (drift-checked against the import constants), applied to declared scope only so a store "
+          "nested under the product's own `.working/` cannot suppress a store stray; an --include under an "
+          "ABSENT covered declared path is still a no-match finding while a PRESENT one is clean; a covered "
+          "subtree is pruned before "
           "descent so an unreadable / exotic entry inside an excluded tree never blocks detection; a CLEAN "
           "detection's worksheet always validates; the engine module self-test is green)")
     return EXIT_OK

@@ -172,7 +172,7 @@ def _row(source_path, scope, sha256, size):
 
 # --- contained no-follow enumeration (mirrors _opf_check._list_contained / _opf_store._immediate_subdirs) -
 
-def _walk_regular_files(dfd, prefix, prune, out, budget):
+def _walk_regular_files(dfd, prefix, prune, out, budget, pruned_dirs=None):
     """Recursively collect the regular-file paths beneath the OPEN directory fd `dfd`, no-follow. `prefix`
     is the POSIX relpath of `dfd` from the walk root ("" for the root). A subdirectory whose relpath is in
     `prune` is skipped entirely and NEVER ENTERED, which (because the walk reaches every directory at its own
@@ -186,7 +186,10 @@ def _walk_regular_files(dfd, prefix, prune, out, budget):
     naming the entry) on a symlink, an exotic entry (neither a directory nor a regular file), or an I/O
     error, so a swapped or exotic entry is never silently skipped (check-fails-closed-on-unreadable,
     SECI-symlink-resolution). Bounded by `budget` (a one-element mutable counter) so a runaway or hostile
-    deep tree is refused rather than enumerated unboundedly (SECA resource-bounds)."""
+    deep tree is refused rather than enumerated unboundedly (SECA resource-bounds). When `pruned_dirs` is
+    a list, every pruned subdirectory's relpath is appended to it (the covered directories that ACTUALLY
+    EXIST, encountered and skipped before descent), so a caller can tell an existing-but-excluded subtree
+    from an absent one without entering it (F2: existence is separate from exclusion)."""
     try:
         entries = sorted(os.listdir(dfd))
     except OSError as exc:
@@ -210,13 +213,15 @@ def _walk_regular_files(dfd, prefix, prune, out, budget):
             raise _cannot("cannot stat {!r} ({})".format(rel, exc))
         if stat.S_ISDIR(est.st_mode):
             if rel in prune:
+                if pruned_dirs is not None:
+                    pruned_dirs.append(rel)
                 continue
             try:
                 sub = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
             except OSError as exc:
                 raise _cannot("cannot open directory {!r} no-follow ({})".format(rel, exc))
             try:
-                _walk_regular_files(sub, rel, prune, out, budget)
+                _walk_regular_files(sub, rel, prune, out, budget, pruned_dirs)
             finally:
                 os.close(sub)
         elif stat.S_ISREG(est.st_mode):
@@ -285,10 +290,12 @@ def _store_root_control_prefixes(resolution):
     never reaches it). Anchored at the RESOLVED store root EXACTLY as `_store_working_under_product` anchors
     `.working`, so a relocated store's control trees are excluded wherever they resolve and ONLY the
     store-root `.aiqt` / `.git` (never a same-named dir nested deeper, e.g. `.working/.aiqt`) is covered,
-    mirroring `_opf_import._assemble_preview`'s store-root-only drop. These join the `covered` set so the
-    declared scope never reads an apply-promotion ops / journal / archive tree or the VCS dir (spec 14.2
-    never reads a managed path); because the `.aiqt` subtree is a prefix, every tree that nests under it is
-    covered by construction (see `_STORE_ROOT_CONTROL_DIRS`)."""
+    mirroring `_opf_import._assemble_preview`'s store-root-only drop. `_managed_paths` returns these as its
+    separate `control` set, joined to the covered set of the DECLARED (product-root) scope ONLY (never store
+    scope, whose STORE-relative paths a `.working`-nested store's product-relative prefix could otherwise
+    collide with; see `_managed_paths`), so the declared scope never reads an apply-promotion ops / journal /
+    archive tree or the VCS dir (spec 14.2 never reads a managed path); because the `.aiqt` subtree is a
+    prefix, every tree that nests under it is covered by construction (see `_STORE_ROOT_CONTROL_DIRS`)."""
     try:
         rel = Path(os.path.abspath(resolution.store_root)).relative_to(
             Path(os.path.abspath(resolution.product_root)))
@@ -300,7 +307,7 @@ def _store_root_control_prefixes(resolution):
 
 def _managed_paths(resolution, manifest_data):
     """The CLOSED "OPF-managed" set, derived FROM the resolved store authorities rather than a parallel
-    hand-copied list (guard-input-soundness). Returns (prune_prefixes, covered):
+    hand-copied list (guard-input-soundness). Returns (prune_prefixes, covered, control):
       - prune_prefixes: store-relative directory subtrees never detected under `.working/`: the machine
         store subtree (`resolution.machine_rel`, which contains the manifest, the typed indexes, and the
         control ledgers) and the reserved `.working/imports/` run tree (`_opf_import.IMPORTS_REL`).
@@ -314,11 +321,17 @@ def _managed_paths(resolution, manifest_data):
         control files, never ingestible). Because membership is by containment, a declared-unmanaged
         DIRECTORY covers its whole subtree so tooling never reads an unmanaged path (spec 14.2), and a
         view / deliverable target is defended the same way should one ever be a directory (single-file
-        today, but subtree-prefix membership is the correct rule, low-cost, and closes the class). It also
-        carries the store-root control / VCS subtrees (`.aiqt` / `.git`, product-relative via
-        `_store_root_control_prefixes`), mirroring `_opf_import._assemble_preview`'s store-root drop set so
-        the whole apply / migration control umbrella and the VCS dir are excluded by SUBTREE containment,
-        derived from that shared authority rather than a parallel hand-list (guard-input-soundness)."""
+        today, but subtree-prefix membership is the correct rule, low-cost, and closes the class).
+      - control: the store-root control / VCS subtrees (`.aiqt` / `.git`, product-relative via
+        `_store_root_control_prefixes`), mirroring `_opf_import._assemble_preview`'s store-root drop set,
+        derived from that shared authority rather than a parallel hand-list (guard-input-soundness).
+        Returned SEPARATELY from `covered` and applied to the DECLARED (product-root) scope ONLY, never to
+        store scope: store scope walks the store's own `.working/` and grades STORE-relative paths, while
+        the control trees sit at the store ROOT (siblings of `.working/`, never under it), so excluding them
+        there is unnecessary AND, for a store relocated UNDER the product's own `.working/` (`dir:.working/
+        ops`), a product-relative prefix such as `.working/ops/.aiqt` would collide with a store-relative
+        path and silently suppress a real store stray. Binding each exclusion to its correct resolved root
+        keeps the store-relative and product-relative namespaces from cross-contaminating (F1)."""
     prune = {resolution.machine_rel, _opf_import.IMPORTS_REL}
     covered = set()
     for section in ("views", "deliverables"):
@@ -343,9 +356,11 @@ def _managed_paths(resolution, manifest_data):
     # product-root scope never enumerates or reads an apply-promotion ops / journal / archive tree or the
     # VCS dir. The whole `.aiqt` subtree is a prefix, so every tree nesting under it (IMPORT_OPS_REL,
     # IMPORT_ARCHIVE_REL, migrate's `.aiqt/migration/journal`) is covered BY CONSTRUCTION, not by a parallel
-    # hand-list that keeps missing an authority (the F-MAJOR premise shift; guard-input-soundness).
-    covered.update(_store_root_control_prefixes(resolution))
-    return prune, covered
+    # hand-list that keeps missing an authority (the F-MAJOR premise shift; guard-input-soundness). They are
+    # PRODUCT-relative, so they are returned SEPARATELY and joined ONLY to the DECLARED-scope covered set,
+    # never store scope, so a `.working`-nested store's prefix cannot collide with a store-relative path (F1).
+    control = set(_store_root_control_prefixes(resolution))
+    return prune, covered, control
 
 
 # --- detection ---------------------------------------------------------------------------------------
@@ -432,17 +447,30 @@ def _detect_declared_scope(product_root, include, covered, store_working_rel):
     fd = _opf_store._open_root_fd(Path(os.path.abspath(product_root)))
     try:
         files = []
+        pruned_dirs = []
         # Prune the store `.working/` scope AND every covered managed subtree BEFORE descent (F1:
         # traverse-before-exclude), so a declared-unmanaged directory or the store-root `.aiqt` / `.git`
         # control trees are never entered or read even when an entry inside them is unreadable / exotic.
-        _walk_regular_files(fd, "", set(scope_prefixes) | covered, files, [0])
+        # `pruned_dirs` collects every covered directory that ACTUALLY EXISTS (was encountered and skipped),
+        # so the no-match check can tell an existing-but-excluded subtree from an absent one WITHOUT
+        # entering it (F2: separate existence from exclusion).
+        _walk_regular_files(fd, "", set(scope_prefixes) | covered, files, [0], pruned_dirs)
+        # The covered directories that EXIST on the real filesystem (pruned before descent). A pattern that
+        # points at, or under, one resolves to a present-but-excluded subtree; a covered path that does NOT
+        # exist leaves no entry here, so a pattern under it stays an (unresolved) no-match finding.
+        existing_covered = {d for d in pruned_dirs if d in covered}
         matched = set()
         for pat in include:
             hits = [f for f in files if fnmatch.fnmatchcase(f, pat)]
-            # A pattern that names ONLY a covered managed path is NOT a no-match: its target is excluded
-            # (never read), not absent, so `_under_any(pat, covered)` keeps it from a spurious finding now
-            # that the covered subtree is pruned from `files` (it was formerly walked then result-excluded).
-            if not hits and not _under_any(pat, covered):
+            # A pattern with no non-excluded hit is a no-match FINDING (a declared input must resolve),
+            # SEPARATING existence from exclusion (F2): it stays a finding UNLESS it points at or under a
+            # covered path that ACTUALLY EXISTS (`existing_covered`), which resolves to a present-but-excluded
+            # subtree (never read), not an absent input. A covered path that does NOT exist is still a
+            # no-match finding, so an `--include` naming an ABSENT declared-unmanaged path is caught even
+            # though the path is covered (round-5 conflated covered with existing, letting an absent covered
+            # path bypass the finding). A covered FILE that exists is walked into `files`, so a pattern
+            # naming one already gets a hit and never reaches this branch.
+            if not hits and not _under_any(pat, existing_covered):
                 raise _finding("--include pattern {!r} matched no product-root file (a declared input must "
                                "resolve; fail-closed)".format(pat))
             matched.update(hits)
@@ -478,12 +506,14 @@ def _detect_rows(product_root, resolution, include):
         if reval.status != _opf_store.VALID:
             raise _cannot("store manifest {} is not VALID on re-read ({}: {}); fail-closed".format(
                 manifest_rel, reval.status, "; ".join(reval.findings)))
-        prune, covered = _managed_paths(resolution, manifest_data)
+        prune, covered, control = _managed_paths(resolution, manifest_data)
         rows = _detect_store_scope(store_fd, prune, covered)
     finally:
         os.close(store_fd)
     if include:
-        rows += _detect_declared_scope(product_root, include, covered,
+        # The store-root control / VCS prefixes are PRODUCT-relative, so they join the covered set for the
+        # DECLARED product-root scope ONLY (never store scope; see `_managed_paths` for why).
+        rows += _detect_declared_scope(product_root, include, covered | control,
                                        _store_working_under_product(resolution))
     rows.sort(key=lambda r: (r["source_path"].encode("utf-8"), r["scope"]))
     return rows
@@ -820,6 +850,23 @@ def self_test():
               and ".working/legacy-dir/sub/deep.md" not in sub_paths
               and "docs/legacy/old.md" not in sub_paths)
 
+        # 8b-existence (F2: separate EXISTENCE from exclusion). Round 5 conflated "covered" with "exists": an
+        #     --include under a covered path bypassed the no-match FINDING regardless of whether the path
+        #     existed. An --include naming an ABSENT declared-unmanaged path must STILL be a no-match FINDING
+        #     (a declared input must resolve), while one under a PRESENT declared-unmanaged directory stays
+        #     CLEAN (a present-but-excluded subtree, never read). Both cases share a covered [unmanaged] path;
+        #     only filesystem existence distinguishes them, so this is the fail-without-the-fix discriminator.
+        root, _m = build_store(product={"live.md": "L"},
+                               manifest_extra='[unmanaged]\npaths = ["qa-absent-legacy"]')
+        absent = detect(root, include=["qa-absent-legacy/*.md"])
+        check("declared-absent-covered-include-is-finding", absent.verdict == FINDING and absent.rows == [])
+        root, _m = build_store(product={"present-legacy/old.md": "o", "live.md": "L"},
+                               manifest_extra='[unmanaged]\npaths = ["present-legacy"]')
+        present = detect(root, include=["present-legacy/*.md"])
+        present_decl = {row["source_path"] for row in present.rows if row["scope"] == "declared"}
+        check("declared-present-covered-include-clean",
+              present.verdict == CLEAN and "present-legacy/old.md" not in present_decl)
+
         # 8b-control (F-MAJOR premise shift). The store-root control / VCS subtrees (`.aiqt/import`,
         #     `.aiqt/import/journal`, `.aiqt/import-archive`, and `.git`) are OPF-managed / VCS content, NOT
         #     ingestible: a broad `--include=["*"]` product-root walk must neither emit them as declared rows
@@ -898,6 +945,22 @@ def self_test():
         check("relocated-product-include-ok",
               f1ok.verdict == CLEAN and f1decl == ["readme.md"]
               and not any(".working" in p for p in f1decl))
+
+        # 8c-nested (F1: bind each exclusion to its correct resolved root). A store relocated UNDER the
+        #     product's OWN `.working/` (`dir:.working/ops`) resolves (store_root at `.working/ops`), so its
+        #     PRODUCT-relative store-root control prefix is `.working/ops/.aiqt`. That prefix must NOT enter
+        #     the STORE-scope covered set: store scope grades STORE-relative paths, and a store stray whose
+        #     store-relative path is `.working/ops/.aiqt/foo.md` would then COLLIDE with the product-relative
+        #     prefix and be silently suppressed. The fix returns the control prefixes SEPARATELY (declared
+        #     scope only), so the colliding store stray is detected; a plain store stray alongside is the
+        #     live-sibling flip. Without the fix the colliding stray is dropped (fail-without-the-fix).
+        reloc = build_relocated(subdir=".working/ops",
+                                strays={".working/ops/.aiqt/foo.md": "collide", ".working/plain.md": "p"})
+        nested = detect(reloc)
+        nested_store = {row["source_path"] for row in nested.rows if row["scope"] == "store"}
+        check("nested-store-control-prefix-no-false-suppression",
+              nested.verdict == CLEAN and ".working/plain.md" in nested_store
+              and ".working/ops/.aiqt/foo.md" in nested_store)
 
         # 8d. store pointer control files excluded from declared scope (round-2 C1): `.opf.toml` /
         #     `.opf.local.toml` are OPF control files at the product root, managed wherever they fall; an
@@ -1040,8 +1103,11 @@ def self_test():
           "construction, drift-checked against the import constants), PRUNES a covered subtree before "
           "descent so an unreadable / exotic entry inside an excluded tree never blocks detection, derives "
           "the declared-scope exclusion from the RESOLVED store location so a relocated (`dir:`) store's "
-          "own subtree never leaks as declared, honours declared-scope --include (glob-no-match/escape/"
-          "store-scope each a finding), is deterministic + writes nothing, fails closed on an unresolved "
+          "own subtree never leaks as declared and its product-relative store-root control prefix never "
+          "suppresses a store stray (even a store nested under the product's own `.working/`), honours "
+          "declared-scope --include (glob-no-match/escape/store-scope each a finding, an absent covered "
+          "declared path still a no-match finding while a present covered one is clean), is deterministic "
+          "+ writes nothing, fails closed on an unresolved "
           "store, a symlink, a non-UTF-8 name, and a non-contained detected path (so a CLEAN worksheet "
           "always validates), the worksheet validates and catches vocab/digest/keyset/schema-type "
           "mutations, a source_path the contained reader rejects, and a non-string top-level key, and "
