@@ -161,17 +161,25 @@ def _self_test():
                and set(ws) == {"format", "schema", "row", "worksheet_digest"}
                and ws["format"] == ing.WORKSHEET_FORMAT and ws["schema"] == ing.SCHEMA
                and isinstance(ws["row"], list) and ws["worksheet_digest"])
-        # discriminator: a worksheet stripped of its format token fails validation.
-        broken = dict(ws)
-        broken["format"] = "wrong"
-        expect("worksheet-structure-flip", ing.validate_worksheet(broken) != [])
+        # discriminator: a worksheet with a wrong format token fails validation. It carries an HONESTLY
+        # recomputed digest over its own mutated payload (F2: isolate the format check), so the finding is
+        # the format mismatch itself, not a masking digest-recompute mismatch; dropping the format check
+        # would turn this discriminator GREEN.
+        broken_payload = {"format": "wrong", "schema": ws["schema"], "row": ws["row"]}
+        broken_honest = "sha256:" + ing._opf_import._sha256_hex(ing._worksheet_bytes(broken_payload))
+        expect("worksheet-structure-flip",
+               ing.validate_worksheet(dict(broken_payload, worksheet_digest=broken_honest)) != [])
 
         # --- worksheet-schema-vocab ----------------------------------------------------------------
         expect("worksheet-schema-vocab-clean", ing.validate_worksheet(ws) == [])
-        bad_vocab = {"format": ws["format"], "schema": ws["schema"],
-                     "row": [dict(ws["row"][0], origin="not-an-origin")],
-                     "worksheet_digest": ws["worksheet_digest"]}
-        expect("worksheet-schema-vocab-flip", ing.validate_worksheet(bad_vocab) != [])
+        # an out-of-vocabulary origin is a finding. The discriminator carries an HONESTLY recomputed digest
+        # over its own mutated payload (F2: isolate the vocab check), so the finding is the origin violation
+        # itself, not a masking digest-recompute mismatch; dropping the origin check turns it GREEN.
+        vocab_payload = {"format": ws["format"], "schema": ws["schema"],
+                         "row": [dict(ws["row"][0], origin="not-an-origin")]}
+        vocab_honest = "sha256:" + ing._opf_import._sha256_hex(ing._worksheet_bytes(vocab_payload))
+        expect("worksheet-schema-vocab-flip",
+               ing.validate_worksheet(dict(vocab_payload, worksheet_digest=vocab_honest)) != [])
         # discriminator (F5): a bool/float schema that compares == the version (True == 1 == 1.0), with an
         # HONESTLY recomputed digest, is still rejected type-strictly; a bare `!= SCHEMA` comparison accepts it.
         sch_payload = {"format": ws["format"], "schema": True, "row": ws["row"]}
@@ -234,6 +242,18 @@ def _self_test():
         expect("non-canonical-managed-exclusion",
                r5.verdict == ing.CLEAN and ".working/real.md" in paths5
                and ".working/kept.md" not in paths5)
+        # discriminator (round-3 F1): a declared-unmanaged DIRECTORY covers its whole subtree by containment
+        # (matching _opf_check.managed_file / _under_any), so a file UNDER it is excluded (never read) in
+        # BOTH store and declared scope; an exact-match exclusion would emit (and read) each child.
+        root5b = build_store(
+            strays={".working/legacy-dir/kept.md": "k", ".working/real.md": "r"},
+            product={"docs/legacy/old.md": "o", "docs/keep.md": "K"},
+            manifest_extra='[unmanaged]\npaths = [".working/legacy-dir", "docs/legacy"]')
+        r5b = ing.detect(root5b, include=["docs/legacy/old.md", "docs/keep.md"])
+        paths5b = {row["source_path"] for row in r5b.rows}
+        expect("unmanaged-directory-covers-subtree",
+               r5b.verdict == ing.CLEAN and ".working/real.md" in paths5b and "docs/keep.md" in paths5b
+               and ".working/legacy-dir/kept.md" not in paths5b and "docs/legacy/old.md" not in paths5b)
         # discriminator (round-2 F1): a RELOCATED store (`.opf.toml` -> `dir:ops`, so store_root at
         # `ops/.working/`) does not leak its own machine / imports / stray subtree into declared scope; the
         # exclusion is derived from the RESOLVED store location, so naming the relocated store scope via
@@ -280,8 +300,9 @@ def _self_test():
     print("check_opf_ingest self-test: PASS (worksheet-structure/schema-vocab/digest each PASS on a clean "
           "detection and FINDING on its discriminator, including a type-strict schema flip; "
           "detection-completeness matches an independent re-enumeration and catches an omitted store-scope "
-          "file; detect-writes-nothing; managed-path exclusion catches over-detection, a managed path an "
-          "--include names, a non-canonical managed spelling, a relocated (`dir:`) store's whole resolved "
+          "file; detect-writes-nothing; managed-path exclusion (by subtree containment) catches "
+          "over-detection, a managed path an --include names, a non-canonical managed spelling, a "
+          "declared-unmanaged DIRECTORY's whole subtree unread, a relocated (`dir:`) store's whole resolved "
           "subtree, and the store pointer control files; a CLEAN detection's worksheet always validates; "
           "the engine module self-test is green)")
     return EXIT_OK

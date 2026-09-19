@@ -245,47 +245,67 @@ def _canonical_managed(p):
     return posixpath.normpath(p)
 
 
+def _under_any(p, prefixes):
+    """True when the canonical POSIX-relative path `p` EQUALS, or lies UNDER, any prefix in `prefixes`
+    (subtree containment). This is the same grading `_opf_check.managed_file` applies via
+    `_opf_check._under_any` against its `valid_unmanaged` authority, so the ingest exclusion covers a
+    declared-unmanaged DIRECTORY exactly as the checker does: a file under a valid unmanaged subtree is
+    managed, never enumerated as a stray and never read (spec 14.2). The trailing `/` keeps a name-prefix
+    sibling (`report.md.bak` beside `report.md`) from being falsely treated as contained."""
+    for pref in prefixes:
+        if p == pref or p.startswith(pref + "/"):
+            return True
+    return False
+
+
 def _managed_paths(resolution, manifest_data):
     """The CLOSED "OPF-managed" set, derived FROM the resolved store authorities rather than a parallel
-    hand-copied list (guard-input-soundness). Returns (prune_prefixes, exact):
+    hand-copied list (guard-input-soundness). Returns (prune_prefixes, covered):
       - prune_prefixes: store-relative directory subtrees never detected under `.working/`: the machine
         store subtree (`resolution.machine_rel`, which contains the manifest, the typed indexes, and the
         control ledgers) and the reserved `.working/imports/` run tree (`_opf_import.IMPORTS_REL`).
-      - exact: individual paths that are managed wherever they fall: the manifest's declared view targets
-        and deliverable targets (`[views].*.target` / `[deliverables].*.target`), its already-declared
-        `[unmanaged].paths` (each canonicalized by `_canonical_managed` so a non-canonical but valid spelling
-        cannot evade exclusion, and NOT re-detected), and the store pointer control files
-        (`.opf.toml` / `.opf.local.toml`) that live at the PRODUCT root: OPF control files, never ingestible,
-        excluded from declared scope exactly as a manifest-declared managed path is."""
+      - covered: managed paths matched by SUBTREE containment (`_under_any`), exactly as
+        `_opf_check.managed_file` grades a file against its `valid_unmanaged` authority: a path that EQUALS
+        a covered entry OR lies UNDER one is managed wherever it falls, neither enumerated as a stray nor
+        read. The entries are the manifest's declared view / deliverable targets
+        (`[views].*.target` / `[deliverables].*.target`), its already-declared `[unmanaged].paths` (each
+        canonicalized by `_canonical_managed` so a non-canonical but valid spelling cannot evade exclusion),
+        and the store pointer control files (`.opf.toml` / `.opf.local.toml`) at the PRODUCT root (OPF
+        control files, never ingestible). Because membership is by containment, a declared-unmanaged
+        DIRECTORY covers its whole subtree so tooling never reads an unmanaged path (spec 14.2), and a
+        view / deliverable target is defended the same way should one ever be a directory (single-file
+        today, but subtree-prefix membership is the correct rule, low-cost, and closes the class)."""
     prune = {resolution.machine_rel, _opf_import.IMPORTS_REL}
-    exact = set()
+    covered = set()
     for section in ("views", "deliverables"):
         tables = manifest_data.get(section)
         if isinstance(tables, dict):
             for tbl in tables.values():
                 if isinstance(tbl, dict) and isinstance(tbl.get("target"), str):
-                    exact.add(_canonical_managed(tbl["target"]))
+                    covered.add(_canonical_managed(tbl["target"]))
     unmanaged = manifest_data.get("unmanaged")
     if isinstance(unmanaged, dict):
         paths = unmanaged.get("paths")
         if isinstance(paths, list):
             for p in paths:
                 if isinstance(p, str):
-                    exact.add(_canonical_managed(p))
+                    covered.add(_canonical_managed(p))
     # The store pointer control files at the product root are OPF control files, managed wherever they fall
     # and never ingestible, so an `--include` naming one yields no declared row (C1).
-    exact.add(_opf_store.POINTER_REL)
-    exact.add(_opf_store.LOCAL_POINTER_REL)
-    return prune, exact
+    covered.add(_opf_store.POINTER_REL)
+    covered.add(_opf_store.LOCAL_POINTER_REL)
+    return prune, covered
 
 
 # --- detection ---------------------------------------------------------------------------------------
 
-def _detect_store_scope(store_fd, prune, exact):
+def _detect_store_scope(store_fd, prune, covered):
     """Enumerate every non-OPF-managed regular file under `.working/` (the mandatory store scope). Opens
     the `.working/` directory no-follow beneath the resolved store-root fd, walks it pruning the managed
-    subtrees, and drops any file whose store-relative path is an already-declared managed exact path. Each
-    survivor is a `store`-scope row defaulting to `unresolved` / `baseline`."""
+    subtrees, and drops any file a `covered` entry manages by SUBTREE containment (`_under_any`): a path
+    that equals a covered entry OR lies under a declared-unmanaged directory is skipped BEFORE it is read,
+    so an unmanaged subtree's contents are never digested (spec 14.2). Each survivor is a `store`-scope row
+    defaulting to `unresolved` / `baseline`."""
     try:
         working_fd = os.open(_opf_store.WORKING_DIRNAME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                              dir_fd=store_fd)
@@ -302,7 +322,7 @@ def _detect_store_scope(store_fd, prune, exact):
         os.close(working_fd)
     rows = []
     for rel in files:
-        if rel in exact:
+        if _under_any(rel, covered):
             continue
         digest, size = _digest_of(store_fd, rel)
         rows.append(_row(rel, "store", digest, size))
@@ -325,7 +345,7 @@ def _store_working_under_product(resolution):
     return posixpath.normpath(posixpath.join(rel.as_posix(), _opf_store.WORKING_DIRNAME))
 
 
-def _detect_declared_scope(product_root, include, exact, store_working_rel):
+def _detect_declared_scope(product_root, include, covered, store_working_rel):
     """Enumerate the product-root files an operator `--include` pattern names (the opt-in declared scope,
     OQ-3). Each pattern is validated FIRST (contained, root-relative, and never naming the auto-detected
     store scope), then the product root is walked no-follow ONCE (pruning the store `.working/` subtree,
@@ -337,10 +357,12 @@ def _detect_declared_scope(product_root, include, exact, store_working_rel):
     is always off-limits too (the pre-relocation contract). A pattern that matches no product file is a
     FINDING (declared-input must resolve, OQ-A, matching `scan_import`'s refusal of an absent declared
     source). Each matched file is a `declared`-scope row (union across patterns, digested once), EXCEPT a
-    managed path in `exact` (a `[views]`/`[deliverables]` target, a declared `[unmanaged]` path, or a store
-    pointer control file, which commonly falls at the product root): it is excluded wherever it falls,
-    exactly as the store scope excludes it, so an `--include` cannot pull an already-managed path into
-    declared scope (OQ-3 contract)."""
+    path a `covered` entry manages by SUBTREE containment (`_under_any`): a `[views]`/`[deliverables]`
+    target, a declared `[unmanaged]` path (or a file UNDER a declared-unmanaged directory), or a store
+    pointer control file, which commonly falls at the product root. It is excluded before it is read,
+    exactly as the store scope excludes it, so an `--include` cannot pull an already-managed path (or a
+    file inside an unmanaged subtree) into declared scope (OQ-3 contract; spec 14.2 never reads an
+    unmanaged path)."""
     scope_prefixes = {_opf_store.WORKING_DIRNAME}
     if store_working_rel is not None:
         scope_prefixes.add(store_working_rel)
@@ -365,8 +387,8 @@ def _detect_declared_scope(product_root, include, exact, store_working_rel):
             matched.update(hits)
         rows = []
         for rel in sorted(matched):
-            if rel in exact:
-                continue      # a managed path is excluded wherever it falls, even when --include names it
+            if _under_any(rel, covered):
+                continue      # excluded wherever it falls (equal to, or under, a covered path), unread
             digest, size = _digest_of(fd, rel)
             rows.append(_row(rel, "declared", digest, size))
     finally:
@@ -395,12 +417,12 @@ def _detect_rows(product_root, resolution, include):
         if reval.status != _opf_store.VALID:
             raise _cannot("store manifest {} is not VALID on re-read ({}: {}); fail-closed".format(
                 manifest_rel, reval.status, "; ".join(reval.findings)))
-        prune, exact = _managed_paths(resolution, manifest_data)
-        rows = _detect_store_scope(store_fd, prune, exact)
+        prune, covered = _managed_paths(resolution, manifest_data)
+        rows = _detect_store_scope(store_fd, prune, covered)
     finally:
         os.close(store_fd)
     if include:
-        rows += _detect_declared_scope(product_root, include, exact,
+        rows += _detect_declared_scope(product_root, include, covered,
                                        _store_working_under_product(resolution))
     rows.sort(key=lambda r: (r["source_path"].encode("utf-8"), r["scope"]))
     return rows
@@ -697,6 +719,25 @@ def self_test():
                   r.verdict == CLEAN and ".working/real.md" in r_paths
                   and ".working/kept.md" not in r_paths)
 
+        # 8b-subtree. declared-unmanaged DIRECTORY covers its subtree (round-3 F1): an [unmanaged].paths
+        #     entry that names a DIRECTORY covers its whole subtree by containment (matching
+        #     _opf_check.managed_file / _under_any), so a file UNDER it is neither enumerated as a stray nor
+        #     READ (its content is never digested; spec 14.2), in BOTH store scope (under `.working/`) and
+        #     declared scope (a product-root --include hit). An exact-match exclusion would emit (and read)
+        #     each child, so a child appearing as a row is the fail-without-the-fix discriminator.
+        root, _m = build_store(
+            strays={".working/legacy-dir/kept.md": "k", ".working/legacy-dir/sub/deep.md": "d",
+                    ".working/real.md": "r"},
+            product={"docs/legacy/old.md": "o", "docs/keep.md": "K"},
+            manifest_extra='[unmanaged]\npaths = [".working/legacy-dir", "docs/legacy"]')
+        r = detect(root, include=["docs/legacy/old.md", "docs/keep.md"])
+        sub_paths = {row["source_path"] for row in r.rows}
+        check("unmanaged-directory-covers-subtree",
+              r.verdict == CLEAN and ".working/real.md" in sub_paths and "docs/keep.md" in sub_paths
+              and ".working/legacy-dir/kept.md" not in sub_paths
+              and ".working/legacy-dir/sub/deep.md" not in sub_paths
+              and "docs/legacy/old.md" not in sub_paths)
+
         # 8c. RELOCATED-store declared-scope exclusion (round-2 F1): a `.opf.toml` -> `dir:ops` relocation
         #     puts the store at `ops/.working/`. The declared-scope exclusion is derived from the RESOLVED
         #     store location, so an --include naming the relocated store scope is a FINDING and the store's
@@ -719,7 +760,7 @@ def self_test():
         # 8d. store pointer control files excluded from declared scope (round-2 C1): `.opf.toml` /
         #     `.opf.local.toml` are OPF control files at the product root, managed wherever they fall; an
         #     --include naming one yields NO declared row (excluded exactly as a manifest-declared managed
-        #     path). Without them in the managed `exact` set the walkable product-root pointer is emitted.
+        #     path). Without them in the managed `covered` set the walkable product-root pointer is emitted.
         reloc = build_relocated(product={"readme.md": "R"})
         (reloc / _opf_store.LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:ops"\n', encoding="utf-8")
         c1 = detect(reloc, include=[".opf.toml", ".opf.local.toml", "readme.md"])
@@ -770,21 +811,27 @@ def self_test():
         check("detect-writes-nothing", snapshot(root) == before)
 
         # 12. worksheet validation: a clean worksheet validates; a vocab mutation and a digest mutation are
-        #     each caught (the gate's schema/vocab and digest-recompute checks).
+        #     each caught (the gate's schema/vocab and digest-recompute checks). Each vocab/keyset
+        #     discriminator carries an HONESTLY recomputed digest over its own mutated payload (round-3 F2:
+        #     isolate the target check), so the finding it raises is the vocab/keyset violation itself, not
+        #     a masking digest-recompute mismatch; removing the vocab/keyset check would then turn the
+        #     discriminator GREEN. The digest-drift discriminator alone keeps a deliberately wrong digest.
         root, _m = build_store(strays={".working/v.md": "vv"})
         good = detect(root).worksheet
         check("validate-clean-worksheet", validate_worksheet(good) == [])
-        bad_vocab = {"format": good["format"], "schema": good["schema"],
-                     "row": [dict(good["row"][0], disposition="bogus")],
-                     "worksheet_digest": good["worksheet_digest"]}
-        check("validate-vocab-violation", validate_worksheet(bad_vocab) != [])
+        vocab_payload = {"format": good["format"], "schema": good["schema"],
+                         "row": [dict(good["row"][0], disposition="bogus")]}
+        vocab_honest = "sha256:" + _opf_import._sha256_hex(_worksheet_bytes(vocab_payload))
+        check("validate-vocab-violation",
+              validate_worksheet(dict(vocab_payload, worksheet_digest=vocab_honest)) != [])
         bad_digest = dict(good)
         bad_digest["worksheet_digest"] = "sha256:" + "0" * 64
         check("validate-digest-drift", validate_worksheet(bad_digest) != [])
-        bad_key = {"format": good["format"], "schema": good["schema"],
-                   "row": [dict(good["row"][0], surprise=1)],
-                   "worksheet_digest": good["worksheet_digest"]}
-        check("validate-closed-keyset", validate_worksheet(bad_key) != [])
+        key_payload = {"format": good["format"], "schema": good["schema"],
+                       "row": [dict(good["row"][0], surprise=1)]}
+        key_honest = "sha256:" + _opf_import._sha256_hex(_worksheet_bytes(key_payload))
+        check("validate-closed-keyset",
+              validate_worksheet(dict(key_payload, worksheet_digest=key_honest)) != [])
         # 12a. schema type-strictness (F5): schema True (== 1) or 1.0 (== 1), each with an HONESTLY
         #      recomputed digest, is still rejected; a bare `!= SCHEMA` comparison would accept it because
         #      True == 1 == 1.0, so the digest recompute is the only thing that would catch a mutation and a
@@ -826,8 +873,9 @@ def self_test():
             print("OPF-INGEST SELF-TEST FAIL: {}".format(f), file=sys.stderr)
         return 1
     print("OPF-INGEST SELF-TEST PASS: detect enumerates store scope exactly once, excludes the managed set "
-          "(including a managed path an --include names, a non-canonical managed spelling, and the store "
-          "pointer control files), derives the declared-scope exclusion from the RESOLVED store location so "
+          "by subtree containment (including a managed path an --include names, a non-canonical managed "
+          "spelling, a declared-unmanaged DIRECTORY's whole subtree unread, and the store pointer control "
+          "files), derives the declared-scope exclusion from the RESOLVED store location so "
           "a relocated (`dir:`) store's own subtree never leaks as declared, honours declared-scope "
           "--include (glob-no-match/escape/store-scope each a finding), is deterministic + writes nothing, "
           "fails closed on an unresolved store, a symlink, a non-UTF-8 name, and a non-contained detected "
