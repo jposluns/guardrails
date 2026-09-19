@@ -3093,9 +3093,11 @@ def _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shuti
         drop = set()
         # Drop the VCS dir and the store-root .aiqt ops trees ONLY at the store root (never a same-named dir
         # nested deeper): a nested `.git`/`.aiqt` is not promoted store content, so it is COPIED into the
-        # preview and graded by C-CONTAINMENT rather than hidden from the D4 gate (PRC-F5).
+        # preview and graded by C-CONTAINMENT rather than hidden from the D4 gate (PRC-F5). The drop set is
+        # sourced from `_opf_store.STORE_ROOT_CONTROL_DIRS`, the single store-topology authority `_opf_ingest`
+        # also derives its store-root control exclusion from, so the two cannot mirror-drift.
         if os.path.abspath(dirpath) == os.path.abspath(store_root):
-            drop |= set(n for n in names if n in (".git", ".aiqt"))
+            drop |= set(n for n in names if n in _opf_store.STORE_ROOT_CONTROL_DIRS)
             # Also neutralize the store-root OPF pointer files: the D4 gate runs resolve_store(preview),
             # which reads a `[store].target` pointer FIRST, so a copied pointer whose target is an absolute
             # path would redirect resolution BACK to the ORIGINAL store and grade the wrong target. Dropping
