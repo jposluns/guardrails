@@ -143,6 +143,12 @@ def _self_test():
                      "row": [dict(ws["row"][0], origin="not-an-origin")],
                      "worksheet_digest": ws["worksheet_digest"]}
         expect("worksheet-schema-vocab-flip", ing.validate_worksheet(bad_vocab) != [])
+        # discriminator (F5): a bool/float schema that compares == the version (True == 1 == 1.0), with an
+        # HONESTLY recomputed digest, is still rejected type-strictly; a bare `!= SCHEMA` comparison accepts it.
+        sch_payload = {"format": ws["format"], "schema": True, "row": ws["row"]}
+        sch_honest = "sha256:" + ing._opf_import._sha256_hex(ing._worksheet_bytes(sch_payload))
+        expect("worksheet-schema-type-flip",
+               ing.validate_worksheet(dict(sch_payload, worksheet_digest=sch_honest)) != [])
 
         # --- worksheet-digest ----------------------------------------------------------------------
         drifted = dict(ws)
@@ -178,6 +184,27 @@ def _self_test():
                and ".working/toml/counters.toml" not in paths3
                and ".working/imports/imp-x/frames.log" not in paths3
                and ".working/declared.md" not in paths3)
+        # discriminator (F1): an --include naming a MANAGED product-root path (a view target, a deliverable
+        # target, or a declared [unmanaged] path) yields NO declared row for it: excluded wherever it falls.
+        root4 = build_store(
+            strays={"report.md": "R", "out.pdf": "D", "keep.md": "K", "loose.md": "L"},
+            manifest_extra=('[views.main]\nkind = "composed"\nsources = ["docs"]\ntarget = "report.md"\n\n'
+                            '[deliverables.d1]\nkind = "curated"\ntarget = "out.pdf"\n\n'
+                            '[unmanaged]\npaths = ["keep.md"]'))
+        r4 = ing.detect(root4, include=["report.md", "out.pdf", "keep.md", "loose.md"])
+        decl4 = {row["source_path"] for row in r4.rows if row["scope"] == "declared"}
+        expect("declared-scope-managed-exclusion",
+               r4.verdict == ing.CLEAN and "loose.md" in decl4
+               and "report.md" not in decl4 and "out.pdf" not in decl4 and "keep.md" not in decl4)
+        # discriminator (F2): a non-canonical [unmanaged].paths spelling still excludes the store file it
+        # names; a literal-string comparison would let the aliased path be detected as a stray.
+        root5 = build_store(strays={".working/kept.md": "k", ".working/real.md": "r"},
+                            manifest_extra='[unmanaged]\npaths = ["./.working/kept.md"]')
+        r5 = ing.detect(root5)
+        paths5 = {row["source_path"] for row in r5.rows}
+        expect("non-canonical-managed-exclusion",
+               r5.verdict == ing.CLEAN and ".working/real.md" in paths5
+               and ".working/kept.md" not in paths5)
 
         # --- module-self-test delegation -----------------------------------------------------------
         expect("module-self-test", ing.self_test() == 0)
@@ -193,9 +220,10 @@ def _self_test():
             print("check_opf_ingest self-test: FAIL: {}".format(f), file=sys.stderr)
         return EXIT_FINDING
     print("check_opf_ingest self-test: PASS (worksheet-structure/schema-vocab/digest each PASS on a clean "
-          "detection and FINDING on its discriminator; detection-completeness matches an independent "
-          "re-enumeration and catches an omitted store-scope file; detect-writes-nothing; managed-path "
-          "exclusion catches over-detection; the engine module self-test is green)")
+          "detection and FINDING on its discriminator, including a type-strict schema flip; "
+          "detection-completeness matches an independent re-enumeration and catches an omitted store-scope "
+          "file; detect-writes-nothing; managed-path exclusion catches over-detection, a managed path an "
+          "--include names, and a non-canonical managed spelling; the engine module self-test is green)")
     return EXIT_OK
 
 

@@ -52,6 +52,7 @@ Exit convention (the sibling OPF units): 0 clean, 1 a finding, 2 cannot-evaluate
 """
 import fnmatch
 import os
+import posixpath
 import stat
 import sys
 from pathlib import Path
@@ -181,6 +182,14 @@ def _walk_regular_files(dfd, prefix, prune, out, budget):
         budget[0] += 1
         if budget[0] > _MAX_WALK_ENTRIES:
             raise _cannot("detection set exceeds the {}-entry ceiling (fail-closed)".format(_MAX_WALK_ENTRIES))
+        # A non-UTF-8 (surrogate-escaped) entry name cannot be represented in the byte-canonical worksheet
+        # (a TOML string is UTF-8) and would raise uncaught when sorted or digested: refuse it fail-closed,
+        # naming it, rather than crash or silently skip (check-fails-closed-on-unreadable).
+        try:
+            rel.encode("utf-8")
+        except UnicodeEncodeError:
+            raise _cannot("{!r} has a non-UTF-8 name that cannot be represented in the worksheet "
+                          "(fail-closed, never followed or silently skipped)".format(rel))
         try:
             est = os.stat(entry, dir_fd=dfd, follow_symlinks=False)
         except OSError as exc:
@@ -218,6 +227,16 @@ def _digest_of(root_fd, rel):
 
 # --- the OPF-managed set (OQ-B: derived from the resolved manifest authorities, never hard-coded) --------
 
+def _canonical_managed(p):
+    """Canonicalize a manifest-declared managed path to the byte-canonical POSIX-relative spelling the
+    no-follow walk produces, so a non-canonical BUT VALID declaration (`./x`, `x//y`, `x/./y`) still
+    matches the file it names and cannot evade the managed-exclusion set (the literal-string comparison
+    would otherwise miss an aliased spelling). Called only on a path the manifest validator already
+    accepted as contained (`_is_contained_relpath`), so `posixpath.normpath` cannot escape the root or
+    yield an empty result."""
+    return posixpath.normpath(p)
+
+
 def _managed_paths(resolution, manifest_data):
     """The CLOSED "OPF-managed" set, derived FROM the resolved store authorities rather than a parallel
     hand-copied list (guard-input-soundness). Returns (prune_prefixes, exact):
@@ -226,7 +245,8 @@ def _managed_paths(resolution, manifest_data):
         control ledgers) and the reserved `.working/imports/` run tree (`_opf_import.IMPORTS_REL`).
       - exact: store-relative individual paths that are managed wherever they fall: the manifest's declared
         view targets and deliverable targets (`[views].*.target` / `[deliverables].*.target`) and its
-        already-declared `[unmanaged].paths`. An already-declared unmanaged path is NOT re-detected."""
+        already-declared `[unmanaged].paths`. An already-declared unmanaged path is NOT re-detected. Each is
+        canonicalized (`_canonical_managed`) so a non-canonical but valid spelling cannot evade exclusion."""
     prune = {resolution.machine_rel, _opf_import.IMPORTS_REL}
     exact = set()
     for section in ("views", "deliverables"):
@@ -234,14 +254,14 @@ def _managed_paths(resolution, manifest_data):
         if isinstance(tables, dict):
             for tbl in tables.values():
                 if isinstance(tbl, dict) and isinstance(tbl.get("target"), str):
-                    exact.add(tbl["target"])
+                    exact.add(_canonical_managed(tbl["target"]))
     unmanaged = manifest_data.get("unmanaged")
     if isinstance(unmanaged, dict):
         paths = unmanaged.get("paths")
         if isinstance(paths, list):
             for p in paths:
                 if isinstance(p, str):
-                    exact.add(p)
+                    exact.add(_canonical_managed(p))
     return prune, exact
 
 
@@ -275,13 +295,16 @@ def _detect_store_scope(store_fd, prune, exact):
     return rows
 
 
-def _detect_declared_scope(product_root, include):
+def _detect_declared_scope(product_root, include, exact):
     """Enumerate the product-root files an operator `--include` pattern names (the opt-in declared scope,
     OQ-3). Each pattern is validated FIRST (contained, root-relative, and never naming the auto-detected
     `.working/` store scope), then the product root is walked no-follow ONCE (pruning `.working/`, which is
     store scope), and each pattern is matched with `fnmatch.fnmatchcase`. A pattern that matches no product
     file is a FINDING (declared-input must resolve, OQ-A, matching `scan_import`'s refusal of an absent
-    declared source). Each matched file is a `declared`-scope row (union across patterns, digested once)."""
+    declared source). Each matched file is a `declared`-scope row (union across patterns, digested once),
+    EXCEPT a managed path in `exact` (a `[views]`/`[deliverables]` target or a declared `[unmanaged]` path,
+    which commonly falls at the product root): it is excluded wherever it falls, exactly as the store scope
+    excludes it, so an `--include` cannot pull an already-managed path into declared scope (OQ-3 contract)."""
     for pat in include:
         if not (isinstance(pat, str) and _opf_store._is_contained_relpath(pat)):
             raise _finding("--include pattern {!r} is not a contained root-relative pattern (no absolute "
@@ -303,6 +326,8 @@ def _detect_declared_scope(product_root, include):
             matched.update(hits)
         rows = []
         for rel in sorted(matched):
+            if rel in exact:
+                continue      # a managed path is excluded wherever it falls, even when --include names it
             digest, size = _digest_of(fd, rel)
             rows.append(_row(rel, "declared", digest, size))
     finally:
@@ -324,12 +349,19 @@ def _detect_rows(product_root, resolution, include):
             raise _cannot(str(exc))
         if not isinstance(manifest_data, dict):
             raise _cannot("store manifest {} vanished after validation (fail-closed)".format(manifest_rel))
+        # The exclusion set is derived from THIS read, so re-validate it rather than trusting a bare dict
+        # check: a racing rewrite to a parseable-but-non-VALID manifest between the init-first validation and
+        # here must fail closed, never feed exclusions from an unvalidated re-read (guard-input-soundness).
+        reval = _opf_store.validate_manifest(manifest_data)
+        if reval.status != _opf_store.VALID:
+            raise _cannot("store manifest {} is not VALID on re-read ({}: {}); fail-closed".format(
+                manifest_rel, reval.status, "; ".join(reval.findings)))
         prune, exact = _managed_paths(resolution, manifest_data)
         rows = _detect_store_scope(store_fd, prune, exact)
     finally:
         os.close(store_fd)
     if include:
-        rows += _detect_declared_scope(product_root, include)
+        rows += _detect_declared_scope(product_root, include, exact)
     rows.sort(key=lambda r: (r["source_path"].encode("utf-8"), r["scope"]))
     return rows
 
@@ -395,7 +427,8 @@ def validate_worksheet(worksheet):
         findings.append("worksheet carries unknown key(s): {}".format(", ".join(sorted(extra))))
     if worksheet.get("format") != WORKSHEET_FORMAT:
         findings.append("worksheet.format is not {!r}".format(WORKSHEET_FORMAT))
-    if worksheet.get("schema") != SCHEMA:
+    sch = worksheet.get("schema")
+    if not (type(sch) is int and sch == SCHEMA):    # type-strict: True (== 1) and 1.0 (== 1) are not the version
         findings.append("worksheet.schema is not {!r}".format(SCHEMA))
     rows = worksheet.get("row")
     if not isinstance(rows, list):
@@ -574,6 +607,33 @@ def self_test():
         check("include-store-scope-is-finding",
               detect(root, include=[".working/a.md"]).verdict == FINDING)
 
+        # 8a. declared-scope managed-exclusion (F1): an --include naming a MANAGED product-root path (a
+        #     [views]/[deliverables] target, or a declared [unmanaged] path at the product root) yields NO
+        #     declared row for it: it is excluded wherever it falls, exactly as the store scope excludes it.
+        root, _m = build_store(
+            product={"report.md": "R", "out.pdf": "D", "keep.md": "K", "loose.md": "L"},
+            manifest_extra=('[views.main]\nkind = "composed"\nsources = ["docs"]\ntarget = "report.md"\n\n'
+                            '[deliverables.d1]\nkind = "curated"\ntarget = "out.pdf"\n\n'
+                            '[unmanaged]\npaths = ["keep.md"]'))
+        decl = detect(root, include=["report.md", "out.pdf", "keep.md", "loose.md"])
+        decl_paths = {row["source_path"] for row in decl.rows if row["scope"] == "declared"}
+        check("declared-scope-managed-excluded",
+              decl.verdict == CLEAN and "loose.md" in decl_paths
+              and "report.md" not in decl_paths and "out.pdf" not in decl_paths
+              and "keep.md" not in decl_paths)
+
+        # 8b. non-canonical managed spelling (F2): a VALID but non-canonical [unmanaged].paths spelling
+        #     (`./x`, `x//y`, `x/./y`) still excludes the store file it names; a literal-string comparison
+        #     would let the aliased path evade exclusion and be detected as a stray.
+        for _spell in ("./.working/kept.md", ".working//kept.md", ".working/./kept.md"):
+            root, _m = build_store(strays={".working/kept.md": "k", ".working/real.md": "r"},
+                                   manifest_extra='[unmanaged]\npaths = ["{}"]'.format(_spell))
+            r = detect(root)
+            r_paths = {row["source_path"] for row in r.rows}
+            check("non-canonical-managed-excluded",
+                  r.verdict == CLEAN and ".working/real.md" in r_paths
+                  and ".working/kept.md" not in r_paths)
+
         # 9. init-first: an unresolved store (no manifest) is CANNOT-EVALUATE, "run `opf init` first".
         unadopted = base / "unadopted"
         unadopted.mkdir()
@@ -591,6 +651,23 @@ def self_test():
             sym_ok = False   # platform without symlink support: skip this vector, not a failure
         if sym_ok:
             check("symlink-in-scope-fail-closed", detect(root).verdict == CANNOT_EVALUATE)
+
+        # 10a. a non-UTF-8 (invalid-byte) filename in scope is refused fail-closed (F4): it cannot be
+        #      represented in the byte-canonical worksheet, so detect returns CANNOT-EVALUATE naming it,
+        #      never a clean row and never an uncaught UnicodeEncodeError.
+        root, _m = build_store(strays={".working/ok.md": "o"})
+        working_fd = os.open(str(root / ".working"), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            bad_fd = os.open(b"\xff.md", os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=working_fd)
+            os.write(bad_fd, b"x")
+            os.close(bad_fd)
+            nonutf8_ok = True
+        except OSError:
+            nonutf8_ok = False   # a filesystem that rejects the byte name: skip this vector, not a failure
+        finally:
+            os.close(working_fd)
+        if nonutf8_ok:
+            check("non-utf8-name-fail-closed", detect(root).verdict == CANNOT_EVALUATE)
 
         # 11. detect-writes-nothing: the store tree is byte-identical after detect (preview, no side effect).
         root, _m = build_store(strays={".working/s.md": "s"}, product={"docs/p.md": "p"})
@@ -614,6 +691,15 @@ def self_test():
                    "row": [dict(good["row"][0], surprise=1)],
                    "worksheet_digest": good["worksheet_digest"]}
         check("validate-closed-keyset", validate_worksheet(bad_key) != [])
+        # 12a. schema type-strictness (F5): schema True (== 1) or 1.0 (== 1), each with an HONESTLY
+        #      recomputed digest, is still rejected; a bare `!= SCHEMA` comparison would accept it because
+        #      True == 1 == 1.0, so the digest recompute is the only thing that would catch a mutation and a
+        #      matching-digest payload with a bool/float schema would otherwise validate.
+        for _bad_schema in (True, 1.0):
+            _payload = {"format": good["format"], "schema": _bad_schema, "row": good["row"]}
+            _honest = "sha256:" + _opf_import._sha256_hex(_worksheet_bytes(_payload))
+            _bad_sch = dict(_payload, worksheet_digest=_honest)
+            check("validate-schema-type-strict", validate_worksheet(_bad_sch) != [])
 
         # 13. dispatch-deferral: `opf adopt` is NOT wired; the fail-closed KNOWN_VERBS dispatch stands
         #     (consciously flipped at MIG-PR6, which wires the verb).
@@ -631,10 +717,12 @@ def self_test():
         for f in failures:
             print("OPF-INGEST SELF-TEST FAIL: {}".format(f), file=sys.stderr)
         return 1
-    print("OPF-INGEST SELF-TEST PASS: detect enumerates store scope exactly once, excludes the managed set, "
-          "honours declared-scope --include (glob-no-match/escape/store-scope each a finding), is "
-          "deterministic + writes nothing, fails closed on an unresolved store and a symlink, the worksheet "
-          "validates and catches vocab/digest/keyset mutations, and `opf adopt` stays unwired.")
+    print("OPF-INGEST SELF-TEST PASS: detect enumerates store scope exactly once, excludes the managed set "
+          "(including a managed path an --include names and a non-canonical managed spelling), honours "
+          "declared-scope --include (glob-no-match/escape/store-scope each a finding), is deterministic + "
+          "writes nothing, fails closed on an unresolved store, a symlink, and a non-UTF-8 name, the "
+          "worksheet validates and catches vocab/digest/keyset/schema-type mutations, and `opf adopt` stays "
+          "unwired.")
     return 0
 
 
