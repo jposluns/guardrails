@@ -56,6 +56,7 @@ def _self_test():
     """Build synthetic stores and assert every registered check PASSes on a clean detection and FINDINGs on
     its own discriminator, plus delegate to the engine's own unit suite. Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (a fixture could not be built)."""
+    import errno
     import shutil
     import tempfile
 
@@ -153,15 +154,21 @@ def _self_test():
 
     def symlink_supported():
         """True when this platform + filesystem can create a symlink, PROBED ONCE with a throwaway dangling
-        link under `base`. A genuinely unsupported platform returns False so a symlink vector is SKIPPED; on a
-        supported platform a later fixture `os.symlink` failure (e.g. EACCES) then RAISES and is caught by the
-        harness-error path (EXIT_ERROR), so a fixture-setup error can never silently skip a symlink
-        discriminator and let it gain zero coverage (codex-8 #3)."""
+        link under `base`. Only a GENUINE unsupported-platform signal returns False so a symlink vector is
+        SKIPPED: `errno.ENOSYS` (the platform-level "function not implemented"), or a NotImplementedError /
+        AttributeError on `os.symlink` itself. Any OTHER OSError (EACCES, EPERM, a read-only filesystem, etc.)
+        PROPAGATES to the harness-error path (EXIT_ERROR): a permission-denied environment can never
+        MASQUERADE as unsupported and SILENTLY SKIP the symlink discriminators, letting them gain zero
+        coverage (F9.2 / codex-8 #3)."""
         probe = base / ".symlink-probe"
         try:
             os.symlink("target", str(probe))
-        except OSError:
-            return False
+        except (NotImplementedError, AttributeError):
+            return False   # os.symlink is genuinely unavailable / not implemented on this platform
+        except OSError as exc:
+            if exc.errno == errno.ENOSYS:
+                return False   # the platform-level "function not implemented" signal
+            raise              # EACCES / EPERM / read-only fs / etc. -> a real error, never a silent skip
         os.unlink(str(probe))
         return True
 
@@ -280,6 +287,39 @@ def _self_test():
         ndr = ing.detect(nd); ndr_p = {row["source_path"] for row in ndr.rows}
         expect("f81-nonpublic-deliverable-target-detected",
                ndr.verdict == ing.CLEAN and ".working/d.md" in ndr_p and ".working/real.md" in ndr_p)
+        # discriminator (R9-1): ingest mirrors the checker's MATCHING semantics, not only its covered-set
+        # DERIVATION. An EXACT-LEAF managed destination (a recognized view spec destination; a public
+        # deliverable target) is matched by EXACT equality (as `_opf_check.managed_leaf` matches a view target
+        # `if p in view_targets`), NOT subtree containment: a REGULAR FILE there is the managed output
+        # (excluded), but a DIRECTORY there is a WRONG-TYPE anomaly -> CANNOT-EVALUATE naming it, never a silent
+        # subtree prune that hides its children. Pre-fix the covered entry pruned the subtree, so a DIRECTORY at
+        # `.working/TODO.md/` silently OMITTED `.working/TODO.md/inner.md` and returned CLEAN while the checker
+        # flagged it C-CONTAINMENT and cannot-evaluated the store (they DISAGREED). The fix restores agreement:
+        # ingest CANNOT-EVALUATE AND `_opf_check.validate_store` non-clean on the SAME store (the cross-run).
+        import _opf_check
+        r91d = build_store(strays={".working/TODO.md/inner.md": "hidden", ".working/real.md": "r"},
+                           manifest_extra=('[views."TODO.md"]\nkind = "composed"\nsources = ["backlog_item"]\n'
+                                           'target = ".working/TODO.md"'))
+        r91 = ing.detect(r91d)
+        chk91 = _opf_check.validate_store(_opf_store.resolve_store(r91d))
+        expect("f91-dir-at-view-dest-cannot-evaluate-ingest-checker-agree",
+               r91.verdict == ing.CANNOT_EVALUATE and any(".working/TODO.md" in f for f in r91.findings)
+               and not any(row["source_path"] == ".working/TODO.md/inner.md" for row in r91.rows)
+               and _opf_check.exit_code(chk91) == ing.CANNOT_EVALUATE)
+        r91f = build_store(strays={".working/TODO.md": "t", ".working/real.md": "r"},
+                           manifest_extra=('[views."TODO.md"]\nkind = "composed"\nsources = ["backlog_item"]\n'
+                                           'target = ".working/TODO.md"'))
+        r91fr = ing.detect(r91f)
+        r91fr_p = {row["source_path"] for row in r91fr.rows}
+        expect("f91-regular-file-at-view-dest-excluded",
+               r91fr.verdict == ing.CLEAN and ".working/TODO.md" not in r91fr_p
+               and ".working/real.md" in r91fr_p)
+        r91p = build_store(product={"CHANGELOG.md/inner.md": "hidden", "readme.md": "R"},
+                           manifest_extra='[deliverables."CHANGELOG.md"]\nkind = "curated"\ntarget = "CHANGELOG.md"')
+        r91pr = ing.detect(r91p, include=["*"])
+        expect("f91-dir-at-public-target-cannot-evaluate",
+               r91pr.verdict == ing.CANNOT_EVALUATE and any("CHANGELOG.md" in f for f in r91pr.findings)
+               and not any(row["source_path"] == "CHANGELOG.md/inner.md" for row in r91pr.rows))
         # discriminator (F2): a non-canonical [unmanaged].paths spelling still excludes the store file it
         # names; a literal-string comparison would let the aliased path be detected as a stray.
         root5 = build_store(strays={".working/kept.md": "k", ".working/real.md": "r"},
@@ -488,6 +528,31 @@ def _self_test():
             expect("covered-symlink-beneath-cannot-evaluate-parity",
                    sb.verdict == ing.CANNOT_EVALUATE and any("legacy" in f for f in sb.findings)
                    and rbd.verdict == ing.CANNOT_EVALUATE and sb.verdict == rbd.verdict)
+        # discriminator (F9.2): the symlink_supported() probe treats ONLY a genuine unsupported-platform signal
+        # (errno.ENOSYS, or a NotImplementedError / AttributeError on os.symlink) as "unsupported" (skip); any
+        # OTHER OSError (EACCES etc.) PROPAGATES to the harness-error path, so a permission-denied environment
+        # can never MASQUERADE as unsupported and SILENTLY SKIP the symlink discriminators. Pre-fix the probe
+        # caught EVERY OSError and returned False, so an injected EACCES read as "unsupported"; with the fix it
+        # RAISES (the harness maps it to EXIT_ERROR) while an injected ENOSYS still returns False (skip-and-
+        # stay-green, the disclosed intended path). os.symlink is restored in a finally (test-hermeticity).
+        real_symlink = os.symlink
+
+        def symlink_raising(err):
+            def stub(*_a, **_k):
+                raise err
+            return stub
+        try:
+            os.symlink = symlink_raising(PermissionError(errno.EACCES, "permission denied"))
+            eacces_propagates = False
+            try:
+                symlink_supported()
+            except OSError as exc:
+                eacces_propagates = exc.errno == errno.EACCES
+            os.symlink = symlink_raising(OSError(errno.ENOSYS, "function not implemented"))
+            enosys_skips = symlink_supported() is False
+        finally:
+            os.symlink = real_symlink
+        expect("f92-probe-eacces-propagates", eacces_propagates and enosys_skips)
         # discriminator (F2): validate_worksheet rejects a source_path the CONTAINED READER
         # (_journal._check_rel) rejects (a control char slips past _is_contained_relpath), with an HONESTLY
         # recomputed digest isolating the reader check; dropping it turns this GREEN.
@@ -529,13 +594,19 @@ def _self_test():
           "+ unmanaged-read directions) while a PUBLIC deliverable target stays product-relative; the view / "
           "deliverable covered set MIRRORS the checker authority so a rogue view NAME cannot launder a store "
           "path, a REBIND covers the spec destination not the raw target, and a non-public deliverable target "
-          "is a detectable stray (ingest and C-CONTAINMENT agree; F-8.1); the no-match derivation is "
+          "is a detectable stray (ingest and C-CONTAINMENT agree; F-8.1); an EXACT-LEAF managed destination "
+          "(a view spec destination, a public deliverable target) is matched by EQUALITY so a DIRECTORY there "
+          "is a WRONG-TYPE CANNOT-EVALUATE (ingest and _opf_check.validate_store agree on the store) rather "
+          "than a silent subtree prune that hides its children, while a regular-file output stays excluded "
+          "(R9-1); the no-match derivation is "
           "THREE-VALUED (an ABSENT covered path and a read-space no-match are findings, a pattern that could "
           "match within a PRESENT covered subtree detection never reads is CANNOT-EVALUATE, never a false "
           "clean or a false no-match); a covered DIRECTORY, and a covered entry that is ITSELF a symlink, are "
           "pruned before descent / refusal so an unreadable / exotic entry inside or as an excluded entry "
           "never blocks detection, with a present covered symlink-to-dir yielding a CANNOT-EVALUATE beneath "
-          "it at parity with the real-dir case (F-8.2); a CLEAN detection's worksheet always validates; the "
+          "it at parity with the real-dir case (F-8.2); the symlink probe skips a symlink vector only on a "
+          "genuine unsupported-platform signal (ENOSYS) so an EACCES propagates rather than masquerading as a "
+          "silent skip (F9.2); a CLEAN detection's worksheet always validates; the "
           "engine module self-test is green)")
     return EXIT_OK
 
