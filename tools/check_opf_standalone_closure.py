@@ -45,6 +45,7 @@ _SUBSET = [
     ("opf-init-selftest", "check_opf_init.py", ["--self-test"]),
     ("opf-upgrade-selftest", "check_opf_upgrade.py", ["--self-test"]),
     ("opf-import-selftest", "check_opf_import.py", ["--self-test"]),
+    ("opf-adopt-selftest", "_opf_adopt.py", ["--self-test"]),
     ("commonmark-headings-selftest", "selftest_commonmark_headings.py", []),
     ("commonmark-conformance", "selftest_commonmark_conformance.py", []),
 ]

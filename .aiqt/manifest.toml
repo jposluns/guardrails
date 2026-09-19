@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8654d8d40912e0449a32eb7238941fcb380ea66879f94e7bdfd64673a931b136"
+tree-sha256 = "4c5d18323ac1ca1fed779939910b0f47c777dc115ca9dd4b8def6a3e602b15b7"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2186,8 +2186,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 38511
-sha256 = "d13ccfa9371c5e05903b315ffb62c3faf572251abd20cfd32433c40cc3790632"
+bytes = 38547
+sha256 = "1776a0f0c63363fd18c85ebc5dd784a2f99164eb9772c146fa977a68a0a7a09a"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2433,6 +2433,11 @@ sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
 path = "opf/tools/_journal.py"
 bytes = 108638
 sha256 = "785721cd229e683f1ab99abf5e70a8a3e3afdfa495fd7cf342d013ee55a88b1b"
+
+[[sources]]
+path = "opf/tools/_opf_adopt.py"
+bytes = 76182
+sha256 = "38f79a20b5eb7f44d929836eaeb6e7797c131f4743fde13ce3a229d7c175a2c8"
 
 [[sources]]
 path = "opf/tools/_opf_changelog.py"
@@ -3006,8 +3011,8 @@ sha256 = "f64934bd8d6522f9c01f804b0722d31d2708c4e6f89007be5200e5bbb9a3bb85"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
-bytes = 9329
-sha256 = "fb755727798188408d94f87ee80944cde9dd2fff16f6bbc5f30641284bf20d9c"
+bytes = 9391
+sha256 = "bd60928ab9a47aeeb7f5de9b79f2c59c1420ed52282514778bca5136bf849414"
 
 [[sources]]
 path = "tools/check_overclaim.py"
