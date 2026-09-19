@@ -244,31 +244,44 @@ def _self_test():
                and ".working/kept.md" not in paths5)
         # discriminator (round-3 F1): a declared-unmanaged DIRECTORY covers its whole subtree by containment
         # (matching _opf_check.managed_file / _under_any), so a file UNDER it is excluded (never read) in
-        # BOTH store and declared scope; an exact-match exclusion would emit (and read) each child.
+        # BOTH store and declared scope; an exact-match exclusion would emit (and read) each child. The
+        # declared include is a BROAD glob with a real hit (`docs/keep.md`), not a pattern naming the covered
+        # `docs/legacy` subtree directly (which is now a CANNOT-EVALUATE, R7-1): the pruned `docs/legacy`
+        # yields no `docs/legacy/old.md` row while `docs/keep.md` is detected.
         root5b = build_store(
             strays={".working/legacy-dir/kept.md": "k", ".working/real.md": "r"},
             product={"docs/legacy/old.md": "o", "docs/keep.md": "K"},
             manifest_extra='[unmanaged]\npaths = [".working/legacy-dir", "docs/legacy"]')
-        r5b = ing.detect(root5b, include=["docs/legacy/old.md", "docs/keep.md"])
+        r5b = ing.detect(root5b, include=["docs/*"])
         paths5b = {row["source_path"] for row in r5b.rows}
         expect("unmanaged-directory-covers-subtree",
                r5b.verdict == ing.CLEAN and ".working/real.md" in paths5b and "docs/keep.md" in paths5b
                and ".working/legacy-dir/kept.md" not in paths5b and "docs/legacy/old.md" not in paths5b)
-        # discriminator (F2): separate EXISTENCE from exclusion. An --include naming an ABSENT
-        # declared-unmanaged path is STILL a no-match FINDING (a declared input must resolve), while one
-        # under a PRESENT declared-unmanaged directory stays CLEAN (a present-but-excluded subtree, unread).
-        # Both share a covered [unmanaged] path; only filesystem existence distinguishes them, so a round-5
-        # covered==exists conflation (which let the absent case pass CLEAN) fails this discriminator.
+        # discriminator (R7-1): THREE-VALUED no-match, separating existence from exclusion SOUNDLY (no
+        # literal-ancestor existence proxy). An --include naming an ABSENT declared-unmanaged path (no unread
+        # content) is a no-match FINDING; one that could match within a PRESENT covered subtree detection
+        # never reads is CANNOT-EVALUATE (neither match nor no-match is knowable across the no-read boundary),
+        # whether a literal descendant (round-7 returned a false CLEAN) or a wildcard reaching the covered
+        # dir (round-7 returned a false no-match FINDING). Both flip on reverting the derivation.
         root5c = build_store(product={"live.md": "L"},
                              manifest_extra='[unmanaged]\npaths = ["qa-absent-legacy"]')
         r5c = ing.detect(root5c, include=["qa-absent-legacy/*.md"])
+        expect("declared-absent-covered-include-is-finding",
+               r5c.verdict == ing.FINDING and r5c.rows == [])
         root5d = build_store(product={"present-legacy/old.md": "o", "live.md": "L"},
                              manifest_extra='[unmanaged]\npaths = ["present-legacy"]')
-        r5d = ing.detect(root5d, include=["present-legacy/*.md"])
-        d5d = {row["source_path"] for row in r5d.rows if row["scope"] == "declared"}
-        expect("declared-covered-include-existence",
-               r5c.verdict == ing.FINDING and r5c.rows == []
-               and r5d.verdict == ing.CLEAN and "present-legacy/old.md" not in d5d)
+        # literal descendant of a PRESENT covered dir -> CANNOT-EVALUATE (round-7: false CLEAN)
+        r5d_lit = ing.detect(root5d, include=["present-legacy/old.md"])
+        # wildcard that reaches into the covered dir its literal prefix does not name -> CANNOT-EVALUATE
+        # (round-7: false no-match FINDING that would withhold the store scope)
+        r5d_wild = ing.detect(root5d, include=["*/old.md"])
+        expect("declared-present-covered-include-cannot-evaluate",
+               r5d_lit.verdict == ing.CANNOT_EVALUATE
+               and any("present-legacy" in f for f in r5d_lit.findings)
+               and r5d_wild.verdict == ing.CANNOT_EVALUATE)
+        # a purely READ-SPACE no-match (no covered subtree reachable) stays a FINDING (no over-widening).
+        expect("read-space-no-match-is-finding",
+               ing.detect(root5d, include=["nope/*.md"]).verdict == ing.FINDING)
         # discriminator (round-2 F1): a RELOCATED store (`.opf.toml` -> `dir:ops`, so store_root at
         # `ops/.working/`) does not leak its own machine / imports / stray subtree into declared scope; the
         # exclusion is derived from the RESOLVED store location, so naming the relocated store scope via
@@ -304,6 +317,41 @@ def _self_test():
         expect("nested-store-control-prefix-no-false-suppression",
                r7b.verdict == ing.CLEAN and ".working/plain.md" in store7b
                and ".working/ops/.aiqt/foo.md" in store7b)
+        # discriminator (round-7 MAJOR, F1): RE-ANCHOR the store-relative managed set for DECLARED scope on
+        # a relocated (`dir:ops`) store. A store-relative `notes` / `report.md` binds to the resolved STORE
+        # root (`ops/notes` / `ops/report.md`) for the product-root scope, so (i) a raw un-anchored entry no
+        # longer SUPPRESSES a real product stray at `notes/` / `report.md`, and (ii) the store-side path is
+        # EXCLUDED and never READ. Both entry types (unmanaged + target), both directions. Inline is identity.
+        rc_u = build_relocated(manifest_extra='[unmanaged]\npaths = ["notes"]',
+                               product={"notes/todo.md": "stray", "ops/notes/legacy.md": "storeside",
+                                        "readme.md": "R"})
+        ru_sup = ing.detect(rc_u, include=["notes/*", "readme.md"])
+        ru_sup_decl = {row["source_path"] for row in ru_sup.rows if row["scope"] == "declared"}
+        ru_read = ing.detect(rc_u, include=["ops/notes/*", "readme.md"])
+        expect("reanchor-unmanaged-suppression-and-not-read",
+               ru_sup.verdict == ing.CLEAN and "notes/todo.md" in ru_sup_decl
+               and ru_read.verdict == ing.CANNOT_EVALUATE
+               and not any(row["source_path"] == "ops/notes/legacy.md" for row in ru_read.rows))
+        rc_t = build_relocated(manifest_extra='[deliverables.d1]\nkind = "curated"\ntarget = "report.md"',
+                               product={"report.md": "stray", "readme.md": "R"})
+        rt_sup = ing.detect(rc_t, include=["report.md", "readme.md"])
+        rt_sup_decl = {row["source_path"] for row in rt_sup.rows if row["scope"] == "declared"}
+        rc_t2 = build_relocated(manifest_extra='[deliverables.d1]\nkind = "curated"\ntarget = "report.md"',
+                                product={"ops/report.md": "storeside", "readme.md": "R"})
+        rt_read = ing.detect(rc_t2, include=["ops/report.md", "readme.md"])
+        rt_read_decl = {row["source_path"] for row in rt_read.rows if row["scope"] == "declared"}
+        expect("reanchor-target-suppression-and-not-read",
+               rt_sup.verdict == ing.CLEAN and "report.md" in rt_sup_decl
+               and rt_read.verdict == ing.CLEAN and rt_read_decl == {"readme.md"})
+        # PUBLIC deliverable target (product-root in every topology, spec 5.8) is NOT re-anchored, so the
+        # real product-root `CHANGELOG.md` stays excluded on a relocated store (re-anchoring it would detect
+        # it as a stray).
+        rc_p = build_relocated(
+            manifest_extra='[deliverables."CHANGELOG.md"]\nkind = "curated"\ntarget = "CHANGELOG.md"',
+            product={"CHANGELOG.md": "cl", "readme.md": "R"})
+        rp = ing.detect(rc_p, include=["CHANGELOG.md", "readme.md"])
+        rp_decl = {row["source_path"] for row in rp.rows if row["scope"] == "declared"}
+        expect("public-target-not-reanchored", rp.verdict == ing.CLEAN and rp_decl == {"readme.md"})
         # discriminator (round-2 F2): a detected path the worksheet validator would reject as non-contained
         # (a `:` in its second character) is a LOCATED CANNOT-EVALUATE, never a CLEAN worksheet that then
         # fails validate_worksheet, so a CLEAN detection's worksheet ALWAYS validates.
@@ -346,11 +394,12 @@ def _self_test():
                        for rel in (ing._opf_import.IMPORT_OPS_REL, ing._opf_import.IMPORT_JOURNAL_REL,
                                    ing._opf_import.IMPORT_ARCHIVE_REL))
                and ing._opf_import.IMPORTS_REL.startswith(_opf_store.WORKING_DIRNAME + "/"))
-        # discriminator (F1: traverse-before-exclude): a covered (excluded) directory is PRUNED before
+        # discriminator (F1: traverse-before-exclude): a covered (excluded) DIRECTORY is PRUNED before
         # descent, never entered, so an unreadable / exotic entry inside it cannot block detection with a
         # spurious CANNOT-EVALUATE. A symlink inside a declared-unmanaged directory makes the pre-fix walk
         # (which entered then excluded only at the result stage) fail closed; pruning detects the live
-        # sibling CLEAN. Symlink support is platform-gated.
+        # sibling CLEAN. The include is `live.md` alone (a covered-subtree pattern like `legacy/*` is now a
+        # CANNOT-EVALUATE, R7-1, masking this DIRECTORY-prune vector). Symlink support is platform-gated.
         root10 = build_store(strays={".working/real.md": "r"},
                              product={"legacy/keep.md": "k", "live.md": "L"},
                              manifest_extra='[unmanaged]\npaths = ["legacy"]')
@@ -361,11 +410,26 @@ def _self_test():
         except OSError:
             g_sym_ok = False   # platform without symlink support: skip this vector, not a failure
         if g_sym_ok:
-            r10 = ing.detect(root10, include=["legacy/*", "live.md"])
+            r10 = ing.detect(root10, include=["live.md"])
             p10 = {row["source_path"] for row in r10.rows}
             expect("excluded-subtree-pruned-before-descent",
                    r10.verdict == ing.CLEAN and "live.md" in p10
                    and not any(p.startswith("legacy/") for p in p10))
+        # discriminator (F2): a covered entry that is ITSELF a symlink (a declared-unmanaged SYMLINK) is
+        # pruned BEFORE the exotic-entry refusal, never read and never refused (spec 14.2); the round-7 walk
+        # refused it and blocked the whole detect with a spurious CANNOT-EVALUATE. A NON-covered exotic entry
+        # still fails closed. Reverting the pre-refusal prune makes `legacy` fail closed again.
+        root10b = build_store(product={"live.md": "L"}, manifest_extra='[unmanaged]\npaths = ["legacy"]')
+        try:
+            os.symlink(str(root10b / ".working" / "toml" / "manifest.toml"), str(root10b / "legacy"))
+            g_csym_ok = True
+        except OSError:
+            g_csym_ok = False
+        if g_csym_ok:
+            r10b = ing.detect(root10b, include=["live.md"])
+            p10b = {row["source_path"] for row in r10b.rows}
+            expect("covered-symlink-entry-pruned-not-refused",
+                   r10b.verdict == ing.CLEAN and "live.md" in p10b and "legacy" not in p10b)
         # discriminator (F2): validate_worksheet rejects a source_path the CONTAINED READER
         # (_journal._check_rel) rejects (a control char slips past _is_contained_relpath), with an HONESTLY
         # recomputed digest isolating the reader check; dropping it turns this GREEN.
@@ -402,11 +466,15 @@ def _self_test():
           "unread, a relocated (`dir:`) store's whole resolved subtree, the store pointer control files, and "
           "the store-root `.aiqt` / `.git` control / VCS trees derived from the import layer's own drop-set "
           "authority (drift-checked against the import constants), applied to declared scope only so a store "
-          "nested under the product's own `.working/` cannot suppress a store stray; an --include under an "
-          "ABSENT covered declared path is still a no-match finding while a PRESENT one is clean; a covered "
-          "subtree is pruned before "
-          "descent so an unreadable / exotic entry inside an excluded tree never blocks detection; a CLEAN "
-          "detection's worksheet always validates; the engine module self-test is green)")
+          "nested under the product's own `.working/` cannot suppress a store stray, and RE-ANCHORED at the "
+          "resolved store root for declared scope on a relocated store (both unmanaged + target entry types, "
+          "suppression + unmanaged-read directions) while a PUBLIC deliverable target stays product-relative; "
+          "the no-match derivation is THREE-VALUED (an ABSENT covered path and a read-space no-match are "
+          "findings, a pattern that could match within a PRESENT covered subtree detection never reads is "
+          "CANNOT-EVALUATE, never a false clean or a false no-match); a covered DIRECTORY, and a covered entry "
+          "that is ITSELF a symlink, are pruned before "
+          "descent / refusal so an unreadable / exotic entry inside or as an excluded entry never blocks "
+          "detection; a CLEAN detection's worksheet always validates; the engine module self-test is green)")
     return EXIT_OK
 
 

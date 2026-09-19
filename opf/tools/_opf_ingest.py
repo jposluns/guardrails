@@ -180,8 +180,11 @@ def _walk_regular_files(dfd, prefix, prune, out, budget, pruned_dirs=None):
     control trees). Pruning a covered directory BEFORE descent is load-bearing: an excluded subtree is
     neither listed nor read, so an unreadable, symlinked, or exotic entry inside a subtree we would exclude
     anyway cannot block detection with a spurious CANNOT-EVALUATE (spec 14.2 never reads / enters an
-    unmanaged path). Fails CLOSED (a refusing CANNOT-EVALUATE
-    naming the entry) on a symlink, an exotic entry (neither a directory nor a regular file), or an I/O
+    unmanaged path). A pruned entry is skipped BEFORE it is refused as exotic, so a covered entry that is
+    ITSELF a symlink or other exotic entry (a declared-unmanaged symlink) is pruned, not refused, exactly
+    as a covered directory is (F2); the exotic refusal below stands for a NON-covered exotic entry. Fails
+    CLOSED (a refusing CANNOT-EVALUATE
+    naming the entry) on a NON-pruned symlink, exotic entry (neither a directory nor a regular file), or I/O
     error, so a swapped or exotic entry is never silently skipped (check-fails-closed-on-unreadable,
     SECI-symlink-resolution). Bounded by `budget` (a one-element mutable counter) so a runaway or hostile
     deep tree is refused rather than enumerated unboundedly (SECA resource-bounds). When `pruned_dirs` is
@@ -224,6 +227,14 @@ def _walk_regular_files(dfd, prefix, prune, out, budget, pruned_dirs=None):
                 os.close(sub)
         elif stat.S_ISREG(est.st_mode):
             out.append(rel)
+        elif rel in prune:
+            # A COVERED (declared-unmanaged / pruned) entry that is ITSELF a symlink or other exotic entry
+            # is PRUNED here, exactly as a covered DIRECTORY is pruned before descent above: never read and
+            # never refused, honouring "tooling never reads an unmanaged path" (spec 14.2). Without this a
+            # covered symlink reached the exotic refusal below and blocked the whole detect with a spurious
+            # CANNOT-EVALUATE before it could be pruned (F2). A covered exotic entry is not a subtree, so it
+            # is not recorded in `pruned_dirs`; the refusal below stays for a NON-covered exotic entry.
+            continue
         else:
             raise _cannot("{!r} is neither a directory nor a regular file (an exotic or symlinked entry; "
                           "fail-closed, never followed)".format(rel))
@@ -257,6 +268,14 @@ def _digest_of(root_fd, rel):
 # literal or an ops tree relocated out from under `.aiqt` is caught as drift.
 
 
+# The generated PUBLIC deliverables live at the PRODUCT repository root in EVERY topology (spec 5.8;
+# OPF-SPEC.md 408-417 / 867-868), so their manifest `target`s are genuinely PRODUCT-relative and are NOT
+# re-anchored at the store root, unlike every other view/deliverable target and every `[unmanaged].path`,
+# which are STORE-relative (graded relative to the store root; spec 14.2 / OPF-SPEC.md:16). This is the
+# closed public set; a target whose value is one of these is bound to the product root.
+_PUBLIC_TARGETS = frozenset({"VERSION", "CHANGELOG.md"})
+
+
 def _canonical_managed(p):
     """Canonicalize a manifest-declared managed path to the byte-canonical POSIX-relative spelling the
     no-follow walk produces, so a non-canonical BUT VALID declaration (`./x`, `x//y`, `x/./y`) still
@@ -280,84 +299,113 @@ def _under_any(p, prefixes):
     return False
 
 
-def _store_root_control_prefixes(resolution):
-    """The store-root control / VCS subtrees (`.aiqt`, `.git`) as PRODUCT-root-relative POSIX prefixes when
-    the store falls UNDER the product root (`.aiqt` / `.git` inline, `ops/.aiqt` / `ops/.git` for a `dir:ops`
-    relocation), else () (the store resolves OUTSIDE the product root, so the declared product-root walk
-    never reaches it). Anchored at the RESOLVED store root EXACTLY as `_store_working_under_product` anchors
-    `.working`, so a relocated store's control trees are excluded wherever they resolve and ONLY the
-    store-root `.aiqt` / `.git` (never a same-named dir nested deeper, e.g. `.working/.aiqt`) is covered,
-    mirroring `_opf_import._assemble_preview`'s store-root-only drop. `_managed_paths` returns these as its
-    separate `control` set, joined to the covered set of the DECLARED (product-root) scope ONLY (never store
-    scope, whose STORE-relative paths a `.working`-nested store's product-relative prefix could otherwise
-    collide with; see `_managed_paths`), so the declared scope never reads an apply-promotion ops / journal /
-    archive tree or the VCS dir (spec 14.2 never reads a managed path); because the `.aiqt` subtree is a
-    prefix, every tree nesting under it is covered by construction (see `_opf_store.STORE_ROOT_CONTROL_DIRS`)."""
+def _reanchor_declared(resolution, store_rel_paths):
+    """Map STORE-relative POSIX paths to their PRODUCT-root-relative spelling for the DECLARED (product-root)
+    scope when the store falls UNDER the product root (IDENTITY for an inline/default store whose store root
+    IS the product root; `ops/x` for a `dir:ops` relocation; `.working/ops/x` for a store nested under the
+    product's own `.working/`), else () (the store resolves OUTSIDE the product root, so the declared
+    product-root walk never reaches store content and no store-relative entry can collide with a product
+    path). This is the SINGLE re-anchoring path the declared scope uses, so EVERY store-relative managed
+    entry -- the `.working/` view/deliverable targets, the `[unmanaged].paths`, and the store-root control /
+    VCS dirs -- is bound to the resolved store root BY CONSTRUCTION and the store-relative / product-relative
+    namespaces can never cross-contaminate (F1). Anchored EXACTLY as `_store_working_under_product` anchors
+    `.working`; a returned path is the byte-canonical POSIX spelling the no-follow walk produces (via
+    `posixpath.normpath`), so it compares against the walk's paths without an aliased-spelling miss."""
     try:
         rel = Path(os.path.abspath(resolution.store_root)).relative_to(
             Path(os.path.abspath(resolution.product_root)))
     except ValueError:
         return ()
     base = rel.as_posix()
-    return tuple(posixpath.normpath(posixpath.join(base, d)) for d in _opf_store.STORE_ROOT_CONTROL_DIRS)
+    return tuple(posixpath.normpath(posixpath.join(base, p)) for p in store_rel_paths)
+
+
+def _store_root_control_prefixes(resolution):
+    """The store-root control / VCS subtrees (`.aiqt`, `.git`) as PRODUCT-root-relative POSIX prefixes when
+    the store falls UNDER the product root (`.aiqt` / `.git` inline, `ops/.aiqt` / `ops/.git` for a `dir:ops`
+    relocation), else () (the store resolves OUTSIDE the product root, so the declared product-root walk
+    never reaches it). Re-anchored at the RESOLVED store root through the shared `_reanchor_declared` path
+    (the SAME path `_managed_paths` re-anchors the manifest covered entries through), so ONLY the store-root
+    `.aiqt` / `.git` (never a same-named dir nested deeper, e.g. `.working/.aiqt`) is covered, mirroring
+    `_opf_import._assemble_preview`'s store-root-only drop. `_managed_paths` folds these into the DECLARED
+    (product-root) scope ONLY (never store scope, whose STORE-relative paths a `.working`-nested store's
+    product-relative prefix could otherwise collide with; see `_managed_paths`), so the declared scope never
+    reads an apply-promotion ops / journal / archive tree or the VCS dir (spec 14.2 never reads a managed
+    path); because the `.aiqt` subtree is a prefix, every tree nesting under it is covered by construction
+    (see `_opf_store.STORE_ROOT_CONTROL_DIRS`). Derived from that ONE authority, so no parallel literal can
+    drift (the self-test asserts set-equality for an inline store)."""
+    return _reanchor_declared(resolution, _opf_store.STORE_ROOT_CONTROL_DIRS)
 
 
 def _managed_paths(resolution, manifest_data):
     """The CLOSED "OPF-managed" set, derived FROM the resolved store authorities rather than a parallel
-    hand-copied list (guard-input-soundness). Returns (prune_prefixes, covered, control):
+    hand-copied list (guard-input-soundness). Returns (prune_prefixes, store_covered, declared_covered):
       - prune_prefixes: store-relative directory subtrees never detected under `.working/`: the machine
         store subtree (`resolution.machine_rel`, which contains the manifest, the typed indexes, and the
         control ledgers) and the reserved `.working/imports/` run tree (`_opf_import.IMPORTS_REL`).
-      - covered: managed paths matched by SUBTREE containment (`_under_any`), exactly as
-        `_opf_check.managed_file` grades a file against its `valid_unmanaged` authority: a path that EQUALS
-        a covered entry OR lies UNDER one is managed wherever it falls, neither enumerated as a stray nor
-        read. The entries are the manifest's declared view / deliverable targets
-        (`[views].*.target` / `[deliverables].*.target`), its already-declared `[unmanaged].paths` (each
-        canonicalized by `_canonical_managed` so a non-canonical but valid spelling cannot evade exclusion),
-        and the store pointer control files (`.opf.toml` / `.opf.local.toml`) at the PRODUCT root (OPF
-        control files, never ingestible). Because membership is by containment, a declared-unmanaged
-        DIRECTORY covers its whole subtree so tooling never reads an unmanaged path (spec 14.2), and a
-        view / deliverable target is defended the same way should one ever be a directory (single-file
-        today, but subtree-prefix membership is the correct rule, low-cost, and closes the class).
-      - control: the store-root control / VCS subtrees (`.aiqt` / `.git`, product-relative via
-        `_store_root_control_prefixes`), mirroring `_opf_import._assemble_preview`'s store-root drop set,
-        derived from that shared authority rather than a parallel hand-list (guard-input-soundness).
-        Returned SEPARATELY from `covered` and applied to the DECLARED (product-root) scope ONLY, never to
-        store scope: store scope walks the store's own `.working/` and grades STORE-relative paths, while
-        the control trees sit at the store ROOT (siblings of `.working/`, never under it), so excluding them
-        there is unnecessary AND, for a store relocated UNDER the product's own `.working/` (`dir:.working/
-        ops`), a product-relative prefix such as `.working/ops/.aiqt` would collide with a store-relative
-        path and silently suppress a real store stray. Binding each exclusion to its correct resolved root
-        keeps the store-relative and product-relative namespaces from cross-contaminating (F1)."""
+      - store_covered: the STORE-relative managed paths for the STORE scope, matched by SUBTREE containment
+        (`_under_any`) exactly as `_opf_check.managed_file` grades a file against its `valid_unmanaged`
+        authority: a path that EQUALS a covered entry OR lies UNDER one is managed wherever it falls under
+        `.working/`, neither enumerated as a stray nor read. The entries are the manifest's declared view /
+        deliverable targets (`[views].*.target` / `[deliverables].*.target`) and its already-declared
+        `[unmanaged].paths`, each canonicalized by `_canonical_managed` so a non-canonical but valid
+        spelling cannot evade exclusion, kept in the RAW store-relative spelling the store `.working/` walk
+        produces. Because membership is by containment, a declared-unmanaged DIRECTORY covers its whole
+        subtree so tooling never reads an unmanaged path (spec 14.2).
+      - declared_covered: the SAME managed set re-anchored for the DECLARED (product-root) scope, which
+        grades PRODUCT-relative paths. Every STORE-relative entry (the store-relative targets, the
+        `[unmanaged].paths`, and the store-root `.aiqt` / `.git` control / VCS dirs) is re-anchored at the
+        RESOLVED store root through the SINGLE `_reanchor_declared` path, so the store-relative / product-
+        relative namespace-collision class is closed BY CONSTRUCTION for any current or future store-relative
+        entry (F1): on a relocated / pointer store (store root != product root) a store-relative `notes`
+        becomes `ops/notes`, so it neither suppresses a real product stray at `notes/` nor leaves a store
+        path `ops/notes/` emitted and READ (the round-7 MAJOR). The genuinely PRODUCT-root entries are
+        folded in UN-anchored: the store pointer control files (`.opf.toml` / `.opf.local.toml`, OPF control
+        files managed wherever they fall; C1) and the PUBLIC deliverable targets (`_PUBLIC_TARGETS`, which
+        live at the product root in every topology, spec 5.8). For an inline / default store (store root ==
+        product root) re-anchoring is IDENTITY, so inline behaviour is unchanged. The `.aiqt` subtree is a
+        prefix, so every tree nesting under it (IMPORT_OPS_REL, IMPORT_ARCHIVE_REL, migrate's
+        `.aiqt/migration/journal`) is covered BY CONSTRUCTION, not by a parallel hand-list that keeps missing
+        an authority (guard-input-soundness). The control dirs / manifest entries are never folded into
+        `store_covered`, so for a store nested under the product's own `.working/` (`dir:.working/ops`) a
+        product-relative prefix such as `.working/ops/.aiqt` cannot collide with a store-relative store-scope
+        path and silently suppress a real store stray (F1)."""
     prune = {resolution.machine_rel, _opf_import.IMPORTS_REL}
-    covered = set()
+    store_rel = set()      # STORE-relative managed entries (re-anchored for declared scope, raw for store scope)
+    product_rel = set()    # genuinely PRODUCT-root managed entries (the public deliverable targets), never re-anchored
     for section in ("views", "deliverables"):
         tables = manifest_data.get(section)
         if isinstance(tables, dict):
             for tbl in tables.values():
                 if isinstance(tbl, dict) and isinstance(tbl.get("target"), str):
-                    covered.add(_canonical_managed(tbl["target"]))
+                    t = _canonical_managed(tbl["target"])
+                    # A PUBLIC deliverable target (VERSION / CHANGELOG.md) is product-root in every topology
+                    # (spec 5.8); every other target is store-relative and re-anchors for declared scope.
+                    (product_rel if t in _PUBLIC_TARGETS else store_rel).add(t)
     unmanaged = manifest_data.get("unmanaged")
     if isinstance(unmanaged, dict):
         paths = unmanaged.get("paths")
         if isinstance(paths, list):
             for p in paths:
                 if isinstance(p, str):
-                    covered.add(_canonical_managed(p))
-    # The store pointer control files at the product root are OPF control files, managed wherever they fall
-    # and never ingestible, so an `--include` naming one yields no declared row (C1).
-    covered.add(_opf_store.POINTER_REL)
-    covered.add(_opf_store.LOCAL_POINTER_REL)
-    # The store-root control / VCS subtrees (`.aiqt` / `.git`), product-relative and anchored at the
-    # RESOLVED store root, mirror `_opf_import._assemble_preview`'s store-root drop set so the declared
-    # product-root scope never enumerates or reads an apply-promotion ops / journal / archive tree or the
-    # VCS dir. The whole `.aiqt` subtree is a prefix, so every tree nesting under it (IMPORT_OPS_REL,
-    # IMPORT_ARCHIVE_REL, migrate's `.aiqt/migration/journal`) is covered BY CONSTRUCTION, not by a parallel
-    # hand-list that keeps missing an authority (the F-MAJOR premise shift; guard-input-soundness). They are
-    # PRODUCT-relative, so they are returned SEPARATELY and joined ONLY to the DECLARED-scope covered set,
-    # never store scope, so a `.working`-nested store's prefix cannot collide with a store-relative path (F1).
-    control = set(_store_root_control_prefixes(resolution))
-    return prune, covered, control
+                    # `[unmanaged].paths` are STORE-relative (spec 14.2; `_opf_check` grades them relative to
+                    # the store root), so they re-anchor at the resolved store root for the declared scope.
+                    store_rel.add(_canonical_managed(p))
+    # STORE scope grades STORE-relative paths, so it uses the RAW store-relative managed set. (A product-root
+    # public target never falls under `.working/`, so folding it in would be a harmless no-op; it is left out
+    # to keep store scope strictly the store-relative set.)
+    store_covered = set(store_rel)
+    # DECLARED (product-root) scope: re-anchor EVERY store-relative managed entry (manifest store-relative
+    # entries UNION the store-root control / VCS dirs) through the ONE `_reanchor_declared` path, and fold in
+    # the genuinely product-root entries (the pointer control files and the public deliverable targets)
+    # UN-anchored. On a store OUTSIDE the product root, `_reanchor_declared` yields () (the declared walk
+    # never reaches store content), leaving only the product-root entries.
+    declared_covered = set(product_rel)
+    declared_covered.add(_opf_store.POINTER_REL)
+    declared_covered.add(_opf_store.LOCAL_POINTER_REL)
+    declared_covered.update(_reanchor_declared(
+        resolution, store_rel | set(_opf_store.STORE_ROOT_CONTROL_DIRS)))
+    return prune, store_covered, declared_covered
 
 
 # --- detection ---------------------------------------------------------------------------------------
@@ -412,6 +460,80 @@ def _store_working_under_product(resolution):
     return posixpath.normpath(posixpath.join(rel.as_posix(), _opf_store.WORKING_DIRNAME))
 
 
+def _skip_char_class(pat, i):
+    """Given `pat[i] == '['`, return (end_index, is_class): `end_index` is the index just past a completed
+    `fnmatch` character class (the char after its closing `]`), mirroring `fnmatch`'s own class scan (a `]`
+    immediately after `[` or `[!` is a literal member, not the close). An unterminated `[` is a LITERAL `[`,
+    returned as (i + 1, False). Used by `_glob_prefix_possible` to step over a class as a single-char match."""
+    n = len(pat)
+    k = i + 1
+    if k < n and pat[k] == "!":
+        k += 1
+    if k < n and pat[k] == "]":
+        k += 1
+    while k < n and pat[k] != "]":
+        k += 1
+    if k >= n:
+        return i + 1, False   # unterminated '[' is a literal '['
+    return k + 1, True        # index past the closing ']'
+
+
+def _glob_prefix_possible(pat, prefix):
+    """True when SOME string beginning with the literal `prefix` can match the `fnmatch.fnmatchcase` pattern
+    `pat` (`*` matches any run INCLUDING `/`, `?` any single char, `[...]` one char), used to decide whether
+    a glob's match set can descend into a covered subtree (prefix `<covered>/`). This is a SOUND
+    OVER-APPROXIMATION toward a match (fail-closed toward CANNOT-EVALUATE, R7-1): a `[...]` class is treated
+    as matching ANY single char, and once the whole prefix is consumed at ANY pattern position the remaining
+    pattern is assumed satisfiable, so it NEVER reports False when the pattern could really match within the
+    subtree (a spurious True only over-widens toward CANNOT-EVALUATE, never a false no-match). Each recursion
+    step strictly advances the pattern or prefix index, so it terminates; the memo bounds the `*` fan-out."""
+    n, m = len(pat), len(prefix)
+    memo = {}
+
+    def can(i, j):
+        if j == m:
+            return True             # whole prefix consumed; the remaining pattern matches some suffix
+        if i == n:
+            return False            # pattern exhausted with prefix left: no match has this prefix
+        key = (i, j)
+        if key in memo:
+            return memo[key]
+        ch = pat[i]
+        if ch == "*":
+            res = can(i + 1, j) or can(i, j + 1)   # match zero, or consume prefix[j] and stay on '*'
+        elif ch == "?":
+            res = can(i + 1, j + 1)                 # one char
+        elif ch == "[":
+            k, is_class = _skip_char_class(pat, i)
+            res = can(k, j + 1) if is_class else (prefix[j] == "[" and can(i + 1, j + 1))
+        else:
+            res = ch == prefix[j] and can(i + 1, j + 1)
+        memo[key] = res
+        return res
+
+    return can(0, 0)
+
+
+def _pattern_intersects_covered(pat, existing_covered):
+    """The PRESENT covered subtree an `--include` pattern with no read-space hit COULD still match within (so
+    the match can be neither confirmed nor denied without reading an unmanaged path), or None when the
+    pattern lies ENTIRELY within the read (non-excluded) space. This replaces the round-7 literal-ancestor
+    proxy (`_under_any(pat, existing_covered)`), which unsoundly took a pattern's literal ANCESTOR prefix as
+    proof the input EXISTS: ancestor existence never proves a descendant, and a wildcard can match a covered
+    path its literal prefix does not name (R7-1). A covered subtree qualifies when the pattern names it or a
+    path under it (`_under_any`), when it fnmatches the covered dir itself, or when the glob's match set can
+    descend into it (`_glob_prefix_possible` against `<covered>/`), over-approximating toward a hit
+    (fail-closed toward CANNOT-EVALUATE). Only a PRESENT covered dir (`existing_covered`) qualifies: an ABSENT
+    covered path holds no unread content, so a pattern that can only resolve within it stays a genuine
+    no-match FINDING (a declared input must resolve). Returns the first such covered dir (name-sorted) for a
+    LOCATED message."""
+    for c in sorted(existing_covered):
+        if (_under_any(pat, (c,)) or fnmatch.fnmatchcase(c, pat)
+                or _glob_prefix_possible(pat, c + "/")):
+            return c
+    return None
+
+
 def _detect_declared_scope(product_root, include, covered, store_working_rel):
     """Enumerate the product-root files an operator `--include` pattern names (the opt-in declared scope,
     OQ-3). Each pattern is validated FIRST (contained, root-relative, and never naming the auto-detected
@@ -421,9 +543,12 @@ def _detect_declared_scope(product_root, include, covered, store_working_rel):
     for a `dir:ops` relocation, or None when the store resolves outside the product root), derived from the
     RESOLVED store location so a relocated store's machine / imports / stray files are excluded from declared
     scope wherever they resolve and are never emitted as declared rows; the literal product-root `.working/`
-    is always off-limits too (the pre-relocation contract). A pattern that matches no product file is a
-    FINDING (declared-input must resolve, OQ-A, matching `scan_import`'s refusal of an absent declared
-    source). Each matched file is a `declared`-scope row (union across patterns, digested once), EXCEPT a
+    is always off-limits too (the pre-relocation contract). A pattern with no read-space hit is THREE-VALUED
+    (R7-1): a no-match FINDING (declared-input must resolve, OQ-A, matching `scan_import`'s refusal of an
+    absent declared source) only when it lies ENTIRELY within the read space, but a CANNOT-EVALUATE when its
+    match set could reach into a PRESENT covered subtree detection never reads (neither match nor no-match is
+    knowable across that no-read boundary; `_pattern_intersects_covered`). Each matched file is a
+    `declared`-scope row (union across patterns, digested once), EXCEPT a
     path a `covered` entry manages by SUBTREE containment (`_under_any`): a `[views]`/`[deliverables]`
     target, a declared `[unmanaged]` path (or a file UNDER a declared-unmanaged directory), or a store
     pointer control file, which commonly falls at the product root. It is excluded before it is read,
@@ -452,22 +577,34 @@ def _detect_declared_scope(product_root, include, covered, store_working_rel):
         # so the no-match check can tell an existing-but-excluded subtree from an absent one WITHOUT
         # entering it (F2: separate existence from exclusion).
         _walk_regular_files(fd, "", set(scope_prefixes) | covered, files, [0], pruned_dirs)
-        # The covered directories that EXIST on the real filesystem (pruned before descent). A pattern that
-        # points at, or under, one resolves to a present-but-excluded subtree; a covered path that does NOT
-        # exist leaves no entry here, so a pattern under it stays an (unresolved) no-match finding.
+        # The covered directories that EXIST on the real filesystem (pruned before descent). A pattern whose
+        # match set can descend into one resolves to a PRESENT-but-excluded subtree whose contents detection
+        # never reads; a covered path that does NOT exist leaves no entry here, so a pattern that can only
+        # resolve within it stays an (unresolved) no-match finding.
         existing_covered = {d for d in pruned_dirs if d in covered}
         matched = set()
         for pat in include:
             hits = [f for f in files if fnmatch.fnmatchcase(f, pat)]
-            # A pattern with no non-excluded hit is a no-match FINDING (a declared input must resolve),
-            # SEPARATING existence from exclusion (F2): it stays a finding UNLESS it points at or under a
-            # covered path that ACTUALLY EXISTS (`existing_covered`), which resolves to a present-but-excluded
-            # subtree (never read), not an absent input. A covered path that does NOT exist is still a
-            # no-match finding, so an `--include` naming an ABSENT declared-unmanaged path is caught even
-            # though the path is covered (round-5 conflated covered with existing, letting an absent covered
-            # path bypass the finding). A covered FILE that exists is walked into `files`, so a pattern
-            # naming one already gets a hit and never reaches this branch.
-            if not hits and not _under_any(pat, existing_covered):
+            if not hits:
+                # THREE-VALUED no-match derivation (R7-1), never the round-7 literal-ancestor existence
+                # proxy. A declared pattern with no read-space hit is:
+                #  - CANNOT-EVALUATE (verdict 2) when its match set COULD reach into a PRESENT covered
+                #    subtree whose contents detection never reads: the match can be neither confirmed nor
+                #    denied across that no-read boundary, so detection invents neither existence nor absence
+                #    (`_pattern_intersects_covered`, over-approximating toward this fail-closed verdict). An
+                #    ancestor prefix that merely exists never proves a descendant, and a wildcard can reach a
+                #    covered path its literal prefix does not name; both now resolve here.
+                #  - a no-match FINDING (verdict 1) only when the pattern lies ENTIRELY within the read
+                #    (non-excluded) space and matched nothing (a declared input must resolve, OQ-A). An
+                #    ABSENT covered path holds no unread content, so a pattern that can only resolve within it
+                #    is a genuine no-match, not a CANNOT-EVALUATE.
+                # A covered FILE that exists is walked into `files`, so a pattern naming one already gets a
+                # hit and never reaches this branch.
+                covered_reach = _pattern_intersects_covered(pat, existing_covered)
+                if covered_reach is not None:
+                    raise _cannot("--include pattern {!r} could match within the covered, unread subtree "
+                                  "{!r}, so detection can neither confirm nor deny the match without reading "
+                                  "an unmanaged path (fail-closed)".format(pat, covered_reach))
                 raise _finding("--include pattern {!r} matched no product-root file (a declared input must "
                                "resolve; fail-closed)".format(pat))
             matched.update(hits)
@@ -503,14 +640,15 @@ def _detect_rows(product_root, resolution, include):
         if reval.status != _opf_store.VALID:
             raise _cannot("store manifest {} is not VALID on re-read ({}: {}); fail-closed".format(
                 manifest_rel, reval.status, "; ".join(reval.findings)))
-        prune, covered, control = _managed_paths(resolution, manifest_data)
-        rows = _detect_store_scope(store_fd, prune, covered)
+        prune, store_covered, declared_covered = _managed_paths(resolution, manifest_data)
+        rows = _detect_store_scope(store_fd, prune, store_covered)
     finally:
         os.close(store_fd)
     if include:
-        # The store-root control / VCS prefixes are PRODUCT-relative, so they join the covered set for the
-        # DECLARED product-root scope ONLY (never store scope; see `_managed_paths` for why).
-        rows += _detect_declared_scope(product_root, include, covered | control,
+        # `declared_covered` is the managed set already re-anchored for the product-root scope (the
+        # store-relative entries and control / VCS dirs bound to the resolved store root, plus the
+        # product-root pointer + public-target entries un-anchored); see `_managed_paths`.
+        rows += _detect_declared_scope(product_root, include, declared_covered,
                                        _store_working_under_product(resolution))
     rows.sort(key=lambda r: (r["source_path"].encode("utf-8"), r["scope"]))
     return rows
@@ -852,7 +990,12 @@ def self_test():
                     ".working/real.md": "r"},
             product={"docs/legacy/old.md": "o", "docs/keep.md": "K"},
             manifest_extra='[unmanaged]\npaths = [".working/legacy-dir", "docs/legacy"]')
-        r = detect(root, include=["docs/legacy/old.md", "docs/keep.md"])
+        # The declared include is a BROAD glob with a real read-space hit (`docs/keep.md`), NOT a pattern
+        # naming the covered `docs/legacy` subtree directly: a pattern that can only resolve within a PRESENT
+        # covered subtree is now a CANNOT-EVALUATE (R7-1), so the declared-scope subtree exclusion is shown
+        # here by the pruned `docs/legacy` producing no `docs/legacy/old.md` row while `docs/keep.md` is
+        # detected (revert the directory prune -> `docs/legacy/old.md` is entered, matched and read).
+        r = detect(root, include=["docs/*"])
         sub_paths = {row["source_path"] for row in r.rows}
         check("unmanaged-directory-covers-subtree",
               r.verdict == CLEAN and ".working/real.md" in sub_paths and "docs/keep.md" in sub_paths
@@ -860,22 +1003,46 @@ def self_test():
               and ".working/legacy-dir/sub/deep.md" not in sub_paths
               and "docs/legacy/old.md" not in sub_paths)
 
-        # 8b-existence (F2: separate EXISTENCE from exclusion). Round 5 conflated "covered" with "exists": an
-        #     --include under a covered path bypassed the no-match FINDING regardless of whether the path
-        #     existed. An --include naming an ABSENT declared-unmanaged path must STILL be a no-match FINDING
-        #     (a declared input must resolve), while one under a PRESENT declared-unmanaged directory stays
-        #     CLEAN (a present-but-excluded subtree, never read). Both cases share a covered [unmanaged] path;
-        #     only filesystem existence distinguishes them, so this is the fail-without-the-fix discriminator.
+        # 8b-existence + R7-1 THREE-VALUED no-match derivation. Round 5 separated EXISTENCE from exclusion;
+        #     R7-1 corrects the residual UNSOUNDNESS of using a pattern's literal ANCESTOR prefix as proof
+        #     the input EXISTS. A declared --include with no read-space hit is:
+        #       - a no-match FINDING only if it lies ENTIRELY within the read (non-excluded) space, so an
+        #         --include naming an ABSENT covered path (no unread content to hide a match) is a FINDING;
+        #       - CANNOT-EVALUATE if it could match within a PRESENT covered subtree detection never reads
+        #         (neither match nor no-match is knowable across the no-read boundary), whether the pattern
+        #         is a literal descendant (ancestor existence never proves a descendant), a wildcard whose
+        #         match set descends into the covered dir, or a wildcard the covered dir's literal prefix
+        #         does not name. The round-7 proxy returned CLEAN for the literal cases and a FALSE no-match
+        #         FINDING for the wildcard cases; both are now CANNOT-EVALUATE (fail-closed).
+        # (a) ABSENT covered path -> a genuine no-match FINDING (only existence separates it from the cases
+        #     below); reverting the derivation keeps this a FINDING, so it is the existence-separator anchor.
         root, _m = build_store(product={"live.md": "L"},
                                manifest_extra='[unmanaged]\npaths = ["qa-absent-legacy"]')
         absent = detect(root, include=["qa-absent-legacy/*.md"])
         check("declared-absent-covered-include-is-finding", absent.verdict == FINDING and absent.rows == [])
-        root, _m = build_store(product={"present-legacy/old.md": "o", "live.md": "L"},
-                               manifest_extra='[unmanaged]\npaths = ["present-legacy"]')
-        present = detect(root, include=["present-legacy/*.md"])
-        present_decl = {row["source_path"] for row in present.rows if row["scope"] == "declared"}
-        check("declared-present-covered-include-clean",
-              present.verdict == CLEAN and "present-legacy/old.md" not in present_decl)
+        # (b/c) PRESENT covered `legacy` with an UNREAD child `legacy/old.md`: a literal descendant (present
+        #     or absent) and a wildcard that reaches into `legacy` are each CANNOT-EVALUATE naming `legacy`.
+        root, _m = build_store(product={"live.md": "L", "legacy/old.md": "o"},
+                               manifest_extra='[unmanaged]\npaths = ["legacy"]')
+        for _pat in ("legacy/old.md", "legacy/ABSENT.md", "legacy/*.txt"):
+            _r = detect(root, include=[_pat])   # literal descendant: reverting -> CLEAN (verdict 0)
+            check("r71-covered-descendant-cannot-evaluate",
+                  _r.verdict == CANNOT_EVALUATE and any("legacy" in f for f in _r.findings))
+        for _pat in ("*/old.md", "l*/old.md"):
+            _r = detect(root, include=[_pat])   # wildcard into covered: reverting -> false FINDING (verdict 1)
+            check("r71-wildcard-reaches-covered-cannot-evaluate",
+                  _r.verdict == CANNOT_EVALUATE and any("legacy" in f for f in _r.findings))
+        # (d) withheld-stray: `*/old.md` must NOT masquerade as a no-match FINDING that withholds a real store
+        #     stray (`.working/loose.md`); with a present covered `legacy` it is the sound CANNOT-EVALUATE,
+        #     never verdict 1. Reverting R7-1 makes it a false FINDING (verdict 1).
+        root, _m = build_store(strays={".working/loose.md": "loose"}, product={"legacy/old.md": "o"},
+                               manifest_extra='[unmanaged]\npaths = ["legacy"]')
+        withheld = detect(root, include=["*/old.md"])
+        check("r71-wildcard-does-not-withhold-stray-as-finding", withheld.verdict == CANNOT_EVALUATE)
+        # (e) a purely READ-SPACE no-match (no covered subtree the pattern can reach) stays a FINDING, so the
+        #     three-valued derivation never over-widens a genuine no-match into CANNOT-EVALUATE.
+        root, _m = build_store(product={"live.md": "L"})
+        check("r71-read-space-no-match-is-finding", detect(root, include=["nope/*.md"]).verdict == FINDING)
 
         # 8b-control (F-MAJOR premise shift). The store-root control / VCS subtrees (`.aiqt/import`,
         #     `.aiqt/import/journal`, `.aiqt/import-archive`, and `.git`) are OPF-managed / VCS content, NOT
@@ -928,13 +1095,15 @@ def self_test():
                                   _opf_import.IMPORT_ARCHIVE_REL))
               and _opf_import.IMPORTS_REL.startswith(_opf_store.WORKING_DIRNAME + "/"))
 
-        # 8b-prune (F1: traverse-before-exclude). A covered (excluded) directory is PRUNED before descent,
+        # 8b-prune (F1: traverse-before-exclude). A covered (excluded) DIRECTORY is PRUNED before descent,
         #     never entered, so an unreadable / exotic entry inside a subtree we would exclude anyway cannot
         #     block detection with a spurious CANNOT-EVALUATE (spec 14.2 never enters an unmanaged subtree). A
         #     SYMLINK planted inside a declared-unmanaged directory makes the pre-fix walk (which entered the
         #     subtree, excluding only at the result stage) fail closed on the symlink; pruning before descent
-        #     detects the live sibling CLEAN and never enters the excluded subtree. Symlink support is
-        #     platform-gated exactly as the symlink-in-scope vector below.
+        #     detects the live sibling CLEAN and never enters the excluded subtree. The declared include is
+        #     `live.md` alone (a covered-subtree pattern like `legacy/*` is now a CANNOT-EVALUATE, R7-1, which
+        #     would mask this DIRECTORY-prune vector); reverting the directory prune enters `legacy`, hits the
+        #     symlink and fails closed. Symlink support is platform-gated exactly as the symlink-in-scope below.
         root, _m = build_store(strays={".working/real.md": "r"},
                                product={"legacy/keep.md": "k", "live.md": "L"},
                                manifest_extra='[unmanaged]\npaths = ["legacy"]')
@@ -944,11 +1113,29 @@ def self_test():
         except OSError:
             prune_sym_ok = False   # platform without symlink support: skip this vector, not a failure
         if prune_sym_ok:
-            pr = detect(root, include=["legacy/*", "live.md"])
+            pr = detect(root, include=["live.md"])
             pr_paths = {row["source_path"] for row in pr.rows}
             check("excluded-subtree-pruned-before-descent",
                   pr.verdict == CLEAN and "live.md" in pr_paths
                   and not any(p.startswith("legacy/") for p in pr_paths))
+
+        # 8b-covered-symlink-entry (F2). A covered entry that is ITSELF a symlink (a declared-unmanaged
+        #     SYMLINK, not a directory containing one) reached the exotic-entry refusal before it could be
+        #     pruned, blocking the whole detect with a spurious CANNOT-EVALUATE. Pruning a covered entry
+        #     BEFORE the exotic classification prunes it (never read, never refused, spec 14.2), so a live
+        #     sibling detects CLEAN. Reverting the pre-refusal prune makes the covered symlink fail closed
+        #     (CANNOT-EVALUATE) again. A NON-covered exotic entry still fails closed (the 10./10a. vectors).
+        root, _m = build_store(product={"live.md": "L"}, manifest_extra='[unmanaged]\npaths = ["legacy"]')
+        try:
+            os.symlink(str(_m / "manifest.toml"), str(root / "legacy"))   # `legacy` IS the symlink (covered)
+            csym_ok = True
+        except OSError:
+            csym_ok = False   # platform without symlink support: skip this vector, not a failure
+        if csym_ok:
+            cs = detect(root, include=["live.md"])
+            cs_paths = {row["source_path"] for row in cs.rows}
+            check("covered-symlink-entry-pruned-not-refused",
+                  cs.verdict == CLEAN and "live.md" in cs_paths and "legacy" not in cs_paths)
 
         # 8c. RELOCATED-store declared-scope exclusion (round-2 F1): a `.opf.toml` -> `dir:ops` relocation
         #     puts the store at `ops/.working/`. The declared-scope exclusion is derived from the RESOLVED
@@ -996,6 +1183,59 @@ def self_test():
         check("pointer-control-files-excluded",
               c1.verdict == CLEAN and c1decl == {"readme.md"}
               and ".opf.toml" not in c1decl and ".opf.local.toml" not in c1decl)
+
+        # 8e. RE-ANCHOR the store-relative managed set for DECLARED scope on a RELOCATED store (round-7
+        #     MAJOR, F1). On a `dir:ops` store (store root != product root) a manifest STORE-relative entry
+        #     is bound to the resolved STORE root for the product-root declared scope, so a store-relative
+        #     `notes` becomes `ops/notes`. Two directions, BOTH entry types (unmanaged + target):
+        #       - SUPPRESSION: the raw (un-anchored) entry would match the product-relative namespace and
+        #         silently suppress a REAL product stray at `notes/`; re-anchored, the product stray is
+        #         DETECTED. (fail-without-fix: the stray is missing from the rows.)
+        #       - UNMANAGED-READ: the store-side path under `ops/notes/` (or `ops/report.md`) must be
+        #         EXCLUDED and never READ; the raw entry left it emitted + digested (spec 14.2 violation).
+        #     For an inline store re-anchoring is IDENTITY, so the inline vectors above are unchanged.
+        # (a) unmanaged SUPPRESSION: `[unmanaged] notes` (store-relative) must not suppress product `notes/`.
+        reloc = build_relocated(manifest_extra='[unmanaged]\npaths = ["notes"]',
+                                product={"notes/todo.md": "stray", "ops/notes/legacy.md": "storeside",
+                                         "readme.md": "R"})
+        s1 = detect(reloc, include=["notes/*", "readme.md"])
+        s1decl = {row["source_path"] for row in s1.rows if row["scope"] == "declared"}
+        check("reanchor-unmanaged-suppression",
+              s1.verdict == CLEAN and "notes/todo.md" in s1decl)   # raw `notes` would suppress it
+        # (b) unmanaged UNMANAGED-READ: the store-side `ops/notes/legacy.md` is excluded + never read. The
+        #     pattern resolves entirely within the (re-anchored) covered `ops/notes`, so per R7-1 the sound
+        #     verdict is CANNOT-EVALUATE; the KEY property is that `ops/notes/legacy.md` is never a row (the
+        #     raw entry emitted + READ it). Reverting the re-anchor: `ops/notes/legacy.md` becomes a row.
+        s2 = detect(reloc, include=["ops/notes/*", "readme.md"])
+        check("reanchor-unmanaged-not-read",
+              s2.verdict == CANNOT_EVALUATE
+              and not any(row["source_path"] == "ops/notes/legacy.md" for row in s2.rows))
+        # (c) TARGET SUPPRESSION: a non-public deliverable target `report.md` (store-relative) re-anchors to
+        #     `ops/report.md`, so a real product stray `report.md` is DETECTED (raw would suppress it).
+        reloc = build_relocated(manifest_extra='[deliverables.d1]\nkind = "curated"\ntarget = "report.md"',
+                                product={"report.md": "stray", "readme.md": "R"})
+        t1 = detect(reloc, include=["report.md", "readme.md"])
+        t1decl = {row["source_path"] for row in t1.rows if row["scope"] == "declared"}
+        check("reanchor-target-suppression", t1.verdict == CLEAN and "report.md" in t1decl)
+        # (d) TARGET UNMANAGED-READ: the store-side `ops/report.md` (the re-anchored target) is excluded +
+        #     never read; a covered FILE is walked, hit and dropped BEFORE its digest, so this stays CLEAN.
+        #     Reverting the re-anchor: `ops/report.md` is emitted + READ.
+        reloc = build_relocated(manifest_extra='[deliverables.d1]\nkind = "curated"\ntarget = "report.md"',
+                                product={"ops/report.md": "storeside", "readme.md": "R"})
+        t2 = detect(reloc, include=["ops/report.md", "readme.md"])
+        t2decl = {row["source_path"] for row in t2.rows if row["scope"] == "declared"}
+        check("reanchor-target-not-read",
+              t2.verdict == CLEAN and t2decl == {"readme.md"}
+              and not any(row["source_path"] == "ops/report.md" for row in t2.rows))
+        # (e) PUBLIC-target correctness: a PUBLIC deliverable target (`CHANGELOG.md`, product-root in every
+        #     topology, spec 5.8) is NOT re-anchored, so the real product-root `CHANGELOG.md` stays excluded
+        #     on a relocated store. Re-anchoring it (the finding's simplification) would DETECT it as a stray.
+        reloc = build_relocated(
+            manifest_extra='[deliverables."CHANGELOG.md"]\nkind = "curated"\ntarget = "CHANGELOG.md"',
+            product={"CHANGELOG.md": "cl", "readme.md": "R"})
+        pt = detect(reloc, include=["CHANGELOG.md", "readme.md"])
+        ptdecl = {row["source_path"] for row in pt.rows if row["scope"] == "declared"}
+        check("public-target-not-reanchored", pt.verdict == CLEAN and ptdecl == {"readme.md"})
 
         # 9. init-first: an unresolved store (no manifest) is CANNOT-EVALUATE, "run `opf init` first".
         unadopted = base / "unadopted"
@@ -1143,14 +1383,17 @@ def self_test():
           "spelling, a declared-unmanaged DIRECTORY's whole subtree unread, the store pointer control "
           "files, and the store-root `.aiqt` / `.git` control / VCS trees derived from the import layer's "
           "own drop-set authority so every apply / migration ops / journal / archive tree is covered by "
-          "construction, drift-checked against the import constants), PRUNES a covered subtree before "
-          "descent so an unreadable / exotic entry inside an excluded tree never blocks detection, derives "
-          "the declared-scope exclusion from the RESOLVED store location so a relocated (`dir:`) store's "
-          "own subtree never leaks as declared and its product-relative store-root control prefix never "
-          "suppresses a store stray (even a store nested under the product's own `.working/`), honours "
-          "declared-scope --include (glob-no-match/escape/store-scope each a finding, an absent covered "
-          "declared path still a no-match finding while a present covered one is clean), is deterministic "
-          "+ writes nothing, fails closed on an unresolved "
+          "construction, drift-checked against the import constants), PRUNES a covered DIRECTORY (and a "
+          "covered entry that is ITSELF a symlink or exotic) before it is entered or refused so it never "
+          "blocks detection, RE-ANCHORS every store-relative managed entry (the store-relative targets, the "
+          "[unmanaged].paths, and the control / VCS dirs) at the RESOLVED store root for declared scope so a "
+          "relocated (`dir:`) store neither suppresses a real product stray nor emits + reads a store path "
+          "(identity for an inline store), while a PUBLIC deliverable target and the pointer files stay "
+          "product-relative, honours declared-scope --include (escape / store-scope each a finding) with a "
+          "THREE-VALUED no-match derivation (a read-space no-match and an ABSENT covered path are findings, "
+          "while a pattern that could match within a PRESENT covered subtree detection never reads is "
+          "CANNOT-EVALUATE, never a false CLEAN or a false no-match that withholds a real stray), is "
+          "deterministic + writes nothing, fails closed on an unresolved "
           "store, a symlink, a non-UTF-8 name, and a non-contained detected path (so a CLEAN worksheet "
           "always validates), the worksheet validates and catches vocab/digest/keyset/schema-type "
           "mutations, a source_path the contained reader rejects, and a non-string top-level key, and "
