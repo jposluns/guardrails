@@ -23,8 +23,10 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
   - detect-writes-nothing : the synthetic store is byte-identical after detect (SECI-preview-has-no-side-
                            effects); detect stages no run and mutates nothing at all.
   - managed-path-exclusion : an OPF-managed file (the manifest, a control ledger, a file under
-                           `.working/imports/`, an already-declared `[unmanaged]` path) does NOT appear as a
-                           detected row (this catches over-detection, which completeness alone does not).
+                           `.working/imports/`, an already-declared `[unmanaged]` path, a relocated (`dir:`)
+                           store's whole resolved subtree, or a store pointer control file) does NOT appear
+                           as a detected row (this catches over-detection, which completeness alone does
+                           not); and a CLEAN detection's worksheet always passes `validate_worksheet`.
   - module-self-test     : _opf_ingest.self_test() == 0 (the engine's own unit invariants run wherever this
                            CI-registered gate runs).
 
@@ -83,7 +85,7 @@ def _self_test():
     base = Path(tempfile.mkdtemp(prefix="opf-ingest-gate-selftest-")).resolve()
     counter = [0]
 
-    def build_store(strays=None, manifest_extra=""):
+    def build_store(strays=None, manifest_extra="", product=None):
         counter[0] += 1
         root = base / "case-{:02d}".format(counter[0])
         machine = root / ".working" / "toml"
@@ -92,6 +94,33 @@ def _self_test():
         (machine / "counters.toml").write_text(
             "schema = 1\n\n[counters]\nBI = 0\nLF = 0\nWL = 0\n", encoding="utf-8")
         for rel, text in (strays or {}).items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        for rel, text in (product or {}).items():   # product-root-relative (inline: same tree as strays)
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        return root
+
+    def build_relocated(subdir="ops", strays=None, product=None, manifest_extra=""):
+        """A RELOCATED store: a committed `.opf.toml` at the product root names `dir:<subdir>`, so the store
+        resolves at `<root>/<subdir>/.working/toml` (store_root != product_root). `strays` are store-relative
+        (under `<subdir>/.working/`); `product` are product-root-relative. Returns root."""
+        counter[0] += 1
+        root = base / "reloc-{:02d}".format(counter[0])
+        machine = root / subdir / ".working" / "toml"
+        machine.mkdir(parents=True)
+        (machine / "manifest.toml").write_text(manifest_text(manifest_extra), encoding="utf-8")
+        (machine / "counters.toml").write_text(
+            "schema = 1\n\n[counters]\nBI = 0\nLF = 0\nWL = 0\n", encoding="utf-8")
+        (root / _opf_store.POINTER_REL).write_text(
+            '[store]\ntarget = "dir:{}"\n'.format(subdir), encoding="utf-8")
+        for rel, text in (strays or {}).items():
+            p = root / subdir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        for rel, text in (product or {}).items():
             p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
@@ -205,6 +234,35 @@ def _self_test():
         expect("non-canonical-managed-exclusion",
                r5.verdict == ing.CLEAN and ".working/real.md" in paths5
                and ".working/kept.md" not in paths5)
+        # discriminator (round-2 F1): a RELOCATED store (`.opf.toml` -> `dir:ops`, so store_root at
+        # `ops/.working/`) does not leak its own machine / imports / stray subtree into declared scope; the
+        # exclusion is derived from the RESOLVED store location, so naming the relocated store scope via
+        # --include is a FINDING and the store subtree never appears as declared rows.
+        root6 = build_relocated(
+            strays={".working/toml/extra.toml": "m", ".working/imports/imp-x/frames.log": "run",
+                    ".working/stray.md": "s"},
+            product={"readme.md": "R"})
+        r6 = ing.detect(root6, include=["ops/.working/*"])
+        r6ok = ing.detect(root6, include=["readme.md", "*"])
+        r6decl = sorted(row["source_path"] for row in r6ok.rows if row["scope"] == "declared")
+        expect("relocated-store-scope-exclusion",
+               r6.verdict == ing.FINDING and r6.rows == []
+               and r6ok.verdict == ing.CLEAN and r6decl == ["readme.md"])
+        # discriminator (round-2 C1): the store pointer control files (`.opf.toml` / `.opf.local.toml`) at
+        # the product root are managed wherever they fall; an --include naming one yields no declared row.
+        root7 = build_relocated(product={"readme.md": "R"})
+        (root7 / _opf_store.LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:ops"\n', encoding="utf-8")
+        r7 = ing.detect(root7, include=[".opf.toml", ".opf.local.toml", "readme.md"])
+        decl7 = {row["source_path"] for row in r7.rows if row["scope"] == "declared"}
+        expect("pointer-control-files-exclusion",
+               r7.verdict == ing.CLEAN and decl7 == {"readme.md"})
+        # discriminator (round-2 F2): a detected path the worksheet validator would reject as non-contained
+        # (a `:` in its second character) is a LOCATED CANNOT-EVALUATE, never a CLEAN worksheet that then
+        # fails validate_worksheet, so a CLEAN detection's worksheet ALWAYS validates.
+        root8 = build_store(product={"a:b.md": "x"})
+        r8 = ing.detect(root8, include=["*"])
+        expect("clean-worksheet-always-validates",
+               r8.verdict == ing.CANNOT_EVALUATE and any("a:b.md" in msg for msg in r8.findings))
 
         # --- module-self-test delegation -----------------------------------------------------------
         expect("module-self-test", ing.self_test() == 0)
@@ -223,7 +281,9 @@ def _self_test():
           "detection and FINDING on its discriminator, including a type-strict schema flip; "
           "detection-completeness matches an independent re-enumeration and catches an omitted store-scope "
           "file; detect-writes-nothing; managed-path exclusion catches over-detection, a managed path an "
-          "--include names, and a non-canonical managed spelling; the engine module self-test is green)")
+          "--include names, a non-canonical managed spelling, a relocated (`dir:`) store's whole resolved "
+          "subtree, and the store pointer control files; a CLEAN detection's worksheet always validates; "
+          "the engine module self-test is green)")
     return EXIT_OK
 
 

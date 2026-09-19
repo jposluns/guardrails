@@ -157,7 +157,15 @@ def _build_worksheet(rows):
 
 def _row(source_path, scope, sha256, size):
     """One closed-keyset disposition row. Detect always emits `unresolved` / `baseline`; `note` is a
-    present, string-typed, empty field (the closed keyset is fixed so the worksheet shape is stable)."""
+    present, string-typed, empty field (the closed keyset is fixed so the worksheet shape is stable). A
+    selected path that the worksheet validator's own containment check (`_is_contained_relpath`) would
+    reject (a name whose second character is `:`, or one carrying a backslash, which the validator reads as
+    a drive / UNC path) is a LOCATED refusal here, fail-closed, so a CLEAN detection can never emit a
+    worksheet row that then fails `validate_worksheet` (detection-consistent-with-its-own-validator)."""
+    if not _opf_store._is_contained_relpath(source_path):
+        raise _cannot("detected {} path {!r} is not a contained root-relative path, so it cannot be "
+                      "represented as a worksheet source_path (fail-closed, never a clean row that would "
+                      "fail validation)".format(scope, source_path))
     return {"source_path": source_path, "scope": scope, "disposition": _DETECT_DISPOSITION,
             "origin": _DETECT_ORIGIN, "sha256": sha256, "size": size, "note": ""}
 
@@ -243,10 +251,12 @@ def _managed_paths(resolution, manifest_data):
       - prune_prefixes: store-relative directory subtrees never detected under `.working/`: the machine
         store subtree (`resolution.machine_rel`, which contains the manifest, the typed indexes, and the
         control ledgers) and the reserved `.working/imports/` run tree (`_opf_import.IMPORTS_REL`).
-      - exact: store-relative individual paths that are managed wherever they fall: the manifest's declared
-        view targets and deliverable targets (`[views].*.target` / `[deliverables].*.target`) and its
-        already-declared `[unmanaged].paths`. An already-declared unmanaged path is NOT re-detected. Each is
-        canonicalized (`_canonical_managed`) so a non-canonical but valid spelling cannot evade exclusion."""
+      - exact: individual paths that are managed wherever they fall: the manifest's declared view targets
+        and deliverable targets (`[views].*.target` / `[deliverables].*.target`), its already-declared
+        `[unmanaged].paths` (each canonicalized by `_canonical_managed` so a non-canonical but valid spelling
+        cannot evade exclusion, and NOT re-detected), and the store pointer control files
+        (`.opf.toml` / `.opf.local.toml`) that live at the PRODUCT root: OPF control files, never ingestible,
+        excluded from declared scope exactly as a manifest-declared managed path is."""
     prune = {resolution.machine_rel, _opf_import.IMPORTS_REL}
     exact = set()
     for section in ("views", "deliverables"):
@@ -262,6 +272,10 @@ def _managed_paths(resolution, manifest_data):
             for p in paths:
                 if isinstance(p, str):
                     exact.add(_canonical_managed(p))
+    # The store pointer control files at the product root are OPF control files, managed wherever they fall
+    # and never ingestible, so an `--include` naming one yields no declared row (C1).
+    exact.add(_opf_store.POINTER_REL)
+    exact.add(_opf_store.LOCAL_POINTER_REL)
     return prune, exact
 
 
@@ -295,28 +309,53 @@ def _detect_store_scope(store_fd, prune, exact):
     return rows
 
 
-def _detect_declared_scope(product_root, include, exact):
+def _store_working_under_product(resolution):
+    """The resolved store's `.working` subtree as a PRODUCT-root-relative POSIX path when the store falls
+    UNDER the product root (".working" for an inline/default store, "ops/.working" for a `dir:ops`
+    relocation), else None (the store resolves OUTSIDE the product root, so the product-root declared walk
+    never reaches it). Derived from the RESOLVED store location (`resolution.store_root` against
+    `resolution.product_root`), the same authority `_detect_store_scope` walks, so a relocated store's own
+    subtree is excluded from declared scope wherever it resolves, not only the literal product-root
+    `.working`."""
+    try:
+        rel = Path(os.path.abspath(resolution.store_root)).relative_to(
+            Path(os.path.abspath(resolution.product_root)))
+    except ValueError:
+        return None
+    return posixpath.normpath(posixpath.join(rel.as_posix(), _opf_store.WORKING_DIRNAME))
+
+
+def _detect_declared_scope(product_root, include, exact, store_working_rel):
     """Enumerate the product-root files an operator `--include` pattern names (the opt-in declared scope,
     OQ-3). Each pattern is validated FIRST (contained, root-relative, and never naming the auto-detected
-    `.working/` store scope), then the product root is walked no-follow ONCE (pruning `.working/`, which is
-    store scope), and each pattern is matched with `fnmatch.fnmatchcase`. A pattern that matches no product
-    file is a FINDING (declared-input must resolve, OQ-A, matching `scan_import`'s refusal of an absent
-    declared source). Each matched file is a `declared`-scope row (union across patterns, digested once),
-    EXCEPT a managed path in `exact` (a `[views]`/`[deliverables]` target or a declared `[unmanaged]` path,
-    which commonly falls at the product root): it is excluded wherever it falls, exactly as the store scope
-    excludes it, so an `--include` cannot pull an already-managed path into declared scope (OQ-3 contract)."""
+    store scope), then the product root is walked no-follow ONCE (pruning the store `.working/` subtree,
+    which is store scope), and each pattern is matched with `fnmatch.fnmatchcase`. `store_working_rel` is the
+    resolved store's `.working` subtree as a product-relative POSIX path (".working" inline, "ops/.working"
+    for a `dir:ops` relocation, or None when the store resolves outside the product root), derived from the
+    RESOLVED store location so a relocated store's machine / imports / stray files are excluded from declared
+    scope wherever they resolve and are never emitted as declared rows; the literal product-root `.working/`
+    is always off-limits too (the pre-relocation contract). A pattern that matches no product file is a
+    FINDING (declared-input must resolve, OQ-A, matching `scan_import`'s refusal of an absent declared
+    source). Each matched file is a `declared`-scope row (union across patterns, digested once), EXCEPT a
+    managed path in `exact` (a `[views]`/`[deliverables]` target, a declared `[unmanaged]` path, or a store
+    pointer control file, which commonly falls at the product root): it is excluded wherever it falls,
+    exactly as the store scope excludes it, so an `--include` cannot pull an already-managed path into
+    declared scope (OQ-3 contract)."""
+    scope_prefixes = {_opf_store.WORKING_DIRNAME}
+    if store_working_rel is not None:
+        scope_prefixes.add(store_working_rel)
     for pat in include:
         if not (isinstance(pat, str) and _opf_store._is_contained_relpath(pat)):
             raise _finding("--include pattern {!r} is not a contained root-relative pattern (no absolute "
                            "path, no '..' escape)".format(pat))
-        if pat.split("/", 1)[0] == _opf_store.WORKING_DIRNAME:
+        named = next((pref for pref in scope_prefixes if pat == pref or pat.startswith(pref + "/")), None)
+        if named is not None:
             raise _finding("--include pattern {!r} names the {} store scope, which is detected "
-                           "automatically; declared scope is the product root only".format(
-                               pat, _opf_store.WORKING_DIRNAME))
+                           "automatically; declared scope is the product root only".format(pat, named))
     fd = _opf_store._open_root_fd(Path(os.path.abspath(product_root)))
     try:
         files = []
-        _walk_regular_files(fd, "", {_opf_store.WORKING_DIRNAME}, files, [0])
+        _walk_regular_files(fd, "", set(scope_prefixes), files, [0])
         matched = set()
         for pat in include:
             hits = [f for f in files if fnmatch.fnmatchcase(f, pat)]
@@ -361,7 +400,8 @@ def _detect_rows(product_root, resolution, include):
     finally:
         os.close(store_fd)
     if include:
-        rows += _detect_declared_scope(product_root, include, exact)
+        rows += _detect_declared_scope(product_root, include, exact,
+                                       _store_working_under_product(resolution))
     rows.sort(key=lambda r: (r["source_path"].encode("utf-8"), r["scope"]))
     return rows
 
@@ -532,6 +572,29 @@ def self_test():
             p.write_text(text, encoding="utf-8")
         return root, machine_dir
 
+    def build_relocated(subdir="ops", strays=None, product=None, manifest_extra=""):
+        """A synthetic RELOCATED store: a committed `.opf.toml` at the product root names `dir:<subdir>`, so
+        the store resolves at `<root>/<subdir>/.working/toml` (store_root != product_root). `strays` are
+        store-relative (under `<subdir>/.working/`); `product` are product-root-relative. Returns root."""
+        counter[0] += 1
+        root = base / "reloc-{:02d}".format(counter[0])
+        machine_dir = root / subdir / ".working" / "toml"
+        machine_dir.mkdir(parents=True)
+        (machine_dir / "manifest.toml").write_text(manifest_text(manifest_extra), encoding="utf-8")
+        (machine_dir / "counters.toml").write_text(
+            "schema = 1\n\n[counters]\nBI = 0\nLF = 0\nWL = 0\n", encoding="utf-8")
+        (root / _opf_store.POINTER_REL).write_text(
+            '[store]\ntarget = "dir:{}"\n'.format(subdir), encoding="utf-8")
+        for rel, text in (strays or {}).items():
+            p = root / subdir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        for rel, text in (product or {}).items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        return root
+
     def snapshot(root):
         """A byte snapshot of a store tree (relpath -> bytes), for the detect-writes-nothing invariant."""
         out = {}
@@ -634,6 +697,37 @@ def self_test():
                   r.verdict == CLEAN and ".working/real.md" in r_paths
                   and ".working/kept.md" not in r_paths)
 
+        # 8c. RELOCATED-store declared-scope exclusion (round-2 F1): a `.opf.toml` -> `dir:ops` relocation
+        #     puts the store at `ops/.working/`. The declared-scope exclusion is derived from the RESOLVED
+        #     store location, so an --include naming the relocated store scope is a FINDING and the store's
+        #     machine / imports / stray files never leak as declared rows. A product-relative-`.working`-only
+        #     exclusion would emit `ops/.working/...` as declared rows.
+        reloc = build_relocated(
+            strays={".working/toml/extra.toml": "m", ".working/imports/imp-x/frames.log": "run",
+                    ".working/stray.md": "s"},
+            product={"readme.md": "R"})
+        f1 = detect(reloc, include=["ops/.working/*"])
+        check("relocated-store-scope-include-is-finding", f1.verdict == FINDING and f1.rows == [])
+        # a legitimate product-root include on the SAME relocated store still emits its declared row, and a
+        # broad `*` never pulls the pruned store subtree in.
+        f1ok = detect(reloc, include=["readme.md", "*"])
+        f1decl = sorted(row["source_path"] for row in f1ok.rows if row["scope"] == "declared")
+        check("relocated-product-include-ok",
+              f1ok.verdict == CLEAN and f1decl == ["readme.md"]
+              and not any(".working" in p for p in f1decl))
+
+        # 8d. store pointer control files excluded from declared scope (round-2 C1): `.opf.toml` /
+        #     `.opf.local.toml` are OPF control files at the product root, managed wherever they fall; an
+        #     --include naming one yields NO declared row (excluded exactly as a manifest-declared managed
+        #     path). Without them in the managed `exact` set the walkable product-root pointer is emitted.
+        reloc = build_relocated(product={"readme.md": "R"})
+        (reloc / _opf_store.LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:ops"\n', encoding="utf-8")
+        c1 = detect(reloc, include=[".opf.toml", ".opf.local.toml", "readme.md"])
+        c1decl = {row["source_path"] for row in c1.rows if row["scope"] == "declared"}
+        check("pointer-control-files-excluded",
+              c1.verdict == CLEAN and c1decl == {"readme.md"}
+              and ".opf.toml" not in c1decl and ".opf.local.toml" not in c1decl)
+
         # 9. init-first: an unresolved store (no manifest) is CANNOT-EVALUATE, "run `opf init` first".
         unadopted = base / "unadopted"
         unadopted.mkdir()
@@ -701,6 +795,20 @@ def self_test():
             _bad_sch = dict(_payload, worksheet_digest=_honest)
             check("validate-schema-type-strict", validate_worksheet(_bad_sch) != [])
 
+        # 12b. detection-consistent-with-its-validator (round-2 F2): a product-root file whose name the
+        #      worksheet validator would reject as non-contained (a `:` in the second character, read as a
+        #      drive letter) is a LOCATED CANNOT-EVALUATE at detection, never a CLEAN worksheet that then
+        #      FAILS validate_worksheet. A bare enumerate-then-emit returns CLEAN with an invalid row.
+        root, _m = build_store(product={"a:b.md": "x"})
+        f2 = detect(root, include=["*"])
+        check("bad-name-located-refusal-not-clean",
+              f2.verdict == CANNOT_EVALUATE and any("a:b.md" in msg for msg in f2.findings))
+        # the invariant the guard secures: a CLEAN detection's worksheet ALWAYS validates.
+        root, _m = build_store(strays={".working/ok.md": "o"}, product={"docs/y.md": "y"})
+        cleaned = detect(root, include=["docs/*.md"])
+        check("clean-worksheet-always-validates",
+              cleaned.verdict == CLEAN and validate_worksheet(cleaned.worksheet) == [])
+
         # 13. dispatch-deferral: `opf adopt` is NOT wired; the fail-closed KNOWN_VERBS dispatch stands
         #     (consciously flipped at MIG-PR6, which wires the verb).
         import opf as _opf_cli
@@ -718,11 +826,13 @@ def self_test():
             print("OPF-INGEST SELF-TEST FAIL: {}".format(f), file=sys.stderr)
         return 1
     print("OPF-INGEST SELF-TEST PASS: detect enumerates store scope exactly once, excludes the managed set "
-          "(including a managed path an --include names and a non-canonical managed spelling), honours "
-          "declared-scope --include (glob-no-match/escape/store-scope each a finding), is deterministic + "
-          "writes nothing, fails closed on an unresolved store, a symlink, and a non-UTF-8 name, the "
-          "worksheet validates and catches vocab/digest/keyset/schema-type mutations, and `opf adopt` stays "
-          "unwired.")
+          "(including a managed path an --include names, a non-canonical managed spelling, and the store "
+          "pointer control files), derives the declared-scope exclusion from the RESOLVED store location so "
+          "a relocated (`dir:`) store's own subtree never leaks as declared, honours declared-scope "
+          "--include (glob-no-match/escape/store-scope each a finding), is deterministic + writes nothing, "
+          "fails closed on an unresolved store, a symlink, a non-UTF-8 name, and a non-contained detected "
+          "path (so a CLEAN worksheet always validates), the worksheet validates and catches "
+          "vocab/digest/keyset/schema-type mutations, and `opf adopt` stays unwired.")
     return 0
 
 
