@@ -10,10 +10,11 @@ brand, not a legal entity.
 
 The crosswalk mappings reference third-party security and AI-governance frameworks. Only control,
 guidance, risk, technique, and weakness IDENTIFIERS and their TITLES are reproduced, as
-navigational pointers. No specification prose, requirement text, control or clause bodies,
-figures, or tables from any framework are reproduced. Each framework's identifiers and titles
-remain the property of their respective publisher under the terms below, and no publisher listed
-here endorses, sponsors, or is affiliated with this pack.
+navigational pointers (for public-domain sources such as NIST, a reproduced title may be a limited
+subcategory statement). No copyrighted specification prose, requirement text, control or clause
+bodies, figures, or tables from any framework are reproduced. Each framework's identifiers and
+titles remain the property of their respective publisher under the terms below, and no publisher
+listed here endorses, sponsors, or is affiliated with this pack.
 
 AIQT Guardrails reproduces only each referenced control's identifier and the publisher's official
 title or heading (or a brief AIQT-authored descriptor where the publisher publishes no title of
@@ -172,5 +173,32 @@ OWASP is a registered trademark of the OWASP Foundation, Inc.
 
 The OWASP Foundation does not endorse and is not affiliated with this pack; the OWASP name and
 marks are not used to imply endorsement.
+
+==================================================================================================
+
+Vendored third-party components
+-------------------------------
+
+The pack bundles the following third-party components, which remain under their own licences. The
+pack's Apache License 2.0 does not relicense them; each is reproduced under the terms stated here.
+
+CommonMark specification examples (version 0.31.2)
+  Conformance fixture, vendored at
+  opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json
+Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/)
+Copyright John MacFarlane and the CommonMark project
+Source: https://spec.commonmark.org/0.31.2/
+The example set from the CommonMark 0.31.2 specification, vendored unchanged as a test fixture;
+its bytes are not modified. The CommonMark specification is authored by John MacFarlane and the
+CommonMark project and licensed under CC BY-SA 4.0.
+
+Marko (version 2.2.4)
+  CommonMark parser, vendored under opf/tools/_vendor/marko/
+Licence: MIT
+Copyright (c) 2019 Frost Ming
+Source: https://github.com/frostming/marko
+Vendored unchanged and used parse-only. The full MIT licence text is retained verbatim at
+opf/tools/_vendor/licenses/marko-MIT.txt; provenance is recorded in
+opf/tools/_vendor/marko-2.2.4.provenance.toml.
 
 ==================================================================================================

@@ -3,7 +3,8 @@
 
 The pack itself is published under the Apache License 2.0 (see the LICENSE file). The pack's crosswalk
 mappings reproduce third-party framework control/clause IDENTIFIERS and TITLES as navigational pointers
-only; no specification prose, requirement text, control or clause bodies, figures, or tables are
+only (for public-domain sources such as NIST, a reproduced title may be a limited subcategory statement);
+no copyrighted specification prose, requirement text, control or clause bodies, figures, or tables are
 reproduced. This generator renders the third-party attribution NOTICE from a single checked-in source
 of truth so it cannot drift from the vendored manifest set.
 
@@ -32,7 +33,8 @@ INTRO_TEMPLATE = (
     "section 6). AIQT™ and AIQT Guardrails™ are trademarks of Jeff Posluns (registration pending). "
     "AIQT is a brand, not a legal entity.\n\n"
     "The crosswalk mappings reference third-party security and AI-governance frameworks. Only "
-    "{kinds} IDENTIFIERS and their TITLES are reproduced, as navigational pointers. No "
+    "{kinds} IDENTIFIERS and their TITLES are reproduced, as navigational pointers (for public-domain "
+    "sources such as NIST, a reproduced title may be a limited subcategory statement). No copyrighted "
     "specification prose, requirement text, control or clause bodies, figures, or tables from any "
     "framework are reproduced. Each framework's identifiers and titles remain the property of their "
     "respective publisher under the terms below, and no publisher listed here endorses, sponsors, or is "
@@ -108,6 +110,7 @@ def build(root):
     attrib = load_toml(root / ATTRIB_REL)
     publishers = attrib.get("publisher", {})
     per_manifest = attrib.get("manifest", {})
+    vendored = attrib.get("vendored", {})
 
     groups = {}
     for manifest in manifests.values():
@@ -123,6 +126,9 @@ def build(root):
     for stem, mblock in sorted(per_manifest.items()):
         if "licence" in mblock and mblock.get("verified") is not True:
             errors.append("manifest override {!r} changes the licence but is not verified=true".format(stem))
+    for key, vblock in sorted(vendored.items()):
+        if vblock.get("verified") is not True:
+            errors.append("vendored component {!r} attribution is not verified=true".format(key))
     if errors:
         for err in errors:
             print("error: " + err + "; fail-closed (NOTICE not rendered)", file=sys.stderr)
@@ -174,6 +180,35 @@ def build(root):
         lines.append("")
         lines.append("=" * WRAP)
 
+    if vendored:
+        title = "Vendored third-party components"
+        lines.append("")
+        lines.append(title)
+        lines.append("-" * len(title))
+        lines.append("")
+        lines.append(_wrap(
+            "The pack bundles the following third-party components, which remain under their own "
+            "licences. The pack's Apache License 2.0 does not relicense them; each is reproduced under "
+            "the terms stated here."))
+        for key in sorted(vendored):
+            vblock = vendored[key]
+            lines.append("")
+            lines.append(_wrap("{} (version {})".format(vblock["name"], vblock["version"])))
+            if vblock.get("component"):
+                lines.append(_wrap(vblock["component"], indent="  "))
+            licence_line = "Licence: {}".format(vblock["licence"])
+            if vblock.get("licence-url"):
+                licence_line += " ({})".format(vblock["licence-url"])
+            lines.append(_wrap(licence_line))
+            if vblock.get("copyright"):
+                lines.append(_wrap(vblock["copyright"]))
+            if vblock.get("homepage"):
+                lines.append(_wrap("Source: " + vblock["homepage"]))
+            if vblock.get("note"):
+                lines.append(_wrap(vblock["note"]))
+        lines.append("")
+        lines.append("=" * WRAP)
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -189,7 +224,11 @@ def main():
         print("drift: NOTICE is out of date; run tools/gen_notice.py", file=sys.stderr)
         return 1
     if not check:
-        print("wrote NOTICE ({} publisher block(s))".format(text.count("=" * WRAP) - 1))
+        # Publisher blocks = all WRAP separators, minus the intro separator and the optional
+        # vendored-components separator, so the reported count stays accurate as sections are added.
+        vendored_section = 1 if "Vendored third-party components" in text else 0
+        print("wrote NOTICE ({} publisher block(s))".format(
+            text.count("=" * WRAP) - 1 - vendored_section))
     return 0
 
 

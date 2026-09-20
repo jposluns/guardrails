@@ -2,7 +2,8 @@
 #
 # The AIQT pack is published under the Apache License 2.0 (see the repository LICENSE file). The pack's
 # crosswalk mappings reproduce third-party framework control/clause IDENTIFIERS and TITLES as
-# uncopyrightable factual pointers only. NO specification prose, requirement text, control or clause bodies, figures, or tables
+# uncopyrightable factual pointers only (for public-domain sources such as NIST, a reproduced title may be a
+# limited subcategory statement). NO copyrighted specification prose, requirement text, control or clause bodies, figures, or tables
 # are reproduced. tools/gen_notice.py renders the root NOTICE from this file plus the live set of id
 # manifests under .aiqt/standards/.
 #
@@ -105,3 +106,32 @@ licence = "CWE Terms of Use"
 note = "CWE Terms of Use (https://cwe.mitre.org/about/termsofuse.html), reproduced as the Terms require: Copyright (c) 2006-2026, The MITRE Corporation. The MITRE Corporation hereby grants you a non-exclusive, royalty-free license to use CWE for research, development, and commercial purposes. Any copy you make for such purposes is authorized on the condition that you reproduce MITRE's copyright designation and this license in any such copy. CWE, CWSS, CWRAF, and the CWE logo are trademarks of The MITRE Corporation. This pack reproduces CWE identifiers and short names only; no weakness description text is reproduced."
 verified = true
 verified-date = "2026-08-22"
+
+# ===================================================================================================
+# Vendored third-party components shipped in the pack, distinct from the crosswalk publishers above.
+# These are bundled files that remain under their OWN licences; the pack's Apache License 2.0 does not
+# relicense them. gen_notice.py renders these into a separate "Vendored third-party components" section
+# of the root NOTICE. Each block requires verified = true (same fail-closed discipline as a publisher).
+
+[vendored."marko"]
+name = "Marko"
+component = "CommonMark parser, vendored under opf/tools/_vendor/marko/"
+version = "2.2.4"
+licence = "MIT"
+copyright = "Copyright (c) 2019 Frost Ming"
+homepage = "https://github.com/frostming/marko"
+note = "Vendored unchanged and used parse-only. The full MIT licence text is retained verbatim at opf/tools/_vendor/licenses/marko-MIT.txt; provenance is recorded in opf/tools/_vendor/marko-2.2.4.provenance.toml."
+verified = true
+verified-date = "2026-09-20"
+
+[vendored."commonmark-spec-examples"]
+name = "CommonMark specification examples"
+component = "Conformance fixture, vendored at opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json"
+version = "0.31.2"
+licence = "CC BY-SA 4.0"
+licence-url = "https://creativecommons.org/licenses/by-sa/4.0/"
+copyright = "Copyright John MacFarlane and the CommonMark project"
+homepage = "https://spec.commonmark.org/0.31.2/"
+note = "The example set from the CommonMark 0.31.2 specification, vendored unchanged as a test fixture; its bytes are not modified. The CommonMark specification is authored by John MacFarlane and the CommonMark project and licensed under CC BY-SA 4.0."
+verified = true
+verified-date = "2026-09-20"
