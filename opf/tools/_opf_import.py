@@ -170,7 +170,8 @@ _TRANSACTION_STATES = ("prepared", "published", "complete")
 # observations=None). C-RECORDS / C-PERRECORD-RECONCILE / C-HISTORY-RESURRECTION cannot evaluate when the
 # store carries importer-tier legacy_fragment records whose record schema the baseline validator defers
 # (spec 8.5 / _opf_check._schema_deferred). ANY OTHER cannot-evaluate, or ANY INVALID finding, is a real
-# composition failure that aborts the promotion (fail-closed).
+# composition failure that aborts the promotion (fail-closed). Only the pre-render D4 pass may defer
+# attributed C-VIEW-DRIFT findings; full D4 is required after the view overlay.
 _PREVIEW_GIT_OBSERVATION_CANTS = frozenset({
     "C-TRACKED", "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-HISTORY-RESURRECTION", "C-SYNC-AGREE"})
 _PREVIEW_SCHEMA_DEFERRAL_CANTS = frozenset({
@@ -2933,7 +2934,7 @@ def _minted_by_namespace(store_root_fd, run_rel, machine_rel, candidate_types):
     return by_ns
 
 
-def _preview_composition_findings(preview_root):
+def _preview_composition_findings(preview_root, *, defer_view_drift=False):
     """D4 composition gate: resolve + validate_store over the assembled candidate PREVIEW, returning a list of
     the REAL findings that must abort the promotion. Empty list == the composition is sound. Observations are
     omitted (the throwaway tempdir preview is not a git repo, a disclosed omission). A tolerated result is
@@ -2943,7 +2944,9 @@ def _preview_composition_findings(preview_root):
     is REASON-aware, not blind to the check id: a non-deferral cant under a deferral check id -- e.g. a missing
     or malformed REQUIRED worklog ledger surfacing under C-RECORDS -- is a REAL finding (PRC-F4). ANY INVALID
     finding, ANY unattributed fault, or ANY other cannot-evaluate is a real finding (fail-closed: a store the
-    validator could not resolve is itself a finding)."""
+    validator could not resolve is itself a finding). With defer_view_drift=True, only FINDING messages
+    attributed exclusively to C-VIEW-DRIFT wait for the preview overlay; no CANNOT-EVALUATE is relaxed.
+    The caller must run full D4 after rendering and before publication."""
     import _opf_check   # lazy: _opf_check imports _opf_views/_opf_import transitively; call-time avoids a cycle
     try:
         res = _opf_store.resolve_store(Path(preview_root))
@@ -2956,6 +2959,15 @@ def _preview_composition_findings(preview_root):
     findings += ["unattributed: {}".format(m) for m in (getattr(result, "unattributed", []) or [])]
     checks = getattr(result, "checks", None) or {}
     by_check = getattr(result, "by_check", {}) or {}
+    # Only the render output may wait for regeneration, never a source finding or a cant.
+    # Use the validator's attribution, not a diagnostic prefix. Shared/unattributed messages remain.
+    if defer_view_drift and checks.get("C-VIEW-DRIFT") == "FINDING":
+        drift_messages = set(by_check.get("C-VIEW-DRIFT", []))
+        other_messages = set(getattr(result, "unattributed", []) or [])
+        for cid, messages in by_check.items():
+            if cid != "C-VIEW-DRIFT":
+                other_messages.update(messages)
+        findings = [m for m in findings if m not in drift_messages or m in other_messages]
     deferral_marker = _opf_check._SCHEMA_DEFERRAL
     for cid, verdict in checks.items():
         if verdict != "CANNOT-EVALUATE":
@@ -2992,6 +3004,122 @@ def _preview_render_reproducible(preview_root):
     if rc == _opf_views.EXIT_DRIFT:
         return True, True
     return False, False
+
+
+def _render_preview_view_targets(preview_root, store_root_fd, machine_rel, product_root):
+    """Plan store-view drift without writing. Product VERSION drift remains out of scope.
+
+    Targets come from plan_views and are reconciled with the engine's name-bound destination.
+    A pointer preview whose machine location differs is refused; this does not implement relocation.
+    """
+    import _opf_views
+    preview_fd = None
+    product_fd = None
+    try:
+        res = _opf_store.resolve_store(Path(preview_root))
+        if (res.status != _opf_store.RESOLVED or res.pointer_source != "default"
+                or Path(res.store_root) != Path(preview_root) or res.machine_rel != machine_rel):
+            raise _cannot("candidate view planner cannot bind a self-contained preview at the live "
+                          "machine location; pointer-preview relocation is not implemented")
+        preview_fd = _opf_store._open_store_root_fd(res.store_root, False)
+        planned = _opf_views.plan_views(preview_fd, res.machine_rel)
+        files = {}
+        seen = set()
+        for name, scope, dest_rel, text in planned:
+            _opf_views._resolve_view(name)
+            if (scope, dest_rel) != _opf_views._spec_destination(name):
+                raise _cannot("candidate view planner returned a non-spec destination")
+            if (scope, dest_rel) in seen:
+                raise _cannot("candidate view planner returned a duplicate destination")
+            seen.add((scope, dest_rel))
+            data = text.encode("utf-8")
+            if scope == "product":
+                if product_fd is None:
+                    product_fd = _opf_store._open_root_fd(Path(product_root))
+                for fd in (product_fd, preview_fd):
+                    st = _journal._lstat_contained(fd, dest_rel)
+                    current = None if st is None else _journal._read_contained(fd, dest_rel)[0]
+                    if current != data:
+                        raise _finding("promotion would drift the product-root VERSION deliverable; "
+                                       "not re-rendered in this build; nothing promoted")
+                continue
+            if scope != "store":
+                raise _cannot("candidate view planner returned an unsupported scope")
+            st = _journal._lstat_contained(store_root_fd, dest_rel)
+            current = None if st is None else _journal._read_contained(store_root_fd, dest_rel)[0]
+            if current != data:
+                files[dest_rel] = data
+        return files
+    except (_opf_views.ViewsError, _journal.JournalError, OSError, ValueError,
+            TypeError, AttributeError, RecursionError) as exc:
+        raise _cannot("candidate view planning cannot evaluate ({}); nothing promoted".format(exc))
+    finally:
+        if product_fd is not None:
+            _journal._close_fd_quietly(product_fd)
+        if preview_fd is not None:
+            _journal._close_fd_quietly(preview_fd)
+
+
+def _overlay_preview_view_files(preview_root, view_files):
+    """Overlay planned bytes only in the disposable preview, through contained no-follow handles."""
+    root_fd = _opf_store._open_store_root_fd(Path(preview_root), False)
+    try:
+        for rel, data in sorted(view_files.items()):
+            pfd, name = _journal._open_parent(root_fd, rel)
+            fd = None
+            try:
+                st = _journal._lstat_at(pfd, name)
+                flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                if st is None:
+                    flags |= os.O_CREAT | os.O_EXCL
+                fd = os.open(name, flags, FILE_MODE, dir_fd=pfd)
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                    raise _cannot("candidate view overlay refuses a non-regular or multiply-linked target")
+                os.ftruncate(fd, 0)
+                _journal._write_all(fd, data)
+            finally:
+                if fd is not None:
+                    _journal._close_fd_quietly(fd)
+                _journal._close_fd_quietly(pfd)
+    finally:
+        _journal._close_fd_quietly(root_fd)
+
+
+def _reconcile_preview_views(preview_root, store_root_fd, machine_rel, product_root):
+    """Establish source composition, overlay store views, and witness before live publication.
+
+    Only attributed C-VIEW-DRIFT findings may wait for the overlay. All source checks retain D4's
+    reason-aware policy, and full D4 must pass afterward. Planning before D4 is read-only; no preview
+    view is changed before D4 establishes the sources. Pre-existing live drift is still refused.
+    """
+    live_ok, live_drift = _preview_render_reproducible(product_root)
+    if not live_ok:
+        raise _cannot("live view reproducibility cannot be evaluated; nothing promoted")
+    if live_drift:
+        raise _finding("live views already drift before promotion; reconcile them before import apply")
+    render_ok, needs_write = _preview_render_reproducible(preview_root)
+    if not render_ok:
+        raise _cannot("candidate render reproducibility could not be evaluated over the "
+                      "assembled preview (`opf render --check` cannot-evaluate); fail-closed")
+    view_files = (_render_preview_view_targets(
+        preview_root, store_root_fd, machine_rel, product_root) if needs_write else {})
+    if needs_write and not view_files:
+        raise _cannot("candidate render reports drift without a publishable store-view target")
+    comp_findings = _preview_composition_findings(preview_root, defer_view_drift=needs_write)
+    if comp_findings:
+        raise _finding("candidate composition gate: the assembled store is not doctor-composable "
+                       "({}); nothing promoted".format("; ".join(comp_findings)))
+    if needs_write:
+        _overlay_preview_view_files(preview_root, view_files)
+        if _preview_render_reproducible(preview_root) != (True, False):
+            raise _cannot("candidate view witness failed: regenerated preview is not render-check "
+                          "clean; nothing promoted")
+        comp_findings = _preview_composition_findings(preview_root)
+        if comp_findings:
+            raise _finding("candidate composition after view regeneration failed ({}); nothing "
+                           "promoted".format("; ".join(comp_findings)))
+    return view_files
 
 
 def _read_json_acceptance(store_root_fd, run_rel):
@@ -3245,15 +3373,18 @@ def _build_publication_ops(store_root_fd, machine_rel, run_rel, run_id, machine_
     return ops, content
 
 
-def _unmanaged_paths(ops, machine_rel, run_rel, run_id):
+def _unmanaged_paths(ops, machine_rel, run_rel, run_id, extra_allowed=frozenset()):
     """Step-7 unmanaged-path pre-flight: every op path must be an OPF-managed store path (under the machine
     subdir), the import-ops or archive tree (`.aiqt/import` / `.aiqt/import-archive`, outside `.working/`), or
-    the staging run dir being deleted. Any other path is refused (fail-closed, no default action). Returns the
+    the staging run dir being deleted. extra_allowed contains exact planner-validated view destinations,
+    permitted only for write/create, never a directory prefix. Any other path is refused. Returns the
     sorted set of offending paths."""
     allowed_prefixes = (machine_rel + "/", IMPORT_ARCHIVE_REL + "/", IMPORT_OPS_REL + "/")
     bad = set()
     for op in ops:
         p = op["path"]
+        if p in extra_allowed and op["op"] in ("write", "create"):
+            continue
         if p == run_rel or p.startswith(run_rel + "/"):
             continue
         if p in (IMPORT_ARCHIVE_REL, IMPORT_OPS_REL):
@@ -3282,9 +3413,10 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
         transaction record + journal, not the deleted run dir.
       - D4: the composition gate assembles the merged store into a machine-subdir-carrying tempdir PREVIEW and
         requires validate_store to report NO real finding, tolerating ONLY the disclosed-benign cannot-
-        evaluates (importer/module schema-deferral + git-observation omission). ANY real finding aborts.
-      - D5: promotion re-renders views so a view-feeding record never leaves the store drifted; a `render
-        --check` over the assembled preview is required to report no drift (see the residual note below).
+        evaluates (importer/module schema-deferral + git-observation omission). Before rendering, only
+        attributed C-VIEW-DRIFT findings may wait; the full gate is required after the overlay.
+      - D5: promotion plans store-scope views and journals changed bytes with the records; render --check
+        over the augmented preview must report no drift before publication.
       - TERMINAL: the staging run dir is deleted as the last journaled op set, so `import_status = complete`
         leaves no unregistered staging tree for the containment check to find.
 
@@ -3293,15 +3425,17 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
     verified preimage restore. The staged report/plan digest is the AUTHORITATIVE binding; accepted_plan_digest
     is an optional extra assertion checked only when not None (the CLI does not forward it today).
 
-    DISCLOSED RESIDUAL (D5, surfaced for the finalizer, not silently resolved): a promotion that would drift a
-    view is reconciled inside the transaction ONLY if the assembled candidate can be re-rendered. `render
-    --write`'s SOURCE gate (`_opf_check.source_integrity_ok`) requires every source check to PASS, which a
-    store carrying importer legacy_fragment records (C-RECORDS schema-deferral) or a non-git preview (the git-
-    observation cannot-evaluates) cannot satisfy, so `render --write` cannot run over such a preview. This
-    build therefore promotes only when the assembled preview shows NO view drift (`render --check` == 0), which
-    holds for the quarantine import plan_import produces today (legacy_fragment records feed no view); a
-    view-feeding promotion aborts fail-closed (exit 1) rather than commit a drifted store. Closing this (a
-    render path that reconciles views for a schema-deferred/non-git candidate) is a reserved design decision."""
+    D5 reconciles store-scope view drift with the read-only plan_views engine, witnesses the augmented
+    preview with render --check and full D4, and includes only changed view bytes in the same journal as
+    the records. Before the overlay, D4 defers only attributed C-VIEW-DRIFT findings; source findings and
+    non-benign cannot-evaluates still refuse. Existing live view drift must be reconciled before apply.
+    The public render --write strict source gate is unchanged and is not called by this transaction.
+
+    DISCLOSED RESIDUALS: product-root VERSION drift is refused, including on default stores; this build
+    publishes store-scope views only. Pointer-preview relocation remains unimplemented. Post-publication
+    verification failure reports promoted=True: COMPLETE is already durable, so it is not an automatic
+    rollback. The journal and import lock provide recoverable cutover under the existing cooperating-
+    writer contract, not simultaneous multi-file visibility to unlocked readers."""
     resolution = None
     try:
         _journal.require_containment()
@@ -3717,19 +3851,12 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                 preview_dir = tempfile.mkdtemp(prefix="opf-import-apply-preview-")
                 try:
                     _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shutil, run_id)
-                    comp_findings = _preview_composition_findings(preview_dir)
-                    if comp_findings:
-                        raise _finding("candidate composition gate: the assembled store is not doctor-"
-                                       "composable ({}); nothing promoted".format("; ".join(comp_findings)))
-                    render_ok, needs_write = _preview_render_reproducible(preview_dir)
-                    if not render_ok:
-                        raise _cannot("candidate render reproducibility could not be evaluated over the "
-                                      "assembled preview (`opf render --check` cannot-evaluate); fail-closed")
-                    if needs_write:
-                        raise _finding("candidate view reproducibility: the promotion would drift a view "
-                                       "(`opf render --check` reports drift over the assembled preview) and "
-                                       "this build cannot re-render a schema-deferred / non-git candidate in "
-                                       "the transaction (disclosed D5 residual); nothing promoted")
+                    view_files = _reconcile_preview_views(
+                        preview_dir, root_fd, machine_rel, product_root)
+                    if set(view_files) & set(machine_files):
+                        raise _cannot("planned view destination collides with a machine publication target")
+                    machine_files.update(view_files)
+                    published_views = frozenset(view_files)
                 finally:
                     shutil.rmtree(preview_dir, ignore_errors=True)
 
@@ -3742,7 +3869,7 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                     plan_digest, inventory_digest, minted, txn_id, restore_ref, observed_head)
                 # step 7: unmanaged-path pre-flight over the computed write set (defence in depth; every op
                 # path must be an OPF-managed store path, the import-ops/archive tree, or the staging run dir).
-                unmanaged = _unmanaged_paths(ops, machine_rel, run_rel, run_id)
+                unmanaged = _unmanaged_paths(ops, machine_rel, run_rel, run_id, published_views)
                 if unmanaged:
                     raise _cannot("promotion write set touches non-managed path(s): {} (fail-closed; no "
                                   "default action)".format(", ".join(unmanaged)))
@@ -3782,11 +3909,14 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                 # the common case -- an `opf init` store carries a committed pointer). A fresh resolve reads the
                 # post-publication content.
                 post_findings = _preview_composition_findings(str(product_root))
+                if _preview_render_reproducible(product_root) != (True, False):
+                    post_findings.append("live render --check did not certify reproducible views")
                 if post_findings:
                     return ApplyResult(CANNOT_EVALUATE,
-                                       ["post-publish validation found a finding over the LIVE store ({}); "
-                                        "the promotion committed but the store is not composition-clean, "
-                                        "evidence retained for recover".format("; ".join(post_findings))],
+                                       ["post-publish verification failed over the LIVE store ({}); "
+                                        "the promotion committed; inspect the retained journal before "
+                                        "recovery (no automatic rollback of COMPLETE)".format(
+                                            "; ".join(post_findings))],
                                        promoted=True, outcome="promoted", restore_ref=restore_ref)
                 return ApplyResult(CLEAN, [], promoted=True, outcome="promoted", restore_ref=restore_ref)
             finally:
@@ -3828,6 +3958,364 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
 
 
 # --- self-test ---------------------------------------------------------------------------------------
+
+def _self_test_d5(check, build_apply_store, bi_candidate, review_accept_all, now):
+    """Physical D5 vectors; run only in a writable, isolated self-test scratch tree."""
+    import subprocess
+    from unittest.mock import patch
+    import _opf_views
+
+    mirror = ".working/BACKLOG_ITEM-INDEX.md"
+
+    def require(name, condition):
+        check(name, condition)
+        if not condition:
+            raise RuntimeError("D5 fixture prerequisite failed: " + name)
+
+    def snapshot(root):
+        result = {}
+        def unreadable(exc):
+            raise exc
+        for directory, dirs, files in os.walk(root, onerror=unreadable, followlinks=False):
+            for name in sorted(dirs + files):
+                path = Path(directory) / name
+                st = path.lstat()
+                rel = str(path.relative_to(root))
+                if stat.S_ISDIR(st.st_mode):
+                    result[rel] = ("dir", stat.S_IMODE(st.st_mode))
+                elif stat.S_ISREG(st.st_mode):
+                    result[rel] = ("file", stat.S_IMODE(st.st_mode), path.read_bytes())
+                else:
+                    raise RuntimeError("D5 fixture contains a non-regular entry: " + rel)
+        return result
+
+    def planned_bytes(root):
+        res = _opf_store.resolve_store(root)
+        require("D5-resolved", res.status == _opf_store.RESOLVED)
+        fd = _opf_store._open_store_root_fd(res.store_root, res.pointer_source != "default")
+        try:
+            return {dest: text.encode("utf-8")
+                    for _name, scope, dest, text in _opf_views.plan_views(fd, res.machine_rel)
+                    if scope == "store"}
+        finally:
+            os.close(fd)
+
+    def fixture(mapped=True):
+        root, machine = build_apply_store()
+        model = tomllib.loads((machine / "manifest.toml").read_text(encoding="utf-8"))
+        model["views"]["BACKLOG_ITEM-INDEX.md"] = {
+            "kind": "deterministic", "sources": ["backlog_item"], "target": mirror}
+        (machine / "manifest.toml").write_text(_opf_emit.emit_checked(model), encoding="utf-8")
+        res = _opf_store.resolve_store(root)
+        require("D5-seed-render", _opf_views._render_resolved_store(root, res, False) == 0)
+        require("D5-seed-check", _preview_render_reproducible(root) == (True, False))
+        if mapped:
+            # Two whole-file fragments: mapped BI plus LF schema deferral. The review loader's
+            # one-to-one inventory/mapping correspondence is preserved.
+            (root / "b.txt").write_bytes(b"quarantine companion")
+            sources = ["a.txt", "b.txt"]
+            scan = scan_import(root, sources)
+            require("D5-scan", scan.verdict == CLEAN)
+            plan = {"fragments": {
+                "a.txt": [{"span": [0, (root / "a.txt").stat().st_size], "state": "mapped",
+                           "origin": "human_revision", "record": bi_candidate()}],
+                "b.txt": [{"span": [0, (root / "b.txt").stat().st_size], "state": "unmapped",
+                           "origin": "baseline"}],
+            }}
+            staged = stage_import(root, sources, plan, now=now, run_nonce="d5-mapped")
+            require("D5-stage", staged.verdict == CLEAN and bool(staged.run_id))
+            report = _render_report_md(scan.inventory_digest, scan.fragments, [], staged.run_id)
+            _write_plan_artifacts(root, staged.run_rel, staged.run_id, scan.inventory,
+                                  report.encode("utf-8"), [])
+        else:
+            staged = plan_import(root, ["a.txt"], now=now, run_nonce="d5-quarantine")
+            require("D5-quarantine-plan", staged.verdict == CLEAN and bool(staged.run_id))
+        require("D5-review", review_accept_all(root, staged.run_id).verdict == CLEAN)
+        return root, machine, staged.run_id
+
+    def apply_capturing(root, run):
+        captured = []
+        original = _journal.run_transaction
+        def capture(*args, **kwargs):
+            captured.extend(copy.deepcopy(args[5]))
+            return original(*args, **kwargs)
+        with patch.object(_journal, "run_transaction", side_effect=capture):
+            result = apply_import(root, run, now=now)
+        return result, captured
+
+    root, machine, run = fixture()
+    before_views = planned_bytes(root)
+    result, ops = apply_capturing(root, run)
+    require("D5-view-feeding-promotes", result.verdict == CLEAN and result.promoted
+            and result.outcome == "promoted")
+    after_views = planned_bytes(root)
+    expected_drift = {p for p in after_views if before_views.get(p) != after_views[p]}
+    check("D5-mirror-and-named-views-feed",
+          mirror in expected_drift and ".working/BACKLOG.md" in expected_drift
+          and b"BI-1" in (root / mirror).read_bytes())
+    check("D5-published-view-set-exact",
+          {op["path"] for op in ops if op["path"] in after_views} == expected_drift)
+    check("D5-published-byte-canon",
+          all((root / p).read_bytes() == data for p, data in after_views.items()))
+    check("D5-live-render-check", _preview_render_reproducible(root) == (True, False))
+    check("D5-lf-also-promoted",
+          len(tomllib.loads((machine / "legacy_fragment.index.toml").read_text())["record"]) == 1)
+    check("D5-view-before-terminal-delete",
+          ops[-1]["op"] == "rmdir" and ops[-1]["path"] == IMPORTS_REL + "/" + run)
+    noop_before = snapshot(root)
+    with patch(__name__ + "._reconcile_preview_views", side_effect=AssertionError("no-op rendered")):
+        noop = apply_import(root, run, now=now)
+    check("D5-idempotent-noop", noop.verdict == CLEAN and noop.promoted
+          and noop.outcome == "noop_already_complete" and snapshot(root) == noop_before)
+
+    # Witness disagreement must stop before run_transaction, after an actual preview overlay.
+    root, machine, run = fixture()
+    before = snapshot(root / ".working")
+    original_check = _preview_render_reproducible
+    calls = []
+    def disagree(path):
+        if Path(path) != root:
+            calls.append(str(path))
+            if len(calls) == 2:
+                return True, True
+        return original_check(path)
+    with patch(__name__ + "._preview_render_reproducible", side_effect=disagree), \
+            patch(__name__ + "._overlay_preview_view_files",
+                  wraps=_overlay_preview_view_files) as overlay, \
+            patch.object(_journal, "run_transaction", wraps=_journal.run_transaction) as transaction:
+        result = apply_import(root, run, now=now)
+    check("D5-witness-fails-closed", result.verdict == CANNOT_EVALUATE and not result.promoted
+          and len(calls) == 2 and overlay.call_count == 1 and transaction.call_count == 0
+          and any("witness failed" in msg for msg in result.findings))
+    check("D5-witness-preserves-store", snapshot(root / ".working") == before
+          and not (root / _archive_run_rel(run)).exists()
+          and not (root / _txn_record_rel(run)).exists())
+
+    # A second D4 pass is independently load-bearing.
+    root, machine, run = fixture()
+    before = snapshot(root / ".working")
+    original_composition = _preview_composition_findings
+    calls = []
+    def broken_post(path, **kwargs):
+        calls.append(kwargs.get("defer_view_drift", False))
+        if len(calls) == 2:
+            return ["injected post-overlay composition fault"]
+        return original_composition(path, **kwargs)
+    with patch(__name__ + "._preview_composition_findings", side_effect=broken_post), \
+            patch.object(_journal, "run_transaction", wraps=_journal.run_transaction) as transaction:
+        result = apply_import(root, run, now=now)
+    check("D5-post-overlay-D4-required", result.verdict == FINDING and not result.promoted
+          and calls == [True, False] and transaction.call_count == 0
+          and snapshot(root / ".working") == before)
+
+    # Immediate exception rollback, then rollback-incomplete with retained lock and later recovery.
+    for target_kind, incomplete in (("view", False), ("records", False), ("view", True)):
+        root, machine, run = fixture()
+        before = snapshot(root / ".working")
+        original_transaction = _journal.run_transaction
+        original_kill = _journal._kill_point
+        original_restore = _journal._restore_preimage
+        fired = []
+        def failing_transaction(*args, **kwargs):
+            publication_ops = args[5]
+            target = (mirror if target_kind == "view"
+                      else str(machine.relative_to(root)) + "/counters.toml")
+            index = next(i for i, op in enumerate(publication_ops) if op["path"] == target)
+            require("D5-target-is-write", publication_ops[index]["op"] == "write")
+            def fail_after_view(name):
+                if name == "after-apply-{}".format(index):
+                    fired.append((
+                        (root / mirror).read_bytes() != before["BACKLOG_ITEM-INDEX.md"][2],
+                        len(tomllib.loads((machine / "backlog_item.index.toml").read_text())["record"])))
+                    raise _journal.JournalError("D5 injected failure after publication write")
+                return original_kill(name)
+            def fail_restore(*rargs, **rkwargs):
+                if incomplete and rargs[3]["path"] == mirror:
+                    raise _journal.JournalError("D5 injected view restore failure")
+                return original_restore(*rargs, **rkwargs)
+            with patch.object(_journal, "_kill_point", side_effect=fail_after_view), \
+                    patch.object(_journal, "_restore_preimage", side_effect=fail_restore):
+                return original_transaction(*args, **kwargs)
+        with patch.object(_journal, "run_transaction", side_effect=failing_transaction):
+            result = apply_import(root, run, now=now)
+        require("D5-cutover-failure-reached", len(fired) == 1 and fired[0][0]
+                and (target_kind != "records" or fired[0][1] == 1)
+                and result.verdict == CANNOT_EVALUATE and not result.promoted
+                and result.outcome == "aborted")
+        journal_root = root / IMPORT_JOURNAL_REL
+        rfd = _opf_store._open_store_root_fd(root, False)
+        jfd = _journal.open_journal_root_fd(rfd, IMPORT_JOURNAL_REL)
+        try:
+            txn_dir = journal_root / result.restore_ref["txn_id"]
+            check("D5-rollback-classification-" + target_kind + "-" + str(incomplete),
+                  _journal.classify_state(jfd, txn_dir) == ("open" if incomplete else "rolled-back"))
+            if incomplete:
+                require("D5-rollback-retains-lock", _journal.read_lock_owner(journal_root) is not None)
+                check("D5-view-recovery", _journal.recover(jfd, txn_dir, rfd) == "rolled-back")
+                check("D5-view-recovery-idempotent", _journal.recover(jfd, txn_dir, rfd) == "terminal")
+                _journal.release_lock(journal_root)
+            else:
+                check("D5-rollback-releases-lock", _journal.read_lock_owner(journal_root) is None)
+        finally:
+            os.close(jfd)
+            os.close(rfd)
+        check("D5-rollback-restores-records-and-views-" + target_kind + "-" + str(incomplete),
+              snapshot(root / ".working") == before)
+
+    # Real crash: derive the kill index from this dispatch's op list, never a guessed ordinal.
+    root, machine, run = fixture()
+    before = snapshot(root / ".working")
+    before_mirror = (root / mirror).read_bytes()
+    child = """
+import datetime
+import os
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import _opf_import as imp
+import _journal
+now = datetime.datetime.fromisoformat(sys.argv[5])
+original = imp._build_publication_ops
+def arm(*args, **kwargs):
+    ops, content = original(*args, **kwargs)
+    index = next(i for i, op in enumerate(ops) if op['path'] == sys.argv[4])
+    assert ops[index]['op'] == 'write'
+    os.environ[_journal.KILL_ENV] = 'after-apply-{}'.format(index)
+    return ops, content
+imp._build_publication_ops = arm
+result = imp.apply_import(Path(sys.argv[2]), sys.argv[3], now=now)
+raise SystemExit(result.verdict)
+"""
+    cp = subprocess.run([sys.executable, "-I", "-B", "-c", child,
+                         str(Path(__file__).resolve().parent), str(root), run, mirror, now.isoformat()],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    require("D5-killed-after-view", cp.returncode == 137
+            and (root / mirror).read_bytes() != before_mirror)
+    journal_root = root / IMPORT_JOURNAL_REL
+    rfd = _opf_store._open_store_root_fd(root, False)
+    jfd = _journal.open_journal_root_fd(rfd, IMPORT_JOURNAL_REL)
+    try:
+        txns = _journal._journal_txn_dirs(jfd, journal_root)
+        require("D5-crash-journal-enumeration", len(txns) == 1)
+        require("D5-crash-open", _journal.classify_state(jfd, txns[0]) == "open")
+        require("D5-claim-recovers-dead-owner", _claim_apply_lock(journal_root, jfd, rfd) == "acquired")
+        check("D5-crash-recovery-restores", snapshot(root / ".working") == before
+              and _journal.classify_state(jfd, txns[0]) == "rolled-back")
+        check("D5-crash-recovery-idempotent",
+              _recover_open_txns(jfd, journal_root, rfd) == {txns[0].name: "terminal"})
+        _journal.release_lock(journal_root)
+    finally:
+        os.close(jfd)
+        os.close(rfd)
+    retry = apply_import(root, run, now=now)
+    check("D5-retry-after-crash", retry.verdict == CLEAN and retry.promoted
+          and _preview_render_reproducible(root) == (True, False))
+
+    allowed = frozenset({mirror})
+    unmanaged_ops = [{"op": "write", "path": p} for p in (
+        mirror, ".working/imports/other", ".working/x", mirror + ".bak", mirror + "/child")]
+    check("D5-exact-allow-set",
+          _unmanaged_paths(unmanaged_ops, ".working/toml", IMPORTS_REL + "/this", "this", allowed)
+          == sorted(op["path"] for op in unmanaged_ops[1:]))
+    check("D5-default-allow-set",
+          _unmanaged_paths(unmanaged_ops, ".working/toml", IMPORTS_REL + "/this", "this")
+          == sorted(op["path"] for op in unmanaged_ops))
+    check("D5-view-delete-not-allowed",
+          _unmanaged_paths([{"op": "remove", "path": mirror}],
+                           ".working/toml", IMPORTS_REL + "/this", "this", allowed) == [mirror])
+
+    root, machine, run = fixture(mapped=False)
+    views_before = planned_bytes(root)
+    with patch(__name__ + "._render_preview_view_targets",
+               side_effect=AssertionError("quarantine requested view regeneration")):
+        result, ops = apply_capturing(root, run)
+    check("D5-quarantine-no-view-ops", result.verdict == CLEAN and result.promoted
+          and not any(op["path"] in views_before for op in ops)
+          and all((root / p).read_bytes() == data for p, data in views_before.items()))
+
+    # Version candidates are currently refused by staging. Simulate their future merged payload
+    # at the builder seam to exercise apply's product-scope guard without changing the staging contract.
+    root, machine, run = fixture()
+    before = snapshot(root / ".working")
+    original_builder = _build_promotion_machine_files
+    def version_candidate(*args, **kwargs):
+        files = original_builder(*args, **kwargs)
+        manifest_rel = args[1] + "/manifest.toml"
+        model = tomllib.loads(files[manifest_rel].decode("utf-8"))
+        model["views"]["VERSION"] = {"kind": "deterministic", "sources": ["version"], "target": "VERSION"}
+        files[manifest_rel] = _emit_bytes(model, "manifest.toml")
+        files[args[1] + "/version.toml"] = _emit_bytes({
+            "schema": SCHEMA, "summary": [],
+            "release": [{"version": "0.1.0", "date": "2026-01-01T00:00:00Z",
+                         "worklog_span": [], "coverage_digest": _opf_release.coverage_digest([])}],
+        }, "version.toml")
+        return files
+    with patch(__name__ + "._build_promotion_machine_files", side_effect=version_candidate), \
+            patch.object(_journal, "run_transaction", wraps=_journal.run_transaction) as transaction:
+        result = apply_import(root, run, now=now)
+    check("D5-VERSION-refusal", result.verdict == FINDING and not result.promoted
+          and any("promotion would drift the product-root VERSION deliverable; "
+                  "not re-rendered in this build" in msg for msg in result.findings)
+          and transaction.call_count == 0 and snapshot(root / ".working") == before
+          and not (root / "VERSION").exists())
+
+
+    # Attribute the temporary output deferral precisely; never tolerate a source fault by its text.
+    import _opf_check
+    res = _opf_store.resolve_store(root)
+    cases = [
+        ("view-finding", "C-VIEW-DRIFT", "FINDING", "view drift", [], False),
+        ("view-cannot", "C-VIEW-DRIFT", "CANNOT-EVALUATE", "unreadable view", [], True),
+        ("source-finding", "C-RECORDS", "FINDING", "C-VIEW-DRIFT: misleading text", [], True),
+        ("source-cannot", "C-RECORDS", "CANNOT-EVALUATE", "missing required worklog", [], True),
+        ("schema-deferral", "C-RECORDS", "CANNOT-EVALUATE", _opf_check._SCHEMA_DEFERRAL, [], False),
+        ("unattributed", "C-VIEW-DRIFT", "FINDING", "view drift", ["internal fault"], True),
+    ]
+    for label, cid, verdict, message, unattributed, expected_bad in cases:
+        checks = {name: "PASS" for name in _opf_check.REQUIRED_CHECKS}
+        checks[cid] = verdict
+        report = _opf_check.StoreValidation(
+            _opf_check.CANNOT_EVALUATE if verdict == "CANNOT-EVALUATE" else _opf_check.INVALID,
+            findings=[message] if verdict == "FINDING" else [],
+            cannot_evaluate=[message] if verdict == "CANNOT-EVALUATE" else [],
+            checks=checks, by_check={cid: [message]}, unattributed=unattributed)
+        with patch.object(_opf_check, "validate_store", return_value=report):
+            check("D5-attribution-" + label,
+                  bool(_preview_composition_findings(root, defer_view_drift=True)) == expected_bad)
+            if label == "view-finding":
+                check("D5-default-D4-still-refuses-drift", bool(_preview_composition_findings(root)))
+
+    # A plan may not rebind a valid view name to a staging sibling.
+    fd = _opf_store._open_store_root_fd(root, False)
+    try:
+        with patch.object(_opf_views, "plan_views",
+                          return_value=[("BACKLOG_ITEM-INDEX.md", "store",
+                                         ".working/imports/other", "bad\n")]):
+            try:
+                _render_preview_view_targets(root, fd, res.machine_rel, root)
+            except _StageError as exc:
+                check("D5-rebound-target-refused", exc.verdict == CANNOT_EVALUATE)
+            else:
+                check("D5-rebound-target-refused", False)
+    finally:
+        os.close(fd)
+
+    # A post-COMPLETE fault must not be reported as an aborted, unpromoted transaction.
+    root, machine, run = fixture()
+    live_calls = []
+    def post_fault(path):
+        if Path(path) == root:
+            live_calls.append(str(path))
+            if len(live_calls) == 2:
+                return False, False
+        return original_check(path)
+    with patch(__name__ + "._preview_render_reproducible", side_effect=post_fault):
+        result = apply_import(root, run, now=now)
+    check("D5-post-publish-failure-keeps-promoted",
+          result.verdict == CANNOT_EVALUATE and result.promoted
+          and result.outcome == "promoted" and len(live_calls) == 2
+          and (root / _txn_record_rel(run)).is_file())
+
 
 def self_test():
     """Import-staging invariants over synthetic stores. Judged on the returned verdict values, never by
@@ -4008,6 +4496,7 @@ def self_test():
     # DELIBERATELY sets+unsets it locally within its own block; this only removes an inherited value.
     _saved_kill_env = os.environ.pop(_journal.KILL_ENV, None)
     try:
+        _self_test_d5(check, build_apply_store, bi_candidate, review_accept_all, NOW)
         # 1: positive stage (mapped + unmapped): verdict 0, run dir + files present, LF quarantine for the
         # unmapped fragment carrying all four provenance fields, active store + counters unchanged.
         src = "hello world body"
@@ -5848,8 +6337,8 @@ def self_test():
               apA4.verdict == 1 and apA4.outcome == "rejected" and apA4.promoted is False)
         check("A4-reject-mutates-nothing", snapshot(mA4) == a4_before)
 
-        # A5 (composition gate fail-closed): a real store finding (a corrupted rendered view -> C-VIEW-DRIFT)
-        # makes apply's D4 composition gate over the assembled preview abort -> exit 1, nothing promoted.
+        # A5: pre-existing corrupted views remain a refusal. D5 checks the live baseline before
+        # deferring candidate view drift, so existing damage still aborts -> exit 1, nothing promoted.
         rootA5, mA5 = build_apply_store()
         for _view in (rootA5 / ".working").glob("*.md"):
             _view.write_text(_view.read_text() + "\nINJECTED DRIFT\n", encoding="utf-8")
