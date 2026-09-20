@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a34722491028739d6953aea7cf65f6618661e91756254534187291caf104a39e"
+tree-sha256 = "a2b2e0bd953422f11552a6a05b990a25041711a7bd5999378464c1ebac513899"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -56,8 +56,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 117103
-sha256 = "209f2e6a4fcdf2090e584f9ed4a80444e41fb777d849501eb097c107b9f7eeb7"
+bytes = 116247
+sha256 = "b4dec40247fa3cdbea01d60212bf4f6165c28a7ffd411f4740552d4e17747d06"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2186,8 +2186,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 38626
-sha256 = "148df1ab75c11d6d0d181eefde6b1ec4808e9b20c4d84dca81b82a16097e466f"
+bytes = 38667
+sha256 = "882d3fabcc59b670db926a4c62d63e684429bb645d77b09c0bef08603b9f329e"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2436,8 +2436,13 @@ sha256 = "785721cd229e683f1ab99abf5e70a8a3e3afdfa495fd7cf342d013ee55a88b1b"
 
 [[sources]]
 path = "opf/tools/_opf_adopt.py"
-bytes = 80550
-sha256 = "d586f493ee1811e883b75eb1f887f390227f127c8ab7af6754530fa9ef9d16dc"
+bytes = 81331
+sha256 = "951e26ffd22caae88bfa3bcc6f5c50387c5942fa414bde0c0f4ae7fa81e3b6ff"
+
+[[sources]]
+path = "opf/tools/_opf_adopt_plan.py"
+bytes = 36928
+sha256 = "4be572f12f2039151791191b43ce05dc32124b20781fdf9cbfc8dceddc8a8413"
 
 [[sources]]
 path = "opf/tools/_opf_changelog.py"
@@ -2686,8 +2691,8 @@ sha256 = "c9368c8dfa8da8893aec9711e858512955efb9fb117bbf0ea4f4de5995174498"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
-bytes = 2052
-sha256 = "7e8497d048134b63710f24c81feb8be8545ec101f4af0e4b3fe665bd4696f84e"
+bytes = 2139
+sha256 = "b2c4bfaf7248bab4c1d66d0260270b1f26066a35aa8b7323b2e3f753528a0900"
 
 [[sources]]
 path = "opf/tools/selftest_commonmark_conformance.py"
