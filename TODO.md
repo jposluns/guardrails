@@ -46,6 +46,10 @@ Fix errors and prevent their recurrence. Worked first.
 
 Fill significant gaps: deepen thin-but-present capability to operational sufficiency, and add the significant missing capabilities.
 
+| ID | Item | Tags |
+| --- | --- | --- |
+| GD-152 | Portable consumer-side findings-lifecycle capability (queue, resurface, escalation) (M, L) | `[public]` |
+
 ## Priority 3 - Tooling
 
 Tooling: the pack's operational-files framework, migration and adoption machinery, and internal apparatus.
