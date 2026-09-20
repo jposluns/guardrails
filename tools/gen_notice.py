@@ -26,7 +26,7 @@ ATTRIB_REL = Path(".aiqt") / "attribution.toml"
 WRAP = 98  # wrap prose paragraphs at this column for a readable plain-text NOTICE
 
 INTRO_TEMPLATE = (
-    "This pack is published under the Apache License 2.0; see the LICENSE file. That licence "
+    "This pack is published under the Apache License 2.0, except vendored third-party material which remains under its own terms (see below); see the LICENSE file. That licence "
     "covers the pack's own content and code, including its crosswalk mappings.\n\n"
     "AIQT Guardrails is authored and maintained by Jeff Posluns. The Apache License 2.0 covers the "
     "pack's copyrightable material and does not grant any trademark rights (Apache License 2.0, "

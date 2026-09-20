@@ -8,7 +8,7 @@ synchronizer `opf sync`, and the schema-upgrader `opf upgrade`, ship in later re
 Date: 2026-09-14 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache
-License 2.0. AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand,
+License 2.0 (except vendored third-party material, which remains under its own terms). AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand,
 not a legal entity, and the standard is authored and maintained by its lead maintainer. A project
 conforms to OPFiles with this specification and
 its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer

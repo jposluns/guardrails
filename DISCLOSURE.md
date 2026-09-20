@@ -68,7 +68,7 @@ Evidence: [Platform test status](https://aiqt.ai/evidence#platform-tests)
 
 ## Licence, warranty, and endorsement
 
-Claim: AIQT is open source under the Apache License 2.0: you may use, copy, modify, distribute, and prepare derivative works of it freely, including commercially, and you keep your changes. If you redistribute it you keep the licence and copyright notices, carry prominent notices in any files you modify stating that you changed them (Apache License 2.0, section 4(b)), and retain the applicable attribution notices from the NOTICE (Apache License 2.0, section 4(d)).
+Claim: AIQT is open source under the Apache License 2.0 (except vendored third-party material, which remains under its own terms; see the NOTICE): you may use, copy, modify, distribute, and prepare derivative works of it freely, including commercially, and you keep your changes. If you redistribute it you keep the licence and copyright notices, carry prominent notices in any files you modify stating that you changed them (Apache License 2.0, section 4(b)), and retain the applicable attribution notices from the NOTICE (Apache License 2.0, section 4(d)).
 
 Limitation: It is provided as-is, with no warranty or condition of any kind. No trademark rights are licensed (Apache License 2.0, section 6), and it carries the patent grant the Apache License 2.0 provides (Apache License 2.0, section 3). Using AIQT does not mean the project or its maintainer endorses you, and nothing permits you to imply sponsorship or official status. Equally, no framework publisher or platform vendor endorses AIQT.
 

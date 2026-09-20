@@ -1,6 +1,6 @@
 # attribution.toml: single source of truth for the generated root NOTICE.
 #
-# The AIQT pack is published under the Apache License 2.0 (see the repository LICENSE file). The pack's
+# The AIQT pack is published under the Apache License 2.0, except vendored third-party material which remains under its own terms (see the repository LICENSE file and NOTICE). The pack's
 # crosswalk mappings reproduce third-party framework control/clause IDENTIFIERS and TITLES as
 # uncopyrightable factual pointers only (for public-domain sources such as NIST, a reproduced title may be a
 # limited subcategory statement). NO copyrighted specification prose, requirement text, control or clause bodies, figures, or tables

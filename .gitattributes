@@ -601,6 +601,7 @@ tools/check_gensrc_failclose.py text eol=lf
 tools/check_install_page.py text eol=lf
 tools/check_internal_names.py text eol=lf
 tools/check_leaks.py text eol=lf
+tools/check_license_qualification.py text eol=lf
 tools/check_links.py text eol=lf
 tools/check_manifest.py text eol=lf
 tools/check_mappings.py text eol=lf
