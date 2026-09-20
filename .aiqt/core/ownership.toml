@@ -204,6 +204,10 @@ path = "SYSTEM-HARDENING.md"
 class = "pack-immutable"
 
 [[release-class]]
+path = "TODO.md"
+class = "pack-immutable"
+
+[[release-class]]
 path = "VERSION"
 class = "pack-immutable"
 

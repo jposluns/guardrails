@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a3aa91752b43d353986532bb9c1714b824b75b92f2405f3bb968c9078125e072"
+tree-sha256 = "a42f6be9b9cf3b207ef86944160616711cc09eefc2d5dd8bc507a7894d2ab14a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -91,8 +91,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 13726
-sha256 = "c7c33edb372fb648aa10a87e610a54aa32891a0c6a6e51b1e7e7d77d822bc6d3"
+bytes = 13787
+sha256 = "792c169a2799c2cc38bbdb0c5de38fd5f59cfe5596355112f859e13d4f9dbc83"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2186,8 +2186,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 38707
-sha256 = "0a30f76239e795d5bbe8f07208982cae65d17cf858732bd28f4e2947fc32e561"
+bytes = 38727
+sha256 = "6ea50fde0ec1aa5a6a2da72f8178c55c69bc2c861e3bc8500d1e24f8eacd33c1"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2248,6 +2248,11 @@ sha256 = "063bcfc743567f1b2438f33a0481453b065996f06172b17eea9f4047d41105a5"
 path = "SYSTEM-HARDENING.md"
 bytes = 21128
 sha256 = "98e5f2448fe25323996e8b57032ed654938aac4553929a9ea8bc7c51986923a0"
+
+[[sources]]
+path = "TODO.md"
+bytes = 6223
+sha256 = "5f19f5bb74b3173697d5c41016613be9d674f8c7d37862be51e466da11403d03"
 
 [[sources]]
 path = "VERSION"
