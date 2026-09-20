@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""OPF adoption convergence, PR-A: the INERT data model (schemas + op vocabulary + fail-closed validators).
+"""OPF adoption convergence: inert schemas and read-only investigation/planning.
 
-This is the foundation slice of the OPF-ADOPT-ORCH component (foundation-fable-plan section (b), PR-A per
-b.6). It carries ONLY inert data and pure validators: the `AdoptionPlan`, adoption `receipt core`, and
-append-only `outcome event` schemas (as `validate_*` functions plus canonical shapes), the closed 12-op
-`ADOPT_OPS` vocabulary (as a code-enumerated tuple with per-op precondition / journal / reversal metadata,
-DATA ONLY), and the fail-closed validators that refuse malformed, out-of-vocabulary, or unparseable input.
+PR-A supplies the `AdoptionPlan`, receipt-core and outcome-event schemas, the closed twelve-op
+ADOPT_OPS vocabulary, and pure fail-closed validators. Validators receive already-parsed objects and
+decide well-formedness only; they never read bytes themselves.
 
-What this module is NOT (deferred to later PRs, per b.6): there is NO engine here. Nothing scans, plans,
-applies, renders, or writes; nothing calls the journal, touches the filesystem, spawns git, or fetches a
-release; no CLI verb, gate, or generator is wired. The `enable-hook` op is DECLARED in the vocabulary as a
-row shape but is neither implemented nor executed here (H-8 the merge adapter and H-9 the trust anchor are
-PR-D and PR-C; this module is PR-A). Validators receive an ALREADY-PARSED object (a dict from a TOML/JSON
-load performed by a caller) and decide its well-formedness; they never read bytes themselves.
+PR-B adds the investigate() and plan() library entry points, implemented by the sibling
+_opf_adopt_plan module. They inspect an explicitly scoped repository and return canonical inert
+observation, inventory and plan bytes. They never persist those outputs or run an operation.
+The registered self-test also exercises synthetic temporary fixtures.
+
+Apply, trust verification, acceptance capture, the adoption doctor, behavioral probes, and the CLI
+entry point remain later slices. In particular, enable-hook remains a vocabulary row only: this
+module neither computes a harness-specific registration merge nor activates a hook. A VALID frozen
+proposal is not execution authorization or an ADOPTED_AND_VALID verdict.
 
 Base-neutral by construction (H-7 ratified): the adoption receipt is a STORE-LEVEL artefact whose vocabulary
 stays adopter-neutral. Nothing here is an AIQT-profile-specific record type; `product` is the only identity
@@ -1237,14 +1238,36 @@ def self_test():
     # findings; the chain stays INVALID either way. The intact-chain path is unchanged and stays guarded by
     # the section-6 chain vectors (all built from individually-VALID events), so no new vector is added here.
 
+    from _opf_adopt_plan import self_test as planning_self_test
+    planning_rc = planning_self_test()
+    check("read-only-investigate-plan-suite",
+          type(planning_rc) is int and planning_rc == 0)
+
     if failures:
         print("OPF-ADOPT SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
         for f in failures:
             print("  FAILED: {}".format(f))
         return 1
-    print("OPF-ADOPT SELF-TEST: PASS ({} plan / receipt-core / outcome-event / ADOPT_OPS checks)".format(
+    print("OPF-ADOPT SELF-TEST: PASS ({} schema / vocabulary / planning checks)".format(
         checked[0]))
     return 0
+
+
+def investigate(product_root, *, sources, targets=()):
+    """Read-only investigation; see _opf_adopt_plan for scope and residuals."""
+    from _opf_adopt_plan import investigate as investigate_readonly
+    return investigate_readonly(product_root, sources=sources, targets=targets)
+
+
+def plan(product_root, *, sources, expected_observation_digest, product, decisions,
+         ops, now, run_nonce, targets=()):
+    """Freeze an inert proposal. This does not capture acceptance or authorize apply."""
+    from _opf_adopt_plan import plan as plan_readonly
+    return plan_readonly(
+        product_root, sources=sources, targets=targets,
+        expected_observation_digest=expected_observation_digest,
+        product=product, decisions=decisions, ops=ops, now=now, run_nonce=run_nonce,
+    )
 
 
 def main():
