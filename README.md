@@ -44,9 +44,8 @@ we intended you to have.
 
 ## Licence and trademarks
 
-AIQT Guardrails is authored and maintained by Jeff Posluns and published under the
-[Apache License 2.0](LICENSE); see [NOTICE](NOTICE) for attribution and third-party notices. The licence
-covers the pack's content and grants no trademark rights (Apache License 2.0, section 6): AIQT™ and AIQT
+AIQT Guardrails is authored and maintained by Jeff Posluns.
+See [LICENSE](LICENSE) and [NOTICE](NOTICE) for terms and third-party attribution. AIQT™ and AIQT
 Guardrails™ are trademarks of Jeff Posluns (registration pending), and AIQT is a brand, not a legal entity.
 
 ## More
