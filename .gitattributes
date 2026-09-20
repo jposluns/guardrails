@@ -452,6 +452,7 @@ RELEASING.md text eol=lf
 ROADMAP.md text eol=lf
 SCOPE.md text eol=lf
 SYSTEM-HARDENING.md text eol=lf
+TODO.md text eol=lf
 VERSION text eol=lf
 aiqt-barebones.md text eol=lf
 changelog.toml text eol=lf
