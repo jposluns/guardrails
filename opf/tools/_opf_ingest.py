@@ -53,6 +53,15 @@ Disclosed coverage residuals (part of the engine, not a footnote):
     ledgers, and the reserved import runs (never adoption source), so they are pruned from detection
     wholesale by construction. This is a ratified intentional prune (F10-2 / F10-3), disclosed here, not a
     coverage gap; the convergence gate (`check_opf_ingest.py`) asserts it rather than re-policing it.
+  - RATIFIED DIVERGENCES (R12, disclosed; hardening deferred post-1.1.1): ingest and the checker may differ
+    on two TRAVERSAL / ENTRY edges, by design: (a) when a DEEP file is declared `[unmanaged]` (e.g.
+    `.working/legacy/keep.md`), the checker grades the intermediate directory `.working/legacy` as
+    unregistered while ingest reports only stray FILES (no stray is laundered into CLEAN); (b) a COVERED
+    exotic entry (a symlink / FIFO under an `[unmanaged]` cover) is pruned unread by ingest (CLEAN) but
+    fail-closed CANNOT-EVALUATE'd by the checker. These are an inherent division of labor: ingest =
+    adoption-SOURCE stray-file detection; the checker = full steady-state integrity incl. directory-grading
+    + covered-exotic fail-close. The full traversal / entry-type unification is a POST-1.1.1 hardening TODO
+    (see PD-MIG-PR1-R12).
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules, so the standalone-closure property (OPF-SELF-CONTAIN) holds.
@@ -75,8 +84,9 @@ import _opf_views      # noqa: E402  the SAME view name-resolution + spec-destin
 #                                    so ingest's covered set cannot disagree with C-CONTAINMENT (F-8.1)
 import _opf_check      # noqa: E402  the steady-state store checker: its pure `classify_containment` is the
 #                                    SINGLE authority ingest derives its [unmanaged] cover + store-scope view
-#                                    targets from, so ingest and C-CONTAINMENT cannot diverge on adoption
-#                                    content by construction (F10-1). Acyclic: _opf_check's top-level imports
+#                                    targets from, so ingest and C-CONTAINMENT cannot diverge on the managed
+#                                    SET (the collision-filtered valid_unmanaged + the view/deliverable
+#                                    targets) by construction (F10-1). Acyclic: _opf_check's top-level imports
 #                                    (_journal, _opf_emit, _opf_import, _opf_views, _opf_changelog, _opf_store,
 #                                    _opf_schema, _opf_release) none import _opf_ingest; only check_opf_ingest
 #                                    imports _opf_ingest, lazily inside its self-test.
@@ -395,8 +405,9 @@ def _managed_paths(resolution, manifest_data):
     (`_opf_check`), one pair per scope, so ingest mirrors the checker's MATCHING semantics and not only its
     derivation (R9-1). The adoption-content classification (the store-scope view targets and the
     collision-filtered [unmanaged] cover) is DERIVED from the checker's SINGLE pure authority
-    `_opf_check.classify_containment`, so ingest and C-CONTAINMENT cannot diverge on adoption content by
-    construction (F10-1): the same `_resolve_view` + `_spec_destination` view derivation and the same
+    `_opf_check.classify_containment`, so ingest and C-CONTAINMENT cannot diverge on the managed SET (the
+    collision-filtered valid_unmanaged + the view/deliverable targets) by construction (F10-1): the same
+    `_resolve_view` + `_spec_destination` view derivation and the same
     contained-only, collision-filtered, canonicalized `valid_unmanaged`.
       - prune_prefixes: store-relative directory subtrees never detected under `.working/`: the machine
         store subtree (`resolution.machine_rel`, which contains the manifest, the typed indexes, and the

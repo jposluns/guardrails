@@ -40,8 +40,16 @@ OPF's control area, policed by the steady-state checker's C-CONTAINMENT, not by 
 detector, so the detector prunes them wholesale by design (F10-2 / F10-3, ratified); this gate asserts that
 convergence rather than re-policing the control area here. The detector's [unmanaged] cover and store-scope
 view targets are DERIVED from the checker's own `classify_containment` authority, so ingest and C-CONTAINMENT
-cannot diverge on adoption content by construction (F10-1); the cross-run f101 / f91 legs assert that
-agreement.
+cannot diverge on the managed set (the collision-filtered valid_unmanaged + the view/deliverable targets) by
+construction (F10-1); the cross-run f101 / f91 legs assert that agreement. RATIFIED DIVERGENCES (R12,
+disclosed; hardening deferred post-1.1.1): ingest and the checker may differ on two TRAVERSAL / ENTRY edges,
+by design: (a) when a DEEP file is declared `[unmanaged]` (e.g. `.working/legacy/keep.md`), the checker
+grades the intermediate directory `.working/legacy` as unregistered while ingest reports only stray FILES (no
+stray is laundered into CLEAN); (b) a COVERED exotic entry (a symlink / FIFO under an `[unmanaged]` cover) is
+pruned unread by ingest (CLEAN) but fail-closed CANNOT-EVALUATE'd by the checker. These are an inherent
+division of labor: ingest = adoption-SOURCE stray-file detection; the checker = full steady-state integrity
+incl. directory-grading + covered-exotic fail-close. The full traversal / entry-type unification is a
+POST-1.1.1 hardening TODO (see PD-MIG-PR1-R12).
 
 This repository is not an OPFiles adopter (it has no store), and root-ingest wires no verb in this slice,
 so there is no live detection to run: the live leg prints NOT APPLICABLE and exits 0, spec-honest like the
@@ -726,7 +734,7 @@ def _self_test():
           "it at parity with the real-dir case (F-8.2); the symlink probe skips a symlink vector only on a "
           "genuine unsupported-platform signal (ENOSYS) so an EACCES propagates rather than masquerading as a "
           "silent skip (F9.2); a CLEAN detection's worksheet always validates; the "
-          "adoption-content managed set (the [unmanaged] cover and store-scope view targets) is DERIVED from "
+          "managed set (the collision-filtered [unmanaged] cover and store-scope view targets) is DERIVED from "
           "the checker's own classify_containment authority, so a colliding [unmanaged] declaration (one that "
           "NAMES or CONTAINS a managed store path) covers NOTHING and is a LOCATED FINDING that can no longer "
           "launder a stray beneath it into a false CLEAN, with ingest and the checker's C-CONTAINMENT agreeing "
