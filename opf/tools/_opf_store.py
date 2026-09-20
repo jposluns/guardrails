@@ -85,6 +85,13 @@ except ModuleNotFoundError:  # Python < 3.11
 POINTER_REL = ".opf.toml"              # committed store pointer, at the PRODUCT root (spec 4.3)
 LOCAL_POINTER_REL = ".opf.local.toml"  # uncommitted machine-local override, resolved FIRST (spec 4.3)
 WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root (spec 4.4)
+# The store-root control / VCS directory names, dropped or excluded at the STORE ROOT only (never a
+# same-named dir nested deeper): `.git` is the VCS dir; `.aiqt` is the control UMBRELLA under which every
+# apply / import / migration ops, journal, and archive tree nests, so excluding the `.aiqt` subtree covers
+# them all by construction. This tuple is the SINGLE store-topology authority both
+# `_opf_import._assemble_preview` (its store-root drop set) and `_opf_ingest` (its store-root control
+# exclusion) derive from, so the two can never mirror-drift (spec 4.4 / 14.2).
+STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
 DEFAULT_MACHINE_SUBDIR = "toml"        # standard machine-store subdir name, tried first (spec 4.4)
 MANIFEST_NAME = "manifest.toml"        # discovery marker filename (spec 4.5)
 STANDARD_TOKEN = "opf"          # exact discovery token in [opf].standard (spec 4.5)
