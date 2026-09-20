@@ -47,6 +47,12 @@ Disclosed coverage residuals (part of the engine, not a footnote):
     matches `/`; the pattern semantics are disclosed rather than a full recursive-glob grammar.
   - semantic disposition correctness (which files SHOULD be kept, migrated, or moved) is a human decision,
     out of scope: detect defaults EVERY row to `unresolved` and takes no action on any file (spec 14.2).
+  - the machine-store interior (`.working/<machine>/`) and the reserved imports staging tree
+    (`_opf_import.IMPORTS_REL`) are OPF's CONTROL AREA, policed by the steady-state checker's C-CONTAINMENT,
+    NOT by this adoption-SOURCE stray detector: they hold the manifest, the typed indexes, the control
+    ledgers, and the reserved import runs (never adoption source), so they are pruned from detection
+    wholesale by construction. This is a ratified intentional prune (F10-2 / F10-3), disclosed here, not a
+    coverage gap; the convergence gate (`check_opf_ingest.py`) asserts it rather than re-policing it.
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules, so the standalone-closure property (OPF-SELF-CONTAIN) holds.
@@ -67,13 +73,21 @@ import _opf_import     # noqa: E402  reuse the 0/1/2 verdicts, provenance vocab,
 import _opf_views      # noqa: E402  the SAME view name-resolution + spec-destination authority the checker
 #                                    (`_opf_check._check_containment`) grades managed view targets against,
 #                                    so ingest's covered set cannot disagree with C-CONTAINMENT (F-8.1)
+import _opf_check      # noqa: E402  the steady-state store checker: its pure `classify_containment` is the
+#                                    SINGLE authority ingest derives its [unmanaged] cover + store-scope view
+#                                    targets from, so ingest and C-CONTAINMENT cannot diverge on adoption
+#                                    content by construction (F10-1). Acyclic: _opf_check's top-level imports
+#                                    (_journal, _opf_emit, _opf_import, _opf_views, _opf_changelog, _opf_store,
+#                                    _opf_schema, _opf_release) none import _opf_ingest; only check_opf_ingest
+#                                    imports _opf_ingest, lazily inside its self-test.
 
 
 # --- fixed formats, closed vocabularies, and the outcome model ---------------------------------------
 
 # The 0/1/2 verdict contract, single-sourced from the import layer (OQ-C): one contract, no local mirror.
 CLEAN = _opf_import.CLEAN                    # 0: a clean detection
-FINDING = _opf_import.FINDING                # 1: a validation finding (a bad --include, a store-scope glob)
+FINDING = _opf_import.FINDING                # 1: a validation finding (a bad --include, a store-scope glob, a
+#                                                 colliding [unmanaged] declaration that covers nothing, F10-1)
 CANNOT_EVALUATE = _opf_import.CANNOT_EVALUATE  # 2: unresolved store / unreadable / exotic (fail-closed)
 
 # The disposition worksheet format token and schema marker (canonical `_opf_emit` TOML, the store's native
@@ -379,58 +393,86 @@ def _managed_paths(resolution, manifest_data):
     hand-copied list (guard-input-soundness). Returns (prune_prefixes, store_leaf, store_subtree,
     declared_leaf, declared_subtree), splitting the managed set into the TWO MATCHING KINDS the checker uses
     (`_opf_check`), one pair per scope, so ingest mirrors the checker's MATCHING semantics and not only its
-    derivation (R9-1):
+    derivation (R9-1). The adoption-content classification (the store-scope view targets and the
+    collision-filtered [unmanaged] cover) is DERIVED from the checker's SINGLE pure authority
+    `_opf_check.classify_containment`, so ingest and C-CONTAINMENT cannot diverge on adoption content by
+    construction (F10-1): the same `_resolve_view` + `_spec_destination` view derivation and the same
+    contained-only, collision-filtered, canonicalized `valid_unmanaged`.
       - prune_prefixes: store-relative directory subtrees never detected under `.working/`: the machine
         store subtree (`resolution.machine_rel`, which contains the manifest, the typed indexes, and the
-        control ledgers) and the reserved `.working/imports/` run tree (`_opf_import.IMPORTS_REL`).
+        control ledgers) and the reserved `.working/imports/` run tree (`_opf_import.IMPORTS_REL`). This is
+        OPF's control area, the checker's C-CONTAINMENT ground, not this adoption-source detector's, so it is
+        pruned wholesale by design (F10-2 / F10-3, ratified).
       - store_leaf / declared_leaf: EXACT-LEAF managed destinations, matched by EXACT path EQUALITY, exactly
         as `_opf_check.managed_leaf` matches a VIEW target (`if p in view_targets`), NEVER by subtree
         containment. A REGULAR FILE at that exact path is the managed output (excluded from results, as an
         equality member); a DIRECTORY there is a WRONG-TYPE anomaly the walk fails closed on (a regular-file
         output is expected), NEVER a subtree prune that hides its children, agreeing with the checker (R9-1).
-        The store-scope leaf entries are each RECOGNIZED view's SPEC destination (`_opf_views._spec_destination`,
-        gated on `_opf_views._resolve_view`, so the derivation MIRRORS the checker `_opf_check._check_containment`
-        and a rogue / rebound view target cannot launder a store path into "managed"; F-8.1), in the RAW
-        store-relative spelling the store `.working/` walk produces. The declared-scope leaf set RE-ANCHORS
-        those store-scope destinations at the resolved store root AND folds in the genuinely product-root
-        leaves UN-anchored: the store pointer control files (`.opf.toml` / `.opf.local.toml`, managed wherever
-        they fall; C1) and the PUBLIC view / deliverable targets (`_PUBLIC_TARGETS`, product-root in every
-        topology, spec 5.8). A deliverable target is a leaf ONLY when PUBLIC (deliverables have no
-        name-resolution authority and the checker treats a store-scope deliverable target as a stray; F-8.1).
-      - store_subtree / declared_subtree: SUBTREE-covered entries, matched by SUBTREE containment (`_under_any`)
-        exactly as `_opf_check.managed_file` grades a file against its `valid_unmanaged` authority: a path that
-        EQUALS a covered entry OR lies UNDER one is managed, so a declared-unmanaged DIRECTORY covers its whole
-        subtree and tooling never reads an unmanaged path (spec 14.2). The store-scope subtree entries are the
-        already-declared `[unmanaged].paths`, canonicalized by `_canonical_managed` so a non-canonical but
-        valid spelling cannot evade exclusion, kept in the RAW store-relative spelling. The declared-scope
-        subtree set RE-ANCHORS those `[unmanaged].paths` AND the store-root `.aiqt` / `.git` control / VCS dirs
-        through the SINGLE `_reanchor_declared` path, so the store-relative / product-relative
-        namespace-collision class is closed BY CONSTRUCTION for any current or future store-relative entry (F1):
-        on a relocated / pointer store (store root != product root) a store-relative `notes` becomes
-        `ops/notes`, so it neither suppresses a real product stray at `notes/` nor leaves a store path
-        `ops/notes/` emitted and READ (the round-7 MAJOR). The `.aiqt` subtree is a prefix, so every tree
-        nesting under it (IMPORT_OPS_REL, IMPORT_ARCHIVE_REL, migrate's `.aiqt/migration/journal`) is covered
-        BY CONSTRUCTION, not by a parallel hand-list that keeps missing an authority (guard-input-soundness).
-        Only the DECLARED scope folds in the control dirs, so for a store nested under the product's own
-        `.working/` (`dir:.working/ops`) a product-relative prefix such as `.working/ops/.aiqt` cannot collide
-        with a store-relative store-scope path and silently suppress a real store stray (F1). For an inline /
-        default store re-anchoring is IDENTITY, so inline behaviour is unchanged. The R7-1 three-valued
-        no-match consults ONLY the SUBTREE set, since an exact-leaf entry is a single file matched in results,
-        not an unread covered subtree."""
+        The store-scope leaf entries are the checker's `classify_containment(...).view_targets` VERBATIM (the
+        recognized store-scope view spec destinations, in the RAW store-relative spelling the checker uses;
+        no `_canonical_managed` re-wrap, so they are byte-identical to the checker's set). The declared-scope
+        leaf set RE-ANCHORS those store-scope destinations at the resolved store root AND folds in the
+        genuinely product-root leaves UN-anchored: the store pointer control files (`.opf.toml` /
+        `.opf.local.toml`, managed wherever they fall; C1) and the PUBLIC view / deliverable targets
+        (`_PUBLIC_TARGETS`, product-root in every topology, spec 5.8). A deliverable target is a leaf ONLY
+        when PUBLIC (deliverables have no name-resolution authority and the checker treats a store-scope
+        deliverable target as a stray; F-8.1). The PUBLIC view destination (VERSION, product scope) is NOT
+        part of the checker's store-scope `view_targets`, so it is still derived here from the same
+        `_opf_views` authority (D3: product / deliverable handling unchanged).
+      - store_subtree / declared_subtree: SUBTREE-covered entries, matched by SUBTREE containment
+        (`_under_any`) exactly as `_opf_check.managed_file` grades a file against its `valid_unmanaged`
+        authority: a path that EQUALS a covered entry OR lies UNDER one is managed, so a declared-unmanaged
+        DIRECTORY covers its whole subtree and tooling never reads an unmanaged path (spec 14.2). The
+        store-scope subtree entries are the checker's collision-filtered `valid_unmanaged` VERBATIM (the
+        surviving [unmanaged].paths, canonicalized and contained-only, in the RAW store-relative spelling): a
+        COLLIDING declaration (one that names or contains a managed store path) is ABSENT from that set and is
+        surfaced as a located FINDING below, so it covers NOTHING and can no longer launder a stray beneath
+        it into a false CLEAN (F10-1; the 5-round-recurring divergence, closed by construction). The
+        declared-scope subtree set RE-ANCHORS those [unmanaged].paths AND the store-root `.aiqt` / `.git`
+        control / VCS dirs through the SINGLE `_reanchor_declared` path, so the store-relative /
+        product-relative namespace-collision class is closed BY CONSTRUCTION for any current or future
+        store-relative entry (F1): on a relocated / pointer store (store root != product root) a
+        store-relative `notes` becomes `ops/notes`, so it neither suppresses a real product stray at `notes/`
+        nor leaves a store path `ops/notes/` emitted and READ (the round-7 MAJOR). The `.aiqt` subtree is a
+        prefix, so every tree nesting under it (IMPORT_OPS_REL, IMPORT_ARCHIVE_REL, migrate's
+        `.aiqt/migration/journal`) is covered BY CONSTRUCTION, not by a parallel hand-list that keeps missing
+        an authority (guard-input-soundness). Only the DECLARED scope folds in the control dirs, so for a
+        store nested under the product's own `.working/` (`dir:.working/ops`) a product-relative prefix such
+        as `.working/ops/.aiqt` cannot collide with a store-relative store-scope path and silently suppress a
+        real store stray (F1). For an inline / default store re-anchoring is IDENTITY, so inline behaviour is
+        unchanged. The R7-1 three-valued no-match consults ONLY the SUBTREE set, since an exact-leaf entry is
+        a single file matched in results, not an unread covered subtree."""
     prune = {resolution.machine_rel, _opf_import.IMPORTS_REL}
-    store_leaf_rel = set()     # STORE-relative EXACT-LEAF destinations (recognized store-scope view dests)
-    store_subtree_rel = set()  # STORE-relative SUBTREE covers (declared [unmanaged].paths)
+    # DERIVE the adoption-content managed classification from the checker's SINGLE pure authority rather than
+    # re-deriving it here, so ingest and C-CONTAINMENT cannot diverge on the [unmanaged] cover or the view
+    # targets (F10-1). The helper is pure (no I/O, no `rep`) and derives enabled_types / layout internally
+    # from the manifest the caller already validated (D2).
+    cls = _opf_check.classify_containment(manifest_data, resolution.machine_rel)
+    # A malformed [unmanaged] entry is a located CANNOT-EVALUATE (a by-construction backstop: the manifest
+    # validator `_opf_store._validate_unmanaged` normally rejects an escaping / non-string entry upstream, so
+    # `detect` fails closed at init-first validation before reaching here; this mirrors the checker's cant).
+    if cls.malformed:
+        raise _cannot("a declared [unmanaged] path entry cannot be evaluated, mirroring _opf_check "
+                      "C-CONTAINMENT (spec 14.2): {}".format("; ".join(cls.malformed)))
+    # FINDING (F10-1 / D1): a COLLIDING [unmanaged] declaration (one that names or contains a managed store
+    # path) COVERS NOTHING and is a located FINDING, exactly as the checker's C-CONTAINMENT rejects it. Ingest
+    # must not fold a rejected declaration into the cover, where (pre-fix) it laundered a stray beneath it into
+    # a false CLEAN; a colliding store flips CLEAN -> FINDING.
+    if cls.colliding:
+        raise _finding("a declared [unmanaged] path collides with a managed store path, so it covers "
+                       "nothing and is a containment finding, mirroring _opf_check C-CONTAINMENT (spec "
+                       "14.2): {}".format("; ".join(cls.colliding)))
+    # STORE-scope view leaves and the surviving [unmanaged] subtree covers come STRAIGHT from the checker's
+    # validated classification, in the RAW store-relative spelling the checker uses (no `_canonical_managed`
+    # re-wrap on the view dests, so ingest's leaves are byte-identical to the checker's `view_targets`).
+    store_leaf_rel = set(cls.view_targets)      # STORE-relative EXACT-LEAF view spec destinations (checker authority)
+    store_subtree_rel = set(cls.valid_unmanaged)  # STORE-relative SUBTREE covers (collision-filtered [unmanaged].paths)
     product_leaf = set()       # genuinely PRODUCT-root EXACT-LEAF entries (public view/deliverable targets)
-    # VIEW covered targets MIRROR the checker authority `_opf_check._check_containment` (round-14 C3) rather
-    # than trusting the RAW manifest `target`, so ingest and the checker cannot DISAGREE (F-8.1). A view
-    # contributes its SPEC destination (`_opf_views._spec_destination(name)`) ONLY when the name RESOLVES
-    # (`_opf_views._resolve_view`, a pure name check, no I/O): an UNRECOGNIZED name marks NOTHING (so a crafted
-    # `[views.rogue] target=".working/rogue.md"` cannot launder that store path into "managed"), and a KNOWN
-    # name uses its SPEC destination, NEVER the manifest's raw target (so a REBIND off the spec destination
-    # cannot launder either -- the spec destination stays covered and the rebound target is a detectable
-    # stray). A store-scope contained destination joins the store EXACT-LEAF set (exactly as the checker's
-    # `managed_leaf` matches a view target by equality); the one PUBLIC view destination (VERSION, product
-    # scope) joins the product-root EXACT-LEAF set.
+    # The PRODUCT-root public view destination (VERSION, product scope, spec 5.8) has no store-scope leaf and
+    # is NOT part of the checker's store-scope view_targets, so ingest still derives it here from the same
+    # `_opf_views` authority (D3: product / deliverable handling unchanged). A store-scope view destination is
+    # already carried by cls.view_targets above, so this loop contributes ONLY the public product-root leaf,
+    # keeping the exact original `elif dest in _PUBLIC_TARGETS` guard semantics.
     views = manifest_data.get("views")
     if isinstance(views, dict):
         for name in views:
@@ -442,8 +484,8 @@ def _managed_paths(resolution, manifest_data):
                 continue                          # C3: an unrecognized name marks NO managed target
             scope, dest = _opf_views._spec_destination(name)
             if scope == "store" and _opf_store._is_contained_relpath(dest):
-                store_leaf_rel.add(_canonical_managed(dest))
-            elif dest in _PUBLIC_TARGETS:         # the product-scope view destination (VERSION), spec 5.8
+                continue                          # store-scope leaf now derived from cls.view_targets (F10-1)
+            if dest in _PUBLIC_TARGETS:           # the product-scope view destination (VERSION), spec 5.8
                 product_leaf.add(dest)
     # DELIVERABLES have NO name-resolution authority (the manifest validator grades only their SHAPE, and the
     # checker's C-CONTAINMENT does NOT treat a store-scope deliverable target as managed), so ingest mirrors
@@ -457,16 +499,6 @@ def _managed_paths(resolution, manifest_data):
                 t = _canonical_managed(tbl["target"])
                 if t in _PUBLIC_TARGETS:
                     product_leaf.add(t)
-    unmanaged = manifest_data.get("unmanaged")
-    if isinstance(unmanaged, dict):
-        paths = unmanaged.get("paths")
-        if isinstance(paths, list):
-            for p in paths:
-                if isinstance(p, str):
-                    # `[unmanaged].paths` are STORE-relative (spec 14.2; `_opf_check` grades them relative to
-                    # the store root by SUBTREE containment), so they join the SUBTREE set and re-anchor at the
-                    # resolved store root for the declared scope.
-                    store_subtree_rel.add(_canonical_managed(p))
     # STORE scope grades STORE-relative paths, so it uses the RAW store-relative sets. (A product-root public
     # target never falls under `.working/`, so folding it in would be a harmless no-op; it is left out to keep
     # store scope strictly the store-relative sets.)

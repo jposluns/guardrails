@@ -35,6 +35,13 @@ correctness of a disposition (which files should be kept, migrated, or moved) is
 blind; there is no acceptance / actor authenticity in PR1 (review is MIG-PR4); and the importer layer, plan
 composition, apply promotion, and verb wiring that later slices add are out of this gate's scope. The gate
 asserts representative synthetic-store scenarios with exact verdicts, not detect's whole input space.
+The machine-store interior (`.working/<machine>/`) and the reserved `.working/imports/` staging tree are
+OPF's control area, policed by the steady-state checker's C-CONTAINMENT, not by this adoption-source stray
+detector, so the detector prunes them wholesale by design (F10-2 / F10-3, ratified); this gate asserts that
+convergence rather than re-policing the control area here. The detector's [unmanaged] cover and store-scope
+view targets are DERIVED from the checker's own `classify_containment` authority, so ingest and C-CONTAINMENT
+cannot diverge on adoption content by construction (F10-1); the cross-run f101 / f91 legs assert that
+agreement.
 
 This repository is not an OPFiles adopter (it has no store), and root-ingest wires no verb in this slice,
 so there is no live detection to run: the live leg prints NOT APPLICABLE and exits 0, spec-honest like the
@@ -302,10 +309,20 @@ def _self_test():
                                            'target = ".working/TODO.md"'))
         r91 = ing.detect(r91d)
         chk91 = _opf_check.validate_store(_opf_store.resolve_store(r91d))
+        # F10-4: assert the checker RAISED the SPECIFIC C-CONTAINMENT finding for the flagged child path, not
+        # merely that the whole-store exit is CANNOT-EVALUATE (which unrelated cants pin at 2 on every minimal
+        # fixture, so the checker leg could not fail independently). Prefer the per-check attribution map
+        # (`by_check["C-CONTAINMENT"]`, verified at source: `rep.ran("C-CONTAINMENT")` precedes the check, so
+        # its findings attribute there); fall back to the whole findings list if attribution ever differs
+        # (same load-bearing property: the checker located the same child path ingest excluded and flagged).
+        chk91_cc = chk91.by_check.get("C-CONTAINMENT", [])
+        chk91_located = (any(".working/TODO.md/inner.md" in m for m in chk91_cc)
+                         or any(".working/TODO.md/inner.md" in f for f in chk91.findings))
         expect("f91-dir-at-view-dest-cannot-evaluate-ingest-checker-agree",
                r91.verdict == ing.CANNOT_EVALUATE and any(".working/TODO.md" in f for f in r91.findings)
                and not any(row["source_path"] == ".working/TODO.md/inner.md" for row in r91.rows)
-               and _opf_check.exit_code(chk91) == ing.CANNOT_EVALUATE)
+               and _opf_check.exit_code(chk91) == ing.CANNOT_EVALUATE
+               and chk91_located)
         r91f = build_store(strays={".working/TODO.md": "t", ".working/real.md": "r"},
                            manifest_extra=('[views."TODO.md"]\nkind = "composed"\nsources = ["backlog_item"]\n'
                                            'target = ".working/TODO.md"'))
@@ -320,6 +337,108 @@ def _self_test():
         expect("f91-dir-at-public-target-cannot-evaluate",
                r91pr.verdict == ing.CANNOT_EVALUATE and any("CHANGELOG.md" in f for f in r91pr.findings)
                and not any(row["source_path"] == "CHANGELOG.md/inner.md" for row in r91pr.rows))
+        # --- F10-1: a colliding [unmanaged] declaration covers NOTHING and is a LOCATED FINDING ----------
+        # Ingest now DERIVES its [unmanaged] cover and store-scope view targets from the checker's SINGLE
+        # authority (`_opf_check.classify_containment`), so a declaration that NAMES or CONTAINS a managed
+        # store path can no longer be folded RAW into the cover to launder a stray beneath it into a false
+        # CLEAN (the 5-round-recurring divergence, closed BY CONSTRUCTION; D1). Behaviour delta: such a store
+        # flips CLEAN -> FINDING. Each colliding case asserts ingest RAISES the located finding (covers
+        # nothing: no rows) AND the checker's C-CONTAINMENT check (via `by_check`, NOT the whole-store exit
+        # code, which unrelated cants pin at CANNOT-EVALUATE on a minimal fixture -- the F10-4 lesson) carries
+        # the SAME collision for the SAME declaration, so ingest and the checker AGREE.
+        def cc_unregistered(chk):
+            # The store-relative paths the checker's C-CONTAINMENT flagged as unregistered strays, parsed from
+            # the per-check attribution map (message format `_opf_check.py`: unregistered path {!r} ...).
+            out = set()
+            for m in chk.by_check.get("C-CONTAINMENT", []):
+                if "unregistered path " in m and "'" in m:
+                    out.add(m.split("'", 2)[1])
+            return out
+        f101_cases = [
+            # (label, manifest_extra, strays, the collision-repr the checker's C-CONTAINMENT message carries)
+            ("contains-machine-root", '[unmanaged]\npaths = [".working"]',
+             {".working/loose.md": "x"}, "'.working'"),
+            ("contains-imports", '[unmanaged]\npaths = [".working/imports"]',
+             {".working/real.md": "r"}, "'.working/imports'"),
+            ("names-managed-leaf", '[unmanaged]\npaths = [".working/toml/manifest.toml"]',
+             {".working/real.md": "r"}, "'.working/toml/manifest.toml'"),
+            ("names-view-target",
+             ('[views."TODO.md"]\nkind = "composed"\nsources = ["backlog_item"]\n'
+              'target = ".working/TODO.md"\n\n[unmanaged]\npaths = [".working/TODO.md"]'),
+             {".working/TODO.md": "t", ".working/real.md": "r"}, "'.working/TODO.md'"),
+        ]
+        for label, extra, strays, needle in f101_cases:
+            f101 = build_store(strays=strays, manifest_extra=extra)
+            r101 = ing.detect(f101)
+            chk101 = _opf_check.validate_store(_opf_store.resolve_store(f101))
+            chk101_cc = chk101.by_check.get("C-CONTAINMENT", [])
+            chk101_agrees = (any("collides" in m and needle in m for m in chk101_cc)
+                             or any("collides" in m and needle in m for m in chk101.findings))
+            expect("f101-colliding-unmanaged-covers-nothing-finding-{}".format(label),
+                   r101.verdict == ing.FINDING
+                   and any("collides" in m for m in r101.findings)
+                   and r101.rows == []
+                   and chk101_agrees)
+        # A legit (non-colliding) [unmanaged] legacy path is UNAFFECTED: it stays CLEAN and covers its whole
+        # subtree unread, so the f101 finding is the collision itself, not [unmanaged] handling breaking.
+        # (Reverting the derivation to the raw fold would turn a colliding case CLEAN.) The cross-run leg
+        # asserts ingest's detected row set EQUALS the checker's C-CONTAINMENT unregistered-path set -- the
+        # invariant the five rounds kept breaking, now asserted directly. Repeated with a NON-CANONICAL
+        # spelling to confirm `_canonical_contained` parity (the module self-test 8b vectors remain the
+        # exhaustive spelling guard), and with a legacy path merely UNDER the machine dir naming no managed
+        # slot (the codex-7 arm: a file / dir under mrel that names no managed slot is VALID, not a collision;
+        # this guards against any future symmetric-overlap rewrite of the lifted classifier).
+        f101_clean = [
+            ("still-covers-subtree", '[unmanaged]\npaths = [".working/legacy"]',
+             {".working/legacy/old.md": "o", ".working/real.md": "r"}, {".working/legacy/old.md"}),
+            ("noncanonical-spelling", '[unmanaged]\npaths = [".working//legacy"]',
+             {".working/legacy/old.md": "o", ".working/real.md": "r"}, {".working/legacy/old.md"}),
+            ("valid-under-machine-dir", '[unmanaged]\npaths = [".working/toml/legacy-notes"]',
+             {".working/real.md": "r"}, set()),
+        ]
+        for label, extra, strays, covered in f101_clean:
+            fok = build_store(strays=strays, manifest_extra=extra)
+            rok = ing.detect(fok)
+            chkok = _opf_check.validate_store(_opf_store.resolve_store(fok))
+            pok = {row["source_path"] for row in rok.rows}
+            expect("f101-noncolliding-{}".format(label),
+                   rok.verdict == ing.CLEAN
+                   and ".working/real.md" in pok
+                   and not (pok & covered)                       # the covered subtree is unread, absent from rows
+                   and not any("collides" in m for m in chkok.by_check.get("C-CONTAINMENT", []))
+                   and pok == cc_unregistered(chkok))            # cross-run: ingest rows == checker strays (F10-1)
+        # A colliding declaration on a RELOCATED (`dir:`) store is still an ingest FINDING (the classifier is
+        # store-relative, so the collision is caught PRE-re-anchor), while a NON-colliding store-relative cover
+        # re-anchors at the resolved store root and does NOT suppress a same-named PRODUCT-root stray (F1).
+        rc_col = build_relocated(strays={".working/loose.md": "x"},
+                                 manifest_extra='[unmanaged]\npaths = [".working"]')
+        rrc = ing.detect(rc_col)
+        expect("f101-colliding-unmanaged-relocated-finding",
+               rrc.verdict == ing.FINDING and any("collides" in m for m in rrc.findings) and rrc.rows == [])
+        rc_ok = build_relocated(strays={".working/legacy/a.md": "a", ".working/real.md": "r"},
+                                product={"legacy/prod.md": "p"},
+                                manifest_extra='[unmanaged]\npaths = [".working/legacy"]')
+        rrc_ok = ing.detect(rc_ok, include=["*"])
+        rrc_ok_p = {row["source_path"] for row in rrc_ok.rows}
+        expect("f101-noncolliding-unmanaged-relocated-reanchors",
+               rrc_ok.verdict == ing.CLEAN and ".working/legacy/a.md" not in rrc_ok_p
+               and "legacy/prod.md" in rrc_ok_p and ".working/real.md" in rrc_ok_p)
+        # F10-1 backstop: a MALFORMED (escaping / non-contained) [unmanaged] entry is a located
+        # CANNOT-EVALUATE from the classifier. Through `detect` this is pre-empted by the manifest validator
+        # (`_opf_store._validate_unmanaged` rejects an escaping path, so detect fails closed at init-first
+        # validation with CANNOT-EVALUATE), asserted here; the classifier's own malformed branch is then
+        # exercised as a DIRECT unit call on the shared pure helper with a crafted manifest dict, proving the
+        # malformed branch classifies (covers nothing) by construction.
+        f101mal = build_store(strays={".working/real.md": "r"},
+                              manifest_extra='[unmanaged]\npaths = ["../escape.md"]')
+        r101mal = ing.detect(f101mal)
+        expect("f101-malformed-unmanaged-upstream-cannot-evaluate", r101mal.verdict == ing.CANNOT_EVALUATE)
+        mal_manifest = {"opf": {"layout": "inline"}, "types": {"backlog_item": {"namespace": "BI"}},
+                        "unmanaged": {"paths": ["../escape"]}}
+        mal_cls = _opf_check.classify_containment(mal_manifest, ".working/toml")
+        expect("f101-malformed-unmanaged-classifier-backstop",
+               len(mal_cls.malformed) == 1 and mal_cls.valid_unmanaged == []
+               and "escape" in " ".join(mal_cls.malformed))
         # discriminator (F2): a non-canonical [unmanaged].paths spelling still excludes the store file it
         # names; a literal-string comparison would let the aliased path be detected as a stray.
         root5 = build_store(strays={".working/kept.md": "k", ".working/real.md": "r"},
@@ -607,6 +726,12 @@ def _self_test():
           "it at parity with the real-dir case (F-8.2); the symlink probe skips a symlink vector only on a "
           "genuine unsupported-platform signal (ENOSYS) so an EACCES propagates rather than masquerading as a "
           "silent skip (F9.2); a CLEAN detection's worksheet always validates; the "
+          "adoption-content managed set (the [unmanaged] cover and store-scope view targets) is DERIVED from "
+          "the checker's own classify_containment authority, so a colliding [unmanaged] declaration (one that "
+          "NAMES or CONTAINS a managed store path) covers NOTHING and is a LOCATED FINDING that can no longer "
+          "launder a stray beneath it into a false CLEAN, with ingest and the checker's C-CONTAINMENT agreeing "
+          "on the collision (F10-1), while the machine-store interior and reserved imports tree stay the "
+          "checker's control area, pruned by design (F10-2/F10-3); the "
           "engine module self-test is green)")
     return EXIT_OK
 
