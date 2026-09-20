@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "3b8796e5e44eab50958f35e8401058337dd63b3a8017813fe77afd4faaeef78e"
+tree-sha256 = "ec9869fc5de70ded37192eaec5fbcf02037d1b6c4ab163a1b2579899d86a2f69"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2186,8 +2186,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 38667
-sha256 = "882d3fabcc59b670db926a4c62d63e684429bb645d77b09c0bef08603b9f329e"
+bytes = 38707
+sha256 = "0a30f76239e795d5bbe8f07208982cae65d17cf858732bd28f4e2947fc32e561"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2468,6 +2468,11 @@ sha256 = "b6c0cb20ee98daaa8cd6ff796183df70fc40e5348376666ea16a5710a2936a31"
 path = "opf/tools/_opf_import.py"
 bytes = 485090
 sha256 = "3dc2e14060aea7904fb6f1862cbd631e06cd7ba28514f047044857015a75e1ad"
+
+[[sources]]
+path = "opf/tools/_opf_importers.py"
+bytes = 56105
+sha256 = "b65b464547cd4a0166e73b2d6d7dea52bc1bf6a0e55bea03daf7e8dc582e698b"
 
 [[sources]]
 path = "opf/tools/_opf_ingest.py"
