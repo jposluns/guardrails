@@ -7,8 +7,10 @@ validator `opf doctor`, the renderer `opf render`, the relocator `opf migrate`, 
 synchronizer `opf sync`, and the schema-upgrader `opf upgrade`, ship in later releases).
 Date: 2026-09-14 (UTC).
 
-OPFiles is a neutral, self-contained operational-files standard, owned by AIQT and
-published under the Apache License 2.0. A project conforms to OPFiles with this specification and
+OPFiles is a neutral, self-contained operational-files standard published under the Apache
+License 2.0. AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand,
+not a legal entity, and the standard is authored and maintained by its lead maintainer. A project
+conforms to OPFiles with this specification and
 its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer
 of the standard, not its definition. AIQT-specific requirements are layered as one optional
 profile, `[profiles.aiqt]` (section 9), and a base adopter need not adopt AIQT.
