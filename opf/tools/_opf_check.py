@@ -46,6 +46,7 @@ into the `opf-check` self-test leg ONLY, exactly as the earlier units did. Assur
 over synthetic whole stores; the observation seam under test is exercised directly.
 """
 import bisect
+import collections
 import hashlib
 import ipaddress
 import os
@@ -1701,15 +1702,37 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
 
 # --- containment (C-CONTAINMENT, OPF-SPEC 14.2) ------------------------------------------------------
 
-def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_data, import_status, rep):
-    """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
-    (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
-    store-scope view targets, and files under a valid declared [unmanaged] path). A path in neither set is
-    a finding at steady state; at a SUBSTANTIATED `import_status = "partial"` (an active imports/<run-id>
-    run present) it goes to `triage` instead (spec 11/14.2). The imports subtree interior is walked, not
-    skipped, so a leftover run or stray bytes is graded (F3). An unmanaged declaration that names or
-    contains a managed path is a finding. Listing failure is CANNOT-EVALUATE."""
+# The pure classification `classify_containment` returns, the SINGLE authority both `_check_containment`
+# (below) and the migration root-ingest detector (`_opf_ingest`) consume so they cannot diverge on
+# adoption content by construction (F10-1). `view_targets` is the store-scope contained view spec
+# destinations (managed leaves, matched by equality); `valid_unmanaged` the surviving [unmanaged]
+# declarations (canonicalized, contained-only, collision-filtered, matched by subtree containment);
+# `malformed` / `colliding` the messages for a malformed entry (a CANNOT-EVALUATE) and a colliding
+# declaration (a FINDING; it covers NOTHING), which each caller re-emits or raises in its own idiom;
+# `managed_file` the tree-walk managed test; and `layout` / `perrecord_body_dirs` / `archive_root` /
+# `imports_root` the derived structures the walk needs.
+ContainmentClassification = collections.namedtuple(
+    "ContainmentClassification",
+    ("view_targets", "valid_unmanaged", "malformed", "colliding", "managed_file", "layout",
+     "perrecord_body_dirs", "archive_root", "imports_root"))
+
+
+def classify_containment(manifest_data, machine_rel):
+    """Pure, side-effect-free derivation of the C-CONTAINMENT managed-set classification from the manifest
+    and the machine-store relpath (spec 14.2). It does NO I/O and holds no `rep`: a malformed [unmanaged]
+    entry is collected into `malformed` (the checker re-emits it as a CANNOT-EVALUATE, ingest raises a
+    located cannot-evaluate) and a colliding declaration into `colliding` (the checker re-emits it as a
+    C-CONTAINMENT finding, ingest raises a located finding; a colliding declaration covers NOTHING). This is
+    the SINGLE authority both `_check_containment` and the migration root-ingest detector (`_opf_ingest`)
+    derive their adoption-content managed set from, so they cannot diverge by construction (F10-1).
+    `enabled_types` and `layout` are derived internally from `manifest_data` by the SAME pure helpers the
+    caller uses (D2), so the classification cannot drift from the manifest the caller validated. Returns a
+    ContainmentClassification."""
     mrel = machine_rel
+    dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
+    layout = dp.get("layout") if isinstance(dp, dict) else None
+    types_tbl = manifest_data.get("types") if isinstance(manifest_data, dict) else None
+    enabled_types = _authoritative_types(_enabled_modules(manifest_data), types_tbl)
     view_targets = set()
     views = manifest_data.get("views") if isinstance(manifest_data, dict) else None
     if isinstance(views, dict):
@@ -1727,6 +1750,7 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
             scope, dest = _opf_views._spec_destination(name)
             if scope == "store" and _is_contained_relpath(dest):
                 view_targets.add(dest)
+    malformed = []
     unmanaged = []
     um = manifest_data.get("unmanaged") if isinstance(manifest_data, dict) else None
     if isinstance(um, dict) and isinstance(um.get("paths"), list):
@@ -1740,8 +1764,9 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
                 # guard-input-soundness (round-14 C4): a malformed [unmanaged] entry (non-string, or a
                 # non-contained / escaping path) is a named CANNOT-EVALUATE, not a silent drop; a malformed
                 # control input is surfaced, never quietly removed.
-                rep.cant("C-CONTAINMENT: [unmanaged] path entry {} is not a contained store-relative string "
-                         "(spec 14.2); the unmanaged declaration cannot be evaluated".format(_safe_display(p)))
+                malformed.append(
+                    "C-CONTAINMENT: [unmanaged] path entry {} is not a contained store-relative string "
+                    "(spec 14.2); the unmanaged declaration cannot be evaluated".format(_safe_display(p)))
     ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, WORKLOG_NAME, LEASE_NAME})
     # Importer namespaces (legacy_fragment) are schema-deferred and, per the decoupled D6 design, are NOT
     # declared in the manifest [types]; their type index (e.g. legacy_fragment.index.toml) is therefore a
@@ -1815,16 +1840,52 @@ def _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_dat
                                if t in _LEDGER_TYPES)
     graded_containers = (archive_root, imports_root) + type_body_dirs
     managed_dir_prefixes = (mrel, archive_root, imports_root) + type_body_dirs + ledger_index_files
+    colliding = []
     valid_unmanaged = []
     for u in unmanaged:
         if (managed_leaf(u)
                 or any(_under_any(pfx, (u,)) for pfx in managed_dir_prefixes)
                 or _under_any(u, graded_containers)
                 or any(_under_any(vt, (u,)) for vt in view_targets)):
-            rep.finding("C-CONTAINMENT: unmanaged path {!r} collides with a managed store path (an "
-                        "unmanaged declaration cannot name or contain a managed file; spec 14.2)".format(u))
+            colliding.append(
+                "C-CONTAINMENT: unmanaged path {!r} collides with a managed store path (an "
+                "unmanaged declaration cannot name or contain a managed file; spec 14.2)".format(u))
         else:
             valid_unmanaged.append(u)
+
+    return ContainmentClassification(
+        view_targets=view_targets, valid_unmanaged=valid_unmanaged, malformed=malformed,
+        colliding=colliding, managed_file=managed_file, layout=layout,
+        perrecord_body_dirs=perrecord_body_dirs, archive_root=archive_root, imports_root=imports_root)
+
+
+def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
+    """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
+    (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
+    store-scope view targets, and files under a valid declared [unmanaged] path). A path in neither set is
+    a finding at steady state; at a SUBSTANTIATED `import_status = "partial"` (an active imports/<run-id>
+    run present) it goes to `triage` instead (spec 11/14.2). The imports subtree interior is walked, not
+    skipped, so a leftover run or stray bytes is graded (F3). An unmanaged declaration that names or
+    contains a managed path is a finding. Listing failure is CANNOT-EVALUATE. The managed-set classification
+    (view targets, the collision-filtered valid_unmanaged, and the malformed / colliding declarations) is
+    derived by the pure `classify_containment`, the SINGLE authority the migration root-ingest detector
+    shares, so this check and ingest cannot diverge on adoption content (F10-1). enabled_types / layout are
+    derived inside that helper from the manifest (D2), so they are no longer passed in."""
+    cls = classify_containment(manifest_data, machine_rel)
+    # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
+    # all colliding findings), exactly as the inline classification emitted them before the extraction.
+    for msg in cls.malformed:
+        rep.cant(msg)
+    for msg in cls.colliding:
+        rep.finding(msg)
+    mrel = machine_rel
+    view_targets = cls.view_targets
+    valid_unmanaged = cls.valid_unmanaged
+    managed_file = cls.managed_file
+    layout = cls.layout
+    perrecord_body_dirs = cls.perrecord_body_dirs
+    archive_root = cls.archive_root
+    imports_root = cls.imports_root
 
     unmanaged_files = []
 
@@ -2490,7 +2551,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-CONTAINMENT: whole-tree path / unmanaged-path containment (spec 14.2/11) -------------------
     rep.ran("C-CONTAINMENT")
-    _check_containment(root_fd, machine_rel, enabled_types, layout, manifest_data, import_status, rep)
+    _check_containment(root_fd, machine_rel, manifest_data, import_status, rep)
 
     # --- C-VIEW-DRIFT: byte-level drift of every declared deterministic view (spec 5.8/10) ------------
     rep.ran("C-VIEW-DRIFT")
