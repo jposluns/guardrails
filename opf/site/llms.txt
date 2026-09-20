@@ -13,4 +13,4 @@ OPFiles is a neutral operational-files standard: lowercase TOML sources paired w
 - [Pointer, meta and generated](/store-meta): the committed store pointer, the calendar-year archive, and the generated DECISIONS.toml projection.
 - [OPFiles and AIQT](/aiqt): how OPFiles relates to the AIQT Guardrails pack that adopts it.
 - [Roadmap](/roadmap): what has shipped and what is coming next.
-- [About and licence](/about): what OPFiles is, who maintains it, and the licence it ships under.
+- [About](/about): what OPFiles is and who maintains it.
