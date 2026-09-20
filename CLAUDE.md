@@ -25,7 +25,7 @@ The rule corpus is indexed in [.claude/RULES-INDEX.md](.claude/RULES-INDEX.md), 
 ## Project identity and product
 
 AIQT Guardrails is a portable governance pack for AI coding assistants, published to aiqt.ai under the
-Elastic License 2.0 (source-available). This repo is its sole author going forward; `grc_library` is the frozen dogfood adopter with
+Apache License 2.0. This repo is its sole author going forward; `grc_library` is the frozen dogfood adopter with
 a provenance pin. The pack ships a portable core plus generated platform adapters, versioned in SemVer
 (first public release 1.0.5), with a per-file UTC Date for currency.
 

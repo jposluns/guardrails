@@ -1,7 +1,7 @@
 === meta ===
 name: aiqt
 version: 1.0.5
-license: Elastic-2.0
+license: Apache-2.0
 date: 2026-09-15
 apex-id: prjint1
 

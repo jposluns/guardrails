@@ -110,9 +110,9 @@ GENSRC_OUTPUTS = (
 # the real SKILL.md rather than an opaque compressed blob, and --check can byte-compare the archive.
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 ZIP_MEMBER = "SKILL.md"
-LICENSE_MEMBER = "LICENSE"        # the canonical Elastic License 2.0, packed alongside SKILL.md so a
-                                  # recipient of the download alone also gets the licence terms (LICENSE
-                                  # Notices clause). Read from the pack root at build time (fail-closed).
+LICENSE_MEMBER = "LICENSE"        # the canonical Apache License 2.0, packed alongside SKILL.md so a
+                                  # recipient of the download alone also gets the licence terms (the
+                                  # licence's redistribution terms). Read from the pack root at build time (fail-closed).
 LICENSE_PARTS = ("LICENSE",)      # LICENSE lives at the pack root, beside README/NOTICE
 
 _SECTION = re.compile(r"^=== (\S+) ===$")
@@ -342,7 +342,7 @@ def _header_block(data):
             "Author: {name}  \n"
             "Website: {homepage}  \n"
             "GitHub: {github}  \n"
-            "Licence: Elastic License 2.0 (https://www.elastic.co/licensing/elastic-license)").format(
+            "Licence: Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0)").format(
                 version=data["meta"]["version"], name=data["identity_name"],
                 homepage=data["identity_homepage"], github=ATTRIBUTION_SOURCE_URL)
 
@@ -355,7 +355,7 @@ def render_skill(data):
         _conduct_block(data),
         _security_block(data),
         # Public attribution footer (GD-56): attributes both the project and the maintainer under the
-        # pack's Elastic License 2.0. The portability gate carries a narrow, reviewed exemption for exactly this line.
+        # pack's Apache License 2.0. The portability gate carries a narrow, reviewed exemption for exactly this line.
         "---\n\n" + data["attribution"],
     ]
     return "\n\n".join(blocks) + "\n"
@@ -384,8 +384,8 @@ def zip_versioned_version():
 def render_zip(data, license_text):
     """The public aiqt-skill.zip, built in memory from the SAME SKILL.md the reserved subtree carries, so
     the zip's SKILL.md member is byte-identical to the tracked SKILL.md. It also carries the canonical
-    LICENSE (Elastic License 2.0) so a recipient of the download alone also receives the licence terms,
-    as the licence's Notices clause requires. Deterministic (see ZIP_EPOCH note): fixed timestamp, sorted
+    LICENSE (Apache License 2.0) so a recipient of the download alone also receives the licence terms,
+    as the licence's redistribution terms require. Deterministic (see ZIP_EPOCH note): fixed timestamp, sorted
     members, STORED compression, fixed unix mode, no wall-clock, so two runs produce identical bytes and
     --check can byte-compare the archive."""
     members = {
@@ -405,8 +405,8 @@ def render_zip(data, license_text):
 
 def render_instructions(data):
     header = ("AIQT™: a standard for your AI assistant\n"
-              "Version {v} . Licensed under the Elastic License 2.0 "
-              "(https://www.elastic.co/licensing/elastic-license)\n"
+              "Version {v} . Licensed under the Apache License 2.0 "
+              "(https://www.apache.org/licenses/LICENSE-2.0)\n"
               "{attr}").format(v=data["meta"]["version"], attr=data["attribution"])
     blocks = [
         header,
@@ -444,14 +444,14 @@ def render_provenance(data):
         "",
         "- Skill: {}".format(m["name"]),
         "- Version: {}".format(m["version"]),
-        "- Licence: Elastic License 2.0 (https://www.elastic.co/licensing/elastic-license)",
+        "- Licence: Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0)",
         "- Date: {}".format(m["date"]),
         "- Source corpus hash: {}".format(data["corpus_hash"]),
         "- Included rules (by corpus id): {}".format(", ".join(data["included_ids"])),
         "",
         "The published aiqt-skill.zip and its version-numbered copy aiqt-skill-{}.zip are "
         "byte-identical, packed deterministically by the same generator: each carries this same SKILL.md "
-        "(byte-identical to the text recorded here) and the canonical LICENSE (Elastic License 2.0), so a "
+        "(byte-identical to the text recorded here) and the canonical LICENSE (Apache License 2.0), so a "
         "recipient of the download alone also receives the licence terms.".format(m["version"]),
     ]
     return "\n".join(lines) + "\n"
@@ -480,7 +480,7 @@ def attribution_string(name):
     """The public attribution line (GD-56), built from the operator name plus the pack's public source URL,
     so the maintainer's name is never a literal in a scanned source file. The exact string must match the
     portability gate's exempt line."""
-    return "AIQT Guardrails by {}, {}, Elastic License 2.0".format(name, ATTRIBUTION_SOURCE_URL)
+    return "AIQT Guardrails by {}, {}, Apache License 2.0".format(name, ATTRIBUTION_SOURCE_URL)
 
 
 def build_outputs(root):
@@ -516,7 +516,7 @@ def build_outputs(root):
     # Both zips are written from the SAME bytes, so the version-numbered copy and the stable "latest" alias
     # are byte-identical by construction; gen_skill --check compares each to disk, so a divergence is caught.
     # The canonical LICENSE is packed into the archive (fail-closed: a missing/unreadable LICENSE raises
-    # OSError, which the caller surfaces as exit 2) so the download alone carries the Elastic License 2.0.
+    # OSError, which the caller surfaces as exit 2) so the download alone carries the Apache License 2.0.
     license_text = root.joinpath(*LICENSE_PARTS).read_text(encoding="utf-8")
     zip_bytes = render_zip(data, license_text)
     binary = [(root.joinpath(*ZIP_PARTS), zip_bytes),
@@ -699,7 +699,7 @@ A second self-test conduct rule body.
 _SKILL_SRC = """=== meta ===
 name: aiqt
 version: __ZIPVER__
-license: Elastic-2.0
+license: Apache-2.0
 date: 2026-01-01
 apex-id: prjint1
 
@@ -760,7 +760,7 @@ def _write_fixture(root, skill_src_text):
                         encoding="utf-8")
     # build_outputs packs the pack-root LICENSE into the zip (fail-closed if absent); a well-formed
     # fixture therefore ships one so regeneration succeeds.
-    (root / "LICENSE").write_text("Elastic License 2.0\n\n(self-test fixture licence text)\n",
+    (root / "LICENSE").write_text("Apache License 2.0\n\n(self-test fixture licence text)\n",
                                   encoding="utf-8")
 
 

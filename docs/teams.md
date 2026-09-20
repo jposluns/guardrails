@@ -155,9 +155,9 @@ sidebar-active = "teams"
 
 <section id="open">
   <div class="wrap">
-    <p class="eyebrow">Source-available</p>
-    <h2>Source-available, portable, and shared</h2>
-    <p>AIQT is source-available under the Elastic License 2.0. The guardrails
+    <p class="eyebrow">Open source</p>
+    <h2>Open source, portable, and shared</h2>
+    <p>AIQT is open source under the Apache License 2.0. The guardrails
       are designed to be portable across toolchains, so adopting the standard leaves your team free to
       change tools without changing rules. Contributing an improvement back is Rule 5's voluntary
       Guardrail-Seed give-back, separate from the software licence, so a fix one team contributes can

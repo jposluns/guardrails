@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the root NOTICE file from .aiqt/attribution.toml plus the live standards manifests.
 
-The pack itself is published under the Elastic License 2.0 (see the LICENSE file). The pack's crosswalk
+The pack itself is published under the Apache License 2.0 (see the LICENSE file). The pack's crosswalk
 mappings reproduce third-party framework control/clause IDENTIFIERS and TITLES as navigational pointers
 only; no specification prose, requirement text, control or clause bodies, figures, or tables are
 reproduced. This generator renders the third-party attribution NOTICE from a single checked-in source
@@ -25,11 +25,11 @@ ATTRIB_REL = Path(".aiqt") / "attribution.toml"
 WRAP = 98  # wrap prose paragraphs at this column for a readable plain-text NOTICE
 
 INTRO_TEMPLATE = (
-    "This pack is published under the Elastic License 2.0 (ELv2); see the LICENSE file. That licence "
+    "This pack is published under the Apache License 2.0; see the LICENSE file. That licence "
     "covers the pack's own content and code, including its crosswalk mappings.\n\n"
-    "The Elastic License 2.0 covers the pack's copyrightable material and does not grant any "
-    "trademark rights. AIQT™ and AIQT Guardrails™ are trademarks of Jeff Posluns. These "
-    "marks are unregistered.\n\n"
+    "The Apache License 2.0 covers the pack's copyrightable material and does not grant any "
+    "trademark rights (Apache License 2.0, section 6). AIQT™ and AIQT Guardrails™ are trademarks of "
+    "Jeff Posluns. These marks are unregistered.\n\n"
     "The crosswalk mappings reference third-party security and AI-governance frameworks. Only "
     "{kinds} IDENTIFIERS and their TITLES are reproduced, as navigational pointers. No "
     "specification prose, requirement text, control or clause bodies, figures, or tables from any "

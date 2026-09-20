@@ -1,6 +1,6 @@
 AIQT™: a standard for your AI assistant
-Version 1.0.5 . Licensed under the Elastic License 2.0 (https://www.elastic.co/licensing/elastic-license)
-AIQT Guardrails by Jeff Posluns, https://github.com/jposluns/guardrails, Elastic License 2.0
+Version 1.0.5 . Licensed under the Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+AIQT Guardrails by Jeff Posluns, https://github.com/jposluns/guardrails, Apache License 2.0
 
 HOW TO USE THIS FILE
 Paste everything below into your assistant as its instructions (or add it as a skill).
