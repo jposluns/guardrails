@@ -1224,9 +1224,10 @@ provenance stays inside the adopter's own repositories. Experimental fields ride
 
 The base standard's required schema vocabulary names no adopter, operator, or profile by
 definition; a conforming store's own data legitimately may (an operator via `actor.id`, a profile
-via a `[profiles.<name>]` table the adopter chose). AIQT is the standard's owner, named in its title and brand, which is
-ownership rather than a requirement dependency; AIQT is also one profile, `[profiles.aiqt]`, cited
-only as the reference enforcement suite and a consumer. A profile
+via a `[profiles.<name>]` table the adopter chose). AIQT appears in the standard's title and brand
+as trademark and authorship attribution (the standard is authored and maintained by its lead
+maintainer), which is attribution rather than a requirement dependency; AIQT is also one profile,
+`[profiles.aiqt]`, cited only as the reference enforcement suite and a consumer. A profile
 carries an adopter's own additional requirements without the base ever depending on them.
 
 ## 16. Conformance vocabulary and claims
