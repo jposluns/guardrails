@@ -27,7 +27,13 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
                            store's whole resolved subtree, or a store pointer control file) does NOT appear
                            as a detected row (this catches over-detection, which completeness alone does
                            not); and a CLEAN detection's worksheet always passes `validate_worksheet`.
-  - module-self-test     : _opf_ingest.self_test() == 0 (the engine's own unit invariants run wherever this
+  - loss-accounting-completeness : a lossy report (`opf-ingest-lossy-report-v1`) over a source tiles its
+                           byte space [0, size) exactly; a planted unaccounted range (a gap), an overlap, or
+                           a digest drift FAILS validate_lossy_report (the load-bearing no-drop guarantee of
+                           the MIG-PR2 importer layer). The importer layer is a PURE composition of
+                           plan_import's proposals channel; this gate exercises its own invariants here.
+  - module-self-test     : _opf_ingest.self_test() == 0 AND _opf_importers.self_test() == 0 (the detection
+                           engine's and the importer layer's own unit invariants run wherever this
                            CI-registered gate runs).
 
 Disclosed coverage limits (part of the gate, not a footnote, per disclose-guard-residuals): the SEMANTIC
@@ -76,6 +82,7 @@ def _self_test():
     import tempfile
 
     import _opf_ingest as ing
+    import _opf_importers as imp
     import _opf_store
 
     failures = []
@@ -694,8 +701,30 @@ def _self_test():
         nonstr[1] = "x"
         expect("validate-nonstring-key-flip", ing.validate_worksheet(nonstr) != [])
 
+        # --- gate check 5: loss-accounting completeness (the MIG-PR2 importer layer) ----------------
+        # A lossy report over a real importer result validates; a planted gap in the byte-range tiling
+        # FAILS (the load-bearing no-drop guarantee). Judged on the verdict of validate_lossy_report,
+        # never by grepping. Pure: the importer layer touches no filesystem.
+        import copy as _copy
+        _isrc_raw = "- [ ] one\n- [x] two\n".encode("utf-8")
+        _isrc = {"path": "legacy/TODO.md", "raw": _isrc_raw, "body": _isrc_raw.decode("utf-8"),
+                 "sha256": imp._opf_import._sha256_hex(_isrc_raw), "size": len(_isrc_raw)}
+        _ir = imp.import_github_tasklist(_isrc)
+        _report, _ = imp.build_lossy_report([_ir.lossy])
+        expect("loss-accounting-completeness-clean", imp.validate_lossy_report(_report) == [])
+        # discriminator: drop the last span so a byte range to `size` is unaccounted, restamp the digest so
+        # ONLY the gap is under test; dropping this check turns a lossy report with a hole GREEN.
+        _holed = _copy.deepcopy(_report["source"])
+        _holed[0]["span"] = _holed[0]["span"][:-1]
+        _holed_report, _ = imp.build_lossy_report(_holed)
+        expect("loss-accounting-completeness-gap-flip",
+               any("unaccounted" in m for m in imp.validate_lossy_report(_holed_report)))
+        # the importer layer's validator gate binds the source and accepts plan_import's proposals.
+        expect("importer-gate-clean", imp.validate_importer_output(_ir, _isrc) == (imp.CLEAN, []))
+
         # --- module-self-test delegation -----------------------------------------------------------
         expect("module-self-test", ing.self_test() == 0)
+        expect("importers-module-self-test", imp.self_test() == 0)
     except OSError as exc:
         print("check_opf_ingest self-test: harness error: {}".format(exc), file=sys.stderr)
         shutil.rmtree(str(base), ignore_errors=True)
@@ -740,7 +769,10 @@ def _self_test():
           "launder a stray beneath it into a false CLEAN, with ingest and the checker's C-CONTAINMENT agreeing "
           "on the collision (F10-1), while the machine-store interior and reserved imports tree stay the "
           "checker's control area, pruned by design (F10-2/F10-3); the "
-          "engine module self-test is green)")
+          "loss-accounting-completeness check validates a clean lossy report and FAILS a planted byte-range "
+          "gap (the MIG-PR2 importer layer's no-drop guarantee), and the importer-layer gate binds the "
+          "source and accepts plan_import's proposals; the detection-engine and importer-layer module "
+          "self-tests are green)")
     return EXIT_OK
 
 
