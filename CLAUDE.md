@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.6** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.8** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -25,7 +25,7 @@ The rule corpus is indexed in [.claude/RULES-INDEX.md](.claude/RULES-INDEX.md), 
 ## Project identity and product
 
 AIQT Guardrails is a portable governance pack for AI coding assistants, published to aiqt.ai under the
-Elastic License 2.0 (source-available). This repo is its sole author going forward; `grc_library` is the frozen dogfood adopter with
+Apache License 2.0 (except vendored third-party material, which remains under its own terms). This repo is its sole author going forward; `grc_library` is the frozen dogfood adopter with
 a provenance pin. The pack ships a portable core plus generated platform adapters, versioned in SemVer
 (first public release 1.0.5), with a per-file UTC Date for currency.
 

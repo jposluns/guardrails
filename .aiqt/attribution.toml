@@ -1,8 +1,9 @@
 # attribution.toml: single source of truth for the generated root NOTICE.
 #
-# The AIQT pack is published under the Elastic License 2.0 (see the repository LICENSE file). The pack's
+# The AIQT pack is published under the Apache License 2.0, except vendored third-party material which remains under its own terms (see the repository LICENSE file and NOTICE). The pack's
 # crosswalk mappings reproduce third-party framework control/clause IDENTIFIERS and TITLES as
-# uncopyrightable factual pointers only. NO specification prose, requirement text, control or clause bodies, figures, or tables
+# uncopyrightable factual pointers only (for public-domain sources such as NIST, a reproduced title may be a
+# limited subcategory statement). NO copyrighted specification prose, requirement text, control or clause bodies, figures, or tables
 # are reproduced. tools/gen_notice.py renders the root NOTICE from this file plus the live set of id
 # manifests under .aiqt/standards/.
 #
@@ -21,7 +22,7 @@ slug = "owasp"
 legal-name = "OWASP Foundation, Inc."
 licence = "CC BY-SA 4.0"
 licence-url = "https://creativecommons.org/licenses/by-sa/4.0/"
-basis = "The OWASP materials are copyright the OWASP Foundation, Inc. and published under CC BY-SA 4.0. This pack reproduces only OWASP framework identifiers and their titles as uncopyrightable factual pointers, with OWASP attributed; it reproduces no OWASP specification or requirement prose, so no ShareAlike obligation is triggered. The mappings are the pack's own work. This pack does not redistribute or relicense the OWASP material, and its own Elastic License 2.0 does not depend on OWASP's ShareAlike terms."
+basis = "The OWASP materials are copyright the OWASP Foundation, Inc. and published under CC BY-SA 4.0. This pack reproduces only OWASP framework identifiers and their titles as uncopyrightable factual pointers, with OWASP attributed; it reproduces no OWASP specification or requirement prose, so no ShareAlike obligation is triggered. The mappings are the pack's own work. This pack does not redistribute or relicense the OWASP material, and its own Apache License 2.0 does not depend on OWASP's ShareAlike terms."
 attribution = "Framework identifiers and titles are Copyright the OWASP Foundation, Inc., used as factual references with attribution."
 trademark = "OWASP is a registered trademark of the OWASP Foundation, Inc."
 non-endorsement = "The OWASP Foundation does not endorse and is not affiliated with this pack; the OWASP name and marks are not used to imply endorsement."
@@ -77,7 +78,7 @@ slug = "csa"
 legal-name = "Cloud Security Alliance"
 licence = "Proprietary CSA copyright licence (non-commercial, no-redistribution reference use)"
 licence-url = "https://cloudsecurityalliance.org/artifacts/ccm-aicm-licensing-faq"
-basis = "The CSA matrices are copyright the Cloud Security Alliance under a non-commercial, no-redistribution, no-modification reference licence. This pack reproduces only control identifiers and titles as uncopyrightable factual pointers, with CSA attributed; it does NOT redistribute or relicense the CSA matrices, and reproduces no control-specification text. This pack's own Elastic License 2.0 covers its own mappings, not the CSA catalogue."
+basis = "The CSA matrices are copyright the Cloud Security Alliance under a non-commercial, no-redistribution, no-modification reference licence. This pack reproduces only control identifiers and titles as uncopyrightable factual pointers, with CSA attributed; it does NOT redistribute or relicense the CSA matrices, and reproduces no control-specification text. This pack's own Apache License 2.0 covers its own mappings, not the CSA catalogue."
 attribution = "Control identifiers and titles are Copyright the Cloud Security Alliance, used as factual references with attribution."
 trademark = "CCM, AICM, and Cloud Security Alliance are works and marks of the Cloud Security Alliance."
 non-endorsement = "The Cloud Security Alliance does not endorse and is not affiliated with this pack; CSA marks are not used to imply endorsement."
@@ -105,3 +106,32 @@ licence = "CWE Terms of Use"
 note = "CWE Terms of Use (https://cwe.mitre.org/about/termsofuse.html), reproduced as the Terms require: Copyright (c) 2006-2026, The MITRE Corporation. The MITRE Corporation hereby grants you a non-exclusive, royalty-free license to use CWE for research, development, and commercial purposes. Any copy you make for such purposes is authorized on the condition that you reproduce MITRE's copyright designation and this license in any such copy. CWE, CWSS, CWRAF, and the CWE logo are trademarks of The MITRE Corporation. This pack reproduces CWE identifiers and short names only; no weakness description text is reproduced."
 verified = true
 verified-date = "2026-08-22"
+
+# ===================================================================================================
+# Vendored third-party components shipped in the pack, distinct from the crosswalk publishers above.
+# These are bundled files that remain under their OWN licences; the pack's Apache License 2.0 does not
+# relicense them. gen_notice.py renders these into a separate "Vendored third-party components" section
+# of the root NOTICE. Each block requires verified = true (same fail-closed discipline as a publisher).
+
+[vendored."marko"]
+name = "Marko"
+component = "CommonMark parser, vendored under opf/tools/_vendor/marko/"
+version = "2.2.4"
+licence = "MIT"
+copyright = "Copyright (c) 2019 Frost Ming"
+homepage = "https://github.com/frostming/marko"
+note = "Vendored unchanged and used parse-only. The full MIT licence text is retained verbatim at opf/tools/_vendor/licenses/marko-MIT.txt; provenance is recorded in opf/tools/_vendor/marko-2.2.4.provenance.toml."
+verified = true
+verified-date = "2026-09-20"
+
+[vendored."commonmark-spec-examples"]
+name = "CommonMark specification examples"
+component = "Conformance fixture, vendored at opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json"
+version = "0.31.2"
+licence = "CC BY-SA 4.0"
+licence-url = "https://creativecommons.org/licenses/by-sa/4.0/"
+copyright = "Copyright John MacFarlane and the CommonMark project"
+homepage = "https://spec.commonmark.org/0.31.2/"
+note = "The example set from the CommonMark 0.31.2 specification, vendored unchanged as a test fixture; its bytes are not modified. The CommonMark specification is authored by John MacFarlane and the CommonMark project and licensed under CC BY-SA 4.0."
+verified = true
+verified-date = "2026-09-20"

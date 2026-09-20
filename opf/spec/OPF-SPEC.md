@@ -7,8 +7,10 @@ validator `opf doctor`, the renderer `opf render`, the relocator `opf migrate`, 
 synchronizer `opf sync`, and the schema-upgrader `opf upgrade`, ship in later releases).
 Date: 2026-09-14 (UTC).
 
-OPFiles is a neutral, self-contained operational-files standard, owned by AIQT and
-published under the Elastic License 2.0. A project conforms to OPFiles with this specification and
+OPFiles is a neutral, self-contained operational-files standard published under the Apache
+License 2.0 (except vendored third-party material, which remains under its own terms). AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand,
+not a legal entity, and the standard is authored and maintained by its lead maintainer. A project
+conforms to OPFiles with this specification and
 its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer
 of the standard, not its definition. AIQT-specific requirements are layered as one optional
 profile, `[profiles.aiqt]` (section 9), and a base adopter need not adopt AIQT.
@@ -1222,9 +1224,10 @@ provenance stays inside the adopter's own repositories. Experimental fields ride
 
 The base standard's required schema vocabulary names no adopter, operator, or profile by
 definition; a conforming store's own data legitimately may (an operator via `actor.id`, a profile
-via a `[profiles.<name>]` table the adopter chose). AIQT is the standard's owner, named in its title and brand, which is
-ownership rather than a requirement dependency; AIQT is also one profile, `[profiles.aiqt]`, cited
-only as the reference enforcement suite and a consumer. A profile
+via a `[profiles.<name>]` table the adopter chose). AIQT appears in the standard's title and brand
+as trademark and authorship attribution (the standard is authored and maintained by its lead
+maintainer), which is attribution rather than a requirement dependency; AIQT is also one profile,
+`[profiles.aiqt]`, cited only as the reference enforcement suite and a consumer. A profile
 carries an adopter's own additional requirements without the base ever depending on them.
 
 ## 16. Conformance vocabulary and claims

@@ -100,6 +100,12 @@ jobs:
       - name: Overclaim lint
         run: python3 -I -B tools/check_overclaim.py
 
+      - name: License-qualification self-test
+        run: python3 -I -B tools/check_license_qualification.py --self-test
+
+      - name: License-qualification lint
+        run: python3 -I -B tools/check_license_qualification.py
+
       - name: Footer coverage self-test
         run: python3 -I -B tools/check_footer.py --self-test
 

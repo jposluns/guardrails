@@ -121,7 +121,7 @@ PLUGIN_JSON = "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
 # values the hooks generator renders from them. mask_identity_attribution() blanks ONLY those exact value
 # spans; everywhere ELSE in these files (a comment, a description, an extra or nested-author field, or a
 # value split across lines) and everywhere else in the surface, the identity is a finding. An adopter keeps
-# the original attribution (Elastic License 2.0), so these values ship the identity by design.
+# the original attribution (Apache License 2.0), so these values ship the identity by design.
 
 # The only shippable file that is not scannable text. It is byte-reconciled by gen_skill.py --check from
 # sources this gate DOES scan, so its content portability follows transitively; it is still OPENED here so
@@ -130,7 +130,7 @@ BINARY_ALLOW = {"site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.
 
 # GD-56 attribution exemption (NARROW and REVIEWED; NOT a general operator-identity allowance). The
 # maintainer deliberately attributes both the project and himself, by name, on the two PUBLISHED chat
-# artefacts, under the Elastic License 2.0 the pack ships. That one exact line therefore carries the operator NAME by
+# artefacts, under the Apache License 2.0 the pack ships. That one exact line therefore carries the operator NAME by
 # design. attribution_line() rebuilds it from the loaded operator name plus the pack's public source URL
 # (so no personal data is hardcoded here, the same reason load_identity reads the name at runtime), and
 # mask_attribution_line() blanks ONLY a STANDALONE LINE whose full stripped content equals that exact
@@ -158,7 +158,7 @@ def attribution_line(name):
     """The single public attribution string GD-56 permits, built from the loaded operator NAME and the
     pack's public source URL. Exactly this string, on its own line, and only in ATTRIBUTION_EXEMPT_FILES,
     is masked before the C1 scan; nothing else is exempted."""
-    return "AIQT Guardrails by {}, {}, Elastic License 2.0".format(name, ATTRIBUTION_SOURCE_URL)
+    return "AIQT Guardrails by {}, {}, Apache License 2.0".format(name, ATTRIBUTION_SOURCE_URL)
 
 
 def author_header_line(name):
@@ -274,7 +274,7 @@ def find_identity(text, ident_forms, ident_maxn):
 def mask_identity_attribution(rel, text):
     """Return text with ONLY the operator-identity attribution VALUE spans blanked out: the manifest
     [plugin] author-name/author-email values, or plugin.json's TOP-LEVEL author.name/author.email values.
-    Those are the two places the identity ships by design (Elastic License 2.0 attribution). Every OTHER occurrence in
+    Those are the two places the identity ships by design (Apache License 2.0 attribution). Every OTHER occurrence in
     these files (a comment, a description, an extra field, a NESTED non-top-level author, or a value split
     across lines) survives the mask and faces the whole-document C1 scan. Each masked span is replaced by
     equal-length spaces so line and column offsets elsewhere are preserved for the finding message.

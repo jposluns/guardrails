@@ -66,6 +66,8 @@ run_gate "site-selftest" python3 -I -B tools/check_site.py --self-test
 run_gate "site"      python3 -I -B tools/check_site.py
 run_gate "overclaim-selftest" python3 -I -B tools/check_overclaim.py --self-test
 run_gate "overclaim" python3 -I -B tools/check_overclaim.py
+run_gate "license-qual-selftest" python3 -I -B tools/check_license_qualification.py --self-test
+run_gate "license-qual" python3 -I -B tools/check_license_qualification.py
 run_gate "footer-selftest" python3 -I -B tools/check_footer.py --self-test
 run_gate "footer" python3 -I -B tools/check_footer.py
 run_gate "newtab-selftest" python3 -I -B tools/check_newtab.py --self-test
