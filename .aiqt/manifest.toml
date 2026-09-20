@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "4abc803d055962750aa28a65c6ee175ddff71329f7df75922146f19aa29e6b05"
+tree-sha256 = "d1bcd42c399c1b88af7456041ad86949fa4c71e2a7e40545aa8982beea6374db"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2316,8 +2316,8 @@ sha256 = "b5b650a1ed9f002c3387c228af1c25d987227b933d6ba3ebed5ff1024a122077"
 
 [[sources]]
 path = "opf/site/_redirects"
-bytes = 1225
-sha256 = "147c683a1095fb19fad389ad9bf89b5f70b9bc76c1e6330fc4d56b53e324557b"
+bytes = 1285
+sha256 = "c20179ba1112b772147d104d5fb975adb473c158442bfc49b449d69a9320ac9b"
 
 [[sources]]
 path = "opf/site/about.html"
@@ -2376,8 +2376,8 @@ sha256 = "53d470e3c1274136ed657e55355c74c75adedfe0fe00b43f6f101d28df09dae6"
 
 [[sources]]
 path = "opf/site/robots.txt"
-bytes = 138
-sha256 = "ee36742f5396a19ed1359eaa5898be31d612d26f68e1ba7157c2bad90df578fb"
+bytes = 37
+sha256 = "c2612ca82a1165f8517bed2e5a5ee00efb558f5e6c813822545607b7a5cf850c"
 
 [[sources]]
 path = "opf/site/standard.html"
@@ -2846,8 +2846,8 @@ sha256 = "bc03b190cd386ad5f1542032511619726047770228edd94cb981d6684ecec773"
 
 [[sources]]
 path = "site/robots.txt"
-bytes = 269
-sha256 = "4af241b735cd232d6d688a808865a2448d90a47dce196d956aa026063fdd27ac"
+bytes = 34
+sha256 = "e6ba55a1a23472e554deec7b68202c21e911525451f1dc1c5611dfd570873a5d"
 
 [[sources]]
 path = "site/rules.html"
