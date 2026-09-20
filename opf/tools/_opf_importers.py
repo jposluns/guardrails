@@ -62,6 +62,7 @@ modules, so the standalone-closure property (OPF-SELF-CONTAIN) holds.
 Exit convention (the sibling OPF units): 0 clean, 1 a finding, 2 cannot-evaluate.
 """
 import copy
+import datetime
 import re
 import sys
 from pathlib import Path
@@ -359,9 +360,21 @@ _KAC_RESIDUAL = ("keepachangelog recognizes the Keep-a-Changelog structure (`## 
                  "candidate; the entry's time-of-day is DEFAULTED to T00:00:00Z (the source carries a "
                  "calendar date only) and flagged `defaulted`. Release-pipeline records (version.toml + "
                  "release records) are spec 14.3 and OUT of base MIGRATE scope, so a version header is a "
-                 "`ignored_by_declared_rule` grouping. An Unreleased / undated entry, and an unmapped "
-                 "category (e.g. Deprecated), is `ambiguous`; a duplicate version block and its entries are "
-                 "`conflict`; free prose is `unparsed`. Multi-line entry bodies are not recognized in v1.")
+                 "`ignored_by_declared_rule` grouping. An Unreleased / undated entry, an unmapped "
+                 "category (e.g. Deprecated), and a version header whose date is not a real calendar date "
+                 "(with the entries under it), is `ambiguous`; a duplicate version block and its entries "
+                 "are `conflict`; free prose is `unparsed`. Multi-line entry bodies are not recognized in v1.")
+
+
+def _is_valid_calendar_date(date):
+    """True iff `date` (already constrained to the YYYY-MM-DD shape by _KAC_VERSION_RE) is a REAL calendar
+    date. datetime.date.fromisoformat rejects an impossible month or day (2026-13-45, 2026-02-30), so an
+    entry is never mapped onto a date that cannot exist (a syntactically-valid but invalid date is drift)."""
+    try:
+        datetime.date.fromisoformat(date)
+    except ValueError:
+        return False
+    return True
 
 
 def import_keepachangelog(source):
@@ -378,6 +391,7 @@ def import_keepachangelog(source):
     cur_kind = None       # the current category's worklog kind, or None (unmapped / none)
     cur_cat = None
     cur_conflict = False  # True while inside a duplicate version block
+    cur_bad_date = None   # the raw date string while inside a version block with an invalid calendar date
     seen_versions = set()
     for line_no, (start, end) in enumerate(_tile_lines(raw), start=1):
         line = _text(raw, start, end)
@@ -388,14 +402,29 @@ def import_keepachangelog(source):
             cells.append(_cell(start, end, line_no, "ignored_by_declared_rule", note="blank line"))
         elif mver:
             ver = mver.group("ver")
+            date = mver.group("date")
             if ver in seen_versions:
                 cur_conflict = True
                 cells.append(_cell(start, end, line_no, "conflict",
                                    note="duplicate version block [{}]".format(ver)))
+            elif not _is_valid_calendar_date(date):
+                # A syntactically well-formed but calendar-INVALID date (e.g. 2026-13-45) maps to no real
+                # date: the header is drift (`ambiguous`), and its entries route to `ambiguous` below rather
+                # than being silently `mapped` onto an impossible date.
+                seen_versions.add(ver)
+                cur_conflict = False
+                cur_date = None
+                cur_bad_date = date
+                cur_kind = None
+                cur_cat = None
+                cells.append(_cell(start, end, line_no, "ambiguous",
+                                   note="version header [{}] carries an invalid calendar date {!r}".format(
+                                       ver, date)))
             else:
                 seen_versions.add(ver)
                 cur_conflict = False
-                cur_date = mver.group("date") + "T00:00:00Z"
+                cur_date = date + "T00:00:00Z"
+                cur_bad_date = None
                 cur_kind = None
                 cur_cat = None
                 cells.append(_cell(start, end, line_no, "ignored_by_declared_rule",
@@ -403,6 +432,7 @@ def import_keepachangelog(source):
         elif _KAC_UNRELEASED_RE.match(line):
             cur_conflict = False
             cur_date = None
+            cur_bad_date = None
             cur_kind = None
             cur_cat = None
             cells.append(_cell(start, end, line_no, "ignored_by_declared_rule",
@@ -417,6 +447,10 @@ def import_keepachangelog(source):
             if cur_conflict:
                 cells.append(_cell(start, end, line_no, "conflict",
                                    note="entry under a duplicate version block"))
+            elif cur_bad_date is not None:
+                cells.append(_cell(start, end, line_no, "ambiguous",
+                                   note="entry under a version header with an invalid calendar date "
+                                        "{!r}".format(cur_bad_date)))
             elif cur_date is None:
                 cells.append(_cell(start, end, line_no, "ambiguous",
                                    note="undated entry (Unreleased): a worklog entry requires a date"))
@@ -457,7 +491,10 @@ _FACE_RESIDUAL = ("aiqt-face recognizes an EXACT OPF/AIQT-generated markdown fac
                   "/ blank lines are `ignored_by_declared_rule`, and a recognized rendered record line is "
                   "`preserved_verbatim` with NO candidate (re-importing it would duplicate the store). A "
                   "body line that has DRIFTED from the exact generated grammar (a possible hand edit) is "
-                  "`ambiguous` and routes to review. Faithful RECONSTRUCTION of records from a rendered "
+                  "`ambiguous` and routes to review; likewise, if the header comment is unterminated (its "
+                  "closing `-->` dropped or mangled), only the opening sentinel line is header and every "
+                  "following line is `ambiguous` drift rather than silently swallowed as header. Faithful "
+                  "RECONSTRUCTION of records from a rendered "
                   "face (the inline escape is one-way for a markdown sink) is deferred to the "
                   "assistant-guided path or an operator KEEP of the original (spec 14.2).")
 
@@ -476,9 +513,18 @@ def import_aiqt_face(source):
                               kind="aiqt-face", source_path=path)
     cells = []
     in_header = True
+    # An HTML comment closes at `-->`; a generated face's header ends with a line that is exactly `-->`
+    # (_opf_views._header). If NO such line exists the header comment is unterminated (a hand edit dropped
+    # or mangled the close, e.g. `--!>`): only the opening sentinel line is header, and every following line
+    # is drift, so it is `ambiguous` (clean == False) rather than silently swallowed as header/ignored.
+    header_closes = any(_text(raw, s, e).strip() == "-->" for s, e in _tile_lines(raw))
     for line_no, (start, end) in enumerate(_tile_lines(raw), start=1):
         line = _text(raw, start, end)
         if in_header:
+            if not header_closes and line_no > 1:
+                cells.append(_cell(start, end, line_no, "ambiguous",
+                                   note="generated-face header comment is not closed by `-->` (drift)"))
+                continue
             cells.append(_cell(start, end, line_no, "ignored_by_declared_rule",
                                note="generator header (identity / regenerate metadata)"))
             if line.strip() == "-->":
@@ -862,6 +908,15 @@ def self_test():
           and any(s["class"] == "conflict" for s in r5.lossy["span"])
           and any(p["suggested_state"] == "cannot_evaluate" for p in r5.proposals))
 
+    # 5b. keepachangelog invalid calendar date DISCRIMINATOR: a syntactically-valid but impossible date
+    # (2026-13-45) is NOT mapped clean; the header and its entry are both `ambiguous` (no mapped span, so an
+    # entry never carries a date that cannot exist). Without the calendar check the entry would map clean.
+    src5b = mk("legacy/CL4.md", "## [1.3.0] - 2026-13-45\n\n### Added\n\n- a thing on an impossible day\n")
+    r5b = import_keepachangelog(src5b)
+    check("kac-invalid-date-ambiguous", r5b.clean is False and tiles(r5b.lossy)
+          and not any(s["class"] == "mapped" for s in r5b.lossy["span"])
+          and sum(1 for s in r5b.lossy["span"] if s["class"] == "ambiguous") >= 2)
+
     # 6. aiqt-face exact: a generated face is a derived projection -> ignored/preserved, no candidate, clean.
     face = ("<!-- GENERATED by opf render --write (opf/tools/_opf_views.py). DO NOT EDIT; edit the store "
             "and regenerate.\nsources: x\nschema: 1; generator: opf-views/2\nsource-set-digest: sha256:z\n"
@@ -881,6 +936,16 @@ def self_test():
     check("face-drift-ambiguous",
           r7.verdict == CLEAN and r7.clean is False
           and any(s["class"] == "ambiguous" for s in r7.lossy["span"]))
+
+    # 7b. aiqt-face UNCLOSED header DISCRIMINATOR: a face whose header comment is missing its closing `-->`
+    # must NOT be swallowed as all-header/clean; only line 1 is header and the body after it is `ambiguous`
+    # (drift). Without the header-close check every line would be `ignored_by_declared_rule` and clean True.
+    face_open = face.replace("regenerate: opf render --write\n-->\n", "regenerate: opf render --write\n")
+    src7b = mk("legacy/TODO-open.md", face_open)
+    r7b = import_aiqt_face(src7b)
+    check("face-unclosed-header-ambiguous",
+          r7b.verdict == CLEAN and r7b.clean is False and tiles(r7b.lossy)
+          and any(s["class"] == "ambiguous" for s in r7b.lossy["span"]))
 
     # 8. aiqt-face declines a non-face source (verdict FINDING, empty payload).
     r8 = import_aiqt_face(mk("legacy/plain.md", "# just a doc\n"))
