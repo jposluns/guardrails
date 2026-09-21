@@ -1044,15 +1044,18 @@ def scan(text, site=True):
 # attr(a) attr(b)) whose ordered cross-attr boundary is not composed (each attr is still scanned
 # individually); an @import inside an inline <style>, whose imported sheet the inline-style scan does not
 # follow (only linked sheets and the page-level @import graph are); a backslash-newline line continuation
-# inside a content: string literal, which the string extractor does not join; a <base href> that REBASES a
-# relative asset URL (to a different same-origin path or off-origin), since the resolver reads the asset at
-# the site-root path not the page's <base> (a rebased asset is read at the wrong local path, or off-origin
-# routed to the off-site residual below); a CSS GENERATED-CONTENT phrase composed with DOM text (content: on
-# ::before/::after abutting the element text, or split across ::before/::after), read separately not by visual
-# composition; and a quoted </style>/</script> leaving an UNTERMINATED CSS string (the extractor needs a
-# closed string). (An otherwise malformed RAWTEXT truncation is handled: a complete-string quoted end-tag is
-# asset-scanned, trailing text Collector-1 scanned, and an UNCLOSED body at EOF is flushed+scanned at parser
-# close().) This CSS content-injection asset scan is anchored to the
+# inside a content: string literal, which the string extractor does not join; a <base href>, which the
+# resolver does NOT honour (a relative asset resolves against the site root not the <base>, so for any base -
+# same-origin or off-origin - the site-root-relative local file is read, a wrong file if present else
+# fail-closed, and an off-origin target is never fetched); a CSS GENERATED-CONTENT phrase composed with DOM
+# text (content: on ::before/::after abutting the element text, or split across ::before/::after), read
+# separately not by visual composition; an UNTERMINATED CSS string (left unterminated by a quoted </style>/
+# </script> truncation OR by an unclosed body at EOF), which the extractor cannot decode (it needs a closed
+# string); and TEXT HIDDEN from display (hidden attribute, inline display:none/visibility:hidden, or a
+# stylesheet class), which the visible-text scan still collects (visibility is not modelled), so a hidden
+# negator can clear a visible overclaim. (An otherwise malformed RAWTEXT truncation is handled: a
+# complete-string quoted end-tag is asset-scanned, trailing text Collector-1 scanned, and an UNCLOSED body at
+# EOF is flushed+scanned at parser close().) This CSS content-injection asset scan is anchored to the
 # register page (HTML_REL) alone: a CSS content-injection overclaim on the other public pages (site/*.html,
 # opf/site/*.html) is visible-text scanned but not CSS-injection scanned.
 # Runtime-JS DOM text construction, an encoded payload buried in an arbitrary JS string whose location and
@@ -1999,19 +2002,23 @@ def _scan_asset_closure(root):
     <style> element, whose imported sheet the inline-style scan does not traverse (only LINKED stylesheets and
     the page-level @import graph are followed); (10) a backslash-newline line continuation inside a content:
     string literal, which the string extractor (_CSS_STRING_RE) does not join, so a phrase split across the
-    continuation is not decoded; (11) a <base href> that REBASES a relative asset URL (<link href>/
-    <script src>), whether to a different SAME-ORIGIN path or OFF-origin: the resolver reads the asset at the
-    site-root-relative path, NOT the page's <base>, so a <base>-rebased relative asset is either read at the
-    wrong local path (its real target unscanned) or, off-origin, routed to the disclosed off-site residual
-    below (not fetched); (12) a CSS GENERATED-CONTENT phrase composed with DOM text (content: on ::before/
-    ::after abutting the element's text, e.g. a ::before content: prefix on a <p> whose text completes the
-    phrase, or a phrase split across ::before and ::after): the scan reads the CSS content and the DOM text
-    SEPARATELY and does not model their visual composition; and (13) a quoted </style>/</script> that
-    truncates the RAWTEXT body leaving an UNTERMINATED CSS string (an escaped char inside a content: string
-    cut by </style>): the string extractor requires a closed string, so the escaped phrase is not decoded
-    though CSS EOF string-recovery would render it. A malformed RAWTEXT truncation is otherwise handled: a
-    quoted </style>/</script> that leaves a COMPLETE string is asset-scanned and any trailing text Collector-1
-    scanned, and an UNCLOSED body at end-of-input is FLUSHED and scanned at parser close(). SCOPE: this CSS
+    continuation is not decoded; (11) a <base href> element, which the resolver does NOT honour: a relative
+    asset URL (<link href>/<script src>) resolves against the site root, not the page's <base>, so for ANY
+    <base> (same-origin OR off-origin) the base-resolved target is not the file scanned - the site-root-
+    relative local file is read instead (a WRONG local file if one exists at that path, else a fail-closed
+    exit 2), and an off-origin base target is never fetched; (12) a CSS GENERATED-CONTENT phrase composed with
+    DOM text (content: on ::before/::after abutting the element's text, e.g. a ::before content: prefix on a
+    <p> whose text completes the phrase, or a phrase split across ::before and ::after): the scan reads the
+    CSS content and the DOM text SEPARATELY and does not model their visual composition; (13) an UNTERMINATED
+    CSS string, left unterminated either by a quoted </style>/</script> that truncates the RAWTEXT body or by
+    an unclosed body at end-of-input: the string extractor requires a CLOSED string, so an unterminated
+    string's phrase is not decoded though CSS EOF string-recovery would render it (the EOF flush below scans a
+    COMPLETE rule/closed string, not an unterminated one); and (14) TEXT HIDDEN from display - an element with
+    the hidden attribute, inline display:none/visibility:hidden, or hidden via a stylesheet class - which the
+    visible-text scan STILL collects (it does not model element visibility), so a hidden negator can clear a
+    visible overclaim and a hidden overclaim can be flagged. A malformed RAWTEXT truncation is otherwise
+    handled: a quoted </style>/</script> that leaves a COMPLETE string is asset-scanned and any trailing text
+    Collector-1 scanned, and an UNCLOSED body at end-of-input is FLUSHED and scanned at parser close(). SCOPE: this CSS
     content-injection asset scan is anchored to the register page (HTML_REL,
     site/enforcement.html) ALONE; a CSS content-injection overclaim on the OTHER public pages (site/*.html,
     opf/site/*.html) is scanned for VISIBLE TEXT by Collector 1 but NOT for CSS content injection. Also out of
