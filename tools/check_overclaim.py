@@ -73,7 +73,10 @@ a guarantee in the second ("No setup required and AIQT guarantees secure output"
 required", not "guarantees"). Cutting the window at "but"/"yet"/..., at each block boundary, and at a
 coordinating conjunction before a new subject binds the negation to the phrase it actually modifies. A
 DISTRIBUTED negation over a shared subject ("does not guarantee security and reliability") is not split, so
-its negator still clears.
+its negator still clears. A negator word used AFFIRMATIVELY does NOT clear (see AFFIRMATIVE_NEG_SUFFIX /
+_has_genuine_negator): an exclusive-focus "not only|just|merely|solely ... but also ..." intensifier and a
+"no other|others|else" comparative both AFFIRM the guarantee, so "AIQT not only guarantees secure output but
+also saves time" and "No other tool guarantees secure output like AIQT" still flag.
 
 The vocabulary, and why each pattern is shaped the way it is (calibrated so the current softened site is
 clean; a pattern that flagged a legitimate line would be too broad):
@@ -268,6 +271,13 @@ _NEGATOR_ALT = (
     r"not|no|never|cannot|can't|without|nor|neither|hardly|rarely|"
     r"n't|doesn't|don't|isn't|aren't|won't|wouldn't")
 NEGATOR = re.compile(r"\b(?:" + _NEGATOR_ALT + r")\b", re.IGNORECASE)
+# A negator word can be used AFFIRMATIVELY, NOT negating the following claim: an EXCLUSIVE-FOCUS "not
+# only|just|merely|solely ... but also ..." intensifier, or a "no other|others|else" COMPARATIVE, both
+# AFFIRM the guarantee ("AIQT not only guarantees secure output but also saves time", "No other tool
+# guarantees secure output like AIQT"). A negator immediately followed by one of these suffix words does
+# NOT clear a match (see _has_genuine_negator), so such affirmative marketing prose still FLAGS while a
+# genuine "does not guarantee" / "cannot guarantee" still clears.
+AFFIRMATIVE_NEG_SUFFIX = re.compile(r"\s+(?:only|just|merely|solely|other|others|else)\b", re.IGNORECASE)
 # A be-form COPULA between the governing negator and the match means the negator governs a DIFFERENT
 # predicate and the banned claim is a fresh copular assertion, so the negator does NOT launder it (the
 # tight-adjacency denial rule _adjacent_denial_clears checks this): "The not-expensive release IS
@@ -838,6 +848,18 @@ class _AssetClosureParser(HTMLParser):
         elif self._grab == "script" and tag == "script":
             self.inline_scripts.append("".join(self._buf)); self._grab, self._buf = None, []
 
+    def close(self):
+        # An UNCLOSED <style>/<script> body at end-of-input never fires handle_endtag, so its buffered body
+        # would be dropped and never scanned. A browser implicitly closes the element at EOF and APPLIES a
+        # complete CSS rule (or runs the script) inside it, so flush any pending capture here (close() is the
+        # end-of-input signal) and store it for scanning, rather than letting the overclaim escape.
+        super().close()
+        if self._grab == "style":
+            self.styles.append("".join(self._buf))
+        elif self._grab == "script":
+            self.inline_scripts.append("".join(self._buf))
+        self._grab, self._buf = None, []
+
 
 def _snippet(text, start, end):
     a = max(0, start - 25)
@@ -867,6 +889,19 @@ def _clause_window(text, start):
     negator only counts when it binds to the guarantee phrase: never one that leaked in from a prior
     sentence, a prior block, a 'but'/'yet' flip, or a coordinated new-subject clause."""
     return text[_clause_start(text, start):start]
+
+
+def _has_genuine_negator(window):
+    """True when `window` holds a negator that ACTUALLY negates the following claim, ignoring an AFFIRMATIVE
+    use of a negator word (an exclusive-focus "not only|just|merely|solely" intensifier or a "no other|
+    others|else" comparative), which affirms rather than negates. So "AIQT not only guarantees secure output
+    but also saves time" and "No other tool guarantees secure output like AIQT" are NOT cleared, while "does
+    not guarantee" / "cannot guarantee" still are."""
+    for nm in NEGATOR.finditer(window):
+        if AFFIRMATIVE_NEG_SUFFIX.match(window[nm.end():]):
+            continue
+        return True
+    return False
 
 
 def _adjacent_denial_clears(text, start, end):
@@ -944,10 +979,10 @@ def _guard_clears(guard, text, m):
     adjacency (_adjacent_denial_clears). There is no future-tense clearance, and there is no bound-allowance
     (the categorical pattern is a plain scan, guard ""). "" never clears."""
     if guard == "neg":
-        return bool(NEGATOR.search(_clause_window(text, m.start())))
+        return _has_genuine_negator(_clause_window(text, m.start()))
     if guard == "intent":
         window = _clause_window(text, m.start())
-        return bool(NEGATOR.search(window) or INTENT_HEDGE.search(window))
+        return _has_genuine_negator(window) or bool(INTENT_HEDGE.search(window))
     if guard == "release":
         if _title_allowlisted(text, m.start(), m.end()):
             return True
@@ -1009,12 +1044,15 @@ def scan(text, site=True):
 # attr(a) attr(b)) whose ordered cross-attr boundary is not composed (each attr is still scanned
 # individually); an @import inside an inline <style>, whose imported sheet the inline-style scan does not
 # follow (only linked sheets and the page-level @import graph are); a backslash-newline line continuation
-# inside a content: string literal, which the string extractor does not join; and a <base href> pointing
-# off-origin, since a relative asset URL is resolved against the local site directory (not the page's <base>),
-# routing an off-origin-redirected relative asset to the off-site residual below. (A malformed RAWTEXT
-# <style>/<script> truncation is NOT a residual: a browser applies the same first-</style>/</script> end-tag
-# rule, so the overclaim is either in the asset-scanned captured body or in the Collector-1 visible text, and
-# an unclosed body at end-of-input is not rendered.) This CSS content-injection asset scan is anchored to the
+# inside a content: string literal, which the string extractor does not join; a <base href> that REBASES a
+# relative asset URL (to a different same-origin path or off-origin), since the resolver reads the asset at
+# the site-root path not the page's <base> (a rebased asset is read at the wrong local path, or off-origin
+# routed to the off-site residual below); a CSS GENERATED-CONTENT phrase composed with DOM text (content: on
+# ::before/::after abutting the element text, or split across ::before/::after), read separately not by visual
+# composition; and a quoted </style>/</script> leaving an UNTERMINATED CSS string (the extractor needs a
+# closed string). (An otherwise malformed RAWTEXT truncation is handled: a complete-string quoted end-tag is
+# asset-scanned, trailing text Collector-1 scanned, and an UNCLOSED body at EOF is flushed+scanned at parser
+# close().) This CSS content-injection asset scan is anchored to the
 # register page (HTML_REL) alone: a CSS content-injection overclaim on the other public pages (site/*.html,
 # opf/site/*.html) is visible-text scanned but not CSS-injection scanned.
 # Runtime-JS DOM text construction, an encoded payload buried in an arbitrary JS string whose location and
@@ -1961,13 +1999,19 @@ def _scan_asset_closure(root):
     <style> element, whose imported sheet the inline-style scan does not traverse (only LINKED stylesheets and
     the page-level @import graph are followed); (10) a backslash-newline line continuation inside a content:
     string literal, which the string extractor (_CSS_STRING_RE) does not join, so a phrase split across the
-    continuation is not decoded; and (11) a <base href> pointing off-origin: a relative asset URL
-    (<link href>/<script src>) is resolved against the local site directory, NOT the page's <base>, so a
-    <base> that redirects a relative asset off-origin routes to the disclosed off-site (cross-origin) residual
-    below (the asset is not fetched, so its content is out of a static gate's reach). A malformed RAWTEXT
-    <style>/<script> truncation is NOT a residual: a browser applies the SAME first-</style>/</script> end-tag
-    rule, so any overclaim lands either in the captured body (asset-scanned) or in the following visible text
-    (Collector 1), and an unclosed body at end-of-input is not rendered as visible content. SCOPE: this CSS
+    continuation is not decoded; (11) a <base href> that REBASES a relative asset URL (<link href>/
+    <script src>), whether to a different SAME-ORIGIN path or OFF-origin: the resolver reads the asset at the
+    site-root-relative path, NOT the page's <base>, so a <base>-rebased relative asset is either read at the
+    wrong local path (its real target unscanned) or, off-origin, routed to the disclosed off-site residual
+    below (not fetched); (12) a CSS GENERATED-CONTENT phrase composed with DOM text (content: on ::before/
+    ::after abutting the element's text, e.g. a ::before content: prefix on a <p> whose text completes the
+    phrase, or a phrase split across ::before and ::after): the scan reads the CSS content and the DOM text
+    SEPARATELY and does not model their visual composition; and (13) a quoted </style>/</script> that
+    truncates the RAWTEXT body leaving an UNTERMINATED CSS string (an escaped char inside a content: string
+    cut by </style>): the string extractor requires a closed string, so the escaped phrase is not decoded
+    though CSS EOF string-recovery would render it. A malformed RAWTEXT truncation is otherwise handled: a
+    quoted </style>/</script> that leaves a COMPLETE string is asset-scanned and any trailing text Collector-1
+    scanned, and an UNCLOSED body at end-of-input is FLUSHED and scanned at parser close(). SCOPE: this CSS
     content-injection asset scan is anchored to the register page (HTML_REL,
     site/enforcement.html) ALONE; a CSS content-injection overclaim on the OTHER public pages (site/*.html,
     opf/site/*.html) is scanned for VISIBLE TEXT by Collector 1 but NOT for CSS content injection. Also out of
@@ -2238,6 +2282,9 @@ POSITIVE = [
     "Blocks each push, with no bound on scope.",                     # "no bound on scope" is an anti-bound -> flags
     # F-330 fix 6 false-clear: a bound word in a SEPARATE coordinated clause must NOT launder the claim.
     "The gate rejects all edits, and the manual has a scope section.",  # "scope" sits past the "and" -> flags
+    # r7 (affirmative-negator): a negator used AFFIRMATIVELY does not clear the guarantee it emphasises.
+    "AIQT not only guarantees secure output but also saves time.",  # "not only ... but also" AFFIRMS -> flags
+    "No other tool guarantees secure output like AIQT.",            # "no other" comparative AFFIRMS -> flags
     # RELEASE-INTEGRITY positives (VER-CORE 4.4, simplified deny-list): a banned claim term with NO negator
     # DIRECTLY negating it flags on every surface. There is no future-tense clearance any more; a forward
     # promise about tamper/signing/independent-anchor is itself banned (D2), so it flags too.
@@ -3551,6 +3598,14 @@ def _asset_closure_self_test():
         f = _scan_asset_closure(build("self-closing-style", page, {}))
         if not any("CSS content injection" in x for x in f):
             failures.append("SELFSTYLE: a self-closing <style/> body must be captured and its content: scanned (FIX self-closing-style-body)")
+        # (s1b) FIX (eof-flush): an UNCLOSED <style> body at end-of-input (no </style>, EOF) is FLUSHED at
+        # parser close() and its content: rule scanned. A browser implicitly closes the element at EOF and
+        # applies the complete rule. MUTATION: dropping the close() flush drops the buffered body -> no finding.
+        page = ("<html><head><style>.eofprobe::after " + LB
+                + ' content: "AIQT guarantees secure output" ' + RB)
+        f = _scan_asset_closure(build("unclosed-style-eof", page, {}))
+        if not any("guarantees" in x for x in f):
+            failures.append("EOFSTYLE: an unclosed <style> body at EOF must be flushed and its content: scanned (FIX eof-flush)")
         # (s2) FIX (content-ordered-composition): content:"guar" attr(data-tail) renders the literal and the
         # attr value CONCATENATED in source order ("guarantees secure output"); neither the literal-only
         # concat nor the per-attr scan sees the joined phrase. MUTATION: scanning literals and attrs
