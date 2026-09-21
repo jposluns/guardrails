@@ -3,6 +3,7 @@
 
 Run with: python3 -I -B tools/check_git_option_table.py [--root DIR]
           python3 -I -B tools/check_git_option_table.py --self-test
+The self-test uses in-memory fixtures only; it invokes no git or filesystem writes.
 Exit: 0 clean within scope; 1 drift finding; 2 cannot-evaluate.
 
 Primary input is git <sub> -h, stdout plus stderr, status 129. Completion
@@ -14,15 +15,16 @@ options and unadvertised negations can escape membership checking. Unchanged
 spellings can change semantics without detection. The maintained role catalog
 can itself drift. Help-format changes can defeat enumeration; recognizable
 malformations fail closed, but the sanity floor cannot prove completeness.
-NOCOMPLETE options lack the helper value-form layer. Role verdict profiles
+Combined short clusters in synopses (for example [-dZ]) are not decomposed;
+options advertised only in that form can escape membership checking.
+NOCOMPLETE options lack the helper value-form layer. Long-role verdict profiles
 cover the operand shapes documented below, not every command combination.
+Short roles are compared exactly, with conservative W over-roles permitted.
 This does not verify the classifier algorithm, dynamic table mutation, or
 the provenance of the git executable selected from PATH.
 """
 import argparse
 import ast
-import contextlib
-import io
 import os
 import re
 import shutil
@@ -71,6 +73,9 @@ ROLE_VERDICTS = {
 # F: filter that implies listing and consumes a value; D: required display value
 # without list mode; O: optional attached value; R: no value or list mode;
 # N: optional attached decimal and list mode. W over-roles always remain safe.
+# Short entries specify exact roles, independently of the hook's short fields:
+# W: write; L: list/verify; R: no value or list mode; N: attached decimal/list.
+# Equal bare-option verdicts do not make short roles interchangeable in clusters.
 # These are safety profiles, not claims that every accepted git invocation has
 # that effect. For example show-current is conservatively R, and cancelled
 # actions are W. Display modifiers and create-reflog do not imply list mode.
@@ -152,11 +157,11 @@ ROLE_CATALOG = {
     ("branch", "--no-format"): "R",  # B/P: formatting.
     ("tag", "--list"): "L",  # T: list mode.
     ("tag", "-l"): "L",  # T: list mode.
-    ("tag", "-n"): "N",  # T: list message lines.
+    ("tag", "-n"): "N",  # T: list message lines, optional attached decimal.
     ("tag", "--delete"): "W",  # T: deletion.
     ("tag", "-d"): "W",  # T: deletion.
     ("tag", "--verify"): "V",  # T: verification.
-    ("tag", "-v"): "L",  # T: verification.
+    ("tag", "-v"): "L",  # T: verification, no attached numeric value.
     ("tag", "--annotate"): "W",  # T: tag creation.
     ("tag", "--no-annotate"): "W",  # T/P: creation control.
     ("tag", "-a"): "W",  # T: tag creation.
@@ -370,7 +375,8 @@ def compare(sub, enumerated, hook, catalog, required=()):
         if role is not None and role not in ROLE_VERDICTS:
             issues.append((2, "{} {}: UNKNOWN HOOK ROLE {!r}".format(sub, option, role)))
         elif (known in ROLE_VERDICTS and role in ROLE_VERDICTS and role != "W"
-              and ROLE_VERDICTS[known] != ROLE_VERDICTS[role]):
+              and (known != role if SHORT_NAME.fullmatch(option)
+                   else ROLE_VERDICTS[known] != ROLE_VERDICTS[role])):
             issues.append((1, "{} {}: MIS-ROLE catalog {}, hook {}".format(
                 sub, option, known, role)))
     # The secondary source only adds checks, including any helper-only value form.
@@ -474,6 +480,7 @@ def run(root):
 
 
 def self_test():
+    """Exercise literal/help/completion fixtures without git or scratch files."""
     failures = []
 
     def case(label, expected, probe):
@@ -607,41 +614,64 @@ def self_test():
     case("r2 synopsis unknown short", 2, lambda: short_help_code(
         good_help.replace("[<options>]", "[-Z]"), baseline))
 
-    # R2-2: run the production path against a generated hook fixture and real
-    # git. Require the value diagnostic so MIS-ROLE cannot mask a skipped leg.
-    def completion_code():
-        specs = []
+    # R2-2/R3-1: mock helper stdout, then feed fixture required-sets to compare.
+    # Require the value diagnostic so MIS-ROLE cannot mask a skipped layer.
+    def completion_code(role):
+        required = parse_completion("--list --format= --sort= --")
+        if required != {"--format", "--sort"}:
+            return 2
+        issues = []
         for sub in SUBCOMMANDS:
-            roles = {opt: role for (cmd, opt), role in ROLE_CATALOG.items() if cmd == sub}
-            longs = {opt: role for opt, role in roles.items() if opt.startswith("--")}
-            longs["--format"] = "R"
-            fields = ["'long': " + repr(longs)]
-            for field, role in SHORT_FIELDS.items():
-                chars = "".join(sorted(opt[1:] for opt, known in roles.items()
-                                       if SHORT_NAME.fullmatch(opt) and known == role))
-                fields.append("{!r}: frozenset({!r})".format(field, chars))
-            specs.append("{!r}: {{{}}}".format(sub, ", ".join(fields)))
-        fixture = "_GIT_REF_SPECS = {" + ", ".join(specs) + "}\n"
-        with tempfile.TemporaryDirectory(prefix="aiqt-git-options-test-") as cwd:
-            root = Path(cwd)
-            path = root / SOURCE_REL
-            path.parent.mkdir(parents=True)
-            path.write_text(fixture, encoding="utf-8")
-            out, err = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = run(root)
-            if code != 1:
-                return code
-            for sub in SUBCOMMANDS:
-                if "{} --format: VALUE-FORM".format(sub) not in err.getvalue():
-                    return 0
-        return 1
+            current = compare(sub, {"--format", "--sort"},
+                              {"--format": role, "--sort": "D"}, ROLE_CATALOG, required)
+            if role == "R" and (1, "{} --format: VALUE-FORM requires_arg=True, hook R".format(
+                    sub)) not in current:
+                return 0
+            issues.extend(current)
+        return verdict(issues)
 
-    case("r2 initialized helper format D->R", 1, completion_code)
+    case("r3 fixture helper format D->R", 1, lambda: completion_code("R"))
+    case("r3 fixture helper repair", 0, lambda: completion_code("D"))
+    case("r3 fixture helper conservative W", 0, lambda: completion_code("W"))
+
+    # R3-2: exercise the literal short fields against independent catalog roles.
+    tag_spec = spec.replace("'short_optnum': frozenset()",
+                            "'short_optnum': frozenset('n')")
+    tag_source = "_GIT_REF_SPECS = {'branch': " + spec + ", 'tag': " + tag_spec + "}"
+
+    def tag_short_code(source):
+        roles = parse_hook(source)["tag"]
+        return verdict(compare("tag", {"-l", "-n"}, roles, ROLE_CATALOG))
+
+    case("r3 short N->L", 1, lambda: tag_short_code(tag_source.replace(
+        "'short_list': frozenset('l')", "'short_list': frozenset('ln')").replace(
+        "'short_optnum': frozenset('n')", "'short_optnum': frozenset()")))
+    case("r3 short L->N", 1, lambda: tag_short_code(tag_source.replace(
+        "'short_list': frozenset('l')", "'short_list': frozenset()").replace(
+        "'short_optnum': frozenset('n')", "'short_optnum': frozenset('nl')")))
+    case("r3 short repair", 0, lambda: tag_short_code(tag_source))
+    case("r3 short conservative N->W", 0, lambda: tag_short_code(tag_source.replace(
+        "'short_write': frozenset()", "'short_write': frozenset('n')").replace(
+        "'short_optnum': frozenset('n')", "'short_optnum': frozenset()")))
+    # Probe every catalog short against every representable short-field role.
+    for (sub, option), known in sorted(ROLE_CATALOG.items()):
+        if not SHORT_NAME.fullmatch(option):
+            continue
+        if known not in SHORT_FIELDS.values():
+            failures.append("r3 catalog short role invalid: {} {}".format(sub, option))
+            continue
+        for role in SHORT_FIELDS.values():
+            expected = 0 if role in (known, "W") else 1
+            case("r3 short matrix {} {} {}->{}".format(sub, option, known, role),
+                 expected, lambda: verdict(compare(
+                     sub, {option}, {option: role}, ROLE_CATALOG)))
+    # The long-role comparison still permits equal verdict profiles.
+    check("r3 long equal profiles", 0, {"--list"}, {"--list": "V"}, ROLE_CATALOG)
+
     if failures:
         print("SELF-TEST FAIL:\n  " + "\n  ".join(failures))
         return 1
-    print("SELF-TEST PASS: a-h, R2 role profiles, short help and initialized git helpers.")
+    print("SELF-TEST PASS: a-h, R2/R3 roles, short help and fixture value forms (git-free).")
     return 0
 
 
