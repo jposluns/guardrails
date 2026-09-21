@@ -26,6 +26,12 @@ Limits are fixed:
 - Component length: 255 bytes
 - Actor ID: 256 bytes
 - Reason: 4,096 bytes
+- Aggregate inventory path bytes: 1,048,576
+- File size: 0 through 2^63 - 1
+- Permission mode: 0 through 0o777
+- Identity integer (device, inode): 0 through 2^64 - 1
+- JSON integer parser range: -2^63 through 2^64 - 1
+- General contract string (paths, refs, object ids): 4,096 bytes
 
 A directory group encapsulates a parent and every recursive descendant it contains. Duplicate decisions, overlapping group boundaries, and missing coverage result in refusal. Noncanonical paths, absolute paths, backslashes, unreadable files, or traversal directories matching the reserved managed set refuse execution.
 

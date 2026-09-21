@@ -35,4 +35,6 @@ Durable sensitive-tier review register for OPF initialization.
 | F29 | Reports distinguish attempts, observations, unknowns, ownership, staging, and mutation effects. | PR1/6 | specified - not runtime-verified |
 | F30 | Preserve D2a distinction, unstaged views, import acceptance guarantees, rejected fragments, and existing-store history. | PR1-7 | specified - not runtime-verified |
 
-Reviewed revision: bd815bd
+Base revision (authored against): bd815bd
+
+Each row's status is "specified - not runtime-verified": this register SPECIFIES the PR1 through PR7 refusal invariants and is not a runtime review of the implementation. A row's reviewed-revision binding is recorded when that invariant is runtime-verified in its owning PR.
