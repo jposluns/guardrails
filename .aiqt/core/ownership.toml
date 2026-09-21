@@ -172,6 +172,10 @@ path = "DISCLOSURE.md"
 class = "pack-immutable"
 
 [[release-class]]
+path = "ENFORCEMENT.md"
+class = "pack-immutable"
+
+[[release-class]]
 path = "GEMINI.md"
 class = "pack-immutable"
 
@@ -249,6 +253,10 @@ class = "pack-immutable"
 
 [[release-class]]
 path = "site/disclosure.html"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/enforcement.html"
 class = "pack-immutable"
 
 [[release-class]]

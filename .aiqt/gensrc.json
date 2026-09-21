@@ -176,6 +176,16 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_enforcement_register.py",
+      "sources": [
+        ".aiqt/enforceability.json",
+        ".aiqt/core/enforcement-roadmap.toml",
+        ".aiqt/core/rules/"
+      ],
+      "target": "ENFORCEMENT.md"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_adapters.py",
       "sources": [
         ".aiqt/core/rules/"
@@ -310,6 +320,17 @@
         ".aiqt/core/rules/"
       ],
       "target": "site/downloads/mappings.json"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_enforcement_register.py",
+      "sources": [
+        "docs/_shell.html",
+        ".aiqt/enforceability.json",
+        ".aiqt/core/enforcement-roadmap.toml",
+        ".aiqt/core/rules/"
+      ],
+      "target": "site/enforcement.html"
     },
     {
       "kind": "file",
