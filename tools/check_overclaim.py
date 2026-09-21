@@ -10,7 +10,8 @@ one string and an overclaim hidden in an attribute is not falsely flagged. Text 
 elements is kept apart by a hard boundary sentinel (see BLOCK_TAGS / BLOCK_SENTINEL):
 "<p>guarantees</p><p>secure</p>" reads as two phrases, not the phantom token "guaranteessecure", so an
 overclaim cannot hide by straddling a block boundary and a negator in one block cannot reach across it;
-inline markup ("<b>guar</b>antee") still joins into one word.
+inline markup ("<b>guar</b>antee") still joins into one word, and a line break (<br>) is inline whitespace
+(INLINE_BREAK_TAGS), NOT a block boundary, so a categorical claim across a <br> still reads as one phrase.
 
 TWO SURFACE CLASSES, TWO PATTERN SETS (VER-CORE 4.4). The guarantee-flavoured MARKETING patterns
 (SITE_PATTERNS) are calibrated for the public site copy and run on the SITE PAGES ONLY: the rule corpus,
@@ -60,15 +61,19 @@ replace human review of public copy for honesty; it polices wording, not whether
 mechanism actually works. Grow the vocabulary when a new class is found; do not read a PASS as proof the
 copy is free of overclaims.
 
-Negation binds to the GUARANTEE PHRASE, not the whole clause (see NEGATOR / CLAUSE_BOUNDARY): a negator
-marks a match honest only when it sits in the same window as the match, where the window begins after
-the last sentence/clause punctuation, contrastive conjunction, OR block-element boundary before it. A
-fixed char window let a negator in a prior sentence launder a fresh overclaim; a whole-clause window let
-a contrastive "but" launder one too ("does not merely help but guarantees secure output"), because the
-"not" there negates "help", not "guarantees"; and a plain-space block join let a negator in an unrelated
-prior block launder a guarantee in the next block ("No setup required" then "AIQT guarantees secure
-output"). Cutting the window at "but"/"yet"/... and at each block boundary binds the negation to the
-phrase it actually modifies.
+Negation binds to the GUARANTEE PHRASE, not the whole clause (see NEGATOR / CLAUSE_BOUNDARY /
+COORD_NEW_SUBJECT): a negator marks a match honest only when it sits in the same window as the match,
+where the window begins after the last sentence/clause punctuation, contrastive conjunction, block-element
+boundary, OR coordinating conjunction that introduces a NEW-SUBJECT clause, before it. A fixed char window
+let a negator in a prior sentence launder a fresh overclaim; a whole-clause window let a contrastive "but"
+launder one too ("does not merely help but guarantees secure output"), because the "not" there negates
+"help", not "guarantees"; a plain-space block join let a negator in an unrelated prior block launder a
+guarantee in the next block; and a same-block coordinating "and" let a negator in the first conjunct launder
+a guarantee in the second ("No setup required and AIQT guarantees secure output" - "No" scopes "setup
+required", not "guarantees"). Cutting the window at "but"/"yet"/..., at each block boundary, and at a
+coordinating conjunction before a new subject binds the negation to the phrase it actually modifies. A
+DISTRIBUTED negation over a shared subject ("does not guarantee security and reliability") is not split, so
+its negator still clears.
 
 The vocabulary, and why each pattern is shaped the way it is (calibrated so the current softened site is
 clean; a pattern that flagged a legitimate line would be too broad):
@@ -304,6 +309,17 @@ INTEGRITY_NEG_TAIL = re.compile(
 CLAUSE_BOUNDARY = re.compile(
     r"[.!?;:," + BLOCK_SENTINEL + r"]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas)\b",
     re.IGNORECASE)
+# A COORDINATING conjunction (and/or/plus/&) that introduces a clause with its OWN NEW SUBJECT also ends the
+# negation window, so a negator in the first conjunct does not reach a guarantee in the second: "No setup
+# required and AIQT guarantees secure output" - "No" scopes "setup required", and "and AIQT ..." starts an
+# independent clause the negator does not govern. The boundary fires ONLY when the conjunction is followed by
+# a new-subject marker (a determiner/pronoun, or a capitalised proper-noun word), so a DISTRIBUTED negation
+# over a shared subject ("does not guarantee security and reliability", "does not sandbox and does not promise
+# X") is NOT split and its negator still clears. The lookahead keeps the boundary at the START of the new
+# subject, so the negator (which is before the conjunction) is excluded from the window.
+COORD_NEW_SUBJECT = re.compile(
+    r"(?:(?i:\b(?:and|or|plus)\b)|&)\s+"
+    r"(?=(?i:the|a|an|it|its|they|their|this|that|these|those|we|our|you|your|i)\b|[A-Z])")
 # An INTENT HEDGE marks a COMPATIBILITY claim honest: the decided softening frames cross-assistant reach
 # as an aim, not a verified result ("intended/designed to be portable across ...", "is meant to work to
 # the same rules", "the intent, not a verified result yet"). A compat match is skipped when an intent
@@ -591,18 +607,23 @@ RELEASE_PATTERNS = [
 
 SKIP_TEXT_TAGS = {"script", "style"}
 
-# Block-level (and line-breaking) elements separate their text content: "<p>guarantees</p><p>secure</p>"
+# Block-level elements separate their text content: "<p>guarantees</p><p>secure</p>"
 # is two visible phrases, not the word "guaranteessecure". Their boundaries emit BLOCK_SENTINEL so adjacent
 # text nodes never fuse into a phantom token an overclaim could hide across (a real evasion the earlier
 # "".join let through) AND a negator in one block cannot reach across the boundary into the next (the
 # sentinel is a hard CLAUSE_BOUNDARY). Inline elements (b, em, a, span, code, ...) deliberately do NOT
 # separate, so a phrase marked up mid-word ("<b>guar</b>antee") stays one token.
 BLOCK_TAGS = {
-    "address", "article", "aside", "blockquote", "br", "button", "caption", "dd", "div", "dl", "dt",
+    "address", "article", "aside", "blockquote", "button", "caption", "dd", "div", "dl", "dt",
     "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
     "hr", "label", "legend", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td",
     "tfoot", "th", "thead", "tr", "ul",
 }
+# A line break renders as WHITESPACE, not a clause boundary: "<p>catches<br>all mistakes</p>" is ONE visible
+# categorical claim. So <br> emits a single SPACE (not BLOCK_SENTINEL, which would both split the phrase for
+# the categorical patterns and wrongly bound negation), while the true block containers above stay hard
+# boundaries. (<wbr>, a zero-width word-break opportunity, is left inline -> emits nothing -> fuses.)
+INLINE_BREAK_TAGS = {"br"}
 
 
 # The SEO/social snippets, meta[name=description] and meta[property=og:description], are attribute
@@ -713,21 +734,28 @@ class VisibleText(HTMLParser):
             self._skip += 1
         elif tag in BLOCK_TAGS:
             self.chunks.append(BLOCK_SENTINEL)
+        elif tag in INLINE_BREAK_TAGS:
+            self.chunks.append(" ")  # a line break is whitespace, not a clause boundary
 
     def handle_startendtag(self, tag, attrs):
-        # a self-closing void block element (e.g. <br/>, <hr/>) still separates, and a self-closing
-        # <meta ... /> still carries public-facing description copy that must be scanned (via _collect_meta);
-        # a self-closing <input .../> / <img .../> carries the same displayed-text attributes as its paired form
+        # a self-closing void block element (e.g. <hr/>) still separates, a self-closing <br/> is a line
+        # break emitting whitespace, and a self-closing <meta ... /> still carries public-facing description
+        # copy that must be scanned (via _collect_meta); a self-closing <input .../> / <img .../> carries the
+        # same displayed-text attributes as its paired form
         self._collect_meta(tag, attrs)
         self._collect_displayed_text(tag, attrs)
         if tag in BLOCK_TAGS:
             self.chunks.append(BLOCK_SENTINEL)
+        elif tag in INLINE_BREAK_TAGS:
+            self.chunks.append(" ")  # <br/> is whitespace, not a clause boundary
 
     def handle_endtag(self, tag):
         if tag in SKIP_TEXT_TAGS and self._skip:
             self._skip -= 1
         elif tag in BLOCK_TAGS:
             self.chunks.append(BLOCK_SENTINEL)
+        elif tag in INLINE_BREAK_TAGS:
+            self.chunks.append(" ")  # a stray </br> is whitespace too
 
     def handle_data(self, data):
         if self._skip == 0:
@@ -818,16 +846,27 @@ def _snippet(text, start, end):
     return ("..." if a else "") + body + ("..." if b < len(text) else "")
 
 
-def _clause_window(text, start):
-    """The text from the start of the clause containing `start` up to `start`. The window begins after
-    the last CLAUSE_BOUNDARY before the match, which is sentence/clause punctuation, a contrastive
-    conjunction, OR a block-element boundary (BLOCK_SENTINEL), so a negator only counts when it binds to
-    the guarantee phrase: never one that leaked in from a prior sentence or a prior block, and never one
-    that a 'but'/'yet' has flipped away from the match."""
+def _clause_start(text, start):
+    """Index where the clause containing `start` begins: after the last CLAUSE_BOUNDARY (sentence/clause
+    punctuation, a contrastive conjunction, or a block-element boundary), OR after a COORD_NEW_SUBJECT
+    boundary (a coordinating conjunction introducing a new-subject clause), whichever is CLOSEST to the
+    match. This binds a negator to the guarantee phrase's own clause: one that leaked in from a prior
+    sentence, a prior block, a 'but'/'yet' flip, or a coordinated new-subject clause does not reach it."""
     boundary = 0
     for m in CLAUSE_BOUNDARY.finditer(text, 0, start):
-        boundary = m.end()
-    return text[boundary:start]
+        if m.end() > boundary:
+            boundary = m.end()
+    for m in COORD_NEW_SUBJECT.finditer(text, 0, start):
+        if m.end() > boundary:
+            boundary = m.end()
+    return boundary
+
+
+def _clause_window(text, start):
+    """The text from the start of the clause containing `start` (see _clause_start) up to `start`, so a
+    negator only counts when it binds to the guarantee phrase: never one that leaked in from a prior
+    sentence, a prior block, a 'but'/'yet' flip, or a coordinated new-subject clause."""
+    return text[_clause_start(text, start):start]
 
 
 def _adjacent_denial_clears(text, start, end):
@@ -854,10 +893,7 @@ def _adjacent_denial_clears(text, start, end):
     # it does NOT clear. "not tamper-resistant in name only; they resist real attacks" affirms and FLAGS.
     if not POSTMATCH_PREDICATE_FINAL.match(text, end):
         return False
-    left = 0
-    for m in CLAUSE_BOUNDARY.finditer(text, 0, start):
-        left = m.end()
-    window = text[left:start]
+    window = text[_clause_start(text, start):start]
     neg = None
     for m in NEGATOR.finditer(window):
         neg = m  # the negator CLOSEST to the match governs
@@ -973,9 +1009,12 @@ def scan(text, site=True):
 # attr(a) attr(b)) whose ordered cross-attr boundary is not composed (each attr is still scanned
 # individually); an @import inside an inline <style>, whose imported sheet the inline-style scan does not
 # follow (only linked sheets and the page-level @import graph are); a backslash-newline line continuation
-# inside a content: string literal, which the string extractor does not join; and a malformed RAWTEXT
-# <style>/<script> (a quoted </style> or </script> in the body ends the element and truncates the capture; an
-# unclosed body at end-of-input is not stored). This CSS content-injection asset scan is anchored to the
+# inside a content: string literal, which the string extractor does not join; and a <base href> pointing
+# off-origin, since a relative asset URL is resolved against the local site directory (not the page's <base>),
+# routing an off-origin-redirected relative asset to the off-site residual below. (A malformed RAWTEXT
+# <style>/<script> truncation is NOT a residual: a browser applies the same first-</style>/</script> end-tag
+# rule, so the overclaim is either in the asset-scanned captured body or in the Collector-1 visible text, and
+# an unclosed body at end-of-input is not rendered.) This CSS content-injection asset scan is anchored to the
 # register page (HTML_REL) alone: a CSS content-injection overclaim on the other public pages (site/*.html,
 # opf/site/*.html) is visible-text scanned but not CSS-injection scanned.
 # Runtime-JS DOM text construction, an encoded payload buried in an arbitrary JS string whose location and
@@ -1922,10 +1961,14 @@ def _scan_asset_closure(root):
     <style> element, whose imported sheet the inline-style scan does not traverse (only LINKED stylesheets and
     the page-level @import graph are followed); (10) a backslash-newline line continuation inside a content:
     string literal, which the string extractor (_CSS_STRING_RE) does not join, so a phrase split across the
-    continuation is not decoded; and (11) a malformed RAWTEXT <style>/<script> body: a quoted </style> (or
-    </script>) sequence inside it ends the element early and truncates the captured body, and an unclosed
-    <style>/<script> body at end-of-input is never stored, so an overclaim placed via these forms escapes the
-    asset scan. SCOPE: this CSS content-injection asset scan is anchored to the register page (HTML_REL,
+    continuation is not decoded; and (11) a <base href> pointing off-origin: a relative asset URL
+    (<link href>/<script src>) is resolved against the local site directory, NOT the page's <base>, so a
+    <base> that redirects a relative asset off-origin routes to the disclosed off-site (cross-origin) residual
+    below (the asset is not fetched, so its content is out of a static gate's reach). A malformed RAWTEXT
+    <style>/<script> truncation is NOT a residual: a browser applies the SAME first-</style>/</script> end-tag
+    rule, so any overclaim lands either in the captured body (asset-scanned) or in the following visible text
+    (Collector 1), and an unclosed body at end-of-input is not rendered as visible content. SCOPE: this CSS
+    content-injection asset scan is anchored to the register page (HTML_REL,
     site/enforcement.html) ALONE; a CSS content-injection overclaim on the OTHER public pages (site/*.html,
     opf/site/*.html) is scanned for VISIBLE TEXT by Collector 1 but NOT for CSS content injection. Also out of
     static reach: runtime-JS DOM construction of marketing text (theme.js building strings at run time); an
@@ -2396,6 +2439,26 @@ def _block_boundary_negation_self_test():
     inline.feed("<p>AIQT <b>guar</b>antees secure output.</p>")
     if not scan(inline.text(), site=True):
         failures.append("BLOCKNEG: an inline mid-word split must still fuse into one token and flag")
+    # (d) FIX (br-inline): a line break (<br>) is inline whitespace, NOT a block boundary, so a categorical
+    # claim across it still reads as one phrase and FLAGS. MUTATION: <br> back in BLOCK_TAGS (emitting the
+    # sentinel) splits "catches all mistakes" -> this case fails.
+    brk = VisibleText()
+    brk.feed("<p>AIQT catches<br>all mistakes.</p>")
+    if not scan(brk.text(), site=True):
+        failures.append("BLOCKNEG: a categorical claim across a <br> line break must still flag")
+    # (e) FIX (coord-new-subject): a same-block coordinating "and" that starts a NEW-SUBJECT clause does not
+    # let the first conjunct's negator clear the second conjunct's guarantee -> FLAGGED. MUTATION: dropping
+    # COORD_NEW_SUBJECT from the clause-start lets the prior "No" launder "guarantees" -> this case fails.
+    coord = VisibleText()
+    coord.feed("<p>No setup required and AIQT guarantees secure output.</p>")
+    if not scan(coord.text(), site=True):
+        failures.append("BLOCKNEG: a new-subject coordinating 'and' must not let a prior negator clear the guarantee")
+    # (f) a DISTRIBUTED negation over a shared subject is NOT split by COORD_NEW_SUBJECT, so its negator still
+    # clears -> NOT flagged (no false positive).
+    distrib = VisibleText()
+    distrib.feed("<p>AIQT does not guarantee security and reliability.</p>")
+    if scan(distrib.text(), site=True):
+        failures.append("BLOCKNEG: a distributed negation over a shared subject must still clear (no false positive)")
     return failures
 
 
