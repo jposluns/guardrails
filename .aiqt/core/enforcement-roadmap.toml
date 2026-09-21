@@ -1,0 +1,662 @@
+# .aiqt/core/enforcement-roadmap.toml: the human enforcement DECISION for every rule (GER-1).
+#
+# One [[rule]] per corpus-id, in ascending corpus-id order. `status` is enforced, none, or pending.
+# enforced: the enforceability ledger links at least one shipped control to the rule; `mechanisms`
+#   RESTATES that linkage (namespaced gate:/hook: refs, unique and sorted) so this file is reviewable
+#   standalone, and tools/gen_enforcement_register.py CROSS-VALIDATES it against the ledger, so the two
+#   can never fork. none: enforcement is not built yet. pending: not built yet, and `description` states
+#   the intended build. This file records the DECISION only; the linkage itself is authored in the gate
+#   and hook manifests and rendered into .aiqt/enforceability.json, never re-authored here.
+# Verified by tools/gen_enforcement_register.py (schema and ledger contradictions are fail-closed exit 2).
+
+version = 1
+
+[[rule]]
+corpus-id = "abspth"
+status = "enforced"
+mechanisms = ["hook:abs-paths", "hook:abs-paths-bash"]
+
+[[rule]]
+corpus-id = "actbef"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "aitreg"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "artbr1"
+status = "enforced"
+mechanisms = ["hook:protected-line-guard"]
+
+[[rule]]
+corpus-id = "asadv1"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "atmclm"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "bgcwai"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "brnrot"
+status = "enforced"
+mechanisms = ["gate:branch-root", "hook:branch-root-guard"]
+
+[[rule]]
+corpus-id = "chgchk"
+status = "enforced"
+mechanisms = ["gate:selftest-execution"]
+
+[[rule]]
+corpus-id = "chgtrk"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "chkfcl"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "chtrk1"
+status = "enforced"
+mechanisms = ["gate:record-drift"]
+
+[[rule]]
+corpus-id = "clmobs"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "clrfy1"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "cmpmig"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "cmtidn"
+status = "enforced"
+mechanisms = ["hook:commit-identity"]
+
+[[rule]]
+corpus-id = "cnclse"
+status = "enforced"
+mechanisms = ["hook:orch-resume-audit", "hook:orch-stop-guard"]
+
+[[rule]]
+corpus-id = "cnsdif"
+status = "enforced"
+mechanisms = ["hook:diff-source", "hook:diff-wall-stop"]
+
+[[rule]]
+corpus-id = "cnstpr"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "cntdef"
+status = "enforced"
+mechanisms = ["hook:orch-ask-unattended", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-yield-tool-guard"]
+
+[[rule]]
+corpus-id = "cntprd"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "corrob"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "csttir"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "datbnd"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "deccls"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "dfdpth"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "dscres"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "estsep"
+status = "enforced"
+mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
+
+[[rule]]
+corpus-id = "evgcmp"
+status = "enforced"
+mechanisms = ["gate:selftest-execution"]
+
+[[rule]]
+corpus-id = "exauth"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "exetgt"
+status = "enforced"
+mechanisms = ["gate:derived-command-parameters", "hook:write-scope"]
+
+[[rule]]
+corpus-id = "expbnd"
+status = "enforced"
+mechanisms = ["hook:git-discard", "hook:git-explicit-binding", "hook:git-stash-ref", "hook:orch-dispatch-ledger"]
+
+[[rule]]
+corpus-id = "fndfix"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "gatdis"
+status = "enforced"
+mechanisms = ["gate:ci-parity", "hook:gate-weakening-guard"]
+
+[[rule]]
+corpus-id = "gensrc"
+status = "enforced"
+mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:install-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "hook:gensrc-edit-guard"]
+
+[[rule]]
+corpus-id = "goalfd"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "grdinp"
+status = "enforced"
+mechanisms = ["gate:aei-enumerator-selftest", "gate:derived-command-parameters"]
+
+[[rule]]
+corpus-id = "hiasrv"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "humovs"
+status = "enforced"
+mechanisms = ["hook:orch-ask-unattended"]
+
+[[rule]]
+corpus-id = "kltwat"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "liccmp"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "lvw001"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "mindep"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "mstreg"
+status = "enforced"
+mechanisms = ["gate:mistakes-register"]
+
+[[rule]]
+corpus-id = "mtchcd"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "nocncl"
+status = "enforced"
+mechanisms = ["hook:orch-truncation-guard"]
+
+[[rule]]
+corpus-id = "nofabr"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "obsbeh"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "prjint1"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "prsunc"
+status = "enforced"
+mechanisms = ["hook:git-discard"]
+
+[[rule]]
+corpus-id = "prtbrn"
+status = "enforced"
+mechanisms = ["hook:protected-line-guard"]
+
+[[rule]]
+corpus-id = "prtwhl"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "rdbchr"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "recfst"
+status = "enforced"
+mechanisms = ["hook:orch-ask-unattended", "hook:orch-dispatch-ledger"]
+
+[[rule]]
+corpus-id = "recncl"
+status = "enforced"
+mechanisms = ["gate:record-drift", "gate:record-sections", "hook:orch-resume-audit", "hook:orch-resume-barrier"]
+
+[[rule]]
+corpus-id = "refcap"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "reprod"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "reqstp"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "rerunf"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "rmvpth"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "rpfail"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "rtsafe"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "rvwpin"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secagt"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secau1"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secaud"
+status = "enforced"
+mechanisms = ["gate:mistakes-register"]
+
+[[rule]]
+corpus-id = "secazn"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "seccet"
+status = "enforced"
+mechanisms = ["gate:python-launcher-isolation"]
+
+[[rule]]
+corpus-id = "seccfg"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "seccry"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secdrr"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secdsz"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secegr"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secenc"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secfcl"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secfid"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secgci"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "sechau"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secinp"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "seckey"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "seclog"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "seclpr"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "seclpt"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secmin"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secncb"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secndc"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secopd"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secout"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secpin"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secprv"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secpsn"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secpth"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secpub"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secpur"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secred"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secres"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secrot"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secrst"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secsec"
+status = "enforced"
+mechanisms = ["gate:secrets-scan", "hook:secrets-shift-left"]
+
+[[rule]]
+corpus-id = "secspr"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secssr"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secsup"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secsyn"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secthm"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "sectok"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "sectvl"
+status = "enforced"
+mechanisms = ["hook:commit-msg-subst"]
+
+[[rule]]
+corpus-id = "secunt"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secupl"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secvde"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "secvln"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "septsk"
+status = "enforced"
+mechanisms = ["hook:write-scope"]
+
+[[rule]]
+corpus-id = "sescls"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "sesres"
+status = "enforced"
+mechanisms = ["hook:orch-resume-audit", "hook:orch-resume-barrier"]
+
+[[rule]]
+corpus-id = "setcmp"
+status = "enforced"
+mechanisms = ["hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-yield-tool-guard"]
+
+[[rule]]
+corpus-id = "slfgrd"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "smlcng"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "srfcp1"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "stgprm"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "tmrrst"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "trkasy"
+status = "enforced"
+mechanisms = ["hook:orch-dispatch-ledger", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-truncation-guard", "hook:orch-untracked-wait-loop"]
+
+[[rule]]
+corpus-id = "trsrcv"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "trstre"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "tstamp"
+status = "enforced"
+mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
+
+[[rule]]
+corpus-id = "tsthrm"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "valgat"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "valinf"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "vfxcmt"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "vrfdiv"
+status = "none"
+mechanisms = []
+
+[[rule]]
+corpus-id = "vrfdlv"
+status = "enforced"
+mechanisms = ["hook:orch-truncation-guard"]
+
+[[rule]]
+corpus-id = "wowo01"
+status = "enforced"
+mechanisms = ["hook:write-scope"]

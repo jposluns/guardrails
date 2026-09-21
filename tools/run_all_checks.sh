@@ -162,6 +162,8 @@ run_gate "gensrc-failclose-selftest" python3 -I -B tools/check_gensrc_failclose.
 run_gate "gensrc-failclose" python3 -I -B tools/check_gensrc_failclose.py
 run_gate "enforceability-selftest" python3 -I -B tools/gen_enforceability.py --self-test
 run_gate "enforceability-drift" python3 -I -B tools/gen_enforceability.py --check
+run_gate "enforcement-register-selftest" python3 -I -B tools/gen_enforcement_register.py --self-test
+run_gate "enforcement-register-drift" python3 -I -B tools/gen_enforcement_register.py --check
 run_gate "launcher-isolation-selftest" python3 -I -B tools/check_python_launcher_isolation.py --self-test
 run_gate "launcher-isolation" python3 -I -B tools/check_python_launcher_isolation.py
 run_gate "renderers-selftest"    python3 -I -B tools/gen_renderers.py --self-test
