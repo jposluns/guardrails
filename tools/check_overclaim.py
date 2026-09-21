@@ -602,7 +602,11 @@ BLOCK_TAGS = {
 # option/optgroup (the displayed choice text), each rendered visible text scanned like meta. DISCLOSED
 # RESIDUAL: title (a hover-only tooltip) and ARIA text alternatives (aria-label / aria-labelledby) are NOT
 # scanned; no other attribute is scanned.
-META_DESC_NAMES = {"description", "og:description"}
+# FIX B (meta-desc-name-completeness): the site ships Twitter cards, so twitter:description (name=) renders
+# in social previews, and Schema.org uses itemprop="description"; both carry public-facing description copy
+# that must be scanned. The bare "description" also matches itemprop="description" (read via a.get("itemprop")
+# in _collect_meta). Scope: DESCRIPTIONS only (og:title / twitter:title are a separate title surface).
+META_DESC_NAMES = {"description", "og:description", "twitter:description"}
 
 
 def _collapse(value):
@@ -639,8 +643,14 @@ class VisibleText(HTMLParser):
                 key = k.lower()
                 if key not in a:          # first occurrence wins, as HTML attribute parsing does
                     a[key] = v if v is not None else ""
-            key = a.get("name") or a.get("property")
-            if key and key.lower() in META_DESC_NAMES and a.get("content"):
+            # FIX A (og-desc-name-shadow): recognize the tag as a description snippet if ANY of its
+            # description-carrying keys (name, property, itemprop) is in META_DESC_NAMES. The old
+            # `name or property` selection let a non-description name= shadow a description property=/
+            # itemprop=, so <meta property="og:description" name="x" content="OVERCLAIM"> read key "x"
+            # and skipped the tag while an Open Graph consumer ships the overclaim. Each attr is already
+            # first-occurrence-wins in the map above.
+            if any(k and k.lower() in META_DESC_NAMES
+                   for k in (a.get("name"), a.get("property"), a.get("itemprop"))) and a.get("content"):
                 self.meta.append(a["content"])
 
     def _collect_displayed_text(self, tag, attrs):
@@ -672,6 +682,11 @@ class VisibleText(HTMLParser):
         elif tag in ("option", "optgroup"):
             if a.get("label"):
                 self.meta.append(a["label"])        # the displayed choice text
+            # FIX C (option-value-displayed): an <option value> renders as displayed suggestion text in a
+            # datalist (and option label text in a select), so its value is collected and scanned too. The
+            # option's text content is already collected as a text node; the value/label attributes are the gap.
+            if tag == "option" and a.get("value"):
+                self.meta.append(a["value"])        # the displayed suggestion/choice value
 
     def handle_starttag(self, tag, attrs):
         self._collect_meta(tag, attrs)
@@ -2404,6 +2419,30 @@ def _self_closing_meta_self_test():
     disp_ctl.feed('<html><body><input type="text" value="{}"></body></html>'.format(overclaim))
     if any(scan(m, site=True) for m in disp_ctl.meta):
         failures.append("DISPTEXT: a text input value is user data and must NOT be scanned (false positive)")
+    # FIX A (og-desc-name-shadow): a non-description name= must NOT shadow a description property=. The tag
+    # carries og:description via property=, so it is a description snippet even though name="x" is not.
+    # MUTATION: the old `name or property` selection reads name="x" (not a desc key) and skips the tag.
+    og_shadow = VisibleText()
+    og_shadow.feed('<meta property="og:description" name="x" content="{}">'.format(overclaim))
+    if not any(scan(m, site=True) for m in og_shadow.meta):
+        failures.append("OGDESCSHADOW: a description property= must not be shadowed by a non-description name=")
+    # FIX B (meta-desc-name-completeness): twitter:description (name=) and itemprop="description" both render
+    # in social/schema previews and must be scanned. MUTATION: META_DESC_NAMES without twitter:description, or
+    # not reading itemprop, leaves each unflagged.
+    tw_desc = VisibleText()
+    tw_desc.feed('<meta name="twitter:description" content="{}">'.format(overclaim))
+    if not any(scan(m, site=True) for m in tw_desc.meta):
+        failures.append("METADESCSET: a twitter:description meta must be captured and scanned")
+    ip_desc = VisibleText()
+    ip_desc.feed('<meta itemprop="description" content="{}">'.format(overclaim))
+    if not any(scan(m, site=True) for m in ip_desc.meta):
+        failures.append("METADESCSET: an itemprop=description meta must be captured and scanned")
+    # FIX C (option-value-displayed): an <option value> inside a <datalist> renders as displayed suggestion
+    # text, so its value is collected and scanned. MUTATION: not collecting option value leaves it unflagged.
+    opt_val = VisibleText()
+    opt_val.feed('<datalist><option value="{}"></datalist>'.format(overclaim))
+    if not any(scan(m, site=True) for m in opt_val.meta):
+        failures.append("OPTVALUE: a datalist <option value> (displayed suggestion text) must be collected and scanned")
     # (b) end-to-end via _collect: the overclaim surfaces as a (meta) finding on the site page.
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-overclaim-selfmeta-"))
