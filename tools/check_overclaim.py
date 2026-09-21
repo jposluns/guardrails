@@ -11,7 +11,8 @@ elements is kept apart by a hard boundary sentinel (see BLOCK_TAGS / BLOCK_SENTI
 "<p>guarantees</p><p>secure</p>" reads as two phrases, not the phantom token "guaranteessecure", so adjacent
 block phrases are scanned SEPARATELY (a browser renders them on separate lines): a phantom fused token cannot
 form and a negator in one block cannot reach across into the next, and a categorical claim SPLIT across
-separate block elements reads as two line-phrases rather than one (as a browser also renders it);
+separate block elements reads as two line-phrases rather than one (as a browser renders block elements,
+though CSS display:inline can override that layout - a disclosed residual);
 inline markup ("<b>guar</b>antee") still joins into one word, and a line break (<br>) is inline whitespace
 (INLINE_BREAK_TAGS), NOT a block boundary, so a categorical claim across a <br> still reads as one phrase.
 
@@ -354,12 +355,14 @@ COORD_NEW_SUBJECT = re.compile(
 # the same rules", "the intent, not a verified result yet"). A compat match is skipped when an intent
 # hedge (or a negator) sits in its clause window, so the softened forms stay clean while a bare present-
 # tense assertion of reach still trips. The word "intent" is included so "the intent, not a verified
-# result" reads as a hedge. It is clause-scoped exactly like NEGATOR: a hedge in a PRIOR clause does not
+# result" reads as a hedge; a hedge VERB (intend/design/aim/aspire/meant) clears ONLY when followed by "to"
+# within a few words ("designed to be portable"), so an unrelated NOUN ("a simple design and is portable")
+# does NOT clear - "intent" is the sole noun-form hedge. It is clause-scoped exactly like NEGATOR: a hedge in a PRIOR clause does not
 # launder a fresh assertion (teams.html says the standard is "intended to reach across ..." and then, in a
 # separate clause after the comma+"so", asserts a colleague "is working to the same rules" as a verified
 # fact; the earlier hedge does not scope over that later clause, so the assertion is what must soften).
 INTENT_HEDGE = re.compile(
-    r"\b(?:intend(?:s|ed|ing)?|design(?:s|ed|ing)?|meant|aim(?:s|ed|ing)?|aspir(?:e|es|ed|ing)?|intent)\b",
+    r"\b(?:intend(?:s|ed|ing)?|design(?:s|ed|ing)?|meant|aim(?:s|ed|ing)?|aspir(?:e|es|ed|ing)?)\b(?:\s+\w+){0,3}?\s+to\b|\bintent\b",
     re.IGNORECASE)
 # PREDICATE-FINAL boundary for the adjacent-denial (paired with the pre-match surface): a denial clears only
 # when the banned term ENDS the predicate, i.e. the first non-space AFTER the matched span is end-of-string,
@@ -666,7 +669,8 @@ INLINE_BREAK_TAGS = {"br"}
 # displayed-text attribute set (FIX displayed-text-attrs, _collect_displayed_text): an input[type in
 # submit/button/reset] value (the button label), an alt on img/area/input[type=image] (shown when the image
 # is unavailable), a placeholder on input/textarea (displayed until the field is filled), and a label on
-# option/optgroup (the displayed choice text), each rendered visible text scanned like meta. DISCLOSED
+# option/optgroup (the displayed choice text), and a value on a datalist option (the displayed suggestion),
+# each rendered visible text scanned like meta. DISCLOSED
 # RESIDUAL: title (a hover-only tooltip) and ARIA text alternatives (aria-label / aria-labelledby) are NOT
 # scanned; no other attribute is scanned.
 # FIX B (meta-desc-name-completeness): the site ships Twitter cards, so twitter:description (name=) renders
@@ -1090,8 +1094,11 @@ def scan(text, site=True):
 # stylesheet class), which the visible-text scan still collects (visibility is not modelled), so a hidden
 # negator can clear a visible overclaim; a content: attr(NAME) whose NAME is a NON-SIMPLE identifier (a
 # CSS-escaped dotted/colon name attr(data\.copy), backslash-escaped in the CSS identifier), which the
-# attr-name extractor does not resolve - it stops at the backslash (a plain Unicode word-character name IS resolved); and CSS custom generated content the extractor does not resolve
-# (a counter(n, <custom-style>) whose @counter-style symbols carry the phrase). (An otherwise malformed RAWTEXT truncation is handled: a
+# attr-name extractor does not resolve - it stops at the decoded dot, the escape decoding to a non-word-char dot (a plain Unicode word-character name IS resolved); and CSS custom generated content the extractor does not resolve
+# (a counter(n, <custom-style>) whose @counter-style symbols carry the phrase); a tag-based block boundary
+# CSS OVERRIDES (display:inline blocks render on one line but the sentinel still splits them); a CSS content
+# "/" ALT text concatenated into the scanned string; and a displayed ATTRIBUTE value composed with adjacent
+# BODY text (scanned separately, the attribute analogue of the CSS+DOM composition residual). (An otherwise malformed RAWTEXT truncation is handled: a
 # complete-string quoted end-tag is asset-scanned, trailing text Collector-1 scanned, and an UNCLOSED body at
 # EOF is flushed+scanned at parser close().) This CSS content-injection asset scan is anchored to the
 # register page (HTML_REL) alone: a CSS content-injection overclaim on the other public pages (site/*.html,
@@ -2059,9 +2066,18 @@ def _scan_asset_closure(root):
     visible-text scan STILL collects (it does not model element visibility), so a hidden negator can clear a
     visible overclaim and a hidden overclaim can be flagged; (15) a content: attr(NAME) whose attribute NAME
     is a NON-SIMPLE identifier - a CSS-escaped name (attr(data\\.copy) for a dotted or colon name), which the attr-name extractor does not resolve (it reads the identifier run
-    and stops at the backslash); a plain Unicode word-character name (attr(data-x), attr(data-e-acute)) IS
+    and stops at the decoded dot (the CSS escape decodes, leaving a dot that is not a word character; a
+    hex-escaped simple character resolves); a plain Unicode word-character name (attr(data-x), attr(data-e-acute)) IS
     resolved (the extractor is not ASCII-only); and (16) CSS custom generated content the extractor does not
-    resolve, e.g. a counter(n, <custom-style>) whose @counter-style symbols carry the phrase. A malformed RAWTEXT truncation is otherwise
+    resolve, e.g. a counter(n, <custom-style>) whose @counter-style symbols carry the phrase; (17) a tag-based
+    block boundary that CSS OVERRIDES - two block elements styled display:inline render on one line, but the
+    collector still emits the boundary sentinel between them, so a categorical claim split across CSS-inlined
+    blocks is scanned as two phrases (the sentinel follows tag names, not computed CSS layout); (18) a CSS
+    content ALT text after a "/" (content: "x" "y" / "alt") - the "/" begins an accessibility alternative the
+    extractor concatenates into the scanned string, which can suppress the visual phrase; and (19) a displayed
+    ATTRIBUTE value (e.g. a button value) composed with adjacent BODY text ("AIQT catches <input value=...>")
+    - the body text and the attribute are scanned SEPARATELY, not by visual composition (the attribute
+    analogue of residual 12). A malformed RAWTEXT truncation is otherwise
     handled: a quoted </style>/</script> that leaves a COMPLETE string is asset-scanned and any trailing text
     Collector-1 scanned, and an UNCLOSED body at end-of-input is FLUSHED and scanned at parser close(). SCOPE: this CSS
     content-injection asset scan is anchored to the register page (HTML_REL,
@@ -2336,6 +2352,7 @@ POSITIVE = [
     "The gate rejects all edits, and the manual has a scope section.",  # "scope" sits past the "and" -> flags
     # r7/r9/r10 (tight-adjacency): a negator that does not DIRECTLY bind the guarantee does not clear it.
     "AIQT is not without a guarantee of secure output.",            # r10: double negation AFFIRMS -> flags
+    "AIQT has a simple design and is portable across tools.",       # r12: noun "design" is not an intent hedge -> flags
     "AIQT not only guarantees secure output but also saves time.",  # "not only ... but also" AFFIRMS -> flags
     "No other tool guarantees secure output like AIQT.",            # "no other" comparative AFFIRMS -> flags
     "Without exception AIQT guarantees secure output.",             # r9: affirmative "without exception" -> flags
