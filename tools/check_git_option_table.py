@@ -174,6 +174,7 @@ ROLE_CATALOG = {
     ("tag", "--no-file"): "W",  # T/P: content control.
     ("tag", "-F"): "W",  # T: tag content.
     ("tag", "--trailer"): "W",  # T: tag content.
+    ("tag", "--no-trailer"): "W",  # T/P: content cancellation (advertised from git 2.55.0).
     ("tag", "--edit"): "W",  # T: editor.
     ("tag", "--no-edit"): "W",  # T/P: editor control.
     ("tag", "-e"): "W",  # T: editor.
