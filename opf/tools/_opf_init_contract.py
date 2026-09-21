@@ -745,6 +745,14 @@ def _run_self_test():
     m_c1["actor"]["id"] = "a\u0080b"
     expect("K-N39-r2-c1-control", canonical_json_bytes(m_c1), ctx0, "INVALID")
 
+    # QA-R3: every pinned reserved view is refused as a Keep (defense in depth for the _RESERVED set,
+    # so a source mutation that drops a view from _RESERVED is caught here, not only by the gate).
+    for _view in _INITIAL_VIEWS:
+        _vp = ".working/" + _view
+        _cv = _mk_ctx([_file_entry(_vp)])
+        expect("K-N40-reserved-view-" + _view,
+               canonical_json_bytes(_mk_model(_cv, [_file_dec(_vp)])), _cv, "INVALID")
+
     failed = [(lbl, why) for (lbl, ok, why) in checks if not ok]
     for lbl, why in failed:
         sys.stderr.write("SELF-TEST FAIL {}: {}\n".format(lbl, why))

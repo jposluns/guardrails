@@ -12,6 +12,7 @@ store path is checked against the store authority's DEFAULT_MACHINE_SUBDIR; and 
 must appear on an ACTIVE (non-comment) line, with the live gate present in the repo-root runner and CI.
 """
 import re
+import runpy
 import sys
 from pathlib import Path
 
@@ -112,6 +113,12 @@ def _active_line_has(text, needle):
     return any(needle in line and not line.strip().startswith("#") for line in text.splitlines())
 
 
+def _active_line_matches(text, pattern):
+    """True if `pattern` (a regex) matches on a non-comment line."""
+    rx = re.compile(pattern)
+    return any(rx.search(line) and not line.strip().startswith("#") for line in text.splitlines())
+
+
 def _checks():
     contract = _read("opf/tools/_opf_init_contract.py")
     schema = _read("opf/tools/_opf_schema.py")
@@ -161,6 +168,21 @@ def _checks():
     if con_views != src_views:
         _drift("validator view tuple diverges from _opf_init.py: {} vs {}".format(con_views, src_views))
 
+    # Value-based membership: load the pure validator and confirm the ACTUAL _RESERVED tuple contains
+    # every pinned view path (the source-text checks above cannot see the view comprehension). runpy sets
+    # __name__ to the module path, not "__main__", so the self-test does not run on load; any load failure
+    # is fail-closed.
+    try:
+        ns = runpy.run_path(str(ROOT / "opf/tools/_opf_init_contract.py"))
+    except Exception as exc:
+        _cant("could not load the validator to verify _RESERVED membership: {}".format(exc))
+    live_reserved = ns.get("_RESERVED")
+    if not isinstance(live_reserved, tuple):
+        _cant("validator _RESERVED is not a tuple at load time")
+    for view in src_views:
+        if (".working/" + view) not in live_reserved:
+            _drift("pinned view not a member of the validator _RESERVED set: .working/{}".format(view))
+
     # C-D2A: the shipped D2a success wording is present (D2b must not silently retrofit an envelope).
     if "tracking and rendering are pending." not in opf:
         _cant("D2a success wording changed at source; re-verify the D2a/D2b boundary")
@@ -182,9 +204,12 @@ def _checks():
     # LIVE consistency gate (no --self-test) present in the repo-root runner and the CI workflow.
     for rel in ROSTER_FILES:
         text = _read(rel)
-        for script in ("_opf_init_contract.py", "check_opf_init_contract.py"):
-            if not _active_line_has(text, script):
-                _drift("{} not actively registered in {}".format(script, rel))
+        # The validator name is a substring of the gate name, so match it on a word boundary; the gate
+        # name is unique and matched as a plain active-line substring.
+        if not _active_line_matches(text, r"\b_opf_init_contract\.py"):
+            _drift("_opf_init_contract.py not actively registered in {}".format(rel))
+        if not _active_line_has(text, "check_opf_init_contract.py"):
+            _drift("check_opf_init_contract.py not actively registered in {}".format(rel))
     for rel in LIVE_GATE_FILES:
         text = _read(rel)
         live = any("check_opf_init_contract.py" in line and "--self-test" not in line
@@ -208,6 +233,10 @@ def _self_test():
         ("A.md", "B.md"), "ordered view parse"
     assert _value_of('DEFAULT_MACHINE_SUBDIR = "toml"  # c', "DEFAULT_MACHINE_SUBDIR") == "toml", "value"
     assert _active_line_has('run x check_opf_init_contract.py', "check_opf_init_contract.py"), "active line"
+    assert not _active_line_matches('run check_opf_init_contract.py --self-test', r"\b_opf_init_contract\.py"), \
+        "validator boundary must NOT match inside the gate filename"
+    assert _active_line_matches('run "$here/_opf_init_contract.py" --self-test', r"\b_opf_init_contract\.py"), \
+        "validator boundary must match a real validator invocation"
     assert not _active_line_has('# run check_opf_init_contract.py', "check_opf_init_contract.py"), \
         "a commented registration is not active"
     labels = ["F{:02d}".format(n) for n in range(1, 31)]
