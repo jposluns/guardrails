@@ -8,8 +8,10 @@ than shipping. On the SITE pages it scans the VISIBLE TEXT of each page (tags, <
 stripped; entities unescaped; whitespace collapsed), so a phrase that wraps across source lines is still
 one string and an overclaim hidden in an attribute is not falsely flagged. Text from two SEPARATE block
 elements is kept apart by a hard boundary sentinel (see BLOCK_TAGS / BLOCK_SENTINEL):
-"<p>guarantees</p><p>secure</p>" reads as two phrases, not the phantom token "guaranteessecure", so an
-overclaim cannot hide by straddling a block boundary and a negator in one block cannot reach across it;
+"<p>guarantees</p><p>secure</p>" reads as two phrases, not the phantom token "guaranteessecure", so adjacent
+block phrases are scanned SEPARATELY (a browser renders them on separate lines): a phantom fused token cannot
+form and a negator in one block cannot reach across into the next, and a categorical claim SPLIT across
+separate block elements reads as two line-phrases rather than one (as a browser also renders it);
 inline markup ("<b>guar</b>antee") still joins into one word, and a line break (<br>) is inline whitespace
 (INLINE_BREAK_TAGS), NOT a block boundary, so a categorical claim across a <br> still reads as one phrase.
 
@@ -73,10 +75,14 @@ a guarantee in the second ("No setup required and AIQT guarantees secure output"
 required", not "guarantees"). Cutting the window at "but"/"yet"/..., at each block boundary, and at a
 coordinating conjunction before a new subject binds the negation to the phrase it actually modifies. A
 DISTRIBUTED negation over a shared subject ("does not guarantee security and reliability") is not split, so
-its negator still clears. A negator word used AFFIRMATIVELY does NOT clear (see AFFIRMATIVE_NEG_SUFFIX /
-_has_genuine_negator): an exclusive-focus "not only|just|merely|solely ... but also ..." intensifier and a
-"no other|others|else" comparative both AFFIRM the guarantee, so "AIQT not only guarantees secure output but
-also saves time" and "No other tool guarantees secure output like AIQT" still flag.
+its negator still clears. A negator clears a guarantee ONLY by TIGHT ADJACENCY (see NEG_AUX_TAIL /
+_tight_negation_clears): it must sit directly before the guarantee, separated only by auxiliary/modal verbs
+(verb form) or an article plus adjectives (noun form), so a negator binding a different phrase does not
+clear. "Without exception ... guarantees", "there is no doubt ... guarantees", "requires no setup and
+guarantees", "not only ... guarantees", and "no other ... guarantees" all still flag; "does not guarantee",
+"cannot guarantee", "will never guarantee", and "not a (cryptographic) guarantee" clear. This binds the
+open-ended affirmative-negator idiom space by adjacency rather than enumeration (an adverb between, e.g.
+"does not always guarantee", is deliberately not cleared - the safe direction for an honesty gate).
 
 The vocabulary, and why each pattern is shaped the way it is (calibrated so the current softened site is
 clean; a pattern that flagged a legitimate line would be too broad):
@@ -143,9 +149,11 @@ clean; a pattern that flagged a legitimate line would be too broad):
   - "working|works to the same ...": parties asserted to be working to one standard as a present fact
     ("a colleague on one assistant is working to the same rules as a colleague on another"), the
     present-continuous/finite form the subject-first pattern (which needs an all|every-assistant subject)
-    misses. INTENT-guarded, and the softened intent form reads bare "work" ("is meant to work to the same
-    rules"), so it is not "works|working" and stays clean; "works under the same rules as the session that
-    spawned it" is "under", not "to", so the subagent mechanism claim stays clean.
+    misses. The pattern now matches bare "work" too ("work|works|working to the same"), so a bare-work
+    assertion with no hedge ("All assistants work to the same rules") TRIPS; the softened intent form ("is
+    meant to work to the same rules") stays clean via the INTENT HEDGE ("meant"/"intended" in its clause),
+    NOT because bare "work" is uncaught. "works under the same rules as the session that spawned it" is
+    "under", not "to", so the subagent mechanism claim stays clean.
   - "foolproof": a bare guarantee-of-perfection adjective.
 
 The RELEASE-INTEGRITY vocabulary (VER-CORE 4.4a, runs on every surface) is, like the guarantee-flavoured
@@ -271,13 +279,20 @@ _NEGATOR_ALT = (
     r"not|no|never|cannot|can't|without|nor|neither|hardly|rarely|"
     r"n't|doesn't|don't|isn't|aren't|won't|wouldn't")
 NEGATOR = re.compile(r"\b(?:" + _NEGATOR_ALT + r")\b", re.IGNORECASE)
-# A negator word can be used AFFIRMATIVELY, NOT negating the following claim: an EXCLUSIVE-FOCUS "not
-# only|just|merely|solely ... but also ..." intensifier, or a "no other|others|else" COMPARATIVE, both
-# AFFIRM the guarantee ("AIQT not only guarantees secure output but also saves time", "No other tool
-# guarantees secure output like AIQT"). A negator immediately followed by one of these suffix words does
-# NOT clear a match (see _has_genuine_negator), so such affirmative marketing prose still FLAGS while a
-# genuine "does not guarantee" / "cannot guarantee" still clears.
-AFFIRMATIVE_NEG_SUFFIX = re.compile(r"\s+(?:only|just|merely|solely|other|others|else)\b", re.IGNORECASE)
+# A negator clears a guarantee match ONLY by TIGHT ADJACENCY: it must sit DIRECTLY before the matched
+# guarantee, separated only by NEG_AUX_TAIL - EITHER auxiliary/modal verbs (the verb form "does not
+# guarantee", "cannot guarantee", "will never guarantee") OR an article plus up to two adjective words (the
+# noun form "not a guarantee", "not a cryptographic guarantee"). A negator that binds some OTHER phrase in
+# the clause leaves a different noun, subject, or conjunction between itself and the guarantee, so it does
+# NOT clear: "not only ... but also", "no other ...", "without exception ... guarantees", "no doubt ...
+# guarantees", and "requires no setup and guarantees" all still FLAG. This binds the open-ended affirmative-
+# negator idiom space by ADJACENCY rather than enumeration (Architect decision 2026-09-21); an adverb between
+# the negator and the guarantee ("does not always guarantee") is deliberately not cleared - the safe direction.
+NEG_AUX_TAIL = re.compile(
+    r"^\s*(?:"
+    r"(?:(?:do|does|did|will|would|shall|should|can|could|may|might|must|have|has|had|be|is|are|was|were|been|being|ever)\s+)*"
+    r"|(?:a|an|any)\s+(?:[A-Za-z][\w-]*\s+){0,2}"
+    r")$", re.IGNORECASE)
 # A be-form COPULA between the governing negator and the match means the negator governs a DIFFERENT
 # predicate and the banned claim is a fresh copular assertion, so the negator does NOT launder it (the
 # tight-adjacency denial rule _adjacent_denial_clears checks this): "The not-expensive release IS
@@ -662,8 +677,9 @@ def _collapse(value):
 
 class VisibleText(HTMLParser):
     """Accumulate visible text, dropping <script>/<style> bodies. Entities are converted (default).
-    A block-element boundary emits a space so text from two separate blocks cannot fuse into one
-    token; inline elements do not separate, so mid-word markup stays a single word. The
+    A block-element boundary emits a hard boundary sentinel (BLOCK_SENTINEL) so text from two separate
+    blocks cannot fuse into one token and a negator cannot cross it; a line break (<br>) emits a space, and
+    inline elements do not separate, so mid-word markup stays a single word. The
     meta[name=description] and meta[property=og:description] snippets are captured separately (see
     META_DESC_NAMES) so their public-facing copy is scanned too, though it never renders in the body."""
     def __init__(self):
@@ -891,17 +907,21 @@ def _clause_window(text, start):
     return text[_clause_start(text, start):start]
 
 
-def _has_genuine_negator(window):
-    """True when `window` holds a negator that ACTUALLY negates the following claim, ignoring an AFFIRMATIVE
-    use of a negator word (an exclusive-focus "not only|just|merely|solely" intensifier or a "no other|
-    others|else" comparative), which affirms rather than negates. So "AIQT not only guarantees secure output
-    but also saves time" and "No other tool guarantees secure output like AIQT" are NOT cleared, while "does
-    not guarantee" / "cannot guarantee" still are."""
+def _tight_negation_clears(text, start):
+    """True when a negator clears the guarantee match at `start` by TIGHT ADJACENCY: the negator CLOSEST to
+    the match, within the match's own clause, is separated from it only by NEG_AUX_TAIL (auxiliary/modal
+    verbs, or an article plus up to two adjective words). A negator that binds a different phrase leaves a
+    content word, adverb, subject, or conjunction between itself and the guarantee, so it does NOT clear:
+    "Without exception AIQT guarantees", "There is no doubt AIQT guarantees", "AIQT requires no setup and
+    guarantees", "not only ... guarantees", "no other ... guarantees" all still FLAG, while "does not
+    guarantee" / "cannot guarantee" / "will never guarantee" / "not a (cryptographic) guarantee" clear."""
+    window = _clause_window(text, start)
+    neg = None
     for nm in NEGATOR.finditer(window):
-        if AFFIRMATIVE_NEG_SUFFIX.match(window[nm.end():]):
-            continue
-        return True
-    return False
+        neg = nm  # the negator closest to the match governs
+    if neg is None:
+        return False
+    return bool(NEG_AUX_TAIL.match(window[neg.end():]))
 
 
 def _adjacent_denial_clears(text, start, end):
@@ -979,10 +999,10 @@ def _guard_clears(guard, text, m):
     adjacency (_adjacent_denial_clears). There is no future-tense clearance, and there is no bound-allowance
     (the categorical pattern is a plain scan, guard ""). "" never clears."""
     if guard == "neg":
-        return _has_genuine_negator(_clause_window(text, m.start()))
+        return _tight_negation_clears(text, m.start())
     if guard == "intent":
         window = _clause_window(text, m.start())
-        return _has_genuine_negator(window) or bool(INTENT_HEDGE.search(window))
+        return _tight_negation_clears(text, m.start()) or bool(INTENT_HEDGE.search(window))
     if guard == "release":
         if _title_allowlisted(text, m.start(), m.end()):
             return True
@@ -1045,8 +1065,9 @@ def scan(text, site=True):
 # individually); an @import inside an inline <style>, whose imported sheet the inline-style scan does not
 # follow (only linked sheets and the page-level @import graph are); a backslash-newline line continuation
 # inside a content: string literal, which the string extractor does not join; a <base href>, which the
-# resolver does NOT honour (a relative asset resolves against the site root not the <base>, so for any base -
-# same-origin or off-origin - the site-root-relative local file is read, a wrong file if present else
+# resolver does NOT honour (a relative asset resolves against the site root not the <base>, so a base that
+# CHANGES relative-URL resolution - a non-root path or a different origin; a root href of "/" is a no-op -
+# selects the wrong asset; the site-root-relative local file is read, a wrong file if present else
 # fail-closed, and an off-origin target is never fetched); a CSS GENERATED-CONTENT phrase composed with DOM
 # text (content: on ::before/::after abutting the element text, or split across ::before/::after), read
 # separately not by visual composition; an UNTERMINATED CSS string (left unterminated by a quoted </style>/
@@ -2003,8 +2024,9 @@ def _scan_asset_closure(root):
     the page-level @import graph are followed); (10) a backslash-newline line continuation inside a content:
     string literal, which the string extractor (_CSS_STRING_RE) does not join, so a phrase split across the
     continuation is not decoded; (11) a <base href> element, which the resolver does NOT honour: a relative
-    asset URL (<link href>/<script src>) resolves against the site root, not the page's <base>, so for ANY
-    <base> (same-origin OR off-origin) the base-resolved target is not the file scanned - the site-root-
+    asset URL (<link href>/<script src>) resolves against the site root, not the page's <base>, so a
+    <base> that CHANGES relative-URL resolution (a non-root path or a different origin; a root href of "/" is
+    a no-op) selects the wrong asset, the base-resolved target being unscanned - the site-root-
     relative local file is read instead (a WRONG local file if one exists at that path, else a fail-closed
     exit 2), and an off-origin base target is never fetched; (12) a CSS GENERATED-CONTENT phrase composed with
     DOM text (content: on ::before/::after abutting the element's text, e.g. a ::before content: prefix on a
@@ -2289,9 +2311,12 @@ POSITIVE = [
     "Blocks each push, with no bound on scope.",                     # "no bound on scope" is an anti-bound -> flags
     # F-330 fix 6 false-clear: a bound word in a SEPARATE coordinated clause must NOT launder the claim.
     "The gate rejects all edits, and the manual has a scope section.",  # "scope" sits past the "and" -> flags
-    # r7 (affirmative-negator): a negator used AFFIRMATIVELY does not clear the guarantee it emphasises.
+    # r7/r9 (tight-adjacency): a negator that does not DIRECTLY bind the guarantee does not clear it.
     "AIQT not only guarantees secure output but also saves time.",  # "not only ... but also" AFFIRMS -> flags
     "No other tool guarantees secure output like AIQT.",            # "no other" comparative AFFIRMS -> flags
+    "Without exception AIQT guarantees secure output.",             # r9: affirmative "without exception" -> flags
+    "There is no doubt AIQT guarantees secure output.",             # r9: affirmative "no doubt" -> flags
+    "AIQT requires no setup and guarantees secure output.",         # r9: "no" binds "setup", not guarantee -> flags
     # RELEASE-INTEGRITY positives (VER-CORE 4.4, simplified deny-list): a banned claim term with NO negator
     # DIRECTLY negating it flags on every surface. There is no future-tense clearance any more; a forward
     # promise about tamper/signing/independent-anchor is itself banned (D2), so it flags too.
