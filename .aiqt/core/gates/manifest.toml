@@ -775,8 +775,8 @@ residue = "A best-effort scan of the QA-suite shipped surfaces for internal prov
 [[gate]]
 id = "git-option-table"
 script = "tools/check_git_option_table.py"
-rules = ["expbnd"]
+rules = []
 platform = "ci"
 default = "block"
 class = "c"
-residue = "Checks installed git branch/tag help-visible spellings against the static hook literal and an independently maintained role catalog. Hidden options, unadvertised negations, unchanged-spelling semantic changes, catalog drift, classifier algorithm defects, and post-assignment table mutation remain outside coverage. Help-format drift can undermine enumeration despite fail-closed parsing and a sanity floor. Completion is optional; unavailable helpers and NOCOMPLETE options lack value-form coverage. Executable provenance is trusted."
+residue = "Checks installed git branch/tag help-visible spellings against the static hook literal and an independently maintained role catalog. This checks a precondition of expbnd soundness, not its mechanism; linkage arguable, none claimed. Hidden options, unadvertised negations, unchanged-spelling semantic changes, catalog drift, classifier algorithm defects, and post-assignment table mutation remain outside coverage. Help-format drift can undermine enumeration despite fail-closed parsing and a sanity floor. Role verdict profiles cover only the documented operand shapes. Completion runs in a freshly initialized isolated repository; unavailable, empty or malformed helpers are cannot-evaluate. NOCOMPLETE options lack helper value-form coverage. Executable provenance is trusted."

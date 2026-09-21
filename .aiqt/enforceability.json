@@ -444,16 +444,7 @@
     {
       "corpus-id": "expbnd",
       "family": "aiqt",
-      "gates": [
-        {
-          "class": "c",
-          "default": "block",
-          "id": "git-option-table",
-          "platform": "ci",
-          "residue": "Checks installed git branch/tag help-visible spellings against the static hook literal and an independently maintained role catalog. Hidden options, unadvertised negations, unchanged-spelling semantic changes, catalog drift, classifier algorithm defects, and post-assignment table mutation remain outside coverage. Help-format drift can undermine enumeration despite fail-closed parsing and a sanity floor. Completion is optional; unavailable helpers and NOCOMPLETE options lack value-form coverage. Executable provenance is trusted.",
-          "script": "tools/check_git_option_table.py"
-        }
-      ],
+      "gates": [],
       "hooks": [
         {
           "class": "b",
@@ -493,7 +484,7 @@
         }
       ],
       "source": ".aiqt/core/rules/integ-explicit-binding-over-ambient-context.md",
-      "status": "gate-linked"
+      "status": "hook-linked"
     },
     {
       "corpus-id": "fndfix",

@@ -6,19 +6,23 @@ Run with: python3 -I -B tools/check_git_option_table.py [--root DIR]
 Exit: 0 clean within scope; 1 drift finding; 2 cannot-evaluate.
 
 Primary input is git <sub> -h, stdout plus stderr, status 129. Completion
-is optional and only adds value-form checks. No hook code is imported.
+adds required value-form checks in a fresh isolated repository. Unavailable,
+empty or malformed completion is cannot-evaluate. No hook code is imported.
 
 Residuals: only branch/tag and help-visible options are enumerated. Hidden
 options and unadvertised negations can escape membership checking. Unchanged
 spellings can change semantics without detection. The maintained role catalog
 can itself drift. Help-format changes can defeat enumeration; recognizable
 malformations fail closed, but the sanity floor cannot prove completeness.
-NOCOMPLETE options and an unavailable helper lack the value-form layer.
+NOCOMPLETE options lack the helper value-form layer. Role verdict profiles
+cover the operand shapes documented below, not every command combination.
 This does not verify the classifier algorithm, dynamic table mutation, or
 the provenance of the git executable selected from PATH.
 """
 import argparse
 import ast
+import contextlib
+import io
 import os
 import re
 import shutil
@@ -35,7 +39,7 @@ LONG_NAME = re.compile(r"--[a-z][a-z0-9-]*\Z")
 SHORT_NAME = re.compile(r"-[A-Za-z0-9]\Z")
 HELP_OPTION = re.compile(
     r"(?<![\w-])(?:--(\[no-\])?([a-z][a-z0-9-]*)|(-[A-Za-z0-9]))"
-    r"(?=$|[\s,=\[<])"
+    r"(?=$|[\s,=\[<\]|)])"
 )
 SHORT_FIELDS = {
     "short_write": "W", "short_list": "L",
@@ -44,11 +48,32 @@ SHORT_FIELDS = {
 LONG_ROLES = frozenset("WLVFDOR")
 VALUE_ROLES = frozenset("WFD")
 
+# Derived from _git_ref_cmd_mutating and _short_cluster_verdict in SOURCE_REL.
+# Columns: OPTION; OPTION name; OPTION value name; OPTION=value;
+# OPTION=value name; OPTION -- name. True is MUTATING, False is READ.
+# No unconditional R/W mapping exists: consuming a value or enabling list mode
+# can hide a creation operand. L/V share verdicts; N shares these bare-option
+# verdicts but additionally consumes attached decimal digits in short clusters.
+ROLE_VERDICTS = {
+    "W": (True, True, True, True, True, True),
+    "L": (False, False, False, True, True, False),
+    "V": (False, False, False, True, True, False),
+    "F": (False, False, False, False, False, False),
+    "D": (True, False, True, False, True, True),
+    "O": (False, True, True, False, True, True),
+    "R": (False, True, True, True, True, True),
+    "N": (False, False, False, True, True, False),
+}
+
 # Independent safety catalog, not copied or inferred at runtime from the hook.
-# W means require the hook's immediate MUTATING outcome. R means independently
-# known read-neutral for this check, not necessarily the hook's literal R role.
-# A read-neutral modifier can accompany creation; operand handling still belongs
-# to the classifier. In particular create-reflog does not itself select creation.
+# Each entry selects the expected classifier role profile from git semantics:
+# W: mutation/control, conservatively immediate MUTATING; L/V: list/verify;
+# F: filter that implies listing and consumes a value; D: required display value
+# without list mode; O: optional attached value; R: no value or list mode;
+# N: optional attached decimal and list mode. W over-roles always remain safe.
+# These are safety profiles, not claims that every accepted git invocation has
+# that effect. For example show-current is conservatively R, and cancelled
+# actions are W. Display modifiers and create-reflog do not imply list mode.
 #
 # B: git v2.53.0 builtin/branch.c, cmd_branch options and action dispatch:
 # https://raw.githubusercontent.com/git/git/v2.53.0/builtin/branch.c
@@ -74,13 +99,13 @@ ROLE_CATALOG = {
     ("branch", "-u"): "W",  # B: upstream configuration.
     ("branch", "--unset-upstream"): "W",  # B: removes upstream.
     ("branch", "--no-unset-upstream"): "W",  # B/P: upstream control.
-    ("branch", "--color"): "R",  # B: display.
+    ("branch", "--color"): "O",  # B: display.
     ("branch", "--no-color"): "R",  # B/P: display.
     ("branch", "--remotes"): "R",  # B: selection.
     ("branch", "-r"): "R",  # B: selection.
-    ("branch", "--contains"): "R",  # B: filter.
-    ("branch", "--no-contains"): "R",  # B: inverse filter.
-    ("branch", "--abbrev"): "R",  # B: display.
+    ("branch", "--contains"): "F",  # B: filter.
+    ("branch", "--no-contains"): "F",  # B: inverse filter.
+    ("branch", "--abbrev"): "O",  # B: display.
     ("branch", "--no-abbrev"): "R",  # B/P: display.
     ("branch", "--all"): "R",  # B: selection.
     ("branch", "-a"): "R",  # B: selection.
@@ -98,9 +123,9 @@ ROLE_CATALOG = {
     ("branch", "--no-copy"): "W",  # B/P: action cancellation.
     ("branch", "-c"): "W",  # B: copy.
     ("branch", "-C"): "W",  # B: forced copy.
-    ("branch", "--list"): "R",  # B: list mode.
+    ("branch", "--list"): "L",  # B: list mode.
     ("branch", "--no-list"): "W",  # B/P: cancels list.
-    ("branch", "-l"): "R",  # B: list mode.
+    ("branch", "-l"): "L",  # B: list mode.
     ("branch", "--show-current"): "R",  # B: display.
     ("branch", "--no-show-current"): "W",  # B/P: cancels action.
     ("branch", "--create-reflog"): "R",  # B: creation modifier.
@@ -110,28 +135,28 @@ ROLE_CATALOG = {
     ("branch", "--force"): "W",  # B: mutation override.
     ("branch", "--no-force"): "W",  # B/P: mutation control.
     ("branch", "-f"): "W",  # B: mutation override.
-    ("branch", "--merged"): "R",  # B: filter.
-    ("branch", "--no-merged"): "R",  # B: inverse filter.
-    ("branch", "--column"): "R",  # B: display.
+    ("branch", "--merged"): "F",  # B: filter.
+    ("branch", "--no-merged"): "F",  # B: inverse filter.
+    ("branch", "--column"): "O",  # B: display.
     ("branch", "--no-column"): "R",  # B/P: display.
-    ("branch", "--sort"): "R",  # B: sorting.
+    ("branch", "--sort"): "D",  # B: sorting.
     ("branch", "--no-sort"): "R",  # B/P: sorting.
-    ("branch", "--points-at"): "R",  # B: filter.
+    ("branch", "--points-at"): "F",  # B: filter.
     ("branch", "--no-points-at"): "W",  # B/P: clears filter.
     ("branch", "--ignore-case"): "R",  # B: matching.
     ("branch", "--no-ignore-case"): "R",  # B/P: matching.
     ("branch", "-i"): "R",  # B: matching.
     ("branch", "--recurse-submodules"): "W",  # B: recursive creation.
     ("branch", "--no-recurse-submodules"): "W",  # B/P: creation control.
-    ("branch", "--format"): "R",  # B: formatting.
+    ("branch", "--format"): "D",  # B: formatting.
     ("branch", "--no-format"): "R",  # B/P: formatting.
-    ("tag", "--list"): "R",  # T: list mode.
-    ("tag", "-l"): "R",  # T: list mode.
-    ("tag", "-n"): "R",  # T: list message lines.
+    ("tag", "--list"): "L",  # T: list mode.
+    ("tag", "-l"): "L",  # T: list mode.
+    ("tag", "-n"): "N",  # T: list message lines.
     ("tag", "--delete"): "W",  # T: deletion.
     ("tag", "-d"): "W",  # T: deletion.
-    ("tag", "--verify"): "R",  # T: verification.
-    ("tag", "-v"): "R",  # T: verification.
+    ("tag", "--verify"): "V",  # T: verification.
+    ("tag", "-v"): "L",  # T: verification.
     ("tag", "--annotate"): "W",  # T: tag creation.
     ("tag", "--no-annotate"): "W",  # T/P: creation control.
     ("tag", "-a"): "W",  # T: tag creation.
@@ -157,21 +182,21 @@ ROLE_CATALOG = {
     ("tag", "-f"): "W",  # T: replacement.
     ("tag", "--create-reflog"): "R",  # T: creation modifier.
     ("tag", "--no-create-reflog"): "R",  # T/P: creation modifier.
-    ("tag", "--column"): "R",  # T: display.
+    ("tag", "--column"): "O",  # T: display.
     ("tag", "--no-column"): "R",  # T/P: display.
-    ("tag", "--contains"): "R",  # T: filter.
-    ("tag", "--no-contains"): "R",  # T: inverse filter.
-    ("tag", "--merged"): "R",  # T: filter.
-    ("tag", "--no-merged"): "R",  # T: inverse filter.
+    ("tag", "--contains"): "F",  # T: filter.
+    ("tag", "--no-contains"): "F",  # T: inverse filter.
+    ("tag", "--merged"): "F",  # T: filter.
+    ("tag", "--no-merged"): "F",  # T: inverse filter.
     ("tag", "--omit-empty"): "R",  # T: display.
     ("tag", "--no-omit-empty"): "R",  # T/P: display.
-    ("tag", "--sort"): "R",  # T: sorting.
+    ("tag", "--sort"): "D",  # T: sorting.
     ("tag", "--no-sort"): "R",  # T/P: sorting.
-    ("tag", "--points-at"): "R",  # T: filter.
+    ("tag", "--points-at"): "F",  # T: filter.
     ("tag", "--no-points-at"): "W",  # T/P: clears filter.
-    ("tag", "--format"): "R",  # T: formatting.
+    ("tag", "--format"): "D",  # T: formatting.
     ("tag", "--no-format"): "R",  # T/P: formatting.
-    ("tag", "--color"): "R",  # T: display.
+    ("tag", "--color"): "O",  # T: display.
     ("tag", "--no-color"): "R",  # T/P: display.
     ("tag", "--ignore-case"): "R",  # T: matching.
     ("tag", "--no-ignore-case"): "R",  # T/P: matching.
@@ -269,28 +294,17 @@ def parse_help(sub, status, stdout, stderr):
     if status != 129 or not re.search(r"^usage: git " + sub + r"\b", text, re.M):
         raise CannotEvaluate("{}: PRIMARY expected usage and exit 129, got {}".format(sub, status))
     options = set()
-    # Include long spellings in usage synopses as well as declaration rows.
-    for negative, name in re.findall(r"--(\[no-\])?([a-z][a-z0-9-]*)", text):
-        options.add("--" + name)
-        if negative:
-            options.add("--no-" + name)
-    rows = 0
-    for line in text.splitlines():
-        # Git's option table has four-space indentation; descriptions may wrap.
-        if not line.lstrip().startswith("-"):
-            continue
-        if not line.startswith("    -"):
-            raise CannotEvaluate("{}: PRIMARY unrecognized option row {!r}".format(sub, line))
-        declaration = re.split(r"\s{2,}", line.strip(), maxsplit=1)[0]
+
+    def collect(declaration, strict=False):
         matches = list(HELP_OPTION.finditer(declaration))
-        if not matches or matches[0].start() != 0:
-            raise CannotEvaluate("{}: PRIMARY malformed row {!r}".format(sub, line))
-        # Every option-looking token in the declaration must have been parsed.
-        starts = {match.start() for match in matches}
-        for token in re.finditer(r"(?<![\w-])-", declaration):
-            if token.start() not in starts:
-                raise CannotEvaluate("{}: PRIMARY unparsed spelling {!r}".format(sub, declaration))
-        rows += 1
+        if strict:
+            if not matches or matches[0].start() != 0:
+                raise CannotEvaluate("{}: PRIMARY malformed row {!r}".format(sub, declaration))
+            starts = {match.start() for match in matches}
+            for token in re.finditer(r"(?<![\w-])-", declaration):
+                if token.start() not in starts:
+                    raise CannotEvaluate("{}: PRIMARY unparsed spelling {!r}".format(
+                        sub, declaration))
         for match in matches:
             negative, name, short = match.groups()
             if short:
@@ -299,6 +313,27 @@ def parse_help(sub, status, stdout, stderr):
                 options.add("--" + name)
                 if negative:
                     options.add("--no-" + name)
+
+    rows = 0
+    synopsis = False
+    for line in text.splitlines():
+        if re.match(r"^(?:usage:|   or:) git " + sub + r"\b", line):
+            synopsis = True
+        if synopsis:
+            if not line.strip():
+                synopsis = False
+            else:
+                collect(line)
+                continue
+        if not line.lstrip().startswith("-"):
+            continue
+        if not line.startswith("    -"):
+            raise CannotEvaluate("{}: PRIMARY unrecognized option row {!r}".format(sub, line))
+        # Commas join aliases even when padding would otherwise end a column.
+        declaration = re.sub(r",\s+(?=-)", ", ", line.strip())
+        declaration = re.split(r"\s{2,}", declaration, maxsplit=1)[0]
+        collect(declaration, strict=True)
+        rows += 1
     if rows < MIN_OPTIONS or len(options) < MIN_OPTIONS:
         raise CannotEvaluate("{}: PRIMARY empty/below-floor option table".format(sub))
     return options
@@ -307,7 +342,7 @@ def parse_help(sub, status, stdout, stderr):
 def parse_completion(stdout):
     tokens = stdout.split()
     if not tokens:
-        return None
+        raise CannotEvaluate("VALUE-FORM empty completion")
     required = set()
     for token in tokens:
         if token == "--":
@@ -317,24 +352,32 @@ def parse_completion(stdout):
             raise CannotEvaluate("malformed completion token {!r}".format(token))
         if token.endswith("="):
             required.add(option)
+    if not required:
+        raise CannotEvaluate("VALUE-FORM completion has no value forms")
     return required
 
 
 def compare(sub, enumerated, hook, catalog, required=()):
     issues = []
-    for option in sorted(enumerated):
+    for option in sorted(set(enumerated) | set(required)):
         role = hook.get(option)
         if role is None:
             issues.append((1, "{} {}: MEMBERSHIP missing from hook".format(sub, option)))
         known = catalog.get((sub, option))
-        if known not in ("R", "W"):
+        if known not in ROLE_VERDICTS:
             issues.append((2, "{} {}: UNKNOWN ROLE; independent catalog review required".format(
                 sub, option)))
-        elif known == "W" and role is not None and role != "W":
-            issues.append((1, "{} {}: MIS-ROLE catalog W, hook {}".format(sub, option, role)))
+        if role is not None and role not in ROLE_VERDICTS:
+            issues.append((2, "{} {}: UNKNOWN HOOK ROLE {!r}".format(sub, option, role)))
+        elif (known in ROLE_VERDICTS and role in ROLE_VERDICTS and role != "W"
+              and ROLE_VERDICTS[known] != ROLE_VERDICTS[role]):
+            issues.append((1, "{} {}: MIS-ROLE catalog {}, hook {}".format(
+                sub, option, known, role)))
     # The secondary source only adds checks, including any helper-only value form.
     for option in sorted(required):
         role = hook.get(option)
+        if role is not None and role not in ROLE_VERDICTS:
+            continue
         if role not in VALUE_ROLES:
             issues.append((1, "{} {}: VALUE-FORM requires_arg=True, hook {}".format(
                 sub, option, role if role is not None else "MISSING")))
@@ -370,6 +413,20 @@ def _git(executable, cwd, env, *args):
         raise CannotEvaluate("git {}: {}".format(" ".join(args), exc))
 
 
+def init_repo(executable, cwd, env):
+    # Explicit target; no inherited templates or GIT_* repository selection.
+    result = _git(executable, cwd, env, "init", "-q", "--template=", str(cwd))
+    if result.returncode != 0:
+        raise CannotEvaluate("scratch git init failed: {}".format(result.stderr.strip()))
+
+
+def value_forms(executable, cwd, env, sub):
+    result = _git(executable, cwd, env, sub, "--git-completion-helper")
+    if result.returncode != 0:
+        raise CannotEvaluate("{}: VALUE-FORM helper exit {}".format(sub, result.returncode))
+    return parse_completion(result.stdout)
+
+
 def run(root):
     issues = []
     try:
@@ -381,6 +438,7 @@ def run(root):
         executable = str(Path(found).resolve(strict=True))
         with tempfile.TemporaryDirectory(prefix="aiqt-git-options-") as cwd:
             env = _git_env(cwd)
+            init_repo(executable, cwd, env)
             version = _git(executable, cwd, env, "--version")
             if version.returncode != 0 or not re.fullmatch(
                     r"git version [^\r\n]+", version.stdout.strip()):
@@ -397,19 +455,9 @@ def run(root):
                     continue
                 required = None
                 try:
-                    helper = _git(executable, cwd, env, sub, "--git-completion-helper")
+                    required = value_forms(executable, cwd, env, sub)
                 except CannotEvaluate as exc:
-                    print("{}: VALUE-FORM skipped: {}".format(sub, exc))
-                else:
-                    if helper.returncode != 0:
-                        print("{}: VALUE-FORM skipped: helper exit {}".format(sub, helper.returncode))
-                    else:
-                        try:
-                            required = parse_completion(helper.stdout)
-                        except CannotEvaluate as exc:
-                            issues.append((2, "{}: {}".format(sub, exc)))
-                        if required is None:
-                            print("{}: VALUE-FORM unavailable/empty".format(sub))
+                    issues.append((2, "{}: {}".format(sub, exc)))
                 issues.extend(compare(sub, enumerated, hook[sub], ROLE_CATALOG, required or ()))
                 print("{}: PRIMARY spellings: {}".format(sub, " ".join(sorted(enumerated))))
                 if required is not None:
@@ -454,13 +502,13 @@ def self_test():
     check("c repair", 0, {"--delete"}, {"--delete": "W"}, catalog(delete="W"))
     # d: Change H's non-consuming role from R to D; W also safely short-circuits.
     required = parse_completion("--format=")
-    check("d fail", 1, {"--format"}, {"--format": "R"}, catalog(format="R"), required)
-    check("d repair", 0, {"--format"}, {"--format": "D"}, catalog(format="R"), required)
-    check("d conservative", 0, {"--format"}, {"--format": "W"}, catalog(format="R"), required)
+    check("d fail", 1, {"--format"}, {"--format": "R"}, catalog(format="D"), required)
+    check("d repair", 0, {"--format"}, {"--format": "D"}, catalog(format="D"), required)
+    check("d conservative", 0, {"--format"}, {"--format": "W"}, catalog(format="D"), required)
     # e: Extra H members and conservative W over-roles do not cause findings.
     check("e superset", 0, {"--list"}, {"--list": "L", "--future-known": "W"},
-          catalog(list="R"))
-    check("e conservative", 0, {"--list"}, {"--list": "W"}, catalog(list="R"))
+          catalog(list="L"))
+    check("e conservative", 0, {"--list"}, {"--list": "W"}, catalog(list="L"))
     # f: Restore a complete fixture table, exercising stdout and stderr paths.
     good_help = (
         "usage: git branch [<options>]\n\n"
@@ -509,20 +557,91 @@ def self_test():
     case("g repair", 0, lambda: source_code(good_source))
     # h: Add the full write spelling; a read prefix must not satisfy membership.
     e = {"--list", "--list-rewrite"}
-    c = {("branch", "--list"): "R", ("branch", "--list-rewrite"): "W"}
+    c = {("branch", "--list"): "L", ("branch", "--list-rewrite"): "W"}
     check("h fail", 1, e, {"--list": "L"}, c)
     check("h repair", 0, e, {"--list": "L", "--list-rewrite": "W"}, c)
     # Short membership and write-role coverage use the same comparator.
     check("short missing", 1, {"-d"}, {}, {("branch", "-d"): "W"})
     check("short mis-role", 1, {"-d"}, {"-d": "R"}, {("branch", "-d"): "W"})
     check("short repair", 0, {"-d"}, {"-d": "W"}, {("branch", "-d"): "W"})
-    if parse_completion("") is not None:
-        failures.append("empty completion must remain optional")
+    case("empty completion", 2, lambda: (parse_completion(""), 0)[1])
+    case("no value forms", 2, lambda: (parse_completion("--list --"), 0)[1])
     case("malformed completion", 2, lambda: (parse_completion("--bad???"), 0)[1])
+
+    # R2-1: real catalog entries, not fixture copies of the hook table.
+    check("r2 quiet R->D", 1, {"--quiet"}, {"--quiet": "D"}, ROLE_CATALOG)
+    check("r2 format D->F", 1, {"--format"}, {"--format": "F"}, ROLE_CATALOG)
+    check("r2 quiet correct", 0, {"--quiet"}, {"--quiet": "R"}, ROLE_CATALOG)
+    check("r2 format correct", 0, {"--format"}, {"--format": "D"}, ROLE_CATALOG)
+    check("r2 conservative W", 0, {"--quiet"}, {"--quiet": "W"}, ROLE_CATALOG)
+    check("r2 unmapped role", 2, {"--quiet"}, {"--quiet": "X"}, ROLE_CATALOG)
+
+    check("r2 helper-only unknown option", 2, set(), {"--future": "W"}, {}, {"--future"})
+    check("r2 helper-only wrong role", 1, set(), {"--format": "F"},
+          ROLE_CATALOG, {"--format"})
+
+    # R2-3: parser -> comparator, including stdout, stderr and synopsis paths.
+    baseline = {
+        "-l": "L", "--list": "L", "--force": "W", "--no-force": "W",
+        "--format": "D", "--quiet": "R", "--verbose": "R",
+        "--delete": "W", "--no-delete": "W",
+    }
+
+    def short_help_code(text, roles, stderr=False):
+        parsed = parse_help("branch", 129, "" if stderr else text, text if stderr else "")
+        return verdict(compare("branch", parsed, roles, ROLE_CATALOG))
+
+    reordered = good_help + "    --[no-]delete,  -d    delete\n"
+    case("r2 reordered missing short", 1, lambda: short_help_code(reordered, baseline))
+    case("r2 reordered short repair", 0, lambda: short_help_code(
+        reordered, dict(baseline, **{"-d": "W"}), stderr=True))
+    case("r2 reordered short mis-role", 1, lambda: short_help_code(
+        reordered, dict(baseline, **{"-d": "R"})))
+    aliases = good_help + "    -d,  -D, --[no-]delete    delete\n"
+    case("r2 multiple short aliases", 1, lambda: short_help_code(
+        aliases, dict(baseline, **{"-d": "W"})))
+    case("r2 unknown short alias", 2, lambda: short_help_code(
+        good_help + "    --quiet,  -Z    quiet\n", baseline))
+    synopsis = good_help.replace("[<options>]", "[-d]")
+    case("r2 synopsis missing short", 1, lambda: short_help_code(synopsis, baseline))
+    case("r2 synopsis unknown short", 2, lambda: short_help_code(
+        good_help.replace("[<options>]", "[-Z]"), baseline))
+
+    # R2-2: run the production path against a generated hook fixture and real
+    # git. Require the value diagnostic so MIS-ROLE cannot mask a skipped leg.
+    def completion_code():
+        specs = []
+        for sub in SUBCOMMANDS:
+            roles = {opt: role for (cmd, opt), role in ROLE_CATALOG.items() if cmd == sub}
+            longs = {opt: role for opt, role in roles.items() if opt.startswith("--")}
+            longs["--format"] = "R"
+            fields = ["'long': " + repr(longs)]
+            for field, role in SHORT_FIELDS.items():
+                chars = "".join(sorted(opt[1:] for opt, known in roles.items()
+                                       if SHORT_NAME.fullmatch(opt) and known == role))
+                fields.append("{!r}: frozenset({!r})".format(field, chars))
+            specs.append("{!r}: {{{}}}".format(sub, ", ".join(fields)))
+        fixture = "_GIT_REF_SPECS = {" + ", ".join(specs) + "}\n"
+        with tempfile.TemporaryDirectory(prefix="aiqt-git-options-test-") as cwd:
+            root = Path(cwd)
+            path = root / SOURCE_REL
+            path.parent.mkdir(parents=True)
+            path.write_text(fixture, encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = run(root)
+            if code != 1:
+                return code
+            for sub in SUBCOMMANDS:
+                if "{} --format: VALUE-FORM".format(sub) not in err.getvalue():
+                    return 0
+        return 1
+
+    case("r2 initialized helper format D->R", 1, completion_code)
     if failures:
         print("SELF-TEST FAIL:\n  " + "\n  ".join(failures))
         return 1
-    print("SELF-TEST PASS: a-h, short options, parser errors, conservative roles; no git invoked.")
+    print("SELF-TEST PASS: a-h, R2 role profiles, short help and initialized git helpers.")
     return 0
 
 
