@@ -5,9 +5,11 @@ contract surface is registered. Fail-closed: exit 2 (CANNOT-EVALUATE) on a missi
 or a changed source shape that means the contract can no longer be checked; exit 1 (DRIFT) on a concrete
 mismatch; exit 0 clean. Run: python3 -I -B opf/tools/check_opf_init_contract.py [--self-test].
 
-Detection is EXACT, never substring: a constant is matched as a whole module-level line, so a longer
-value (KEEP_SCHEMA = 10 against KEEP_SCHEMA = 1) cannot satisfy it, and the pinned view tuple and the
-frozen limit and reserved-namespace lines are compared in full.
+Detection is SEMANTIC, never a bare substring: a constant is matched as a whole module-level line
+(ignoring trailing comments); the pinned view tuple and the reserved-namespace set are parsed with
+comments stripped and compared by membership (so a commented-out literal does not count); the machine
+store path is checked against the store authority's DEFAULT_MACHINE_SUBDIR; and a roster registration
+must appear on an ACTIVE (non-comment) line, with the live gate present in the repo-root runner and CI.
 """
 import re
 import sys
@@ -38,9 +40,10 @@ FROZEN_LINES = (
     "MAX_IDENTITY_INT = (1 << 64) - 1",
 )
 
-# The reserved-namespace string literals the validator's _RESERVED tuple must carry (the machine store,
-# import staging, archive, and the pointer). The 13 pinned views are checked via the view-tuple compare.
-RESERVED_LITERALS = ('".opf.toml"', '".working/toml"', '".working/imports"', '".working/archive"')
+# The reserved-namespace literals the validator's _RESERVED tuple must carry as MEMBERS (the pointer,
+# import staging, archive; the machine store is checked against DEFAULT_MACHINE_SUBDIR; the 13 views via
+# the view-tuple compare).
+RESERVED_MEMBERS = (".opf.toml", ".working/imports", ".working/archive")
 
 # Every roster surface that must register BOTH the validator self-test and the consistency gate.
 ROSTER_FILES = (
@@ -49,6 +52,8 @@ ROSTER_FILES = (
     "tools/check_opf_standalone_closure.py",
     ".github/workflows/quality.yml",
 )
+# Surfaces where the LIVE consistency gate (invoked without --self-test) must run.
+LIVE_GATE_FILES = ("tools/run_all_checks.sh", ".github/workflows/quality.yml")
 
 
 def _cant(msg):
@@ -77,12 +82,34 @@ def _has_line(text, exact):
     return any(line.split("#", 1)[0].rstrip() == exact for line in text.splitlines())
 
 
-def _view_tuple(text, name):
-    """Extract the ordered quoted names from a `NAME = ( ... )` tuple, or None if not found/parseable."""
+def _quoted_in_tuple(text, name):
+    """The set of double-quoted string literals in the first `NAME = ( ... )` group, comments stripped so
+    a commented-out literal does not count. None if the assignment is absent/unparseable."""
     m = re.search(re.escape(name) + r"\s*=\s*\((.*?)\)", text, re.S)
     if not m:
         return None
-    return tuple(re.findall(r'"([^"]+)"', m.group(1)))
+    body = "\n".join(line.split("#", 1)[0] for line in m.group(1).splitlines())
+    return set(re.findall(r'"([^"]+)"', body))
+
+
+def _ordered_quoted_in_tuple(text, name):
+    """As _quoted_in_tuple but preserving order (for the view-tuple order compare)."""
+    m = re.search(re.escape(name) + r"\s*=\s*\((.*?)\)", text, re.S)
+    if not m:
+        return None
+    body = "\n".join(line.split("#", 1)[0] for line in m.group(1).splitlines())
+    return tuple(re.findall(r'"([^"]+)"', body))
+
+
+def _value_of(text, name):
+    """The double-quoted value of a `NAME = "value"` module assignment (comments ignored), or None."""
+    m = re.search(r"(?m)^" + re.escape(name) + r'\s*=\s*"([^"]+)"', text)
+    return m.group(1) if m else None
+
+
+def _active_line_has(text, needle):
+    """True if `needle` appears on a line whose stripped form does not start with '#' (i.e. not commented)."""
+    return any(needle in line and not line.strip().startswith("#") for line in text.splitlines())
 
 
 def _checks():
@@ -108,16 +135,27 @@ def _checks():
     if "opf-init-keep" not in spec:
         _drift("OPF-INIT-D2B.md does not state the opf-init-keep operation")
 
-    # C-RESERVED: the reserved namespace literals are present in the validator's reserved set.
-    for lit in RESERVED_LITERALS:
-        if lit not in contract:
-            _drift("reserved namespace literal absent from the validator: {}".format(lit))
+    # C-RESERVED: the reserved literals are MEMBERS of the parsed _RESERVED tuple (a commented-out literal
+    # does not count), and the machine store path matches the store authority's DEFAULT_MACHINE_SUBDIR.
+    reserved = _quoted_in_tuple(contract, "_RESERVED")
+    if reserved is None:
+        _drift("_opf_init_contract.py _RESERVED tuple missing or unparseable")
+    for lit in RESERVED_MEMBERS:
+        if lit not in reserved:
+            _drift("reserved namespace not a member of _RESERVED: {}".format(lit))
+    machine = _value_of(store, "DEFAULT_MACHINE_SUBDIR")
+    if machine is None:
+        _cant("_opf_store.py DEFAULT_MACHINE_SUBDIR missing")
+    if (".working/" + machine) not in reserved:
+        _drift("validator machine-store reserved path does not match "
+               "_opf_store DEFAULT_MACHINE_SUBDIR={!r}".format(machine))
 
-    # C-VIEWS: the pinned view tuple in the validator equals _opf_init.py's authority, in order.
-    src_views = _view_tuple(init, "_INITIAL_VIEW_NAMES")
+    # C-KEEP: the frozen operation id is named in the spec (the values are covered by C-FROZEN).
+    # C-VIEWS: the validator's pinned view tuple equals _opf_init.py's authority, in order (comments off).
+    src_views = _ordered_quoted_in_tuple(init, "_INITIAL_VIEW_NAMES")
     if src_views is None:
         _cant("_opf_init.py _INITIAL_VIEW_NAMES missing or unparseable")
-    con_views = _view_tuple(contract, "_INITIAL_VIEWS")
+    con_views = _ordered_quoted_in_tuple(contract, "_INITIAL_VIEWS")
     if con_views is None:
         _drift("_opf_init_contract.py _INITIAL_VIEWS missing or unparseable")
     if con_views != src_views:
@@ -140,24 +178,38 @@ def _checks():
         if "F{:02d}".format(n) not in review:
             _drift("review register missing F{:02d}".format(n))
 
-    # C-RUNNERS: BOTH the validator and the gate are registered in every roster surface (so neither can be
-    # silently dropped from CI, and the workflow is checked directly, not only the shell runners).
+    # C-RUNNERS: BOTH scripts registered on an ACTIVE (non-comment) line in every roster surface; and the
+    # LIVE consistency gate (no --self-test) present in the repo-root runner and the CI workflow.
     for rel in ROSTER_FILES:
         text = _read(rel)
         for script in ("_opf_init_contract.py", "check_opf_init_contract.py"):
-            if script not in text:
-                _drift("{} not registered in {}".format(script, rel))
+            if not _active_line_has(text, script):
+                _drift("{} not actively registered in {}".format(script, rel))
+    for rel in LIVE_GATE_FILES:
+        text = _read(rel)
+        live = any("check_opf_init_contract.py" in line and "--self-test" not in line
+                   and not line.strip().startswith("#") for line in text.splitlines())
+        if not live:
+            _drift("live consistency gate (no --self-test) not registered in {}".format(rel))
 
     sys.stdout.write("PASS check_opf_init_contract: contract/source consistency\n")
     sys.exit(0)
 
 
 def _self_test():
-    # Git-free / source-free: exercise the exact-line matcher and the view-tuple parser on in-memory text.
-    assert _has_line("KEEP_SCHEMA = 1\nX = 2", "KEEP_SCHEMA = 1"), "exact line should match"
+    # Git-free / source-free: exercise the matchers on in-memory text, including the comment-evasion cases.
+    assert _has_line("KEEP_SCHEMA = 1  # comment", "KEEP_SCHEMA = 1"), "exact line ignores comment"
     assert not _has_line("KEEP_SCHEMA = 10\n", "KEEP_SCHEMA = 1"), "substring must NOT match a longer value"
-    assert _view_tuple('_INITIAL_VIEWS = (\n"A.md", "B.md",\n)', "_INITIAL_VIEWS") == ("A.md", "B.md"), "view parse"
-    assert _view_tuple("nope", "_INITIAL_VIEWS") is None, "missing tuple is None"
+    assert _quoted_in_tuple('_RESERVED = (\n".opf.toml",\n".working/toml",\n)', "_RESERVED") == \
+        {".opf.toml", ".working/toml"}, "tuple membership"
+    assert ".x" not in _quoted_in_tuple('_RESERVED = (\n# ".x",\n".y",\n)', "_RESERVED"), \
+        "a commented-out literal must NOT count as a member"
+    assert _ordered_quoted_in_tuple('_INITIAL_VIEWS = (\n"A.md", "B.md",\n)', "_INITIAL_VIEWS") == \
+        ("A.md", "B.md"), "ordered view parse"
+    assert _value_of('DEFAULT_MACHINE_SUBDIR = "toml"  # c', "DEFAULT_MACHINE_SUBDIR") == "toml", "value"
+    assert _active_line_has('run x check_opf_init_contract.py', "check_opf_init_contract.py"), "active line"
+    assert not _active_line_has('# run check_opf_init_contract.py', "check_opf_init_contract.py"), \
+        "a commented registration is not active"
     labels = ["F{:02d}".format(n) for n in range(1, 31)]
     assert labels[0] == "F01" and labels[-1] == "F30" and len(labels) == 30, "F-range"
     assert ACTOR_LINE.count('"') == 8, "actor line shape"

@@ -70,7 +70,7 @@ _RESERVED = (
 ) + tuple(".working/" + v for v in _INITIAL_VIEWS)
 
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f﻿]")
 _HEX_RE = re.compile(r"[0-9a-f]+\Z")
 
 
@@ -153,22 +153,26 @@ def _bad_relpath(p):
     return None
 
 
+_REF_FORBIDDEN = set(" ~^:?*[\\\x7f") | {chr(c) for c in range(0x20)}
+
+
 def _bad_ref(ref):
     """Reason if ref is not a well-formed refs/heads/... name, else None. A conservative subset of
-    git check-ref-format: below refs/heads/, at least one non-empty component, no '..', no '.'/'..'
-    component, no trailing '/' or '.lock', no '@{', no control chars, bounded length."""
+    git check-ref-format: below refs/heads/, no forbidden character (space ~ ^ : ? * [ backslash,
+    control chars, DEL), no '..', no '@{', no '//', no trailing '/' or '.lock', and no component that
+    is empty, starts with '.', or ends with '.' or '.lock'."""
     reason = _bad_string(ref, MAX_STRING_BYTES)
     if reason:
         return reason
     if not ref.startswith("refs/heads/"):
         return "must be under refs/heads/"
+    if any(ch in _REF_FORBIDDEN for ch in ref) or "@{" in ref or ".." in ref or ref.endswith(".lock"):
+        return "malformed ref (forbidden character or sequence)"
     rest = ref[len("refs/heads/"):]
-    if rest == "" or rest.endswith("/") or "//" in rest or ".." in rest or "@{" in rest or "\\" in rest:
+    if rest == "" or rest.endswith("/") or "//" in rest:
         return "malformed ref body"
-    if ref.endswith(".lock"):
-        return "ref may not end with .lock"
     for comp in rest.split("/"):
-        if comp in ("", ".", "..") or comp.endswith(".lock") or comp.startswith("."):
+        if comp in ("", ".", "..") or comp.startswith(".") or comp.endswith(".") or comp.endswith(".lock"):
             return "malformed ref component {!r}".format(comp)
     return None
 
@@ -238,6 +242,8 @@ def _bad_location(loc):
     reason = _bad_string(loc["path"], MAX_STRING_BYTES)
     if reason:
         return "location path: " + reason
+    if not loc["path"].startswith("/"):
+        return "location path must be a non-empty absolute path"
     ident = loc["identity"]
     if type(ident) is not dict or set(ident.keys()) != {"device", "inode"}:
         return "identity keys"
@@ -262,6 +268,8 @@ def _bad_binding(b):
     reason = _bad_string(b["index_path"], MAX_STRING_BYTES)
     if reason:
         return "index_path: " + reason
+    if not b["index_path"].startswith("/"):
+        return "index_path must be a non-empty absolute path"
     # product_prefix is a repository-relative path or "" for the repository root.
     if type(b["product_prefix"]) is not str:
         return "product_prefix must be a string"
@@ -274,7 +282,7 @@ def _bad_binding(b):
     return None
 
 
-def _bad_head(head):
+def _bad_head(head, object_format):
     """Reason if head is not a structurally well-formed closed HEAD union, else None."""
     if type(head) is not dict or "kind" not in head:
         return "head must be an object with a kind"
@@ -283,8 +291,9 @@ def _bad_head(head):
         if set(head.keys()) != {"kind", "oid", "binding"}:
             return "commit head keys"
         oid = head["oid"]
-        if type(oid) is not str or not _HEX_RE.match(oid) or len(oid) not in (40, 64):
-            return "commit oid must be 40 or 64 lowercase hex"
+        if type(oid) is not str or not _HEX_RE.match(oid) \
+                or len(oid) != (40 if object_format == "sha1" else 64):
+            return "commit oid length must match object_format"
         b = head["binding"]
         if type(b) is not dict or "kind" not in b:
             return "commit head binding"
@@ -315,7 +324,7 @@ def _bad_head(head):
 def _bad_inventory(inv):
     """Fail-closed validation of the observed inventory, including per-entry metadata and topology. Return
     a reason string, or None if usable. Never raises."""
-    if type(inv) is not dict or type(inv.get("schema")) is not int or inv.get("schema") != 1 or inv.get("scope") != ".working":
+    if type(inv) is not dict or set(inv.keys()) != {"schema", "scope", "entries"} or type(inv.get("schema")) is not int or inv.get("schema") != 1 or inv.get("scope") != ".working":
         return "inventory must be {schema:1, scope:'.working', entries:[...]}"
     entries = inv.get("entries")
     if type(entries) is not list:
@@ -332,6 +341,8 @@ def _bad_inventory(inv):
         p = e["path"]
         if _bad_relpath(p) is not None:
             return "malformed inventory path"
+        if not p.startswith(".working/"):
+            return "inventory entry path outside .working scope"
         if p in seen:
             return "duplicate inventory path"
         seen.add(p)
@@ -420,7 +431,7 @@ def validate_keep(raw_bytes, *, observed_context):
     reason = _bad_binding(model["binding"])
     if reason is not None:
         return _v("INVALID", "SCHEMA", "binding", reason)
-    reason = _bad_head(model["head"])
+    reason = _bad_head(model["head"], model["binding"]["object_format"])
     if reason is not None:
         return _v("INVALID", "SCHEMA", "head", reason)
 
@@ -433,7 +444,7 @@ def validate_keep(raw_bytes, *, observed_context):
             return _v("CANNOT-EVALUATE", "CONTEXT", key, "missing observation")
     if _bad_binding(observed_context["binding"]) is not None:
         return _v("CANNOT-EVALUATE", "CONTEXT", "binding", "malformed observed binding")
-    if _bad_head(observed_context["head"]) is not None:
+    if _bad_head(observed_context["head"], observed_context["binding"]["object_format"]) is not None:
         return _v("CANNOT-EVALUATE", "CONTEXT", "head", "malformed observed head")
     inv_reason = _bad_inventory(observed_context["inventory"])
     if inv_reason is not None:
@@ -658,7 +669,7 @@ def _run_self_test():
            ctxab, "INVALID")
     expect("K-N20-uncovered-file", canonical_json_bytes(_mk_model(ctxf, [])), ctxf, "INVALID")
     expect("K-N21-binding-mismatch",
-           canonical_json_bytes(_mk_model(ctx0, [], binding=dict(_mk_binding(), object_format="sha256"))),
+           canonical_json_bytes(_mk_model(ctx0, [], binding=dict(_mk_binding(), index_path="/other/.git/index"))),
            ctx0, "CANNOT-EVALUATE")
     expect("K-N22-inv-digest-mismatch",
            canonical_json_bytes(_mk_model(ctx0, [], inventory_digest="sha256:" + "1" * 64)), ctx0,
@@ -710,6 +721,29 @@ def _run_self_test():
         b'"id":"u"', b'"id":"\\ud800"'), ctx0, "INVALID")
     # F5: a non-dict observed_context never raises; it is CANNOT-EVALUATE.
     expect("K-N32-f5-nondict-ctx", canonical_json_bytes(_mk_model(ctx0, [])), None, "CANNOT-EVALUATE")
+
+    # QA-R2 regressions.
+    m_ref = copy.deepcopy(_mk_model(ctx0, []))
+    m_ref["head"]["binding"]["ref"] = "refs/heads/a:b"
+    expect("K-N33-r2-bad-ref-char", canonical_json_bytes(m_ref), ctx0, "INVALID")
+    m_ref2 = copy.deepcopy(_mk_model(ctx0, []))
+    m_ref2["head"]["binding"]["ref"] = "refs/heads/main."
+    expect("K-N34-r2-ref-trailing-dot", canonical_json_bytes(m_ref2), ctx0, "INVALID")
+    m_emp = copy.deepcopy(_mk_model(ctx0, []))
+    m_emp["binding"]["product_root"]["path"] = ""
+    expect("K-N35-r2-empty-location", canonical_json_bytes(m_emp), ctx0, "INVALID")
+    m_oid = copy.deepcopy(_mk_model(ctx0, []))
+    m_oid["head"]["oid"] = "a" * 64
+    expect("K-N36-r2-oid-format-mismatch", canonical_json_bytes(m_oid), ctx0, "INVALID")
+    ctx_scope = {"binding": _mk_binding(), "head": ctx0["head"],
+                 "inventory": {"schema": 1, "scope": ".working", "entries": [_file_entry(".opf.toml")]}}
+    expect("K-N37-r2-inventory-scope", canonical_json_bytes(_mk_model(ctx0, [])), ctx_scope, "CANNOT-EVALUATE")
+    ctx_extra = {"binding": _mk_binding(), "head": ctx0["head"],
+                 "inventory": {"schema": 1, "scope": ".working", "entries": [], "extra": True}}
+    expect("K-N38-r2-inventory-unknown-key", canonical_json_bytes(_mk_model(ctx0, [])), ctx_extra, "CANNOT-EVALUATE")
+    m_c1 = copy.deepcopy(_mk_model(ctx0, []))
+    m_c1["actor"]["id"] = "a\u0080b"
+    expect("K-N39-r2-c1-control", canonical_json_bytes(m_c1), ctx0, "INVALID")
 
     failed = [(lbl, why) for (lbl, ok, why) in checks if not ok]
     for lbl, why in failed:
