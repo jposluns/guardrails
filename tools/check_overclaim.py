@@ -942,7 +942,16 @@ def scan(text, site=True):
 # gated only by a .css filename rather than the HTML stylesheet sink; nested HTML in an <iframe srcdoc>; and
 # (FIX content-ordered-composition) a literal+attr() content composition whose multi-valued attributes exceed
 # the ordered-product cap, past which each attr's values are concatenated in place (a bounded over-approx that
-# adds coverage but does not reproduce every exact cross-value ordered boundary).
+# adds coverage but does not reproduce every exact cross-value ordered boundary). Further DISCLOSED
+# residuals: a pure attr-only composition of two or more adjacent attr() values with no literal (content:
+# attr(a) attr(b)) whose ordered cross-attr boundary is not composed (each attr is still scanned
+# individually); an @import inside an inline <style>, whose imported sheet the inline-style scan does not
+# follow (only linked sheets and the page-level @import graph are); a backslash-newline line continuation
+# inside a content: string literal, which the string extractor does not join; and a malformed RAWTEXT
+# <style>/<script> (a quoted </style> or </script> in the body ends the element and truncates the capture; an
+# unclosed body at end-of-input is not stored). This CSS content-injection asset scan is anchored to the
+# register page (HTML_REL) alone: a CSS content-injection overclaim on the other public pages (site/*.html,
+# opf/site/*.html) is visible-text scanned but not CSS-injection scanned.
 # Runtime-JS DOM text construction, an encoded payload buried in an arbitrary JS string whose location and
 # encoding are not statically declared, and a genuinely off-site (cross-origin) asset a static gate does not
 # fetch are out of static reach as well.
@@ -1572,7 +1581,7 @@ def _scan_css_content_strings(css, where, findings, attr_index=None):
             # (1) nor the per-attr scan just above sees. Build the ORDERED token sequence (string literals
             # CSS-unescaped, attr(NAME) refs resolved to their page values) and scan the composed string.
             # Compose ONLY when the declaration mixes at least one literal AND at least one attr() (pure
-            # cases are already covered). For a multi-valued attribute the exact ordered product is
+            # cases are covered per-token, and the pure-attr ORDERED cross-attr composition is disclosed residual (8)). For a multi-valued attribute the exact ordered product is
             # enumerated when small (<= _CSS_COMPOSE_MAX_COMBOS); past the cap each attr token contributes
             # ALL its values concatenated in place, a bounded over-approximation (DISCLOSED residual).
             tokens = []  # (start, values-in-order); a literal is a single decoded value, an attr its page values
@@ -1880,7 +1889,19 @@ def _scan_asset_closure(root):
     filename rather than the HTML stylesheet sink; (6) nested HTML in an <iframe srcdoc>; and (7) a
     literal+attr() content composition whose multi-valued attributes exceed the ordered-product cap
     (_CSS_COMPOSE_MAX_COMBOS), past which each attr's values are concatenated in place, a bounded
-    over-approximation that adds coverage without reproducing every exact cross-value ordered boundary. Also out of
+    over-approximation that adds coverage without reproducing every exact cross-value ordered boundary; (8) a
+    pure attr-only composition of two or more adjacent attr() values with NO string literal (content: attr(a)
+    attr(b)), whose ordered cross-attr boundary is not composed (composition runs only when a literal AND an
+    attr() are mixed; each attr's values are still scanned individually); (9) an @import inside an inline
+    <style> element, whose imported sheet the inline-style scan does not traverse (only LINKED stylesheets and
+    the page-level @import graph are followed); (10) a backslash-newline line continuation inside a content:
+    string literal, which the string extractor (_CSS_STRING_RE) does not join, so a phrase split across the
+    continuation is not decoded; and (11) a malformed RAWTEXT <style>/<script> body: a quoted </style> (or
+    </script>) sequence inside it ends the element early and truncates the captured body, and an unclosed
+    <style>/<script> body at end-of-input is never stored, so an overclaim placed via these forms escapes the
+    asset scan. SCOPE: this CSS content-injection asset scan is anchored to the register page (HTML_REL,
+    site/enforcement.html) ALONE; a CSS content-injection overclaim on the OTHER public pages (site/*.html,
+    opf/site/*.html) is scanned for VISIBLE TEXT by Collector 1 but NOT for CSS content injection. Also out of
     static reach: runtime-JS DOM construction of marketing text (theme.js building strings at run time); an
     ENCODED payload buried in an ARBITRARY JS string whose location and encoding are not statically declared
     (distinct from a data: URL, which IS decoded); and a genuinely off-site (cross-origin) asset a static
