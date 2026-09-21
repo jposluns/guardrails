@@ -14,10 +14,10 @@ Durable sensitive-tier review register for OPF initialization.
 | F08 | Forged/stale provenance, missing publication evidence, or committed damage cannot authorize empty prior. | PR3/6 | specified - not runtime-verified |
 | F09 | Hidden entries, empty directories, read errors, disappearing entries, and exhausted caps cannot disappear from inventory. | PR4 | specified - not runtime-verified |
 | F10 | Links, special files, unsafe hardlinks, embedded repos/gitlinks, and replaced ancestors refuse unsafe access. | PR3-6 | specified - not runtime-verified |
-| F11 | Closed decisions reject malformed fields, caps, duplicates, overlaps, ghosts, unused choices, and missing coverage. | PR1/4 | specified - not runtime-verified |
+| F11 | Closed decisions reject malformed fields, caps, duplicates, overlaps, ghosts, unused choices, and missing coverage. | PR1/4 | PR1 contract-layer runtime-verified (_opf_init_contract self-test); PR4 apply pending |
 | F12 | Root/HEAD/content/mode/type/group changes invalidate acceptance before adoption. | PR1/4/6 | specified - not runtime-verified |
 | F13 | Plans, proposals, report edits, and blanket consent cannot substitute for explicit attributed acceptance. | PR4/7 | specified - not runtime-verified |
-| F14 | Managed/reserved destination collisions refuse even with identical bytes or generated headers. | PR1/4/6 | specified - not runtime-verified |
+| F14 | Managed/reserved destination collisions refuse even with identical bytes or generated headers. | PR1/4/6 | PR1 contract-layer runtime-verified (_opf_init_contract self-test); PR4/6 apply pending |
 | F15 | After unmanaged adoption, no retained-body reads, staging, or widened exemptions. | PR4/6/7 | specified - not runtime-verified |
 | F16 | Keep worklog entries are deterministic, consecutive, attributed infra; counters agree; no repeated allocation or invented partial import. | PR4/6 | specified - not runtime-verified |
 | F17 | Incompatible changelog and VERSION in worktree/index/HEAD refuse D2b admission. | PR4 | specified - not runtime-verified |

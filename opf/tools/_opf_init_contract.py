@@ -70,7 +70,7 @@ _RESERVED = (
 ) + tuple(".working/" + v for v in _INITIAL_VIEWS)
 
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f﻿]")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ufeff]")
 _HEX_RE = re.compile(r"[0-9a-f]+\Z")
 
 
