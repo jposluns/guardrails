@@ -671,7 +671,8 @@ INLINE_BREAK_TAGS = {"br"}
 # is unavailable), a placeholder on input/textarea (displayed until the field is filled), and a label on
 # option/optgroup (the displayed choice text), and a value on a datalist option (the displayed suggestion),
 # each rendered visible text scanned like meta. DISCLOSED
-# RESIDUAL: title (a hover-only tooltip) and ARIA text alternatives (aria-label / aria-labelledby) are NOT
+# RESIDUAL: title (a hover-only tooltip), ARIA text alternatives (aria-label / aria-labelledby), and
+# media-chrome text such as a <track label> (a subtitle-menu title) are NOT
 # scanned; no other attribute is scanned.
 # FIX B (meta-desc-name-completeness): the site ships Twitter cards, so twitter:description (name=) renders
 # in social previews, and Schema.org uses itemprop="description"; both carry public-facing description copy
@@ -1073,7 +1074,7 @@ def scan(text, site=True):
 # DISCLOSED, not pretended closed: a content: value whose interior ';' or '}' truncates the extractor; a
 # content: value assembled through a var() custom-property indirection; generated content via content:
 # open-quote or content: url(data:image/svg); an escaped ')' inside an @import url(...) target; a stylesheet
-# gated only by a .css filename rather than the HTML stylesheet sink; nested HTML in an <iframe srcdoc>; and
+# gated only by a .css filename rather than the HTML stylesheet sink; nested HTML in an <iframe srcdoc> or via a data: URI in an <iframe src>/<object data> (only link/script data: URIs are scanned); and
 # (FIX content-ordered-composition) a literal+attr() content composition whose multi-valued attributes exceed
 # the ordered-product cap, past which each attr's values are concatenated in place (a DIFFERENT bounded
 # approximation that neither reproduces the exact ordered product nor guarantees catching a match a specific
@@ -2037,7 +2038,9 @@ def _scan_asset_closure(root):
     with an interior ';' or '}' that truncates the extractor; (2) a content: value assembled through a var()
     custom-property indirection; (3) generated content via content: open-quote or content: url(data:image/svg);
     (4) an escaped ')' inside an @import url(evil\\).css) target; (5) a stylesheet gated only by a .css
-    filename rather than the HTML stylesheet sink; (6) nested HTML in an <iframe srcdoc>; and (7) a
+    filename rather than the HTML stylesheet sink; (6) nested HTML in an <iframe srcdoc>, or HTML embedded via a data: URI in an <iframe src> or <object
+    data> (only <link href> and <script src> data: URIs are decoded and scanned, not iframe/object sources);
+    and (7) a
     literal+attr() content composition whose multi-valued attributes exceed the ordered-product cap
     (_CSS_COMPOSE_MAX_COMBOS), past which each attr's values are concatenated in place - a DIFFERENT bounded
     approximation that neither reproduces the exact ordered product NOR guarantees catching a match a specific
