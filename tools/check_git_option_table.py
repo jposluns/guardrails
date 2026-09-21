@@ -20,6 +20,9 @@ options advertised only in that form can escape membership checking.
 NOCOMPLETE options lack the helper value-form layer. Long-role verdict profiles
 cover the operand shapes documented below, not every command combination.
 Short roles are compared exactly, with conservative W over-roles permitted.
+Short roles use the hook's safety buckets W/L/R/N; there is no separate V
+bucket, so a verify option folds into L (verdict-equal to V), and a list-mode
+selection option catalogued as R is a deliberate conservative over-ask, safe.
 This does not verify the classifier algorithm, dynamic table mutation, or
 the provenance of the git executable selected from PATH.
 """
@@ -107,13 +110,13 @@ ROLE_CATALOG = {
     ("branch", "--color"): "O",  # B: display.
     ("branch", "--no-color"): "R",  # B/P: display.
     ("branch", "--remotes"): "R",  # B: selection.
-    ("branch", "-r"): "R",  # B: selection.
+    ("branch", "-r"): "R",  # B: selection; list mode catalogued R (conservative over-ask, safe).
     ("branch", "--contains"): "F",  # B: filter.
     ("branch", "--no-contains"): "F",  # B: inverse filter.
     ("branch", "--abbrev"): "O",  # B: display.
     ("branch", "--no-abbrev"): "R",  # B/P: display.
     ("branch", "--all"): "R",  # B: selection.
-    ("branch", "-a"): "R",  # B: selection.
+    ("branch", "-a"): "R",  # B: selection; list mode catalogued R (conservative over-ask, safe).
     ("branch", "--delete"): "W",  # B: deletion.
     ("branch", "--no-delete"): "W",  # B/P: action cancellation.
     ("branch", "-d"): "W",  # B: deletion.
@@ -161,7 +164,7 @@ ROLE_CATALOG = {
     ("tag", "--delete"): "W",  # T: deletion.
     ("tag", "-d"): "W",  # T: deletion.
     ("tag", "--verify"): "V",  # T: verification.
-    ("tag", "-v"): "L",  # T: verification, no attached numeric value.
+    ("tag", "-v"): "L",  # T: verification; no V short bucket, folds into L (verdict-equal).
     ("tag", "--annotate"): "W",  # T: tag creation.
     ("tag", "--no-annotate"): "W",  # T/P: creation control.
     ("tag", "-a"): "W",  # T: tag creation.
