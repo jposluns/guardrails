@@ -43,6 +43,8 @@ _SUBSET = [
     ("opf-drift-selftest", "check_opf_drift.py", ["--self-test"]),
     ("opf-doctor-selftest", "check_opf_doctor.py", ["--self-test"]),
     ("opf-init-selftest", "check_opf_init.py", ["--self-test"]),
+    ("opf-init-contract-validator-selftest", "_opf_init_contract.py", ["--self-test"]),
+    ("opf-init-contract-check-selftest", "check_opf_init_contract.py", ["--self-test"]),
     ("opf-upgrade-selftest", "check_opf_upgrade.py", ["--self-test"]),
     ("opf-import-selftest", "check_opf_import.py", ["--self-test"]),
     ("opf-ingest-selftest", "check_opf_ingest.py", ["--self-test"]),
