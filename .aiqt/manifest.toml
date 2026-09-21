@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "b441ce8a74b7915e798aeab2f7ab3f424978382688a5a1cad2946e3399d6a005"
+tree-sha256 = "583e75f65d0b1bd0b4cede8e557dd33354543d44d9992923f696c5c528fbaeec"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3061,8 +3061,8 @@ sha256 = "de8bc8150f96a58b3c0e09362ba1d3a491b46e1f85d8c3ece5911fd95ace7d35"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 221918
-sha256 = "e779af12eb757189fd85ee0849c0fe01fdd5a5e8df2a06087d1858e269be1b4d"
+bytes = 228152
+sha256 = "ad1d65cb916fd4bc9e54ddf8722876554d30d77894ada6b8df90b0388d3b6e32"
 
 [[sources]]
 path = "tools/check_portability.py"
@@ -3206,8 +3206,8 @@ sha256 = "83d83418f800350147d842304e168f41249faff506199bdd2862d208877e80b7"
 
 [[sources]]
 path = "tools/gen_enforcement_register.py"
-bytes = 68835
-sha256 = "9b9eefeed37d7638c027394514f3b64bf24c5407ecac1afb9401fb980a5b0565"
+bytes = 71268
+sha256 = "3f865d411bf0a2e54f6de982a4059924070f35e559b4a4350e4c5c0c3aeb92f1"
 
 [[sources]]
 path = "tools/gen_gensrc.py"

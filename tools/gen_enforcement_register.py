@@ -553,11 +553,29 @@ def _md_mechanism_fence(md_text, ref):
     mechanism's heading or its fence is not found before the next mechanism heading."""
     heading = "### `{}`".format(ref)
     lines = md_text.split("\n")
-    try:
-        start = lines.index(heading)
-    except ValueError:
-        return None
     fence_line = re.compile(r"^`{3,}$")
+    # Locate the mechanism heading only OUTSIDE fenced code blocks. A PRIOR mechanism's multi-line residue is
+    # rendered verbatim inside its own fence and may contain a line that equals a later mechanism's
+    # '### `ref`' heading; a fence-unaware lines.index() would select that in-fence occurrence and extract the
+    # wrong (or no) content, falsely rejecting valid input (exit 2, over-rejection). Track fence open/close on
+    # the same exact-marker basis the extraction below uses (a fence opens on a >=3-backtick line alone and
+    # closes on an identical line, so a shorter backtick run inside a longer fence does not close it), and
+    # skip lines inside a fence while scanning for the heading.
+    start = None
+    fence_marker = None
+    for idx, line in enumerate(lines):
+        if fence_marker is not None:
+            if line == fence_marker:
+                fence_marker = None
+            continue
+        if fence_line.match(line):
+            fence_marker = line
+            continue
+        if line == heading:
+            start = idx
+            break
+    if start is None:
+        return None
     j = start + 1
     while j < len(lines) and not fence_line.match(lines[j]):
         if lines[j].startswith("### `"):  # reached the next mechanism without a fence for this one
@@ -1076,6 +1094,29 @@ def self_test_main():
             failures.append("display fidelity: a residue outside its own fence must fail (fix 3)")
         except ValueError:
             pass
+
+        # (a4b) FENCE-UNAWARE HEADING (fenced-heading-not-confused): a PRIOR mechanism's multi-line residue,
+        # rendered verbatim inside its own fence, may contain a line that equals a LATER mechanism's
+        # '### `ref`' heading. The heading lookup must skip fenced blocks; a fence-unaware lines.index() would
+        # select the in-fence occurrence and extract the wrong content (here it runs off the end and returns
+        # None), falsely rejecting a valid page (exit 2, over-rejection). MUTATION: reverting the lookup to
+        # lines.index(heading) makes this return None instead of beta's real residue -> this fails.
+        fenced_md = "\n".join([
+            "### `gate:alpha`",
+            "````",
+            "Alpha residue line one.",
+            "### `gate:beta`",           # a heading-like line that is part of ALPHA's fenced residue
+            "Alpha residue line two.",
+            "````",
+            "",
+            "### `gate:beta`",           # beta's REAL heading, outside any fence
+            "```",
+            "Beta real residue.",
+            "```",
+        ])
+        if _md_mechanism_fence(fenced_md, "gate:beta") != "Beta real residue.":
+            failures.append("fence-unaware heading: the heading lookup must skip fenced blocks so a prior "
+                            "residue containing a heading-like line does not misdirect extraction (fix 3)")
 
         # (b) A drifted ENFORCEMENT.md fails --check (exit 1).
         if md.is_file():

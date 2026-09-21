@@ -617,19 +617,28 @@ class VisibleText(HTMLParser):
         self.meta = []
         self._skip = 0
 
-    def handle_starttag(self, tag, attrs):
+    def _collect_meta(self, tag, attrs):
+        # Collect meta[name=description] / meta[property=og:description] content, the ONE scanned attribute
+        # (see META_DESC_NAMES). Shared by BOTH handle_starttag and handle_startendtag so a self-closing
+        # <meta ... /> (which HTMLParser routes to handle_startendtag) is collected and scanned identically
+        # to a paired <meta ...>, closing the self-closing-meta overclaim bypass.
         if tag == "meta":
             a = dict(attrs)
             key = a.get("name") or a.get("property")
             if key and key.lower() in META_DESC_NAMES and a.get("content"):
                 self.meta.append(a["content"])
+
+    def handle_starttag(self, tag, attrs):
+        self._collect_meta(tag, attrs)
         if tag in SKIP_TEXT_TAGS:
             self._skip += 1
         elif tag in BLOCK_TAGS:
             self.chunks.append(" ")
 
     def handle_startendtag(self, tag, attrs):
-        # a self-closing void block element (e.g. <br/>, <hr/>) still separates
+        # a self-closing void block element (e.g. <br/>, <hr/>) still separates, and a self-closing
+        # <meta ... /> still carries public-facing description copy that must be scanned (via _collect_meta)
+        self._collect_meta(tag, attrs)
         if tag in BLOCK_TAGS:
             self.chunks.append(" ")
 
@@ -1640,27 +1649,20 @@ def _open_regular_nofollow(path, label):
     return fd, st
 
 
-def _regular_identity(path, label):
-    """The (st_dev, st_ino) identity of `path` taken from a VALIDATED no-follow descriptor (FIX B, GER-1 round
-    17). Opens through _open_regular_nofollow, so a symlink final component or a non-regular object FAILS
-    CLOSED (_FailClosed) BEFORE any identity is returned; the collector dedups on THIS identity, obtained after
-    the no-follow validation, rather than on a pre-open path resolve that follows a link past the no-follow
-    read."""
-    fd, st = _open_regular_nofollow(path, label)
-    os.close(fd)
-    return (st.st_dev, st.st_ino)
-
-
 def _read_regular_bounded(path, label, limit):
     """Open `path` ONCE with no-follow, non-blocking semantics (via _open_regular_nofollow), confirm the OPENED
     descriptor is a REGULAR file, and read at most limit+1 bytes FROM THAT DESCRIPTOR, so the ceiling is
     enforced BY CONSTRUCTION on the object actually opened, never on a name stat()'d in a separate call (FIX 1,
-    GER-1 round 16). Returns the raw bytes; the caller decodes. O_NOFOLLOW rejects a symlink final component
-    (ELOOP), O_NONBLOCK stops a FIFO/device open from blocking (FIX A, round 17), the fstat rejects a
-    non-regular object, and the limit+1 read bounds even a regular file whose reported size lies. A symlink,
-    non-regular file, or over-limit read is _FailClosed (SECA, check-fails-closed-on-unreadable)."""
+    GER-1 round 16). Returns ((st_dev, st_ino), data): the (st_dev, st_ino) IDENTITY fstat'd from the SAME
+    descriptor the bytes are read from, and the raw bytes; the caller dedups on that identity and decodes the
+    bytes. Binding identity and read to one open closes a TOCTOU where an attacker swaps the target regular
+    file between a separate identity open and a read open, so a file deduped on file A's identity is scanned as
+    file B (both passing O_NOFOLLOW + S_ISREG). O_NOFOLLOW rejects a symlink final component (ELOOP),
+    O_NONBLOCK stops a FIFO/device open from blocking (FIX A, round 17), the fstat rejects a non-regular
+    object, and the limit+1 read bounds even a regular file whose reported size lies. A symlink, non-regular
+    file, or over-limit read is _FailClosed (SECA, check-fails-closed-on-unreadable)."""
     safe = _bounded_label(label)
-    fd, _st = _open_regular_nofollow(path, label)
+    fd, st = _open_regular_nofollow(path, label)
     try:
         chunks, remaining = [], limit + 1
         while remaining > 0:
@@ -1678,7 +1680,7 @@ def _read_regular_bounded(path, label, limit):
     data = b"".join(chunks)
     if len(data) > limit:
         raise _FailClosed("register {} exceeds the {}-byte pre-read ceiling".format(safe, limit))
-    return data
+    return (st.st_dev, st.st_ino), data
 
 
 def _read_bounded(path, label):
@@ -1687,7 +1689,7 @@ def _read_bounded(path, label):
     opened descriptor before the body is decoded (FIX 1/3, GER-1 round 16; supersedes the r15 stat-then-read
     ceiling). `label` names the offending surface without echoing its contents (_bounded_label). An absent,
     unreadable, or non-UTF-8 file is fail-closed, never a silent skip (check-fails-closed-on-unreadable)."""
-    data = _read_regular_bounded(path, label, _ASSET_MAX_BYTES)
+    _ident, data = _read_regular_bounded(path, label, _ASSET_MAX_BYTES)
     try:
         return data.decode("utf-8")
     except UnicodeError as exc:
@@ -1844,22 +1846,29 @@ class _FailClosed(Exception):
     """A required surface is absent, unwalkable, or of the wrong type; the caller maps this to exit 2."""
 
 
-def _scan_surface(path, rel, site, findings):
+def _scan_surface(path, rel, site, findings, scanned):
     """Read a required non-HTML surface and scan it. Descriptor-bound (FIX 2, GER-1 round 16): open once with
     no-follow, require a regular file, and cap the read at _ASSET_MAX_BYTES on the OPENED descriptor, so a
     roster or registered-output surface (e.g. the textual gensrc target site/downloads/aiqt-instructions.txt,
     referenced as a script asset) can no longer be loaded whole before any bound applies. 4 MiB is the same
     ceiling the asset closure uses; the largest real registered output is ~0.5 MiB, so it clears the bound ~8x
     over. A symlink, non-regular file, or over-ceiling surface is _FailClosed (via _read_regular_bounded); a
-    UTF-8 decode failure stays a FINDING (the surface exists but is unreadable as text)."""
-    data = _read_regular_bounded(path, str(rel), _ASSET_MAX_BYTES)
+    UTF-8 decode failure stays a FINDING (the surface exists but is unreadable as text). Identity and read are
+    bound to ONE open: the (st_dev, st_ino) identity comes from the SAME descriptor the bytes are read from,
+    and a surface whose identity is already in `scanned` is skipped BEFORE scanning (race-free dedup, closing
+    the two-open TOCTOU). Returns the identity so the caller need not re-open to dedup."""
+    ident, data = _read_regular_bounded(path, str(rel), _ASSET_MAX_BYTES)
+    if ident in scanned:  # already scanned by an earlier collector, same inode; dedup on the read fd's identity
+        return ident
+    scanned.add(ident)
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         findings.append("{}: could not read as UTF-8".format(rel))
-        return
+        return ident
     for name, snip in scan(text, site=site):
         findings.append("{}: overclaim [{}] -> {}".format(rel, name, snip))
+    return ident
 
 
 def _collect(root, registry, binary_set):
@@ -1880,12 +1889,14 @@ def _collect(root, registry, binary_set):
             raise _FailClosed("{}/ is a required surface but is absent or not a directory".format(subdir))
         for f in sorted(walk_files(site, suffixes={".html"})):
             rel = f.relative_to(root)
-            scanned.add(_regular_identity(f, "site page {}".format(rel)))
             # Descriptor-bound read (FIX 1, round 16): open once with no-follow, require a regular file, and
             # cap at the pre-read ceiling on the OPENED descriptor, so a symlinked site page (to a device or
             # an oversized file) cannot bypass the ceiling via the old check-then-open stat. A non-UTF-8 body
-            # stays a FINDING (the page exists but is unreadable as text), not a fail-closed skip.
-            raw_bytes = _read_regular_bounded(f, "site page {}".format(rel), _ASSET_MAX_BYTES)
+            # stays a FINDING (the page exists but is unreadable as text), not a fail-closed skip. Identity for
+            # dedup comes from the SAME open the bytes are read from, not a separate _regular_identity open, so
+            # an attacker cannot swap the page between an identity open and a read open (TOCTOU).
+            ident, raw_bytes = _read_regular_bounded(f, "site page {}".format(rel), _ASSET_MAX_BYTES)
+            scanned.add(ident)
             try:
                 raw = raw_bytes.decode("utf-8")
             except UnicodeDecodeError:
@@ -1911,8 +1922,8 @@ def _collect(root, registry, binary_set):
         p = root / name
         if not p.is_file():
             raise _FailClosed("required repo-prose surface {} is absent".format(name))
-        scanned.add(_regular_identity(p, str(p.relative_to(root))))
-        _scan_surface(p, p.relative_to(root), False, findings)
+        # Identity and read are one open inside _scan_surface (race-free dedup); no separate identity open.
+        _scan_surface(p, p.relative_to(root), False, findings, scanned)
 
     # Collector 3: every textual generated output enumerated from the gensrc registry (RELEASE_PATTERNS).
     for entry in registry:
@@ -1934,15 +1945,12 @@ def _collect(root, registry, binary_set):
             rel = f.relative_to(root)
             if str(rel) in binary_set:  # a binary member inside a registered tree
                 continue
-            # Validate through an O_NOFOLLOW descriptor BEFORE the dedup decision (FIX B, round 17): a
-            # registered output that is a FINAL SYMLINK must fail closed, never be silently skipped because
-            # its RESOLVED target was already scanned. Dedup on the validated descriptor's (st_dev, st_ino)
-            # identity, not a pre-open path resolve that follows the link past the no-follow read.
-            ident = _regular_identity(f, str(rel))
-            if ident in scanned:  # already scanned by an earlier collector (e.g. a site page), same inode
-                continue
-            scanned.add(ident)
-            _scan_surface(f, rel, False, findings)
+            # Validate through an O_NOFOLLOW descriptor (FIX B, round 17): a registered output that is a FINAL
+            # SYMLINK must fail closed (ELOOP -> _FailClosed), never be silently skipped because its RESOLVED
+            # target was already scanned. _scan_surface opens once, so the (st_dev, st_ino) identity it dedups
+            # on comes from the SAME descriptor it reads, not a pre-open path resolve that follows the link and
+            # not a separate identity open an attacker could swap the target under (TOCTOU).
+            _scan_surface(f, rel, False, findings, scanned)
 
     return findings
 
@@ -2188,6 +2196,8 @@ def _self_test():
         failures.append("SCOPING: a release-integrity claim should flag on a generated surface too")
 
     failures.extend(_collector_self_test())
+    failures.extend(_single_descriptor_self_test())
+    failures.extend(_self_closing_meta_self_test())
     failures.extend(_page_bound_source_self_test())
     failures.extend(_asset_closure_self_test())
 
@@ -2199,6 +2209,99 @@ def _self_test():
     print("PASS: check_overclaim self-test ({} positive, {} negative, plus scoping and collector cases)"
           .format(len(POSITIVE), len(NEGATIVE)))
     return 0
+
+
+def _single_descriptor_self_test():
+    """FIX 1 (toctou-single-descriptor): the read path binds IDENTITY and BYTES to ONE open, so an attacker
+    cannot swap the target regular file between a separate identity open and a read open (deduped on file A,
+    scanned as file B). _read_regular_bounded returns ((st_dev, st_ino), data) from the SAME descriptor it
+    reads, and every collector dedups on THAT identity, opening each surface exactly once. MUTATIONS:
+    reintroducing the two-open split (a separate identity open before the read) makes the per-page open count
+    2 -> case (b) fails; dropping the identity from the return makes the tuple-unpack fail -> case (a) fails."""
+    import shutil
+    import tempfile
+    failures = []
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-overclaim-onedesc-"))
+    except OSError as exc:
+        return ["ONEDESC: no writable temporary directory: {}".format(exc)]
+    try:
+        # (a) the read returns identity+bytes from a single open, and the identity matches the file's inode.
+        p = tmp / "one.txt"
+        p.write_text("clean prose.\n", encoding="utf-8")
+        ident, data = _read_regular_bounded(p, "one.txt", _ASSET_MAX_BYTES)
+        st = os.stat(p)
+        if ident != (st.st_dev, st.st_ino):
+            failures.append("ONEDESC: _read_regular_bounded must return the read fd's (st_dev, st_ino) identity")
+        if data != b"clean prose.\n":
+            failures.append("ONEDESC: _read_regular_bounded must return the bytes read from that same fd")
+        # (b) collector 1 opens each site page EXACTLY ONCE: identity and read are one descriptor, not two.
+        r = tmp / "root"
+        (r / "site").mkdir(parents=True)
+        (r / "opf" / "site").mkdir(parents=True)
+        for f in REPO_PROSE_ROSTER:
+            (r / f).parent.mkdir(parents=True, exist_ok=True)
+            (r / f).write_text("clean prose.\n", encoding="utf-8")
+        page = r / "site" / "page.html"
+        page.write_text("<html><body>ok</body></html>", encoding="utf-8")
+        global _open_regular_nofollow
+        real_open = _open_regular_nofollow
+        opens = {}
+
+        def _counting_open(path, label):
+            opens[os.fspath(path)] = opens.get(os.fspath(path), 0) + 1
+            return real_open(path, label)
+
+        _open_regular_nofollow = _counting_open
+        try:
+            _collect(r, [], set())
+        finally:
+            _open_regular_nofollow = real_open
+        if opens.get(os.fspath(page)) != 1:
+            failures.append("ONEDESC: collector 1 must open each site page exactly once (got {}), not a "
+                            "separate identity open plus a read open".format(opens.get(os.fspath(page))))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
+def _self_closing_meta_self_test():
+    """FIX 2 (self-closing-meta-scanned): meta description content is collected by BOTH handle_starttag and
+    handle_startendtag (via the shared _collect_meta helper), so an overclaim in a self-closing
+    <meta name="description" content="..."/> (which HTMLParser routes to handle_startendtag) is scanned just
+    like a paired <meta ...>. MUTATION: if handle_startendtag stops collecting meta, the self-closing page
+    captures no description and yields no (meta) finding -> both cases below fail."""
+    import shutil
+    import tempfile
+    failures = []
+    overclaim = 'This is unbreakable and guaranteed.'
+    # (a) direct: a self-closing meta description is captured by VisibleText and scans as an overclaim.
+    parser = VisibleText()
+    parser.feed('<html><head><meta name="description" content="{}"/></head><body>ok</body></html>'
+                .format(overclaim))
+    if not any(scan(m, site=True) for m in parser.meta):
+        failures.append("SELFMETA: a self-closing <meta description/> overclaim must be captured and scanned")
+    # (b) end-to-end via _collect: the overclaim surfaces as a (meta) finding on the site page.
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-overclaim-selfmeta-"))
+    except OSError as exc:
+        return failures + ["SELFMETA: no writable temporary directory: {}".format(exc)]
+    try:
+        r = tmp / "root"
+        (r / "site").mkdir(parents=True)
+        (r / "opf" / "site").mkdir(parents=True)
+        for f in REPO_PROSE_ROSTER:
+            (r / f).parent.mkdir(parents=True, exist_ok=True)
+            (r / f).write_text("clean prose.\n", encoding="utf-8")
+        (r / "site" / "sc.html").write_text(
+            '<html><head><meta name="description" content="{}"/></head><body>ok</body></html>'
+            .format(overclaim), encoding="utf-8")
+        findings = _collect(r, [], set())
+        if not any("sc.html (meta)" in x for x in findings):
+            failures.append("SELFMETA: a self-closing <meta description/> overclaim must be a (meta) finding")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
 
 
 def _collector_self_test():
