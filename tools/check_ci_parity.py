@@ -137,6 +137,8 @@ ALLOWLIST = (
 MANDATORY_MEMBERS = frozenset({
     "tools/check_ci_parity.py",
     "tools/check_ci_parity.py --self-test",
+    "tools/check_git_option_table.py",
+    "tools/check_git_option_table.py --self-test",
 })
 
 INTERPRETERS = frozenset({"python", "python3"})
@@ -1560,6 +1562,8 @@ def self_test():
     common = (
         "python3 -I -B tools/check_ci_parity.py --self-test",
         "python3 -I -B tools/check_ci_parity.py",
+        "python3 -I -B tools/check_git_option_table.py --self-test",
+        "python3 -I -B tools/check_git_option_table.py",
     )
 
     def local_fixture(commands=(), tail=()):
@@ -2177,6 +2181,23 @@ def self_test():
         evaluate(
             local_fixture(("python3 tools/a.py",)),
             ci_fixture(("python3 tools/a.py",)),
+            (),
+        ),
+        1,
+        ("missing-mandatory",),
+    )
+
+    # Both rosters carry the ci-parity mandatory members but omit the git-option-table pair, so the only
+    # findings are missing-mandatory for those two (rosters are otherwise matched, no local/ci-only drift).
+    git_option_absent = (
+        "python3 -I -B tools/check_ci_parity.py --self-test",
+        "python3 -I -B tools/check_ci_parity.py",
+    )
+    case(
+        "19b git-option-table mandatory members",
+        evaluate(
+            local_fixture(git_option_absent),
+            ci_fixture(git_option_absent),
             (),
         ),
         1,

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "cab09dd2ccaba8afd60c7e89c547253a6533b7f050a910e3b70006a04a015863"
+tree-sha256 = "a78e3c734bc0f7385de68106c00c79522b5b4b7d76f60aeb906318d1c7d39716"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -56,8 +56,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 117452
-sha256 = "fc160bca1a2d76d95b7cd8ed5c1e372fef8aa08cedf475f6f2b9f7b8bae74c8b"
+bytes = 118140
+sha256 = "1cd2abd58b5629436f8d7a82d5ae88a0610bf6c46154c287c634525a20785e5c"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -766,8 +766,8 @@ sha256 = "6f6e4138a0b526f6a0aafe2be62d29d57437f9d6c538480e9740e4190dc1f76b"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 296294
-sha256 = "3dae9c5549ea657beac0de168c0e2de235fe1656d1b84a2fc755f0783b836447"
+bytes = 297051
+sha256 = "74ade413938562391558d954a88d2bfd763471fdb52c690bccf7c76176c1412f"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2186,8 +2186,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 38776
-sha256 = "d647b3c95f7b0aced58882e1650b27407bc7c578959fb8d032a9b107244c2bb2"
+bytes = 38820
+sha256 = "f8f3d49785d3ed50bb9bf425d83a2efa4697e73227489d988377f7596d03be71"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2956,8 +2956,8 @@ sha256 = "7f6b2539235b5eea9dc6a61636336ebbdeb7917d1e23f35a6663107ee519ab7b"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 75499
-sha256 = "4bb21be425d51338bf85e7b3e55b7240b328ded2adbd540fe0fb9b231182214d"
+bytes = 76316
+sha256 = "0605ec12e1b70768e75e682165726d45f0274c8a85e21e565f63dab88674f087"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -2983,6 +2983,11 @@ sha256 = "2f574d11ee716e3104b37a34ef5d19fcf89764380c9a54e6cf15cd6649b6aced"
 path = "tools/check_gensrc_failclose.py"
 bytes = 87002
 sha256 = "7a1b9a7b41a59f06e59fa5f264166decdda54342eadf8bbdb9eb188f1ea7a46d"
+
+[[sources]]
+path = "tools/check_git_option_table.py"
+bytes = 25780
+sha256 = "04647bc997a61121106f180a223f9c2edcf0f70aa25d625d4f2eb5380c741934"
 
 [[sources]]
 path = "tools/check_install_page.py"
@@ -3301,8 +3306,8 @@ sha256 = "404252258bdf807b31aa6acfa37bee1c06441587605552280f81476be86c4fea"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 14408
-sha256 = "fe8fc358e054a261d3ca7f0a05de64bdefd3404e1b5e1ca78b8fedfae9299974"
+bytes = 14878
+sha256 = "2b0bff1c5ef7180a3b72aefa1e130689e29c079fdadeb5206df33f0f026540e4"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
