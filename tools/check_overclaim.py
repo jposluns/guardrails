@@ -80,9 +80,13 @@ _tight_negation_clears): it must sit directly before the guarantee, separated on
 (verb form) or an article plus adjectives (noun form), so a negator binding a different phrase does not
 clear. "Without exception ... guarantees", "there is no doubt ... guarantees", "requires no setup and
 guarantees", "not only ... guarantees", and "no other ... guarantees" all still flag; "does not guarantee",
-"cannot guarantee", "will never guarantee", and "not a (cryptographic) guarantee" clear. This binds the
-open-ended affirmative-negator idiom space by adjacency rather than enumeration (an adverb between, e.g.
-"does not always guarantee", is deliberately not cleared - the safe direction for an honesty gate).
+"cannot guarantee", "will never guarantee", and "not a (cryptographic) guarantee" clear. A clearing negator
+itself governed by an EARLIER negator is a DOUBLE NEGATION that affirms, so it does not clear ("not without a
+guarantee" flags). This binds the open-ended affirmative-negator idiom space by adjacency rather than
+enumeration (an adverb between, e.g. "does not always guarantee", is deliberately not cleared - the safe
+direction for an honesty gate). The clearing is best-effort, not a full parse: a RARE trailing scope-reversal
+on a guarantee ("guarantees in name only") or another unusual construction no honest author writes may
+mis-clear, a disclosed residual (the register and site are the project's own honest copy).
 
 The vocabulary, and why each pattern is shaped the way it is (calibrated so the current softened site is
 clean; a pattern that flagged a legitimate line would be too broad):
@@ -639,11 +643,14 @@ SKIP_TEXT_TAGS = {"script", "style"}
 # sentinel is a hard CLAUSE_BOUNDARY). Inline elements (b, em, a, span, code, ...) deliberately do NOT
 # separate, so a phrase marked up mid-word ("<b>guar</b>antee") stays one token.
 BLOCK_TAGS = {
-    "address", "article", "aside", "blockquote", "button", "caption", "dd", "div", "dl", "dt",
+    "address", "article", "aside", "blockquote", "caption", "dd", "div", "dl", "dt",
     "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
-    "hr", "label", "legend", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td",
+    "hr", "legend", "li", "main", "nav", "ol", "p", "pre", "section", "table", "tbody", "td",
     "tfoot", "th", "thead", "tr", "ul",
 }
+# <button> and <label> are INLINE-level (they render in the line flow), NOT block boundaries, so a
+# categorical claim across them ("AIQT catches <label>all mistakes</label>") must fuse and be scanned as one
+# phrase; they are therefore NOT in BLOCK_TAGS and emit nothing (like <b>/<span>).
 # A line break renders as WHITESPACE, not a clause boundary: "<p>catches<br>all mistakes</p>" is ONE visible
 # categorical claim. So <br> emits a single SPACE (not BLOCK_SENTINEL, which would both split the phrase for
 # the categorical patterns and wrongly bound negation), while the true block containers above stay hard
@@ -921,7 +928,11 @@ def _tight_negation_clears(text, start):
         neg = nm  # the negator closest to the match governs
     if neg is None:
         return False
-    return bool(NEG_AUX_TAIL.match(window[neg.end():]))
+    if not NEG_AUX_TAIL.match(window[neg.end():]):
+        return False
+    # CLOSED POLARITY: a clearing negator itself governed by an EARLIER negator (double negation) AFFIRMS, so
+    # it does not clear ("AIQT is not without a guarantee of secure output" -> flags).
+    return not NEGATOR.search(window[:neg.start()])
 
 
 def _adjacent_denial_clears(text, start, end):
@@ -1058,8 +1069,9 @@ def scan(text, site=True):
 # open-quote or content: url(data:image/svg); an escaped ')' inside an @import url(...) target; a stylesheet
 # gated only by a .css filename rather than the HTML stylesheet sink; nested HTML in an <iframe srcdoc>; and
 # (FIX content-ordered-composition) a literal+attr() content composition whose multi-valued attributes exceed
-# the ordered-product cap, past which each attr's values are concatenated in place (a bounded over-approx that
-# adds coverage but does not reproduce every exact cross-value ordered boundary). Further DISCLOSED
+# the ordered-product cap, past which each attr's values are concatenated in place (a DIFFERENT bounded
+# approximation that neither reproduces the exact ordered product nor guarantees catching a match a specific
+# single-value combination would - concatenating an attr's values can MISS a phrase only one value completes). Further DISCLOSED
 # residuals: a pure attr-only composition of two or more adjacent attr() values with no literal (content:
 # attr(a) attr(b)) whose ordered cross-attr boundary is not composed (each attr is still scanned
 # individually); an @import inside an inline <style>, whose imported sheet the inline-style scan does not
@@ -1074,7 +1086,10 @@ def scan(text, site=True):
 # </script> truncation OR by an unclosed body at EOF), which the extractor cannot decode (it needs a closed
 # string); and TEXT HIDDEN from display (hidden attribute, inline display:none/visibility:hidden, or a
 # stylesheet class), which the visible-text scan still collects (visibility is not modelled), so a hidden
-# negator can clear a visible overclaim. (An otherwise malformed RAWTEXT truncation is handled: a
+# negator can clear a visible overclaim; a content: attr(NAME) whose NAME is a NON-SIMPLE identifier (a
+# CSS-escaped dotted/colon name attr(data\.copy), or a non-ASCII name), which the attr-name extractor does
+# not resolve (only a simple ASCII name is); and CSS custom generated content the extractor does not resolve
+# (a counter(n, <custom-style>) whose @counter-style symbols carry the phrase). (An otherwise malformed RAWTEXT truncation is handled: a
 # complete-string quoted end-tag is asset-scanned, trailing text Collector-1 scanned, and an UNCLOSED body at
 # EOF is flushed+scanned at parser close().) This CSS content-injection asset scan is anchored to the
 # register page (HTML_REL) alone: a CSS content-injection overclaim on the other public pages (site/*.html,
@@ -2015,8 +2030,10 @@ def _scan_asset_closure(root):
     (4) an escaped ')' inside an @import url(evil\\).css) target; (5) a stylesheet gated only by a .css
     filename rather than the HTML stylesheet sink; (6) nested HTML in an <iframe srcdoc>; and (7) a
     literal+attr() content composition whose multi-valued attributes exceed the ordered-product cap
-    (_CSS_COMPOSE_MAX_COMBOS), past which each attr's values are concatenated in place, a bounded
-    over-approximation that adds coverage without reproducing every exact cross-value ordered boundary; (8) a
+    (_CSS_COMPOSE_MAX_COMBOS), past which each attr's values are concatenated in place - a DIFFERENT bounded
+    approximation that neither reproduces the exact ordered product NOR guarantees catching a match a specific
+    single-value combination would (concatenating an attr's values into one blob can MISS a phrase only one
+    value completes, e.g. "guaran" attr(a) "ees" where an attr value "t" alone forms "guarantees"); (8) a
     pure attr-only composition of two or more adjacent attr() values with NO string literal (content: attr(a)
     attr(b)), whose ordered cross-attr boundary is not composed (composition runs only when a literal AND an
     attr() are mixed; each attr's values are still scanned individually); (9) an @import inside an inline
@@ -2038,7 +2055,11 @@ def _scan_asset_closure(root):
     COMPLETE rule/closed string, not an unterminated one); and (14) TEXT HIDDEN from display - an element with
     the hidden attribute, inline display:none/visibility:hidden, or hidden via a stylesheet class - which the
     visible-text scan STILL collects (it does not model element visibility), so a hidden negator can clear a
-    visible overclaim and a hidden overclaim can be flagged. A malformed RAWTEXT truncation is otherwise
+    visible overclaim and a hidden overclaim can be flagged; (15) a content: attr(NAME) whose attribute NAME
+    is a NON-SIMPLE identifier - a CSS-escaped name (attr(data\\.copy) for a dotted or colon name) or a
+    non-ASCII name - which the attr-name extractor does not resolve (it reads only the simple leading ASCII
+    identifier; a plain data-x name IS resolved); and (16) CSS custom generated content the extractor does not
+    resolve, e.g. a counter(n, <custom-style>) whose @counter-style symbols carry the phrase. A malformed RAWTEXT truncation is otherwise
     handled: a quoted </style>/</script> that leaves a COMPLETE string is asset-scanned and any trailing text
     Collector-1 scanned, and an UNCLOSED body at end-of-input is FLUSHED and scanned at parser close(). SCOPE: this CSS
     content-injection asset scan is anchored to the register page (HTML_REL,
@@ -2311,7 +2332,8 @@ POSITIVE = [
     "Blocks each push, with no bound on scope.",                     # "no bound on scope" is an anti-bound -> flags
     # F-330 fix 6 false-clear: a bound word in a SEPARATE coordinated clause must NOT launder the claim.
     "The gate rejects all edits, and the manual has a scope section.",  # "scope" sits past the "and" -> flags
-    # r7/r9 (tight-adjacency): a negator that does not DIRECTLY bind the guarantee does not clear it.
+    # r7/r9/r10 (tight-adjacency): a negator that does not DIRECTLY bind the guarantee does not clear it.
+    "AIQT is not without a guarantee of secure output.",            # r10: double negation AFFIRMS -> flags
     "AIQT not only guarantees secure output but also saves time.",  # "not only ... but also" AFFIRMS -> flags
     "No other tool guarantees secure output like AIQT.",            # "no other" comparative AFFIRMS -> flags
     "Without exception AIQT guarantees secure output.",             # r9: affirmative "without exception" -> flags
@@ -2538,6 +2560,12 @@ def _block_boundary_negation_self_test():
     distrib.feed("<p>AIQT does not guarantee security and reliability.</p>")
     if scan(distrib.text(), site=True):
         failures.append("BLOCKNEG: a distributed negation over a shared subject must still clear (no false positive)")
+    # (g) FIX (inline label/button): <label>/<button> are INLINE, not block boundaries, so a categorical claim
+    # across them fuses and FLAGS. MUTATION: label/button back in BLOCK_TAGS splits the phrase -> this fails.
+    lbl = VisibleText()
+    lbl.feed("<p>AIQT catches <label>all mistakes</label>.</p>")
+    if not scan(lbl.text(), site=True):
+        failures.append("BLOCKNEG: a categorical claim across an inline <label> must still fuse and flag")
     return failures
 
 
