@@ -594,8 +594,14 @@ BLOCK_TAGS = {
 # The SEO/social snippets, meta[name=description] and meta[property=og:description], are attribute
 # content that never renders in the page body, so the visible-text scan below does not see them; yet they
 # are public-facing copy a search result or a shared link shows, and an overclaim there ships just as
-# surely. They are the ONE deliberate exception to "an overclaim hidden in an attribute is not flagged":
-# their content is collected and scanned with the same PATTERNS. No other attribute is scanned.
+# surely. They are the FIRST deliberate exception to "an overclaim hidden in an attribute is not flagged":
+# their content is collected and scanned with the same PATTERNS. The SECOND deliberate exception is the
+# displayed-text attribute set (FIX displayed-text-attrs, _collect_displayed_text): an input[type in
+# submit/button/reset] value (the button label), an alt on img/area/input[type=image] (shown when the image
+# is unavailable), a placeholder on input/textarea (displayed until the field is filled), and a label on
+# option/optgroup (the displayed choice text), each rendered visible text scanned like meta. DISCLOSED
+# RESIDUAL: title (a hover-only tooltip) and ARIA text alternatives (aria-label / aria-labelledby) are NOT
+# scanned; no other attribute is scanned.
 META_DESC_NAMES = {"description", "og:description"}
 
 
@@ -623,13 +629,53 @@ class VisibleText(HTMLParser):
         # <meta ... /> (which HTMLParser routes to handle_startendtag) is collected and scanned identically
         # to a paired <meta ...>, closing the self-closing-meta overclaim bypass.
         if tag == "meta":
-            a = dict(attrs)
+            # FIX (meta-dup-first-wins): build the attribute map FIRST-occurrence-wins, exactly like
+            # _AssetClosureParser._open, because HTML5 resolves a DUPLICATE attribute first-wins. A
+            # dict(attrs) is LAST-wins, so <meta name="description" name="viewport" content="OVERCLAIM">
+            # would read key viewport and skip the tag while a browser reads name="description" and ships
+            # the copy, and a second content= would replace the scanned first content.
+            a = {}
+            for k, v in attrs:
+                key = k.lower()
+                if key not in a:          # first occurrence wins, as HTML attribute parsing does
+                    a[key] = v if v is not None else ""
             key = a.get("name") or a.get("property")
             if key and key.lower() in META_DESC_NAMES and a.get("content"):
                 self.meta.append(a["content"])
 
+    def _collect_displayed_text(self, tag, attrs):
+        # FIX (displayed-text-attrs): a DEFINED SET of attributes renders as VISIBLE text (a browser shows
+        # them), so an overclaim placed there ships just as an overclaim in a text node does. They are
+        # collected into self.meta and scanned identically (same site=True patterns). The attribute TYPE is
+        # resolved first-occurrence-wins (the HTML5 rule, as in _collect_meta). Only the label-bearing input
+        # types are scanned; a text/hidden/other input value is USER DATA, not a label, and scanning it
+        # would false-positive, so it is deliberately excluded.
+        a = {}
+        for k, v in attrs:
+            key = k.lower()
+            if key not in a:          # first occurrence wins, as HTML attribute parsing does
+                a[key] = v if v is not None else ""
+        itype = (a.get("type") or "").strip().lower()
+        if tag == "input":
+            if itype in ("submit", "button", "reset") and a.get("value"):
+                self.meta.append(a["value"])       # the button's visible label
+            if itype == "image" and a.get("alt"):
+                self.meta.append(a["alt"])          # shown when the image is unavailable
+            if a.get("placeholder"):
+                self.meta.append(a["placeholder"])  # displayed until the field is filled
+        elif tag == "textarea":
+            if a.get("placeholder"):
+                self.meta.append(a["placeholder"])
+        elif tag in ("img", "area"):
+            if a.get("alt"):
+                self.meta.append(a["alt"])
+        elif tag in ("option", "optgroup"):
+            if a.get("label"):
+                self.meta.append(a["label"])        # the displayed choice text
+
     def handle_starttag(self, tag, attrs):
         self._collect_meta(tag, attrs)
+        self._collect_displayed_text(tag, attrs)
         if tag in SKIP_TEXT_TAGS:
             self._skip += 1
         elif tag in BLOCK_TAGS:
@@ -637,8 +683,10 @@ class VisibleText(HTMLParser):
 
     def handle_startendtag(self, tag, attrs):
         # a self-closing void block element (e.g. <br/>, <hr/>) still separates, and a self-closing
-        # <meta ... /> still carries public-facing description copy that must be scanned (via _collect_meta)
+        # <meta ... /> still carries public-facing description copy that must be scanned (via _collect_meta);
+        # a self-closing <input .../> / <img .../> carries the same displayed-text attributes as its paired form
         self._collect_meta(tag, attrs)
+        self._collect_displayed_text(tag, attrs)
         if tag in BLOCK_TAGS:
             self.chunks.append(" ")
 
@@ -701,7 +749,17 @@ class _AssetClosureParser(HTMLParser):
             self._grab, self._buf = "script", []   # only an inline (src-less) script has a body of record
 
     def handle_startendtag(self, tag, attrs):
-        self._open(tag, attrs)                      # a self-closed style/script carries no body
+        self._open(tag, attrs)
+        # FIX (self-closing-style-body): a browser IGNORES the trailing solidus on a NON-VOID HTML element,
+        # so <style/>...</style> renders its body as CSS and an inline <script/>...</script> as JS. Start
+        # grabbing the body exactly as handle_starttag does, so handle_data/handle_endtag capture and store
+        # it and the CSS/JS after a self-closing tag is scanned. This is narrow (style / inline src-less
+        # script only): inline SVG (<path/>, <rect/>, <circle/>) self-closes legitimately and is untouched,
+        # and void elements (meta/br/img/input/link/...) carry no such body.
+        if tag == "style":
+            self._grab, self._buf = "style", []
+        elif tag == "script" and not any(k.lower() == "src" and v for k, v in attrs):
+            self._grab, self._buf = "script", []
 
     def handle_data(self, data):
         if self._grab is not None:
@@ -866,7 +924,10 @@ def scan(text, site=True):
 # DISCLOSED, not pretended closed: a content: value whose interior ';' or '}' truncates the extractor; a
 # content: value assembled through a var() custom-property indirection; generated content via content:
 # open-quote or content: url(data:image/svg); an escaped ')' inside an @import url(...) target; a stylesheet
-# gated only by a .css filename rather than the HTML stylesheet sink; and nested HTML in an <iframe srcdoc>.
+# gated only by a .css filename rather than the HTML stylesheet sink; nested HTML in an <iframe srcdoc>; and
+# (FIX content-ordered-composition) a literal+attr() content composition whose multi-valued attributes exceed
+# the ordered-product cap, past which each attr's values are concatenated in place (a bounded over-approx that
+# adds coverage but does not reproduce every exact cross-value ordered boundary).
 # Runtime-JS DOM text construction, an encoded payload buried in an arbitrary JS string whose location and
 # encoding are not statically declared, and a genuinely off-site (cross-origin) asset a static gate does not
 # fetch are out of static reach as well.
@@ -1394,6 +1455,7 @@ def _css_unescape(s):
 
 _CSS_MAX_BYTES = 1 << 20  # 1 MiB: bound a single normalize pass, fail-closed past it (SECA)
 _CSS_ATTR_RE = re.compile(r"\battr\(\s*([-\w]+)", re.IGNORECASE)  # content: attr(NAME[, ...]) name capture
+_CSS_COMPOSE_MAX_COMBOS = 64  # cap on the ORDERED literal+attr() product before the over-approx fallback (FIX composition)
 
 
 def _decode_css_escape_at(css, i):
@@ -1490,6 +1552,36 @@ def _scan_css_content_strings(css, where, findings, attr_index=None):
                     for name, snip in scan(aval, site=True):
                         findings.append("{}: CSS content attr({}) injection [{}] -> {}".format(
                             where, attr_name, name, snip))
+            # FIX (content-ordered-composition): content:"guar" attr(data-tail) renders the literal text and
+            # the attr's resolved value CONCATENATED in source order, which neither the literal-only concat
+            # (1) nor the per-attr scan just above sees. Build the ORDERED token sequence (string literals
+            # CSS-unescaped, attr(NAME) refs resolved to their page values) and scan the composed string.
+            # Compose ONLY when the declaration mixes at least one literal AND at least one attr() (pure
+            # cases are already covered). For a multi-valued attribute the exact ordered product is
+            # enumerated when small (<= _CSS_COMPOSE_MAX_COMBOS); past the cap each attr token contributes
+            # ALL its values concatenated in place, a bounded over-approximation (DISCLOSED residual).
+            tokens = []  # (start, values-in-order); a literal is a single decoded value, an attr its page values
+            for sm in _CSS_STRING_RE.finditer(value):
+                literal = sm.group(1) if sm.group(1) is not None else sm.group(2)
+                tokens.append((sm.start(), True, [_css_unescape(literal)]))
+            for am in _CSS_ATTR_RE.finditer(value):
+                tokens.append((am.start(), False, list(attr_index.get(am.group(1).lower(), ()))))
+            if any(is_lit for _, is_lit, _ in tokens) and any(not is_lit for _, is_lit, _ in tokens):
+                tokens.sort(key=lambda t: t[0])
+                combos = 1
+                for _, _, vals in tokens:
+                    combos *= max(1, len(vals))
+                if combos <= _CSS_COMPOSE_MAX_COMBOS:
+                    seqs = [""]
+                    for _, _, vals in tokens:
+                        choices = vals if vals else [""]
+                        seqs = [prefix + choice for prefix in seqs for choice in choices]
+                else:  # over-approximate past the cap: all of each attr's values in place (only ADDS coverage)
+                    seqs = ["".join("".join(vals) for _, _, vals in tokens)]
+                for composed in seqs:
+                    for name, snip in scan(composed, site=True):
+                        findings.append("{}: CSS content composition injection [{}] -> {}".format(
+                            where, name, snip))
 
 
 def _closure_local_asset(url, base_dir=""):
@@ -1770,7 +1862,10 @@ def _scan_asset_closure(root):
     with an interior ';' or '}' that truncates the extractor; (2) a content: value assembled through a var()
     custom-property indirection; (3) generated content via content: open-quote or content: url(data:image/svg);
     (4) an escaped ')' inside an @import url(evil\\).css) target; (5) a stylesheet gated only by a .css
-    filename rather than the HTML stylesheet sink; and (6) nested HTML in an <iframe srcdoc>. Also out of
+    filename rather than the HTML stylesheet sink; (6) nested HTML in an <iframe srcdoc>; and (7) a
+    literal+attr() content composition whose multi-valued attributes exceed the ordered-product cap
+    (_CSS_COMPOSE_MAX_COMBOS), past which each attr's values are concatenated in place, a bounded
+    over-approximation that adds coverage without reproducing every exact cross-value ordered boundary. Also out of
     static reach: runtime-JS DOM construction of marketing text (theme.js building strings at run time); an
     ENCODED payload buried in an ARBITRARY JS string whose location and encoding are not statically declared
     (distinct from a data: URL, which IS decoded); and a genuinely off-site (cross-origin) asset a static
@@ -1858,9 +1953,14 @@ def _scan_surface(path, rel, site, findings, scanned):
     and a surface whose identity is already in `scanned` is skipped BEFORE scanning (race-free dedup, closing
     the two-open TOCTOU). Returns the identity so the caller need not re-open to dedup."""
     ident, data = _read_regular_bounded(path, str(rel), _ASSET_MAX_BYTES)
-    if ident in scanned:  # already scanned by an earlier collector, same inode; dedup on the read fd's identity
+    # FIX (inode-dedup-mode-aware): the dedup key carries the scan MODE ("raw" here; collector 1 uses "html"),
+    # so a file HARD-LINKED as both a raw-text target and an HTML page is scanned in BOTH modes, not just the
+    # first mode that ran; a genuine same-mode re-scan of the same inode is still deduped. Identity still comes
+    # from the read fd (single-descriptor discipline intact).
+    key = (ident, "raw")
+    if key in scanned:  # already scanned in raw mode, same inode; dedup on the read fd's identity + mode
         return ident
-    scanned.add(ident)
+    scanned.add(key)
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
@@ -1896,7 +1996,7 @@ def _collect(root, registry, binary_set):
             # dedup comes from the SAME open the bytes are read from, not a separate _regular_identity open, so
             # an attacker cannot swap the page between an identity open and a read open (TOCTOU).
             ident, raw_bytes = _read_regular_bounded(f, "site page {}".format(rel), _ASSET_MAX_BYTES)
-            scanned.add(ident)
+            scanned.add((ident, "html"))  # dedup key carries the scan MODE (FIX inode-dedup-mode-aware)
             try:
                 raw = raw_bytes.decode("utf-8")
             except UnicodeDecodeError:
@@ -2281,6 +2381,29 @@ def _self_closing_meta_self_test():
                 .format(overclaim))
     if not any(scan(m, site=True) for m in parser.meta):
         failures.append("SELFMETA: a self-closing <meta description/> overclaim must be captured and scanned")
+    # FIX (meta-dup-first-wins): a DUPLICATE attribute resolves FIRST-wins in HTML5, so the scanner must read
+    # the first name/content, not dict(attrs) LAST-wins. (a) a second name= must not suppress description;
+    # (b) a second content= must not replace the scanned (first) content. MUTATION: dict(attrs) last-wins
+    # makes (a) read name=viewport (skipped) and (b) read content="ok" (clean), so both go unflagged.
+    dup_name = VisibleText()
+    dup_name.feed('<meta name="description" name="viewport" content="{}">'.format(overclaim))
+    if not any(scan(m, site=True) for m in dup_name.meta):
+        failures.append("METADUP: a duplicate name= must resolve first-wins (description) and flag")
+    dup_content = VisibleText()
+    dup_content.feed('<meta name="description" content="{}" content="ok">'.format(overclaim))
+    if not any(scan(m, site=True) for m in dup_content.meta):
+        failures.append("METADUP: a duplicate content= must scan the FIRST content and flag")
+    # FIX (displayed-text-attrs): an input[type=button] value IS the button's visible label, so it is
+    # collected into self.meta and scanned; a text input's value is USER DATA and must NOT be scanned.
+    # MUTATION: not collecting the button value leaves DISPTEXT-(a) unflagged.
+    disp_btn = VisibleText()
+    disp_btn.feed('<html><body><input type="button" value="{}"></body></html>'.format(overclaim))
+    if not any(scan(m, site=True) for m in disp_btn.meta):
+        failures.append("DISPTEXT: an input[type=button] value (a visible label) must be collected and scanned")
+    disp_ctl = VisibleText()
+    disp_ctl.feed('<html><body><input type="text" value="{}"></body></html>'.format(overclaim))
+    if any(scan(m, site=True) for m in disp_ctl.meta):
+        failures.append("DISPTEXT: a text input value is user data and must NOT be scanned (false positive)")
     # (b) end-to-end via _collect: the overclaim surfaces as a (meta) finding on the site page.
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-overclaim-selfmeta-"))
@@ -2465,6 +2588,27 @@ def _collector_self_test():
         except _FailClosed as exc:
             if len(str(exc)) > 4096 or longtarget[:200] in str(exc):
                 failures.append("COLLECTOR: a fail-closed target message must be bounded, not echo the name (FIX C)")
+
+        # (l) FIX (inode-dedup-mode-aware): a file HARD-LINKED as BOTH a site HTML page (html mode:
+        # visible-text/meta) and a registered raw-text target (raw mode: whole-text) must be scanned in BOTH
+        # modes, not just the first that ran. The dedup key carries the scan mode, so the raw-mode collector
+        # does not skip the shared inode. MUTATION: a mode-AGNOSTIC (st_dev, st_ino) key skips the raw scan
+        # (the page is scanned first), so the raw-text finding is missing and this case fails.
+        r = _make_root("hardlink-modes")
+        shared = "Releases are signed with minisign."  # a RELEASE_PATTERN, flagged on both surface classes
+        (r / "site" / "dup.html").write_text(
+            "<html><body>{}</body></html>".format(shared), encoding="utf-8")
+        try:
+            os.link(r / "site" / "dup.html", r / "dup.txt")  # same inode, two paths, two scan modes
+            linked = True
+        except OSError:
+            linked = False  # a filesystem that cannot hard-link cannot exercise this vector
+        if linked:
+            hl = _collect(r, [{"target": "dup.txt", "kind": "file"}], set())
+            if not any(x.startswith("site/dup.html") for x in hl):
+                failures.append("HARDLINK: the html-mode (page) scan of a shared inode must produce a finding")
+            if not any(x.startswith("dup.txt") for x in hl):
+                failures.append("HARDLINK: the raw-mode scan of a hard-linked inode must not be deduped away (FIX inode-dedup-mode-aware)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures
@@ -3210,6 +3354,26 @@ def _asset_closure_self_test():
         except _FailClosed as exc:
             if len(str(exc)) > 4096 or longname[:200] in str(exc):
                 failures.append("BOUND: a fail-closed asset-name message must be bounded, not echo the name (FIX 3)")
+        # (s1) FIX (self-closing-style-body): a browser renders the body of a SELF-CLOSING <style/> as CSS,
+        # so a content: injection AFTER the self-closing tag must be captured and scanned. The body concat
+        # ("guar" + "antees secure output") only a CSS content-string scan of the captured body sees.
+        # MUTATION: the old body-less handle_startendtag captures no <style/> body, so no finding is produced.
+        page = ("<html><head><style/>.probe::before" + LB
+                + ' content: "guar" "antees secure output" ' + RB
+                + "</style></head><body>ok</body></html>")
+        f = _scan_asset_closure(build("self-closing-style", page, {}))
+        if not any("CSS content injection" in x for x in f):
+            failures.append("SELFSTYLE: a self-closing <style/> body must be captured and its content: scanned (FIX self-closing-style-body)")
+        # (s2) FIX (content-ordered-composition): content:"guar" attr(data-tail) renders the literal and the
+        # attr value CONCATENATED in source order ("guarantees secure output"); neither the literal-only
+        # concat nor the per-attr scan sees the joined phrase. MUTATION: scanning literals and attrs
+        # separately without the ordered composition yields no finding here.
+        page_comp = ('<html><head><link rel="stylesheet" href="/comp.css"></head>'
+                     '<body><div data-tail="antees secure output"></div></body></html>')
+        comp_css = ".probe::before" + LB + 'content:"guar" attr(data-tail)' + RB
+        f = _scan_asset_closure(build("content-composition", page_comp, {"comp.css": comp_css}))
+        if not any("CSS content composition injection" in x for x in f):
+            failures.append("COMPOSE: content: literal + attr() must be composed in order and scanned (FIX content-ordered-composition)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures

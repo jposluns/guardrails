@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "583e75f65d0b1bd0b4cede8e557dd33354543d44d9992923f696c5c528fbaeec"
+tree-sha256 = "14e9be5518de9d5fca4bb01e75f9f351d4c07d523d73837d30c036d85e41a0ab"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "2fe6b09bad5eacdffd6b1d26475ff26c991a5dbadaae58f9297ed1f58acdc064"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 126154
-sha256 = "f4977c18f9d27ecffdcfcfd05cc32e94a30629f7aba742c004b387fefc99b5c2"
+bytes = 126155
+sha256 = "eb0dc8a89e4567a35d947ca8dae60d9c242ac62ac30f30bea85bc65bf7862a43"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
@@ -771,8 +771,8 @@ sha256 = "6f6e4138a0b526f6a0aafe2be62d29d57437f9d6c538480e9740e4190dc1f76b"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 297930
-sha256 = "539424ed413489abbe5e7e74d675fe13c711e91bc72003ca93cb9163387ad297"
+bytes = 297933
+sha256 = "d2d74b297ee8f23b43f64747a1df12ffe6ed913e68a8394a7aebbd8ac2d28353"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2216,8 +2216,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 174957
-sha256 = "a90abd19a13c87b9109a1e5fb122a10058ecf21f7f69f031f35c1c64a6805414"
+bytes = 174958
+sha256 = "443564cbe5011fa711e08c04fe825525207f58e7d40ae70e0c546612fdd8e138"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2826,8 +2826,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 221571
-sha256 = "9877758e16949f50e432fab3e651a0b8f78e9302cc1b2cc13ea8fea0051e44ec"
+bytes = 221572
+sha256 = "b1f12ff1ee0cbd4ca4088fa75e659b9ed86f6f572c694793a58da53176577e36"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3061,8 +3061,8 @@ sha256 = "de8bc8150f96a58b3c0e09362ba1d3a491b46e1f85d8c3ece5911fd95ace7d35"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 228152
-sha256 = "ad1d65cb916fd4bc9e54ddf8722876554d30d77894ada6b8df90b0388d3b6e32"
+bytes = 240907
+sha256 = "10725b5afce4c1724a644b166a7bdabcba6f6c632b64dca0def60e0779706a1d"
 
 [[sources]]
 path = "tools/check_portability.py"
