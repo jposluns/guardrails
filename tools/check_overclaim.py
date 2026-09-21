@@ -7,9 +7,10 @@ the guarantee-flavoured class the F-59/F-67 pass softened, so a reintroduced ove
 than shipping. On the SITE pages it scans the VISIBLE TEXT of each page (tags, <script>, and <style>
 stripped; entities unescaped; whitespace collapsed), so a phrase that wraps across source lines is still
 one string and an overclaim hidden in an attribute is not falsely flagged. Text from two SEPARATE block
-elements is kept apart by a space (see BLOCK_TAGS): "<p>guarantees</p><p>secure</p>" reads as two
-phrases, not the phantom token "guaranteessecure", so an overclaim cannot hide by straddling a block
-boundary; inline markup ("<b>guar</b>antee") still joins into one word.
+elements is kept apart by a hard boundary sentinel (see BLOCK_TAGS / BLOCK_SENTINEL):
+"<p>guarantees</p><p>secure</p>" reads as two phrases, not the phantom token "guaranteessecure", so an
+overclaim cannot hide by straddling a block boundary and a negator in one block cannot reach across it;
+inline markup ("<b>guar</b>antee") still joins into one word.
 
 TWO SURFACE CLASSES, TWO PATTERN SETS (VER-CORE 4.4). The guarantee-flavoured MARKETING patterns
 (SITE_PATTERNS) are calibrated for the public site copy and run on the SITE PAGES ONLY: the rule corpus,
@@ -61,11 +62,13 @@ copy is free of overclaims.
 
 Negation binds to the GUARANTEE PHRASE, not the whole clause (see NEGATOR / CLAUSE_BOUNDARY): a negator
 marks a match honest only when it sits in the same window as the match, where the window begins after
-the last sentence/clause punctuation OR contrastive conjunction before it. A fixed char window let a
-negator in a prior sentence launder a fresh overclaim; a whole-clause window let a contrastive "but"
-launder one too ("does not merely help but guarantees secure output"), because the "not" there negates
-"help", not "guarantees". Cutting the window at "but"/"yet"/... binds the negation to the phrase it
-actually modifies.
+the last sentence/clause punctuation, contrastive conjunction, OR block-element boundary before it. A
+fixed char window let a negator in a prior sentence launder a fresh overclaim; a whole-clause window let
+a contrastive "but" launder one too ("does not merely help but guarantees secure output"), because the
+"not" there negates "help", not "guarantees"; and a plain-space block join let a negator in an unrelated
+prior block launder a guarantee in the next block ("No setup required" then "AIQT guarantees secure
+output"). Cutting the window at "but"/"yet"/... and at each block boundary binds the negation to the
+phrase it actually modifies.
 
 The vocabulary, and why each pattern is shaped the way it is (calibrated so the current softened site is
 clean; a pattern that flagged a legitimate line would be too broad):
@@ -242,6 +245,14 @@ HTML_REL = gen_enforcement_register.HTML_REL  # single-sourced register page pat
 # reach, disclosed) in _closure_local_asset (FIX 2b, GER-1 round 11).
 SITE_HOST = (urlsplit(gen_enforcement_register.PAGE_URL).hostname or "").lower()
 
+# A block-element boundary emits this hard sentinel (a control char that does not occur in ordinary copy)
+# into the visible text instead of a plain space, so it is a HARD clause boundary for negation
+# (CLAUSE_BOUNDARY includes it) without changing how phrases fuse across INLINE markup. It is scrubbed
+# from incoming source data (see VisibleText.handle_data) so ONLY a real block boundary produces it. It
+# must NOT be a whitespace control char (the information separators \x1c-\x1f satisfy \s and would be
+# collapsed away by the whitespace pass in text()), so \x01 is used.
+BLOCK_SENTINEL = "\x01"
+
 # Negation is CLAUSE-aware, not a fixed char window: a negator only marks a match honest when it sits
 # in the SAME clause as the match. A fixed window let a negator in a PRIOR sentence launder a fresh
 # overclaim (e.g. "AIQT does not sandbox anything. It guarantees secure output." would wrongly pass).
@@ -285,11 +296,13 @@ INTEGRITY_NEG_TAIL = re.compile(
     r")?$", re.IGNORECASE)
 # Sentence and clause punctuation ends the clause a match belongs to. A CONTRASTIVE conjunction
 # (but/yet/however/...) also ends the negation window: it flips polarity, so a negator before it does
-# NOT scope over a guarantee after it. Binding negation to the guarantee-phrase segment this way makes
+# NOT scope over a guarantee after it. A BLOCK-element boundary (BLOCK_SENTINEL, emitted by the visible-
+# text collector) is a hard clause boundary too, so a negator in a PRIOR block cannot reach across into a
+# match in the NEXT block. Binding negation to the guarantee-phrase segment this way makes
 # "does not merely help but guarantees secure output" flag, where a whole-clause negation window let
 # the earlier "not" (which negates "help", not "guarantees") launder the overclaim.
 CLAUSE_BOUNDARY = re.compile(
-    r"[.!?;:,]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas)\b",
+    r"[.!?;:," + BLOCK_SENTINEL + r"]|\b(?:but|yet|however|nonetheless|nevertheless|rather|though|although|whereas)\b",
     re.IGNORECASE)
 # An INTENT HEDGE marks a COMPATIBILITY claim honest: the decided softening frames cross-assistant reach
 # as an aim, not a verified result ("intended/designed to be portable across ...", "is meant to work to
@@ -579,10 +592,11 @@ RELEASE_PATTERNS = [
 SKIP_TEXT_TAGS = {"script", "style"}
 
 # Block-level (and line-breaking) elements separate their text content: "<p>guarantees</p><p>secure</p>"
-# is two visible phrases, not the word "guaranteessecure". Their boundaries emit a space so adjacent text
-# nodes never fuse into a phantom token an overclaim could hide across (a real evasion the earlier
-# "".join let through). Inline elements (b, em, a, span, code, ...) deliberately do NOT separate, so a
-# phrase marked up mid-word ("<b>guar</b>antee") stays one token.
+# is two visible phrases, not the word "guaranteessecure". Their boundaries emit BLOCK_SENTINEL so adjacent
+# text nodes never fuse into a phantom token an overclaim could hide across (a real evasion the earlier
+# "".join let through) AND a negator in one block cannot reach across the boundary into the next (the
+# sentinel is a hard CLAUSE_BOUNDARY). Inline elements (b, em, a, span, code, ...) deliberately do NOT
+# separate, so a phrase marked up mid-word ("<b>guar</b>antee") stays one token.
 BLOCK_TAGS = {
     "address", "article", "aside", "blockquote", "br", "button", "caption", "dd", "div", "dl", "dt",
     "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
@@ -649,8 +663,12 @@ class VisibleText(HTMLParser):
             # itemprop=, so <meta property="og:description" name="x" content="OVERCLAIM"> read key "x"
             # and skipped the tag while an Open Graph consumer ships the overclaim. Each attr is already
             # first-occurrence-wins in the map above.
-            if any(k and k.lower() in META_DESC_NAMES
-                   for k in (a.get("name"), a.get("property"), a.get("itemprop"))) and a.get("content"):
+            # FIX (itemprop-token-list): itemprop is an ASCII-whitespace-separated TOKEN LIST, so split it
+            # and test EACH token (name and property stay single-token comparisons). A whole-string compare
+            # let a multi-token itemprop="name description" escape: it equals no META_DESC_NAMES entry, so
+            # the description token went unscanned while a Schema.org consumer ships the copy.
+            desc_keys = [a.get("name"), a.get("property")] + (a.get("itemprop") or "").split()
+            if any(k and k.lower() in META_DESC_NAMES for k in desc_keys) and a.get("content"):
                 self.meta.append(a["content"])
 
     def _collect_displayed_text(self, tag, attrs):
@@ -694,7 +712,7 @@ class VisibleText(HTMLParser):
         if tag in SKIP_TEXT_TAGS:
             self._skip += 1
         elif tag in BLOCK_TAGS:
-            self.chunks.append(" ")
+            self.chunks.append(BLOCK_SENTINEL)
 
     def handle_startendtag(self, tag, attrs):
         # a self-closing void block element (e.g. <br/>, <hr/>) still separates, and a self-closing
@@ -703,20 +721,26 @@ class VisibleText(HTMLParser):
         self._collect_meta(tag, attrs)
         self._collect_displayed_text(tag, attrs)
         if tag in BLOCK_TAGS:
-            self.chunks.append(" ")
+            self.chunks.append(BLOCK_SENTINEL)
 
     def handle_endtag(self, tag):
         if tag in SKIP_TEXT_TAGS and self._skip:
             self._skip -= 1
         elif tag in BLOCK_TAGS:
-            self.chunks.append(" ")
+            self.chunks.append(BLOCK_SENTINEL)
 
     def handle_data(self, data):
         if self._skip == 0:
-            self.chunks.append(data)
+            # scrub any literal sentinel from source copy so ONLY a real block boundary produces one
+            self.chunks.append(data.replace(BLOCK_SENTINEL, " "))
 
     def text(self):
-        return re.sub(r"\s+", " ", "".join(self.chunks)).strip()
+        # collapse ordinary whitespace to single spaces (the sentinel is not whitespace, so it survives);
+        # a block boundary then absorbs any spaces touching it and reads as one hard clause boundary, while
+        # inline markup (which emits nothing) still lets a mid-word split fuse into a single token.
+        collapsed = re.sub(r"\s+", " ", "".join(self.chunks))
+        collapsed = re.sub(r" *" + BLOCK_SENTINEL + r"[ " + BLOCK_SENTINEL + r"]*", BLOCK_SENTINEL, collapsed)
+        return collapsed.strip(" " + BLOCK_SENTINEL)
 
 
 class _AssetClosureParser(HTMLParser):
@@ -790,14 +814,16 @@ class _AssetClosureParser(HTMLParser):
 def _snippet(text, start, end):
     a = max(0, start - 25)
     b = min(len(text), end + 25)
-    return ("..." if a else "") + text[a:b].strip() + ("..." if b < len(text) else "")
+    body = text[a:b].replace(BLOCK_SENTINEL, " ").strip()
+    return ("..." if a else "") + body + ("..." if b < len(text) else "")
 
 
 def _clause_window(text, start):
     """The text from the start of the clause containing `start` up to `start`. The window begins after
-    the last CLAUSE_BOUNDARY before the match, which is sentence/clause punctuation OR a contrastive
-    conjunction, so a negator only counts when it binds to the guarantee phrase: never one that leaked
-    in from a prior sentence, and never one that a 'but'/'yet' has flipped away from the match."""
+    the last CLAUSE_BOUNDARY before the match, which is sentence/clause punctuation, a contrastive
+    conjunction, OR a block-element boundary (BLOCK_SENTINEL), so a negator only counts when it binds to
+    the guarantee phrase: never one that leaked in from a prior sentence or a prior block, and never one
+    that a 'but'/'yet' has flipped away from the match."""
     boundary = 0
     for m in CLAUSE_BOUNDARY.finditer(text, 0, start):
         boundary = m.end()
@@ -2336,6 +2362,7 @@ def _self_test():
     failures.extend(_self_closing_meta_self_test())
     failures.extend(_page_bound_source_self_test())
     failures.extend(_asset_closure_self_test())
+    failures.extend(_block_boundary_negation_self_test())
 
     if failures:
         print("FAIL: check_overclaim self-test")
@@ -2345,6 +2372,31 @@ def _self_test():
     print("PASS: check_overclaim self-test ({} positive, {} negative, plus scoping and collector cases)"
           .format(len(POSITIVE), len(NEGATIVE)))
     return 0
+
+
+def _block_boundary_negation_self_test():
+    """FIX 1 (block-bounded-negation): a block-element boundary is a HARD clause boundary, so a negator in
+    a PRIOR block cannot clear an overclaim in the NEXT block, while a GENUINE in-block negation still
+    clears and an inline mid-word split still fuses into one scanned token. The collector emits
+    BLOCK_SENTINEL at each block boundary and CLAUSE_BOUNDARY treats it as a hard boundary. MUTATION: a
+    plain-space block join (BLOCK_SENTINEL = " ") lets the prior-block "No" launder "guarantees" -> (a) fails."""
+    failures = []
+    # (a) an unrelated negator in a PRIOR block must NOT clear a guarantee in the NEXT block -> FLAGGED.
+    cross = VisibleText()
+    cross.feed("<p>No setup required</p><p>AIQT guarantees secure output.</p>")
+    if not scan(cross.text(), site=True):
+        failures.append("BLOCKNEG: a negator in a prior block must not clear a guarantee in the next block")
+    # (b) a GENUINE in-block (in-clause) negation still clears -> NOT flagged (no false positive).
+    inblock = VisibleText()
+    inblock.feed("<p>AIQT does not guarantee secure output.</p>")
+    if scan(inblock.text(), site=True):
+        failures.append("BLOCKNEG: a genuine in-block negation must still clear (no false positive)")
+    # (c) an inline mid-word split still fuses into one scanned token -> FLAGGED.
+    inline = VisibleText()
+    inline.feed("<p>AIQT <b>guar</b>antees secure output.</p>")
+    if not scan(inline.text(), site=True):
+        failures.append("BLOCKNEG: an inline mid-word split must still fuse into one token and flag")
+    return failures
 
 
 def _single_descriptor_self_test():
@@ -2458,6 +2510,18 @@ def _self_closing_meta_self_test():
     ip_desc.feed('<meta itemprop="description" content="{}">'.format(overclaim))
     if not any(scan(m, site=True) for m in ip_desc.meta):
         failures.append("METADESCSET: an itemprop=description meta must be captured and scanned")
+    # FIX (itemprop-token-list): itemprop is a TOKEN LIST, so a multi-token itemprop="name description"
+    # must be split and its description token scanned (a), while a single-token itemprop="name" with no
+    # description token must NOT be scanned (b, no false positive); the itemprop="description" single-token
+    # case above still flags (c). MUTATION: a whole-string itemprop comparison leaves (a) unflagged.
+    ip_multi = VisibleText()
+    ip_multi.feed('<meta itemprop="name description" content="{}">'.format(overclaim))
+    if not any(scan(m, site=True) for m in ip_multi.meta):
+        failures.append("METAITEMPROP: a multi-token itemprop with a description token must be scanned")
+    ip_name = VisibleText()
+    ip_name.feed('<meta itemprop="name" content="{}">'.format(overclaim))
+    if any(scan(m, site=True) for m in ip_name.meta):
+        failures.append("METAITEMPROP: a single-token itemprop=name (no description) must NOT be scanned")
     # FIX C (option-value-displayed): an <option value> inside a <datalist> renders as displayed suggestion
     # text, so its value is collected and scanned. MUTATION: not collecting option value leaves it unflagged.
     opt_val = VisibleText()
