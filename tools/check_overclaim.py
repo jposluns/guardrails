@@ -731,7 +731,9 @@ class VisibleText(HTMLParser):
         # collected into self.meta and scanned identically (same site=True patterns). The attribute TYPE is
         # resolved first-occurrence-wins (the HTML5 rule, as in _collect_meta). Only the label-bearing input
         # types are scanned; a text/hidden/other input value is USER DATA, not a label, and scanning it
-        # would false-positive, so it is deliberately excluded.
+        # would false-positive, so it is deliberately excluded (a DISCLOSED residual: a pre-filled default
+        # value an author sets on a text/other input renders but is not scanned, the accepted cost of not
+        # false-positiving on form-field content).
         a = {}
         for k, v in attrs:
             key = k.lower()
@@ -1087,8 +1089,8 @@ def scan(text, site=True):
 # string); and TEXT HIDDEN from display (hidden attribute, inline display:none/visibility:hidden, or a
 # stylesheet class), which the visible-text scan still collects (visibility is not modelled), so a hidden
 # negator can clear a visible overclaim; a content: attr(NAME) whose NAME is a NON-SIMPLE identifier (a
-# CSS-escaped dotted/colon name attr(data\.copy), or a non-ASCII name), which the attr-name extractor does
-# not resolve (only a simple ASCII name is); and CSS custom generated content the extractor does not resolve
+# CSS-escaped dotted/colon name attr(data\.copy), backslash-escaped in the CSS identifier), which the
+# attr-name extractor does not resolve - it stops at the backslash (a plain Unicode word-character name IS resolved); and CSS custom generated content the extractor does not resolve
 # (a counter(n, <custom-style>) whose @counter-style symbols carry the phrase). (An otherwise malformed RAWTEXT truncation is handled: a
 # complete-string quoted end-tag is asset-scanned, trailing text Collector-1 scanned, and an UNCLOSED body at
 # EOF is flushed+scanned at parser close().) This CSS content-injection asset scan is anchored to the
@@ -1621,7 +1623,7 @@ def _css_unescape(s):
 
 _CSS_MAX_BYTES = 1 << 20  # 1 MiB: bound a single normalize pass, fail-closed past it (SECA)
 _CSS_ATTR_RE = re.compile(r"\battr\(\s*([-\w]+)", re.IGNORECASE)  # content: attr(NAME[, ...]) name capture
-_CSS_COMPOSE_MAX_COMBOS = 64  # cap on the ORDERED literal+attr() product before the over-approx fallback (FIX composition)
+_CSS_COMPOSE_MAX_COMBOS = 64  # cap on the ORDERED literal+attr() product before a coarser fallback that can MISS a specific combination (residual 7)
 
 
 def _decode_css_escape_at(css, i):
@@ -1725,7 +1727,7 @@ def _scan_css_content_strings(css, where, findings, attr_index=None):
             # Compose ONLY when the declaration mixes at least one literal AND at least one attr() (pure
             # cases are covered per-token, and the pure-attr ORDERED cross-attr composition is disclosed residual (8)). For a multi-valued attribute the exact ordered product is
             # enumerated when small (<= _CSS_COMPOSE_MAX_COMBOS); past the cap each attr token contributes
-            # ALL its values concatenated in place, a bounded over-approximation (DISCLOSED residual).
+            # ALL its values concatenated in place, a COARSER fallback that can MISS a specific single-value combination (DISCLOSED residual 7).
             tokens = []  # (start, values-in-order); a literal is a single decoded value, an attr its page values
             for sm in _CSS_STRING_RE.finditer(value):
                 literal = sm.group(1) if sm.group(1) is not None else sm.group(2)
@@ -1742,7 +1744,7 @@ def _scan_css_content_strings(css, where, findings, attr_index=None):
                     for _, _, vals in tokens:
                         choices = vals if vals else [""]
                         seqs = [prefix + choice for prefix in seqs for choice in choices]
-                else:  # over-approximate past the cap: all of each attr's values in place (only ADDS coverage)
+                else:  # coarser fallback past the cap: all of each attr's values in place - can MISS a specific single-value combination (residual 7)
                     seqs = ["".join("".join(vals) for _, _, vals in tokens)]
                 for composed in seqs:
                     for name, snip in scan(composed, site=True):
@@ -2056,9 +2058,9 @@ def _scan_asset_closure(root):
     the hidden attribute, inline display:none/visibility:hidden, or hidden via a stylesheet class - which the
     visible-text scan STILL collects (it does not model element visibility), so a hidden negator can clear a
     visible overclaim and a hidden overclaim can be flagged; (15) a content: attr(NAME) whose attribute NAME
-    is a NON-SIMPLE identifier - a CSS-escaped name (attr(data\\.copy) for a dotted or colon name) or a
-    non-ASCII name - which the attr-name extractor does not resolve (it reads only the simple leading ASCII
-    identifier; a plain data-x name IS resolved); and (16) CSS custom generated content the extractor does not
+    is a NON-SIMPLE identifier - a CSS-escaped name (attr(data\\.copy) for a dotted or colon name), which the attr-name extractor does not resolve (it reads the identifier run
+    and stops at the backslash); a plain Unicode word-character name (attr(data-x), attr(data-e-acute)) IS
+    resolved (the extractor is not ASCII-only); and (16) CSS custom generated content the extractor does not
     resolve, e.g. a counter(n, <custom-style>) whose @counter-style symbols carry the phrase. A malformed RAWTEXT truncation is otherwise
     handled: a quoted </style>/</script> that leaves a COMPLETE string is asset-scanned and any trailing text
     Collector-1 scanned, and an UNCLOSED body at end-of-input is FLUSHED and scanned at parser close(). SCOPE: this CSS
