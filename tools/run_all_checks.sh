@@ -188,6 +188,12 @@ run_gate "currency-selftest" python3 -I -B tools/check_standards_currency.py --s
 run_gate "ci-parity-selftest" python3 -I -B tools/check_ci_parity.py --self-test
 run_gate "ci-parity"          python3 -I -B tools/check_ci_parity.py
 
+# Git option-table drift: the self-test exercises the parser/comparator over fixtures (no git invoked);
+# the live leg compares installed git branch/tag help spellings against the hook's static option literal
+# and an independently maintained role catalog, failing on membership or write-role drift.
+run_gate "git-option-table-selftest" python3 -I -B tools/check_git_option_table.py --self-test
+run_gate "git-option-table" python3 -I -B tools/check_git_option_table.py
+
 # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit that
 # proves the harness end to end, and the internal-name leak gate. Their self-tests are gating (a broken
 # harness is a real failure); the internal-name scan is gating too.

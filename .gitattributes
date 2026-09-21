@@ -602,6 +602,7 @@ tools/check_crosswalk.py text eol=lf
 tools/check_derived_command_parameters.py text eol=lf
 tools/check_footer.py text eol=lf
 tools/check_gensrc_failclose.py text eol=lf
+tools/check_git_option_table.py text eol=lf
 tools/check_install_page.py text eol=lf
 tools/check_internal_names.py text eol=lf
 tools/check_leaks.py text eol=lf

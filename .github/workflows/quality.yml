@@ -452,6 +452,12 @@ jobs:
       - name: CI parity
         run: python3 -I -B tools/check_ci_parity.py
 
+      - name: Git option table self-test
+        run: python3 -I -B tools/check_git_option_table.py --self-test
+
+      - name: Git option table
+        run: python3 -I -B tools/check_git_option_table.py
+
       # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit
       # that proves the harness end to end, and the internal-name leak gate. Mirrors the same legs in
       # tools/run_all_checks.sh (roster symmetry). The advisory digest runs last: audit_reference.py
