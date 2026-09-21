@@ -26,6 +26,8 @@ run_gate "opf-tooling-selftest"        python3 -I -B "$here/opf.py" --self-test
 run_gate "opf-drift-selftest"          python3 -I -B "$here/check_opf_drift.py" --self-test
 run_gate "opf-doctor-selftest"         python3 -I -B "$here/check_opf_doctor.py" --self-test
 run_gate "opf-init-selftest"           python3 -I -B "$here/check_opf_init.py" --self-test
+run_gate "opf-init-contract-selftest"  python3 -I -B "$here/_opf_init_contract.py" --self-test
+run_gate "opf-init-contract-check-selftest" python3 -I -B "$here/check_opf_init_contract.py" --self-test
 run_gate "opf-upgrade-selftest"        python3 -I -B "$here/check_opf_upgrade.py" --self-test
 run_gate "opf-import-selftest"         python3 -I -B "$here/check_opf_import.py" --self-test
 run_gate "opf-ingest-selftest"         python3 -I -B "$here/check_opf_ingest.py" --self-test

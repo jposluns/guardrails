@@ -82,6 +82,9 @@ run_gate "opf-doctor-selftest" python3 -I -B opf/tools/check_opf_doctor.py --sel
 run_gate "opf-doctor" python3 -I -B opf/tools/check_opf_doctor.py
 run_gate "opf-init-selftest" python3 -I -B opf/tools/check_opf_init.py --self-test
 run_gate "opf-init" python3 -I -B opf/tools/check_opf_init.py
+run_gate "opf-init-contract-selftest" python3 -I -B opf/tools/_opf_init_contract.py --self-test
+run_gate "opf-init-contract-check-selftest" python3 -I -B opf/tools/check_opf_init_contract.py --self-test
+run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py
 run_gate "opf-upgrade-selftest" python3 -I -B opf/tools/check_opf_upgrade.py --self-test
 run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
 run_gate "opf-import-selftest" python3 -I -B opf/tools/check_opf_import.py --self-test
