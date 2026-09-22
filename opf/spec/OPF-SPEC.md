@@ -37,7 +37,7 @@ can name, with history and the durable worklog preserved (section 5).
 
 OPF specifies formats, layout, naming, lifecycle, and enforcement posture, and names the standard
 command vocabulary of the reference tooling (`opf init`, `opf import`, `opf doctor`, `opf render`,
-`opf migrate`, `opf sync`, `opf upgrade`). It does not specify tooling internals; a reference implementation
+`opf migrate`, `opf sync`, `opf upgrade`, `opf absorb`). It does not specify tooling internals; a reference implementation
 follows in later releases of the AIQT Guardrails reference suite. A project can conform to this
 specification with hand-maintained files and its own checks.
 
@@ -496,10 +496,12 @@ forbidden by policy.
 ### 6.3 CHANGELOG.md, the curated public summary
 
 The public changelog lives at the product repository root as `CHANGELOG.md`; wherever the store
-lives, the changelog's home is the product repository (section 5.8). It is machine-drafted and
-human-curated: a summary of the worklog over declared version ranges, not a deterministic render,
-and not byte-drift-gated. There is exactly one public changelog; it is conceptually single-sourced
-from the worklog and the version ledger, and no separate changelog source file exists.
+lives, the changelog's home is the product repository (section 5.8). It is machine-drafted (from the
+worklog entries in range, the version ledger's `[[release]]` rows, and the `done` completion receipts
+those worklog entries link) and human-curated: a summary of the worklog over declared version ranges, not a
+deterministic render, and not byte-drift-gated. There is exactly one public changelog; it is
+conceptually single-sourced from the store (the worklog and the version ledger, with `done` receipts
+enriching the draft only), and no separate changelog source file exists.
 
 Each entry begins with a heading of the form `## <covers>`, optionally followed by parenthesized
 dates, where `<covers>` is the machine-parseable token matching a `[[summary]]` row: a version, a

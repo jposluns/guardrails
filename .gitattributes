@@ -494,6 +494,7 @@ opf/tools/_byte_canon.py text eol=lf
 opf/tools/_commonmark_headings.py text eol=lf
 opf/tools/_containment.py text eol=lf
 opf/tools/_journal.py text eol=lf
+opf/tools/_opf_absorb.py text eol=lf
 opf/tools/_opf_adopt.py text eol=lf
 opf/tools/_opf_adopt_plan.py text eol=lf
 opf/tools/_opf_changelog.py text eol=lf

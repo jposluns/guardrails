@@ -74,7 +74,7 @@ def _bootstrap():
     invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
     that could not be brought in."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
-    global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_importers, _opf_observe
+    global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_importers, _opf_observe, _opf_absorb
     try:
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
         import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
@@ -87,6 +87,7 @@ def _bootstrap():
         import _opf_import      # U7: import staging (module + self-test; the live import verb is wired below)
         import _opf_importers   # MIG-PR2: the shared import layer (deterministic importers + loss accounting)
         import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
+        import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
         return EXIT_MALFORMED
@@ -562,6 +563,67 @@ def _cmd_render(rest):
         return _opf_views.render(argv)
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
         print("opf render: cannot evaluate: unexpected error in the render check ({!r}); failing closed to "
+              "exit 2".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
+
+
+def _cmd_absorb(rest):
+    """`opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`: the read-only CHANGELOG.md drafter.
+
+    Forwards to the OPF-CHANGELOG-ABSORB engine `_opf_absorb.run`, whose 0/2 contract is exactly the
+    required one (0 draft or NOT APPLICABLE, 2 cannot-evaluate; a NOT-ADOPTED root reports NOT APPLICABLE and
+    exits 0, the pack's own `--root .` case). The verb is READ-ONLY: the draft (or, with `--freeze-digest`,
+    the freeze digest of the curated entry) goes to stdout and the framing to stderr, and the engine writes
+    nothing, so there is no stage-then-promote surface. The parser is the house fail-closed idiom (unknown
+    token, an empty or option-looking or duplicate --root/--covers value -> exit 2), matching _cmd_render."""
+    root = None
+    covers = None
+    freeze = False
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "--freeze-digest":
+            freeze = True
+            i += 1
+        elif tok == "--root":
+            if i + 1 >= len(rest):
+                print("opf absorb: --root requires a directory argument", file=sys.stderr)
+                return EXIT_MALFORMED
+            if root is not None:
+                print("opf absorb: --root given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            val = rest[i + 1]
+            if val == "" or val.startswith("-"):
+                print("opf absorb: --root requires a non-empty directory argument, not {!r}".format(val),
+                      file=sys.stderr)
+                return EXIT_MALFORMED
+            root = val
+            i += 2
+        elif tok == "--covers":
+            if i + 1 >= len(rest):
+                print("opf absorb: --covers requires a value", file=sys.stderr)
+                return EXIT_MALFORMED
+            if covers is not None:
+                print("opf absorb: --covers given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            val = rest[i + 1]
+            if val == "" or val.startswith("-"):
+                print("opf absorb: --covers requires a non-empty value, not {!r}".format(val),
+                      file=sys.stderr)
+                return EXIT_MALFORMED
+            covers = val
+            i += 2
+        else:
+            print("opf absorb: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            return EXIT_MALFORMED
+    covers_val = covers if covers is not None else _opf_absorb.UNRELEASED
+    mode = "freeze-digest" if freeze else "draft"
+    # Class-width backstop: the dispatch forwards the engine's defined 0/2 contract unchanged; any residual
+    # error routes to a located cannot-evaluate (exit 2), never an uncaught exit-1 escape.
+    try:
+        return _opf_absorb.run(root if root is not None else ".", covers_val, mode)
+    except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
+        print("opf absorb: cannot evaluate: unexpected error in the drafter ({!r}); failing closed to "
               "exit 2".format(exc), file=sys.stderr)
         return EXIT_MALFORMED
 
@@ -2618,7 +2680,7 @@ def _cli_self_test():
         expect([], EXIT_MALFORMED)
         expect(["frobnicate"], EXIT_MALFORMED)
         for verb in KNOWN_VERBS:
-            if verb not in ("init", "import", "render", "doctor", "upgrade"):
+            if verb not in ("init", "import", "render", "doctor", "upgrade", "absorb"):
                 expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
         expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
         expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
@@ -2630,6 +2692,16 @@ def _cli_self_test():
         expect(["doctor", "--root"], EXIT_MALFORMED)    # --root needs a value
         expect(["doctor", "--check", "--root", ""], EXIT_MALFORMED)   # unknown doctor flag (and empty root)
         expect(["doctor", "--bogus"], EXIT_MALFORMED)   # unknown doctor flag
+
+        # absorb verb ROUTING (OPF-CHANGELOG-ABSORB), judged on exit code only. These grammar cases fail
+        # closed in the parser BEFORE any store resolution, so they need no store on disk. The NOT-ADOPTED
+        # (0) / garbage (2) discrimination over a real root rides _fixture_leg below (reverting the absorb
+        # dispatch routes these to the fail-closed KNOWN_VERBS branch, returning 2 where 0 is expected).
+        expect(["absorb", "--root"], EXIT_MALFORMED)             # --root needs a value
+        expect(["absorb", "--root", ""], EXIT_MALFORMED)         # empty root refused
+        expect(["absorb", "--covers"], EXIT_MALFORMED)           # --covers needs a value
+        expect(["absorb", "--covers", ""], EXIT_MALFORMED)       # empty covers refused
+        expect(["absorb", "--bogus"], EXIT_MALFORMED)            # unknown arg
 
         # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. These grammar cases fail closed in
         # the parser BEFORE any store resolution, so they need no store on disk. A bare `import` and every
@@ -2711,6 +2783,13 @@ def _cli_self_test():
                 # rides check_opf_upgrade.py --self-test end to end over a byte-pinned committed 1.0.0 store.
                 expect(["upgrade", "--root", not_adopted], EXIT_OK)
                 expect(["upgrade", "--root", broken], EXIT_MALFORMED)
+                # absorb over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and returns
+                # 0 -- the wiring discriminator (reverting the absorb route sends `absorb` to the fail-closed
+                # KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store fails closed
+                # (exit 2). The OK-draft discrimination over a resolved store rides _opf_absorb.self_test end
+                # to end (it builds its own valid synthetic stores).
+                expect(["absorb", "--root", not_adopted], EXIT_OK)
+                expect(["absorb", "--root", broken], EXIT_MALFORMED)
             finally:
                 shutil.rmtree(base, ignore_errors=True)
             return None
@@ -3065,6 +3144,7 @@ def _self_tests():
     ("opf-import", _opf_import.self_test),
     ("opf-importers", _opf_importers.self_test),
     ("opf-observe", _opf_observe.self_test),
+    ("opf-absorb", _opf_absorb.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-watchdog-hostile-ambient", _watchdog_hostile_ambient_self_test),
@@ -3076,7 +3156,7 @@ def _self_tests():
 )
 
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
-KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync", "upgrade")
+KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb")
 
 
 # Helper self-tests that pin sys.set_int_max_str_digits(4300) inside a fixture and MUST restore the ambient
@@ -3162,6 +3242,8 @@ def main(argv=None):
         return _cmd_upgrade(rest)
     if verb == "import":
         return _cmd_import(rest)
+    if verb == "absorb":
+        return _cmd_absorb(rest)
     if verb in KNOWN_VERBS:
         # A recognized verb whose unit has not landed: fail closed (exit 2), never a silent success, so
         # a stub is never mistaken for a completed operation.
