@@ -32,7 +32,9 @@ one leg in opf.py). This drafter REUSES rather than re-implements:
 FAIL-CLOSED everywhere (spec 3; check-fails-closed-on-unreadable; guard-input-soundness): an unresolvable
 store, an unreadable/unparseable/inconsistent ledger, a malformed manifest, an unreadable CHANGELOG.md, a
 `[types.done]`-declared but absent/malformed `done.index.toml`, or a covers token that names a rotated span
-is a distinct CANNOT-EVALUATE (exit 2) that STOPS, never a silent partial draft. A non-adopter root is
+is a distinct CANNOT-EVALUATE (exit 2) that STOPS, never a silent partial draft. BOTH modes run this
+floor: `--freeze-digest` validates the version + worklog ledgers and the covers token exactly as the draft
+mode does before it computes anything. A non-adopter root is
 NOT-APPLICABLE (exit 0), exactly like `_opf_changelog` / doctor; this pack's own `--root .` lands there.
 
 The done join (a tool convention, spec 6.3 fixes only the heading grammar; disclose-guard-residuals):
@@ -50,6 +52,7 @@ may draft otherwise. Adopter-rooted like the rest of the tooling; the assurance 
 over synthetic stores, reached through `opf/tools/opf.py --self-test` as the `opf-absorb` leg.
 """
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -77,6 +80,14 @@ _DN_NS = _opf_store.BASELINE_TYPES["done"]            # "DN"
 _KIND_ORDER = ("added", "changed", "fixed", "removed", "security", "docs", "infra")
 _KIND_TITLES = {"added": "Added", "changed": "Changed", "fixed": "Fixed", "removed": "Removed",
                 "security": "Security", "docs": "Docs", "infra": "Infra"}
+
+# The most missing WL-ids a rotated-span refusal names outright; the remainder is reported as a count, so
+# the refusal stays bounded however wide the ledger span's numeric interval is (SECA bounded consumption).
+_MISSING_ID_SAMPLE = 20
+
+# The underline of a level-2 CommonMark setext heading: up to three leading spaces, one or more '-', then
+# only whitespace. Used to cut a setext entry heading (title line(s) + underline) out of a rollup source.
+_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}-+[ \t]*$")
 
 # Drafter outcomes (the doctor.py / _opf_changelog PASS/NA/cannot-evaluate idiom, named for this drafter).
 OK = "OK"                                  # a candidate draft (or a freeze digest) was produced -> exit 0
@@ -136,8 +147,8 @@ def _enrichment(span_entries, done_records):
                     per_entry.setdefault(n, []).append(token)
         elif bi is not None and bi in span_bis:
             notes.append("done receipt {} closes {}, which this span's worklog references, but no worklog "
-                         "entry links the receipt directly (a worklog row for the completion may be "
-                         "missing)".format(dn, bi))
+                         "entry in this span links the receipt directly (a worklog row for the completion "
+                         "may be missing)".format(dn, bi))
     for n in per_entry:
         per_entry[n] = sorted(set(per_entry[n]))
     return per_entry, sorted(set(notes))
@@ -186,42 +197,78 @@ def _span_draft(heading, span_entries, done_records, done_enabled):
 
 
 def _entry_body(entry_text):
-    """The body of an existing CHANGELOG entry (its bytes minus the heading line, with per-line trailing
-    whitespace and surrounding blank lines trimmed). Used to roll a range draft up from the per-release
-    entries it replaces, so a rollup draws from the tier directly below (spec 6.4), never the raw worklog."""
-    nl = entry_text.find("\n")
-    body = entry_text[nl + 1:] if nl != -1 else ""
-    return "\n".join(line.rstrip() for line in body.split("\n")).strip("\n")
+    """The body of an existing CHANGELOG entry: its bytes minus the entry HEADING, with the surrounding
+    blank lines trimmed and the content lines otherwise preserved byte-for-byte (a trailing double-space
+    hard break is Markdown, never junk whitespace to rstrip away). U5 recognizes BOTH heading forms
+    (`_changelog_entries`), so both are cut here: an ATX heading is its single `## token` line; a setext
+    heading is its title line(s) PLUS the `-` underline that follows them (an underline left behind would
+    inject a thematic break into the rollup). The caller passes an entry whose token is a ledger version,
+    so an ATX first line always starts `##` and a setext title line never starts `#` (an unescaped `# `
+    line would itself be an ATX heading, not a setext title). Used to roll a range draft up from the
+    per-release entries it replaces, so a rollup draws from the tier directly below (spec 6.4), never the
+    raw worklog."""
+    lines = entry_text.split("\n")
+    if lines[0].lstrip().startswith("#"):
+        end = 1                           # ATX: the heading is exactly its one line
+    else:
+        end = 1                           # setext: skip the title line(s) to the underline; a title line
+        while end < len(lines) and _SETEXT_UNDERLINE_RE.match(lines[end]) is None:
+            end += 1                      # can never match the underline shape (a bare `---` line would
+        end += 1                          # already have terminated the title paragraph), then drop it too
+    body = lines[end:]
+    while body and not body[0].strip():
+        del body[0]
+    while body and not body[-1].strip():
+        del body[-1]
+    return "\n".join(body)
 
 
 # --- the pure drafting core --------------------------------------------------------------------------
+
+def _validated_inputs(version_data, worklog_data, covers, registered_vendors, what="draft"):
+    """The shared fail-closed preconditions of BOTH modes (draft and --freeze-digest): the version and
+    worklog ledgers validate (the U3 seam), the worklog ids resolve, and the covers token parses against
+    the ledger versions (`_parse_covers`, the same grammar the gates enforce). Returns (releases,
+    ledger_versions, by_id, parsed_covers, findings): the validated carriers with `findings` None on
+    success, else Nones with the CANNOT-EVALUATE findings. `what` names the refused operation in the
+    messages, so the freeze-digest assist refuses on the same inputs the draft path does rather than
+    digesting past a broken ledger or an unledgered covers token (guard-input-soundness;
+    check-fails-closed-on-unreadable)."""
+    vv = validate_version(version_data)
+    if vv.status != VALID:
+        return None, None, None, None, (
+            ["cannot {}: version.toml does not validate against the release-ledger schema (run the "
+             "version gate first; a consistent ledger is required)".format(what)] + vv.findings)
+    wv = validate_worklog(worklog_data, registered_vendors=registered_vendors)
+    if wv.status != VALID:
+        return None, None, None, None, (
+            ["cannot {}: worklog.toml does not validate".format(what)] + wv.findings)
+    by_id, id_findings = _entries_by_id(worklog_data)
+    if id_findings:
+        return None, None, None, None, (
+            ["cannot {}: worklog ids are malformed".format(what)] + id_findings)
+    releases = vv.releases
+    ledger_versions = [r.get("version") for r in releases if isinstance(r, dict) and "version" in r]
+    parsed, err = _parse_covers(covers, ledger_versions)
+    if err is not None:
+        return None, None, None, None, (
+            ["cannot {}: covers token {!r}: {}".format(what, covers, err)])
+    return releases, ledger_versions, by_id, parsed, None
+
 
 def draft_entry(version_data, worklog_data, done_records, changelog_text, covers,
                 registered_vendors=frozenset(), done_enabled=True):
     """Draft ONE candidate CHANGELOG entry for `covers`. Returns (status, draft_text, notes, findings):
     OK with the entry str on success, else CANNOT_EVALUATE with a fail-closed message. The ledgers are
-    validated here (fail-closed CANNOT_EVALUATE, the U3 seam), so the draft heading always parses under the
-    gate. `done_records` is the validated receipt list, or None when the type is not enabled; `changelog_text`
-    is consulted ONLY for a range rollup (tier-below sourcing). This is the pure core the store-level
-    `evaluate` and the self-test drive; it reads no files and mutates nothing."""
-    vv = validate_version(version_data)
-    if vv.status != VALID:
-        return (CANNOT_EVALUATE, None, [],
-                ["cannot draft: version.toml does not validate against the release-ledger schema (run the "
-                 "version gate first; drafting requires a consistent ledger)"] + vv.findings)
-    wv = validate_worklog(worklog_data, registered_vendors=registered_vendors)
-    if wv.status != VALID:
-        return (CANNOT_EVALUATE, None, [],
-                ["cannot draft: worklog.toml does not validate"] + wv.findings)
-    by_id, id_findings = _entries_by_id(worklog_data)
-    if id_findings:
-        return CANNOT_EVALUATE, None, [], ["cannot draft: worklog ids are malformed"] + id_findings
-
-    releases = vv.releases
-    ledger_versions = [r.get("version") for r in releases if isinstance(r, dict) and "version" in r]
-    parsed, err = _parse_covers(covers, ledger_versions)
-    if err is not None:
-        return CANNOT_EVALUATE, None, [], ["cannot draft: covers token {!r}: {}".format(covers, err)]
+    validated here through `_validated_inputs` (fail-closed CANNOT_EVALUATE, the U3 seam), so the draft
+    heading always parses under the gate. `done_records` is the validated receipt list, or None when the
+    type is not enabled; `changelog_text` is consulted ONLY for a range rollup (tier-below sourcing). This
+    is the pure core the store-level `evaluate` and the self-test drive; it reads no files and mutates
+    nothing."""
+    releases, ledger_versions, by_id, parsed, vfindings = _validated_inputs(
+        version_data, worklog_data, covers, registered_vendors)
+    if vfindings is not None:
+        return CANNOT_EVALUATE, None, [], vfindings
     kind = parsed[0]
 
     if kind == "unreleased":
@@ -245,14 +292,32 @@ def draft_entry(version_data, worklog_data, done_records, changelog_text, covers
                     ["cannot draft {}: {}".format(version, "; ".join(span_findings))])
         span_entries = []
         if span:                          # (start, end); None is an empty span
-            missing = [n for n in range(span[0], span[1] + 1) if n not in by_id]
-            if missing:
+            lo_n, hi_n = span
+            present = sorted(n for n in by_id if lo_n <= n <= hi_n)
+            missing_count = (hi_n - lo_n + 1) - len(present)
+            if missing_count:
+                # The missing ids are located by walking the gaps between the PRESENT ids, never by
+                # materializing the span's numeric interval, and the refusal names at most
+                # _MISSING_ID_SAMPLE of them plus a count of the rest, so an implausibly wide ledger
+                # span refuses with the same located CANNOT-EVALUATE instead of exhausting memory
+                # (SECA bounded consumption).
+                sample = []
+                cursor = lo_n
+                for n in present + [hi_n + 1]:
+                    while cursor < n and len(sample) < _MISSING_ID_SAMPLE:
+                        sample.append(cursor)
+                        cursor += 1
+                    if len(sample) >= _MISSING_ID_SAMPLE:
+                        break
+                    cursor = n + 1
+                shown = ", ".join("WL-{}".format(n) for n in sample)
+                if missing_count > len(sample):
+                    shown += ", and {} more".format(missing_count - len(sample))
                 return (CANNOT_EVALUATE, None, [],
                         ["cannot draft {}: worklog {} covered by its span {} not in the active worklog "
                          "(rotated to the archive; spec 12); archive-composed drafting is deferred".format(
-                             version, ", ".join("WL-{}".format(n) for n in missing),
-                             "are" if len(missing) > 1 else "is")])
-            span_entries = [by_id[n] for n in range(span[0], span[1] + 1)]
+                             version, shown, "are" if missing_count > 1 else "is")])
+            span_entries = [by_id[n] for n in present]
         date = row.get("date")
         suffix = " ({})".format(date[:10]) if isinstance(date, str) and len(date) >= 10 else ""
         text, notes = _span_draft("## {}{}".format(version, suffix), span_entries, done_records, done_enabled)
@@ -315,6 +380,11 @@ def _validate_done_index(data, registered_vendors):
             return None, "done.index.toml record #{} ({}) is malformed: {}".format(
                 i + 1, rv.id or "?", "; ".join(rv.findings))
         out.append(rec)
+    dup_findings = _opf_schema.check_unique_ids([rec.get("id") for rec in out])
+    if dup_findings:
+        # A duplicated DN id would make the completion join ambiguous (one worklog link closing every
+        # record that reuses the id), so a conflicting index refuses, reusing U2's uniqueness check.
+        return None, "done.index.toml: {}".format("; ".join(dup_findings))
     return out, None
 
 
@@ -407,6 +477,13 @@ def evaluate(product_root, covers=UNRELEASED, mode="draft"):
         return AbsorbResult(CANNOT_EVALUATE, findings=[error])
 
     if mode == "freeze-digest":
+        # The freeze-digest assist runs the SAME fail-closed floor as the draft mode: a ledger that does
+        # not validate, or a covers token the ledger does not know, is CANNOT-EVALUATE, never a digest
+        # computed over an unvalidated store (guard-input-soundness).
+        _releases, _versions, _by_id, _parsed, vfindings = _validated_inputs(
+            version_data, worklog_data, covers, registered_vendors, what="compute the freeze digest")
+        if vfindings is not None:
+            return AbsorbResult(CANNOT_EVALUATE, findings=vfindings)
         return _freeze_digest_of(changelog_text, covers)
 
     done_enabled, done_records, derr = _load_done(res, registered_vendors)
@@ -452,12 +529,15 @@ def self_test():
     fail-closed harness error. Vectors: golden unreleased / per-release / range-rollup drafts (byte-exact);
     the rollup tier-below discriminator (mutated worklog prose leaves the rollup unchanged); done enrichment
     (a DN-linked receipt appears; removing the done read flips it); the unlinked-in-span done note (present,
-    draft bytes unchanged, still OK); a rotated span, a missing rollup source, a malformed covers token, and
+    draft bytes unchanged, still OK); a rotated span, a duplicate done id, an implausibly wide span (a
+    bounded refusal, the interval never materialized), a setext-headed rollup source (title and underline
+    dropped, hard breaks preserved), a missing rollup source, a malformed covers token, and
     an empty tail; stdout purity (the draft parses under U5 as exactly one entry whose token round-trips
     _parse_covers); the curated-flow tie to the live gates (draft integrates and run_gates PASS; a published
     edit without re-publish -> FINDING); the freeze-digest assist equal to U5's freeze_digest; the CLI
     parser fail-closed cases; and end-to-end store resolution (NOT-APPLICABLE, cannot-evaluate, OK, done
-    enabled/enriched, done not declared + note, malformed done index, freeze-digest, exit-map)."""
+    enabled/enriched, done not declared + note, malformed done index, freeze-digest, freeze-digest
+    fail-closed on a broken ledger and on an unledgered covers token, exit-map)."""
     import tempfile
     import shutil
 
@@ -596,6 +676,40 @@ def self_test():
     st, text, _n, _f = draft_entry(v_full, worklog_full, None, cl, "unreleased")
     check("empty-tail-placeholder",
           st == OK and text == "## unreleased\n\n- (no worklog entries in this range)\n")
+
+    # 6e: a DUPLICATE DN id in the done index refuses (one worklog link to the id would otherwise close
+    # every record that reuses it, an ambiguous completion join), through U2's uniqueness check.
+    recs, derr = _validate_done_index({"schema": 1, "record": [done1, dict(done1)]}, frozenset())
+    check("done-duplicate-dn-rejected",
+          recs is None and derr is not None and "duplicate id 'DN-1'" in derr)
+
+    # 6f: an implausibly wide release span refuses with the located missing-id CANNOT-EVALUATE, bounded:
+    # the refusal names a capped sample plus a count of the rest, and the finding text stays small (the
+    # billion-wide interval is never materialized; a materializing check would exhaust memory here).
+    v_huge = {"schema": 1,
+              "release": [{"version": "1.0.0", "date": "2026-06-01T00:00:00Z",
+                           "worklog_span": ["WL-1", "WL-1000000000"],
+                           "coverage_digest": "sha256:" + "0" * 64}],
+              "summary": [{"covers": "unreleased", "status": "working"},
+                          {"covers": "1.0.0", "status": "published", "digest": "sha256:" + "0" * 64}]}
+    st, _t, _n, findings = draft_entry(v_huge, worklog, None, cl, "1.0.0")
+    check("huge-span-bounded-refusal",
+          st == CANNOT_EVALUATE and any("rotated" in f and "WL-5" in f and "more" in f for f in findings)
+          and all(len(f) < 1000 for f in findings))
+
+    # 6g: rollup extraction preserves Markdown semantics: a SETEXT-headed source entry loses its title AND
+    # underline (no injected thematic break), and a trailing double-space hard break in a body line
+    # survives (content lines are never rstripped). U5 recognizes both heading forms; so does the cut.
+    cl_setext = ("# Changelog\n\n"
+                 "## unreleased\n\n### Added\n- a feature (WL-4)\n\n"
+                 "## 1.1.0 (2026-06-15)\n\n### Added\n- second release (WL-2)\n\n"
+                 "### Fixed\n- a fix (WL-3)\n\n"
+                 "1.0.0\n---\n\n### Added\n- before  \n  after (WL-1)\n")
+    st, text, _n, _f = draft_entry(vbase, worklog, None, cl_setext, "1.0.0..1.1.0")
+    check("rollup-setext-and-hard-break",
+          st == OK and text == ("## 1.0.0..1.1.0\n\n**1.1.0**\n\n### Added\n- second release (WL-2)\n\n"
+                                "### Fixed\n- a fix (WL-3)\n\n**1.0.0**\n\n### Added\n"
+                                "- before  \n  after (WL-1)\n"))
 
     # 7: STDOUT PURITY -- every draft parses under U5 as exactly one entry whose token round-trips
     # _parse_covers against the ledger. Catches a draft that would break the very gate it feeds.
@@ -763,6 +877,19 @@ def self_test():
         fd_store = build_store(version_disk, worklog_disk, cl_disk, manifest_wl)
         check("disk-freeze-digest",
               evaluate(fd_store, "1.0.0", mode="freeze-digest").draft == freeze_of(cl_disk, "1.0.0"))
+
+        # freeze-digest fails CLOSED on the same inputs the draft mode validates: a schema-broken version
+        # ledger refuses even though the '## 1.0.0' entry itself is digestible ...
+        version_disk_bad = version_disk.replace("schema = 1", "schema = 999", 1)
+        check("disk-freeze-digest-broken-ledger-cannot-eval",
+              evaluate(build_store(version_disk_bad, worklog_disk, cl_disk, manifest_wl),
+                       "1.0.0", mode="freeze-digest").status == CANNOT_EVALUATE)
+        # ... and a covers token present as a CHANGELOG heading but ABSENT from the ledger refuses (the
+        # assist never digests an entry the ledger does not know).
+        cl_stray = cl_disk + "\n## 9.9.9 (2026-06-30)\n\n- a stray entry no ledger release covers\n"
+        check("disk-freeze-digest-unledgered-covers-cannot-eval",
+              evaluate(build_store(version_disk, worklog_disk, cl_stray, manifest_wl),
+                       "9.9.9", mode="freeze-digest").status == CANNOT_EVALUATE)
 
         # run() maps a store-level status to the process exit code through EXIT.
         check("disk-run-ok-exit-0",

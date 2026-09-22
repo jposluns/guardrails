@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f932e179582895f767f2b89f6f15d4900375956db4a27713e21114b0b56c8b26"
+tree-sha256 = "dc384bf3eb792067fcd0ccd87d295f555d58110ef3bc9ef848990dcc32deaee2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2191,8 +2191,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 39186
-sha256 = "5b59702b408d273917b49caf26893de133b2ae130990de6f8035931b4c514384"
+bytes = 39223
+sha256 = "260d66224d7c4a77fce70730fb58ea04d7869ec5665cbe5443e62be9be6a198f"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2436,8 +2436,8 @@ sha256 = "573ac6cad9a676efed6bc35cf92914cde0907ca62e6960c78783e90fe505281e"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 88530
-sha256 = "eaa53638e065b6a394e9212dc7f9d72e414dac08d3263c5bee5ce1d249761969"
+bytes = 88561
+sha256 = "9fe15fd5e7c1a01d4a126dd20b0ce95baca0ef2dbbe5a2422be5fb89b7ef7cc3"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
@@ -2458,6 +2458,11 @@ sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
 path = "opf/tools/_journal.py"
 bytes = 108638
 sha256 = "785721cd229e683f1ab99abf5e70a8a3e3afdfa495fd7cf342d013ee55a88b1b"
+
+[[sources]]
+path = "opf/tools/_opf_absorb.py"
+bytes = 56220
+sha256 = "8144a8febe2d6ec1a74ca9b13ce2aa63a6593dfdb869201068ae84a9b27a493a"
 
 [[sources]]
 path = "opf/tools/_opf_adopt.py"
