@@ -171,12 +171,41 @@ def _enrichment(span_entries, done_records):
 # inline construct. So the emission is RENDER-VERIFIED. Three escape candidates, least-escaped first, are
 # each rendered through the vendored Marko, and the first whose drafted bullet ROUND-TRIPS is emitted: the
 # summary renders as the LITERAL text the maintainer authored, in a single inline run of its own <li>, a
-# sibling of a trailing sentinel bullet that must survive. The full-escape candidate backslash-escapes every
-# ASCII-punctuation character, so by CommonMark's backslash-escape guarantee it always renders literally; the
-# function is therefore TOTAL, and it fails safe to that candidate when the vendored Marko is unavailable
-# (a render outage never silently emits an unsafe bullet). Leading/trailing whitespace, invisible in inline
-# rendering, is stripped: the literal contract is over the summary's visible text (disclose-guard-residuals).
+# sibling of a trailing sentinel bullet that must survive. Emission is NOT total: it FAILS CLOSED (raising
+# _UnsafeSummary, which draft_entry turns into a CANNOT_EVALUATE naming the WL-id) rather than emit an
+# unverified value. When the vendored Marko is available and NO candidate round-trips (a summary carrying a
+# character CommonMark cannot render as literal text, such as a NUL that CommonMark replaces with U+FFFD), it
+# fails closed instead of emitting the corrupted bullet. When Marko is UNAVAILABLE it cannot render, so the
+# full escape is trusted only for characters the CommonMark backslash-escape guarantee covers (ASCII
+# punctuation and ordinary text); a summary carrying a C0 control or DEL, which that guarantee does not cover,
+# fails closed rather than emit an unverified bullet. A blank/whitespace-only summary (rejected upstream;
+# defensive here) likewise fails closed rather than return raw whitespace. Leading/trailing whitespace,
+# invisible in inline rendering, is stripped: the literal contract is over the summary's visible text
+# (disclose-guard-residuals).
 _ASCII_PUNCT = frozenset(string.punctuation)   # the 32 CommonMark ASCII-punctuation chars, each backslash-escapable
+
+# The characters the full escape CANNOT make literal on its own: the CommonMark backslash-escape guarantee
+# covers ASCII punctuation and ordinary text, not the C0 control range (U+0000-U+001F, of which CommonMark
+# MUST replace U+0000 with U+FFFD) or DEL (U+007F). When Marko is unavailable the emission cannot render to
+# check, so a summary carrying any of these fails closed rather than trust the full escape over a character
+# outside the guarantee. (The line-break C0 controls are already rejected upstream by the single-line
+# summary rule; this set is the defensive, renderer-absent floor.)
+_MD_UNRENDERABLE = frozenset([chr(c) for c in range(0x00, 0x20)] + [chr(0x7f)])
+
+
+class _UnsafeSummary(Exception):
+    """A worklog summary that cannot be emitted as a literal inline bullet: no escape candidate round-trips
+    through the vendored Marko (a character CommonMark cannot render as literal text, such as a NUL), or, with
+    Marko unavailable, it carries a control character the full escape cannot make literal, or it is blank.
+    Raised by `_md_safe_summary`/`_bullet`, propagated through `_render_span_body`/`_span_draft`, and turned
+    into a CANNOT_EVALUATE draft naming the offending WL-id by `draft_entry`, so the drafter NEVER emits a
+    corrupted or block-opening bullet (fail-closed; guard-input-soundness; no-concealed-failure)."""
+
+    def __init__(self, reason, wl_id=None):
+        self.reason = reason
+        self.wl_id = wl_id
+        super().__init__(reason if wl_id is None else "{}: {}".format(wl_id, reason))
+
 
 # The leading block-significant token a minimal (candidate-1) escape neutralizes. This tier is a PREFERENCE
 # only: whatever it produces is emitted solely when the render-verification confirms it round-trips, so an
@@ -227,7 +256,9 @@ def _md_minimal_escape(stripped):
 
 def _md_full_escape(stripped):
     """Candidate 2: backslash-escape EVERY ASCII-punctuation character. CommonMark guarantees each renders as
-    its literal self, so this candidate always round-trips; it is the total, always-safe fallback."""
+    its literal self, so this candidate round-trips for ASCII punctuation and ordinary text; it is NOT total,
+    because that guarantee does not extend to a control character CommonMark replaces or drops (a NUL becomes
+    U+FFFD), which the escape leaves untouched and cannot make literal."""
     return "".join("\\" + ch if ch in _ASCII_PUNCT else ch for ch in stripped)
 
 
@@ -255,24 +286,32 @@ def _md_safe_summary(summary, suffix, marko):
     maintainer authored, in a single inline run of its own <li>, and can never open a CommonMark block, drop
     the summary, or swallow the following bullet. Three candidates are tried least-escaped first, the raw
     summary, then a minimal leading-token escape, then a full ASCII-punctuation escape, and the first whose
-    drafted bullet round-trips through the vendored `marko` is returned. The full escape always round-trips
-    (the CommonMark backslash-escape guarantee), so the function is TOTAL. `marko` is the loaded vendored
-    Marko module, or None when it is unavailable, in which case the always-safe full-escape candidate is
-    returned without a render. The bullet's own suffix (the id/closes parenthetical) is passed in and
+    drafted bullet round-trips through the vendored `marko` is returned. Every path either returns a
+    render-verified value (Marko available) or a statically-guaranteed-literal full escape (Marko unavailable,
+    control-free), or raises `_UnsafeSummary` rather than return an unverified value; `marko` is the loaded
+    vendored Marko module, or None when it is unavailable, in which case the full escape is returned only when
+    no un-renderable control character is present, else the emission fails closed. The bullet's own suffix
+    (the id/closes parenthetical) is passed in and
     verified as part of the bullet, because it participates in the parse, for example as a link-reference-
     definition title. Leading/trailing whitespace, invisible in inline rendering, is stripped; the literal
     contract is over the summary's visible text (disclose-guard-residuals)."""
-    if not summary:
-        return summary
-    target = summary.strip()
-    if not target:                           # a blank/whitespace-only summary is rejected upstream; be safe
-        return summary
+    target = (summary or "").strip()
+    if not target:                           # blank/whitespace-only (rejected upstream): never return raw
+        raise _UnsafeSummary("a blank or whitespace-only summary, which cannot be emitted as a literal bullet")
     candidates = (target, _md_minimal_escape(target), _md_full_escape(target))
     if marko is not None:
         for candidate in candidates:
             if _md_bullet_round_trips(marko, candidate, target, suffix):
                 return candidate
-    return candidates[2]                      # marko unavailable, or (defensively) none verified: full escape
+        raise _UnsafeSummary("a summary that cannot be rendered as literal inline text (no raw, minimal, or "
+                             "full-escape candidate round-trips through the vendored Marko)")
+    bad = sorted({ch for ch in target if ch in _MD_UNRENDERABLE})
+    if bad:                                  # marko unavailable: fail closed on a char the escape cannot verify
+        raise _UnsafeSummary(
+            "a summary carrying a control character the full escape cannot make literal ({}), with no "
+            "vendored Marko available to render-verify".format(
+                ", ".join("U+{:04X}".format(ord(ch)) for ch in bad)))
+    return candidates[2]                      # marko unavailable, no unrenderable char: the full escape
 
 
 def _bullet(entry, tokens):
@@ -283,8 +322,10 @@ def _bullet(entry, tokens):
     vendored Marko that the drafted bullet renders as the literal authored text and cannot open a spurious
     block (a nested list, heading, code fence, blockquote, HTML block, thematic break, or link-reference
     definition) that would drop the summary or swallow the following bullet. The Marko loader is reached at
-    runtime here, the drafter verifying its own output; when it is unavailable the summary falls back to the
-    always-safe full escape."""
+    runtime here, the drafter verifying its own output; when it is unavailable the summary is emitted through
+    the full escape only if no un-renderable control character is present, else the emission FAILS CLOSED by
+    raising _UnsafeSummary (carrying this entry's WL-id), which draft_entry turns into a CANNOT_EVALUATE rather
+    than emit a corrupted or block-opening bullet."""
     tag = entry.get("id")
     if tokens:
         suffix = " ({}; closes {})".format(tag, ", ".join(tokens))
@@ -293,8 +334,11 @@ def _bullet(entry, tokens):
     try:
         marko = _commonmark_headings._load_marko()
     except _commonmark_headings.HeadingScanError:
-        marko = None                          # a missing/unverifiable vendored Marko: fail safe to full escape
-    summary = _md_safe_summary(entry.get("summary", ""), suffix, marko)
+        marko = None                          # a missing/unverifiable vendored Marko: no render, pre-check only
+    try:
+        summary = _md_safe_summary(entry.get("summary", ""), suffix, marko)
+    except _UnsafeSummary as exc:             # name the offending WL-id, then propagate to a CANNOT_EVALUATE
+        raise _UnsafeSummary(exc.reason, wl_id=tag)
     return "- " + summary + suffix
 
 
@@ -390,6 +434,15 @@ def _validated_inputs(version_data, worklog_data, covers, registered_vendors, wh
     return releases, ledger_versions, by_id, parsed, None
 
 
+def _unsafe_finding(exc):
+    """The fail-closed CANNOT-EVALUATE finding for a summary that cannot be emitted as a literal bullet,
+    naming the offending WL-id and the reason, so the refusal points a curator at the exact worklog row to
+    fix (no-concealed-failure; guard-input-soundness)."""
+    who = exc.wl_id if exc.wl_id else "a worklog entry"
+    return ("cannot draft: worklog entry {} has {}; the drafter fails closed rather than emit a corrupted or "
+            "block-opening changelog bullet (fix the summary in worklog.toml)".format(who, exc.reason))
+
+
 def draft_entry(version_data, worklog_data, done_records, changelog_text, covers,
                 registered_vendors=frozenset(), done_enabled=True):
     """Draft ONE candidate CHANGELOG entry for `covers`. Returns (status, draft_text, notes, findings):
@@ -411,7 +464,10 @@ def draft_entry(version_data, worklog_data, done_records, changelog_text, covers
         except ReleaseError as exc:
             return CANNOT_EVALUATE, None, [], ["cannot draft the unreleased tail: {}".format(exc)]
         span_entries = [by_id[n] for n in tail]
-        text, notes = _span_draft("## unreleased", span_entries, done_records, done_enabled)
+        try:
+            text, notes = _span_draft("## unreleased", span_entries, done_records, done_enabled)
+        except _UnsafeSummary as exc:
+            return CANNOT_EVALUATE, None, [], [_unsafe_finding(exc)]
         return OK, text, notes, []
 
     if kind == "single":
@@ -454,7 +510,11 @@ def draft_entry(version_data, worklog_data, done_records, changelog_text, covers
             span_entries = [by_id[n] for n in present]
         date = row.get("date")
         suffix = " ({})".format(date[:10]) if isinstance(date, str) and len(date) >= 10 else ""
-        text, notes = _span_draft("## {}{}".format(version, suffix), span_entries, done_records, done_enabled)
+        try:
+            text, notes = _span_draft(
+                "## {}{}".format(version, suffix), span_entries, done_records, done_enabled)
+        except _UnsafeSummary as exc:
+            return CANNOT_EVALUATE, None, [], [_unsafe_finding(exc)]
         return OK, text, notes, []
 
     # range rollup: draw from the EXISTING per-release entries in range, never the raw worklog (spec 6.4).
@@ -693,7 +753,9 @@ def self_test():
     edit without re-publish -> FINDING); the freeze-digest assist equal to U5's freeze_digest; markdown-safe
     summary emission (each summary renders as the literal authored text through the vendored
     Marko renderer and never opens a block or swallows a following bullet, escalating to a full ASCII-
-    punctuation escape when a lesser candidate does not round-trip; TOTAL and Marko-unavailable-safe); U5
+    punctuation escape when a lesser candidate does not round-trip; and FAILING CLOSED to a CANNOT_EVALUATE
+    naming the WL-id when a summary cannot be rendered literally (a NUL) or is blank, both Marko-available and
+    Marko-unavailable, so no unverified value is ever emitted); U5
     malformed-heading findings propagated fail-closed in BOTH the range rollup and the freeze digest; the CLI
     parser fail-closed cases; and end-to-end store resolution (NOT-APPLICABLE, cannot-evaluate, OK, done
     enabled/enriched, done not declared + note, malformed done index, freeze-digest, freeze-digest
@@ -1114,16 +1176,35 @@ def self_test():
         _r = _md_safe_summary(_s, " (WL-4)", _marko)
         check("md-safe-summary-escalates-to-full-" + _lbl,
               _r == _md_full_escape(_s.strip()) and renders_literal(_s))
-    # TOTALITY: _md_safe_summary never raises over degenerate/odd inputs, always returning a str.
-    check("md-safe-summary-total-never-raises",
-          all(isinstance(_md_safe_summary(_s, " (WL-4)", _marko), str)
-              for _s in ["", "   ", "#", "```", "<", "[", "-", "*", "1.", "\t", "\\", "&amp;", "a<b>c", "***", "---"]))
-
     # a Marko-UNAVAILABLE emission (marko=None) falls to the always-safe full escape WITHOUT a render, and
     # _bullet itself degrades the same way when the loader raises HeadingScanError.
     check("md-safe-summary-marko-unavailable-full-escape",
           _md_safe_summary("# heading-like", " (WL-4)", None) == _md_full_escape("# heading-like")
           and _md_safe_summary("[x]: /url", " (WL-4)", None) == _md_full_escape("[x]: /url"))
+
+    # FAIL-CLOSED invariant (replaces the retired totality check): _md_safe_summary never returns an
+    # unverified value -- over odd non-blank inputs and over the NUL/blank vectors the fix targets, each call
+    # either RAISES _UnsafeSummary or returns a value whose drafted bullet renders literal.
+    def _raises_or_round_trips(s):
+        try:
+            _md_safe_summary(s, " (WL-4)", _marko)
+        except _UnsafeSummary:
+            return True
+        return renders_literal(s)
+    check("md-safe-summary-nonblank-returns-and-round-trips",
+          all(_raises_or_round_trips(_s)
+              for _s in ["#", "```", "<", "[", "-", "*", "1.", "\\", "&amp;", "a<b>c", "***", "---"]))
+    check("md-safe-summary-never-unverified-return",
+          all(_raises_or_round_trips(_s)
+              for _s in ["a\x00b", "\x00", "a\x01b", "a\tb", "   ", " ", "", "\t", "# h", "> q", "[x]: /u"]))
+    for _lbl, _s in [("empty", ""), ("spaces", "   "), ("single-space", " "), ("tab-only", "\t")]:
+        _blank_raised = False
+        try:
+            _md_safe_summary(_s, " (WL-4)", _marko)
+        except _UnsafeSummary:
+            _blank_raised = True
+        check("md-safe-summary-blank-fails-closed-" + _lbl, _blank_raised)
+
     _saved_load = _commonmark_headings._load_marko
     try:
         def _raise_load():
@@ -1134,6 +1215,47 @@ def self_test():
               _bullet(entry(4, "added", "[x]: /url"), []) == "- " + _md_full_escape("[x]: /url") + " (WL-4)")
     finally:
         _commonmark_headings._load_marko = _saved_load
+
+    # 12b: FIX 1 END-TO-END -- a summary that cannot render literally (a NUL, which passes validate_worklog
+    # but Marko replaces with U+FFFD) makes draft_entry FAIL CLOSED to a CANNOT_EVALUATE naming the offending
+    # WL-id, at BOTH _span_draft call sites (unreleased tail and per-release span), Marko-available and
+    # Marko-unavailable; and _bullet fails closed on a blank summary (the defensive seam upstream rejects).
+    worklog_nul = {"schema": 1, "entry": [
+        entry(1, "added", "first release"), entry(2, "added", "second release"),
+        entry(3, "fixed", "a fix"), entry(4, "added", "a\x00b")]}
+    st, _t, _n, findings = draft_entry(vbase, worklog_nul, None, cl, "unreleased")
+    check("nul-summary-cannot-eval-marko-available",
+          st == CANNOT_EVALUATE and any("WL-4" in f and "literal" in f for f in findings))
+    _saved_load2 = _commonmark_headings._load_marko
+    try:
+        def _raise_load2():
+            raise _commonmark_headings.HeadingScanError(
+                "forced unavailable", _commonmark_headings.REASON_VENDOR_UNREADABLE)
+        _commonmark_headings._load_marko = _raise_load2
+        st, _t, _n, findings = draft_entry(vbase, worklog_nul, None, cl, "unreleased")
+        check("nul-summary-cannot-eval-marko-unavailable",
+              st == CANNOT_EVALUATE and any("WL-4" in f and "control character" in f for f in findings))
+    finally:
+        _commonmark_headings._load_marko = _saved_load2
+    # the OTHER _span_draft site: a NUL in a per-release span (WL-1) also fails closed, naming WL-1.
+    worklog_nul1 = {"schema": 1, "entry": [
+        entry(1, "added", "a\x00b"), entry(2, "added", "second release"),
+        entry(3, "fixed", "a fix"), entry(4, "added", "a feature")]}
+    st, _t, _n, findings = draft_entry(vbase, worklog_nul1, None, cl, "1.0.0")
+    check("nul-summary-single-span-cannot-eval",
+          st == CANNOT_EVALUATE and any("WL-1" in f for f in findings))
+    # _bullet fails closed on a blank summary, carrying this entry's WL-id (validate_worklog rejects blank
+    # upstream, so this defensive seam is exercised directly at _bullet, never reaching draft_entry).
+    for _lbl, _s in [("four-space", "    "), ("single-space", " "), ("empty", "")]:
+        _bullet_wl = None
+        try:
+            _bullet(entry(4, "added", _s), [])
+        except _UnsafeSummary as _exc:
+            _bullet_wl = _exc.wl_id
+        check("bullet-blank-fails-closed-" + _lbl, _bullet_wl == "WL-4")
+    # the finding helper names both the offending WL-id and the reason.
+    _uf = _unsafe_finding(_UnsafeSummary("SOME REASON TEXT", wl_id="WL-42"))
+    check("unsafe-finding-names-wl-id", "WL-42" in _uf and "SOME REASON TEXT" in _uf)
 
     # 13: FIX 2 -- U5's malformed-heading findings are propagated fail-closed, never discarded. A rollup over
     # a changelog with a malformed bare '##' between two valid entries (content silently dropped), and a
