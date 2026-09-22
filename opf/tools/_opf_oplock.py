@@ -390,21 +390,23 @@ def _git_common_dir(store_root):
     return os.path.abspath(common)
 
 
-def _open_control_dir(control_root_fd, control_root_desc):
-    """Open (creating on genuine absence) the opf-oplock control directory beneath the control
-    root. A pre-existing symlink or wrong type at the name refuses up front; only the single
-    component is ever created (no parents, and never a missing input root)."""
-    label = "{}/{}".format(control_root_desc, CONTROL_DIRNAME)
-    st = _lstat_at(control_root_fd, CONTROL_DIRNAME, label)
+def _open_control_dir(control_root_fd, control_root_desc, dirname=CONTROL_DIRNAME):
+    """Open (creating on genuine absence) a single-component control home beneath an already-open
+    parent: by default this module's own opf-oplock control directory, and by explicit `dirname` a
+    SIBLING control home (the OPF-D2B resume substrate's opf-init tree composes this rather than
+    reimplementing it). A pre-existing symlink or wrong type at the name refuses up front; only
+    the single component is ever created (no parents, and never a missing input root)."""
+    label = "{}/{}".format(control_root_desc, dirname)
+    st = _lstat_at(control_root_fd, dirname, label)
     if st is None:
         try:
-            os.mkdir(CONTROL_DIRNAME, 0o755, dir_fd=control_root_fd)
+            os.mkdir(dirname, 0o755, dir_fd=control_root_fd)
             os.fsync(control_root_fd)
         except FileExistsError:
             pass  # a concurrent creator won the race; classify what is there now
         except OSError as exc:
             raise OpLockError("cannot create control directory {} ({})".format(label, exc))
-        st = _lstat_at(control_root_fd, CONTROL_DIRNAME, label)
+        st = _lstat_at(control_root_fd, dirname, label)
         if st is None:
             raise OpLockError("control directory {} vanished after creation; refusing".format(
                 label))
@@ -412,7 +414,7 @@ def _open_control_dir(control_root_fd, control_root_desc):
         raise OpLockError("control directory name {} is a symlink; refusing".format(label))
     if not stat.S_ISDIR(st.st_mode):
         raise OpLockError("control directory name {} is not a directory".format(label))
-    fd = _open_dir_at(control_root_fd, CONTROL_DIRNAME, label)
+    fd = _open_dir_at(control_root_fd, dirname, label)
     try:
         _validate_ctl_dir_fd(fd, label)
     except OpLockError:
