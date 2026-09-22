@@ -1011,17 +1011,24 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
     root, a declared row under the product root; round-2 P1-2), its bytes are BOUND to the reconciled
     worksheet digest immediately before staging AND re-verified from the staged run's own records after
     staging (round-2 P1-2/P1-4), and a move destination is refused inside the RESOLVED store working tree,
-    not only the literal `.working/` (round-2 P1-3). Verdicts: an invalid-but-well-formed options document
-    and an incompatible per-disposition binding are FINDINGS; an unreadable/unparseable input, a missing
-    required binding or field, and a digest-binding failure are CANNOT-EVALUATE (round-2 P2-5/P2-6).
+    not only the literal `.working/` (round-2 P1-3), and two planned move destinations in
+    ancestor/descendant relation are refused as an impossible move set (round-3 F3). Verdicts: an
+    invalid-but-well-formed options document, an incompatible per-disposition binding, and a present
+    options binding missing a required field are FINDINGS (round-3 F1); an unreadable/unparseable input,
+    a completely absent options binding, and a digest-binding failure are CANNOT-EVALUATE (round-2
+    P2-5/P2-6, round-3 F1).
 
-    Disclosed residuals (round 2): (R-2) a keep action's "steady-state checker never flags it" guarantee is
+    Disclosed residuals (rounds 2-3): (R-2) a keep action's "steady-state checker never flags it" guarantee is
     CONDITIONAL: it holds only once PR-C applies the retention and the [unmanaged].paths registration
     ATOMICALLY, in one journaled transaction (see _keep_action); the plan itself changes nothing.
     (staging-root topology) a store-scope row of a store that resolves OUTSIDE the product root has no
     product-relative spelling for the product-root staging reader, so it is refused CANNOT-EVALUATE rather
-    than planned. (post-stage refusal) a digest-binding failure detected AFTER staging leaves the refused
-    run dir behind; it is non-promotable (it carries the refusal marker as its first-staged artefact).
+    than planned. (keep-exemption topology) a DECLARED-scope keep whose product path does not fall under
+    the RESOLVED store root has no contained store-relative [unmanaged].paths spelling, so it is refused
+    CANNOT-EVALUATE rather than planned with an exemption that re-anchors to a different file (round-3
+    F2; see _keep_action). (post-stage refusal) a digest-binding failure detected AFTER staging leaves
+    the refused run dir behind; it is non-promotable (it carries the refusal marker as its first-staged
+    artefact).
     (cooperating writers) an actor that hand-writes inventory/proposals/acceptance into a partial run dir
     is outside the cooperating-writer contract this layer (like the import journal) assumes.
     Fail-closed throughout. Returns a _opf_import.PlanResult so the CLI's _import_exit maps it uniformly."""
@@ -1132,25 +1139,27 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                     if r["note"] != "":
                         raise _cannot("{} row {!r} carries a non-empty note; configuration belongs in "
                                       "--ingest-options, never the worksheet note (decision 1)".format(dispo, sp))
-                    # round-2 P2-6: REQUIRED + PERMITTED fields per disposition, validated BEFORE any field
-                    # is indexed, so an incompatible binding is a structured verdict (a FORBIDDEN field
-                    # present is a FINDING, a REQUIRED field absent is CANNOT-EVALUATE, the missing-config
-                    # class), never an uncaught KeyError and never a silently ignored field.
+                    # round-2 P2-6 / round-3 F1: REQUIRED + PERMITTED fields per disposition, validated
+                    # BEFORE any field is indexed, so an incompatible binding is a structured verdict (a
+                    # FORBIDDEN field present is a FINDING, and a REQUIRED field absent on a PRESENT binding
+                    # is a FINDING too, an invalid options document the operator must fix; a completely
+                    # ABSENT binding, opt is None above, stays CANNOT-EVALUATE, the missing-config class),
+                    # never an uncaught KeyError and never a silently ignored field.
                     if dispo == "migrate":
                         if "dest_path" in opt:
                             raise _finding("migrate row {!r} binds a dest_path; a migrate row takes "
                                            "importer_kind only (dest_path belongs to a move row)".format(sp))
                         if "importer_kind" not in opt:
-                            raise _cannot("migrate row {!r} binds no importer_kind (required for a migrate "
-                                          "row)".format(sp))
+                            raise _finding("migrate row {!r} binds no importer_kind (required for a migrate "
+                                           "row)".format(sp))
                     else:
                         if "importer_kind" in opt:
                             raise _finding("move row {!r} binds an importer_kind; a move row takes "
                                            "dest_path only (importer_kind belongs to a migrate "
                                            "row)".format(sp))
                         if not _MOVE_DEST_ARCHIVE_DEFAULT and "dest_path" not in opt:
-                            raise _cannot("move row {!r} binds no dest_path and the archive default is "
-                                          "disabled (ruling 3a requires an explicit dest)".format(sp))
+                            raise _finding("move row {!r} binds no dest_path and the archive default is "
+                                           "disabled (ruling 3a requires an explicit dest)".format(sp))
                 resolved_sp = _resolve_by_scope(r["scope"], sp)
                 if resolved_sp in expected:
                     raise _cannot("worksheet row {!r} and another row both resolve to product path {!r}; "
@@ -1188,6 +1197,20 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                             dest, move_dests[dest], sp))
                     if dest == sp:
                         raise _finding("move-to-self: {!r} destination equals its source".format(sp))
+                    # round-3 F3: two planned destinations in ANCESTOR/DESCENDANT relation are impossible
+                    # TOGETHER (the shorter path must be a regular file for one move and a directory for
+                    # the other), yet each passes the per-dest boundary check alone because neither exists
+                    # yet, and the exact-duplicate check above cannot see the relation, so a nested pair
+                    # staged an unappliable move set CLEAN. Both dests are canonical (validate_options and
+                    # the walk admit no `.`/`..`/empty segment), so the `/`-guarded prefix test is an exact
+                    # component-wise ancestor test and a name-prefix sibling (saved/ab beside saved/a) is
+                    # not swept in (the `_under_any` idiom).
+                    for prior_dest, prior_sp in move_dests.items():
+                        if dest.startswith(prior_dest + "/") or prior_dest.startswith(dest + "/"):
+                            raise _finding("move destinations {!r} (for {}) and {!r} (for {}) nest: one "
+                                           "needs the shorter path as a directory, the other as a regular "
+                                           "file, an impossible move set".format(
+                                               prior_dest, prior_sp, dest, sp))
                     move_dests[dest] = sp
                     actions.append({"kind": "move", "scope": r["scope"], "source_path": sp,
                                     "dest_path": dest, "sha256": r["sha256"], "size": r["size"]})
@@ -1243,7 +1266,7 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
 
 
 def _archive_dest(source_path):
-    """decision 3: `.archive/<source_path>` — substructure preserved for provenance, collision-free, and a
+    """decision 3: `.archive/<source_path>` - substructure preserved for provenance, collision-free, and a
     single dotdir under root OUTSIDE .working (root stays clean). posixpath.join keeps forward slashes."""
     return posixpath.join(ARCHIVE_DIRNAME, source_path)
 
@@ -1339,6 +1362,29 @@ def _check_move_boundary(product_root, dest, product_root_fd, store_working_rel)
                        "dangling symlink is a collision".format(dest))
 
 
+def _declared_to_store_rel(resolution, rel):
+    """The STORE-relative spelling of a DECLARED (product-root-relative) path: the exact inverse of
+    `_reanchor_declared`, so `_reanchor_declared(resolution, (result,)) == (rel,)` whenever a spelling
+    exists (both sides are the byte-canonical POSIX spelling the walk produces, so the round trip is an
+    equality, not a heuristic). Returns None when no contained store-relative spelling exists, because the
+    store resolves OUTSIDE the product root or `rel` does not fall under the resolved store root: an
+    `[unmanaged].paths` entry is a STORE-relative vocabulary (spec 14.2; see `_managed_paths`), so no entry
+    can name such a path and the caller must refuse rather than emit a spelling that re-anchors to a
+    different file."""
+    try:
+        base = Path(os.path.abspath(resolution.store_root)).relative_to(
+            Path(os.path.abspath(resolution.product_root))).as_posix()
+    except ValueError:
+        return None
+    base = posixpath.normpath(base)
+    p = posixpath.normpath(rel)
+    if base == ".":
+        return p               # inline / default store: the store root IS the product root (identity)
+    if p.startswith(base + "/"):
+        return p[len(base) + 1:]
+    return None
+
+
 def _keep_action(product_root, resolution, r):
     """One inert keep pending-action (decision 2: retain-in-place + an [unmanaged] exemption). R-2
     DISCLOSURE (the atomicity condition, round-2 P2-7): `unmanaged_path` is a PENDING registration; the
@@ -1347,14 +1393,38 @@ def _keep_action(product_root, resolution, r):
     atomic apply, and under any non-atomic application (registration without retention, or retention
     without registration), the kept file remains a checker-detectable stray or the cover names a missing
     path, and the checker MAY flag either state; the plan itself changes nothing, so planning opens no such
-    window. This is a disclosed residual of the plan slice, not a guarantee the plan can make."""
+    window. This is a disclosed residual of the plan slice, not a guarantee the plan can make.
+
+    `unmanaged_path` is anchored PER SCOPE (round-3 F2). An [unmanaged].paths entry is STORE-relative
+    (detection re-anchors it at the resolved store root for declared scope, `_reanchor_declared`), while a
+    worksheet source_path is SCOPE-relative (a store row store-relative, a declared row product-relative).
+    A store-scope keep therefore emits its source_path verbatim, and a declared-scope keep emits the
+    STORE-relative spelling of its product path (`_declared_to_store_rel`; identity on an inline store), so
+    the registered exemption re-anchors back to the file actually kept, never to a same-spelled store path
+    (the pre-fix defect: a declared keep on a `dir:ops` store emitted the product spelling, which
+    re-anchored to `ops/<path>`, exempting the WRONG file while the kept one stayed detected). A declared
+    keep whose product path does not fall under the resolved store root has NO contained store-relative
+    spelling, so it is refused CANNOT-EVALUATE (a disclosed residual, never a wrong-file exemption). The
+    emitted spelling is round-tripped through `_reanchor_declared` before it is trusted, so the exemption
+    is validated against the SAME authority detection will re-anchor it with (guard-input-soundness)."""
     sp = r["source_path"]
-    if not _opf_store._is_contained_relpath(sp):
-        raise _cannot("keep source {!r} is not a legal [unmanaged].paths entry".format(sp))
+    if r["scope"] == "store":
+        unmanaged = sp   # a store-scope source_path is already STORE-relative (detect emits it that way)
+    else:
+        unmanaged = _declared_to_store_rel(resolution, sp)
+        if unmanaged is None or _reanchor_declared(resolution, (unmanaged,)) != (sp,):
+            raise _cannot("keep row {!r} (declared scope) does not fall under the resolved store root, "
+                          "so no store-relative [unmanaged].paths entry can cover it; emitting the "
+                          "product spelling would exempt a DIFFERENT file once re-anchored at the store "
+                          "root (fail-closed, disclosed residual; retriage the row or relocate the file "
+                          "under the store)".format(sp))
+    if not _opf_store._is_contained_relpath(unmanaged):
+        raise _cannot("keep source {!r} does not yield a legal [unmanaged].paths entry ({!r})".format(
+            sp, unmanaged))
     return {"kind": "keep", "scope": r["scope"], "source_path": sp,
-            "unmanaged_path": sp,   # PR-C must add this to [unmanaged].paths ATOMICALLY with the retention
-            #                         (one journaled transaction) BEFORE the "checker never flags it"
-            #                         guarantee holds (R-2; see the docstring).
+            "unmanaged_path": unmanaged,   # PR-C must add this to [unmanaged].paths ATOMICALLY with the
+            #                                retention (one journaled transaction) BEFORE the "checker
+            #                                never flags it" guarantee holds (R-2; see the docstring).
             "sha256": r["sha256"], "size": r["size"]}
 
 
@@ -1468,21 +1538,88 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                       plan(root, ws, empty, files).verdict == CANNOT_EVALUATE)
 
     def keep():
-        for relocated in (False, True):
-            with fixture(relocated=relocated) as (root, machine):
-                files = ["legacy/a.md"]
-                ws = triage(root, files, "keep")
-                before = snapshot(machine)
-                run = staged(root, machine, ws, empty, files)
-                if run is None:
-                    continue
-                actions = read(run, "ingest-actions.toml")["action"]
+        # round-3 F2: a keep's exemption is judged by its COVERAGE, not its emitted string. Each round
+        # trip registers the EMITTED unmanaged_path in the store manifest (exactly what PR-C will apply)
+        # and RE-DETECTS: the kept file must no longer be detected, and no unrelated file may be
+        # spuriously excluded. Pre-fix a declared keep on a relocated (`dir:ops`) store emitted the
+        # PRODUCT spelling, which re-anchors at the store root to a DIFFERENT file, so every relocated
+        # declared leg here FAILS without the fix.
+        import shutil as _sh
+
+        def register(machine, unmanaged):
+            mp = machine / "manifest.toml"
+            mp.write_text(mp.read_text(encoding="utf-8")
+                          + '\n[unmanaged]\npaths = ["{}"]\n'.format(unmanaged), encoding="utf-8")
+
+        def emitted(root, machine, files, mapped=None):
+            ws = triage(root, files, "keep")
+            before = snapshot(machine)
+            run = staged(root, machine, ws, empty, files)
+            if run is None:
+                return None
+            check("mapping-unmapped", unmapped(run, mapped or files))
+            check("baseline-byte-unchanged", snapshot(machine) == before)
+            return read(run, "ingest-actions.toml")["action"]
+
+        # inline: identity anchoring (unchanged behaviour), asserted by string AND by coverage.
+        with fixture({"legacy/a.md": "source\n", "other.md": "unrelated\n"}) as (root, machine):
+            actions = emitted(root, machine, ["legacy/a.md"])
+            if actions is not None:
                 check("keep-action", len(actions) == 1 and actions[0]["kind"] == "keep"
                       and actions[0]["source_path"] == "legacy/a.md"
                       and actions[0].get("unmanaged_path") == "legacy/a.md")
-                check("mapping-unmapped", unmapped(run, files))
-                check("baseline-byte-unchanged", snapshot(machine) == before)
-                check("source-byte-unchanged", (root / files[0]).read_bytes() == b"source\n")
+                check("source-byte-unchanged", (root / "legacy/a.md").read_bytes() == b"source\n")
+                register(machine, actions[0]["unmanaged_path"])
+                after = detect(root, include=["legacy/a.md", "other.md"])
+                check("keep-coverage-inline", after.verdict == CLEAN and
+                      {r["source_path"] for r in after.rows} == {"other.md"})
+        # relocated dir:ops, DECLARED keep UNDER the store root: the exemption is the STORE-relative
+        # spelling ("legacy/a.md" for product "ops/legacy/a.md"), which re-anchors back to the kept
+        # file, while the same-spelled PRODUCT-root file stays detected (no spurious exclusion).
+        # Pre-fix the emission was "ops/legacy/a.md" (re-anchoring to ops/ops/legacy/a.md, covering
+        # nothing), so both checks FAIL without the fix.
+        root = build_relocated(product={"ops/legacy/a.md": "kept\n", "legacy/a.md": "unrelated\n"})
+        try:
+            machine = root / "ops/.working/toml"
+            actions = emitted(root, machine, ["ops/legacy/a.md"])
+            if actions is not None:
+                check("keep-reloc-declared-store-rel",
+                      len(actions) == 1 and actions[0].get("unmanaged_path") == "legacy/a.md")
+                register(machine, actions[0]["unmanaged_path"])
+                after = detect(root, include=["ops/legacy/a.md", "legacy/a.md"])
+                check("keep-coverage-reloc-declared", after.verdict == CLEAN and
+                      {r["source_path"] for r in after.rows} == {"legacy/a.md"})
+        finally:
+            _sh.rmtree(root)
+        # relocated dir:ops, STORE-scope keep: a store row's source_path is already store-relative and
+        # is emitted verbatim; registered, it covers the kept store file (regression guard).
+        root = build_relocated(strays={".working/a.md": "kept\n"})
+        try:
+            machine = root / "ops/.working/toml"
+            actions = emitted(root, machine, [".working/a.md"], mapped=["ops/.working/a.md"])
+            if actions is not None:
+                check("keep-reloc-store-verbatim",
+                      len(actions) == 1 and actions[0].get("unmanaged_path") == ".working/a.md")
+                register(machine, actions[0]["unmanaged_path"])
+                after = detect(root)
+                check("keep-coverage-reloc-store", after.verdict == CLEAN and after.rows == [])
+        finally:
+            _sh.rmtree(root)
+        # relocated dir:ops, DECLARED keep OUTSIDE the store root (the round-3 F2 repro): no contained
+        # store-relative spelling exists, so the plan is refused CANNOT-EVALUATE with nothing staged,
+        # never a CLEAN plan whose exemption re-anchors to a different file. Pre-fix this was a CLEAN
+        # plan emitting unmanaged_path="legacy/a.md" (which registration would re-anchor to the WRONG
+        # file, ops/legacy/a.md), so this check FAILS without the fix.
+        root = build_relocated(product={"legacy/a.md": "source\n"})
+        try:
+            machine = root / "ops/.working/toml"
+            ws = triage(root, ["legacy/a.md"], "keep")
+            result = plan(root, ws, empty, ["legacy/a.md"])
+            check("keep-reloc-outside-store-refused", result.verdict == CANNOT_EVALUATE)
+            check("keep-reloc-outside-store-nothing-staged",
+                  not (machine.parent / "imports").exists())
+        finally:
+            _sh.rmtree(root)
 
     def migrate():
         for kind, body in (("github-tasklist", "- [ ] one\n- [x] two\n"),
@@ -1548,6 +1685,35 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             check("dest-in-resolved-working",
                   plan(root, ws, options(ws, dest_path="ops/.working/new.md"), files).verdict == FINDING)
             check("dest-in-resolved-working-nothing-staged", not (machine.parent / "imports").exists())
+        # round-3 F3: two planned move destinations in ANCESTOR/DESCENDANT relation (saved/a +
+        # saved/a/b, both absent, on the reported dir:ops store shape) are an IMPOSSIBLE move set: one
+        # needs saved/a as a regular file, the other as a directory. Pre-fix only EXACT duplicates were
+        # rejected, so the nested pair staged CLEAN; each nested leg here FAILS without the fix. A
+        # non-conflicting pair (saved/a + saved/b) and a name-prefix sibling (saved/a + saved/ab) stay
+        # CLEAN, pinning the predicate to path components, never a bare string prefix.
+        import shutil as _sh
+
+        def move_pair(dest_a, dest_b):
+            root = build_relocated(strays={".working/a.md": "one\n", ".working/b.md": "two\n"})
+            try:
+                machine = root / "ops/.working/toml"
+                files = [".working/a.md", ".working/b.md"]
+                ws = triage(root, files, "move")
+                opts = {"format": OPTIONS_FORMAT, "schema": SCHEMA, "option": [
+                    {"scope": "store", "source_path": files[0], "dest_path": dest_a},
+                    {"scope": "store", "source_path": files[1], "dest_path": dest_b}]}
+                result = plan(root, ws, opts, files)
+                return result.verdict, (machine.parent / "imports").exists()
+            finally:
+                _sh.rmtree(root)
+
+        for label, pair, want in (("nested-dest", ("saved/a", "saved/a/b"), FINDING),
+                                  ("nested-dest-reversed", ("saved/a/b", "saved/a"), FINDING),
+                                  ("nested-dest-clean-pair", ("saved/a", "saved/b"), CLEAN),
+                                  ("nested-dest-sibling-name", ("saved/a", "saved/ab"), CLEAN)):
+            verdict, staged_run = move_pair(*pair)
+            check(label, verdict == want and staged_run == (want == CLEAN))
+
         archive()  # clean companion: an always-FINDING guard must fail too
 
     def fail_closed():
@@ -1604,12 +1770,12 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
 
     def disposition_bindings():
         # round-2 P2-6: REQUIRED + PERMITTED fields per disposition, judged on the PLANNER VERDICT: a
-        # FORBIDDEN field present is a FINDING, a REQUIRED field absent is CANNOT-EVALUATE, and a keep row
-        # forbids any binding at all. Discriminators: pre-fix, migrate with a bare binding CRASHED with an
-        # uncaught KeyError (fail-open), and each incompatible combination returned a silent CLEAN, so
-        # every check here FAILS without the fix.
+        # FORBIDDEN field present is a FINDING, a REQUIRED field absent on a present binding is a
+        # FINDING (round-3 F1), and a keep row forbids any binding at all. Discriminators: pre-fix,
+        # migrate with a bare binding CRASHED with an uncaught KeyError (fail-open), and each
+        # incompatible combination returned a silent CLEAN, so every check here FAILS without the fix.
         cases = [
-            ("migrate-bare-binding", "migrate", {"importer_kind": None}, CANNOT_EVALUATE),
+            ("migrate-bare-binding", "migrate", {"importer_kind": None}, FINDING),
             ("migrate-forbids-dest-path", "migrate",
              {"importer_kind": "github-tasklist", "dest_path": "saved/x.md"}, FINDING),
             ("move-forbids-importer-kind", "move",
