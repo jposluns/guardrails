@@ -74,7 +74,7 @@ def _bootstrap():
     invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
     that could not be brought in."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
-    global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_observe
+    global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_importers, _opf_observe
     try:
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
         import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
@@ -85,6 +85,7 @@ def _bootstrap():
         import _opf_views       # U4: deterministic view generators + the closed transform vocabulary
         import _opf_fuzz        # adversarial input-hardening proof (membership/type-guard class closure)
         import _opf_import      # U7: import staging (module + self-test; the live import verb is wired below)
+        import _opf_importers   # MIG-PR2: the shared import layer (deterministic importers + loss accounting)
         import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
@@ -3062,6 +3063,7 @@ def _self_tests():
     ("opf-emit", _opf_emit.self_test),
     ("opf-views", _opf_views.self_test),
     ("opf-import", _opf_import.self_test),
+    ("opf-importers", _opf_importers.self_test),
     ("opf-observe", _opf_observe.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),

@@ -1121,18 +1121,24 @@ def render_version_file(src):
     return "{}\n".format(latest)
 
 
+# The DECLARED projection columns render_mirror emits for a 1:1 <TYPE>-INDEX.md mirror (spec 10.1), in
+# render order. Hoisted to a module constant so the importer that recognizes a generated mirror face keys
+# on the SAME authoritative column vocabulary (guard-input-soundness: the guard's input is derived from its
+# source, never re-declared). Every entry is a registered PROJECT_COLUMNS name (t_project enforces it).
+MIRROR_COLUMNS = ("type", "status", "title", "created_at", "updated_at", "date", "kind", "severity",
+                  "decision", "decided_at", "decided_by", "classification", "action", "scopes",
+                  "recipient", "dedup_class", "content_digest", "delivery", "context", "rationale")
+
+
 def render_mirror(type_name, records):
     """A 1:1 <TYPE>-INDEX.md mirror (spec 10.1): each record in ID order rendered as a projection of its
     declared columns, mirroring the machine index for human reading. Every projected value is escaped for
     the markdown/HTML sink so a free-text column (decision, classification, action, title, ...) cannot
     forge structure or the do-not-edit header comment."""
-    columns = ("type", "status", "title", "created_at", "updated_at", "date", "kind", "severity",
-               "decision", "decided_at", "decided_by", "classification", "action", "scopes",
-               "recipient", "dedup_class", "content_digest", "delivery", "context", "rationale")
     out = []
     for r in t_sort(records):
         out.append("## {}".format(_md_text(r.get("id"))))
-        for col, val in t_project(r, columns):
+        for col, val in t_project(r, MIRROR_COLUMNS):
             if isinstance(val, list):
                 val = "[{}]".format(", ".join(_md_text(x) for x in val))
             elif isinstance(val, dict):

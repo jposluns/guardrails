@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a722f096d74629d979e55abe7b6b8f610d19473690be945d7bdbdce39d181619"
+tree-sha256 = "23ab3fa268c3e50bab12a741bb77dc9dcef61b520a881625eaeb5e0760803e2d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2496,8 +2496,8 @@ sha256 = "3dc2e14060aea7904fb6f1862cbd631e06cd7ba28514f047044857015a75e1ad"
 
 [[sources]]
 path = "opf/tools/_opf_importers.py"
-bytes = 111943
-sha256 = "df0005a95a59d878d99fbd1d02448a03d593c8b93db042933dde9fdda29d5614"
+bytes = 152889
+sha256 = "43c8f35bea1c8a44318947c1c7ee993afe63a64f672729eaa65787829170c5b9"
 
 [[sources]]
 path = "opf/tools/_opf_ingest.py"
@@ -2541,8 +2541,8 @@ sha256 = "a87859d4a0e6e0f61f0b84a703d35e16b12ca0990efd83783f6e1e79b4fae69c"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
-bytes = 283206
-sha256 = "755ae26306953e90c4668dcb6e609c98453dd1eca39e4fb465e2d9e4c551f68b"
+bytes = 283645
+sha256 = "3a4716d3c96a329a37139970aeb14570bc2b28bb66de3d0cdd2b4e341ecf706a"
 
 [[sources]]
 path = "opf/tools/_semver.py"
@@ -2731,8 +2731,8 @@ sha256 = "a16dd3450a9a278bfa9c52e65ff23f1be04bf98deaaa9120e57a0bb464c8ade6"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 205198
-sha256 = "c9368c8dfa8da8893aec9711e858512955efb9fb117bbf0ea4f4de5995174498"
+bytes = 205374
+sha256 = "7252d2bc8ebae6d3799de08a2a18b3aa0d08bb35b50740453fa72161d26d127a"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"

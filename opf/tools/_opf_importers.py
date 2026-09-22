@@ -73,6 +73,9 @@ import _journal        # noqa: E402  the contained-reader path predicate (source
 import _opf_store      # noqa: E402  contained-relpath predicate, the store-read byte cap
 import _opf_import     # noqa: E402  reuse the 0/1/2 verdicts, the proposals validator, digest / emit helpers
 import _opf_schema     # noqa: E402  the REAL record validator both paths pass (the single validator gate)
+import _opf_views      # noqa: E402  the renderer whose faces this layer recognizes: single-source the mirror
+                       # column vocabulary, the empty marker, and the mirror-title -> type resolver (no cycle:
+                       # _opf_views imports none of the importer/import modules)
 
 
 # --- fixed formats, closed vocabularies, and the outcome model ---------------------------------------
@@ -578,18 +581,33 @@ _FACE_RECORD_RE = re.compile(r"^- [A-Z]{2}-[1-9][0-9]* ")
 # output (not a hand edit), so it is `preserved_verbatim` like a record line. Tying the pattern to the
 # closed kind vocabulary keeps this from re-admitting an arbitrary indented bullet (no unrestricted bullet
 # acceptance): only the renderer's own contextual-row shape is recognized.
-_FACE_REF_ROW_RE = re.compile(r"^  - (?:{}): \S".format("|".join(re.escape(k) for k in _opf_schema.REF_KINDS)))
+# The VALUE requirement is at least one NON-whitespace character ANYWHERE after the single separator
+# space (`.*\S`): the locator is the verbatim schema-valid value (_opf_schema._validate_refs requires a
+# non-BLANK string, at least one character `.strip()` keeps), which may BEGIN with whitespace, and
+# render_references emits it verbatim after the `: ` separator, so anchoring `\S` immediately after the
+# separator read a GENUINE leading-space-locator row as false drift; but a schema-valid locator is never
+# ALL whitespace, so the round-3 bare `.` also matched a whitespace-only value and read `  - doc:  ` as a
+# genuine row (a false clean). `.*\S` accepts every schema-valid locator (leading space included) and
+# rejects a whitespace-only / empty value to `ambiguous` (drift). The kind alternation, the 2-space
+# indent, and the REFERENCES-view / owning-record context gating stay unchanged.
+_FACE_REF_ROW_RE = re.compile(r"^  - (?:{}): .*\S".format("|".join(re.escape(k) for k in _opf_schema.REF_KINDS)))
 # The view TITLE `_opf_views.render_references` emits (`_lines("REFERENCES", ...)`). A contextual
 # reference row is generated ONLY inside this view, subordinate to a reference record line, so a row is
 # recognized as generator output by its VIEW-and-record context, never by its `  - <kind>:` line prefix
 # alone (a prefix-only match re-admits an orphan row under an unrelated view / section as clean).
 _FACE_REFERENCES_TITLE = "REFERENCES"
-# A generator-emitted level 2..6 ATX SUBSECTION heading in the face body: the multi-section views
+# A generator-emitted SUBSECTION heading in the face body is EXACTLY H2: the multi-section views
 # (render_decisions / render_pipeline / render_handoff / render_findings / render_contributions /
-# render_version_md) emit `## <Subsection>` groupings at column 0. Like the H1 title it is structural and
-# carries no importable record (records are the `- <NS>-<n>` bullets), so it is `ignored_by_declared_rule`,
-# not drift; a multi-section render is therefore recognized clean rather than flagged as spurious drift.
-_FACE_SUBHEADING_RE = re.compile(r"^#{2,6}\s+\S")
+# render_version_md), render_mirror's `## <id>` record headings, and render_version_md's subsections all
+# emit `## <text>` (two hashes, one space) at column 0, and NO renderer emits an H3..H6 heading. Like the
+# H1 title a recognized H2 is structural and carries no importable record (records are the `- <NS>-<n>`
+# bullets), so it is `ignored_by_declared_rule`, not drift; a multi-section render is therefore recognized
+# clean rather than flagged as spurious drift. Recognition requires EXACTLY two hashes plus a space
+# (`### x` has `#` where the space must be, so it does not match): a deeper heading is NOT generator
+# output, so it establishes no mirror ownership, no VERSION subsection, and no structural subheading, and
+# falls through to `ambiguous` drift (the previous `^#{2,6}` match let an H3..H6 heading, its level
+# discarded by the `lstrip("#")`, forge mirror / VERSION ownership).
+_FACE_H2_RE = re.compile(r"^## \S")
 # A generated HTML comment is closed ONLY by a `--`-led terminator: the standard `-->` or the abrupt
 # `--!>`. `_opf_views._html_comment_safe` neutralizes BOTH in every interpolated value, so neither can
 # appear in a well-formed generated header (its opening sentinel line or any field line). A terminator on
@@ -598,41 +616,144 @@ _FACE_SUBHEADING_RE = re.compile(r"^#{2,6}\s+\S")
 # (the comment is malformed, so NO line is trusted as header and the sentinel and every following line is
 # `ambiguous` drift), so an early-closed / abruptly-closed header can no longer read as all-header/clean.
 _FACE_COMMENT_TERMINATORS = ("-->", "--!>")
-_FACE_EMPTY = "_No records._"
+# The empty-view marker, single-sourced from the renderer (was a local literal). Every view family renders
+# it identically, so it is `ignored_by_declared_rule` in all three grammars below.
+_FACE_EMPTY = _opf_views._EMPTY
+
+# --- view-family grammars (spec 10.1/6.1) --------------------------------------------------------------
+# Beyond the record-list views (the `- <NS>-<n> ...` bullets recognized above), _opf_views renders two
+# OTHER face shapes the importer must recognize so an EXACT generated mirror or VERSION.md face reads clean
+# rather than as drift: the 1:1 <TYPE>-INDEX.md mirror (render_mirror) and VERSION.md (render_version_md).
+# The face's grammar is gated on the family the FIRST structural H1 title selects, generalizing the
+# view-context mechanism the REFERENCES sub-state already uses. An unknown H1 title falls back to the tight
+# record-list family (never a permissive read).
+_FACE_VERSION_TITLE = "VERSION"
+# A mirror H1 title is `<TYPE> index` (render_mirror: `"{} index".format(type_name.upper())`). The token is
+# resolved through _opf_views._mirror_type (reusing the authoritative _LEDGER_SOURCES exclusion AND the
+# BASELINE_SPECS membership test), never a re-encoded type list, so the importer's mirror set cannot drift
+# from the renderer's (guard-input-soundness).
+_FACE_MIRROR_TITLE_RE = re.compile(r"^(?P<tok>[A-Z0-9_]+) index$")
+# A mirror COLUMN row: `- <col>: <val>` where <col> is one of render_mirror's declared columns
+# (MIRROR_COLUMNS, single-sourced from _opf_views) plus the `actor` pseudo-column render_mirror also emits.
+# The value is OPTIONAL: the write path strips per-line trailing whitespace (_opf_views.py str.rstrip), so
+# an empty-valued column is `- <col>:` on disk (and `- <col>: ` before that normalization); BOTH are
+# accepted, and nothing shorter. Anchoring `:` after the closed key alternation keeps a hand-added
+# `- word: something` bullet (an unknown key) out (no unrestricted-bullet acceptance).
+_FACE_MIRROR_COLS = _opf_views.MIRROR_COLUMNS + ("actor",)
+_FACE_MIRROR_COL_RE = re.compile(
+    r"^- (?:{}):(?: .*)?$".format("|".join(re.escape(c) for c in _FACE_MIRROR_COLS)))
+# VERSION.md subsection titles (render_version_md) and its two anchored row shapes. A release row is
+# `- <ver> (<date>) worklog <span>`; a summary row is `- <covers> (<status>)`. Each is recognized ONLY under
+# its owning subsection (shaped, not context-only, recognition), so a row of the wrong shape, or under the
+# wrong subsection, is drift. The two shapes are NOT disjoint: an EMPTY-SPAN release row renders as
+# `- <ver> (<date>) worklog (none)`, which ends in a parenthesized token and so ALSO matches the summary
+# shape; the summaries branch therefore EXCLUDES a release-shaped row (a genuine summary row carries no
+# ` worklog <span>` tail; one whose own text completes the release shape is fail-closed to drift, a
+# residual disclosed below).
+_FACE_VERSION_RELEASES = "Releases"
+_FACE_VERSION_SUMMARIES = "Changelog summaries"
+_FACE_VERSION_RELEASE_RE = re.compile(r"^- .+ \(.+\) worklog .+$")
+_FACE_VERSION_SUMMARY_RE = re.compile(r"^- .+ \(.+\)$")
+
+
+def _face_family(title):
+    """The view family a face's H1 title selects (its leading `#` already stripped and the text stripped):
+    `version`, `mirror`, or the default `record` list family. The mirror resolution reuses
+    _opf_views._mirror_type so the ledger-source exclusion and BASELINE_SPECS membership are never
+    re-encoded here; an unknown title resolves to the tight record-list grammar, never a permissive read."""
+    if title == _FACE_VERSION_TITLE:
+        return "version"
+    m = _FACE_MIRROR_TITLE_RE.match(title)
+    if m and _opf_views._mirror_type("{}-INDEX.md".format(m.group("tok"))) is not None:
+        return "mirror"
+    return "record"
 
 _FACE_RESIDUAL = ("aiqt-face recognizes an EXACT OPF/AIQT-generated markdown face by its generated "
                   "sentinel (`<!-- GENERATED by ... opf/tools/_opf_views.py ... -->`). An exact face is a "
                   "DERIVED projection the store REGENERATES (generated-artefact-source-only), so it carries "
-                  "nothing NEW to import: the header is `ignored_by_declared_rule`, the H1 view title, a "
-                  "generator-emitted level 2..6 ATX subsection heading (`## ...` etc., the multi-section "
-                  "views' structural groupings), the empty-view marker, and blank lines are "
-                  "`ignored_by_declared_rule`, and a rendered record line matching the generator's own "
-                  "`- <NS>-<n> ...` record grammar (_opf_views' render output shape), and a two-space-indented "
-                  "`  - <kind>: <locator>` contextual reference row recognized ONLY within the REFERENCES view "
-                  "and under its owning reference record (render_references, `<kind>` from the closed spec-8.6 "
-                  "vocabulary path / url / doc), not by its line prefix alone, is `preserved_verbatim` "
-                  "with NO candidate (re-importing it would duplicate the store). A "
-                  "bullet that is NOT of the generator-emitted record shape, a reference-row-shaped bullet "
-                  "OUTSIDE the REFERENCES view or not under a reference record (an orphan / wrong-view row), "
-                  "and any other body line that has DRIFTED from the exact generated grammar (a possible hand "
-                  "edit), is "
-                  "`ambiguous` and routes to review. The header is a CONTIGUOUS run of the sentinel line plus "
-                  "the generated field lines `sources:` / `schema:` / `source-set-digest:` / `regenerate:` "
-                  "in THAT FIXED ORDER, each exactly ONCE, terminated by a line that is exactly `-->`: the "
-                  "terminator is recognized ONLY at the end of that full ordered field run, so a forged or "
-                  "relocated `-->` later in the body, a terminator embedded on the OPENING sentinel line "
-                  "(`... regenerate. -->`), an embedded terminator on a field line in the standard `-->` OR "
-                  "the abrupt `--!>` form (`sources: x -->` / `sources: x --!>`, both neutralized by "
-                  "_html_comment_safe in a genuine header), or an out-of-order / repeated / injected field "
-                  "line cannot swallow real content into the header. If the header does not close cleanly at "
-                  "its ordered field run (a terminator on the opening sentinel line, a dropped or mangled or "
-                  "embedded `-->` / `--!>`, an injected / repeated / out-of-order field line, or a "
-                  "sentinel-only source with no `-->` at all), the comment is malformed: NO line is trusted "
-                  "as header and the opening sentinel and every following line is `ambiguous` drift, so an "
-                  "unterminated / sentinel-only header is NON-clean rather than silently all-header/clean. "
-                  "Faithful RECONSTRUCTION of records from a rendered face (the inline escape is one-way for "
-                  "a markdown sink) is deferred to the assistant-guided path or an operator KEEP of the "
-                  "original (spec 14.2).")
+                  "nothing NEW to import: the header and blank lines are `ignored_by_declared_rule`, and the "
+                  "body is read under a grammar GATED on the view FAMILY the FIRST structural H1 title "
+                  "selects; BEFORE that first H1 no family grammar is live, so any non-blank body line "
+                  "ahead of the title is `ambiguous` drift (a genuine face opens with its single H1). "
+                  "Three closed families: (1) RECORD-LIST (the default, and the family for any "
+                  "unknown H1 title): the H1 view title and a generator-emitted exactly-H2 `## ...`"
+                  "subsection heading are `ignored_by_declared_rule`; a `- <NS>-<n> ...` record line "
+                  "(_opf_views' render shape) is `preserved_verbatim`; a two-space-indented `  - <kind>: "
+                  "<locator>` contextual reference row is `preserved_verbatim` ONLY inside the REFERENCES "
+                  "view and under its owning reference record (render_references, `<kind>` from the closed "
+                  "spec-8.6 vocabulary path / url / doc), not by its prefix alone. (2) MIRROR (H1 `# <TYPE> "
+                  "index`, where <TYPE> resolves through _opf_views._mirror_type): a `## <id>` heading whose "
+                  "id passes the schema id shape is `ignored_by_declared_rule` and OWNS the run of "
+                  "`- <col>: <val>` column rows beneath it, whose <col> is in render_mirror's closed column "
+                  "vocabulary (MIRROR_COLUMNS + `actor`); ownership resets on a blank line, a heading, or the "
+                  "empty marker. (3) VERSION (H1 `# VERSION`): the subsections `## Releases` and "
+                  "`## Changelog summaries` are `ignored_by_declared_rule` and each OWNS its shaped rows (a "
+                  "`- <ver> (<date>) worklog <span>` release row under Releases, a `- <covers> (<status>)` "
+                  "summary row under Summaries; a summary row is recognized ONLY when it is not ALSO "
+                  "release-shaped, because an EMPTY-SPAN release row `- <ver> (<date>) worklog (none)` ends "
+                  "in a parenthesized token and would otherwise read as a summary). The empty-view marker "
+                  "is `ignored_by_declared_rule` in every "
+                  "family. An off-grammar readable body line, one that matches NO shape the live family's "
+                  "grammar declares, is `ambiguous` and routes to review (clean == False, so it cannot "
+                  "auto-promote); recognition is by SHAPE, never byte-exactness, so this catches shape "
+                  "drift, not byte drift (the ACCEPTED byte-mimic residual below). Shape drift caught this "
+                  "way: a bullet that is NOT the family's declared "
+                  "shape, an orphan or unknown-key mirror column row (or one whose owning `## <id>` did not "
+                  "precede it, or was separated by a blank), a non-id `## ` heading in a mirror, a VERSION "
+                  "row of the wrong shape or outside its subsection, an alien VERSION subsection, a "
+                  "reference-row-shaped bullet outside the REFERENCES view or not under a reference record, "
+                  "an H3..H6 heading in ANY family (H1 and exactly-H2 are the only generator heading "
+                  "levels, so a deeper heading establishes no ownership, subsection, or structural "
+                  "subheading), a release-shaped row under the Summaries subsection, and a SECOND H1 "
+                  "anywhere in the body (the generator emits exactly one view title, so a "
+                  "later H1 is a hand edit). The header is a CONTIGUOUS run of the sentinel line plus the "
+                  "generated field lines `sources:` / `schema:` / `source-set-digest:` / `regenerate:` in "
+                  "THAT FIXED ORDER, each exactly ONCE, terminated by a line that is exactly `-->` at "
+                  "column 0 with no leading or trailing whitespace (an indented or padded close is NOT a "
+                  "close): a forged "
+                  "or relocated `-->`, a terminator embedded on the opening sentinel line, an embedded `-->` "
+                  "or abrupt `--!>` on a field line, or an out-of-order / repeated / injected field line "
+                  "cannot swallow real content into the header; if the header does not close cleanly at its "
+                  "ordered field run (including a sentinel-only source with no `-->`), the comment is "
+                  "malformed, so NO line is trusted as header and the opening sentinel and every following "
+                  "line is `ambiguous` drift (an unterminated / sentinel-only header is NON-clean). "
+                  "A face whose header closes cleanly but that carries NO body line beyond at most its "
+                  "single H1 view title (header-only, or a bare title with nothing after it) is TRUNCATED "
+                  "generated output and reads NON-clean: every renderer emits at least one non-blank body "
+                  "line after its H1 (the empty-view marker or a subsection heading). "
+                  "DISCLOSED RESIDUALS. The ACCEPTED byte-mimic class (maintainer-accepted: within a "
+                  "genuine generated header the importer recognizes a face by SHAPE, so a hand-authored "
+                  "file that byte-mimics a generated face reads clean; byte-EXACTNESS against the store is "
+                  "the render DRIFT GATE's job, not the importer's, the tolerance is bounded to shape-valid "
+                  "content the importer preserves verbatim downstream, and the safe failure direction on a "
+                  "non-mimicking input is false-DRIFT to review, never a silent import): (a) STRUCTURAL "
+                  "lines are matched by shape, the heading TEXT compared after `#`-strip plus whitespace "
+                  "normalization (the H1 prefix is `#` plus any whitespace run, the H2 prefix exactly "
+                  "`## `), so a whitespace-variant face reads clean: `#  TITLE`, a `#`-tab title, trailing "
+                  "spaces on a heading or on most rows, or a CRLF-converted face. (b) Structural "
+                  "MULTIPLICITY and ORDER inside a genuine face are NOT enforced: a duplicated or "
+                  "reordered subsection or `## <id>` heading, a repeated column or record row, or an "
+                  "appended shape-valid row reads clean; the drift gate catches the byte drift against the "
+                  "store. (c) Content drift INSIDE a well-shaped bullet (an edited title, version, column "
+                  "value, or renumbered id that stays shape-valid) reads `preserved_verbatim` (the face "
+                  "importer never reconstructs records). FAIL-SAFE residuals (a false DRIFT routed to "
+                  "review, never a false clean): a degenerate reference locator that is schema-valid yet "
+                  "ESCAPES to a whitespace-only rendering (an all-control-character locator; the markdown "
+                  "sink drops C0/DEL controls) renders a value-less row that reads `ambiguous`; by the same "
+                  "escape, a GENUINE record whose TITLE (or other free-text projected field) is control-only "
+                  "collapses to a bare `- <id>` row (the escape leaves only the trailing separator space, "
+                  "which the write path's per-line trailing-whitespace normalization strips), off the record "
+                  "shape, so it reads `ambiguous` and routes to review, never a false clean; the store's own "
+                  "record validation and the render drift gate own record completeness for both degenerate "
+                  "escapes; a GENUINE "
+                  "summary row whose own text carries a ` worklog ` tail that completes the release shape "
+                  "is fail-closed to `ambiguous` under Summaries; and a trailing-whitespace variant of the "
+                  "end-anchored summary row shape likewise reads `ambiguous`. Record-list exactly-H2 `## ` "
+                  "subheadings remain generically ignored (per-view "
+                  "subsection vocabularies are not enumerated); a non-UTF-8 source stays CANNOT-EVALUATE "
+                  "(inherited). Faithful RECONSTRUCTION of records from a rendered face (the inline escape is "
+                  "one-way for a markdown sink) is deferred to the assistant-guided path or an operator KEEP "
+                  "of the original (spec 14.2).")
 
 
 def import_aiqt_face(source):
@@ -678,7 +799,11 @@ def import_aiqt_face(source):
     else:
         for idx in range(1, len(lines)):        # idx is 0-based, so this covers line_no idx+1 (line 1 excluded)
             t = lines[idx]
-            if t.strip() == "-->":
+            # The clean close is EXACTLY `-->` with no leading or trailing whitespace (_text has already
+            # stripped only the trailing newline / CR; the renderer emits the close at column 0 unpadded).
+            # An indented `  -->` is NOT a close: it falls to the embedded-terminator break below, so the
+            # header stays malformed (every line ambiguous) rather than closing at a hand-moved terminator.
+            if t == "-->":
                 if fi == n_fields:              # the terminator closes the header ONLY after the full field run
                     header_end = idx + 1
                 break
@@ -688,11 +813,20 @@ def import_aiqt_face(source):
                 fi += 1                         # the next field, IN ORDER: advance the run
                 continue
             break                               # out-of-order / repeated / missing / non-field line: not clean
-    in_refs_view = False   # True while the body sits under the REFERENCES view title: the only view whose
-                           # records own the `  - <kind>: <locator>` contextual reference rows.
-    ref_owner = False      # True immediately under a reference record line (or its run of ref rows), so a
-                           # contextual reference row is recognized ONLY where render_references emits one and
-                           # an orphan row under an unrelated section cannot read as generator output.
+    family = None          # the view family the FIRST structural H1 selects: record-list / mirror / version.
+    in_refs_view = False   # record family: True under the REFERENCES view title, whose records own the
+                           # `  - <kind>: <locator>` contextual reference rows.
+    ref_owner = False      # record family: True immediately under a reference record line (or its run of ref
+                           # rows), so a contextual reference row is recognized ONLY where render_references
+                           # emits one; an orphan row under an unrelated section cannot read as generator output.
+    id_owner = False       # mirror family: True immediately under a `## <id>` mirror record heading, so a
+                           # `- <col>: <val>` column row is recognized ONLY where render_mirror emits one.
+    version_section = None # version family: the owning VERSION.md subsection (`releases` / `summaries`), or None.
+    body_seen = False      # True once any non-blank body line OTHER than the first structural H1 (the view
+                           # title) is seen past the header: every renderer emits at least one such line (the
+                           # empty-view marker or a subsection heading; the empty-source roster self-test pins
+                           # it), so a face still False here at finalization is header-only or title-only,
+                           # truncated generated output, made non-clean below.
     for line_no, (start, end) in enumerate(_tile_lines(raw), start=1):
         line = _text(raw, start, end)
         if header_end is not None and line_no <= header_end:
@@ -711,17 +845,118 @@ def import_aiqt_face(source):
                                     "run (drift / unterminated header)"))
             continue
         if not line.strip():
+            # A blank line RESETS per-record ownership in every family (a mirror record's column run and a
+            # REFERENCES record's ref-row run both terminate at the blank render_mirror / render_references
+            # emit between records). The VERSION subsection persists (no genuine row follows a blank).
             ref_owner = False
+            id_owner = False
             cells.append(_cell(start, end, line_no, "ignored_by_declared_rule", note="blank line"))
-        elif _KAC_H1_RE.match(line):
-            # The H1 view title sets the view context: only the REFERENCES view's records own contextual
-            # reference rows, so track whether this face is that view (reset any pending ref-row context).
-            in_refs_view = line.lstrip("#").strip() == _FACE_REFERENCES_TITLE
-            ref_owner = False
-            cells.append(_cell(start, end, line_no, "ignored_by_declared_rule", note="view title (structural)"))
-        elif _FACE_SUBHEADING_RE.match(line):
-            # A generator-emitted level 2..6 subsection heading (the multi-section views' groupings) is
-            # structural and carries no importable record, mirroring the H1-title branch.
+            continue
+        if _KAC_H1_RE.match(line):
+            title = line.lstrip("#").strip()
+            if family is None:
+                # The FIRST structural H1 selects the view family. REFERENCES is a record-list view whose
+                # sub-state (in_refs_view) still governs its contextual ref rows.
+                family = _face_family(title)
+                in_refs_view = (family == "record" and title == _FACE_REFERENCES_TITLE)
+                ref_owner = False
+                id_owner = False
+                version_section = None
+                cells.append(_cell(start, end, line_no, "ignored_by_declared_rule",
+                                   note="view title (structural)"))
+            else:
+                # A SECOND H1 in the body: every generator view emits exactly ONE view title, so a later H1
+                # is a hand edit (drift). It resets any pending per-record ownership.
+                ref_owner = False
+                id_owner = False
+                body_seen = True
+                cells.append(_cell(start, end, line_no, "ambiguous",
+                                   note="a second H1 in the face body (the generator emits exactly one view "
+                                        "title; possible hand edit)"))
+            continue
+        # Every non-blank body line past the header, other than the FIRST structural H1 (the view title),
+        # marks the face as carrying a body; a face that never reaches here or the second-H1 branch above
+        # is header-only or title-only, truncated generated output, made non-clean at finalization.
+        body_seen = True
+        if family is None:
+            # No structural H1 has selected a view family yet. A genuine generated face opens with its
+            # single H1 view title as its FIRST content line (the header comment is handled above and a
+            # blank line stays ignored), so ANY non-blank body line here is drift: no family-specific
+            # grammar (a record bullet, a contextual ref row, a mirror column, a VERSION row, an H2
+            # subheading, the empty marker) is accepted before a structural title has selected the family.
+            # Pre-fix the record-list fall-through below recognized a `- <NS>-<n>` bullet here, so content
+            # prepended ahead of the H1 bypassed the family gate and read preserved_verbatim / clean.
+            cells.append(_cell(start, end, line_no, "ambiguous",
+                               note="face body content before the view title (a generated face opens with "
+                                    "its single H1; possible hand edit)"))
+            continue
+        if family == "mirror":
+            if _FACE_H2_RE.match(line):
+                heading = line.lstrip("#").strip()
+                if _opf_schema._ID_RE.match(heading):
+                    # A `## <id>` mirror record heading OWNS the column rows rendered immediately beneath it.
+                    id_owner = True
+                    cells.append(_cell(start, end, line_no, "ignored_by_declared_rule",
+                                       note="mirror record heading (structural)"))
+                else:
+                    id_owner = False
+                    cells.append(_cell(start, end, line_no, "ambiguous",
+                                       note="mirror `## ` heading is not a record id (possible hand edit)"))
+            elif line == _FACE_EMPTY:
+                id_owner = False
+                cells.append(_cell(start, end, line_no, "ignored_by_declared_rule", note="empty-view marker"))
+            elif _FACE_MIRROR_COL_RE.match(line) and id_owner:
+                # A `- <col>: <val>` column row of render_mirror's closed vocabulary, under its owning id.
+                cells.append(_cell(start, end, line_no, "preserved_verbatim",
+                                   note="derived mirror column row (render_mirror; not re-imported)"))
+            else:
+                # An orphan column row (no owning `## <id>`), an unknown-key bullet, or any other drift.
+                id_owner = False
+                cells.append(_cell(start, end, line_no, "ambiguous",
+                                   note="mirror body drifted from the exact generated grammar (an orphan or "
+                                        "unknown-column bullet, or possible hand edit)"))
+            continue
+        if family == "version":
+            if _FACE_H2_RE.match(line):
+                heading = line.lstrip("#").strip()
+                if heading == _FACE_VERSION_RELEASES:
+                    version_section = "releases"
+                    cells.append(_cell(start, end, line_no, "ignored_by_declared_rule",
+                                       note="VERSION subsection heading (structural)"))
+                elif heading == _FACE_VERSION_SUMMARIES:
+                    version_section = "summaries"
+                    cells.append(_cell(start, end, line_no, "ignored_by_declared_rule",
+                                       note="VERSION subsection heading (structural)"))
+                else:
+                    version_section = None
+                    cells.append(_cell(start, end, line_no, "ambiguous",
+                                       note="VERSION `## ` heading is not a declared subsection (possible "
+                                            "hand edit)"))
+            elif line == _FACE_EMPTY:
+                cells.append(_cell(start, end, line_no, "ignored_by_declared_rule", note="empty-view marker"))
+            elif version_section == "releases" and _FACE_VERSION_RELEASE_RE.match(line):
+                cells.append(_cell(start, end, line_no, "preserved_verbatim",
+                                   note="derived VERSION release row (render_version_md; not re-imported)"))
+            # A summary row is recognized ONLY when it is not ALSO release-shaped: the summary shape is a
+            # sub-shape of an empty-span release row (`- <ver> (<date>) worklog (none)` ends in a
+            # parenthesized token), so a release row moved under Summaries falls to the else below (drift).
+            elif (version_section == "summaries" and _FACE_VERSION_SUMMARY_RE.match(line)
+                  and not _FACE_VERSION_RELEASE_RE.match(line)):
+                cells.append(_cell(start, end, line_no, "preserved_verbatim",
+                                   note="derived VERSION summary row (render_version_md; not re-imported)"))
+            else:
+                # A row of the wrong shape, a row outside any subsection, or a row under the wrong subsection.
+                cells.append(_cell(start, end, line_no, "ambiguous",
+                                   note="VERSION body drifted from the exact generated grammar (a row of the "
+                                        "wrong shape or outside its subsection; possible hand edit)"))
+            continue
+        # The record-list family (family == "record"; an unknown H1 title also selects it): byte-identical
+        # to the pre-existing grammar. A pre-H1 line (family is None) no longer reaches here: the family
+        # gate above routes it to `ambiguous` before any family grammar is live.
+        if _FACE_H2_RE.match(line):
+            # A generator-emitted exactly-H2 subsection heading (the multi-section views' groupings; no
+            # renderer emits a deeper level) is structural and carries no importable record, mirroring the
+            # H1-title branch. An H3..H6 heading is not generator output and falls to `ambiguous` below.
             ref_owner = False
             cells.append(_cell(start, end, line_no, "ignored_by_declared_rule",
                                note="view subsection heading (structural)"))
@@ -744,6 +979,19 @@ def import_aiqt_face(source):
             ref_owner = False
             cells.append(_cell(start, end, line_no, "ambiguous",
                                note="face body drifted from the exact generated grammar (possible hand edit)"))
+    if header_end is not None and not body_seen:
+        # A face whose header closed cleanly but that carries NO body line beyond at most its single H1
+        # view title (a header-only face, family never selected; or a bare title with nothing after it)
+        # is TRUNCATED generated output, never clean: every renderer emits at least one non-blank body
+        # line after its H1 (the empty-view marker or a subsection heading; the empty-source roster
+        # self-test pins that for every NAMED_VIEWS face, every mirror, and VERSION.md). Mirroring the
+        # malformed-header path, NO line of such a face is trusted: every cell reclassifies to `ambiguous`
+        # drift, so the face derives clean False and routes to review. (A malformed header, header_end
+        # None, is already all-ambiguous above and needs nothing here.)
+        for c in cells:
+            c["class"] = "ambiguous"
+            c["note"] = ("generated face carries no view body (header-only or title-only truncated face; "
+                         "a genuine face renders at least its empty-view marker)")
     # An exact face carries no candidate: it is a projection, not adopter content to import.
     return _finalize(source, "aiqt-face", cells, [], _FACE_RESIDUAL)
 
@@ -1584,6 +1832,21 @@ def self_test():
           f6.verdict == CLEAN and f6.clean is True and tiles(f6.lossy)
           and sum(1 for s in f6.lossy["span"] if s["class"] == "preserved_verbatim") >= 2
           and not any(s["class"] == "ambiguous" for s in f6.lossy["span"]))
+    # LEADING-SPACE LOCATOR (round 3, codex MED-2): a schema-valid locator may BEGIN with whitespace
+    # (_opf_schema._validate_refs requires only a non-BLANK string) and render_references emits it
+    # verbatim (`  - doc:  OPF-SPEC.md 8`), so the genuine row must read preserved_verbatim / clean.
+    # Pre-fix the ref-row regex demanded a NON-SPACE right after the separator, so this genuine
+    # generator output read as false drift (ambiguous, clean False).
+    ref_sp = {"reference": [{"id": "RF-2", "type": "reference", "status": "recorded", "title": "a ref",
+                             "refs": [{"kind": "doc", "locator": " OPF-SPEC.md 8", "note": "n"}]}]}
+    genuine_sp = (_opf_views._header({".working/toml/reference.index.toml": b"data"})
+                  + "\n" + _opf_views.render_references(ref_sp))
+    f6_sp = import_aiqt_face(mk("legacy/F6-lead-space.md", genuine_sp))
+    check("f6-leading-space-locator-clean",
+          f6_sp.verdict == CLEAN and f6_sp.clean is True and tiles(f6_sp.lossy)
+          and any(s["class"] == "preserved_verbatim" and "reference row" in s["note"]
+                  for s in f6_sp.lossy["span"])
+          and not any(s["class"] == "ambiguous" for s in f6_sp.lossy["span"]))
     # F6 REGRESSION discriminators: a reference-shaped `  - <kind>: <locator>` row is recognized ONLY inside
     # the REFERENCES view and under its owning record; a prefix-only match regressed both cases to clean.
     #   - ORPHAN: a row under an unrelated view (`# TODO`) with NO owning record is `ambiguous`, matching
@@ -1631,6 +1894,230 @@ def self_test():
         f7.lossy["span"] = spans
         check("f7-malformed-span-nonclean-{}".format(label), is_clean(f7) is False)
 
+    # --- OPF-MIG-PR2-FU: view-family grammar completeness + malformed-input hardening -------------------
+    # The face importer must recognize an EXACT generated face of EVERY deliverable view, not only the
+    # record-list views. The roster is enumerated from the AUTHORITATIVE indexes (_opf_views.NAMED_VIEWS
+    # and _opf_schema.BASELINE_SPECS minus the ledger sources) through the REAL renderers, never a hand
+    # list (guard-input-soundness, completeness-claim-enumerates-its-set, change-carries-check). COVERAGE,
+    # stated precisely (disclose-guard-residuals): ROSTER 1 exercises every markdown view's STRUCTURAL
+    # grammar (H1 title, subsection headings, empty marker) over EMPTY sources only, so it catches a new or
+    # renamed view whose structure the importer does not recognize, but NOT a row shape a renderer emits
+    # only when POPULATED. Populated row shapes are pinned separately: for every mirror (ROSTER 2), for
+    # VERSION.md (a release + a summary row below), and for the record-list family (the populated TODO /
+    # DONE faces in the round-2 block below, plus the render_references and render_decisions fixtures
+    # above). A composed view whose populated rendering is not synthesized here (BACKLOG / PIPELINE /
+    # FINDINGS / CONTRIBUTIONS / BLOCKS / HANDOFF / WORKLOG) is covered only insofar as it emits the shared
+    # `- <NS>-<n>` record grammar those fixtures pin; a renderer change that emits a NEW populated-only row
+    # shape for such a view must land with its own populated fixture here. Each clean-face check below
+    # FAILS on pre-fix code (a mirror column row / a VERSION row / a second H1 read `ambiguous` today).
+    import _opf_views as _v
+
+    def _face(body):
+        """Wrap a rendered view body in a REAL generated header, exactly as the write path does
+        (_header + a blank line + the body), so the sentinel routes it to import_aiqt_face."""
+        return _v._header({".working/toml/x.index.toml": b"data"}) + "\n" + body
+
+    def _norm(text):
+        """The write path's per-line trailing-whitespace normalization (_opf_views.py str.rstrip), so the
+        test also covers the ON-DISK shape (an empty-valued mirror column is `- <col>:`), not only the
+        pre-normalization render."""
+        return "\n".join(l.rstrip() for l in text.split("\n"))
+
+    def _clean_face(text):
+        r = import_aiqt_face(mk("legacy/rf.md", text))
+        return (r.verdict == CLEAN and r.clean is True and r.candidates == [] and r.proposals == []
+                and tiles(r.lossy) and any(s["class"] == "preserved_verbatim" for s in r.lossy["span"])
+                and not any(s["class"] == "ambiguous" for s in r.lossy["span"]))
+
+    def _ambiguous(text):
+        r = import_aiqt_face(mk("legacy/ra.md", text))
+        return (r.verdict == CLEAN and r.clean is False and tiles(r.lossy)
+                and any(s["class"] == "ambiguous" for s in r.lossy["span"]))
+
+    def _empty_src(sources):
+        return {s: ({"releases": [], "summaries": []} if s == "version" else []) for s in sources}
+
+    # ROSTER 1: every markdown FACE view in NAMED_VIEWS renders clean (empty sources exercise every view's
+    # structural grammar: H1 title, subsection headings, empty marker). The two NON-face roster entries (the
+    # DECISIONS.toml projection and the raw VERSION deliverable) are exempted by their kind / identity read
+    # from NAMED_VIEWS itself, never a hand list, and asserted to DECLINE (no generated markdown sentinel).
+    _roster_faces = 0
+    for _view, (_kind, _sources, _renderer) in _v.NAMED_VIEWS.items():
+        if _kind == "projection" or _view == "VERSION":
+            if _kind == "projection":
+                _txt = _v._toml_header({".working/toml/x.index.toml": b"d"}) + "\n" + _renderer(_empty_src(_sources))
+            else:
+                _txt = _v.render_version_file({"version": {"releases": [
+                    {"version": "1.0.5", "date": "2026-01-01", "worklog_span": ["WL-1", "WL-9"]}],
+                    "summaries": []}})
+            _rr = import_aiqt_face(mk("legacy/roster-{}".format(_view), _txt))
+            check("roster-declines-{}".format(_view), _rr.verdict == FINDING and _rr.lossy == {})
+            continue
+        _roster_faces += 1
+        _rv = import_aiqt_face(mk("legacy/roster-{}".format(_view), _face(_renderer(_empty_src(_sources)))))
+        check("roster-face-clean-{}".format(_view),
+              _rv.verdict == CLEAN and _rv.clean is True and tiles(_rv.lossy)
+              and not any(s["class"] == "ambiguous" for s in _rv.lossy["span"]))
+    check("roster-covers-every-markdown-view", _roster_faces == sum(
+        1 for _n, (_k, _s, _r) in _v.NAMED_VIEWS.items() if _k != "projection" and _n != "VERSION"))
+
+    # ROSTER 2: every MIRRORABLE baseline type's <TYPE>-INDEX.md mirror (render_mirror) reads clean, with a
+    # preserved_verbatim column row. The type roster is BASELINE_SPECS minus the ledger sources, the SAME
+    # authoritative exclusion _mirror_type applies, so the importer's mirror set cannot drift from the
+    # renderer's. Fails pre-fix (Gap A: mirror column rows read `ambiguous`).
+    _mirror_rec = {"id": "AA-1", "type": "x", "status": "open", "title": "a mirror title",
+                   "created_at": _SYNTH_STAMP, "kind": "",           # an EMPTY-valued column (on-disk `- kind:`)
+                   "scopes": ["BI-1", "BI-2"],                       # a list-valued column
+                   "delivery": {"channel": "peer", "ref": "r-1"},    # a table-valued column
+                   "actor": {"kind": "importer"}}
+    _mirror_types = [t for t in _opf_schema.BASELINE_SPECS
+                     if _v._mirror_type("{}-INDEX.md".format(t.upper())) is not None]
+    check("mirror-roster-nonempty", len(_mirror_types) >= 1)
+    for _t in _mirror_types:
+        _mface = _face(_v.render_mirror(_t, [dict(_mirror_rec, type=_t)]))
+        check("mirror-face-clean-{}".format(_t), _clean_face(_mface))
+        check("mirror-face-clean-normalized-{}".format(_t), _clean_face(_norm(_mface)))  # on-disk shape too
+
+    # VERSION.md (render_version_md): a non-empty ledger (a release row + a summary row) and the empty ledger
+    # both read clean. VERSION.md is `deterministic` in NAMED_VIEWS and gets the HTML header, so it routes to
+    # the face importer; before this change every VERSION row read `ambiguous` (Gap B).
+    _ver_full = _v.render_version_md({"version": {
+        "releases": [{"version": "1.0.5", "date": "2026-01-01", "worklog_span": ["WL-1", "WL-9"]}],
+        "summaries": [{"covers": "1.0.5", "status": "released"}]}})
+    check("version-md-clean", _clean_face(_face(_ver_full)))
+    _rve = import_aiqt_face(mk("legacy/version-md-empty.md",
+                               _face(_v.render_version_md({"version": {"releases": [], "summaries": []}}))))
+    check("version-md-empty-clean",
+          _rve.verdict == CLEAN and _rve.clean is True and tiles(_rve.lossy)
+          and not any(s["class"] == "ambiguous" for s in _rve.lossy["span"]))
+    _rme = import_aiqt_face(mk("legacy/mirror-empty.md", _face(_v.render_mirror("backlog_item", []))))
+    check("mirror-empty-clean",
+          _rme.verdict == CLEAN and _rme.clean is True and tiles(_rme.lossy)
+          and not any(s["class"] == "ambiguous" for s in _rme.lossy["span"]))
+
+    # MALFORMED-INPUT HARDENING: each off-grammar line exercised here stays `ambiguous` (clean False,
+    # tiling), never CANNOT_EVALUATE (the disposition stays review-routed per spec 14.1) and never a
+    # permissive read.
+    _mirror_face = _face(_v.render_mirror("backlog_item", [dict(_mirror_rec, type="backlog_item")]))
+    _ver_face = _face(_ver_full)
+    # a column bullet BEFORE any `## <id>` heading (orphan): id_owner not yet held -> ambiguous.
+    check("mirror-orphan-column-ambiguous",
+          _ambiguous(_mirror_face.replace("## AA-1\n", "- title: orphan\n## AA-1\n")))
+    # an UNKNOWN column key under a valid id heading -> ambiguous (closed column vocabulary).
+    check("mirror-unknown-column-ambiguous",
+          _ambiguous(_mirror_face.replace("- title: a mirror title\n", "- notacol: x\n")))
+    # a `## ` heading that is not a record id -> ambiguous.
+    check("mirror-bad-id-heading-ambiguous",
+          _ambiguous(_mirror_face.replace("## AA-1\n", "## NOT AN ID\n")))
+    # ownership does NOT survive a blank line: a column row after the record's terminating blank -> ambiguous.
+    check("mirror-column-after-blank-ambiguous",
+          _ambiguous(_mirror_face.rstrip("\n") + "\n\n- title: stray\n"))
+    # a mirror column bullet under an UNKNOWN H1 title falls back to the record-list family -> ambiguous.
+    check("unknown-h1-record-fallback",
+          _ambiguous(_mirror_face.replace("# BACKLOG_ITEM index", "# NOT A VIEW")))
+    # a VERSION release row before any `## Releases` subsection (section None) -> ambiguous.
+    check("version-row-outside-subsection-ambiguous",
+          _ambiguous(_ver_face.replace(
+              "## Releases\n", "- 1.0.0 (2026-01-01) worklog WL-1..WL-2\n## Releases\n")))
+    # an ALIEN `## ` subsection in VERSION context -> ambiguous.
+    check("version-alien-subsection-ambiguous",
+          _ambiguous(_ver_face.replace("## Changelog summaries", "## Other Section")))
+    # a VERSION release row inside a record-list (TODO) face stays ambiguous (family gating; Gemini's edge).
+    check("version-row-in-record-view-ambiguous",
+          _ambiguous(face.replace("- BI-1 (open): do a thing\n",
+                                  "- 1.0.0 (2026-01-01) worklog WL-1..WL-2\n")))
+    # a SECOND H1 in an otherwise exact face is drift (the newly-found gap): ambiguous, clean False.
+    check("second-h1-ambiguous",
+          _ambiguous(face.replace("- BI-1 (open): do a thing\n",
+                                  "# Injected Heading\n\n- BI-1 (open): do a thing\n")))
+
+    # --- OPF-MIG-PR2-FU round 2: codex-confirmed false-clean discriminators (each fails pre-fix) --------
+    # R2-1 (MAJOR: a release row under `## Changelog summaries`): an EMPTY-SPAN release row renders as
+    # `- <ver> (<date>) worklog (none)`, which ALSO matches the summary shape `- <covers> (<status>)`, so
+    # pre-fix the summaries branch accepted it as a preserved_verbatim summary and the face read clean.
+    # The summaries branch now excludes a release-shaped row -> ambiguous (drift).
+    check("version-release-under-summaries-ambiguous",
+          _ambiguous(_ver_face.replace("- 1.0.5 (released)\n",
+                                       "- 1.0.0 (2026-01-01T00:00:00Z) worklog (none)\n")))
+    # R2-2 (MAJOR: exactly-H2 recognition): no renderer emits an H3..H6 heading, so a deeper heading
+    # establishes NO mirror ownership, NO VERSION subsection, and NO record structural subheading; each is
+    # `ambiguous` drift. Pre-fix `^#{2,6}` accepted the heading and `lstrip("#")` discarded its level, so
+    # an H3/H6 `### <id>` owned mirror column rows and a `### Releases` owned release rows (false-clean).
+    check("mirror-h3-ownership-ambiguous", _ambiguous(_mirror_face.replace("## AA-1\n", "### AA-1\n")))
+    check("mirror-h6-ownership-ambiguous", _ambiguous(_mirror_face.replace("## AA-1\n", "###### AA-1\n")))
+    check("version-h3-subsection-ambiguous",
+          _ambiguous(_ver_face.replace("## Releases\n", "### Releases\n")))
+    check("version-h6-subsection-ambiguous",
+          _ambiguous(_ver_face.replace("## Changelog summaries\n", "###### Changelog summaries\n")))
+    check("record-h3-subheading-ambiguous",
+          _ambiguous(face.replace("# TODO\n\n", "# TODO\n\n### Injected\n\n")))
+    # R2-3 (MINOR: indented header close): the renderer emits the closing `-->` at column 0; an INDENTED
+    # `  -->` is not a clean close, so the header is malformed and the whole face is ambiguous / NON-clean.
+    # Pre-fix the `.strip()` comparison accepted the indented close and the face read clean.
+    check("header-close-indented-ambiguous", _ambiguous(face.replace("\n-->\n", "\n  -->\n")))
+    # R2-4 (roster narrowing witness): a POPULATED record-list face through the REAL renderers reads clean
+    # with a preserved_verbatim record row, pinning the record family's populated row shape (the
+    # empty-source roster above cannot see a populated-only row; coverage stated at the roster comment).
+    check("populated-todo-face-clean", _clean_face(_face(_v.render_todo(dict(
+        backlog_item=[dict(id="BI-7", type="backlog_item", status="open", title="a populated item")],
+        block=[])))))
+    check("populated-done-face-clean", _clean_face(_face(_v.render_done(dict(
+        done=[dict(id="DN-1", type="done", title="a completed thing")])))))
+
+    # --- OPF-MIG-PR2-FU round 3: codex round-2 QA discriminators (each fails pre-fix) -------------------
+    # R3-1 (MAJOR: pre-H1 body content bypassed the family gate): family starts None, and the record-list
+    # fall-through recognized a `- <NS>-<n>` bullet BEFORE any H1 had selected a family, so a bullet
+    # prepended ahead of the H1 of a genuine mirror face AND of the genuine VERSION face read
+    # preserved_verbatim and the face stayed clean (the exact codex repro). Any non-blank, non-header
+    # pre-H1 line is now `ambiguous` drift (a genuine face opens with its single H1).
+    check("pre-h1-bullet-in-mirror-ambiguous",
+          _ambiguous(_mirror_face.replace("# BACKLOG_ITEM index", "- BI-9 (open) x\n# BACKLOG_ITEM index")))
+    check("pre-h1-bullet-in-version-ambiguous",
+          _ambiguous(_ver_face.replace("# VERSION", "- BI-9 (open) x\n# VERSION")))
+    # The pre-H1 line ITSELF is the ambiguous span (never preserved_verbatim), and the genuine body after
+    # the H1 stays recognized (the family gate rejects only what precedes the title).
+    r3 = import_aiqt_face(mk("legacy/R3-preh1.md",
+                             _ver_face.replace("# VERSION", "- BI-9 (open) x\n# VERSION")))
+    check("pre-h1-line-itself-ambiguous",
+          any(s["class"] == "ambiguous" and "before the view title" in s["note"] for s in r3.lossy["span"])
+          and any(s["class"] == "preserved_verbatim" for s in r3.lossy["span"]))
+
+    # --- OPF-MIG-PR2-FU round 4: round-3 QA discriminators (the three false-clean checks fail pre-fix; --
+    # the empty-value ref row never matched even the round-3 regex, so it is a regression guard).
+    # R4-1 (MAJOR, self-introduced in round 3: a whitespace-only ref-row value read clean): the round-3
+    # bare `.` value requirement also matched a whitespace-only value, so `  - doc:  ` under a genuine
+    # REFERENCES record read preserved_verbatim / clean, though a schema-valid locator is never ALL
+    # whitespace (_opf_schema._validate_refs strips it). The requirement is now `.*\S` (at least one
+    # non-whitespace character ANYWHERE in the value): a whitespace-only row and an empty-value row are
+    # both `ambiguous` drift, while the genuine leading-space locator stays clean (the f6 check above).
+    refs_face = face.replace("# TODO", "# REFERENCES")
+    check("ws-only-ref-value-ambiguous",
+          _ambiguous(refs_face.replace("- BI-1 (open): do a thing\n",
+                                       "- RF-1 (recorded): a ref\n  - doc:  \n")))
+    check("empty-ref-value-ambiguous",
+          _ambiguous(refs_face.replace("- BI-1 (open): do a thing\n",
+                                       "- RF-1 (recorded): a ref\n  - doc:\n")))
+    # R4-2 (MED: a sentinel-bearing face with no view body read clean): a header-only face (no H1 ever
+    # seen) and a header plus a bare `# VERSION` title with NOTHING after it both reached finalization
+    # with only ignored cells and read clean, though every renderer emits at least one body line after
+    # its H1 (the empty-source roster above pins that). Both now reclassify to all-`ambiguous` (truncated
+    # generated output), clean False; the genuine EMPTY faces stay clean (the roster, mirror-empty, and
+    # version-md-empty checks above).
+    check("header-only-face-ambiguous", _ambiguous(_face("")))
+    check("title-only-version-face-ambiguous", _ambiguous(_face("# VERSION\n")))
+
+    # --- OPF-MIG-PR2-FU round 5: DISCLOSURE discriminator (round-4 codex QA MEDIUM, maintainer-ACCEPTED --
+    # residual; disclosure-only, no recognition change). A genuine record whose TITLE is control-only
+    # escapes through the REAL renderer (_opf_views._md_text drops C0/DEL controls) to `- <id> `, and the
+    # write path's trailing-whitespace normalization (_norm, the on-disk shape) strips the separator space
+    # to a bare `- <id>` row, off the `- <NS>-<n> ` record shape: a KNOWN safe-direction false-drift
+    # (ambiguous, review-routed, never a false clean), disclosed in _FACE_RESIDUAL; the store's record
+    # validation and the render drift gate own record completeness. Pinning it keeps a later recognition
+    # change from silently flipping the disclosed direction.
+    check("control-only-title-id-collapse-ambiguous",
+          _ambiguous(_norm(_face(_v.render_done(dict(
+              done=[dict(id="DN-1", type="done", title="\x01\x02\x03")]))))))
+
     if failures:
         for x in failures:
             print("OPF-IMPORTERS SELF-TEST FAIL: {}".format(x), file=sys.stderr)
@@ -1664,7 +2151,27 @@ def self_test():
           "never a TypeError; a forged in-range line_range is derived from the byte range at both endpoints "
           "and rejected; a genuine render_references projection (record line plus contextual `  - <kind>: "
           "<locator>` rows) is preserved_verbatim / clean; and is_clean fail-closes a malformed loss span "
-          "(no or unknown class) to NON-clean.")
+          "(no or unknown class) to NON-clean. OPF-MIG-PR2-FU round-2 discriminators (codex QA): an "
+          "empty-span release row moved under the Changelog-summaries subsection is drift, never a summary "
+          "(the two row shapes overlap, so the summaries branch excludes the release shape); a subheading "
+          "is recognized at exactly H2, so an H3..H6 heading forges no mirror ownership, VERSION "
+          "subsection, or structural subheading; an indented header close is a malformed header (the face "
+          "is NON-clean); and a POPULATED record-list face (TODO / DONE through the real renderers) reads "
+          "clean, pinning the record family's populated row shape. OPF-MIG-PR2-FU round-3 discriminators "
+          "(codex QA round 2): pre-H1 body content is drift, never preserved (no family grammar is live "
+          "before the single H1 view title selects one, so a record bullet prepended ahead of the H1 of a "
+          "genuine mirror or VERSION face is ambiguous); and a genuine contextual reference row whose "
+          "schema-valid locator begins with whitespace reads preserved_verbatim / clean (the ref-row value "
+          "requirement no longer anchors a non-space at the separator). OPF-MIG-PR2-FU round-4 "
+          "discriminators (round-3 QA): the ref-row value requires at least one non-whitespace character "
+          "ANYWHERE after the separator, so a whitespace-only or empty value is drift while the "
+          "leading-space locator stays clean; and a truncated generated face (header-only, or a bare H1 "
+          "view title with nothing after it) reclassifies to all-ambiguous / non-clean, while every "
+          "genuine empty render (the roster, mirror-empty, and version-md-empty checks) stays clean. "
+          "OPF-MIG-PR2-FU round-5 disclosure discriminator (round-4 QA, maintainer-accepted residual): a "
+          "genuine record whose control-only title escapes through the real renderer and the on-disk "
+          "trailing-whitespace normalization to a bare `- <id>` row reads ambiguous / non-clean, the "
+          "disclosed safe-direction false-drift, never a false clean.")
     return 0
 
 
