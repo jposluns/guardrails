@@ -581,7 +581,12 @@ _FACE_RECORD_RE = re.compile(r"^- [A-Z]{2}-[1-9][0-9]* ")
 # output (not a hand edit), so it is `preserved_verbatim` like a record line. Tying the pattern to the
 # closed kind vocabulary keeps this from re-admitting an arbitrary indented bullet (no unrestricted bullet
 # acceptance): only the renderer's own contextual-row shape is recognized.
-_FACE_REF_ROW_RE = re.compile(r"^  - (?:{}): \S".format("|".join(re.escape(k) for k in _opf_schema.REF_KINDS)))
+# The VALUE requirement is at least one character after the single separator space (a `.`), never a
+# non-space: the locator is the verbatim schema-valid value (_opf_schema._validate_refs requires only a
+# non-BLANK string), which may itself BEGIN with whitespace, and render_references emits it verbatim after
+# the `: ` separator, so a `\S` here read a GENUINE leading-space-locator row as false drift. The kind
+# alternation, the 2-space indent, and the REFERENCES-view / owning-record context gating stay unchanged.
+_FACE_REF_ROW_RE = re.compile(r"^  - (?:{}): .".format("|".join(re.escape(k) for k in _opf_schema.REF_KINDS)))
 # The view TITLE `_opf_views.render_references` emits (`_lines("REFERENCES", ...)`). A contextual
 # reference row is generated ONLY inside this view, subordinate to a reference record line, so a row is
 # recognized as generator output by its VIEW-and-record context, never by its `  - <kind>:` line prefix
@@ -664,7 +669,9 @@ _FACE_RESIDUAL = ("aiqt-face recognizes an EXACT OPF/AIQT-generated markdown fac
                   "DERIVED projection the store REGENERATES (generated-artefact-source-only), so it carries "
                   "nothing NEW to import: the header and blank lines are `ignored_by_declared_rule`, and the "
                   "body is read under a grammar GATED on the view FAMILY the FIRST structural H1 title "
-                  "selects. Three closed families: (1) RECORD-LIST (the default, and the family for any "
+                  "selects; BEFORE that first H1 no family grammar is live, so any non-blank body line "
+                  "ahead of the title is `ambiguous` drift (a genuine face opens with its single H1). "
+                  "Three closed families: (1) RECORD-LIST (the default, and the family for any "
                   "unknown H1 title): the H1 view title and a generator-emitted exactly-H2 `## ...`"
                   "subsection heading are `ignored_by_declared_rule`; a `- <NS>-<n> ...` record line "
                   "(_opf_views' render shape) is `preserved_verbatim`; a two-space-indented `  - <kind>: "
@@ -830,6 +837,18 @@ def import_aiqt_face(source):
                                    note="a second H1 in the face body (the generator emits exactly one view "
                                         "title; possible hand edit)"))
             continue
+        if family is None:
+            # No structural H1 has selected a view family yet. A genuine generated face opens with its
+            # single H1 view title as its FIRST content line (the header comment is handled above and a
+            # blank line stays ignored), so ANY non-blank body line here is drift: no family-specific
+            # grammar (a record bullet, a contextual ref row, a mirror column, a VERSION row, an H2
+            # subheading, the empty marker) is accepted before a structural title has selected the family.
+            # Pre-fix the record-list fall-through below recognized a `- <NS>-<n>` bullet here, so content
+            # prepended ahead of the H1 bypassed the family gate and read preserved_verbatim / clean.
+            cells.append(_cell(start, end, line_no, "ambiguous",
+                               note="face body content before the view title (a generated face opens with "
+                                    "its single H1; possible hand edit)"))
+            continue
         if family == "mirror":
             if _FACE_H2_RE.match(line):
                 heading = line.lstrip("#").strip()
@@ -890,8 +909,9 @@ def import_aiqt_face(source):
                                    note="VERSION body drifted from the exact generated grammar (a row of the "
                                         "wrong shape or outside its subsection; possible hand edit)"))
             continue
-        # The record-list family (family is None before the first H1, or "record"): byte-identical to the
-        # pre-existing grammar (this is the fall-through for an unknown H1 title too).
+        # The record-list family (family == "record"; an unknown H1 title also selects it): byte-identical
+        # to the pre-existing grammar. A pre-H1 line (family is None) no longer reaches here: the family
+        # gate above routes it to `ambiguous` before any family grammar is live.
         if _FACE_H2_RE.match(line):
             # A generator-emitted exactly-H2 subsection heading (the multi-section views' groupings; no
             # renderer emits a deeper level) is structural and carries no importable record, mirroring the
@@ -1758,6 +1778,21 @@ def self_test():
           f6.verdict == CLEAN and f6.clean is True and tiles(f6.lossy)
           and sum(1 for s in f6.lossy["span"] if s["class"] == "preserved_verbatim") >= 2
           and not any(s["class"] == "ambiguous" for s in f6.lossy["span"]))
+    # LEADING-SPACE LOCATOR (round 3, codex MED-2): a schema-valid locator may BEGIN with whitespace
+    # (_opf_schema._validate_refs requires only a non-BLANK string) and render_references emits it
+    # verbatim (`  - doc:  OPF-SPEC.md 8`), so the genuine row must read preserved_verbatim / clean.
+    # Pre-fix the ref-row regex demanded a NON-SPACE right after the separator, so this genuine
+    # generator output read as false drift (ambiguous, clean False).
+    ref_sp = {"reference": [{"id": "RF-2", "type": "reference", "status": "recorded", "title": "a ref",
+                             "refs": [{"kind": "doc", "locator": " OPF-SPEC.md 8", "note": "n"}]}]}
+    genuine_sp = (_opf_views._header({".working/toml/reference.index.toml": b"data"})
+                  + "\n" + _opf_views.render_references(ref_sp))
+    f6_sp = import_aiqt_face(mk("legacy/F6-lead-space.md", genuine_sp))
+    check("f6-leading-space-locator-clean",
+          f6_sp.verdict == CLEAN and f6_sp.clean is True and tiles(f6_sp.lossy)
+          and any(s["class"] == "preserved_verbatim" and "reference row" in s["note"]
+                  for s in f6_sp.lossy["span"])
+          and not any(s["class"] == "ambiguous" for s in f6_sp.lossy["span"]))
     # F6 REGRESSION discriminators: a reference-shaped `  - <kind>: <locator>` row is recognized ONLY inside
     # the REFERENCES view and under its owning record; a prefix-only match regressed both cases to clean.
     #   - ORPHAN: a row under an unrelated view (`# TODO`) with NO owning record is `ambiguous`, matching
@@ -1974,6 +2009,24 @@ def self_test():
     check("populated-done-face-clean", _clean_face(_face(_v.render_done(dict(
         done=[dict(id="DN-1", type="done", title="a completed thing")])))))
 
+    # --- OPF-MIG-PR2-FU round 3: codex round-2 QA discriminators (each fails pre-fix) -------------------
+    # R3-1 (MAJOR: pre-H1 body content bypassed the family gate): family starts None, and the record-list
+    # fall-through recognized a `- <NS>-<n>` bullet BEFORE any H1 had selected a family, so a bullet
+    # prepended ahead of the H1 of a genuine mirror face AND of the genuine VERSION face read
+    # preserved_verbatim and the face stayed clean (the exact codex repro). Any non-blank, non-header
+    # pre-H1 line is now `ambiguous` drift (a genuine face opens with its single H1).
+    check("pre-h1-bullet-in-mirror-ambiguous",
+          _ambiguous(_mirror_face.replace("# BACKLOG_ITEM index", "- BI-9 (open) x\n# BACKLOG_ITEM index")))
+    check("pre-h1-bullet-in-version-ambiguous",
+          _ambiguous(_ver_face.replace("# VERSION", "- BI-9 (open) x\n# VERSION")))
+    # The pre-H1 line ITSELF is the ambiguous span (never preserved_verbatim), and the genuine body after
+    # the H1 stays recognized (the family gate rejects only what precedes the title).
+    r3 = import_aiqt_face(mk("legacy/R3-preh1.md",
+                             _ver_face.replace("# VERSION", "- BI-9 (open) x\n# VERSION")))
+    check("pre-h1-line-itself-ambiguous",
+          any(s["class"] == "ambiguous" and "before the view title" in s["note"] for s in r3.lossy["span"])
+          and any(s["class"] == "preserved_verbatim" for s in r3.lossy["span"]))
+
     if failures:
         for x in failures:
             print("OPF-IMPORTERS SELF-TEST FAIL: {}".format(x), file=sys.stderr)
@@ -2013,7 +2066,12 @@ def self_test():
           "is recognized at exactly H2, so an H3..H6 heading forges no mirror ownership, VERSION "
           "subsection, or structural subheading; an indented header close is a malformed header (the face "
           "is NON-clean); and a POPULATED record-list face (TODO / DONE through the real renderers) reads "
-          "clean, pinning the record family's populated row shape.")
+          "clean, pinning the record family's populated row shape. OPF-MIG-PR2-FU round-3 discriminators "
+          "(codex QA round 2): pre-H1 body content is drift, never preserved (no family grammar is live "
+          "before the single H1 view title selects one, so a record bullet prepended ahead of the H1 of a "
+          "genuine mirror or VERSION face is ambiguous); and a genuine contextual reference row whose "
+          "schema-valid locator begins with whitespace reads preserved_verbatim / clean (the ref-row value "
+          "requirement is at least one character after the separator, never a non-space).")
     return 0
 
 
