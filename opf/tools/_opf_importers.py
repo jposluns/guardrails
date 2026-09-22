@@ -739,7 +739,13 @@ _FACE_RESIDUAL = ("aiqt-face recognizes an EXACT OPF/AIQT-generated markdown fac
                   "importer never reconstructs records). FAIL-SAFE residuals (a false DRIFT routed to "
                   "review, never a false clean): a degenerate reference locator that is schema-valid yet "
                   "ESCAPES to a whitespace-only rendering (an all-control-character locator; the markdown "
-                  "sink drops C0/DEL controls) renders a value-less row that reads `ambiguous`; a GENUINE "
+                  "sink drops C0/DEL controls) renders a value-less row that reads `ambiguous`; by the same "
+                  "escape, a GENUINE record whose TITLE (or other free-text projected field) is control-only "
+                  "collapses to a bare `- <id>` row (the escape leaves only the trailing separator space, "
+                  "which the write path's per-line trailing-whitespace normalization strips), off the record "
+                  "shape, so it reads `ambiguous` and routes to review, never a false clean; the store's own "
+                  "record validation and the render drift gate own record completeness for both degenerate "
+                  "escapes; a GENUINE "
                   "summary row whose own text carries a ` worklog ` tail that completes the release shape "
                   "is fail-closed to `ambiguous` under Summaries; and a trailing-whitespace variant of the "
                   "end-anchored summary row shape likewise reads `ambiguous`. Record-list exactly-H2 `## ` "
@@ -2100,6 +2106,18 @@ def self_test():
     check("header-only-face-ambiguous", _ambiguous(_face("")))
     check("title-only-version-face-ambiguous", _ambiguous(_face("# VERSION\n")))
 
+    # --- OPF-MIG-PR2-FU round 5: DISCLOSURE discriminator (round-4 codex QA MEDIUM, maintainer-ACCEPTED --
+    # residual; disclosure-only, no recognition change). A genuine record whose TITLE is control-only
+    # escapes through the REAL renderer (_opf_views._md_text drops C0/DEL controls) to `- <id> `, and the
+    # write path's trailing-whitespace normalization (_norm, the on-disk shape) strips the separator space
+    # to a bare `- <id>` row, off the `- <NS>-<n> ` record shape: a KNOWN safe-direction false-drift
+    # (ambiguous, review-routed, never a false clean), disclosed in _FACE_RESIDUAL; the store's record
+    # validation and the render drift gate own record completeness. Pinning it keeps a later recognition
+    # change from silently flipping the disclosed direction.
+    check("control-only-title-id-collapse-ambiguous",
+          _ambiguous(_norm(_face(_v.render_done(dict(
+              done=[dict(id="DN-1", type="done", title="\x01\x02\x03")]))))))
+
     if failures:
         for x in failures:
             print("OPF-IMPORTERS SELF-TEST FAIL: {}".format(x), file=sys.stderr)
@@ -2149,7 +2167,11 @@ def self_test():
           "ANYWHERE after the separator, so a whitespace-only or empty value is drift while the "
           "leading-space locator stays clean; and a truncated generated face (header-only, or a bare H1 "
           "view title with nothing after it) reclassifies to all-ambiguous / non-clean, while every "
-          "genuine empty render (the roster, mirror-empty, and version-md-empty checks) stays clean.")
+          "genuine empty render (the roster, mirror-empty, and version-md-empty checks) stays clean. "
+          "OPF-MIG-PR2-FU round-5 disclosure discriminator (round-4 QA, maintainer-accepted residual): a "
+          "genuine record whose control-only title escapes through the real renderer and the on-disk "
+          "trailing-whitespace normalization to a bare `- <id>` row reads ambiguous / non-clean, the "
+          "disclosed safe-direction false-drift, never a false clean.")
     return 0
 
 
