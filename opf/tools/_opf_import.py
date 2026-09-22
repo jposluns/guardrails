@@ -2023,12 +2023,17 @@ def _write_plan_artifacts(product_root, run_rel, run_id, inventory, report_md_by
 
 
 def _write_ingest_artifacts(product_root, run_rel, run_id, candidates_draft, ingest_actions, source_sizes):
-    """Stage the MIG-PR3 root-ingest artefacts (candidates_draft.toml + ingest-actions.toml) additively into
+    """Stage the MIG-PR3 root-ingest artefacts (ingest-actions.toml + candidates_draft.toml) additively into
     the run dir plan_import just staged, through the same contained, no-follow, fsync'd, digest-verified
     apply_ops pass _write_plan_artifacts uses. candidates_draft.toml holds the id-less importer candidate
     drafts (records mint at apply, MIG-PR5); ingest-actions.toml records the inert keep/move pending actions
-    AND is the non-promotable marker apply_import refuses on (PR-A/PR-C absent). Neither mutates the active
-    store. Fail-closed on any write error, cap overflow, or non-emittable model."""
+    AND is the non-promotable marker apply_import refuses on (PR-A/PR-C absent). ORDERING IS LOAD-BEARING
+    (round-2 P1-1): the refusal marker is the FIRST staged ingest artefact, ordered ahead of
+    candidates_draft.toml, and plan_import calls this writer BEFORE the review artefacts (inventory.toml /
+    proposals.toml / IMPORT-REPORT.md), so a staging failure at ANY point leaves either a run that is not
+    reviewable (no inventory/proposals, so no acceptance can be captured) or a run already carrying the
+    marker (refused at apply); a promotable draft-without-marker leftover cannot exist. Neither artefact
+    mutates the active store. Fail-closed on any write error, cap overflow, or non-emittable model."""
     resolution = _opf_store.resolve_store(product_root)
     if resolution.status != _opf_store.RESOLVED:
         raise _cannot("store did not resolve for the ingest-artefact write ({}: {})".format(
@@ -2045,10 +2050,13 @@ def _write_ingest_artifacts(product_root, run_rel, run_id, candidates_draft, ing
     cand_rel = run_rel + "/" + CANDIDATES_DRAFT_NAME
     act_rel = run_rel + "/" + INGEST_ACTIONS_NAME
     content = {cand_rel: cand_bytes, act_rel: act_bytes}
-    ops = [{"op": "create", "path": cand_rel,
-            "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(cand_bytes)}},
-           {"op": "create", "path": act_rel,
-            "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(act_bytes)}}]
+    # P1-1: the NON-PROMOTABLE refusal marker (ingest-actions.toml) is staged FIRST, so a failure
+    # between the two ops leaves marker-without-draft (recognized and refused as an ingest run), never
+    # draft-without-marker (which apply_import would not recognize as ingest).
+    ops = [{"op": "create", "path": act_rel,
+            "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(act_bytes)}},
+           {"op": "create", "path": cand_rel,
+            "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(cand_bytes)}}]
 
     def staged_reader(op):
         return content[op["path"]]
@@ -2132,11 +2140,16 @@ def plan_import(product_root, import_set, *, proposals=None, importer_proposals=
                               run_rel=result.run_rel, migration_incomplete=result.migration_incomplete)
 
         report_md = _render_report_md(scan.inventory_digest, scan.fragments, all_proposal_rows, result.run_id)
-        _write_plan_artifacts(product_root, result.run_rel, result.run_id, scan.inventory,
-                              report_md.encode("utf-8"), all_proposal_rows)
+        # P1-1: for an ingest run the identity/refusal marker (ingest-actions.toml, staged as the FIRST
+        # ingest artefact inside _write_ingest_artifacts) becomes durable BEFORE the review artefacts
+        # (inventory.toml / proposals.toml) exist, so at every point where a partial staging failure can
+        # leave a leftover run, that run is either not reviewable (review requires inventory + proposals,
+        # so no acceptance can be captured over it) or already recognized and refused as an ingest run.
         if candidates_draft is not None or ingest_actions is not None:
             _write_ingest_artifacts(product_root, result.run_rel, result.run_id,
                                     candidates_draft or [], ingest_actions or [], source_sizes)
+        _write_plan_artifacts(product_root, result.run_rel, result.run_id, scan.inventory,
+                              report_md.encode("utf-8"), all_proposal_rows)
         return PlanResult(CLEAN, run_id=result.run_id, run_rel=result.run_rel,
                           inventory_digest=scan.inventory_digest,
                           report_rel=result.run_rel + "/" + REPORT_MD_NAME,
@@ -3543,7 +3556,10 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
         run_rel = "{}/{}".format(IMPORTS_REL, run_id)
         # MIG-PR3: a root-ingest disposition plan carries keep/move pending actions and importer_proposal
         # suggestions that this build cannot promote (attributed review is PR-A, ingest apply is PR-C). Its
-        # presence marker is ingest-actions.toml in the run dir. Refuse fail-closed BEFORE any journal/lock
+        # presence marker is ingest-actions.toml in the run dir; candidates_draft.toml is ALSO ingest-only,
+        # so its presence is recognized too (round-2 P1-1 defence in depth: a partially-staged leftover from
+        # an older build, or any unforeseen ordering, that carries the draft without the marker is still
+        # refused; marginal cost one extra lstat). Refuse fail-closed BEFORE any journal/lock
         # work, distinct cannot-evaluate, mutating nothing (required-step-remains-required: the block is not
         # weakened just because the baseline candidate alone would look promotable).
         try:
@@ -3552,14 +3568,18 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
         except OSError as exc:
             raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
         try:
+            marker_name = INGEST_ACTIONS_NAME
             marker = _journal._lstat_contained(_ingest_root_fd, run_rel + "/" + INGEST_ACTIONS_NAME)
+            if marker is None:
+                marker_name = CANDIDATES_DRAFT_NAME
+                marker = _journal._lstat_contained(_ingest_root_fd, run_rel + "/" + CANDIDATES_DRAFT_NAME)
         finally:
             os.close(_ingest_root_fd)
         if marker is not None:
             raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest plans are NOT "
                           "promotable in this build (attributed review PR-A and ingest apply PR-C are not "
                           "yet implemented). Refused fail-closed; nothing promoted.".format(
-                              run_id, INGEST_ACTIONS_NAME))
+                              run_id, marker_name))
         journal_root = Path(resolution.store_root) / IMPORT_JOURNAL_REL
 
         try:

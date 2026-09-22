@@ -1004,7 +1004,26 @@ def validate_options(options):
 def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonce):
     """Compose a triaged disposition WORKSHEET + its --ingest-options into a STAGED, INERT plan under
     `.working/imports/<run-id>/` via _opf_import.plan_import. NEVER manufactures acceptance.json; every
-    ingest source stays unmapped/legacy_fragment; apply/promotion is refused (ingest-actions.toml marker).
+    ingest source stays unmapped/legacy_fragment; apply/promotion is refused (ingest-actions.toml, the
+    refusal marker, staged as the FIRST ingest artefact and ahead of the review artefacts, so a partial
+    staging failure can never leave a reviewable-but-unmarked run; round-2 P1-1). Each source is resolved
+    BY SCOPE to the one product-relative path staging reads (a store-scope row under the RESOLVED store
+    root, a declared row under the product root; round-2 P1-2), its bytes are BOUND to the reconciled
+    worksheet digest immediately before staging AND re-verified from the staged run's own records after
+    staging (round-2 P1-2/P1-4), and a move destination is refused inside the RESOLVED store working tree,
+    not only the literal `.working/` (round-2 P1-3). Verdicts: an invalid-but-well-formed options document
+    and an incompatible per-disposition binding are FINDINGS; an unreadable/unparseable input, a missing
+    required binding or field, and a digest-binding failure are CANNOT-EVALUATE (round-2 P2-5/P2-6).
+
+    Disclosed residuals (round 2): (R-2) a keep action's "steady-state checker never flags it" guarantee is
+    CONDITIONAL: it holds only once PR-C applies the retention and the [unmanaged].paths registration
+    ATOMICALLY, in one journaled transaction (see _keep_action); the plan itself changes nothing.
+    (staging-root topology) a store-scope row of a store that resolves OUTSIDE the product root has no
+    product-relative spelling for the product-root staging reader, so it is refused CANNOT-EVALUATE rather
+    than planned. (post-stage refusal) a digest-binding failure detected AFTER staging leaves the refused
+    run dir behind; it is non-promotable (it carries the refusal marker as its first-staged artefact).
+    (cooperating writers) an actor that hand-writes inventory/proposals/acceptance into a partial run dir
+    is outside the cooperating-writer contract this layer (like the import journal) assumes.
     Fail-closed throughout. Returns a _opf_import.PlanResult so the CLI's _import_exit maps it uniformly."""
     try:
         _journal.require_containment()
@@ -1018,10 +1037,16 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
         if ws_findings:
             raise _cannot("worksheet fails validation: {}".format("; ".join(ws_findings)))
 
-        # 2. OPTIONS INTAKE (shape).
+        # 2. OPTIONS INTAKE (shape). An invalid-but-WELL-FORMED options document (an unknown key, a bad
+        #    format/schema marker, an unknown importer_kind, an escaping dest_path) is a FINDING (verdict
+        #    1), the ratified mapping (round-2 P2-5); CANNOT-EVALUATE stays reserved for an input the
+        #    planner cannot even read as a table (unreadable/unparseable, e.g. a non-table payload; a TOML
+        #    parse error is already refused upstream at the CLI read).
+        if not isinstance(options, dict):
+            raise _cannot("ingest-options is not a table (unreadable/unparseable input; fail-closed)")
         opt_findings = validate_options(options)
         if opt_findings:
-            raise _cannot("ingest-options fails validation: {}".format("; ".join(opt_findings)))
+            raise _finding("ingest-options fails validation: {}".format("; ".join(opt_findings)))
 
         # 3. FRESH RECONCILE: re-detect with the SAME include set and require an EXACT-SET match against the
         #    worksheet on the immutable fields (source_path, scope, sha256, size). Any drift is fail-closed:
@@ -1055,14 +1080,51 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                 raise _finding("ingest-options binds {} which is not a worksheet row".format(key))
             opt_by_key[key] = o
 
-        # 6. PER-DISPOSITION COMPOSITION.
+        # 6. PER-DISPOSITION COMPOSITION over the RESOLVED source identities (round-2 P1-2). A worksheet
+        #    source_path is SCOPE-relative: a store-scope row is STORE-relative (detect emits it via the
+        #    store descriptor), a declared row PRODUCT-relative. Each row is resolved BY SCOPE to the one
+        #    product-root-relative path the staging layer (plan_import, which reads under the product root)
+        #    will read: identity for declared scope, `_reanchor_declared` for store scope (identity on an
+        #    inline store, `ops/...` on a `dir:ops` relocation). A store that resolves OUTSIDE the product
+        #    root has no product-relative spelling for its store-scope rows, so planning them through the
+        #    product-root staging reader is refused CANNOT-EVALUATE (disclosed residual), never a read of a
+        #    same-spelled impostor product path.
+        try:
+            resolution = _opf_store.resolve_store(product_root)
+            if resolution.status != _opf_store.RESOLVED:
+                raise _cannot("store did not resolve for planning ({}: {}); fail-closed".format(
+                    resolution.status, resolution.detail))
+        except ValueError as exc:
+            raise _cannot("cannot parse store pointer/manifest for {!r} ({})".format(product_root, exc))
+        # round-2 P1-3: the move boundary is graded against the RESOLVED store working subtree (the same
+        # authority the declared-scope exclusion uses), not only the literal product-root `.working/`.
+        store_working_rel = _store_working_under_product(resolution)
+
+        def _resolve_by_scope(scope, rel):
+            if scope != "store":
+                return rel
+            re_anchored = _reanchor_declared(resolution, (rel,))
+            if not re_anchored:
+                raise _cannot("store-scope row {!r} belongs to a store that resolves OUTSIDE the product "
+                              "root, which this build cannot stage through the product-root import reader "
+                              "(fail-closed, disclosed residual)".format(rel))
+            return re_anchored[0]
+
         product_root_fd = _opf_store._open_root_fd(Path(os.path.abspath(product_root)))
         try:
             import_set, importer_proposals, candidates_draft, actions = [], [], [], []
             move_dests = {}
+            expected = {}   # resolved product-relative path -> the reconciled (sha256, size) it must stage
             for r in rows:
                 key = (r["scope"], r["source_path"]); sp = r["source_path"]; dispo = r["disposition"]
                 opt = opt_by_key.get(key)
+                if dispo in ("keep", "unresolved") and opt is not None:
+                    # round-2 P2-6: a keep/unresolved row binds to NO options row (the ratified "keep/
+                    # unresolved binds to none"); a binding here is misdirected configuration, a FINDING
+                    # exactly like a dangling binding. (An unresolved row already halted at step 4; the
+                    # branch keeps the vocabulary closed.)
+                    raise _finding("{} row {!r} carries an --ingest-options binding; a keep/unresolved row "
+                                   "binds to none (remove the option row or retriage)".format(dispo, sp))
                 if dispo in ("migrate", "move"):
                     if opt is None:
                         raise _cannot("{} row {!r} has no --ingest-options binding (required for a "
@@ -1070,15 +1132,57 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                     if r["note"] != "":
                         raise _cannot("{} row {!r} carries a non-empty note; configuration belongs in "
                                       "--ingest-options, never the worksheet note (decision 1)".format(dispo, sp))
+                    # round-2 P2-6: REQUIRED + PERMITTED fields per disposition, validated BEFORE any field
+                    # is indexed, so an incompatible binding is a structured verdict (a FORBIDDEN field
+                    # present is a FINDING, a REQUIRED field absent is CANNOT-EVALUATE, the missing-config
+                    # class), never an uncaught KeyError and never a silently ignored field.
+                    if dispo == "migrate":
+                        if "dest_path" in opt:
+                            raise _finding("migrate row {!r} binds a dest_path; a migrate row takes "
+                                           "importer_kind only (dest_path belongs to a move row)".format(sp))
+                        if "importer_kind" not in opt:
+                            raise _cannot("migrate row {!r} binds no importer_kind (required for a migrate "
+                                          "row)".format(sp))
+                    else:
+                        if "importer_kind" in opt:
+                            raise _finding("move row {!r} binds an importer_kind; a move row takes "
+                                           "dest_path only (importer_kind belongs to a migrate "
+                                           "row)".format(sp))
+                        if not _MOVE_DEST_ARCHIVE_DEFAULT and "dest_path" not in opt:
+                            raise _cannot("move row {!r} binds no dest_path and the archive default is "
+                                          "disabled (ruling 3a requires an explicit dest)".format(sp))
+                resolved_sp = _resolve_by_scope(r["scope"], sp)
+                if resolved_sp in expected:
+                    raise _cannot("worksheet row {!r} and another row both resolve to product path {!r}; "
+                                  "the staged run cannot bind one path to two identities "
+                                  "(fail-closed)".format(sp, resolved_sp))
+                # round-2 P1-2/P1-4: BIND the bytes staging will read to the reconciled worksheet identity.
+                # Re-read the source at its RESOLVED path immediately before composition and require digest
+                # and size to equal the reconciled row's; an impostor at a same-spelled product path, or a
+                # write racing the reconcile-to-stage window, is CANNOT-EVALUATE, never a clean plan whose
+                # action.sha256 diverges from the staged bytes. plan_import re-reads the file after this
+                # check, so the staged run is re-verified AGAINST the worksheet once staging returns (the
+                # post-stage binding at step 7), closing the residual window between this read and the
+                # staging read.
+                digest, size = _digest_of(product_root_fd, resolved_sp)
+                if digest != r["sha256"] or size != r["size"]:
+                    raise _cannot("source {!r} (resolved {!r}) does not match its reconciled worksheet "
+                                  "identity (worksheet {} / {} bytes, observed {} / {} bytes); the tree "
+                                  "changed between reconcile and staging, or the resolved path carries "
+                                  "different bytes; fail-closed".format(
+                                      sp, resolved_sp, r["sha256"], r["size"], digest, size))
+                expected[resolved_sp] = (r["sha256"], r["size"])
                 if dispo == "keep":
                     # decision 2: retain-in-place + emit an [unmanaged] exemption for an out-of-.working
-                    # file, so the steady-state checker never later flags it. Mapping stays unmapped.
-                    actions.append(_keep_action(product_root, fresh.resolution if hasattr(fresh, "resolution")
-                                                 else None, r))
+                    # file. Mapping stays unmapped. R-2: the "checker never later flags it" guarantee is
+                    # CONDITIONAL on PR-C applying retention + [unmanaged].paths registration ATOMICALLY
+                    # (one journaled transaction; see _keep_action).
+                    actions.append(_keep_action(product_root, resolution, r))
                 elif dispo == "move":
                     dest = (opt.get("dest_path") or _archive_dest(sp)) if _MOVE_DEST_ARCHIVE_DEFAULT \
                         else opt["dest_path"]
-                    _check_move_boundary(product_root, dest, product_root_fd)   # FINDING on any collision
+                    _check_move_boundary(product_root, dest, product_root_fd,
+                                         store_working_rel)   # FINDING on any collision
                     if dest in move_dests:
                         raise _finding("duplicate move destination {!r} ({} and {})".format(
                             dest, move_dests[dest], sp))
@@ -1088,7 +1192,11 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                     actions.append({"kind": "move", "scope": r["scope"], "source_path": sp,
                                     "dest_path": dest, "sha256": r["sha256"], "size": r["size"]})
                 elif dispo == "migrate":
-                    src = _opf_import._read_sources(product_root_fd, [sp])[0]
+                    src = _opf_import._read_sources(product_root_fd, [resolved_sp])[0]
+                    if "sha256:" + src["sha256"] != r["sha256"]:
+                        raise _cannot("migrate source {!r} (resolved {!r}) changed between its binding "
+                                      "verification and the importer read; fail-closed".format(
+                                          sp, resolved_sp))
                     ir = _opf_importers.run_importer(opt["importer_kind"], src)
                     verdict, findings = _opf_importers.validate_importer_output(ir, src)
                     if verdict != CLEAN:
@@ -1098,15 +1206,30 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                                          for c in ir.candidates]
                 # keep/migrate/move ALL stay in the import_set so the baseline quarantines them as
                 # legacy_fragment (unmapped); nothing is dropped (decisions 2/3: mapping stays unmapped).
-                import_set.append(sp)
+                # The import_set carries the RESOLVED product-relative path (the identity the staging
+                # reader actually reads), so a relocated store's store-scope row stages the STORE bytes.
+                import_set.append(resolved_sp)
         finally:
             os.close(product_root_fd)
 
         # 7. STAGE via the op-layer plan_import: baseline (all unmapped -> legacy_fragment), importer
-        #    proposals tagged importer_proposal, candidates_draft.toml, ingest-actions.toml (non-promotable).
-        return _opf_import.plan_import(product_root, import_set, importer_proposals=importer_proposals,
-                                       candidates_draft=candidates_draft, ingest_actions=actions,
-                                       now=now, run_nonce=run_nonce)
+        #    proposals tagged importer_proposal, ingest-actions.toml (the non-promotable refusal marker,
+        #    staged FIRST among the ingest artefacts and ahead of the review artefacts; P1-1), then
+        #    candidates_draft.toml.
+        result = _opf_import.plan_import(product_root, import_set, importer_proposals=importer_proposals,
+                                         candidates_draft=candidates_draft, ingest_actions=actions,
+                                         now=now, run_nonce=run_nonce)
+        if result.verdict != CLEAN:
+            return result
+        # POST-STAGE BINDING (round-2 P1-4): the staged run's OWN records are re-read and required to equal
+        # the reconciled worksheet identities: run.toml (the digests of the bytes stage_import actually read
+        # and preserved) and inventory.toml (the review surface a later acceptance binds). A write racing
+        # the window between the pre-stage verification above and plan_import's own reads therefore cannot
+        # yield a CLEAN plan whose staged bytes diverge from action.sha256. On a mismatch the verdict is
+        # CANNOT-EVALUATE; the refused staged run is left behind NON-PROMOTABLE (its first-staged ingest
+        # artefact is the refusal marker, P1-1) and named in the message.
+        _verify_staged_against_worksheet(resolution, result.run_rel, result.run_id, expected)
+        return result
     except _DetectError as exc:
         return _opf_import.PlanResult(exc.verdict, [exc.message])
     except _opf_import._StageError as exc:
@@ -1143,14 +1266,73 @@ def _reconcile_worksheet_against_detect(worksheet, fresh):
                       "detection and planning); fail-closed".format(drift))
 
 
-def _check_move_boundary(product_root, dest, product_root_fd):
+def _verify_staged_against_worksheet(resolution, run_rel, run_id, expected):
+    """POST-STAGE BINDING (round-2 P1-4): re-read the staged run's run.toml (the digests of the bytes
+    stage_import actually read and content-addressed into `sources/`) and inventory.toml (the review
+    surface) and require their source sets and digests to EQUAL the reconciled worksheet identities in
+    `expected` (resolved product-relative path -> (sha256, size)). Any divergence means the tree moved
+    between the planner's reconcile/verification reads and the staging layer's own reads, so the plan no
+    longer describes the staged bytes: CANNOT-EVALUATE naming the run, which stays behind NON-PROMOTABLE
+    (its first-staged ingest artefact is the refusal marker; P1-1). Fail-closed on anything unreadable or
+    malformed, never a silent pass (check-fails-closed-on-unreadable)."""
+    try:
+        store_fd = _opf_store._open_store_root_fd(resolution.store_root,
+                                                  resolution.pointer_source != "default")
+    except OSError as exc:
+        raise _cannot("cannot open store root {!r} to verify the staged run against the worksheet ({}); "
+                      "fail-closed, the staged run {} is refused non-promotable".format(
+                          resolution.store_root, exc, run_id))
+    try:
+        for name in ("run.toml", "inventory.toml"):
+            rel = run_rel + "/" + name
+            try:
+                doc = _opf_store._read_toml_contained(store_fd, rel)
+            except _opf_store.StoreError as exc:
+                raise _cannot("cannot re-read staged {} for the worksheet binding ({}); fail-closed, the "
+                              "staged run {} is refused non-promotable".format(rel, exc, run_id))
+            rows = doc.get("source") if isinstance(doc, dict) else None
+            if not isinstance(rows, list):
+                raise _cannot("staged {} carries no source list; the worksheet binding cannot be verified "
+                              "(fail-closed, the staged run {} is refused non-promotable)".format(rel, run_id))
+            seen = {}
+            for s in rows:
+                if not (isinstance(s, dict) and isinstance(s.get("path"), str)
+                        and isinstance(s.get("sha256"), str) and type(s.get("size")) is int):
+                    raise _cannot("staged {} carries a malformed source row; the worksheet binding cannot "
+                                  "be verified (fail-closed, the staged run {} is refused "
+                                  "non-promotable)".format(rel, run_id))
+                seen[s["path"]] = ("sha256:" + s["sha256"], s["size"])
+            if set(seen) != set(expected):
+                raise _cannot("staged {} source set {} does not equal the reconciled worksheet set {}; the "
+                              "tree changed under staging (fail-closed, the staged run {} is refused "
+                              "non-promotable)".format(rel, sorted(seen), sorted(expected), run_id))
+            drift = sorted(path for path in expected if seen[path] != expected[path])
+            if drift:
+                raise _cannot("staged {} digests drifted from the reconciled worksheet for {} (a file "
+                              "changed between reconcile/verification and staging); fail-closed, the "
+                              "staged run {} is refused non-promotable".format(rel, drift, run_id))
+    finally:
+        os.close(store_fd)
+
+
+def _check_move_boundary(product_root, dest, product_root_fd, store_working_rel):
     """decision 3 move boundary: dest is a contained relpath beneath the product root but STRICTLY OUTSIDE
     the resolved .working tree, with a hard NO-OVERWRITE rule. An existing file OR a dangling symlink at
-    dest is a collision (FINDING); a dest inside .working, or move-to-self/dup-dest (caller-checked), is a
-    FINDING. Uses the no-follow lstat so a symlink at dest is seen as a symlink, never followed."""
+    dest is a collision (FINDING); a dest inside the store working tree, or move-to-self/dup-dest
+    (caller-checked), is a FINDING. `store_working_rel` is the RESOLVED store's `.working` subtree as a
+    product-relative path (`_store_working_under_product`: ".working" inline, "ops/.working" on a `dir:ops`
+    relocation, None when the store resolves outside the product root), so a relocated store's working tree
+    refuses a dest exactly as the inline literal does (round-2 P1-3); the literal product-root `.working/`
+    stays refused too (the pre-relocation contract, and the inline case where both tests coincide). Uses
+    the no-follow lstat so a symlink at dest is seen as a symlink, never followed."""
     if dest.split("/", 1)[0] == _opf_store.WORKING_DIRNAME:
         raise _finding("move destination {!r} lies inside .working/ (the store tree); a move target must "
                        "be beneath the product root but OUTSIDE .working".format(dest))
+    if store_working_rel is not None and (dest == store_working_rel
+                                          or dest.startswith(store_working_rel + "/")):
+        raise _finding("move destination {!r} lies inside the RESOLVED store working tree {!r}; a move "
+                       "target must be beneath the product root but OUTSIDE the store".format(
+                           dest, store_working_rel))
     st = _journal._lstat_contained(product_root_fd, dest)
     if st is not None:
         raise _finding("move destination {!r} already exists (no-overwrite); a move-to-an-existing-file or "
@@ -1158,11 +1340,21 @@ def _check_move_boundary(product_root, dest, product_root_fd):
 
 
 def _keep_action(product_root, resolution, r):
+    """One inert keep pending-action (decision 2: retain-in-place + an [unmanaged] exemption). R-2
+    DISCLOSURE (the atomicity condition, round-2 P2-7): `unmanaged_path` is a PENDING registration; the
+    "steady-state checker never flags it" guarantee holds ONLY once PR-C applies the retention AND the
+    [unmanaged].paths registration ATOMICALLY, in ONE journaled transaction covering both. Until that
+    atomic apply, and under any non-atomic application (registration without retention, or retention
+    without registration), the kept file remains a checker-detectable stray or the cover names a missing
+    path, and the checker MAY flag either state; the plan itself changes nothing, so planning opens no such
+    window. This is a disclosed residual of the plan slice, not a guarantee the plan can make."""
     sp = r["source_path"]
     if not _opf_store._is_contained_relpath(sp):
         raise _cannot("keep source {!r} is not a legal [unmanaged].paths entry".format(sp))
     return {"kind": "keep", "scope": r["scope"], "source_path": sp,
-            "unmanaged_path": sp,   # PR-C adds this to [unmanaged].paths; steady-state checker then never flags it
+            "unmanaged_path": sp,   # PR-C must add this to [unmanaged].paths ATOMICALLY with the retention
+            #                         (one journaled transaction) BEFORE the "checker never flags it"
+            #                         guarantee holds (R-2; see the docstring).
             "sha256": r["sha256"], "size": r["size"]}
 
 
@@ -1252,6 +1444,22 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                dict(good, option=[dict(row, dest_path="../escape")])]
         for i, doc in enumerate(bad):
             check("invalid-options-{}".format(i), bool(validate_options(doc)))
+            # round-2 P2-5: the PLANNER VERDICT for an invalid-but-well-formed options document is the
+            # ratified FINDING (1), asserted on the verdict itself, never only the validator messages
+            # (pre-fix the planner mapped every one of these to CANNOT-EVALUATE, so this check FAILS
+            # without the fix).
+            with fixture() as (root, _machine):
+                files = ["legacy/a.md"]
+                ws = triage(root, files, "migrate")
+                check("invalid-options-verdict-{}".format(i),
+                      plan(root, ws, doc, files).verdict == FINDING)
+        # an UNREADABLE/UNPARSEABLE options input (not even a table) stays CANNOT-EVALUATE (2), the
+        # reserved unparseable-class verdict; flattening the split would turn this check red.
+        with fixture() as (root, _machine):
+            files = ["legacy/a.md"]
+            ws = triage(root, files, "migrate")
+            check("nontable-options-cannot-evaluate",
+                  plan(root, ws, ["not-a-table"], files).verdict == CANNOT_EVALUATE)
         for disposition in ("migrate", "move"):
             with fixture() as (root, _machine):
                 files = ["legacy/a.md"]
@@ -1331,6 +1539,15 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                     os.symlink("absent-target", root / dest)
                 check(case, plan(root, ws, options(ws, dest_path=dest), files).verdict == FINDING)
                 check(case + "-nothing-staged", not (machine.parent / "imports").exists())
+        # round-2 P1-3: a dest inside the RESOLVED store working tree of a RELOCATED (`dir:ops`) store is
+        # a FINDING exactly like the inline literal `.working/` dest (pre-fix the literal-prefix test let
+        # `ops/.working/new.md` through CLEAN, so this check FAILS without the fix).
+        with fixture(relocated=True) as (root, machine):
+            files = ["legacy/a.md"]
+            ws = triage(root, files, "move")
+            check("dest-in-resolved-working",
+                  plan(root, ws, options(ws, dest_path="ops/.working/new.md"), files).verdict == FINDING)
+            check("dest-in-resolved-working-nothing-staged", not (machine.parent / "imports").exists())
         archive()  # clean companion: an always-FINDING guard must fail too
 
     def fail_closed():
@@ -1385,6 +1602,188 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             check("nothing-staged", snapshot(root) == before
                   and not (machine.parent / "imports").exists())
 
+    def disposition_bindings():
+        # round-2 P2-6: REQUIRED + PERMITTED fields per disposition, judged on the PLANNER VERDICT: a
+        # FORBIDDEN field present is a FINDING, a REQUIRED field absent is CANNOT-EVALUATE, and a keep row
+        # forbids any binding at all. Discriminators: pre-fix, migrate with a bare binding CRASHED with an
+        # uncaught KeyError (fail-open), and each incompatible combination returned a silent CLEAN, so
+        # every check here FAILS without the fix.
+        cases = [
+            ("migrate-bare-binding", "migrate", {"importer_kind": None}, CANNOT_EVALUATE),
+            ("migrate-forbids-dest-path", "migrate",
+             {"importer_kind": "github-tasklist", "dest_path": "saved/x.md"}, FINDING),
+            ("move-forbids-importer-kind", "move",
+             {"dest_path": "saved/x.md", "importer_kind": "github-tasklist"}, FINDING),
+            ("keep-forbids-binding", "keep", {"importer_kind": None}, FINDING),
+            ("keep-forbids-dest-path", "keep", {"dest_path": "saved/x.md"}, FINDING),
+        ]
+        for label, dispo, fields, want in cases:
+            fields = {k: v for k, v in fields.items() if v is not None}
+            with fixture({"legacy/a.md": "- [ ] one\n"}) as (root, machine):
+                files = ["legacy/a.md"]
+                ws = triage(root, files, dispo)
+                result = plan(root, ws, options(ws, **fields), files)
+                check(label, result.verdict == want)
+                check(label + "-nothing-staged", not (machine.parent / "imports").exists())
+
+    def relocated_store_scope():
+        # round-2 P1-2: on a RELOCATED (`dir:ops`) store a STORE-scope row resolves under the RESOLVED
+        # store root and the staged bytes are BOUND to the reconciled worksheet digest. Pre-fix the raw
+        # store-relative source_path was read at the PRODUCT root: with a same-length impostor planted at
+        # the literal product path the plan staged the IMPOSTOR bytes under a CLEAN verdict (action.sha256
+        # = original, staged body = impostor), and with no impostor it failed on a phantom absent source;
+        # every leg here FAILS without the fix.
+        import hashlib
+        import shutil as _sh
+        body = b"- [ ] one\n"
+        orig_hex = hashlib.sha256(body).hexdigest()
+        imp_hex = hashlib.sha256(b"- [x] IMP\n").hexdigest()
+        for dispo, fields, impostor in (("keep", None, True),
+                                        ("migrate", {"importer_kind": "github-tasklist"}, False),
+                                        ("move", {"dest_path": "saved/x.md"}, False)):
+            root = build_relocated(strays={".working/a.md": body.decode("utf-8")})
+            try:
+                machine = root / "ops/.working/toml"
+                if impostor:
+                    ip = root / ".working" / "a.md"
+                    ip.parent.mkdir(parents=True, exist_ok=True)
+                    ip.write_bytes(b"- [x] IMP\n")   # same length, different bytes
+                files = [".working/a.md"]
+                ws = triage(root, files, dispo)
+                opts = options(ws, **fields) if fields else empty
+                run = staged(root, machine, ws, opts, files)
+                if run is None:
+                    continue
+                run_doc = read(run, "run.toml")["source"]
+                inv_doc = read(run, "inventory.toml")["source"]
+                check("reloc-store-bytes-" + dispo,
+                      [s["path"] for s in run_doc] == ["ops/.working/a.md"]
+                      and all(s["sha256"] == orig_hex for s in run_doc)
+                      and [s["path"] for s in inv_doc] == ["ops/.working/a.md"]
+                      and all(s["sha256"] == orig_hex for s in inv_doc)
+                      and (run / "sources" / orig_hex).read_bytes() == body)
+                mappings = read(run, "mappings.toml")["mapping"]
+                check("reloc-resolved-mapping-" + dispo,
+                      set(m["source_path"] for m in mappings) == set(["ops/.working/a.md"]))
+                if impostor:
+                    check("reloc-impostor-never-staged-" + dispo,
+                          not (run / "sources" / imp_hex).exists())
+            finally:
+                _sh.rmtree(root)
+
+    def reconcile_stage_window():
+        # round-2 P1-4, leg 1 (pre-stage verification): a same-length mutation BETWEEN the reconcile and
+        # the composition read is CANNOT-EVALUATE with nothing staged. Pre-fix the plan returned CLEAN with
+        # the mutation staged under the original action.sha256 (the existing reconcile test mutates BEFORE
+        # planning and cannot see this window), so this check FAILS without the fix.
+        with fixture({"legacy/a.md": "original body\n"}) as (root, machine):
+            files = ["legacy/a.md"]
+            ws = triage(root, files, "keep")
+            real_reconcile = _reconcile_worksheet_against_detect
+
+            def mutate_after_reconcile(worksheet, fresh):
+                real_reconcile(worksheet, fresh)
+                (root / files[0]).write_bytes(b"MUTATION body\n")
+
+            globals()["_reconcile_worksheet_against_detect"] = mutate_after_reconcile
+            try:
+                result = plan(root, ws, empty, files)
+            finally:
+                globals()["_reconcile_worksheet_against_detect"] = real_reconcile
+            check("window-prestage-cannot-evaluate", result.verdict == CANNOT_EVALUATE)
+            check("window-prestage-nothing-staged", not (machine.parent / "imports").exists())
+        # leg 2 (post-stage binding): a mutation AFTER every planner read but BEFORE the staging layer's
+        # own reads (injected around plan_import itself) is caught by re-reading the STAGED run's records
+        # against the worksheet: CANNOT-EVALUATE, and the refused leftover run is NON-PROMOTABLE because
+        # it carries the refusal marker as its first-staged ingest artefact (P1-1). Pre-fix this leg was a
+        # CLEAN plan whose staged digests diverged from action.sha256.
+        with fixture({"legacy/a.md": "original body\n"}) as (root, machine):
+            files = ["legacy/a.md"]
+            ws = triage(root, files, "keep")
+            real_plan_import = _opf_import.plan_import
+
+            def mutate_then_plan(*args, **kwargs):
+                (root / files[0]).write_bytes(b"MUTATION body\n")
+                return real_plan_import(*args, **kwargs)
+
+            _opf_import.plan_import = mutate_then_plan
+            try:
+                result = plan(root, ws, empty, files)
+            finally:
+                _opf_import.plan_import = real_plan_import
+            check("window-poststage-cannot-evaluate", result.verdict == CANNOT_EVALUATE)
+            imports = machine.parent / "imports"
+            runs = sorted(imports.iterdir()) if imports.exists() else []
+            check("window-poststage-run-refused",
+                  len(runs) == 1 and (runs[0] / "ingest-actions.toml").exists()
+                  and _opf_import.apply_import(root, runs[0].name, now=now).verdict == CANNOT_EVALUATE)
+
+    def partial_ingest_stage():
+        # round-2 P1-1: the ingest identity/refusal is DURABLE before the run is reviewable or promotable.
+        # Three sabotage points around the ingest-artefact write, each judged on returned verdicts:
+        #  (a) after-first: failure AFTER the FIRST ingest op leaves marker-without-draft; apply refuses
+        #      with the distinct ingest CANNOT-EVALUATE. Pre-fix the first op was candidates_draft and the
+        #      review artefacts were already staged, so the leftover was an unmarked, reviewable,
+        #      PROMOTABLE run (the reported bypass): this check FAILS without the fix.
+        #  (b) draft-without-marker (synthesized by filtering the marker op): apply still refuses via the
+        #      candidates_draft defence-in-depth recognition, and the run is NOT reviewable because the
+        #      review artefacts are staged only AFTER the ingest artefacts.
+        #  (c) before: failure BEFORE any ingest op leaves neither marker nor review artefacts, so review
+        #      is CANNOT-EVALUATE and no acceptance (hence no promotion) can exist.
+        import _journal as _jn
+        for kind in ("after-first", "draft-without-marker", "before"):
+            with fixture() as (root, machine):
+                files = ["legacy/a.md"]
+                ws = triage(root, files, "keep")
+                real_apply = _jn.apply_ops
+
+                def sabotaged(store_root_fd, ops, reader, kind=kind):
+                    paths = [o.get("path", "") for o in ops]
+                    if any(p.endswith("candidates_draft.toml") or p.endswith("ingest-actions.toml")
+                           for p in paths):
+                        if kind == "before":
+                            raise _jn.JournalError("injected: before any ingest op")
+                        if kind == "after-first":
+                            subset = [o for o in ops
+                                      if not o.get("path", "").endswith("candidates_draft.toml")]
+                        else:
+                            subset = [o for o in ops
+                                      if not o.get("path", "").endswith("ingest-actions.toml")]
+                        real_apply(store_root_fd, subset, reader)
+                        raise _jn.JournalError("injected: partial ingest write")
+                    return real_apply(store_root_fd, ops, reader)
+
+                _jn.apply_ops = sabotaged
+                try:
+                    result = plan(root, ws, empty, files)
+                finally:
+                    _jn.apply_ops = real_apply
+                check(kind + "-plan-cannot-evaluate", result.verdict == CANNOT_EVALUATE)
+                imports = machine.parent / "imports"
+                runs = sorted(imports.iterdir()) if imports.exists() else []
+                if len(runs) != 1:
+                    check(kind + "-one-leftover-run", False)
+                    continue
+                run = runs[0]
+                marker = (run / "ingest-actions.toml").exists()
+                draft = (run / "candidates_draft.toml").exists()
+                reviewable = (run / "inventory.toml").exists() or (run / "proposals.toml").exists()
+                rv = _opf_import.review_import(root, run.name, actor="qa", decisions=[], now=now)
+                ap = _opf_import.apply_import(root, run.name, now=now)
+                if kind == "after-first":
+                    check(kind + "-marker-first", marker and not draft and not reviewable)
+                    check(kind + "-apply-refused", ap.verdict == CANNOT_EVALUATE and ap.promoted is False
+                          and any("root-ingest" in f for f in ap.findings))
+                elif kind == "draft-without-marker":
+                    check(kind + "-not-reviewable", draft and not marker and not reviewable
+                          and rv.verdict == CANNOT_EVALUATE)
+                    check(kind + "-apply-refused", ap.verdict == CANNOT_EVALUATE and ap.promoted is False
+                          and any("root-ingest" in f for f in ap.findings))
+                else:
+                    check(kind + "-not-reviewable", not marker and not draft and not reviewable
+                          and rv.verdict == CANNOT_EVALUATE)
+                    check(kind + "-not-promoted", ap.promoted is False)
+
     def refuse_apply():
         with fixture() as (root, machine):
             files = ["legacy/a.md"]
@@ -1404,7 +1803,11 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
     registry = (
         [("options-schema-validator", schema_validator), ("keep-unmanaged-exemption", keep),
          ("migrate-importer-proposal", migrate), ("move-collision-matrix", collisions),
-         ("archive-prefill-default", archive), ("ingest-plan-refuses-apply", refuse_apply)]
+         ("archive-prefill-default", archive), ("ingest-plan-refuses-apply", refuse_apply),
+         ("disposition-binding-matrix", disposition_bindings),
+         ("relocated-store-scope-bytes", relocated_store_scope),
+         ("reconcile-stage-window", reconcile_stage_window),
+         ("partial-ingest-stage-nonpromotable", partial_ingest_stage)]
         if gate else
         [("plan-ingest-keep-exemption", keep), ("plan-ingest-migrate-provenance", migrate),
          ("plan-ingest-move-archive-default", archive),
@@ -1412,7 +1815,11 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
          ("plan-ingest-options-fail-closed", fail_closed),
          ("plan-ingest-reconcile-fail-closed", reconcile),
          ("plan-ingest-unresolved-halts", unresolved),
-         ("plan-ingest-refuses-apply", refuse_apply)])
+         ("plan-ingest-refuses-apply", refuse_apply),
+         ("plan-ingest-disposition-binding-matrix", disposition_bindings),
+         ("plan-ingest-relocated-store-scope", relocated_store_scope),
+         ("plan-ingest-reconcile-stage-window", reconcile_stage_window),
+         ("plan-ingest-partial-stage-nonpromotable", partial_ingest_stage)])
     outer_check = check
     for label, test in registry:
         check = lambda suffix, cond, label=label: outer_check(label + "/" + suffix, cond)
