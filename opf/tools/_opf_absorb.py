@@ -30,11 +30,16 @@ one leg in opf.py). This drafter REUSES rather than re-implements:
   - U1 (`_opf_store`): store resolution, the contained TOML reader, and the section-8.1 namespace bindings.
 
 FAIL-CLOSED everywhere (spec 3; check-fails-closed-on-unreadable; guard-input-soundness): an unresolvable
-store, an unreadable/unparseable/inconsistent ledger, a malformed manifest, an unreadable CHANGELOG.md, a
-`[types.done]`-declared but absent/malformed `done.index.toml`, or a covers token that names a rotated span
-is a distinct CANNOT-EVALUATE (exit 2) that STOPS, never a silent partial draft. BOTH modes run this
-floor: `--freeze-digest` validates the version + worklog ledgers and the covers token exactly as the draft
-mode does before it computes anything. A non-adopter root is
+store, an unreadable/unparseable/inconsistent ledger, a malformed manifest, or an unreadable CHANGELOG.md is
+a distinct CANNOT-EVALUATE (exit 2) that STOPS, never a silent partial draft. BOTH modes first run the
+SHARED ledger-consistency floor: they resolve the store, read the inputs, and validate the version + worklog
+ledgers and the covers token against the ledger (`_validated_inputs`), so `--freeze-digest` never digests
+past a broken ledger or an unledgered covers token. Wherever the curated CHANGELOG entries are consumed (a
+range rollup, or the freeze digest of an entry), a CHANGELOG.md whose entry headings do not all parse is
+CANNOT-EVALUATE too: U5's malformed-heading findings are propagated, never discarded. Two further checks are
+DRAFT-specific, because they guard the worklog->draft synthesis that `--freeze-digest` does not run: a
+`[types.done]`-declared but absent/malformed `done.index.toml` (the done-receipt join), and a covers token
+that names a rotated span (the worklog entries a per-release draft would compose). A non-adopter root is
 NOT-APPLICABLE (exit 0), exactly like `_opf_changelog` / doctor; this pack's own `--root .` lands there.
 
 The done join (a tool convention, spec 6.3 fixes only the heading grammar; disclose-guard-residuals):
@@ -154,12 +159,82 @@ def _enrichment(span_entries, done_records):
     return per_entry, sorted(set(notes))
 
 
+# --- markdown-safe summary emission (a summary must render as literal inline bullet text) -------------
+# A worklog summary is validated single-line prose (validate_worklog VALID), but it is otherwise free
+# text a maintainer wrote, so it may BEGIN a CommonMark block construct. Emitted raw after the "- " list
+# marker, such a summary is parsed as a block (a nested list, a heading, a fenced/indented code block, a
+# blockquote, an HTML block, a thematic break) or, worst, a link-reference definition that consumes the
+# whole bullet, dropping the summary and sometimes the following bullet with it. The leading
+# block-significant token is neutralized with a single CommonMark backslash-escape, which the renderer
+# consumes, so the visible text is unchanged and the summary can never open a block. Only the LINE-START
+# token is treated (block constructs are recognized at the start of the bullet's content); inline
+# constructs later in the line are inert here and left untouched, keeping ordinary summaries byte-identical.
+_MD_ATX_RE = re.compile(r"#{1,6}([ \t]|$)")                   # ATX heading: 1-6 '#' then space/tab/eol
+_MD_FENCE_RE = re.compile(r"(`{3,}|~{3,})")                   # fenced code: 3+ backticks or tildes
+_MD_BULLET_RE = re.compile(r"[-*+]([ \t]|$)")                 # bullet-list marker (a nested list)
+_MD_ORDERED_RE = re.compile(r"\d{1,9}([.)])([ \t]|$)")        # ordered-list marker: digits then '.'/')'
+_MD_TBREAK_RE = re.compile(r"([-*_])[ \t]*(?:\1[ \t]*){2,}$")  # thematic break: 3+ of -, *, or _
+_MD_HTML_RE = re.compile(r"<[a-zA-Z/!?]")                     # HTML block start: '<tag', '</', '<!', '<?'
+_MD_LINKREF_RE = re.compile(r"\[[^\]\n]*\]:")                 # link-reference definition: [label]:
+
+
+def _md_indent_width(ws):
+    """The CommonMark column width of a leading-whitespace run (a tab advances to the next 4-column stop),
+    used to detect an indented code block (4+ columns) at the start of a bullet's content."""
+    w = 0
+    for ch in ws:
+        w += (4 - (w % 4)) if ch == "\t" else 1
+    return w
+
+
+def _md_safe_summary(summary):
+    """Return `summary` so it renders as LITERAL inline text after a "- " list marker and can never open a
+    CommonMark block. The block-significant leading token (after any leading whitespace) is prefixed with a
+    single backslash-escape, which the renderer consumes, so the visible text is unchanged; a summary that
+    begins no block construct is returned byte-for-byte. The one exception is a 4+ column leading indent (an
+    indented code block, which a backslash cannot escape and whitespace-visible rendering cannot preserve):
+    its leading whitespace, invisible in inline rendering, is dropped (disclose-guard-residuals)."""
+    if not summary:
+        return summary
+    stripped = summary.lstrip(" \t")
+    ws = summary[:len(summary) - len(stripped)]
+    if not stripped:                          # a blank summary is rejected upstream; stay defensive
+        return summary
+    if _md_indent_width(ws) >= 4:             # 4+ columns of leading indent is itself an indented code block
+        ws = ""
+    esc_at = None                             # index within `stripped` of the char to backslash-escape
+    c = stripped[0]
+    if c == "#" and _MD_ATX_RE.match(stripped):
+        esc_at = 0
+    elif c in "`~" and _MD_FENCE_RE.match(stripped):
+        esc_at = 0
+    elif c == ">":                            # a blockquote marker (the space after '>' is optional)
+        esc_at = 0
+    elif c == "<" and _MD_HTML_RE.match(stripped):
+        esc_at = 0
+    elif c == "[" and _MD_LINKREF_RE.match(stripped):
+        esc_at = 0
+    elif c in "-*+" and (_MD_BULLET_RE.match(stripped) or _MD_TBREAK_RE.match(stripped)):
+        esc_at = 0
+    elif c == "_" and _MD_TBREAK_RE.match(stripped):
+        esc_at = 0
+    elif c.isdigit():
+        m = _MD_ORDERED_RE.match(stripped)
+        if m:
+            esc_at = m.start(1)               # escape the '.'/')' so the digits are not an ordered marker
+    if esc_at is None:
+        return ws + stripped
+    return ws + stripped[:esc_at] + "\\" + stripped[esc_at:]
+
+
 def _bullet(entry, tokens):
     """One curated-draft bullet for a worklog entry: `- <summary> (<WL-id>[; closes <token>, ...])`. The
-    summary is a validated single-line string (validate_worklog VALID) and the WL-id / closes tokens are
-    validated id shapes, so the bullet cannot introduce a spurious `## ` entry boundary."""
+    WL-id / closes tokens are validated id shapes, and the summary is passed through `_md_safe_summary` so
+    that, though it is free maintainer prose, it renders as literal inline text and cannot open a spurious
+    block construct (a nested list, heading, code fence, blockquote, HTML block, thematic break, or a
+    link-reference definition) that would drop the summary or swallow the following bullet."""
     tag = entry.get("id")
-    summary = entry.get("summary", "")
+    summary = _md_safe_summary(entry.get("summary", ""))
     if tokens:
         return "- {} ({}; closes {})".format(summary, tag, ", ".join(tokens))
     return "- {} ({})".format(summary, tag)
@@ -327,7 +402,7 @@ def draft_entry(version_data, worklog_data, done_records, changelog_text, covers
     lo, hi = parsed[1]
     versions_in_range = ledger_versions[lo:hi + 1]
     try:
-        cl_entries, _findings = _opf_changelog._changelog_entries(changelog_text)
+        cl_entries, cl_findings = _opf_changelog._changelog_entries(changelog_text)
     except _commonmark_headings.HeadingScanError as exc:
         return (CANNOT_EVALUATE, None, [],
                 ["cannot draft {}: CHANGELOG.md heading scan failed ({}): {}".format(
@@ -335,6 +410,16 @@ def draft_entry(version_data, worklog_data, done_records, changelog_text, covers
     except UnicodeEncodeError as exc:
         return (CANNOT_EVALUATE, None, [],
                 ["cannot draft {}: CHANGELOG.md is not encodable as UTF-8 ({})".format(covers, exc)])
+    if cl_findings:
+        # U5's malformed-heading findings are NOT discarded: a bare `##`, a multiline setext title, or a
+        # non-date heading suffix means an entry heading did not parse, so the per-release entries this
+        # rollup would summarize cannot be trusted (a bare `##` silently drops the content beneath it, and
+        # can shift where entry boundaries fall). Fail closed rather than roll up over a mis-parsed source
+        # (check-fails-closed-on-unreadable; no-concealed-failure).
+        return (CANNOT_EVALUATE, None, [],
+                ["cannot roll up {}: CHANGELOG.md has malformed entry heading(s), so its per-release entries "
+                 "cannot be trusted as the rollup source; fix the CHANGELOG.md headings first: {}".format(
+                     covers, "; ".join(cl_findings))])
     by_token = {}
     for token, entry_text in cl_entries:
         by_token.setdefault(token, []).append(entry_text)
@@ -427,9 +512,11 @@ def _load_done(resolution, registered_vendors):
 def _freeze_digest_of(changelog_text, covers):
     """The read-only publication assist: the freeze digest of the CURATED `## <covers>` CHANGELOG.md entry,
     reusing U5's `_changelog_entries` + `freeze_digest`, so the human never hand-computes the sha256. Writes
-    nothing. Fail-closed when the entry is absent, ambiguous, or the scan fails."""
+    nothing. Fail-closed when the entry is absent, ambiguous, the scan fails, or CHANGELOG.md carries a
+    malformed entry heading (U5's heading findings are propagated, never discarded, so a heading such as
+    `## <covers> NOT-A-DATE` cannot digest at exit 0)."""
     try:
-        entries, _findings = _opf_changelog._changelog_entries(changelog_text)
+        entries, cl_findings = _opf_changelog._changelog_entries(changelog_text)
     except _commonmark_headings.HeadingScanError as exc:
         return AbsorbResult(CANNOT_EVALUATE, findings=[
             "cannot compute the freeze digest: CHANGELOG.md heading scan failed ({}): {}".format(
@@ -437,6 +524,13 @@ def _freeze_digest_of(changelog_text, covers):
     except UnicodeEncodeError as exc:
         return AbsorbResult(CANNOT_EVALUATE, findings=[
             "cannot compute the freeze digest: CHANGELOG.md is not encodable as UTF-8 ({})".format(exc)])
+    if cl_findings:
+        # A malformed heading still yields its covers token, so the entry would otherwise digest at exit 0
+        # while its heading is malformed (e.g. `## 1.0.0 NOT-A-DATE`, or a bare `##` elsewhere). Fail closed
+        # on any heading finding rather than digest over a mis-parsed CHANGELOG (check-fails-closed-on-unreadable).
+        return AbsorbResult(CANNOT_EVALUATE, findings=[
+            "cannot compute the freeze digest: CHANGELOG.md has malformed entry heading(s), so its entries "
+            "cannot be trusted; fix the CHANGELOG.md headings first: {}".format("; ".join(cl_findings))])
     matches = [e for t, e in entries if t == covers]
     if len(matches) == 0:
         return AbsorbResult(CANNOT_EVALUATE, findings=[
@@ -477,9 +571,11 @@ def evaluate(product_root, covers=UNRELEASED, mode="draft"):
         return AbsorbResult(CANNOT_EVALUATE, findings=[error])
 
     if mode == "freeze-digest":
-        # The freeze-digest assist runs the SAME fail-closed floor as the draft mode: a ledger that does
-        # not validate, or a covers token the ledger does not know, is CANNOT-EVALUATE, never a digest
-        # computed over an unvalidated store (guard-input-soundness).
+        # The freeze-digest assist runs the SAME ledger-consistency floor as the draft mode (the shared
+        # `_validated_inputs` preconditions: the version + worklog ledgers and the covers token), NOT the
+        # draft-only done-index and rotated-span checks, which guard the worklog->draft synthesis freeze does
+        # not perform. A ledger that does not validate, or a covers token the ledger does not know, is
+        # CANNOT-EVALUATE, never a digest computed over an unvalidated store (guard-input-soundness).
         _releases, _versions, _by_id, _parsed, vfindings = _validated_inputs(
             version_data, worklog_data, covers, registered_vendors, what="compute the freeze digest")
         if vfindings is not None:
@@ -534,7 +630,10 @@ def self_test():
     dropped, hard breaks preserved), a missing rollup source, a malformed covers token, and
     an empty tail; stdout purity (the draft parses under U5 as exactly one entry whose token round-trips
     _parse_covers); the curated-flow tie to the live gates (draft integrates and run_gates PASS; a published
-    edit without re-publish -> FINDING); the freeze-digest assist equal to U5's freeze_digest; the CLI
+    edit without re-publish -> FINDING); the freeze-digest assist equal to U5's freeze_digest; markdown-safe
+    summary emission (a block-construct-leading summary renders as literal inline text through the vendored
+    Marko renderer and never swallows a following bullet, ordinary summaries byte-identical); U5
+    malformed-heading findings propagated fail-closed in BOTH the range rollup and the freeze digest; the CLI
     parser fail-closed cases; and end-to-end store resolution (NOT-APPLICABLE, cannot-evaluate, OK, done
     enabled/enriched, done not declared + note, malformed done index, freeze-digest, freeze-digest
     fail-closed on a broken ledger and on an unledgered covers token, exit-map)."""
@@ -899,6 +998,48 @@ def self_test():
               run(str(build_store("bad [[", worklog_disk, cl_disk, manifest_wl))) == 2)
     finally:
         shutil.rmtree(base_dir, ignore_errors=True)
+
+    # 12: FIX 1 -- markdown-unsafe summary emission. A summary that begins a CommonMark block construct is
+    # backslash-escaped so the DRAFTED BULLET renders as literal inline text and cannot open a block or
+    # swallow the following bullet; ordinary summaries stay byte-identical. Judged on the RENDERED output
+    # through the vendored Marko renderer (a parse-only / heading-count test cannot see this loss). The
+    # renderer is reached through U5's provenance-checked `_load_marko`, off the gate's per-parse path.
+    import html as _html
+    _marko = _commonmark_headings._load_marko()
+    _two_li = re.compile(r"<ul>\n<li>(.*?) \(WL-4\)</li>\n<li>SENTINEL \(WL-9\)</li>\n</ul>", re.S)
+
+    def renders_literal(s):
+        b = _bullet(entry(4, "added", s), [])
+        rendered = _marko.convert("### Added\n" + b + "\n- SENTINEL (WL-9)\n")
+        m = _two_li.search(rendered)          # the summary bullet and the sentinel stay sibling <li> of one <ul>
+        return bool(m) and "\n" not in m.group(1) and _html.unescape(m.group(1)) == s.strip()
+
+    for _lbl, _haz in [("linkref", "[x]: /url"), ("fence", "`" + "`" + "`py"),
+                       ("atx", "# not a heading"), ("blockquote", "> not a quote"),
+                       ("nested-bullet", "- not nested"), ("ordered", "1. not ordered"),
+                       ("html", "<div> literal")]:
+        check("md-safe-summary-renders-" + _lbl, renders_literal(_haz))
+    check("md-safe-summary-plain-unchanged",
+          renders_literal("Add plain feature") and _md_safe_summary("Add plain feature") == "Add plain feature")
+    check("md-safe-summary-versionish-unchanged",
+          renders_literal("1.0 support") and _md_safe_summary("1.0 support") == "1.0 support")
+
+    # 13: FIX 2 -- U5's malformed-heading findings are propagated fail-closed, never discarded. A rollup over
+    # a changelog with a malformed bare '##' between two valid entries (content silently dropped), and a
+    # freeze digest whose target heading is malformed, are each CANNOT-EVALUATE naming the finding
+    # (check-fails-closed-on-unreadable; no-concealed-failure).
+    cl_malformed = ("# Changelog\n\n## 1.1.0 (2026-06-15)\n\n### Added\n- second release (WL-2)\n\n"
+                    "##\n\ncontent under a bare heading that would be silently dropped\n\n"
+                    "## 1.0.0 (2026-06-01)\n\n### Added\n- first release (WL-1)\n")
+    st, _t, _n, findings = draft_entry(vbase, worklog, None, cl_malformed, "1.0.0..1.1.0")
+    check("rollup-malformed-heading-cannot-eval",
+          st == CANNOT_EVALUATE and any("malformed entry heading" in f for f in findings))
+    check("freeze-malformed-heading-cannot-eval",
+          _freeze_digest_of("# Changelog\n\n## 1.0.0 NOT-A-DATE\n\n### Added\n- a (WL-1)\n", "1.0.0").status
+          == CANNOT_EVALUATE)
+    check("freeze-bare-heading-cannot-eval",
+          _freeze_digest_of("# Changelog\n\n## 1.0.0 (2026-06-01)\n\n- a\n\n##\n\ntail\n", "1.0.0").status
+          == CANNOT_EVALUATE)
 
     if failures:
         print("OPF-ABSORB SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked))
