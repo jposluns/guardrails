@@ -1128,7 +1128,7 @@ def self_test():
     # summary, or swallowing the following bullet. Each vector is rendered through the vendored Marko (a
     # parse-only / heading-count test cannot see this loss) and checked to survive literal beside its sibling
     # sentinel; the emission escalates to a full ASCII-punctuation escape whenever a lesser candidate does not
-    # round-trip, so it is TOTAL. The renderer is reached through U5's provenance-checked `_load_marko`, off
+    # round-trip, and fails closed (CANNOT_EVALUATE) when no candidate round-trips or the summary is blank or un-renderable. The renderer is reached through U5's provenance-checked `_load_marko`, off
     # the gate's per-parse path.
     _marko = _commonmark_headings._load_marko()
     _rt_pre, _rt_post = "<ul>\n<li>", "</li>\n<li>SENT (WL-9)</li>\n</ul>\n"
@@ -1176,7 +1176,7 @@ def self_test():
         _r = _md_safe_summary(_s, " (WL-4)", _marko)
         check("md-safe-summary-escalates-to-full-" + _lbl,
               _r == _md_full_escape(_s.strip()) and renders_literal(_s))
-    # a Marko-UNAVAILABLE emission (marko=None) falls to the always-safe full escape WITHOUT a render, and
+    # a Marko-UNAVAILABLE emission (marko=None) falls to the full escape for a control-free summary (and fails closed on an un-renderable C0/DEL control) WITHOUT a render, and
     # _bullet itself degrades the same way when the loader raises HeadingScanError.
     check("md-safe-summary-marko-unavailable-full-escape",
           _md_safe_summary("# heading-like", " (WL-4)", None) == _md_full_escape("# heading-like")
