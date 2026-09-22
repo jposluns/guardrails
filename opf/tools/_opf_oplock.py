@@ -18,17 +18,28 @@ The lock identity is THREE LEGS, held together or the acquisition fails and unwi
      this module's own paths can never swap the flock inode under a waiting peer.
   2. An exclusive ACTIVE RECORD at <control-root>/opf-oplock/active.toml (O_CREAT|O_EXCL). A
      crash leaves it behind, and a pre-existing record under a free anchor refuses acquisition
-     until EXPLICIT recovery (recover=True); staleness is never inferred from pid, host, age, or
-     timeout, and a possibly-live holder is never seized.
+     until EXPLICIT recovery (recover=True). The active record persists the FULL owner identity
+     (pid, uid, nodename, canonical /proc start time, session, and acquisition stamp) so a later
+     recovery can DECIDE the holder's liveness rather than infer staleness from age or timeout.
+     Recovery is never granted by age or timeout, and even under recover=True a record is cleared
+     ONLY when the recorded holder is CONFIRMED DEAD on this host by the journal's
+     possibly-live-never-seized model (_journal.owner_confirmed_dead over the persisted owner
+     identity); a possibly-live, cross-host, or malformed holder, or a lone lease with no paired
+     active record, is REFUSED rather than seized. So a live holder whose records are exposed
+     under a split anchor can never be recovered into a two-holder state.
   3. The spec 5.7 LEASE at <machine-store>/lease.toml (O_CREAT|O_EXCL), mandatory: acquisition
      requires a RESOLVED machine store and every capability carries a lease. A capability without
-     a lease cannot exist.
+     a lease cannot exist. The lease schema is single-sourced from the store validator and is not
+     extended here; lease-holder liveness is derived from the paired active record's owner (same
+     holder).
 
 Both control records are emitted through the checked TOML encoder (_opf_emit.emit_checked) and
 re-checked for top-key equality against their closed key sets, written with the shared full-write
 loop (_journal._write_all), and fsynced (file and parent directory) before the capability
 returns. The capability retains the open descriptors, the (st_dev, st_ino) identities, and the
-exact payload bytes of everything it created.
+exact payload bytes of everything it created. A control-record write that FAILS mid-way unlinks
+the just-created (O_EXCL, singly-linked) file by verified identity before raising, so a torn
+record is never stranded for a later acquisition to meet.
 
 Release is identity-bound. It refuses, FIRST, any caller that is not the recorded acquirer (pid
 plus the /proc start-time identity _journal._pid_start provides); it re-checks the retained
@@ -52,9 +63,15 @@ processes; a same-uid actor who unlinks and recreates the anchor out of band is 
 only bounded by the control-directory ownership and permission checks and surfaced by the
 stale-record refusal; the final unlink is by name, so a window remains between the pre-unlink
 name-stat and the unlink itself, narrowed by flock exclusivity, never closed; acquirer identity
-degrades to bare pid equality where /proc start times are unavailable (non-Linux); a store or
-common-dir path with a symlinked ancestor is refused by the no-follow walk rather than served;
-and this is the LOCAL in-repository serialization boundary, not a remote-visible lease.
+degrades to bare pid equality where /proc start times are unavailable (non-Linux), where a
+confirmed-dead recovery still rests on os.kill returning ProcessLookupError rather than on a start
+time; the machine-store directory is validated for OWNERSHIP ONLY (not group- or other-writability),
+so a group-writable machine store can weaken the lease leg where the control root and the machine
+store diverge in trust: this is ownership-only BY DESIGN, to avoid over-firing on the shared-group
+adopter stores the machine store legitimately lives in, and is disclosed here rather than
+prevented; a store or common-dir path with a symlinked ancestor is refused by the no-follow walk
+rather than served; and this is the LOCAL in-repository serialization boundary, not a
+remote-visible lease.
 
 Nested journal/index lock composition is DELIBERATELY OUT OF SCOPE here (deferred to PR3); this
 module makes no cross-lock ordering claim.
@@ -91,8 +108,11 @@ ACTIVE_NAME = "active.toml"
 
 # Closed top-level key sets for the two control records. The lease shape is single-sourced from
 # the store validator (_opf_check.LEASE_TOP_KEYS, spec 5.7); the active record adds the op_id that
-# correlates the control-side record to the capability that owns it.
-ACTIVE_TOP_KEYS = frozenset(("schema", "op_id", "holder", "operation", "acquired_at"))
+# correlates the control-side record to the capability that owns it, and (PR2 round 3) the [owner]
+# sub-table that persists the acquirer's full identity so recovery can decide liveness without
+# inferring staleness. PR2 OWNS the active-record schema (PR1 froze the coupled-init contracts,
+# NOT this record), so extending it here is in-scope; the lease schema is NOT ours to change.
+ACTIVE_TOP_KEYS = frozenset(("schema", "op_id", "holder", "operation", "acquired_at", "owner"))
 _SCHEMA = 1  # == _opf_schema.SUPPORTED_SCHEMA (the lease payload the doctor validates)
 
 # Field bounds: single-sourced from the D2b contract's actor-id bound and control-character class
@@ -101,6 +121,10 @@ MAX_FIELD_BYTES = _opf_init_contract.MAX_ACTOR_ID_BYTES
 _CONTROL_RE = _opf_init_contract._CONTROL_RE
 
 _GIT_TIMEOUT_SECONDS = 30
+
+# A small control record (active.toml or lease.toml) is tiny; a read for the recovery liveness gate
+# is bounded so an oversize plant is a fail-closed refusal, never slurped (SECA resource-bounds).
+_MAX_RECORD_BYTES = 65536
 
 # Control opens: no-follow always; O_NONBLOCK always, so a FIFO planted at a control name cannot
 # block the open that feeds the type check (c13); O_CLOEXEC so a retained fd never leaks across an
@@ -251,6 +275,47 @@ def _control_payload(document, closed_keys, label):
         raise OpLockError("{} top-level keys {} do not equal the closed set {}".format(
             label, sorted(reparsed), sorted(closed_keys)))
     return text.encode("utf-8")
+
+
+def _read_control_record(dir_fd, name, label):
+    """Read and TOML-parse an on-disk control record beneath dir_fd, no-follow and fail-closed. The
+    opened object (not just the name) must be a plain singly-linked regular file, bounded by
+    _MAX_RECORD_BYTES, decodable UTF-8, and a TOML table. ANY failure (absence, wrong type,
+    oversize, unparseable, or a non-table document) raises OpLockError, so a record the recovery
+    gate cannot read is a refusal, never a silent clean pass (check-fails-closed-on-unreadable).
+    Returns the parsed dict."""
+    try:
+        fd = os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd)
+    except OSError as exc:
+        raise OpLockError("cannot read {} for the recovery liveness gate ({})".format(label, exc))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OpLockError("{} is not a regular file; refusing recovery".format(label))
+        if st.st_nlink != 1:
+            raise OpLockError("{} link count is {}, expected exactly 1; refusing recovery".format(
+                label, st.st_nlink))
+        if st.st_size > _MAX_RECORD_BYTES:
+            raise OpLockError("{} is {} bytes, over the {}-byte record cap; refusing recovery".format(
+                label, st.st_size, _MAX_RECORD_BYTES))
+        data = bytearray()
+        while len(data) <= _MAX_RECORD_BYTES:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > _MAX_RECORD_BYTES:
+            raise OpLockError("{} exceeds the {}-byte record cap; refusing recovery".format(
+                label, _MAX_RECORD_BYTES))
+    finally:
+        os.close(fd)
+    try:
+        doc = tomllib.loads(bytes(data).decode("utf-8", errors="strict"))
+    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError) as exc:
+        raise OpLockError("{} is not decodable UTF-8 TOML; refusing recovery ({})".format(label, exc))
+    if not isinstance(doc, dict):
+        raise OpLockError("{} is not a TOML table; refusing recovery".format(label))
+    return doc
 
 
 # --- the control root (authoritative common git dir) --------------------------------------------
@@ -439,8 +504,9 @@ def _open_machine_dir(store_root_fd, machine_rel, store_root):
             raise OpLockError("cannot fstat machine store {}/{} ({})".format(
                 store_root, machine_rel, exc))
         # Ownership only: the machine store is adopter content, not this module's control
-        # directory, so the group/other-write hardening is not imposed on it; the lease file
-        # itself is created 0o644 by us and fully identity- and byte-verified at release.
+        # directory, so the group/other-write hardening is not imposed on it (a DISCLOSED
+        # residual, above); the lease file itself is created 0o644 by us and fully identity- and
+        # byte-verified at release.
         if st.st_uid != os.getuid():
             raise OpLockError("machine store {}/{} is owned by uid {}, not the current uid "
                               "{}".format(store_root, machine_rel, st.st_uid, os.getuid()))
@@ -470,11 +536,57 @@ def _classify_stale(dir_fd, name, label):
     return True
 
 
+def _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease):
+    """The recovery LIVENESS GATE (fail-closed). Under recover=True a stale record is cleared ONLY
+    when the recorded holder is CONFIRMED DEAD, reusing the journal's possibly-live-never-seized
+    model (_journal.owner_confirmed_dead) over the owner identity the active record persists. A
+    possibly-live, cross-host, or malformed holder, or a stale lease with no paired active record,
+    RAISES rather than being seized, so a live holder whose records are exposed under a split
+    anchor can never be recovered into a two-holder state. Returns on a confirmed-dead holder;
+    raises OpLockError otherwise. Called ONLY on the explicit recover=True path, under the held
+    anchor flock, before any _recover_stale delete runs."""
+    if not stale_active:
+        # A stale lease with no active record carries no owner identity, so its holder cannot be
+        # confirmed dead: possibly-live, refused even under recover=True (fail-closed).
+        raise OpLockError("a stale lease exists with no paired active record; its holder carries no "
+                          "owner identity and cannot be confirmed dead (possibly live); refusing "
+                          "recovery (manual intervention required)")
+    doc = _read_control_record(ctl_fd, ACTIVE_NAME, "active record")
+    owner = doc.get("owner")
+    if not isinstance(owner, dict):
+        raise OpLockError("the stale active record carries no [owner] identity; its holder may be "
+                          "live; refusing recovery (manual intervention required)")
+    node = owner.get("nodename")
+    if not isinstance(node, str) or not node:
+        raise OpLockError("the stale active record owner has no usable nodename; its holder may be "
+                          "live; refusing recovery (manual intervention required)")
+    here = os.uname().nodename
+    if node != here:
+        # owner_confirmed_dead can only probe a LOCAL pid; a remote pid is never seizable, so a
+        # foreign nodename refuses BEFORE any os.kill (never seize a remote holder).
+        raise OpLockError("the stale active record was written on host {!r}, not this host {!r}; a "
+                          "cross-host holder is never seized; refusing recovery (manual "
+                          "intervention required)".format(node, here))
+    if not _journal.owner_confirmed_dead(owner):
+        raise OpLockError("the stale active record holder is not confirmed dead (possibly live or a "
+                          "malformed owner identity); a possibly-live holder is never seized; "
+                          "refusing recovery (manual intervention required)")
+    # Confirmed dead. A paired stale lease must belong to the SAME dead holder; a lease naming a
+    # different holder is not this dead holder's and is not seized on its behalf (fail-closed).
+    if stale_lease:
+        holder = doc.get("holder")
+        lease_doc = _read_control_record(machine_fd, _opf_check.LEASE_NAME, "lease")
+        if lease_doc.get("holder") != holder:
+            raise OpLockError("the stale lease holder does not match the confirmed-dead active "
+                              "record holder; refusing recovery (manual intervention required)")
+
+
 def _recover_stale(dir_fd, name, label):
     """Type-verified unlink of an OBSERVED stale control record, under the held anchor flock and
-    only on the explicit recover=True path. The opened object (not just the name) must be a plain
-    regular file with link count exactly 1, and the name must still bind that same inode at the
-    final pre-unlink re-check; anything else refuses and preserves."""
+    only on the explicit recover=True path AFTER the liveness gate has confirmed the holder dead.
+    The opened object (not just the name) must be a plain regular file with link count exactly 1,
+    and the name must still bind that same inode at the final pre-unlink re-check; anything else
+    refuses and preserves."""
     try:
         fd = os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd)
     except FileNotFoundError:
@@ -504,17 +616,39 @@ def _recover_stale(dir_fd, name, label):
 # --- control-record create and verified unlink ------------------------------------------------------
 
 
+def _unlink_created_on_failure(dir_fd, name, fd):
+    """LOW-1: best-effort removal of a just-created control file whose write/fsync FAILED, so a
+    torn record is not stranded for a later acquisition to meet. The file was O_CREAT|O_EXCL-created
+    and is singly-linked, so it is ours; the name is required to still bind the open fd's (st_dev,
+    st_ino) before the unlink, and any mismatch or error leaves the file in place (never unlink a
+    substituted target). Its OWN failures are swallowed: the write failure is the error being
+    raised, and stranding cleanup must not mask it."""
+    try:
+        fst = os.fstat(fd)
+        if fst.st_nlink != 1:
+            return
+        ident = (fst.st_dev, fst.st_ino)
+        name_st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(name_st.st_mode) or (name_st.st_dev, name_st.st_ino) != ident:
+            return
+        os.unlink(name, dir_fd=dir_fd)
+        os.fsync(dir_fd)
+    except OSError:
+        return
+
+
 def _create_control_file(dir_fd, name, payload, label):
     """O_CREAT|O_EXCL creation of a control record, the full-byte write loop, and durability
     (fsync of the file AND its parent directory) before returning. Returns the still-open fd and
-    the (st_dev, st_ino) identity; the caller retains both."""
+    the (st_dev, st_ino) identity; the caller retains both. On a write/fsync FAILURE the just-created
+    file is unlinked by verified identity before raising (LOW-1: no torn record is stranded)."""
     try:
         fd = os.open(name,
                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
                      | os.O_CLOEXEC, 0o644, dir_fd=dir_fd)
     except FileExistsError:
-        raise OpLockError("stale {} already exists; a previous operation did not release cleanly "
-                          "(EXPLICIT recovery required: recover=True)".format(label))
+        raise OpLockError("{} already exists under a free anchor (EXPLICIT recovery required: "
+                          "recover=True)".format(label))
     except OSError as exc:
         raise OpLockError("cannot create {} ({})".format(label, exc))
     try:
@@ -523,6 +657,7 @@ def _create_control_file(dir_fd, name, payload, label):
         os.fsync(dir_fd)
         st = os.fstat(fd)
     except OSError as exc:
+        _unlink_created_on_failure(dir_fd, name, fd)
         os.close(fd)
         raise OpLockError("cannot write {} ({})".format(label, exc))
     return fd, (st.st_dev, st.st_ino)
@@ -585,8 +720,12 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     All three legs are taken or the acquisition unwinds: the anchor flock under the authoritative
     control root, the exclusive active record, and the mandatory lease. A pre-existing active
     record or lease under a free anchor is a crash artefact: it refuses acquisition unless
-    recover=True explicitly clears it (staleness is never inferred; a held flock is never
-    seized). Returns an OpCapability; raises OpLockError fail-closed on everything else.
+    recover=True. recover=True is NOT a licence to seize: the recovery liveness gate clears a stale
+    record only when the recorded holder is CONFIRMED DEAD on this host (via the journal's
+    possibly-live-never-seized model over the owner identity the active record persists); a
+    possibly-live, cross-host, or malformed holder, or a stale lease with no paired active record,
+    is refused so a live holder whose records are exposed under a split anchor is never seized into
+    a two-holder state. Returns an OpCapability; raises OpLockError fail-closed on everything else.
     """
     if not _containment.probe():
         raise OpLockError("race-free containment primitive absent; fail-closed")
@@ -648,26 +787,38 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
         anchor_ident = _post_lock_anchor_check(ctl_fd, anchor_fd)
 
         # Stale-state classification under the held flock: a record under a FREE anchor is a
-        # crash artefact; only explicit recovery clears it.
+        # crash artefact; only explicit recovery clears it, and only for a CONFIRMED-DEAD holder.
         stale_active = _classify_stale(ctl_fd, ACTIVE_NAME, "active record")
         stale_lease = _classify_stale(machine_fd, _opf_check.LEASE_NAME, "lease")
-        if (stale_active or stale_lease) and not recover:
-            stale = ", ".join(n for n, s in ((ACTIVE_NAME, stale_active),
-                                             (_opf_check.LEASE_NAME, stale_lease)) if s)
-            raise OpLockError("stale operation record(s) under a free anchor ({}); a previous "
-                              "holder did not release cleanly; refusing without EXPLICIT "
-                              "recovery (recover=True)".format(stale))
-        if stale_active:
-            _recover_stale(ctl_fd, ACTIVE_NAME, "active record")
-        if stale_lease:
-            _recover_stale(machine_fd, _opf_check.LEASE_NAME, "lease")
+        if stale_active or stale_lease:
+            if not recover:
+                stale = ", ".join(n for n, s in ((ACTIVE_NAME, stale_active),
+                                                 (_opf_check.LEASE_NAME, stale_lease)) if s)
+                raise OpLockError(
+                    "stale operation record(s) under a free anchor ({}); refusing without EXPLICIT "
+                    "recovery (recover=True), which itself proceeds only when the recorded holder "
+                    "is confirmed dead".format(stale))
+            # recover=True: CONFIRM the recorded holder is dead before any delete (never seize a
+            # possibly-live, cross-host, or malformed holder, nor a lone owner-less lease).
+            _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease)
+            if stale_active:
+                _recover_stale(ctl_fd, ACTIVE_NAME, "active record")
+            if stale_lease:
+                _recover_stale(machine_fd, _opf_check.LEASE_NAME, "lease")
 
         op_id = str(uuid.uuid4())
         _validate_field("op_id", op_id)
         acquired_at = _utc_now()
+        # The active record persists the FULL owner identity a later recovery needs to decide
+        # liveness WITHOUT inferring it: exactly the schema _journal.owner_confirmed_dead validates
+        # (pid, uid, session, utc, and the canonical /proc start time), plus the nodename that lets
+        # recovery refuse a cross-host holder it can never probe by pid.
+        owner = dict(pid=os.getpid(), uid=os.getuid(), nodename=os.uname().nodename,
+                     session=op_id, utc=acquired_at)
+        owner["pid-start"] = _journal._pid_start(os.getpid())
         active_payload = _control_payload(
             dict(schema=_SCHEMA, op_id=op_id, holder=holder, operation=operation,
-                 acquired_at=acquired_at),
+                 acquired_at=acquired_at, owner=owner),
             ACTIVE_TOP_KEYS, "active record")
         lease_payload = _control_payload(
             dict(schema=_SCHEMA, holder=holder, operation=operation, acquired_at=acquired_at),
@@ -805,11 +956,16 @@ def release_operation(cap):
 
 
 def _st_git_env(home):
-    """A pinned, hermetic environment for FIXTURE git commands: ambient GIT_* dropped, HOME bound
-    to the fixture (no user config), system config disabled."""
+    """A pinned, hermetic environment for FIXTURE git commands: ambient GIT_* dropped, then HOME,
+    XDG_CONFIG_HOME, and the global/system config files bound into the fixture so no ambient user
+    or system git config can affect a fixture command (LOW-5). The production _git_common_dir keeps
+    HOME/XDG_CONFIG_HOME (scrubbing only GIT_*), so self_test() also pins those in os.environ."""
     env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
     env["HOME"] = home
+    env["XDG_CONFIG_HOME"] = os.path.join(home, "xdg")
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.path.join(home, "gitconfig-global")
+    env["GIT_CONFIG_SYSTEM"] = os.path.join(home, "gitconfig-system")
     return env
 
 
@@ -862,6 +1018,65 @@ def _st_ctl_dir(root):
 
 def _st_lease_path(root):
     return os.path.join(root, ".working", "toml", _opf_check.LEASE_NAME)
+
+
+def _st_reaped_child():
+    """A pid that is CONFIRMED DEAD on this host: a forked child reports its /proc starttime and
+    exits, and the parent reaps it, so os.kill(pid, 0) later raises ProcessLookupError (or, on the
+    astronomically-unlikely reuse, a differing start time confirms death). Returns (pid,
+    pid_start)."""
+    rfd, wfd = os.pipe()
+    pid = os.fork()
+    if pid == 0:                          # the child: report its own start time, then die
+        os.close(rfd)
+        try:
+            os.write(wfd, _journal._pid_start(os.getpid()).encode("utf-8"))
+        except OSError:
+            pass
+        os._exit(0)
+    os.close(wfd)
+    data = b""
+    while True:
+        chunk = os.read(rfd, 4096)
+        if not chunk:
+            break
+        data += chunk
+    os.close(rfd)
+    os.waitpid(pid, 0)                    # reap: the pid is now dead
+    return pid, data.decode("utf-8")
+
+
+def _st_write_active_owned(root, pid, pid_start, nodename, op_id, holder=None):
+    """Write a stale active.toml carrying an [owner] identity directly (a crash artefact the
+    recovery gate reads). Returns the holder string it wrote, so a paired lease can match it."""
+    if holder is None:
+        holder = "opf:{}:{}".format(nodename, pid)
+    lines = (
+        'schema = 1',
+        'op_id = "{}"'.format(op_id),
+        'holder = "{}"'.format(holder),
+        'operation = "recovered-op"',
+        'acquired_at = "2026-01-01T00:00:00Z"',
+        '',
+        '[owner]',
+        'pid = {}'.format(pid),
+        'uid = {}'.format(os.getuid()),
+        'nodename = "{}"'.format(nodename),
+        'session = "{}"'.format(op_id),
+        'utc = "2026-01-01T00:00:00Z"',
+        'pid-start = "{}"'.format(pid_start),
+        '',
+    )
+    with open(os.path.join(_st_ctl_dir(root), ACTIVE_NAME), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    return holder
+
+
+def _st_write_lease_owned(root, holder):
+    """Write a stale lease.toml naming `holder` (a crash artefact paired with the active record)."""
+    with open(_st_lease_path(root), "w", encoding="utf-8") as fh:
+        fh.write('schema = 1\nholder = "{}"\noperation = "recovered-op"\n'
+                 'acquired_at = "2026-01-01T00:00:00Z"\n'.format(holder))
 
 
 def _t_c1_common_dir_authority(d, env):
@@ -926,6 +1141,22 @@ def _t_c2_anchor_validation(d, env):
     release_operation(cap)
 
 
+def _t_c2_dirperms(d, env):
+    """T-c2-dirperms (LOW-4): a group- or other-writable CONTROL DIRECTORY refuses acquisition (the
+    directory ownership/permission vector, distinct from the anchor-file bits in T-c2)."""
+    root = _st_git_store(d, "repo", env)
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+    ctl = _st_ctl_dir(root)
+    os.chmod(ctl, 0o775)                  # group-writable control dir
+    _st_expect_refusal(acquire_operation, root, "op", needle="writable")
+    os.chmod(ctl, 0o757)                  # other-writable control dir
+    _st_expect_refusal(acquire_operation, root, "op", needle="writable")
+    os.chmod(ctl, 0o755)
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+
+
 def _t_crit1_anchor_swap(d, env):
     """T-crit1: an out-of-band unlink-and-recreate of the anchor while held cannot yield a second
     holder (the active record refuses it), and the anomaly is surfaced at release while both
@@ -948,8 +1179,8 @@ def _t_crit1_anchor_swap(d, env):
 
 def _t_c3_c11_mandatory_lease_and_bytes(d, env):
     """T-c3 plus T-c11: acquisition requires a RESOLVED store; the lease and active record exist
-    while held with EXACTLY the recorded bytes (checked-encoder TOML, closed key sets); the lease
-    is gone after release."""
+    while held with EXACTLY the recorded bytes (checked-encoder TOML, closed key sets); the active
+    record now persists an [owner] identity; the lease is gone after release."""
     plain = os.path.join(d, "plain")
     os.mkdir(plain)
     _st_git(["init", "-q"], plain, env)
@@ -972,6 +1203,12 @@ def _t_c3_c11_mandatory_lease_and_bytes(d, env):
     active_doc = tomllib.loads(cap._active_bytes.decode("utf-8"))
     assert set(active_doc) == set(ACTIVE_TOP_KEYS), active_doc
     assert active_doc["op_id"] == cap.op_id
+    owner = active_doc["owner"]
+    assert isinstance(owner, dict), owner
+    assert owner["pid"] == os.getpid() and type(owner["pid"]) is int
+    assert owner["nodename"] == os.uname().nodename
+    assert isinstance(owner["pid-start"], str)
+    assert owner["session"] == cap.op_id and owner["utc"] == active_doc["acquired_at"]
     release_operation(cap)
     assert not os.path.exists(lease) and not os.path.exists(active)
 
@@ -988,30 +1225,105 @@ def _t_c4_dir_nlink_free(d, env):
 
 
 def _t_c5_stale_and_recovery(d, env):
-    """T-c5: a stale lease or active record under a free anchor refuses without recover=True and
-    is cleared by explicit recovery; a simulated crash (descriptors dropped, no release) leaves
-    both records and the same discipline applies."""
+    """T-c5: a stale record under a free anchor refuses without recover=True; and a LONE stale
+    lease with NO paired active record is fail-closed even WITH recover=True (its holder carries no
+    owner identity and cannot be confirmed dead, so it is possibly-live and never seized). The
+    confirmed-dead recovery path is exercised by T-r3-dead."""
     root = _st_git_store(d, "repo", env)
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
     with open(_st_lease_path(root), "wb") as fh:
-        fh.write(b'schema = 1\nholder = "crashed"\noperation = "old"\n'
+        fh.write(b'schema = 1\nholder = "opf:host:1"\noperation = "old"\n'
                  b'acquired_at = "2026-01-01T00:00:00Z"\n')
     _st_expect_refusal(acquire_operation, root, "op", needle="stale")
-    cap = acquire_operation(root, "op", recover=True)
-    release_operation(cap)
-    # Simulated kill -9: the holder vanishes without releasing; only the on-disk records remain.
+    _st_expect_refusal(acquire_operation, root, "op", recover=True,
+                       needle="no paired active record")
+    assert os.path.exists(_st_lease_path(root)), "a possibly-live lone lease is never seized"
+    os.unlink(_st_lease_path(root))       # operator manual intervention (no confirmable owner)
     cap = acquire_operation(root, "op")
-    fcntl.flock(cap._anchor_fd, fcntl.LOCK_UN)
-    for fd in (cap._lease_fd, cap._active_fd, cap._anchor_fd, cap._ctl_fd, cap._machine_fd):
-        os.close(fd)
-    cap._released = True                  # the object is dead; the crash artefacts are on disk
-    _st_expect_refusal(acquire_operation, root, "op", needle="recover=True")
-    cap = acquire_operation(root, "op", recover=True)
     release_operation(cap)
+
+
+def _t_r3_live_recover_refuses(d, env):
+    """T-r3-live-recover-refuses (the gemini-CRITICAL regression): a LIVE holder's records exposed
+    under a FRESH/free anchor are NEVER seized under recover=True. The anchor is split BOTH ways (a
+    fresh anchor via unlink of mutex.lock, and via rename aside); recovery must REFUSE and delete
+    nothing, so no two-holder state can arise."""
+    root = _st_git_store(d, "repo", env)
+    cap = acquire_operation(root, "op")
+    release_operation(cap)                # establish the control dir + persistent anchor
+    node = os.uname().nodename
+    live_pid = os.getpid()
+    live_start = _journal._pid_start(live_pid)
+    holder = _st_write_active_owned(root, live_pid, live_start, node, op_id="live-op-id")
+    _st_write_lease_owned(root, holder=holder)
+    ctl = _st_ctl_dir(root)
+    anchor = os.path.join(ctl, ANCHOR_NAME)
+    active = os.path.join(ctl, ACTIVE_NAME)
+    lease = _st_lease_path(root)
+    for split in ("unlink", "rename"):
+        # Force a SECOND acquirer to mint a fresh, free anchor while the LIVE holder's records stay:
+        if split == "unlink":
+            if os.path.exists(anchor):
+                os.unlink(anchor)
+        else:
+            if os.path.exists(anchor):
+                os.rename(anchor, anchor + ".aside")
+        _st_expect_refusal(acquire_operation, root, "op2", recover=True, needle="live")
+        assert os.path.exists(active), "the LIVE holder's active record must be preserved ({})".format(split)
+        assert os.path.exists(lease), "the LIVE holder's lease must be preserved ({})".format(split)
+        if split == "rename" and os.path.exists(anchor + ".aside"):
+            os.unlink(anchor + ".aside")
+    # No two-holder state ever arose; the (fictitious) live holder's records are cleared manually.
+    os.unlink(active)
+    os.unlink(lease)
+
+
+def _t_r3_dead_recover_proceeds(d, env):
+    """T-r3-dead-recover-proceeds: a CONFIRMED-DEAD owner (same host, a reaped child's pid plus its
+    recorded /proc start time) refuses without recover=True and is cleared WITH recover=True; the
+    paired lease (matching holder) is cleared with it."""
+    root = _st_git_store(d, "repo", env)
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+    dead_pid, dead_start = _st_reaped_child()
+    node = os.uname().nodename
+    holder = _st_write_active_owned(root, dead_pid, dead_start, node, op_id="dead-op-id")
+    _st_write_lease_owned(root, holder=holder)
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+    _st_expect_refusal(acquire_operation, root, "op", needle="recover=True")
+    cap = acquire_operation(root, "op", recover=True)   # confirmed dead: proceeds and clears
+    release_operation(cap)
+    assert not os.path.exists(active), "a confirmed-dead active record is cleared"
+    assert not os.path.exists(lease), "the paired lease is cleared with it"
+
+
+def _t_r3_crosshost_refuses(d, env):
+    """T-r3-crosshost-refuses: an owner with a FOREIGN nodename is never seized (a remote pid can
+    never be probed locally), so recover=True REFUSES and preserves the records."""
+    root = _st_git_store(d, "repo", env)
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+    foreign = "some-other-host.invalid"
+    assert foreign != os.uname().nodename
+    holder = _st_write_active_owned(root, os.getpid(), _journal._pid_start(os.getpid()),
+                                    foreign, op_id="foreign-op-id")
+    _st_write_lease_owned(root, holder=holder)
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+    _st_expect_refusal(acquire_operation, root, "op", recover=True, needle="host")
+    assert os.path.exists(active) and os.path.exists(lease), \
+        "a cross-host holder's records are never seized"
+    os.unlink(active)
+    os.unlink(lease)
 
 
 def _t_c6_c7_med6_verified_release(d, env):
-    """T-c6/T-c7 plus T-med6: a tampered record is refused and PRESERVED at release, and the
-    OTHER leg still runs (error collection, not an early raise)."""
+    """T-c6/T-c7 plus T-med6: a tampered record is refused and PRESERVED at release, and the OTHER
+    leg still runs (error collection, not an early raise). A preserved, owner-less leftover is
+    cleared by explicit manual intervention (recover=True no longer seizes it: it has no confirmable
+    owner)."""
     root = _st_git_store(d, "repo", env)
     lease = _st_lease_path(root)
     active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
@@ -1021,14 +1333,57 @@ def _t_c6_c7_med6_verified_release(d, env):
     _st_expect_refusal(release_operation, cap, needle="lease leg")
     assert os.path.exists(lease), "a mismatched lease must be PRESERVED"
     assert not os.path.exists(active), "the active leg must still run (T-med6)"
-    cap = acquire_operation(root, "op", recover=True)
-    with open(active, "wb") as fh:                    # replaced content, same inode
+    os.unlink(lease)                                     # manual clear of the owner-less leftover
+    cap = acquire_operation(root, "op")
+    with open(active, "wb") as fh:                       # replaced content, same inode
         fh.write(b"forged = true\n")
     _st_expect_refusal(release_operation, cap, needle="active leg")
     assert os.path.exists(active), "a mismatched active record must be PRESERVED"
     assert not os.path.exists(lease), "the lease leg must still have run"
-    cap = acquire_operation(root, "op", recover=True)
+    os.unlink(active)                                    # manual clear of the owner-less leftover
+    cap = acquire_operation(root, "op")
     release_operation(cap)
+
+
+def _t_c6_diffinode(d, env):
+    """T-c6-diffinode (LOW-4): a same-BYTES but DIFFERENT-INODE lease swap under a held capability
+    is refused and PRESERVED at release (identity is device+inode, not bytes), and the active leg
+    still runs."""
+    root = _st_git_store(d, "repo", env)
+    cap = acquire_operation(root, "op")
+    lease = _st_lease_path(root)
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    with open(lease, "rb") as fh:
+        same_bytes = fh.read()
+    os.unlink(lease)                                     # swap the inode: same bytes, new inode
+    with open(lease, "wb") as fh:
+        fh.write(same_bytes)
+    os.chmod(lease, 0o644)
+    _st_expect_refusal(release_operation, cap, needle="device/inode")
+    assert os.path.exists(lease), "a byte-identical but inode-swapped lease is PRESERVED"
+    assert not os.path.exists(active), "the active leg still runs"
+    os.unlink(lease)                                     # manual clear of the preserved swap
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+
+
+def _t_h4_quote(d, env):
+    """T-h4-quote (LOW-4): a holder carrying a double-quote (allowed: it is outside the control
+    class) round-trips through the checked encoder to a schema-valid lease with the value intact,
+    distinct from the control-character refusal (T-low1)."""
+    root = _st_git_store(d, "repo", env)
+    holder = 'opf:host:pid with a "double quote" inside'
+    cap = acquire_operation(root, "op", holder=holder)
+    lease = _st_lease_path(root)
+    with open(lease, "rb") as fh:
+        doc = tomllib.loads(fh.read().decode("utf-8"))
+    assert set(doc) == set(_opf_check.LEASE_TOP_KEYS), doc
+    assert doc["holder"] == holder, "the double-quoted holder must round-trip intact"
+    assert cap.holder == holder
+    active_doc = tomllib.loads(cap._active_bytes.decode("utf-8"))
+    assert active_doc["holder"] == holder
+    release_operation(cap)
+    assert not os.path.exists(lease)
 
 
 def _t_c9_acquirer_identity(d, env):
@@ -1093,6 +1448,28 @@ def _t_c10_git_classification(d, env):
         os.environ["PATH"] = old_path
     assert not os.path.exists(os.path.join(r3, CONTROL_DIRNAME)), \
         "missing git must never fall back to a repo-root control tree"
+
+
+def _t_c3_companion(d, env):
+    """T-c3-companion (LOW-4): two product roots companion-pointed at ONE store contend on the
+    single shared anchor; the lease is rooted at the RESOLVED store root, not at either product
+    root."""
+    store = _st_git_store(d, "store", env)
+    lease = os.path.join(store, ".working", "toml", _opf_check.LEASE_NAME)
+    prod_a = os.path.join(d, "prodA")
+    prod_b = os.path.join(d, "prodB")
+    for prod in (prod_a, prod_b):
+        os.mkdir(prod)
+        with open(os.path.join(prod, _opf_store.POINTER_REL), "w", encoding="utf-8") as fh:
+            fh.write('[store]\ntarget = "dir:{}"\n'.format(store))
+    cap = acquire_operation(prod_a, "op-a")
+    assert os.path.isfile(lease), "the lease is rooted at the resolved store, not the product root"
+    assert not os.path.exists(os.path.join(prod_a, ".working", "toml", _opf_check.LEASE_NAME))
+    _st_expect_refusal(acquire_operation, prod_b, "op-b", needle="held")
+    release_operation(cap)
+    cap = acquire_operation(prod_b, "op-b")   # freed: the companion product now acquires
+    release_operation(cap)
+    assert not os.path.exists(lease)
 
 
 def _t_c12_contention_and_double_release(d, env):
@@ -1162,10 +1539,37 @@ def _t_low1_field_validation(d, env):
     assert not os.path.exists(_st_lease_path(root))
 
 
+def _t_low1_torn_write(d, env):
+    """T-low1-torn (LOW-1): a forced short/failed control write leaves NO stranded file. The
+    active-record write is made to write a partial prefix and then raise; the just-created record
+    must be unlinked (not stranded as a crash artefact), and the lock must remain re-acquirable."""
+    root = _st_git_store(d, "repo", env)
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+    saved_write_all = _journal._write_all
+
+    def _boom(fd, payload):
+        os.write(fd, payload[:5])         # a torn partial write, then fail
+        raise OSError("simulated control-write failure (T-low1-torn)")
+
+    _journal._write_all = _boom
+    try:
+        _st_expect_refusal(acquire_operation, root, "op", needle="cannot write")
+    finally:
+        _journal._write_all = saved_write_all
+    assert not os.path.exists(active), "a failed control write must not strand a torn active record"
+    assert not os.path.exists(lease), "no lease is created when the active write fails first"
+    cap = acquire_operation(root, "op")   # fully unwound and re-acquirable
+    release_operation(cap)
+
+
 def self_test():
-    """Regression roster (plan section (e)): T-c1..T-c14, T-crit1, T-med6, T-low1, each a witness
-    against a named defect of the retired draft. A missing containment primitive or git binary is
-    a REFUSAL (non-zero), never a clean skip."""
+    """Regression roster (plan section (e)): the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
+    round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
+    T-r3-crosshost-refuses), the LOW-4 coverage tests (T-c2-dirperms, T-c3-companion, T-h4-quote,
+    T-c6-diffinode), and the LOW-1 torn-write witness (T-low1-torn), each a witness against a named
+    defect. A missing containment primitive or git binary is a REFUSAL (non-zero), never a clean
+    skip. The git fixtures are pinned hermetically (LOW-5)."""
     import tempfile
     import traceback
 
@@ -1182,23 +1586,47 @@ def self_test():
         ("T-c1 authoritative common git dir (worktree, scrubbed env, bogus gitdir)",
          _t_c1_common_dir_authority),
         ("T-c2 anchor validation and persistence", _t_c2_anchor_validation),
+        ("T-c2-dirperms group/other-writable control dir refuses", _t_c2_dirperms),
         ("T-crit1 anchor unlink/recreate is caught, never a second holder",
          _t_crit1_anchor_swap),
-        ("T-c3/T-c11 mandatory lease, exact checked-encoder bytes",
+        ("T-c3/T-c11 mandatory lease, exact checked-encoder bytes, owner identity",
          _t_c3_c11_mandatory_lease_and_bytes),
+        ("T-c3-companion two product roots, one store, one shared anchor", _t_c3_companion),
         ("T-c4 link-count check is file-only", _t_c4_dir_nlink_free),
-        ("T-c5 stale records refuse; explicit recovery clears", _t_c5_stale_and_recovery),
+        ("T-c5 stale refuses; lone lease is fail-closed even under recovery",
+         _t_c5_stale_and_recovery),
+        ("T-r3-live recover REFUSES a live holder (never a second holder)",
+         _t_r3_live_recover_refuses),
+        ("T-r3-dead recover PROCEEDS on a confirmed-dead holder", _t_r3_dead_recover_proceeds),
+        ("T-r3-crosshost recover REFUSES a foreign-host holder", _t_r3_crosshost_refuses),
         ("T-c6/T-c7/T-med6 verified release preserves mismatches, legs collected",
          _t_c6_c7_med6_verified_release),
+        ("T-c6-diffinode same-bytes inode swap is preserved", _t_c6_diffinode),
+        ("T-h4-quote a double-quoted holder round-trips intact", _t_h4_quote),
         ("T-c9 release is bound to the acquirer identity", _t_c9_acquirer_identity),
         ("T-c10 three-way .git classification, no fallback", _t_c10_git_classification),
         ("T-c12 contention and double release refuse", _t_c12_contention_and_double_release),
         ("T-c13 FIFO control names cannot block or pass", _t_c13_fifo_control_names),
         ("T-c8/T-c14 nested-lock scope-out (PR3)", _t_c8_c14_scope_out),
         ("T-low1 single-sourced field validation", _t_low1_field_validation),
+        ("T-low1-torn a failed control write strands no file", _t_low1_torn_write),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-oplock-selftest-"))
+    # LOW-5: pin the git fixtures AND the production rev-parse hermetically. Bind HOME and
+    # XDG_CONFIG_HOME (which production _git_common_dir keeps, scrubbing only GIT_*) plus
+    # GIT_CONFIG_GLOBAL/SYSTEM into the per-run temp dir, and restore them afterwards, so no ambient
+    # user or system git config can affect a fixture command or the module's own rev-parse.
+    _saved_env = {}
+    for _k in ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+               "GIT_CONFIG_NOSYSTEM"):
+        _saved_env[_k] = os.environ.get(_k)
+    os.environ["HOME"] = base
+    os.environ["XDG_CONFIG_HOME"] = os.path.join(base, "xdg")
+    os.environ["GIT_CONFIG_GLOBAL"] = os.path.join(base, "gitconfig-global")
+    os.environ["GIT_CONFIG_SYSTEM"] = os.path.join(base, "gitconfig-system")
+    os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+    os.makedirs(os.path.join(base, "xdg"), exist_ok=True)
     failures = []
     try:
         env = _st_git_env(base)
@@ -1213,6 +1641,11 @@ def self_test():
                 print("FAIL  {}".format(name))
                 traceback.print_exc()
     finally:
+        for _k, _v in _saved_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
         shutil.rmtree(base, ignore_errors=True)
     if failures:
         print("SELF-TEST FAIL: {} of {} tests failed: {}".format(
