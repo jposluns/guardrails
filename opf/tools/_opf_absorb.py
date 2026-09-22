@@ -34,7 +34,7 @@ store, an unreadable/unparseable/inconsistent ledger, a malformed manifest, or a
 a distinct CANNOT-EVALUATE (exit 2) that STOPS, never a silent partial draft. BOTH modes first run the
 SHARED ledger-consistency floor: they resolve the store, read the inputs, and validate the version + worklog
 ledgers and the covers token against the ledger (`_validated_inputs`), so `--freeze-digest` never digests
-past a broken ledger or an unledgered covers token. Wherever the curated CHANGELOG entries are consumed (a
+past a broken ledger or a covers token that fails to parse or resolve against the ledger. Wherever the curated CHANGELOG entries are consumed (a
 range rollup, or the freeze digest of an entry), a CHANGELOG.md whose entry headings do not all parse is
 CANNOT-EVALUATE too: U5's malformed-heading findings are propagated, never discarded. Two further checks are
 DRAFT-specific, because they guard the worklog->draft synthesis that `--freeze-digest` does not run: a
@@ -56,8 +56,10 @@ rows (never the clock), so the self-test can golden the output; the standard doe
 may draft otherwise. Adopter-rooted like the rest of the tooling; the assurance rides the `--self-test` leg
 over synthetic stores, reached through `opf/tools/opf.py --self-test` as the `opf-absorb` leg.
 """
+import html
 import os
 import re
+import string
 import sys
 from pathlib import Path
 
@@ -160,15 +162,26 @@ def _enrichment(span_entries, done_records):
 
 
 # --- markdown-safe summary emission (a summary must render as literal inline bullet text) -------------
-# A worklog summary is validated single-line prose (validate_worklog VALID), but it is otherwise free
-# text a maintainer wrote, so it may BEGIN a CommonMark block construct. Emitted raw after the "- " list
-# marker, such a summary is parsed as a block (a nested list, a heading, a fenced/indented code block, a
-# blockquote, an HTML block, a thematic break) or, worst, a link-reference definition that consumes the
-# whole bullet, dropping the summary and sometimes the following bullet with it. The leading
-# block-significant token is neutralized with a single CommonMark backslash-escape, which the renderer
-# consumes, so the visible text is unchanged and the summary can never open a block. Only the LINE-START
-# token is treated (block constructs are recognized at the start of the bullet's content); inline
-# constructs later in the line are inert here and left untouched, keeping ordinary summaries byte-identical.
+# A worklog summary is validated single-line prose (validate_worklog VALID), but it is otherwise free text a
+# maintainer wrote, so it may BEGIN a CommonMark block construct (a nested list, heading, fenced or indented
+# code block, blockquote, HTML block, thematic break) or, worst, a link-reference definition that consumes
+# the whole bullet and can swallow the following bullet with it, dropping the summary. Which constructs a
+# given summary triggers cannot be decided by a regex over its leading token: an escaped-bracket link label
+# still defines a reference, a mid-line HTML comment still renders invisibly, an autolink is a legitimate
+# inline construct. So the emission is RENDER-VERIFIED. Three escape candidates, least-escaped first, are
+# each rendered through the vendored Marko, and the first whose drafted bullet ROUND-TRIPS is emitted: the
+# summary renders as the LITERAL text the maintainer authored, in a single inline run of its own <li>, a
+# sibling of a trailing sentinel bullet that must survive. The full-escape candidate backslash-escapes every
+# ASCII-punctuation character, so by CommonMark's backslash-escape guarantee it always renders literally; the
+# function is therefore TOTAL, and it fails safe to that candidate when the vendored Marko is unavailable
+# (a render outage never silently emits an unsafe bullet). Leading/trailing whitespace, invisible in inline
+# rendering, is stripped: the literal contract is over the summary's visible text (disclose-guard-residuals).
+_ASCII_PUNCT = frozenset(string.punctuation)   # the 32 CommonMark ASCII-punctuation chars, each backslash-escapable
+
+# The leading block-significant token a minimal (candidate-1) escape neutralizes. This tier is a PREFERENCE
+# only: whatever it produces is emitted solely when the render-verification confirms it round-trips, so an
+# imperfect match here never emits an unsafe bullet, it only forgoes the cleaner minimal escape and lets the
+# full-escape candidate take over.
 _MD_ATX_RE = re.compile(r"#{1,6}([ \t]|$)")                   # ATX heading: 1-6 '#' then space/tab/eol
 _MD_FENCE_RE = re.compile(r"(`{3,}|~{3,})")                   # fenced code: 3+ backticks or tildes
 _MD_BULLET_RE = re.compile(r"[-*+]([ \t]|$)")                 # bullet-list marker (a nested list)
@@ -177,32 +190,17 @@ _MD_TBREAK_RE = re.compile(r"([-*_])[ \t]*(?:\1[ \t]*){2,}$")  # thematic break:
 _MD_HTML_RE = re.compile(r"<[a-zA-Z/!?]")                     # HTML block start: '<tag', '</', '<!', '<?'
 _MD_LINKREF_RE = re.compile(r"\[[^\]\n]*\]:")                 # link-reference definition: [label]:
 
-
-def _md_indent_width(ws):
-    """The CommonMark column width of a leading-whitespace run (a tab advances to the next 4-column stop),
-    used to detect an indented code block (4+ columns) at the start of a bullet's content."""
-    w = 0
-    for ch in ws:
-        w += (4 - (w % 4)) if ch == "\t" else 1
-    return w
+# The sentinel bullet the round-trip probe appends: a plain literal whose own <li> must survive as a sibling
+# of the summary's, proving the summary neither opened a block nor swallowed the bullet that follows it.
+_MD_SENTINEL = "- OPF_ABSORB_RENDER_SENTINEL"
+_MD_RT_PRE = "<ul>\n<li>"
+_MD_RT_POST = "</li>\n<li>OPF_ABSORB_RENDER_SENTINEL</li>\n</ul>\n"
 
 
-def _md_safe_summary(summary):
-    """Return `summary` so it renders as LITERAL inline text after a "- " list marker and can never open a
-    CommonMark block. The block-significant leading token (after any leading whitespace) is prefixed with a
-    single backslash-escape, which the renderer consumes, so the visible text is unchanged; a summary that
-    begins no block construct is returned byte-for-byte. The one exception is a 4+ column leading indent (an
-    indented code block, which a backslash cannot escape and whitespace-visible rendering cannot preserve):
-    its leading whitespace, invisible in inline rendering, is dropped (disclose-guard-residuals)."""
-    if not summary:
-        return summary
-    stripped = summary.lstrip(" \t")
-    ws = summary[:len(summary) - len(stripped)]
-    if not stripped:                          # a blank summary is rejected upstream; stay defensive
-        return summary
-    if _md_indent_width(ws) >= 4:             # 4+ columns of leading indent is itself an indented code block
-        ws = ""
-    esc_at = None                             # index within `stripped` of the char to backslash-escape
+def _md_minimal_escape(stripped):
+    """Candidate 1: backslash-escape only the leading block-significant token of `stripped` (the token the
+    earlier selective escape targeted). A preference tier, emitted only if the render-verification passes."""
+    esc_at = None
     c = stripped[0]
     if c == "#" and _MD_ATX_RE.match(stripped):
         esc_at = 0
@@ -223,21 +221,81 @@ def _md_safe_summary(summary):
         if m:
             esc_at = m.start(1)               # escape the '.'/')' so the digits are not an ordered marker
     if esc_at is None:
-        return ws + stripped
-    return ws + stripped[:esc_at] + "\\" + stripped[esc_at:]
+        return stripped
+    return stripped[:esc_at] + "\\" + stripped[esc_at:]
+
+
+def _md_full_escape(stripped):
+    """Candidate 2: backslash-escape EVERY ASCII-punctuation character. CommonMark guarantees each renders as
+    its literal self, so this candidate always round-trips; it is the total, always-safe fallback."""
+    return "".join("\\" + ch if ch in _ASCII_PUNCT else ch for ch in stripped)
+
+
+def _md_bullet_round_trips(marko, candidate, target, suffix):
+    """True when the drafted bullet `- <candidate><suffix>`, followed by the sentinel bullet, renders through
+    the vendored `marko` as exactly two sibling <li> of one <ul>: the first the LITERAL `target + suffix` in a
+    single inline run (no block opened, no tag emitted, no newline), the second the surviving sentinel.
+    `target` is the intended literal (the stripped summary); `candidate` is its escaped form. Judged on the
+    RENDERED HTML, not on the escape logic: the render is the authority for whether the summary is literal,
+    not the regexes that produced the candidate (guard-input-soundness; isolate-verifiers by result signal)."""
+    try:
+        out = marko.convert("- " + candidate + suffix + "\n" + _MD_SENTINEL + "\n")
+    except Exception:
+        return False                          # a parser hiccup on this candidate: treat as not round-tripping
+    if not (out.startswith(_MD_RT_PRE) and out.endswith(_MD_RT_POST)):
+        return False                          # a block opened, or the sentinel did not survive as a sibling
+    inner = out[len(_MD_RT_PRE):len(out) - len(_MD_RT_POST)]
+    if "<" in inner or ">" in inner or "\n" in inner:
+        return False                          # a literal text run escapes '<'/'>'; a raw one means a tag/block
+    return html.unescape(inner) == target + suffix
+
+
+def _md_safe_summary(summary, suffix, marko):
+    """Return `summary` escaped so the drafted bullet `- <return><suffix>` renders as the LITERAL text the
+    maintainer authored, in a single inline run of its own <li>, and can never open a CommonMark block, drop
+    the summary, or swallow the following bullet. Three candidates are tried least-escaped first, the raw
+    summary, then a minimal leading-token escape, then a full ASCII-punctuation escape, and the first whose
+    drafted bullet round-trips through the vendored `marko` is returned. The full escape always round-trips
+    (the CommonMark backslash-escape guarantee), so the function is TOTAL. `marko` is the loaded vendored
+    Marko module, or None when it is unavailable, in which case the always-safe full-escape candidate is
+    returned without a render. The bullet's own suffix (the id/closes parenthetical) is passed in and
+    verified as part of the bullet, because it participates in the parse, for example as a link-reference-
+    definition title. Leading/trailing whitespace, invisible in inline rendering, is stripped; the literal
+    contract is over the summary's visible text (disclose-guard-residuals)."""
+    if not summary:
+        return summary
+    target = summary.strip()
+    if not target:                           # a blank/whitespace-only summary is rejected upstream; be safe
+        return summary
+    candidates = (target, _md_minimal_escape(target), _md_full_escape(target))
+    if marko is not None:
+        for candidate in candidates:
+            if _md_bullet_round_trips(marko, candidate, target, suffix):
+                return candidate
+    return candidates[2]                      # marko unavailable, or (defensively) none verified: full escape
 
 
 def _bullet(entry, tokens):
     """One curated-draft bullet for a worklog entry: `- <summary> (<WL-id>[; closes <token>, ...])`. The
-    WL-id / closes tokens are validated id shapes, and the summary is passed through `_md_safe_summary` so
-    that, though it is free maintainer prose, it renders as literal inline text and cannot open a spurious
-    block construct (a nested list, heading, code fence, blockquote, HTML block, thematic break, or a
-    link-reference definition) that would drop the summary or swallow the following bullet."""
+    WL-id / closes tokens are validated id shapes. The summary is free maintainer prose, so it is passed
+    through `_md_safe_summary` together with the bullet's own suffix (the id/closes parenthetical
+    participates in the parse, e.g. as a link-reference-definition title), which RENDER-VERIFIES through the
+    vendored Marko that the drafted bullet renders as the literal authored text and cannot open a spurious
+    block (a nested list, heading, code fence, blockquote, HTML block, thematic break, or link-reference
+    definition) that would drop the summary or swallow the following bullet. The Marko loader is reached at
+    runtime here, the drafter verifying its own output; when it is unavailable the summary falls back to the
+    always-safe full escape."""
     tag = entry.get("id")
-    summary = _md_safe_summary(entry.get("summary", ""))
     if tokens:
-        return "- {} ({}; closes {})".format(summary, tag, ", ".join(tokens))
-    return "- {} ({})".format(summary, tag)
+        suffix = " ({}; closes {})".format(tag, ", ".join(tokens))
+    else:
+        suffix = " ({})".format(tag)
+    try:
+        marko = _commonmark_headings._load_marko()
+    except _commonmark_headings.HeadingScanError:
+        marko = None                          # a missing/unverifiable vendored Marko: fail safe to full escape
+    summary = _md_safe_summary(entry.get("summary", ""), suffix, marko)
+    return "- " + summary + suffix
 
 
 def _render_span_body(span_entries, per_entry_tokens):
@@ -307,7 +365,8 @@ def _validated_inputs(version_data, worklog_data, covers, registered_vendors, wh
     ledger_versions, by_id, parsed_covers, findings): the validated carriers with `findings` None on
     success, else Nones with the CANNOT-EVALUATE findings. `what` names the refused operation in the
     messages, so the freeze-digest assist refuses on the same inputs the draft path does rather than
-    digesting past a broken ledger or an unledgered covers token (guard-input-soundness;
+    digesting past a broken ledger or a covers token that fails to parse or resolve against the ledger
+    (guard-input-soundness;
     check-fails-closed-on-unreadable)."""
     vv = validate_version(version_data)
     if vv.status != VALID:
@@ -574,8 +633,9 @@ def evaluate(product_root, covers=UNRELEASED, mode="draft"):
         # The freeze-digest assist runs the SAME ledger-consistency floor as the draft mode (the shared
         # `_validated_inputs` preconditions: the version + worklog ledgers and the covers token), NOT the
         # draft-only done-index and rotated-span checks, which guard the worklog->draft synthesis freeze does
-        # not perform. A ledger that does not validate, or a covers token the ledger does not know, is
-        # CANNOT-EVALUATE, never a digest computed over an unvalidated store (guard-input-soundness).
+        # not perform. A ledger that does not validate, or a covers token that fails to parse or resolve
+        # against the ledger, is CANNOT-EVALUATE (`unreleased` and a valid in-ledger range DO resolve and are
+        # digested when the entry is present), never a digest over an unvalidated store (guard-input-soundness).
         _releases, _versions, _by_id, _parsed, vfindings = _validated_inputs(
             version_data, worklog_data, covers, registered_vendors, what="compute the freeze digest")
         if vfindings is not None:
@@ -631,8 +691,9 @@ def self_test():
     an empty tail; stdout purity (the draft parses under U5 as exactly one entry whose token round-trips
     _parse_covers); the curated-flow tie to the live gates (draft integrates and run_gates PASS; a published
     edit without re-publish -> FINDING); the freeze-digest assist equal to U5's freeze_digest; markdown-safe
-    summary emission (a block-construct-leading summary renders as literal inline text through the vendored
-    Marko renderer and never swallows a following bullet, ordinary summaries byte-identical); U5
+    summary emission (each summary renders as the literal authored text through the vendored
+    Marko renderer and never opens a block or swallows a following bullet, escalating to a full ASCII-
+    punctuation escape when a lesser candidate does not round-trip; TOTAL and Marko-unavailable-safe); U5
     malformed-heading findings propagated fail-closed in BOTH the range rollup and the freeze digest; the CLI
     parser fail-closed cases; and end-to-end store resolution (NOT-APPLICABLE, cannot-evaluate, OK, done
     enabled/enriched, done not declared + note, malformed done index, freeze-digest, freeze-digest
@@ -983,8 +1044,9 @@ def self_test():
         check("disk-freeze-digest-broken-ledger-cannot-eval",
               evaluate(build_store(version_disk_bad, worklog_disk, cl_disk, manifest_wl),
                        "1.0.0", mode="freeze-digest").status == CANNOT_EVALUATE)
-        # ... and a covers token present as a CHANGELOG heading but ABSENT from the ledger refuses (the
-        # assist never digests an entry the ledger does not know).
+        # ... and a SINGLE-RELEASE covers token present as a CHANGELOG heading but ABSENT from the ledger
+        # refuses (the assist never digests a single-release entry no ledger release names; `unreleased` and a
+        # valid in-ledger range parse and are accepted).
         cl_stray = cl_disk + "\n## 9.9.9 (2026-06-30)\n\n- a stray entry no ledger release covers\n"
         check("disk-freeze-digest-unledgered-covers-cannot-eval",
               evaluate(build_store(version_disk, worklog_disk, cl_stray, manifest_wl),
@@ -999,30 +1061,79 @@ def self_test():
     finally:
         shutil.rmtree(base_dir, ignore_errors=True)
 
-    # 12: FIX 1 -- markdown-unsafe summary emission. A summary that begins a CommonMark block construct is
-    # backslash-escaped so the DRAFTED BULLET renders as literal inline text and cannot open a block or
-    # swallow the following bullet; ordinary summaries stay byte-identical. Judged on the RENDERED output
-    # through the vendored Marko renderer (a parse-only / heading-count test cannot see this loss). The
-    # renderer is reached through U5's provenance-checked `_load_marko`, off the gate's per-parse path.
-    import html as _html
+    # 12: FIX 1 -- RENDER-VERIFIED markdown-safe summary emission. Each summary is emitted so the DRAFTED
+    # BULLET renders as the LITERAL authored text in its own <li>, never opening a block, dropping the
+    # summary, or swallowing the following bullet. Each vector is rendered through the vendored Marko (a
+    # parse-only / heading-count test cannot see this loss) and checked to survive literal beside its sibling
+    # sentinel; the emission escalates to a full ASCII-punctuation escape whenever a lesser candidate does not
+    # round-trip, so it is TOTAL. The renderer is reached through U5's provenance-checked `_load_marko`, off
+    # the gate's per-parse path.
     _marko = _commonmark_headings._load_marko()
-    _two_li = re.compile(r"<ul>\n<li>(.*?) \(WL-4\)</li>\n<li>SENTINEL \(WL-9\)</li>\n</ul>", re.S)
+    _rt_pre, _rt_post = "<ul>\n<li>", "</li>\n<li>SENT (WL-9)</li>\n</ul>\n"
 
-    def renders_literal(s):
-        b = _bullet(entry(4, "added", s), [])
-        rendered = _marko.convert("### Added\n" + b + "\n- SENTINEL (WL-9)\n")
-        m = _two_li.search(rendered)          # the summary bullet and the sentinel stay sibling <li> of one <ul>
-        return bool(m) and "\n" not in m.group(1) and _html.unescape(m.group(1)) == s.strip()
+    def renders_literal(s, suffix=" (WL-4)"):
+        # Emit the bullet exactly as _bullet would (through _md_safe_summary + the real Marko), then confirm
+        # the DRAFTED bullet renders the literal summary text and keeps the sentinel a sibling <li>.
+        safe = _md_safe_summary(s, suffix, _marko)
+        out = _marko.convert("- " + safe + suffix + "\n- SENT (WL-9)\n")
+        if not (out.startswith(_rt_pre) and out.endswith(_rt_post)):
+            return False
+        inner = out[len(_rt_pre):len(out) - len(_rt_post)]
+        return "<" not in inner and ">" not in inner and "\n" not in inner \
+            and html.unescape(inner) == s.strip() + suffix
 
-    for _lbl, _haz in [("linkref", "[x]: /url"), ("fence", "`" + "`" + "`py"),
-                       ("atx", "# not a heading"), ("blockquote", "> not a quote"),
-                       ("nested-bullet", "- not nested"), ("ordered", "1. not ordered"),
-                       ("html", "<div> literal")]:
+    # block-construct-leading / content-dropping / over-escaped hazards: each must render literal + survive.
+    for _lbl, _haz in [("linkref", "[x]: /url"), ("linkref-escbracket", "[x\\]]: /url"),
+                       ("linkref-escbracket2", "[x\\]y]: z"), ("atx-comment", "# visible <!-- LOST -->"),
+                       ("blockquote-emph", "> *important*"), ("autolink", "<https://example.com>"),
+                       ("fence", "```py"), ("nested-bullet", "- nested"), ("ordered", "1. ordered"),
+                       ("html-block", "<div> literal"), ("tab-indent", "\tplain")]:
         check("md-safe-summary-renders-" + _lbl, renders_literal(_haz))
-    check("md-safe-summary-plain-unchanged",
-          renders_literal("Add plain feature") and _md_safe_summary("Add plain feature") == "Add plain feature")
-    check("md-safe-summary-versionish-unchanged",
-          renders_literal("1.0 support") and _md_safe_summary("1.0 support") == "1.0 support")
+    # ordinary summaries render literal too (raw or minimal candidate); an inline-markup summary escalates to
+    # a render-verified escape, which is CORRECT under the literal-prose contract.
+    for _lbl, _ok in [("plain", "Add feature"), ("scope", "[scope] did X"),
+                      ("versionish", "1.0 support"), ("emph-code", "use *emphasis* and `code`")]:
+        check("md-safe-summary-ordinary-" + _lbl, renders_literal(_ok))
+    # ordinary block-free prose is emitted VERBATIM (the raw candidate is accepted, no escaping).
+    check("md-safe-summary-plain-verbatim",
+          _md_safe_summary("Add feature", " (WL-4)", _marko) == "Add feature")
+    check("md-safe-summary-versionish-verbatim",
+          _md_safe_summary("1.0 support", " (WL-4)", _marko) == "1.0 support")
+    check("md-safe-summary-scope-verbatim",
+          _md_safe_summary("[scope] did X", " (WL-4)", _marko) == "[scope] did X")
+    # the closes-token suffix participates in the parse (a link-ref-definition title), so a bullet is verified
+    # against its REAL suffix, not a generic one.
+    check("md-safe-summary-renders-linkref-with-closes",
+          renders_literal("[x]: /url", " (WL-4; closes BI-7)"))
+
+    # the FULL-ESCAPE fallback path is exercised: a summary whose minimal (candidate-1) escape still does not
+    # round-trip (an escaped-bracket link-ref definition; a mid-line HTML comment; inline emphasis/code) is
+    # escalated all the way to the full ASCII-punctuation escape, and that emitted bullet still renders literal.
+    for _lbl, _s in [("escbr", "[x\\]]: /url"), ("comment", "# visible <!-- LOST -->"),
+                     ("emph", "use *emphasis* and `code`"), ("bq-emph", "> *important*")]:
+        _r = _md_safe_summary(_s, " (WL-4)", _marko)
+        check("md-safe-summary-escalates-to-full-" + _lbl,
+              _r == _md_full_escape(_s.strip()) and renders_literal(_s))
+    # TOTALITY: _md_safe_summary never raises over degenerate/odd inputs, always returning a str.
+    check("md-safe-summary-total-never-raises",
+          all(isinstance(_md_safe_summary(_s, " (WL-4)", _marko), str)
+              for _s in ["", "   ", "#", "```", "<", "[", "-", "*", "1.", "\t", "\\", "&amp;", "a<b>c", "***", "---"]))
+
+    # a Marko-UNAVAILABLE emission (marko=None) falls to the always-safe full escape WITHOUT a render, and
+    # _bullet itself degrades the same way when the loader raises HeadingScanError.
+    check("md-safe-summary-marko-unavailable-full-escape",
+          _md_safe_summary("# heading-like", " (WL-4)", None) == _md_full_escape("# heading-like")
+          and _md_safe_summary("[x]: /url", " (WL-4)", None) == _md_full_escape("[x]: /url"))
+    _saved_load = _commonmark_headings._load_marko
+    try:
+        def _raise_load():
+            raise _commonmark_headings.HeadingScanError(
+                "forced unavailable", _commonmark_headings.REASON_VENDOR_UNREADABLE)
+        _commonmark_headings._load_marko = _raise_load
+        check("bullet-marko-unavailable-full-escape",
+              _bullet(entry(4, "added", "[x]: /url"), []) == "- " + _md_full_escape("[x]: /url") + " (WL-4)")
+    finally:
+        _commonmark_headings._load_marko = _saved_load
 
     # 13: FIX 2 -- U5's malformed-heading findings are propagated fail-closed, never discarded. A rollup over
     # a changelog with a malformed bare '##' between two valid entries (content silently dropped), and a
