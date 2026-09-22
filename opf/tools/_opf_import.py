@@ -212,6 +212,18 @@ _ORIGIN_VALUES = ("baseline", "model_proposal", "human_revision")
 _ORIGIN_SET = frozenset(_ORIGIN_VALUES)
 _BASELINE_ORIGIN = "baseline"
 _MODEL_PROPOSAL_ORIGIN = "model_proposal"
+_IMPORTER_PROPOSAL_ORIGIN = "importer_proposal"   # MIG-PR3 decision 4: deterministic-importer suggestions,
+                                                  # machine-distinguishable from AI model_proposal rows.
+# The closed provenance vocabulary for a proposals.toml ROW (distinct from the plan-fragment _ORIGIN_SET,
+# which governs {fragments:[{origin}]} and is unchanged). A later --review (PR-A) reads this set.
+_PROPOSAL_ORIGIN_VALUES = (_MODEL_PROPOSAL_ORIGIN, _IMPORTER_PROPOSAL_ORIGIN)
+
+# MIG-PR3 root-ingest staging: the additive artefacts a disposition plan stages beside the baseline
+# candidate, and the marker that makes apply_import refuse to promote an ingest plan (PR-A/PR-C absent).
+CANDIDATES_DRAFT_NAME = "candidates_draft.toml"
+INGEST_ACTIONS_NAME = "ingest-actions.toml"   # presence => non-promotable ingest plan (fail-closed at apply)
+INGEST_ACTIONS_FORMAT = "opf-ingest-plan-actions-v1"
+_INGEST_ACTION_KINDS = ("keep", "move")
 
 # The resting states a promoted mapping comes to rest in (spec 14.1): a `mapped`/`split` candidate, a
 # `duplicate` naming an existing record, or an `ignored` fragment. A model_proposal-origin mapping resting
@@ -1935,14 +1947,15 @@ def _render_report_md(inventory_digest, fragments, proposals, run_id):
         lines.append("- `{}` [{}:{}] state=unmapped fragment_id=`{}` digest=`{}`".format(
             frag["source_path"], frag["span"][0], frag["span"][1], frag["fragment_id"],
             frag["fragment_digest"]))
-    lines += ["", "## Model proposals (inert; require attributed acceptance)", ""]
+    lines += ["", "## Proposals (inert; require attributed acceptance)", ""]
     if not proposals:
         lines.append("- (none)")
     else:
         for p in proposals:
             suffix = " note={!r}".format(p["note"]) if p["note"] else ""
-            lines.append("- `{}` [{}:{}] suggested_state={} origin=model_proposal{}".format(
-                p["source_path"], p["span"][0], p["span"][1], p["suggested_state"], suffix))
+            lines.append("- `{}` [{}:{}] suggested_state={} origin={}{}".format(
+                p["source_path"], p["span"][0], p["span"][1], p["suggested_state"],
+                p.get("_origin", _MODEL_PROPOSAL_ORIGIN), suffix))
     lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -1970,7 +1983,8 @@ def _write_plan_artifacts(product_root, run_rel, run_id, inventory, report_md_by
     # stamped origin = "model_proposal" (their machine-readable resting provenance).
     proposals_model = {
         "schema": SCHEMA, "run_id": run_id,
-        "proposal": [dict(p, origin=_MODEL_PROPOSAL_ORIGIN) for p in proposal_rows],
+        "proposal": [{k: v for k, v in dict(p, origin=p.get("_origin", _MODEL_PROPOSAL_ORIGIN)).items()
+                      if k != "_origin"} for p in proposal_rows],
     }
     prop_bytes = _emit_bytes(proposals_model, PROPOSALS_NAME)
     if len(prop_bytes) > _opf_store.MAX_STORE_READ_BYTES:
@@ -2008,7 +2022,61 @@ def _write_plan_artifacts(product_root, run_rel, run_id, inventory, report_md_by
         os.close(store_root_fd)
 
 
-def plan_import(product_root, import_set, *, proposals=None, now, run_nonce):
+def _write_ingest_artifacts(product_root, run_rel, run_id, candidates_draft, ingest_actions, source_sizes):
+    """Stage the MIG-PR3 root-ingest artefacts (ingest-actions.toml + candidates_draft.toml) additively into
+    the run dir plan_import just staged, through the same contained, no-follow, fsync'd, digest-verified
+    apply_ops pass _write_plan_artifacts uses. candidates_draft.toml holds the id-less importer candidate
+    drafts (records mint at apply, MIG-PR5); ingest-actions.toml records the inert keep/move pending actions
+    AND is the non-promotable marker apply_import refuses on (PR-A/PR-C absent). ORDERING IS LOAD-BEARING
+    (round-2 P1-1): the refusal marker is the FIRST staged ingest artefact, ordered ahead of
+    candidates_draft.toml, and plan_import calls this writer BEFORE the review artefacts (inventory.toml /
+    proposals.toml / IMPORT-REPORT.md), so a staging failure at ANY point leaves either a run that is not
+    reviewable (no inventory/proposals, so no acceptance can be captured) or a run already carrying the
+    marker (refused at apply); a promotable draft-without-marker leftover cannot exist. Neither artefact
+    mutates the active store. Fail-closed on any write error, cap overflow, or non-emittable model."""
+    resolution = _opf_store.resolve_store(product_root)
+    if resolution.status != _opf_store.RESOLVED:
+        raise _cannot("store did not resolve for the ingest-artefact write ({}: {})".format(
+            resolution.status, resolution.detail))
+    cand_model = {"schema": SCHEMA, "run_id": run_id, "candidate": candidates_draft}
+    actions_model = {"format": INGEST_ACTIONS_FORMAT, "schema": SCHEMA, "run_id": run_id,
+                     "action": ingest_actions}
+    cand_bytes = _emit_bytes(cand_model, CANDIDATES_DRAFT_NAME)
+    act_bytes = _emit_bytes(actions_model, INGEST_ACTIONS_NAME)
+    for name, data in ((CANDIDATES_DRAFT_NAME, cand_bytes), (INGEST_ACTIONS_NAME, act_bytes)):
+        if len(data) > _opf_store.MAX_STORE_READ_BYTES:
+            raise _cannot("{} is {} bytes, over the {}-byte contained store-read cap (rejected at the "
+                          "producer boundary)".format(name, len(data), _opf_store.MAX_STORE_READ_BYTES))
+    cand_rel = run_rel + "/" + CANDIDATES_DRAFT_NAME
+    act_rel = run_rel + "/" + INGEST_ACTIONS_NAME
+    content = {cand_rel: cand_bytes, act_rel: act_bytes}
+    # P1-1: the NON-PROMOTABLE refusal marker (ingest-actions.toml) is staged FIRST, so a failure
+    # between the two ops leaves marker-without-draft (recognized and refused as an ingest run), never
+    # draft-without-marker (which apply_import would not recognize as ingest).
+    ops = [{"op": "create", "path": act_rel,
+            "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(act_bytes)}},
+           {"op": "create", "path": cand_rel,
+            "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(cand_bytes)}}]
+
+    def staged_reader(op):
+        return content[op["path"]]
+    try:
+        store_root_fd = _opf_store._open_store_root_fd(
+            resolution.store_root, resolution.pointer_source != "default")
+    except OSError as exc:
+        raise _cannot("cannot open store root {!r} for the ingest-artefact write ({})".format(
+            resolution.store_root, exc))
+    try:
+        _journal.apply_ops(store_root_fd, ops, staged_reader)
+    except _journal.JournalError as exc:
+        raise _cannot("ingest-artefact write failed ({}); the staged candidate is intact, the ingest "
+                      "surface incomplete".format(exc))
+    finally:
+        os.close(store_root_fd)
+
+
+def plan_import(product_root, import_set, *, proposals=None, importer_proposals=None,
+                candidates_draft=None, ingest_actions=None, now, run_nonce):
     """Produce a candidate mapping PLAN over a scanned import set and STAGE it under
     `.working/imports/<run-id>/` (spec 14.1), plus the review surface. This is the operation-layer plan
     step; it composes the read-only `scan_import` (the single enumeration source of truth, so a plan is
@@ -2041,6 +2109,25 @@ def plan_import(product_root, import_set, *, proposals=None, now, run_nonce):
         source_sizes = {s["path"]: s["size"] for s in scan.sources}
         proposal_rows = _validate_proposals(proposals, source_sizes)
 
+        # MIG-PR3: importer-sourced proposals validate through the SAME confinement gate as model proposals
+        # (guard-input-soundness: a proposal this layer stages is one _validate_proposals accepts), but carry
+        # the distinct importer_proposal provenance (decision 4). Model and importer rows may not name the same
+        # (source_path, span): a single logical span has one provenance, never two conflicting tags.
+        model_rows = [dict(p, _origin=_MODEL_PROPOSAL_ORIGIN) for p in proposal_rows]
+        imp_rows = [dict(p, _origin=_IMPORTER_PROPOSAL_ORIGIN)
+                    for p in _validate_proposals(importer_proposals, source_sizes)]
+        seen_span = {}
+        for r in model_rows + imp_rows:
+            key = (r["source_path"], r["span"][0], r["span"][1])
+            if key in seen_span and seen_span[key] != r["_origin"]:
+                return PlanResult(FINDING, ["proposal collision: {} [{}:{}] is tagged both {} and {} "
+                                            "(one span, one provenance)".format(r["source_path"], r["span"][0],
+                                             r["span"][1], seen_span[key], r["_origin"])])
+            seen_span[key] = r["_origin"]
+        all_proposal_rows = sorted(model_rows + imp_rows,
+                                   key=lambda p: (p["source_path"].encode("utf-8"), p["span"][0], p["span"][1],
+                                                  p["_origin"]))
+
         # Deterministic baseline plan: one whole-file fragment per source, classified `unmapped` (nothing
         # mechanically mapped). Handed to the settled staging classifier, which mints a legacy_fragment
         # quarantine record per fragment and stages the byte-canonical candidate run dir.
@@ -2052,9 +2139,17 @@ def plan_import(product_root, import_set, *, proposals=None, now, run_nonce):
             return PlanResult(result.verdict, result.findings, run_id=result.run_id,
                               run_rel=result.run_rel, migration_incomplete=result.migration_incomplete)
 
-        report_md = _render_report_md(scan.inventory_digest, scan.fragments, proposal_rows, result.run_id)
+        report_md = _render_report_md(scan.inventory_digest, scan.fragments, all_proposal_rows, result.run_id)
+        # P1-1: for an ingest run the identity/refusal marker (ingest-actions.toml, staged as the FIRST
+        # ingest artefact inside _write_ingest_artifacts) becomes durable BEFORE the review artefacts
+        # (inventory.toml / proposals.toml) exist, so at every point where a partial staging failure can
+        # leave a leftover run, that run is either not reviewable (review requires inventory + proposals,
+        # so no acceptance can be captured over it) or already recognized and refused as an ingest run.
+        if candidates_draft is not None or ingest_actions is not None:
+            _write_ingest_artifacts(product_root, result.run_rel, result.run_id,
+                                    candidates_draft or [], ingest_actions or [], source_sizes)
         _write_plan_artifacts(product_root, result.run_rel, result.run_id, scan.inventory,
-                              report_md.encode("utf-8"), proposal_rows)
+                              report_md.encode("utf-8"), all_proposal_rows)
         return PlanResult(CLEAN, run_id=result.run_id, run_rel=result.run_rel,
                           inventory_digest=scan.inventory_digest,
                           report_rel=result.run_rel + "/" + REPORT_MD_NAME,
@@ -3459,6 +3554,32 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
         resolution = _resolve_store_for_review(product_root)
         machine_rel = resolution.machine_rel
         run_rel = "{}/{}".format(IMPORTS_REL, run_id)
+        # MIG-PR3: a root-ingest disposition plan carries keep/move pending actions and importer_proposal
+        # suggestions that this build cannot promote (attributed review is PR-A, ingest apply is PR-C). Its
+        # presence marker is ingest-actions.toml in the run dir; candidates_draft.toml is ALSO ingest-only,
+        # so its presence is recognized too (round-2 P1-1 defence in depth: a partially-staged leftover from
+        # an older build, or any unforeseen ordering, that carries the draft without the marker is still
+        # refused; marginal cost one extra lstat). Refuse fail-closed BEFORE any journal/lock
+        # work, distinct cannot-evaluate, mutating nothing (required-step-remains-required: the block is not
+        # weakened just because the baseline candidate alone would look promotable).
+        try:
+            _ingest_root_fd = _opf_store._open_store_root_fd(
+                resolution.store_root, resolution.pointer_source != "default")
+        except OSError as exc:
+            raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
+        try:
+            marker_name = INGEST_ACTIONS_NAME
+            marker = _journal._lstat_contained(_ingest_root_fd, run_rel + "/" + INGEST_ACTIONS_NAME)
+            if marker is None:
+                marker_name = CANDIDATES_DRAFT_NAME
+                marker = _journal._lstat_contained(_ingest_root_fd, run_rel + "/" + CANDIDATES_DRAFT_NAME)
+        finally:
+            os.close(_ingest_root_fd)
+        if marker is not None:
+            raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest plans are NOT "
+                          "promotable in this build (attributed review PR-A and ingest apply PR-C are not "
+                          "yet implemented). Refused fail-closed; nothing promoted.".format(
+                              run_id, marker_name))
         journal_root = Path(resolution.store_root) / IMPORT_JOURNAL_REL
 
         try:
@@ -4317,6 +4438,98 @@ raise SystemExit(result.verdict)
           result.verdict == CANNOT_EVALUATE and result.promoted
           and result.outcome == "promoted" and len(live_calls) == 2
           and (root / _txn_record_rel(run)).is_file())
+
+
+def _self_test_pi(check, build_store, snapshot, now, nonce):
+    """MIG-PR3 additive plan inputs and the pre-journal apply boundary."""
+    import shutil
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    @contextmanager
+    def fixture():
+        root = None
+        try:
+            root, machine = build_store(sources={"a.txt": "aaaa"})
+            yield root, machine
+        finally:
+            if root is not None:
+                shutil.rmtree(root)
+
+    def planned(root, machine, **kwargs):
+        result = plan_import(root, ["a.txt"], now=now, run_nonce=nonce, **kwargs)
+        check("clean", result.verdict == CLEAN and bool(result.run_id))
+        if result.verdict != CLEAN or not result.run_id:
+            return None
+        return machine.parent / "imports" / result.run_id
+
+    def read(run, name):
+        return tomllib.loads((run / name).read_text(encoding="utf-8"))
+
+    def provenance():
+        importer = {"source_path": "a.txt", "span": [0, 2], "suggested_state": "mapped"}
+        model = dict(importer, span=[2, 4])
+        with fixture() as (root, machine):
+            run = planned(root, machine, importer_proposals=[importer], proposals=[model])
+            if run is not None:
+                rows = read(run, "proposals.toml")["proposal"]
+                check("distinct-origins", len(rows) == 2 and
+                      {(tuple(p["span"]), p["origin"]) for p in rows} ==
+                      {((0, 2), "importer_proposal"), ((2, 4), "model_proposal")})
+        with fixture() as (root, machine):
+            result = plan_import(root, ["a.txt"], importer_proposals=[importer],
+                                 proposals=[importer], now=now, run_nonce=nonce)
+            check("same-span-tagged-twice", result.verdict == FINDING)
+            check("collision-nothing-staged", not (machine.parent / "imports").exists())
+
+    def additive():
+        draft = {"source_path": "a.txt", "importer_kind": "github-tasklist",
+                 "type": "backlog_item", "title": "Draft only"}
+        action = {"kind": "keep", "scope": "declared", "source_path": "a.txt",
+                  "unmanaged_path": "a.txt", "sha256": "sha256:" + _sha256_hex(b"aaaa"), "size": 4}
+        with fixture() as (plain_root, plain_machine), fixture() as (root, machine):
+            plain = planned(plain_root, plain_machine)
+            before = snapshot(machine)
+            run = planned(root, machine, candidates_draft=[draft], ingest_actions=[action])
+            if plain is None or run is None:
+                return
+            baseline, augmented = snapshot(plain), snapshot(run)
+            check("baseline-candidate-present",
+                  bool(snapshot(plain / "candidate")) and
+                  bool(read(plain, "fragments/legacy_fragment.index.toml")["record"]))
+            check("additive-file-set", set(augmented) == set(baseline) |
+                  {"candidates_draft.toml", "ingest-actions.toml"})
+            check("baseline-byte-intact", all(augmented.get(k) == v for k, v in baseline.items()))
+            check("draft-payload", read(run, "candidates_draft.toml")["candidate"] == [draft])
+            check("action-payload", read(run, "ingest-actions.toml")["action"] == [action])
+            check("report-shape-unchanged", read(run, "report.toml") == read(plain, "report.toml"))
+            check("active-store-unchanged", snapshot(machine) == before)
+
+    def refuse():
+        with fixture() as (root, machine):
+            run = planned(root, machine, ingest_actions=[])
+            if run is None:
+                return
+            check("empty-marker-present", read(run, "ingest-actions.toml")["action"] == [])
+            before = snapshot(root)
+            with patch.object(_journal, "ensure_journal_dirs",
+                              wraps=_journal.ensure_journal_dirs) as journal, \
+                 patch.object(sys.modules[__name__], "_claim_apply_lock",
+                              wraps=_claim_apply_lock) as lock:
+                result = apply_import(root, run.name, now=now)
+            check("refused-before-journal-and-lock", result.verdict == CANNOT_EVALUATE
+                  and result.promoted is False and not journal.called and not lock.called)
+            check("no-journal-dir", not (root / IMPORT_JOURNAL_REL).exists())
+            check("no-acceptance", not (run / "acceptance.json").exists())
+            check("writes-nothing", snapshot(root) == before)
+
+    outer_check = check
+    for label, test in (
+            ("Pi-importer-proposal-origin", provenance),
+            ("Pi-ingest-artifacts-additive", additive),
+            ("Pi-apply-refuses-ingest-marker", refuse)):
+        check = lambda suffix, cond, label=label: outer_check(label + "/" + suffix, cond)
+        test()
 
 
 def self_test():
@@ -5905,6 +6118,8 @@ def self_test():
         bad_state = [{"source_path": "a.txt", "span": [0, 4], "suggested_state": "renamed"}]
         check("P3-proposal-bad-state-finding",
               plan_import(rootP3c, ["a.txt"], proposals=bad_state, now=NOW, run_nonce=NONCE).verdict == 1)
+
+        _self_test_pi(check, build_store, snapshot, NOW, NONCE)
 
         # P4 init-first + fail-closed: planning a location with no store is cannot-evaluate.
         noroot2 = base / "noopf2-{:02d}".format(counter[0] + 998)

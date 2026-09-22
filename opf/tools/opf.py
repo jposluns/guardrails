@@ -75,6 +75,7 @@ def _bootstrap():
     that could not be brought in."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_importers, _opf_observe, _opf_absorb
+    global _opf_ingest
     try:
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
         import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
@@ -86,6 +87,7 @@ def _bootstrap():
         import _opf_fuzz        # adversarial input-hardening proof (membership/type-guard class closure)
         import _opf_import      # U7: import staging (module + self-test; the live import verb is wired below)
         import _opf_importers   # MIG-PR2: the shared import layer (deterministic importers + loss accounting)
+        import _opf_ingest      # MIG-PR3: root-ingest detect + the disposition planner (plan_ingest)
         import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
     except ImportError as exc:
@@ -2370,6 +2372,39 @@ def _import_read_set(path):
     return sources, proposals
 
 
+def _import_read_worksheet(path):
+    """Read the `--dispositions` triaged worksheet (a TOML file) for the root-ingest planner (MIG-PR3),
+    fail-closed. Returns the parsed dict UNCHANGED: the SHAPE/vocabulary/digest validation is owned by
+    `_opf_ingest.validate_worksheet` (the single worksheet authority) and the semantics by `plan_ingest`,
+    never duplicated here. The file is CALLER input (it may live outside the store); a missing, unreadable,
+    or malformed worksheet is a ValueError the caller maps to cannot-evaluate exit 2, never a silent
+    nothing-to-do (mirrors `_import_read_set`'s read-boundary discipline)."""
+    import tomllib
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except FileNotFoundError:
+        raise ValueError("--dispositions worksheet not found: {}".format(path))
+    except (OSError, ValueError, RecursionError) as exc:
+        raise ValueError("--dispositions worksheet unreadable or malformed ({}): {}".format(path, exc))
+
+
+def _import_read_options(path):
+    """Read the `--ingest-options` companion (a TOML file) for the root-ingest planner (MIG-PR3),
+    fail-closed. Returns the parsed dict UNCHANGED: the SHAPE validation is owned by
+    `_opf_ingest.validate_options` and the semantic binding by `plan_ingest`, never duplicated here. The file
+    is CALLER input (it may live outside the store); a missing, unreadable, or malformed options file is a
+    ValueError the caller maps to cannot-evaluate exit 2, never a silent nothing-to-do."""
+    import tomllib
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except FileNotFoundError:
+        raise ValueError("--ingest-options file not found: {}".format(path))
+    except (OSError, ValueError, RecursionError) as exc:
+        raise ValueError("--ingest-options file unreadable or malformed ({}): {}".format(path, exc))
+
+
 def _import_read_decisions(path, run_id):
     """Read the `--decisions` batch file (canonical JSON), fail-closed. Returns the decisions list. The file
     is CALLER input (it may live outside the store); its envelope (surfaced for maintainer sign-off,
@@ -2456,6 +2491,9 @@ def _cmd_import(rest):
     actor = None
     decisions_file = None
     interactive = False
+    dispositions_file = None      # MIG-PR3: the triaged worksheet for the root-ingest --plan form
+    ingest_options_file = None    # MIG-PR3: the companion --ingest-options for the root-ingest --plan form
+    include = []                  # MIG-PR3: repeatable --include globs for the root-ingest --plan form
 
     def _need_value(flag, idx):
         if idx + 1 >= len(rest):
@@ -2531,25 +2569,73 @@ def _cmd_import(rest):
                 return EXIT_MALFORMED
             interactive = True
             i += 1
+        elif tok == "--dispositions":
+            if dispositions_file is not None:
+                print("opf import: --dispositions given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            val = _need_value(tok, i)
+            if val is None:
+                return EXIT_MALFORMED
+            dispositions_file = val
+            i += 2
+        elif tok == "--ingest-options":
+            if ingest_options_file is not None:
+                print("opf import: --ingest-options given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            val = _need_value(tok, i)
+            if val is None:
+                return EXIT_MALFORMED
+            ingest_options_file = val
+            i += 2
+        elif tok == "--include":
+            val = _need_value(tok, i)
+            if val is None:
+                return EXIT_MALFORMED
+            include.append(val)
+            i += 2
         else:
             print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
 
     # Mode-combination validation (fail-closed: an unsupported flag for the chosen mode is a usage error).
+    ingest_form = dispositions_file is not None or ingest_options_file is not None
     if mode is None:
         print("opf import: give exactly one mode (--scan / --plan / --review / --apply)", file=sys.stderr)
         return EXIT_MALFORMED
-    if mode in ("scan", "plan"):
+    if mode == "scan":
         if set_file is None:
-            print("opf import: --{} requires --set FILE".format(mode), file=sys.stderr)
+            print("opf import: --scan requires --set FILE", file=sys.stderr)
+            return EXIT_MALFORMED
+        if ingest_form or include:
+            print("opf import: --dispositions / --ingest-options / --include are valid only with the "
+                  "root-ingest --plan form", file=sys.stderr)
+            return EXIT_MALFORMED
+        if actor is not None or decisions_file is not None or interactive:
+            print("opf import: --actor / --decisions / --interactive are valid only with --review",
+                  file=sys.stderr)
+            return EXIT_MALFORMED
+    elif mode == "plan":
+        # --plan accepts EXACTLY ONE of two sub-forms: the declared-set import (--set FILE) XOR the
+        # root-ingest disposition planner (--dispositions FILE --ingest-options FILE [--include ...]).
+        if bool(set_file) == bool(ingest_form):
+            print("opf import: --plan requires exactly one of --set FILE (declared-set import) or "
+                  "--dispositions FILE --ingest-options FILE (root-ingest planner)", file=sys.stderr)
+            return EXIT_MALFORMED
+        if ingest_form and (dispositions_file is None or ingest_options_file is None):
+            print("opf import: the root-ingest --plan form requires BOTH --dispositions FILE and "
+                  "--ingest-options FILE", file=sys.stderr)
+            return EXIT_MALFORMED
+        if include and not ingest_form:
+            print("opf import: --include is valid only with the root-ingest --plan form", file=sys.stderr)
             return EXIT_MALFORMED
         if actor is not None or decisions_file is not None or interactive:
             print("opf import: --actor / --decisions / --interactive are valid only with --review",
                   file=sys.stderr)
             return EXIT_MALFORMED
     elif mode == "review":
-        if set_file is not None:
-            print("opf import: --set is not valid with --review", file=sys.stderr)
+        if set_file is not None or ingest_form or include:
+            print("opf import: --set / --dispositions / --ingest-options / --include are not valid with "
+                  "--review", file=sys.stderr)
             return EXIT_MALFORMED
         if actor is None:
             print("opf import: --review requires --actor NAME", file=sys.stderr)
@@ -2559,7 +2645,8 @@ def _cmd_import(rest):
                   file=sys.stderr)
             return EXIT_MALFORMED
     else:   # apply
-        if set_file is not None or actor is not None or decisions_file is not None or interactive:
+        if (set_file is not None or actor is not None or decisions_file is not None or interactive
+                or ingest_form or include):
             print("opf import: --apply takes only a <run-id>", file=sys.stderr)
             return EXIT_MALFORMED
 
@@ -2583,9 +2670,15 @@ def _cmd_import(rest):
                 print("opf import: {}".format(f), file=sys.stderr)
             return _import_exit(res.verdict)
         if mode == "plan":
-            sources, proposals = _import_read_set(set_file)
-            res = _opf_import.plan_import(root_abs, sources, proposals=proposals, now=now,
-                                          run_nonce=os.urandom(16).hex())
+            if dispositions_file is not None:            # root-ingest disposition planner (MIG-PR3)
+                worksheet = _import_read_worksheet(dispositions_file)
+                options = _import_read_options(ingest_options_file)
+                res = _opf_ingest.plan_ingest(root_abs, worksheet, options, include=include or None,
+                                              now=now, run_nonce=os.urandom(16).hex())
+            else:                                        # existing declared-set importer
+                sources, proposals = _import_read_set(set_file)
+                res = _opf_import.plan_import(root_abs, sources, proposals=proposals, now=now,
+                                              run_nonce=os.urandom(16).hex())
             if res.verdict == _opf_import.CLEAN:
                 print("opf import: plan staged: run {}; report {}; migration_incomplete={}".format(
                     res.run_id, res.report_rel, res.migration_incomplete))
