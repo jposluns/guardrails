@@ -26,6 +26,12 @@ defines over the curated `CHANGELOG.md`, which U3's docstring explicitly leaves 
 The curated CHANGELOG.md is a DELIVERABLE gated on FACTS, not a byte-drift view (spec 6.3, 10.4): it
 carries NO do-not-edit header and is never reconciled byte-for-byte. These two gates are its whole gate.
 
+The machine-DRAFTING side of the curated model (spec 6.3/7.3) lives in the sibling `_opf_absorb` drafter,
+which COMPOSES on this unit's exported seams (`_changelog_entries`, `freeze_digest`, `CHANGELOG_REL`, and
+`_load_inputs`) rather than re-implementing them; the parsing, digest scheme, and gate logic stay here. This
+unit is UNCHANGED by that composition: its exported contract stays frozen for U6 (`_opf_check`) and
+`check_opf_doctor`, which import `_changelog_entries` / `freeze_digest` directly.
+
 Adopter-rooted, exactly like doctor.py / migrate.py (and the rest of the OPF tooling): the gates operate
 against a PRODUCT repository root named by --root (default: the cwd), resolving the store through
 `_opf_store` discovery, NEVER through `_gen_common.repo_root()`. This pack is not an OPFiles adopter,

@@ -496,10 +496,12 @@ forbidden by policy.
 ### 6.3 CHANGELOG.md, the curated public summary
 
 The public changelog lives at the product repository root as `CHANGELOG.md`; wherever the store
-lives, the changelog's home is the product repository (section 5.8). It is machine-drafted and
-human-curated: a summary of the worklog over declared version ranges, not a deterministic render,
-and not byte-drift-gated. There is exactly one public changelog; it is conceptually single-sourced
-from the worklog and the version ledger, and no separate changelog source file exists.
+lives, the changelog's home is the product repository (section 5.8). It is machine-drafted (from the
+worklog entries in range, the version ledger's `[[summary]]` rows, and the `done` completion receipts
+they link) and human-curated: a summary of the worklog over declared version ranges, not a
+deterministic render, and not byte-drift-gated. There is exactly one public changelog; it is
+conceptually single-sourced from the store (the worklog and the version ledger, with `done` receipts
+enriching the draft only), and no separate changelog source file exists.
 
 Each entry begins with a heading of the form `## <covers>`, optionally followed by parenthesized
 dates, where `<covers>` is the machine-parseable token matching a `[[summary]]` row: a version, a
