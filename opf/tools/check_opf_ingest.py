@@ -86,8 +86,10 @@ def _self_test():
     import _opf_store
 
     failures = []
+    checked = [0]
 
     def expect(label, cond):
+        checked[0] += 1
         if not cond:
             failures.append(label)
 
@@ -722,6 +724,14 @@ def _self_test():
         # the importer layer's validator gate binds the source and accepts plan_import's proposals.
         expect("importer-gate-clean", imp.validate_importer_output(_ir, _isrc) == (imp.CLEAN, []))
 
+        # MIG-PR3 gate registry; adapt this harness's root-only builder.
+        def planner_store(**kwargs):
+            root = build_store(**kwargs)
+            return root, root / ".working/toml"
+
+        ing._self_test_planner(expect, planner_store, build_relocated, snapshot,
+                               symlink_supported, gate=True)
+
         # --- module-self-test delegation -----------------------------------------------------------
         expect("module-self-test", ing.self_test() == 0)
         expect("importers-module-self-test", imp.self_test() == 0)
@@ -736,6 +746,7 @@ def _self_test():
         for f in failures:
             print("check_opf_ingest self-test: FAIL: {}".format(f), file=sys.stderr)
         return EXIT_FINDING
+    print("check_opf_ingest self-test: COUNT {} checks".format(checked[0]))
     print("check_opf_ingest self-test: PASS (worksheet-structure/schema-vocab/digest each PASS on a clean "
           "detection and FINDING on its discriminator, including a type-strict schema flip, a source_path "
           "the contained reader rejects, and a non-string top-level key; detection-completeness matches an "

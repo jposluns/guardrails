@@ -996,6 +996,12 @@ def import_aiqt_face(source):
     return _finalize(source, "aiqt-face", cells, [], _FACE_RESIDUAL)
 
 
+IMPORTER_KINDS = tuple(sorted(_kinds()))   # the closed, public deterministic-importer-kind vocabulary
+                                           # (MIG-PR3 --ingest-options validates importer_kind against this);
+                                           # derived from _kinds() (the single dispatch source, no drift), and
+                                           # placed after the importer defs so _kinds() resolves at load time.
+
+
 def run_importer(kind, source):
     """Dispatch to the named deterministic importer. An unknown kind is a finding (fail-closed)."""
     fn = _kinds().get(kind)

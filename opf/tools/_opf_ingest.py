@@ -79,6 +79,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal        # noqa: E402  contained no-follow primitives (parent-open, contained read)
 import _opf_store      # noqa: E402  U1: resolution, manifest, contained reads, containment helpers
 import _opf_import     # noqa: E402  reuse the 0/1/2 verdicts, provenance vocab, digest/emit helpers (no fork)
+import _opf_importers   # noqa: E402  MIG-PR3: the closed importer-kind vocabulary + run/validate importer
+#                                    (acyclic: _opf_importers imports _journal/_opf_store/_opf_import/
+#                                    _opf_schema/_opf_views only, never _opf_ingest)
 import _opf_views      # noqa: E402  the SAME view name-resolution + spec-destination authority the checker
 #                                    (`_opf_check._check_containment`) grades managed view targets against,
 #                                    so ingest's covered set cannot disagree with C-CONTAINMENT (F-8.1)
@@ -938,7 +941,483 @@ def validate_worksheet(worksheet):
     return findings
 
 
+# --- ingest-options companion schema (MIG-PR3 decision 1) ---------------------------------------------
+# The EXPLICIT fail-closed companion to a triaged worksheet: it binds each config-bearing disposition row,
+# by (scope, source_path), to its importer_kind (migrate) or dest_path (move). There is NO implicit
+# importer probing and the worksheet `note` is NEVER a config channel (decision 1); a migrate/move row with
+# no options binding is CANNOT_EVALUATE.
+OPTIONS_FORMAT = "opf-ingest-options-v1"
+_OPTIONS_KEYS = frozenset({"format", "schema", "option"})
+_OPTION_ROW_KEYS = frozenset({"scope", "source_path", "importer_kind", "dest_path"})
+# decision 3 archive convention (DIV-1 reconciliation 3b): a move row whose options omit dest_path defaults
+# to `.archive/<source_path>` (substructure preserved, collision-free, provenance-keeping); an explicit
+# dest_path overrides. Flip _MOVE_DEST_ARCHIVE_DEFAULT to False to require an explicit dest (ruling 3a).
+ARCHIVE_DIRNAME = ".archive"
+_MOVE_DEST_ARCHIVE_DEFAULT = True
+
+
+def validate_options(options):
+    """Validate an --ingest-options payload against its closed schema, returns a findings list (empty ==
+    valid). Structural/vocabulary violations are findings; the SEMANTIC binding (every migrate/move row has
+    exactly one option, importer_kind is a known kind, dest is in-bounds) is checked by the planner against
+    the reconciled worksheet, not here (this validates SHAPE only). Fail-closed on an unparseable payload."""
+    if not isinstance(options, dict):
+        return ["ingest-options is not a table"]
+    findings = []
+    extra = set(options) - _OPTIONS_KEYS
+    if extra:
+        findings.append("ingest-options carries unknown key(s): {}".format(
+            ", ".join(sorted(str(k) for k in extra))))
+    if options.get("format") != OPTIONS_FORMAT:
+        findings.append("ingest-options.format is not {!r}".format(OPTIONS_FORMAT))
+    sch = options.get("schema")
+    if not (type(sch) is int and sch == SCHEMA):
+        findings.append("ingest-options.schema is not {!r}".format(SCHEMA))
+    rows = options.get("option")
+    if not isinstance(rows, list):
+        findings.append("ingest-options.option must be a list of option rows")
+        return findings
+    for i, r in enumerate(rows):
+        where = "ingest-options.option[{}]".format(i)
+        if not isinstance(r, dict):
+            findings.append("{}: an option row must be a table".format(where)); continue
+        if not (set(r) <= _OPTION_ROW_KEYS and {"scope", "source_path"} <= set(r)):
+            findings.append("{}: option row keys must be a subset of {{scope, source_path, importer_kind, "
+                            "dest_path}} with scope+source_path required".format(where)); continue
+        if r.get("scope") not in SCOPES:
+            findings.append("{}: scope {!r} is not one of {}".format(where, r.get("scope"), list(SCOPES)))
+        sp = r.get("source_path")
+        if not (isinstance(sp, str) and _opf_store._is_contained_relpath(sp) and _reader_reads(sp)):
+            findings.append("{}: source_path must be a contained root-relative path the reader accepts".format(where))
+        if "importer_kind" in r and (r["importer_kind"] not in _opf_importers.IMPORTER_KINDS):
+            findings.append("{}: importer_kind {!r} is not a known importer ({})".format(
+                where, r.get("importer_kind"), list(_opf_importers.IMPORTER_KINDS)))
+        if "dest_path" in r and not (isinstance(r["dest_path"], str)
+                                     and _opf_store._is_contained_relpath(r["dest_path"])
+                                     and _reader_reads(r["dest_path"])):
+            findings.append("{}: dest_path must be a contained root-relative path".format(where))
+    return findings
+
+
+# --- the disposition PLANNER (MIG-PR3): compose a triaged worksheet + options into a staged inert plan ---
+
+def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonce):
+    """Compose a triaged disposition WORKSHEET + its --ingest-options into a STAGED, INERT plan under
+    `.working/imports/<run-id>/` via _opf_import.plan_import. NEVER manufactures acceptance.json; every
+    ingest source stays unmapped/legacy_fragment; apply/promotion is refused (ingest-actions.toml marker).
+    Fail-closed throughout. Returns a _opf_import.PlanResult so the CLI's _import_exit maps it uniformly."""
+    try:
+        _journal.require_containment()
+    except _journal.JournalError as exc:
+        return _opf_import.PlanResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)])
+    try:
+        _opf_import._require_utc(now); _opf_import._require_nonce(run_nonce)
+
+        # 1. WORKSHEET INTAKE: it must pass its own MIG-PR1 validator (single authority) verbatim.
+        ws_findings = validate_worksheet(worksheet)
+        if ws_findings:
+            raise _cannot("worksheet fails validation: {}".format("; ".join(ws_findings)))
+
+        # 2. OPTIONS INTAKE (shape).
+        opt_findings = validate_options(options)
+        if opt_findings:
+            raise _cannot("ingest-options fails validation: {}".format("; ".join(opt_findings)))
+
+        # 3. FRESH RECONCILE: re-detect with the SAME include set and require an EXACT-SET match against the
+        #    worksheet on the immutable fields (source_path, scope, sha256, size). Any drift is fail-closed:
+        #    a ghost/omitted/newly-detected path, or a mutated digest/size, means the worksheet no longer
+        #    describes the tree (guard-input-soundness: the plan cannot rest on a stale triage).
+        fresh = detect(product_root, include=include)
+        if fresh.verdict != CLEAN:
+            return _opf_import.PlanResult(fresh.verdict, fresh.findings)
+        _reconcile_worksheet_against_detect(worksheet, fresh)   # raises _DetectError on any mismatch
+
+        # 4. UNRESOLVED GATE: a fully-triaged worksheet has NO `unresolved` row (fail-closed choice from the
+        #    ratified synthesis / Seed A). One unresolved row halts planning (FINDING).
+        rows = worksheet["row"]
+        unresolved = [r["source_path"] for r in rows if r["disposition"] == "unresolved"]
+        if unresolved:
+            raise _finding("worksheet has {} unresolved row(s); complete triage before --plan: {}".format(
+                len(unresolved), ", ".join(sorted(unresolved))))
+
+        # 5. OPTIONS BINDING: index options by (scope, source_path); each migrate/move row binds to exactly
+        #    one option; a keep/unresolved row binds to none; a dangling option (no worksheet row) is a
+        #    finding (collision surface). Also the note-is-not-config rule (DIV-2): a non-empty note on a
+        #    migrate/move row is CANNOT_EVALUATE.
+        opt_by_key, dispo_by_key = {}, {}
+        for r in rows:
+            dispo_by_key[(r["scope"], r["source_path"])] = r
+        for o in options["option"]:
+            key = (o["scope"], o["source_path"])
+            if key in opt_by_key:
+                raise _finding("duplicate ingest-options binding for {}".format(key))
+            if key not in dispo_by_key:
+                raise _finding("ingest-options binds {} which is not a worksheet row".format(key))
+            opt_by_key[key] = o
+
+        # 6. PER-DISPOSITION COMPOSITION.
+        product_root_fd = _opf_store._open_root_fd(Path(os.path.abspath(product_root)))
+        try:
+            import_set, importer_proposals, candidates_draft, actions = [], [], [], []
+            move_dests = {}
+            for r in rows:
+                key = (r["scope"], r["source_path"]); sp = r["source_path"]; dispo = r["disposition"]
+                opt = opt_by_key.get(key)
+                if dispo in ("migrate", "move"):
+                    if opt is None:
+                        raise _cannot("{} row {!r} has no --ingest-options binding (required for a "
+                                      "migrate/move row)".format(dispo, sp))
+                    if r["note"] != "":
+                        raise _cannot("{} row {!r} carries a non-empty note; configuration belongs in "
+                                      "--ingest-options, never the worksheet note (decision 1)".format(dispo, sp))
+                if dispo == "keep":
+                    # decision 2: retain-in-place + emit an [unmanaged] exemption for an out-of-.working
+                    # file, so the steady-state checker never later flags it. Mapping stays unmapped.
+                    actions.append(_keep_action(product_root, fresh.resolution if hasattr(fresh, "resolution")
+                                                 else None, r))
+                elif dispo == "move":
+                    dest = (opt.get("dest_path") or _archive_dest(sp)) if _MOVE_DEST_ARCHIVE_DEFAULT \
+                        else opt["dest_path"]
+                    _check_move_boundary(product_root, dest, product_root_fd)   # FINDING on any collision
+                    if dest in move_dests:
+                        raise _finding("duplicate move destination {!r} ({} and {})".format(
+                            dest, move_dests[dest], sp))
+                    if dest == sp:
+                        raise _finding("move-to-self: {!r} destination equals its source".format(sp))
+                    move_dests[dest] = sp
+                    actions.append({"kind": "move", "scope": r["scope"], "source_path": sp,
+                                    "dest_path": dest, "sha256": r["sha256"], "size": r["size"]})
+                elif dispo == "migrate":
+                    src = _opf_import._read_sources(product_root_fd, [sp])[0]
+                    ir = _opf_importers.run_importer(opt["importer_kind"], src)
+                    verdict, findings = _opf_importers.validate_importer_output(ir, src)
+                    if verdict != CLEAN:
+                        return _opf_import.PlanResult(verdict, findings)
+                    importer_proposals += ir.proposals
+                    candidates_draft += [dict(c, source_path=sp, importer_kind=opt["importer_kind"])
+                                         for c in ir.candidates]
+                # keep/migrate/move ALL stay in the import_set so the baseline quarantines them as
+                # legacy_fragment (unmapped); nothing is dropped (decisions 2/3: mapping stays unmapped).
+                import_set.append(sp)
+        finally:
+            os.close(product_root_fd)
+
+        # 7. STAGE via the op-layer plan_import: baseline (all unmapped -> legacy_fragment), importer
+        #    proposals tagged importer_proposal, candidates_draft.toml, ingest-actions.toml (non-promotable).
+        return _opf_import.plan_import(product_root, import_set, importer_proposals=importer_proposals,
+                                       candidates_draft=candidates_draft, ingest_actions=actions,
+                                       now=now, run_nonce=run_nonce)
+    except _DetectError as exc:
+        return _opf_import.PlanResult(exc.verdict, [exc.message])
+    except _opf_import._StageError as exc:
+        return _opf_import.PlanResult(exc.verdict, [exc.message])
+    except _journal.JournalError as exc:
+        return _opf_import.PlanResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)])
+    except OSError as exc:
+        return _opf_import.PlanResult(CANNOT_EVALUATE, ["fail-closed on a filesystem read error: {}".format(exc)])
+    except RecursionError as exc:
+        return _opf_import.PlanResult(CANNOT_EVALUATE, ["fail-closed on excessive input nesting: {}".format(exc)])
+
+
+def _archive_dest(source_path):
+    """decision 3: `.archive/<source_path>` — substructure preserved for provenance, collision-free, and a
+    single dotdir under root OUTSIDE .working (root stays clean). posixpath.join keeps forward slashes."""
+    return posixpath.join(ARCHIVE_DIRNAME, source_path)
+
+
+def _reconcile_worksheet_against_detect(worksheet, fresh):
+    """EXACT-SET reconciliation on the immutable fields. Membership by (scope, source_path); a ghost
+    (worksheet-only), an omission (detect-only), or a sha256/size drift is fail-closed. A mismatch on a
+    detect-derived field is CANNOT_EVALUATE (the tree moved under the triage); membership drift is a
+    FINDING (the worksheet describes a different set)."""
+    def keyset(rows):
+        return {(r["scope"], r["source_path"]): (r["sha256"], r["size"]) for r in rows}
+    w, f = keyset(worksheet["row"]), keyset(fresh.rows)
+    only_w = sorted(set(w) - set(f)); only_f = sorted(set(f) - set(w))
+    if only_w or only_f:
+        raise _finding("worksheet/detect set mismatch: worksheet-only={}, detect-only={} (re-run detect "
+                       "and re-triage)".format(only_w, only_f))
+    drift = sorted(k for k in w if w[k] != f[k])
+    if drift:
+        raise _cannot("worksheet sha256/size drifted from a fresh detect for {} (a file changed between "
+                      "detection and planning); fail-closed".format(drift))
+
+
+def _check_move_boundary(product_root, dest, product_root_fd):
+    """decision 3 move boundary: dest is a contained relpath beneath the product root but STRICTLY OUTSIDE
+    the resolved .working tree, with a hard NO-OVERWRITE rule. An existing file OR a dangling symlink at
+    dest is a collision (FINDING); a dest inside .working, or move-to-self/dup-dest (caller-checked), is a
+    FINDING. Uses the no-follow lstat so a symlink at dest is seen as a symlink, never followed."""
+    if dest.split("/", 1)[0] == _opf_store.WORKING_DIRNAME:
+        raise _finding("move destination {!r} lies inside .working/ (the store tree); a move target must "
+                       "be beneath the product root but OUTSIDE .working".format(dest))
+    st = _journal._lstat_contained(product_root_fd, dest)
+    if st is not None:
+        raise _finding("move destination {!r} already exists (no-overwrite); a move-to-an-existing-file or "
+                       "dangling symlink is a collision".format(dest))
+
+
+def _keep_action(product_root, resolution, r):
+    sp = r["source_path"]
+    if not _opf_store._is_contained_relpath(sp):
+        raise _cannot("keep source {!r} is not a legal [unmanaged].paths entry".format(sp))
+    return {"kind": "keep", "scope": r["scope"], "source_path": sp,
+            "unmanaged_path": sp,   # PR-C adds this to [unmanaged].paths; steady-state checker then never flags it
+            "sha256": r["sha256"], "size": r["size"]}
+
+
 # --- self-test ---------------------------------------------------------------------------------------
+
+def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_supported,
+                       *, gate=False):
+    """MIG-PR3 representative vectors, shared by the gate and module registries.
+
+    Literal expected origins and destinations are independent of production constants.
+    This does not claim exhaustive command-grammar or filesystem coverage.
+    """
+    import datetime
+    import shutil
+    import subprocess
+    import tomllib
+    from contextlib import contextmanager
+
+    now = datetime.datetime(2026, 9, 9, 12, tzinfo=datetime.timezone.utc)
+
+    @contextmanager
+    def fixture(files=None, relocated=False):
+        root = None
+        try:
+            if relocated:
+                root = build_relocated(product=files or {"legacy/a.md": "source\n"})
+                machine = root / "ops/.working/toml"
+            else:
+                root, machine = build_store(product=files or {"legacy/a.md": "source\n"})
+            yield root, machine
+        finally:
+            if root is not None:
+                shutil.rmtree(root)
+
+    def stamp(rows):
+        payload = {"format": WORKSHEET_FORMAT, "schema": SCHEMA, "row": rows}
+        return dict(payload, worksheet_digest="sha256:" +
+                    _opf_import._sha256_hex(_worksheet_bytes(payload)))
+
+    def triage(root, files, disposition):
+        found = detect(root, include=[p for p in files if not p.startswith(".working/")] or None)
+        check("fixture-detect", found.verdict == CLEAN and
+              {r["source_path"] for r in found.rows} == set(files))
+        return stamp([dict(r, disposition=disposition, note="") for r in found.rows])
+
+    def options(ws, **fields):
+        return {"format": "opf-ingest-options-v1", "schema": 1,
+                "option": [dict(scope=r["scope"], source_path=r["source_path"], **fields)
+                           for r in ws["row"]]}
+
+    empty = {"format": "opf-ingest-options-v1", "schema": 1, "option": []}
+
+    def plan(root, ws, opts, files):
+        return plan_ingest(root, ws, opts,
+                           include=[p for p in files if not p.startswith(".working/")] or None,
+                           now=now, run_nonce="mig-pr3-test")
+
+    def read(run, name):
+        return tomllib.loads((run / name).read_text(encoding="utf-8"))
+
+    def staged(root, machine, ws, opts, files):
+        result = plan(root, ws, opts, files)
+        check("clean", result.verdict == CLEAN and bool(result.run_id))
+        if result.verdict != CLEAN or not result.run_id:
+            return None
+        return machine.parent / "imports" / result.run_id
+
+    def unmapped(run, files):
+        mappings = read(run, "mappings.toml")["mapping"]
+        fragments = read(run, "fragments/legacy_fragment.index.toml")["record"]
+        return (len(mappings) == len(files) == len(fragments)
+                and {r["source_path"] for r in mappings} == set(files)
+                and all(r["state"] == "unmapped" for r in mappings)
+                and all(r["type"] == "legacy_fragment" for r in fragments)
+                and {r["source_path"] for r in fragments} == set(files)
+                and all("target" not in r for r in mappings))
+
+    def schema_validator():
+        row = {"scope": "declared", "source_path": "legacy/a.md",
+               "importer_kind": "github-tasklist"}
+        good = dict(empty, option=[row])
+        check("accepts-well-formed", validate_options(good) == [])
+        bad = [dict(good, unknown=True), dict(good, format="wrong"),
+               dict(good, schema=2), dict(good, schema=True),
+               dict(good, option=[dict(row, unknown=True)]),
+               dict(good, option=[dict(row, importer_kind="unknown")]),
+               dict(good, option=[dict(row, dest_path="../escape")])]
+        for i, doc in enumerate(bad):
+            check("invalid-options-{}".format(i), bool(validate_options(doc)))
+        for disposition in ("migrate", "move"):
+            with fixture() as (root, _machine):
+                files = ["legacy/a.md"]
+                ws = triage(root, files, disposition)
+                check("missing-binding-" + disposition,
+                      plan(root, ws, empty, files).verdict == CANNOT_EVALUATE)
+
+    def keep():
+        for relocated in (False, True):
+            with fixture(relocated=relocated) as (root, machine):
+                files = ["legacy/a.md"]
+                ws = triage(root, files, "keep")
+                before = snapshot(machine)
+                run = staged(root, machine, ws, empty, files)
+                if run is None:
+                    continue
+                actions = read(run, "ingest-actions.toml")["action"]
+                check("keep-action", len(actions) == 1 and actions[0]["kind"] == "keep"
+                      and actions[0]["source_path"] == "legacy/a.md"
+                      and actions[0].get("unmanaged_path") == "legacy/a.md")
+                check("mapping-unmapped", unmapped(run, files))
+                check("baseline-byte-unchanged", snapshot(machine) == before)
+                check("source-byte-unchanged", (root / files[0]).read_bytes() == b"source\n")
+
+    def migrate():
+        for kind, body in (("github-tasklist", "- [ ] one\n- [x] two\n"),
+                           ("keepachangelog", "## [1.0.0] - 2026-01-01\n### Added\n- One\n")):
+            files = ["legacy/a.md"]
+            with fixture({files[0]: body}) as (root, machine):
+                ws = triage(root, files, "migrate")
+                run = staged(root, machine, ws, options(ws, importer_kind=kind), files)
+                if run is None:
+                    continue
+                proposals = read(run, "proposals.toml")["proposal"]
+                drafts = read(run, "candidates_draft.toml")["candidate"]
+                check("importer-proposal-" + kind, bool(proposals) and
+                      all(p["origin"] == "importer_proposal" for p in proposals))
+                check("nonempty-drafts-" + kind, bool(drafts) and
+                      all(c["source_path"] == files[0] and c["importer_kind"] == kind
+                          for c in drafts))
+                check("mapping-unmapped-" + kind, unmapped(run, files))
+
+    def archive():
+        for explicit in (False, True):
+            with fixture() as (root, machine):
+                files = ["legacy/a.md"]
+                ws = triage(root, files, "move")
+                opts = options(ws, **({"dest_path": "saved/override.md"} if explicit else {}))
+                check("dest-presence", ("dest_path" in opts["option"][0]) == explicit)
+                run = staged(root, machine, ws, opts, files)
+                if run is None:
+                    continue
+                actions = read(run, "ingest-actions.toml")["action"]
+                expected = "saved/override.md" if explicit else ".archive/legacy/a.md"
+                check("resolved-dest", len(actions) == 1 and actions[0]["kind"] == "move"
+                      and actions[0]["source_path"] == files[0]
+                      and actions[0]["dest_path"] == expected)
+                check("move-inert", (root / files[0]).read_bytes() == b"source\n"
+                      and not (root / expected).exists())
+
+    def collisions():
+        cases = ["dup-dest", "move-to-self", "dest-in-working", "existing-file"]
+        if symlink_supported():
+            cases.append("dangling-symlink")
+        for case in cases:
+            files = ["legacy/a.md", "legacy/b.md"] if case == "dup-dest" else ["legacy/a.md"]
+            # Store-scope source avoids the unrelated declared-scope symlink walk refusal.
+            if case == "dangling-symlink":
+                files = [".working/legacy/a.md"]
+            with fixture({p: "source\n" for p in files}) as (root, machine):
+                ws = triage(root, files, "move")
+                dest = {"move-to-self": files[0], "dest-in-working": ".working/new.md"}.get(
+                    case, "occupied.md")
+                if case == "existing-file":
+                    (root / dest).write_text("existing\n", encoding="utf-8")
+                elif case == "dangling-symlink":
+                    os.symlink("absent-target", root / dest)
+                check(case, plan(root, ws, options(ws, dest_path=dest), files).verdict == FINDING)
+                check(case + "-nothing-staged", not (machine.parent / "imports").exists())
+        archive()  # clean companion: an always-FINDING guard must fail too
+
+    def fail_closed():
+        schema_validator()
+        with fixture() as (root, _machine):
+            files = ["legacy/a.md"]
+            ws = triage(root, files, "move")
+            ws = stamp([dict(r, note="dest_path=saved/a.md") for r in ws["row"]])
+            check("nonempty-note", plan(root, ws, options(ws), files).verdict == CANNOT_EVALUATE)
+        # Positive control prevents an unrelated CLI/flag failure from passing the malformed leg.
+        for malformed in (False, True):
+            with fixture() as (root, _machine):
+                files = ["legacy/a.md"]
+                ws = triage(root, files, "move")
+                wp, op = root / "worksheet.toml", root / "options.toml"
+                wp.write_bytes(_worksheet_bytes(ws))
+                op.write_bytes(b"option = [\n" if malformed else _worksheet_bytes(options(ws)))
+                proc = subprocess.run(
+                    [sys.executable, "-I", "-B", str(Path(__file__).with_name("opf.py")),
+                     "import", "--root", str(root), "--plan", "--dispositions", str(wp),
+                     "--ingest-options", str(op), "--include", files[0]],
+                    capture_output=True, check=False)
+                check("cli-malformed" if malformed else "cli-valid",
+                      proc.returncode == (2 if malformed else 0))
+
+    def reconcile():
+        for case, verdict in (("digest-drift", CANNOT_EVALUATE), ("omission", FINDING),
+                              ("ghost", FINDING)):
+            with fixture() as (root, machine):
+                files = ["legacy/a.md"]
+                ws = triage(root, files, "keep")
+                if case == "digest-drift":
+                    (root / files[0]).write_bytes(b"SOURCE\n")  # same size, changed digest
+                elif case == "omission":
+                    ws = stamp([])
+                else:
+                    ws = stamp(ws["row"] + [dict(ws["row"][0], source_path="legacy/ghost.md")])
+                check(case + "-valid-worksheet", validate_worksheet(ws) == [])
+                before = snapshot(root)
+                check(case, plan(root, ws, empty, files).verdict == verdict)
+                check(case + "-nothing-staged", snapshot(root) == before
+                      and not (machine.parent / "imports").exists())
+
+    def unresolved():
+        with fixture({"legacy/a.md": "one", "legacy/b.md": "two"}) as (root, machine):
+            files = ["legacy/a.md", "legacy/b.md"]
+            ws = triage(root, files, "keep")
+            ws = stamp([dict(r, disposition="unresolved" if i == 0 else "keep")
+                        for i, r in enumerate(ws["row"])])
+            before = snapshot(root)
+            check("one-unresolved", plan(root, ws, empty, files).verdict == FINDING)
+            check("nothing-staged", snapshot(root) == before
+                  and not (machine.parent / "imports").exists())
+
+    def refuse_apply():
+        with fixture() as (root, machine):
+            files = ["legacy/a.md"]
+            ws = triage(root, files, "keep")
+            run = staged(root, machine, ws, empty, files)
+            if run is None:
+                return
+            check("marker-present", read(run, "ingest-actions.toml")["action"] != [])
+            check("no-acceptance-manufactured", not (run / "acceptance.json").exists())
+            before = snapshot(root)
+            result = _opf_import.apply_import(root, run.name, now=now)
+            check("refused", result.verdict == CANNOT_EVALUATE and result.promoted is False)
+            check("no-acceptance-after-apply", not (run / "acceptance.json").exists())
+            check("no-journal", not (root / _opf_import.IMPORT_JOURNAL_REL).exists())
+            check("apply-writes-nothing", snapshot(root) == before)
+
+    registry = (
+        [("options-schema-validator", schema_validator), ("keep-unmanaged-exemption", keep),
+         ("migrate-importer-proposal", migrate), ("move-collision-matrix", collisions),
+         ("archive-prefill-default", archive), ("ingest-plan-refuses-apply", refuse_apply)]
+        if gate else
+        [("plan-ingest-keep-exemption", keep), ("plan-ingest-migrate-provenance", migrate),
+         ("plan-ingest-move-archive-default", archive),
+         ("plan-ingest-move-collision-matrix", collisions),
+         ("plan-ingest-options-fail-closed", fail_closed),
+         ("plan-ingest-reconcile-fail-closed", reconcile),
+         ("plan-ingest-unresolved-halts", unresolved),
+         ("plan-ingest-refuses-apply", refuse_apply)])
+    outer_check = check
+    for label, test in registry:
+        check = lambda suffix, cond, label=label: outer_check(label + "/" + suffix, cond)
+        test()
+
 
 def self_test():
     """Detection + worksheet invariants over synthetic stores, with a discriminating vector per guarantee
@@ -955,8 +1434,10 @@ def self_test():
         return 2
 
     failures = []
+    checked = [0]
 
     def check(label, cond):
+        checked[0] += 1
         if not cond:
             failures.append(label)
 
@@ -1667,6 +2148,8 @@ def self_test():
         check("clean-worksheet-always-validates",
               cleaned.verdict == CLEAN and validate_worksheet(cleaned.worksheet) == [])
 
+        _self_test_planner(check, build_store, build_relocated, snapshot, symlink_supported)
+
         # 13. dispatch-deferral: `opf adopt` is NOT wired; the fail-closed KNOWN_VERBS dispatch stands
         #     (consciously flipped at MIG-PR6, which wires the verb).
         import opf as _opf_cli
@@ -1683,6 +2166,7 @@ def self_test():
         for f in failures:
             print("OPF-INGEST SELF-TEST FAIL: {}".format(f), file=sys.stderr)
         return 1
+    print("OPF-INGEST SELF-TEST COUNT: {} checks".format(checked[0]))
     print("OPF-INGEST SELF-TEST PASS: detect enumerates store scope exactly once, excludes the managed set "
           "by subtree containment (including a managed path an --include names, a non-canonical managed "
           "spelling, a declared-unmanaged DIRECTORY's whole subtree unread, the store pointer control "
