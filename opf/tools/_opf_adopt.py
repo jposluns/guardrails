@@ -149,7 +149,7 @@ def _is_contained_relpath(value):
     if not isinstance(value, str) or not value:
         return False
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F or 0x80 <= ord(ch) <= 0x9F
-           or ch in (" ", " ") for ch in value):
+           or ch in ("\u2028", "\u2029") for ch in value):
         return False
     if value.startswith("/") or value.startswith("\\"):
         return False
@@ -1237,6 +1237,19 @@ def self_test():
     # comparing later events against stale prior state and emitting misleading, structurally-incorrect
     # findings; the chain stays INVALID either way. The intact-chain path is unchanged and stays guarded by
     # the section-6 chain vectors (all built from individually-VALID events), so no new vector is added here.
+
+    # 13: round-9 digest length/charset coverage discriminators. The 11d (uppercase-hex) and 12b (prefix)
+    # vectors flip-guard the CHARSET-case and PREFIX portions of _DIGEST_RE, but neither exercises its LENGTH
+    # bound nor its hex-only charset within the lowercase range. These vectors close that gap: a digest whose
+    # hex body is the wrong LENGTH (not exactly 64) and a right-length digest carrying a NON-HEX character
+    # (e.g. 'g') are both REJECTED. Loosening the {64} count or widening [0-9a-f] to any letter would newly
+    # accept these vectors and flip the self-test red.
+    check("digest-wrong-length-rejected", _is_digest("sha256:" + "0" * 63) is False)
+    check("digest-non-hex-charset-rejected", _is_digest("sha256:" + "g" * 64) is False)
+    r_badlen = canonical_receipt_core(); r_badlen["release"]["manifest_sha256"] = "sha256:" + "0" * 63
+    check("receipt-wrong-length-digest-invalid", validate_receipt_core(r_badlen).status == INVALID)
+    r_nonhex = canonical_receipt_core(); r_nonhex["release"]["manifest_sha256"] = "sha256:" + "g" * 64
+    check("receipt-non-hex-digest-invalid", validate_receipt_core(r_nonhex).status == INVALID)
 
     from _opf_adopt_plan import self_test as planning_self_test
     planning_rc = planning_self_test()
