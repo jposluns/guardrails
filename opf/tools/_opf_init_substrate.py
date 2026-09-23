@@ -521,8 +521,9 @@ def begin_operation(cap, plan_bytes):
                            plan_ident=plan_ident, plan_bytes=plan_bytes)
     except BaseException as exc:
         # Unwind ONLY this facility's own just-created artefacts; every unwind failure is
-        # collected, never swallowed. The composed _create_control_file has already unlinked its
-        # own torn file, so on a write failure the directory is empty and removable.
+        # collected, never swallowed. The composed _create_control_file unlinks its own torn file
+        # when that cleanup succeeds, leaving the directory empty and removable; when the cleanup
+        # itself fails, it names the leftover and the rmdir error below is collected too.
         unwind = []
         if plan_created:
             try:
