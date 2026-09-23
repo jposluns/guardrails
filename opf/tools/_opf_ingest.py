@@ -1913,6 +1913,32 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             check("window-poststage-run-refused",
                   len(runs) == 1 and (runs[0] / "ingest-actions.toml").exists()
                   and _opf_import.apply_import(root, runs[0].name, now=now).verdict == CANNOT_EVALUATE)
+        # leg 3 (post-stage DUP-PATH guard): a staged run.toml whose [[source]] list REPEATS a path (a
+        # DRIFTED sha256 first, the CORRECT row last) is refused CANNOT-EVALUATE by the count guard
+        # (len(seen) != len(rows)) BEFORE the last-wins reduction can mask the drifted occurrence. This leg
+        # FAILS without the `len(seen) != len(rows)` guard in _verify_staged_against_worksheet: with it
+        # removed, last-wins == expected and the drift check passes, so the divergent staged bytes bind CLEAN.
+        with fixture({"legacy/a.md": "source\n"}) as (root, machine):
+            files = ["legacy/a.md"]
+            ws = triage(root, files, "keep")
+            run = staged(root, machine, ws, empty, files)
+            if run is not None:
+                run_rel = "{}/{}".format(_opf_import.IMPORTS_REL, run.name)
+                resolution = _opf_store.resolve_store(root)
+                run_src = read(run, "run.toml")["source"]
+                expected = {s["path"]: ("sha256:" + s["sha256"], s["size"]) for s in run_src}
+                rt = read(run, "run.toml")
+                orig_row = rt["source"][0]
+                drifted = dict(orig_row, sha256=("1" * 64 if orig_row["sha256"] != "1" * 64 else "0" * 64))
+                rt["source"] = [drifted, dict(orig_row)]  # dup path: drifted first, correct (last-wins) last
+                (run / "run.toml").write_bytes(_opf_import._emit_bytes(rt, "run.toml"))
+                raised = False
+                try:
+                    _verify_staged_against_worksheet(resolution, run_rel, run.name, expected)
+                except _DetectError as exc:
+                    raised = (exc.verdict == CANNOT_EVALUATE and "duplicate source path" in exc.message
+                              and "run.toml" in exc.message)
+                check("window-poststage-dup-path-refused", raised)
 
     def partial_ingest_stage():
         # round-2 P1-1: the ingest identity/refusal is DURABLE before the run is reviewable or promotable.
@@ -2272,6 +2298,41 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                     _opf_import._read_toml = _real_read_toml
                 check("bundle-inventory-single-read",
                       (run_rel + "/inventory.toml") not in reads and (run_rel + "/run.toml") in reads)
+
+        # (h) F-MIG-PR4A-INT-VALUEERROR: a staged inventory.toml carrying an integer literal OVER CPython's
+        # 4300-digit string-conversion ceiling makes the step-3 tomllib.loads raise a BARE ValueError (NOT a
+        # TOMLDecodeError). The parse converts the whole ValueError family to CANNOT-EVALUATE, matching
+        # _read_toml's own parse-locus handling, so the writer fails closed to verdict 2 rather than RAISING.
+        # This leg FAILS (a bare ValueError escapes) if step 3 catches only (UnicodeDecodeError,
+        # tomllib.TOMLDecodeError): TOMLDecodeError is a ValueError subclass but the over-long-integer error
+        # is a bare ValueError, so the narrower tuple lets it through.
+        with fixture({"legacy/a.md": "source\n"}) as (root, machine):
+            ws = triage(root, ["legacy/a.md"], "keep")
+            run = staged(root, machine, ws, empty, ["legacy/a.md"])
+            if run is not None:
+                run_rel = "{}/{}".format(_opf_import.IMPORTS_REL, run.name)
+                bundle = load_bundle(root, run)
+                run_src = read(run, "run.toml")["source"]
+                expected = {s["path"]: ("sha256:" + s["sha256"], s["size"]) for s in run_src}
+                review_inputs = {
+                    "include": bundle["include"] if bundle["include_declared"] else None,
+                    "worksheet": bundle["worksheet"], "options": bundle["options"],
+                    "crosswalk": bundle["crosswalk"], "migrate": bundle["migrate"],
+                    "expected": expected}
+                # Append the over-long integer as RAW bytes: the canonical emitter would itself hit the
+                # int->str ceiling, so it is written straight into the staged bytes step 2 binds and step 3
+                # parses. tomllib then raises a bare ValueError on the 5000-digit literal (> the 4300 ceiling).
+                raw = (run / "inventory.toml").read_bytes()
+                (run / "inventory.toml").write_bytes(raw + b"\nover_long = " + b"9" * 5000 + b"\n")
+                verdict = None
+                raised_bare = False
+                try:
+                    _opf_import._write_ingest_review_bundle(root, run_rel, run.name, review_inputs)
+                except _opf_import._StageError as exc:
+                    verdict = exc.verdict
+                except ValueError:
+                    raised_bare = True  # the pre-fix regression: the bare ValueError escaped the writer
+                check("bundle-inventory-hugeint-fail-closed", verdict == CANNOT_EVALUATE and not raised_bare)
 
     registry = (
         [("options-schema-validator", schema_validator), ("keep-unmanaged-exemption", keep),
