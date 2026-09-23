@@ -255,6 +255,28 @@ REPORT_MD_NAME = "IMPORT-REPORT.md"
 # proposals.toml + run id and the review path reads machine data only, never the human-readable report.
 PROPOSALS_NAME = "proposals.toml"
 
+# --- OPF-MIGRATE MIG-PR4a: the FROZEN ingest review-evidence bundle -----------------------------------
+# The review/acceptance step (PR-4) validates a FROZEN staged snapshot (ratified acceptance model A5), so
+# MIG-PR4a freezes the review evidence a later acceptance-capture slice (PR-4c) reads into ONE additive,
+# store-native TOML artefact staged beside the promotion candidate. It EMBEDS the review-only inputs that
+# are otherwise NOT staged (the original triaged worksheet with its recomputed digest, the ingest-options /
+# --include declaration incl. explicit-dest-vs-default, the scoped resolution crosswalk, and each migrate
+# row's importer selection + validated result count, preserving a zero-candidate / zero-proposal result),
+# and BINDS the already-staged artefacts by DIGEST rather than duplicating them (the baseline plan via the
+# report's plan_digest, the frozen inventory, ingest-actions.toml, candidates_draft.toml, proposals.toml).
+# It NEVER redefines plan_digest (A1: acceptance carries an explicit ingest/action binding, not a new
+# digest authority). Its presence is ALSO a non-promotable ingest marker (recognized at apply) and makes an
+# ingest run non-reviewable until PR-4c (recognized at both review entry points). Canonical _opf_emit TOML,
+# matching the house convention (the plan's canonical-JSON residual is reconciled to TOML here too).
+INGEST_REVIEW_NAME = "ingest-review.toml"
+INGEST_REVIEW_FORMAT = "opf-ingest-review-bundle-v1"
+# The ingest-only artefacts whose presence makes a run a NON-PROMOTABLE, NON-REVIEWABLE root-ingest plan in
+# this build. apply_import refuses on ANY of these BEFORE any journal/lock work; the review entry points
+# refuse acceptance capture on ANY of these (PR-4c not yet implemented). ingest-actions.toml stays the
+# FIRST-staged marker (round-2 P1-1); the others are recognized for defence in depth (a partially-staged
+# leftover, or any unforeseen ordering, is still refused; marginal cost one lstat each).
+_INGEST_RUN_MARKERS = (INGEST_ACTIONS_NAME, CANDIDATES_DRAFT_NAME, INGEST_REVIEW_NAME)
+
 # The attributed acceptance record (spec 14.1), captured by `--review` and bound to the exact run. It is the
 # one CANONICAL-JSON artefact in an otherwise-TOML run dir (the approved acceptance design names JSON; the
 # canonical-JSON idiom is already in-repo, so no second canonicalizer enters). Producer discipline mirrors
@@ -2075,8 +2097,203 @@ def _write_ingest_artifacts(product_root, run_rel, run_id, candidates_draft, ing
         os.close(store_root_fd)
 
 
+def _ingest_run_marker(store_root_fd, run_rel):
+    """MIG-PR4a: return the name of the FIRST ingest-only marker present in the run dir (a no-follow
+    `_lstat_contained` over `_INGEST_RUN_MARKERS`), or None when none is present. Fail-closed: a
+    JournalError from the contained lstat (EACCES/ELOOP/a wrong-type control path) PROPAGATES so the
+    caller routes it to CANNOT-EVALUATE, never a silent "no marker" that reads a run as promotable/
+    reviewable. Recognizing the run as ingest is a no-follow inspection bound to the trusted store-root
+    descriptor (symlink-resolution: never a re-resolved string-path existence check)."""
+    for name in _INGEST_RUN_MARKERS:
+        if _journal._lstat_contained(store_root_fd, run_rel + "/" + name) is not None:
+            return name
+    return None
+
+
+def _write_ingest_review_bundle(product_root, run_rel, run_id, review_inputs):
+    """OPF-MIGRATE MIG-PR4a: FREEZE the ingest review evidence into ONE additive `ingest-review.toml` staged
+    into the run dir plan_import just staged, through the SAME contained, no-follow, fsync'd, digest-verified
+    apply_ops pass _write_plan_artifacts / _write_ingest_artifacts use. It never mutates the active store.
+
+    ORDERING (round-2 P1-1 extended, ratified A5): plan_import calls this LAST, AFTER the refusal marker
+    (ingest-actions.toml, staged first) and every required payload (candidates_draft.toml, inventory.toml,
+    proposals.toml, report.toml) are durable. The bundle then RE-READS each payload (a marker alone is
+    insufficient) and BINDS it by its digest recomputed over the STAGED bytes, and RE-CHECKS the staged
+    source identities (run.toml) against the frozen resolution crosswalk BEFORE it finalizes, so a bundle
+    is never finalized over an incomplete or drifted snapshot. It BINDS the baseline plan and the inventory
+    by the report's OWN digests (A1: it never redefines plan_digest). It EMBEDS the review-only inputs that
+    are NOT otherwise staged: the original triaged worksheet with its recomputed digest (A2), the
+    ingest-options / --include declaration incl. explicit-dest-vs-default (a move option's absent dest_path
+    IS the archive default), the scoped resolution crosswalk ((scope, source_path) -> resolved
+    product-relative source), and each migrate row's importer selection + validated result counts (a
+    zero-candidate / zero-proposal migrate is preserved as an explicit row). Fail-closed throughout: any
+    missing payload, unreadable record, source-identity drift, cap overflow, or non-emittable model is
+    CANNOT-EVALUATE (an _StageError the caller maps uniformly), leaving the run non-promotable."""
+    resolution = _opf_store.resolve_store(product_root)
+    if resolution.status != _opf_store.RESOLVED:
+        raise _cannot("store did not resolve for the ingest review-bundle write ({}: {})".format(
+            resolution.status, resolution.detail))
+    try:
+        store_root_fd = _opf_store._open_store_root_fd(
+            resolution.store_root, resolution.pointer_source != "default")
+    except OSError as exc:
+        raise _cannot("cannot open store root {!r} for the ingest review-bundle write ({})".format(
+            resolution.store_root, exc))
+    try:
+        # 1. BIND the baseline plan + inventory by the report's OWN digests (never redefine plan_digest).
+        report = _read_toml(store_root_fd, run_rel + "/report.toml")
+        if not isinstance(report, dict):
+            raise _cannot("ingest review bundle: staged run has no readable report.toml (cannot bind)")
+        plan_digest = report.get("plan_digest")
+        inventory_digest = report.get("inventory_digest")
+        for label, dig in (("plan_digest", plan_digest), ("inventory_digest", inventory_digest)):
+            if not (isinstance(dig, str) and _DIGEST_RE.match(dig)):
+                raise _cannot("ingest review bundle: report.toml {} is missing or malformed "
+                              "(cannot bind the frozen snapshot)".format(label))
+        # 2. RE-READ each required staged payload and BIND it by its digest recomputed over the staged bytes
+        #    (a marker alone is insufficient): absence/unreadability is fail-closed CANNOT-EVALUATE.
+        bound = {}
+        for name in (INGEST_ACTIONS_NAME, CANDIDATES_DRAFT_NAME, PROPOSALS_NAME, INVENTORY_NAME):
+            try:
+                data, _pst = _journal._read_contained(store_root_fd, run_rel + "/" + name)
+            except _journal.JournalError as exc:
+                raise _cannot("ingest review bundle: required payload {} is missing or unreadable ({}); "
+                              "the frozen snapshot is incomplete (fail-closed)".format(name, exc))
+            bound[name] = "sha256:" + _sha256_hex(data)
+        # 3. RE-CHECK staged source identities against the frozen resolution crosswalk (A5: the frozen
+        #    snapshot records the identity it froze). run.toml carries the digests staging preserved.
+        run_tbl = _read_toml(store_root_fd, run_rel + "/run.toml")
+        srcs = run_tbl.get("source") if isinstance(run_tbl, dict) else None
+        if not isinstance(srcs, list):
+            raise _cannot("ingest review bundle: staged run.toml carries no source list (cannot re-check "
+                          "the frozen source identities)")
+        staged_ident = {}
+        for s in srcs:
+            if not (isinstance(s, dict) and isinstance(s.get("path"), str)
+                    and isinstance(s.get("sha256"), str) and type(s.get("size")) is int):
+                raise _cannot("ingest review bundle: staged run.toml carries a malformed source row "
+                              "(cannot re-check the frozen source identities)")
+            staged_ident[s["path"]] = ("sha256:" + s["sha256"], s["size"])
+        for resolved, ident in review_inputs["expected"].items():
+            if staged_ident.get(resolved) != ident:
+                raise _cannot("ingest review bundle: staged source {!r} identity {} does not match the "
+                              "frozen crosswalk identity {} (the snapshot drifted under staging; "
+                              "fail-closed)".format(resolved, staged_ident.get(resolved), ident))
+    finally:
+        os.close(store_root_fd)
+
+    # 4. ASSEMBLE the bundle (A1 canonicalization/version: a closed format token + schema version).
+    bundle = {
+        "format": INGEST_REVIEW_FORMAT, "schema": SCHEMA, "run_id": run_id,
+        "include_declared": review_inputs["include"] is not None,
+        "include": list(review_inputs["include"] or []),
+        "binding": {
+            "plan_digest": plan_digest, "inventory_digest": inventory_digest,
+            "ingest_actions_digest": bound[INGEST_ACTIONS_NAME],
+            "candidates_draft_digest": bound[CANDIDATES_DRAFT_NAME],
+            "proposals_digest": bound[PROPOSALS_NAME],
+            "inventory_toml_digest": bound[INVENTORY_NAME],
+        },
+        "worksheet": review_inputs["worksheet"],
+        "options": review_inputs["options"],
+        "crosswalk": review_inputs["crosswalk"],
+        "migrate": review_inputs["migrate"],
+    }
+    bundle_bytes = _emit_bytes(bundle, INGEST_REVIEW_NAME)
+    if len(bundle_bytes) > _opf_store.MAX_STORE_READ_BYTES:
+        raise _cannot("{} is {} bytes, over the {}-byte contained store-read cap; the frozen review bundle "
+                      "would be unreadable (rejected at the producer boundary)".format(
+                          INGEST_REVIEW_NAME, len(bundle_bytes), _opf_store.MAX_STORE_READ_BYTES))
+    # 5. STAGE additively via the same contained, no-follow, fsync'd, digest-verified apply_ops primitive.
+    rel = run_rel + "/" + INGEST_REVIEW_NAME
+    ops = [{"op": "create", "path": rel,
+            "poststate": {"kind": "file", "mode": FILE_MODE, "content-sha256": _sha256_hex(bundle_bytes)}}]
+
+    def staged_reader(op):
+        return bundle_bytes
+    try:
+        store_root_fd = _opf_store._open_store_root_fd(
+            resolution.store_root, resolution.pointer_source != "default")
+    except OSError as exc:
+        raise _cannot("cannot open store root {!r} for the ingest review-bundle write ({})".format(
+            resolution.store_root, exc))
+    try:
+        _journal.apply_ops(store_root_fd, ops, staged_reader)
+    except _journal.JournalError as exc:
+        raise _cannot("ingest review-bundle write failed ({}); the staged candidate is intact, the review "
+                      "surface incomplete".format(exc))
+    finally:
+        os.close(store_root_fd)
+
+
+def _load_staged_ingest_for_review(store_root_fd, run_rel):
+    """OPF-MIGRATE MIG-PR4a: a BOUNDED, contained, no-follow STRUCTURAL reader of the frozen
+    `ingest-review.toml` review bundle. Returns the validated bundle dict when it is present and structurally
+    well-formed; returns None when the bundle is genuinely ABSENT (the _read_toml None-on-absent idiom, so a
+    non-ingest / non-4a run is distinguishable from a malformed one); raises CANNOT-EVALUATE when the bundle
+    is present but malformed (fail-closed). Structural validity does NOT imply the run is SEMANTICALLY
+    reviewable: this reader proves SHAPE and the presence of the bound identities only, never that the bound
+    digests match the staged artefacts (that binding recompute, and acceptance capture, are PR-4c). It reads
+    the bundle through the same contained TOML reader (bounded by the store-read cap, no-follow) the rest of
+    the review path uses."""
+    bundle = _read_toml(store_root_fd, run_rel + "/" + INGEST_REVIEW_NAME)
+    if bundle is None:
+        return None
+    run_id = run_rel.rsplit("/", 1)[-1]
+    if not isinstance(bundle, dict):
+        raise _cannot("ingest review bundle: {} is not a table (malformed)".format(INGEST_REVIEW_NAME))
+    if bundle.get("format") != INGEST_REVIEW_FORMAT:
+        raise _cannot("ingest review bundle: format is not {!r} (malformed)".format(INGEST_REVIEW_FORMAT))
+    if not (type(bundle.get("schema")) is int and bundle.get("schema") == SCHEMA):
+        raise _cannot("ingest review bundle: schema is not {!r} (malformed)".format(SCHEMA))
+    if bundle.get("run_id") != run_id:
+        raise _cannot("ingest review bundle: run_id does not name this run dir (malformed)")
+    binding = bundle.get("binding")
+    if not isinstance(binding, dict):
+        raise _cannot("ingest review bundle: binding is not a table (malformed)")
+    for k in ("plan_digest", "inventory_digest", "ingest_actions_digest", "candidates_draft_digest",
+              "proposals_digest", "inventory_toml_digest"):
+        v = binding.get(k)
+        if not (isinstance(v, str) and _DIGEST_RE.match(v)):
+            raise _cannot("ingest review bundle: binding.{} is missing or not a 'sha256:'+64-hex "
+                          "digest (malformed)".format(k))
+    if not isinstance(bundle.get("include_declared"), bool):
+        raise _cannot("ingest review bundle: include_declared is not a bool (malformed)")
+    inc = bundle.get("include")
+    if not (isinstance(inc, list) and all(isinstance(p, str) for p in inc)):
+        raise _cannot("ingest review bundle: include is not a list of strings (malformed)")
+    ws = bundle.get("worksheet")
+    if not (isinstance(ws, dict) and isinstance(ws.get("format"), str)
+            and type(ws.get("schema")) is int and isinstance(ws.get("row"), list)
+            and isinstance(ws.get("worksheet_digest"), str) and _DIGEST_RE.match(ws["worksheet_digest"])):
+        raise _cannot("ingest review bundle: worksheet is not a well-formed embedded worksheet (malformed)")
+    opts = bundle.get("options")
+    if not (isinstance(opts, dict) and isinstance(opts.get("format"), str)
+            and type(opts.get("schema")) is int and isinstance(opts.get("option"), list)):
+        raise _cannot("ingest review bundle: options is not a well-formed embedded options doc (malformed)")
+    cross = bundle.get("crosswalk")
+    if not isinstance(cross, list):
+        raise _cannot("ingest review bundle: crosswalk is not an array (malformed)")
+    for i, row in enumerate(cross):
+        if not (isinstance(row, dict)
+                and all(isinstance(row.get(k), str)
+                        for k in ("scope", "source_path", "resolved_source_path", "disposition"))):
+            raise _cannot("ingest review bundle: crosswalk[{}] is malformed".format(i))
+    mig = bundle.get("migrate")
+    if not isinstance(mig, list):
+        raise _cannot("ingest review bundle: migrate is not an array (malformed)")
+    for i, row in enumerate(mig):
+        if not (isinstance(row, dict)
+                and all(isinstance(row.get(k), str)
+                        for k in ("scope", "source_path", "resolved_source_path", "importer_kind"))
+                and all(type(row.get(k)) is int and row.get(k) >= 0
+                        for k in ("candidate_count", "proposal_count"))):
+            raise _cannot("ingest review bundle: migrate[{}] is malformed".format(i))
+    return bundle
+
+
 def plan_import(product_root, import_set, *, proposals=None, importer_proposals=None,
-                candidates_draft=None, ingest_actions=None, now, run_nonce):
+                candidates_draft=None, ingest_actions=None, ingest_review_inputs=None, now, run_nonce):
     """Produce a candidate mapping PLAN over a scanned import set and STAGE it under
     `.working/imports/<run-id>/` (spec 14.1), plus the review surface. This is the operation-layer plan
     step; it composes the read-only `scan_import` (the single enumeration source of truth, so a plan is
@@ -2150,6 +2367,13 @@ def plan_import(product_root, import_set, *, proposals=None, importer_proposals=
                                     candidates_draft or [], ingest_actions or [], source_sizes)
         _write_plan_artifacts(product_root, result.run_rel, result.run_id, scan.inventory,
                               report_md.encode("utf-8"), all_proposal_rows)
+        # MIG-PR4a: FREEZE the ingest review evidence LAST, after the refusal marker and every required
+        # payload above are durable, so the bundle-finalization re-read + source-identity recheck can never
+        # complete over an incomplete snapshot (ratified A5; see _write_ingest_review_bundle). Additive and
+        # opt-in: an ordinary (non-ingest) plan_import caller passes ingest_review_inputs=None and keeps its
+        # existing behaviour exactly.
+        if ingest_review_inputs is not None:
+            _write_ingest_review_bundle(product_root, result.run_rel, result.run_id, ingest_review_inputs)
         return PlanResult(CLEAN, run_id=result.run_id, run_rel=result.run_rel,
                           inventory_digest=scan.inventory_digest,
                           report_rel=result.run_rel + "/" + REPORT_MD_NAME,
@@ -2719,6 +2943,22 @@ def review_import(product_root, run_id, *, actor, decisions, now):
         except OSError as exc:
             raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
         try:
+            # MIG-PR4a: REFUSE acceptance capture over a root-ingest run. Ingest acceptance capture is PR-4c;
+            # until then an ingest run (recognized by ANY of _INGEST_RUN_MARKERS, fail-closed no-follow) is
+            # NOT reviewable, refused CANNOT-EVALUATE BEFORE any acceptance work, mutating nothing. When the
+            # frozen review bundle is present, the bounded structural reader validates it (a malformed bundle
+            # is itself CANNOT-EVALUATE) and the refusal names the frozen snapshot's plan binding.
+            marker = _ingest_run_marker(store_root_fd, run_rel)
+            if marker is not None:
+                extra = ""
+                if marker == INGEST_REVIEW_NAME:
+                    frozen = _load_staged_ingest_for_review(store_root_fd, run_rel)
+                    if frozen is not None:
+                        extra = " (frozen review bundle binds plan {})".format(
+                            frozen["binding"]["plan_digest"])
+                raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest acceptance "
+                              "capture is not implemented in this build (PR-4c). Refused fail-closed; "
+                              "nothing captured.{}".format(run_id, marker, extra))
             plan_digest, inventory_digest, frag_by_id, key_meta, _ordered = \
                 _load_staged_run_for_review(store_root_fd, run_rel)
         finally:
@@ -2821,6 +3061,13 @@ def review_import_interactive(product_root, run_id, *, actor, now, in_stream=Non
         store_root_fd = _opf_store._open_store_root_fd(
             resolution.store_root, resolution.pointer_source != "default")
         try:
+            # MIG-PR4a: REFUSE ingest acceptance capture through the interactive entry point too, BEFORE
+            # prompting for a single fragment (PR-4c not implemented); mirror the batch review_import refusal.
+            marker = _ingest_run_marker(store_root_fd, run_rel)
+            if marker is not None:
+                raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest acceptance "
+                              "capture is not implemented in this build (PR-4c). Refused fail-closed; "
+                              "nothing captured.".format(run_id, marker))
             _pd, _id, _frag_by_id, _km, ordered = _load_staged_run_for_review(store_root_fd, run_rel)
         finally:
             os.close(store_root_fd)
@@ -3554,28 +3801,25 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
         resolution = _resolve_store_for_review(product_root)
         machine_rel = resolution.machine_rel
         run_rel = "{}/{}".format(IMPORTS_REL, run_id)
-        # MIG-PR3: a root-ingest disposition plan carries keep/move pending actions and importer_proposal
-        # suggestions that this build cannot promote (attributed review is PR-A, ingest apply is PR-C). Its
-        # presence marker is ingest-actions.toml in the run dir; candidates_draft.toml is ALSO ingest-only,
-        # so its presence is recognized too (round-2 P1-1 defence in depth: a partially-staged leftover from
-        # an older build, or any unforeseen ordering, that carries the draft without the marker is still
-        # refused; marginal cost one extra lstat). Refuse fail-closed BEFORE any journal/lock
-        # work, distinct cannot-evaluate, mutating nothing (required-step-remains-required: the block is not
-        # weakened just because the baseline candidate alone would look promotable).
+        # MIG-PR3/PR-4a: a root-ingest disposition plan carries keep/move pending actions and
+        # importer_proposal suggestions that this build cannot promote (attributed review is PR-A, ingest
+        # apply is PR-C). Its primary marker is ingest-actions.toml (staged first); candidates_draft.toml and
+        # the MIG-PR4a frozen review bundle (ingest-review.toml) are ALSO ingest-only, so ANY of them is
+        # recognized (_INGEST_RUN_MARKERS, defence in depth: a partially-staged leftover from an older build,
+        # or any unforeseen ordering, that carries a later artefact without the marker is still refused;
+        # marginal cost one lstat each). Refuse fail-closed BEFORE any journal/lock work, distinct
+        # cannot-evaluate, mutating nothing (required-step-remains-required: the block is not weakened just
+        # because the baseline candidate alone would look promotable).
         try:
             _ingest_root_fd = _opf_store._open_store_root_fd(
                 resolution.store_root, resolution.pointer_source != "default")
         except OSError as exc:
             raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
         try:
-            marker_name = INGEST_ACTIONS_NAME
-            marker = _journal._lstat_contained(_ingest_root_fd, run_rel + "/" + INGEST_ACTIONS_NAME)
-            if marker is None:
-                marker_name = CANDIDATES_DRAFT_NAME
-                marker = _journal._lstat_contained(_ingest_root_fd, run_rel + "/" + CANDIDATES_DRAFT_NAME)
+            marker_name = _ingest_run_marker(_ingest_root_fd, run_rel)
         finally:
             os.close(_ingest_root_fd)
-        if marker is not None:
+        if marker_name is not None:
             raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest plans are NOT "
                           "promotable in this build (attributed review PR-A and ingest apply PR-C are not "
                           "yet implemented). Refused fail-closed; nothing promoted.".format(

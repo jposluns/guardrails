@@ -1122,6 +1122,10 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
             import_set, importer_proposals, candidates_draft, actions = [], [], [], []
             move_dests = {}
             expected = {}   # resolved product-relative path -> the reconciled (sha256, size) it must stage
+            # MIG-PR4a review evidence: the scoped resolution crosswalk ((scope, source_path) -> resolved
+            # product-relative source, per disposition) and each migrate row's importer selection + validated
+            # result counts (a zero-candidate / zero-proposal migrate is preserved as an explicit row).
+            crosswalk, migrate_records = [], []
             for r in rows:
                 key = (r["scope"], r["source_path"]); sp = r["source_path"]; dispo = r["disposition"]
                 opt = opt_by_key.get(key)
@@ -1227,20 +1231,42 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                     importer_proposals += ir.proposals
                     candidates_draft += [dict(c, source_path=sp, importer_kind=opt["importer_kind"])
                                          for c in ir.candidates]
+                    # MIG-PR4a: record the importer selection + its VALIDATED result counts per migrate row,
+                    # so a zero-candidate / zero-proposal migrate (a CLEAN importer run that rested nothing)
+                    # is preserved as an explicit review-evidence row rather than leaving no trace.
+                    migrate_records.append({
+                        "scope": r["scope"], "source_path": sp, "resolved_source_path": resolved_sp,
+                        "importer_kind": opt["importer_kind"],
+                        "candidate_count": len(ir.candidates), "proposal_count": len(ir.proposals)})
                 # keep/migrate/move ALL stay in the import_set so the baseline quarantines them as
                 # legacy_fragment (unmapped); nothing is dropped (decisions 2/3: mapping stays unmapped).
                 # The import_set carries the RESOLVED product-relative path (the identity the staging
                 # reader actually reads), so a relocated store's store-scope row stages the STORE bytes.
+                crosswalk.append({"scope": r["scope"], "source_path": sp,
+                                  "resolved_source_path": resolved_sp, "disposition": dispo})
                 import_set.append(resolved_sp)
         finally:
             os.close(product_root_fd)
 
+        # MIG-PR4a: assemble the FROZEN review evidence for plan_import to stage LAST (after the marker and
+        # every payload). The worksheet embeds the ORIGINAL triage (scope/path/origin/disposition/note plus
+        # its recomputed worksheet_digest); the options doc is normalized to its closed shape (a move option's
+        # ABSENT dest_path records the archive default vs an explicit dest); include is preserved as declared;
+        # `expected` lets the bundle writer re-check the staged source identities before it finalizes.
+        normalized_options = {
+            "format": options.get("format"), "schema": options.get("schema"),
+            "option": [{k: o[k] for k in _OPTION_ROW_KEYS if k in o} for o in options["option"]]}
+        ingest_review_inputs = {
+            "worksheet": worksheet, "options": normalized_options, "include": include,
+            "crosswalk": crosswalk, "migrate": migrate_records, "expected": expected}
+
         # 7. STAGE via the op-layer plan_import: baseline (all unmapped -> legacy_fragment), importer
         #    proposals tagged importer_proposal, ingest-actions.toml (the non-promotable refusal marker,
-        #    staged FIRST among the ingest artefacts and ahead of the review artefacts; P1-1), then
-        #    candidates_draft.toml.
+        #    staged FIRST among the ingest artefacts and ahead of the review artefacts; P1-1),
+        #    candidates_draft.toml, then the MIG-PR4a frozen review bundle (ingest-review.toml, staged LAST).
         result = _opf_import.plan_import(product_root, import_set, importer_proposals=importer_proposals,
                                          candidates_draft=candidates_draft, ingest_actions=actions,
+                                         ingest_review_inputs=ingest_review_inputs,
                                          now=now, run_nonce=run_nonce)
         if result.verdict != CLEAN:
             return result
@@ -1966,6 +1992,160 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             check("no-journal", not (root / _opf_import.IMPORT_JOURNAL_REL).exists())
             check("apply-writes-nothing", snapshot(root) == before)
 
+    def review_bundle():
+        """OPF-MIGRATE MIG-PR4a: the FROZEN ingest review bundle is staged for every disposition class, binds
+        the staged artefacts by digest, embeds the review-only inputs, preserves a zero-candidate/zero-proposal
+        migrate, round-trips the bounded structural reader (absent -> None, malformed -> CANNOT-EVALUATE), a
+        run is recognized as ingest by the bundle alone, review capture is refused (PR-4c), and a real staged
+        migrate run now passes the staged-run gate (the repaired importer-proposal provenance gate). Each check
+        FAILS without its production change (change-carries-check)."""
+        import check_opf_import as _chk
+
+        def open_fd(root):
+            resolution = _opf_store.resolve_store(root)
+            return _opf_store._open_store_root_fd(
+                resolution.store_root, resolution.pointer_source != "default")
+
+        def load_bundle(root, run):
+            fd = open_fd(root)
+            try:
+                return _opf_import._load_staged_ingest_for_review(
+                    fd, "{}/{}".format(_opf_import.IMPORTS_REL, run.name))
+            finally:
+                os.close(fd)
+
+        def dig(run, name):
+            return "sha256:" + _opf_import._sha256_hex((run / name).read_bytes())
+
+        # (a) keep-only / move-only / migrate-only / zero-result-migrate round-trips
+        scenarios = [("keep", {"legacy/a.md": "source\n"}, "keep", None),
+                     ("move", {"legacy/a.md": "source\n"}, "move", None),
+                     ("migrate", {"legacy/a.md": "- [ ] one\n- [x] two\n"}, "migrate", "github-tasklist"),
+                     ("zero", {"legacy/a.md": "just prose\nno tasks here\n"}, "migrate", "github-tasklist")]
+        for tag, files_map, dispo, kind in scenarios:
+            files = list(files_map)
+            with fixture(files_map) as (root, machine):
+                ws = triage(root, files, dispo)
+                opts = options(ws, importer_kind=kind) if dispo == "migrate" else (
+                    options(ws) if dispo == "move" else empty)
+                run = staged(root, machine, ws, opts, files)
+                if run is None:
+                    continue
+                check("bundle-present-" + tag, (run / "ingest-review.toml").exists())
+                bundle = load_bundle(root, run)
+                check("bundle-loads-" + tag, bundle is not None
+                      and bundle["format"] == _opf_import.INGEST_REVIEW_FORMAT
+                      and bundle["run_id"] == run.name)
+                if bundle is None:
+                    continue
+                check("bundle-worksheet-" + tag,
+                      bundle["worksheet"]["worksheet_digest"] == ws["worksheet_digest"]
+                      and len(bundle["worksheet"]["row"]) == len(files))
+                check("bundle-include-" + tag,
+                      bundle["include_declared"] is True and bundle["include"] == files)
+                check("bundle-options-" + tag,
+                      bundle["options"]["format"] == OPTIONS_FORMAT
+                      and len(bundle["options"]["option"]) == len(opts["option"]))
+                cw = {r["source_path"]: r for r in bundle["crosswalk"]}
+                check("bundle-crosswalk-" + tag,
+                      set(cw) == set(files)
+                      and all(cw[f]["disposition"] == dispo for f in files)
+                      and all(cw[f]["resolved_source_path"] == f for f in files))
+                b = bundle["binding"]
+                rep = read(run, "report.toml")
+                check("bundle-binding-" + tag,
+                      b["plan_digest"] == rep["plan_digest"]
+                      and b["inventory_digest"] == rep["inventory_digest"]
+                      and b["ingest_actions_digest"] == dig(run, "ingest-actions.toml")
+                      and b["candidates_draft_digest"] == dig(run, "candidates_draft.toml")
+                      and b["proposals_digest"] == dig(run, "proposals.toml")
+                      and b["inventory_toml_digest"] == dig(run, "inventory.toml"))
+                if dispo == "migrate":
+                    mig = {m["source_path"]: m for m in bundle["migrate"]}
+                    check("bundle-migrate-" + tag,
+                          set(mig) == set(files) and all(mig[f]["importer_kind"] == kind for f in files))
+                    # a real staged migrate run passes the repaired staged-run gate (item 7)
+                    check("migrate-gate-proposals-clean-" + tag,
+                          _chk.check_staged_run(str(run))["proposals-artifact"][0] is True)
+                    if tag == "zero":
+                        check("bundle-zero-result-preserved",
+                              all((mig.get(f) or {}).get("candidate_count") == 0
+                                  and (mig.get(f) or {}).get("proposal_count") == 0
+                                  for f in files))
+                else:
+                    check("bundle-no-migrate-" + tag, bundle["migrate"] == [])
+                rev = _opf_import.review_import(root, run.name, actor="tester", decisions=[], now=now)
+                check("review-refused-" + tag, rev.verdict == CANNOT_EVALUATE)
+
+        # (b) a MIXED keep+move+migrate run: crosswalk carries every row's disposition; migrate list carries
+        # ONLY the migrate row (importer selection is per migrate row).
+        mixed_map = {"legacy/keep.md": "keepme\n", "legacy/move.md": "moveme\n",
+                     "legacy/mig.md": "- [ ] t\n"}
+        by = {"legacy/keep.md": "keep", "legacy/move.md": "move", "legacy/mig.md": "migrate"}
+        files = list(mixed_map)
+        with fixture(mixed_map) as (root, machine):
+            found = detect(root, include=files)
+            ws = stamp([dict(r, disposition=by[r["source_path"]], note="") for r in found.rows])
+            opt_rows = []
+            for r in ws["row"]:
+                if by[r["source_path"]] == "migrate":
+                    opt_rows.append({"scope": r["scope"], "source_path": r["source_path"],
+                                     "importer_kind": "github-tasklist"})
+                elif by[r["source_path"]] == "move":
+                    opt_rows.append({"scope": r["scope"], "source_path": r["source_path"]})
+            opts = {"format": OPTIONS_FORMAT, "schema": SCHEMA, "option": opt_rows}
+            run = staged(root, machine, ws, opts, files)
+            if run is not None:
+                bundle = load_bundle(root, run)
+                if bundle is not None:
+                    check("mixed-crosswalk",
+                          {r["source_path"]: r["disposition"] for r in bundle["crosswalk"]} == by)
+                    check("mixed-migrate-only-migrate-row",
+                          [m["source_path"] for m in bundle["migrate"]] == ["legacy/mig.md"])
+                    check("mixed-review-refused",
+                          _opf_import.review_import(root, run.name, actor="t", decisions=[],
+                                                    now=now).verdict == CANNOT_EVALUATE)
+
+        # (c) the bounded structural reader: a genuinely ABSENT bundle -> None (a non-4a run is
+        # distinguishable), a present-but-MALFORMED bundle -> CANNOT-EVALUATE (fail-closed); and the bundle
+        # ALONE marks a run ingest (recognized at apply/review).
+        with fixture({"legacy/a.md": "source\n"}) as (root, machine):
+            ws = triage(root, ["legacy/a.md"], "keep")
+            run = staged(root, machine, ws, empty, ["legacy/a.md"])
+            if run is not None:
+                run_rel = "{}/{}".format(_opf_import.IMPORTS_REL, run.name)
+                (run / "ingest-review.toml").write_text('format = "wrong"\nschema = 1\n', encoding="utf-8")
+                fd = open_fd(root)
+                try:
+                    raised = False
+                    try:
+                        _opf_import._load_staged_ingest_for_review(fd, run_rel)
+                    except _opf_import._StageError:
+                        raised = True
+                    check("reader-malformed-refuses", raised)
+                finally:
+                    os.close(fd)
+                (run / "ingest-review.toml").unlink()
+                fd = open_fd(root)
+                try:
+                    check("reader-absent-none",
+                          _opf_import._load_staged_ingest_for_review(fd, run_rel) is None)
+                finally:
+                    os.close(fd)
+        with fixture({"legacy/a.md": "source\n"}) as (root, machine):
+            bogus = "imp-20260909T120000Z-000000000000beef"
+            rd = machine.parent / "imports" / bogus
+            rd.mkdir(parents=True)
+            (rd / _opf_import.INGEST_REVIEW_NAME).write_text("x = 1\n", encoding="utf-8")
+            fd = open_fd(root)
+            try:
+                check("marker-recognizes-bundle-only",
+                      _opf_import._ingest_run_marker(
+                          fd, "{}/{}".format(_opf_import.IMPORTS_REL, bogus))
+                      == _opf_import.INGEST_REVIEW_NAME)
+            finally:
+                os.close(fd)
+
     registry = (
         [("options-schema-validator", schema_validator), ("keep-unmanaged-exemption", keep),
          ("migrate-importer-proposal", migrate), ("move-collision-matrix", collisions),
@@ -1973,7 +2153,8 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
          ("disposition-binding-matrix", disposition_bindings),
          ("relocated-store-scope-bytes", relocated_store_scope),
          ("reconcile-stage-window", reconcile_stage_window),
-         ("partial-ingest-stage-nonpromotable", partial_ingest_stage)]
+         ("partial-ingest-stage-nonpromotable", partial_ingest_stage),
+         ("ingest-review-bundle", review_bundle)]
         if gate else
         [("plan-ingest-keep-exemption", keep), ("plan-ingest-migrate-provenance", migrate),
          ("plan-ingest-move-archive-default", archive),
@@ -1985,7 +2166,8 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
          ("plan-ingest-disposition-binding-matrix", disposition_bindings),
          ("plan-ingest-relocated-store-scope", relocated_store_scope),
          ("plan-ingest-reconcile-stage-window", reconcile_stage_window),
-         ("plan-ingest-partial-stage-nonpromotable", partial_ingest_stage)])
+         ("plan-ingest-partial-stage-nonpromotable", partial_ingest_stage),
+         ("plan-ingest-review-bundle", review_bundle)])
     outer_check = check
     for label, test in registry:
         check = lambda suffix, cond, label=label: outer_check(label + "/" + suffix, cond)

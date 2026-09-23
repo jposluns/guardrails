@@ -408,18 +408,29 @@ def check_staged_run(run_dir):
                 # not a [start, end] int pair ([] or [5]) is a located row FINDING here rather than an
                 # uncaught IndexError when _render_report_md below indexes span[0]/span[1] over this UNTRUSTED
                 # staged proposal (R6-F1, the exception-coverage class sibling of the artifact-list guard).
+                # MIG-PR4a: admit the DECLARED proposal-provenance vocabulary (imp._PROPOSAL_ORIGIN_VALUES:
+                # model_proposal AND the MIG-PR3 importer_proposal), not model_proposal alone. Pre-fix a real
+                # staged MIGRATE run (whose importer suggestions rest as origin=importer_proposal) failed this
+                # check, so no migrate run could ever pass the gate and thus could never be reviewed. An origin
+                # OUTSIDE the closed vocabulary is still rejected here (reject unknown/conflicting origins).
                 span = pr.get("span") if isinstance(pr, dict) else None
-                if not (isinstance(pr, dict) and pr.get("origin") == imp._MODEL_PROPOSAL_ORIGIN
+                if not (isinstance(pr, dict) and pr.get("origin") in imp._PROPOSAL_ORIGIN_VALUES
                         and isinstance(pr.get("source_path"), str)
                         and isinstance(span, list) and len(span) == 2 and all(type(x) is int for x in span)
                         and isinstance(pr.get("suggested_state"), str)
                         and pr.get("suggested_state") in imp.MAPPING_STATES):
-                    pa_ok, pa_detail = False, "a proposals.toml row is malformed or not origin=model_proposal"
+                    pa_ok, pa_detail = False, ("a proposals.toml row is malformed or carries an origin "
+                                               "outside the proposal-provenance vocabulary")
                     break
     if pa_ok:
         try:
+            # MIG-PR4a: RETAIN each row's provenance during report normalization. _render_report_md renders
+            # `origin=<p._origin>` per proposal, so the reproduced report must carry the SAME per-row origin
+            # the staged proposals.toml records; without it every row reproduced as the default model_proposal
+            # and an importer_proposal row's report line no longer byte-matched the staged IMPORT-REPORT.md.
             norm = [{"source_path": pr["source_path"], "span": list(pr["span"]),
-                     "suggested_state": pr["suggested_state"], "note": pr.get("note", "")}
+                     "suggested_state": pr["suggested_state"], "note": pr.get("note", ""),
+                     "_origin": pr["origin"]}
                     for pr in proposals.get("proposal", [])]
             expected_md = imp._render_report_md(inventory.get("inventory_digest"),
                                                 inventory.get("fragment"), norm, run_dir.name)
