@@ -38,10 +38,6 @@ reorganized.
 
 Fix errors and prevent their recurrence. Worked first.
 
-| ID | Item | Tags |
-| --- | --- | --- |
-| U5-CHANGELOG-PARSE-FIX | Fail-closed changelog heading scanner: cannot-evaluate on ambiguous Markdown blocks (M, S) | `[public]` |
-
 ## Priority 2 - Fill significant gaps
 
 Fill significant gaps: deepen thin-but-present capability to operational sufficiency, and add the significant missing capabilities.
@@ -56,17 +52,15 @@ Tooling: the pack's operational-files framework, migration and adoption machiner
 
 | ID | Item | Tags |
 | --- | --- | --- |
-| OPF-INIT | `opf init`: initialize and wire OPF into a project, with staging and a mutation lock (H, L) | `[public]` `[tooling]` `[BLOCKED: design sign-off]` |
+| OPF-INIT | `opf init`: initialize and wire OPF into a project, with staging and a mutation lock (H, L) | `[public]` `[tooling]` |
 | OPF-DOGFOOD | dogfood: migrate this project's own operational records to OPF (M, M) | `[public]` `[tooling]` |
 | OPF-ADOPT-ENTRY | adoption entry point: a generated assistant-readable entry (llms.txt-style) for self-adoption (M, M) | `[public]` `[tooling]` |
 | OPF-ADOPT-VALIDATE | adoption-validation harness: a standing "does it work" check for adopters (M, M) | `[public]` `[tooling]` |
-| OPF-EARLYCUT | early release exposing `opf migrate` to first adopters (M, S) | `[public]` `[tooling]` |
+| OPF-EARLYCUT | early release exposing OPF migration of existing operational files to first adopters (M, S) | `[public]` `[tooling]` |
 | OPF-CONSUMER | migrate our own tooling to consume the OPF store (M, M) | `[public]` `[tooling]` |
 | OPF-WRITER | OPF round-trip record-append path (M, M) | `[public]` `[BLOCKED: writer licence review]` |
 | OPF-DECISIONS-REGISTER | OPF decisions register: file answered decisions and preference patterns (M, M) | `[public]` `[BLOCKED: round-trip writer]` |
-| OPF-D2B-IGNORE-COMPLETE | `opf init` global-config-aware ignore-destination refusal (M, M) | `[public]` |
 | OPF-CONTRIBUTION-TYPE | OPF outbound contribution ledger type: append/write path (M, M) | `[public]` `[BLOCKED: round-trip writer]` |
-| OPF-CHANGELOG-ABSORB | OPF changelog type: TOML source with a generated CHANGELOG.md view (M, M) | `[public]` |
 | VER-1 | Adoption + versioning umbrella: release/tag process, drift gate, adopter manifest (H, XL) | `[public]` |
 | EN-2 | New protective hooks: trojan-source detection, self-guard loop, config-surface guard (M, L) | `[public]` |
 | EN-5 | Prose-enforcement hook roster: publish/enable the plugin for adopters (H, M) | `[public]` |
