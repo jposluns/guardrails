@@ -1058,6 +1058,37 @@ def _self_test():
         expect("disc-proposals-artifact-fragment-span-index",
                pa[0] is False and "cannot reproduce" in pa[1])
 
+        # proposals-artifact (MIG-PR4a proposal-provenance vocabulary): the gate admits the DECLARED
+        # vocabulary (imp._PROPOSAL_ORIGIN_VALUES: model_proposal AND the MIG-PR3 importer_proposal), so a
+        # real staged run whose proposals rest as origin=importer_proposal PASSes; an origin OUTSIDE the
+        # closed vocabulary is still rejected. Co-locates the vocabulary widening's fail-without-it in this
+        # gate's OWN self-test (change-carries-check): pre-fix (model_proposal alone admitted) the
+        # importer_proposal run FINDINGs, so the PASS leg FAILS without the widening.
+        iroot, imachine = build_store({"a.txt": "aaaa"})
+        importer = {"source_path": "a.txt", "span": [0, 2], "suggested_state": "mapped"}
+        ipr = imp.plan_import(iroot, ["a.txt"], importer_proposals=[importer],
+                              now=NOW, run_nonce="gate-nonce")
+        if ipr.verdict != 0 or not ipr.run_id:
+            raise OSError("harness: could not stage an importer-proposal run ({}: {})".format(
+                ipr.verdict, ipr.findings))
+        irun = imachine.parent / "imports" / ipr.run_id
+        # guard against a vacuous pass: the staged proposals really carry the importer_proposal origin.
+        iprops = _load_toml(irun / "proposals.toml")
+        expect("proposals-artifact-importer-origin-row-present",
+               any(p.get("origin") == imp._IMPORTER_PROPOSAL_ORIGIN
+                   for p in iprops.get("proposal", [])))
+        expect("proposals-artifact-importer-origin",
+               check_staged_run(irun)["proposals-artifact"][0] is True)
+        # an origin OUTSIDE the closed proposal-provenance vocabulary is still REJECTED (the widening admits
+        # the declared set, not anything): a "guessed" origin FINDINGs at the vocabulary arm, which runs
+        # before report reproduction, so proposals.toml (not in report's artefact list) is the only mutation.
+        m = copy_run(irun)
+        props = _load_toml(m / "proposals.toml")
+        for pr in props["proposal"]:
+            pr["origin"] = "guessed"
+        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        expect("disc-proposals-origin-unknown", check_staged_run(m)["proposals-artifact"][0] is False)
+
         # --- acceptance.json (conditionally present): absent PASSes, present-and-valid PASSes, and each
         #     new acceptance check FINDINGs on its single mutation (acceptance.json is not in report's
         #     artefact list, so a mutation trips only the acceptance layer). ------------------------------

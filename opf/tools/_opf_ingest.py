@@ -2146,6 +2146,64 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             finally:
                 os.close(fd)
 
+        # (d) F2 reader ENTRY-shape: a structurally-valid bundle whose worksheet.row (resp. options.option) is
+        # a list whose ENTRIES are NOT tables is CANNOT-EVALUATE. Pre-fix the reader asserted only that row /
+        # option were lists, so a `[42]` entry passed the structural reader and a later per-row consumer would
+        # crash on it; each leg FAILS without its `all(isinstance(...))` entry guard (change-carries-check).
+        import copy
+        with fixture({"legacy/a.md": "source\n"}) as (root, machine):
+            ws = triage(root, ["legacy/a.md"], "keep")
+            run = staged(root, machine, ws, empty, ["legacy/a.md"])
+            if run is not None:
+                run_rel = "{}/{}".format(_opf_import.IMPORTS_REL, run.name)
+                good = load_bundle(root, run)
+                for owner, field, name in (("worksheet", "row", "reader-row-entry-not-table"),
+                                           ("options", "option", "reader-option-entry-not-table")):
+                    bad = copy.deepcopy(good)
+                    bad[owner][field] = [42]
+                    (run / _opf_import.INGEST_REVIEW_NAME).write_bytes(
+                        _opf_import._emit_bytes(bad, _opf_import.INGEST_REVIEW_NAME))
+                    fd = open_fd(root)
+                    try:
+                        raised = False
+                        try:
+                            _opf_import._load_staged_ingest_for_review(fd, run_rel)
+                        except _opf_import._StageError as exc:
+                            raised = exc.verdict == CANNOT_EVALUATE
+                        check(name, raised)
+                    finally:
+                        os.close(fd)
+
+        # (e) F1 bundle-writer INVENTORY drift: the writer re-checks BOTH staged source records (run.toml AND
+        # inventory.toml) against the frozen crosswalk BEFORE it finalizes, so a frozen bundle can never
+        # describe a drifted snapshot. A staged inventory.toml whose source identity drifts from run.toml /
+        # expected is refused CANNOT-EVALUATE naming inventory.toml. Pre-fix only run.toml was re-checked, so
+        # an inventory.toml drift slipped through; this leg FAILS without the inventory.toml arm of the
+        # step-3 loop (change-carries-check).
+        with fixture({"legacy/a.md": "source\n"}) as (root, machine):
+            ws = triage(root, ["legacy/a.md"], "keep")
+            run = staged(root, machine, ws, empty, ["legacy/a.md"])
+            if run is not None:
+                run_rel = "{}/{}".format(_opf_import.IMPORTS_REL, run.name)
+                bundle = load_bundle(root, run)
+                run_src = read(run, "run.toml")["source"]
+                expected = {s["path"]: ("sha256:" + s["sha256"], s["size"]) for s in run_src}
+                review_inputs = {
+                    "include": bundle["include"] if bundle["include_declared"] else None,
+                    "worksheet": bundle["worksheet"], "options": bundle["options"],
+                    "crosswalk": bundle["crosswalk"], "migrate": bundle["migrate"],
+                    "expected": expected}
+                inv = read(run, "inventory.toml")
+                inv["source"][0]["sha256"] = ("1" * 64 if inv["source"][0]["sha256"] != "1" * 64
+                                              else "0" * 64)
+                (run / "inventory.toml").write_bytes(_opf_import._emit_bytes(inv, "inventory.toml"))
+                raised = False
+                try:
+                    _opf_import._write_ingest_review_bundle(root, run_rel, run.name, review_inputs)
+                except _opf_import._StageError as exc:
+                    raised = exc.verdict == CANNOT_EVALUATE and "inventory.toml" in exc.message
+                check("bundle-inventory-drift-refused", raised)
+
     registry = (
         [("options-schema-validator", schema_validator), ("keep-unmanaged-exemption", keep),
          ("migrate-importer-proposal", migrate), ("move-collision-matrix", collisions),

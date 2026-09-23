@@ -2161,24 +2161,35 @@ def _write_ingest_review_bundle(product_root, run_rel, run_id, review_inputs):
                               "the frozen snapshot is incomplete (fail-closed)".format(name, exc))
             bound[name] = "sha256:" + _sha256_hex(data)
         # 3. RE-CHECK staged source identities against the frozen resolution crosswalk (A5: the frozen
-        #    snapshot records the identity it froze). run.toml carries the digests staging preserved.
-        run_tbl = _read_toml(store_root_fd, run_rel + "/run.toml")
-        srcs = run_tbl.get("source") if isinstance(run_tbl, dict) else None
-        if not isinstance(srcs, list):
-            raise _cannot("ingest review bundle: staged run.toml carries no source list (cannot re-check "
-                          "the frozen source identities)")
-        staged_ident = {}
-        for s in srcs:
-            if not (isinstance(s, dict) and isinstance(s.get("path"), str)
-                    and isinstance(s.get("sha256"), str) and type(s.get("size")) is int):
-                raise _cannot("ingest review bundle: staged run.toml carries a malformed source row "
-                              "(cannot re-check the frozen source identities)")
-            staged_ident[s["path"]] = ("sha256:" + s["sha256"], s["size"])
-        for resolved, ident in review_inputs["expected"].items():
-            if staged_ident.get(resolved) != ident:
-                raise _cannot("ingest review bundle: staged source {!r} identity {} does not match the "
-                              "frozen crosswalk identity {} (the snapshot drifted under staging; "
-                              "fail-closed)".format(resolved, staged_ident.get(resolved), ident))
+        #    snapshot records the identity it froze), over BOTH staged source records: run.toml (the digests
+        #    staging preserved) AND inventory.toml (the review surface a later acceptance binds). Checking
+        #    both here refuses the bundle BEFORE it is finalized when EITHER record drifts under a staging
+        #    race, so a frozen bundle can never describe a drifted snapshot. The plan_ingest-level
+        #    _verify_staged_against_worksheet runs only AFTER plan_import has already staged the bundle, so
+        #    the writer must re-check both lists itself (F-MIG-PR4A-BUNDLE-DRIFT-ORDER).
+        expected = review_inputs["expected"]
+        for _src_name in ("run.toml", "inventory.toml"):
+            src_tbl = _read_toml(store_root_fd, run_rel + "/" + _src_name)
+            srcs = src_tbl.get("source") if isinstance(src_tbl, dict) else None
+            if not isinstance(srcs, list):
+                raise _cannot("ingest review bundle: staged {} carries no source list (cannot re-check "
+                              "the frozen source identities)".format(_src_name))
+            staged_ident = {}
+            for s in srcs:
+                if not (isinstance(s, dict) and isinstance(s.get("path"), str)
+                        and isinstance(s.get("sha256"), str) and type(s.get("size")) is int):
+                    raise _cannot("ingest review bundle: staged {} carries a malformed source row "
+                                  "(cannot re-check the frozen source identities)".format(_src_name))
+                staged_ident[s["path"]] = ("sha256:" + s["sha256"], s["size"])
+            if set(staged_ident) != set(expected):
+                raise _cannot("ingest review bundle: staged {} source set {} does not equal the frozen "
+                              "crosswalk set {} (the snapshot drifted under staging; fail-closed)".format(
+                                  _src_name, sorted(staged_ident), sorted(expected)))
+            for resolved, ident in expected.items():
+                if staged_ident.get(resolved) != ident:
+                    raise _cannot("ingest review bundle: staged {} source {!r} identity {} does not match "
+                                  "the frozen crosswalk identity {} (the snapshot drifted under staging; "
+                                  "fail-closed)".format(_src_name, resolved, staged_ident.get(resolved), ident))
     finally:
         os.close(store_root_fd)
 
@@ -2265,11 +2276,13 @@ def _load_staged_ingest_for_review(store_root_fd, run_rel):
     ws = bundle.get("worksheet")
     if not (isinstance(ws, dict) and isinstance(ws.get("format"), str)
             and type(ws.get("schema")) is int and isinstance(ws.get("row"), list)
+            and all(isinstance(r, dict) for r in ws["row"])
             and isinstance(ws.get("worksheet_digest"), str) and _DIGEST_RE.match(ws["worksheet_digest"])):
         raise _cannot("ingest review bundle: worksheet is not a well-formed embedded worksheet (malformed)")
     opts = bundle.get("options")
     if not (isinstance(opts, dict) and isinstance(opts.get("format"), str)
-            and type(opts.get("schema")) is int and isinstance(opts.get("option"), list)):
+            and type(opts.get("schema")) is int and isinstance(opts.get("option"), list)
+            and all(isinstance(o, dict) for o in opts["option"])):
         raise _cannot("ingest review bundle: options is not a well-formed embedded options doc (malformed)")
     cross = bundle.get("crosswalk")
     if not isinstance(cross, list):
