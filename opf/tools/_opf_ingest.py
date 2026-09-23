@@ -1351,6 +1351,10 @@ def _verify_staged_against_worksheet(resolution, run_rel, run_id, expected):
                                   "be verified (fail-closed, the staged run {} is refused "
                                   "non-promotable)".format(rel, run_id))
                 seen[s["path"]] = ("sha256:" + s["sha256"], s["size"])
+            if len(seen) != len(rows):
+                raise _cannot("staged {} carries a duplicate source path; the worksheet binding cannot be "
+                              "verified (fail-closed, the staged run {} is refused non-promotable)".format(
+                                  rel, run_id))
             if set(seen) != set(expected):
                 raise _cannot("staged {} source set {} does not equal the reconciled worksheet set {}; the "
                               "tree changed under staging (fail-closed, the staged run {} is refused "
@@ -2203,6 +2207,71 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 except _opf_import._StageError as exc:
                     raised = exc.verdict == CANNOT_EVALUATE and "inventory.toml" in exc.message
                 check("bundle-inventory-drift-refused", raised)
+
+        # (f) cx4 DUPLICATE source path: a staged inventory.toml whose [[source]] list repeats a path (a
+        # DRIFTED sha256 first, the CORRECT row last) is refused CANNOT-EVALUATE. Last-wins would reduce the
+        # list to the correct final identity and MASK the drifted occurrence, so the writer rejects a source
+        # list whose distinct-path count differs from its row count. This leg FAILS without the
+        # `len(staged_ident) != len(srcs)` guard: with it removed, last-wins == expected and the drift check
+        # passes, so the bundle would finalize over a drifted duplicate (F-MIG-PR4A-DUP-PATH-MASK).
+        with fixture({"legacy/a.md": "source\n"}) as (root, machine):
+            ws = triage(root, ["legacy/a.md"], "keep")
+            run = staged(root, machine, ws, empty, ["legacy/a.md"])
+            if run is not None:
+                run_rel = "{}/{}".format(_opf_import.IMPORTS_REL, run.name)
+                bundle = load_bundle(root, run)
+                run_src = read(run, "run.toml")["source"]
+                expected = {s["path"]: ("sha256:" + s["sha256"], s["size"]) for s in run_src}
+                review_inputs = {
+                    "include": bundle["include"] if bundle["include_declared"] else None,
+                    "worksheet": bundle["worksheet"], "options": bundle["options"],
+                    "crosswalk": bundle["crosswalk"], "migrate": bundle["migrate"],
+                    "expected": expected}
+                inv = read(run, "inventory.toml")
+                orig_row = inv["source"][0]
+                drifted = dict(orig_row, sha256=("1" * 64 if orig_row["sha256"] != "1" * 64 else "0" * 64))
+                inv["source"] = [drifted, dict(orig_row)]  # dup path: drifted first, correct (last-wins) last
+                (run / "inventory.toml").write_bytes(_opf_import._emit_bytes(inv, "inventory.toml"))
+                raised = False
+                try:
+                    _opf_import._write_ingest_review_bundle(root, run_rel, run.name, review_inputs)
+                except _opf_import._StageError as exc:
+                    raised = (exc.verdict == CANNOT_EVALUATE and "duplicate source path" in exc.message
+                              and "inventory.toml" in exc.message)
+                check("bundle-inventory-dup-path-refused", raised)
+
+        # (g) codex A SPLIT-READ (behavioural): inventory.toml's identities are parsed from the SAME bytes
+        # bound in step 2, never a SECOND read in step 3, so no second inventory read exists to race the
+        # binding read. This pins that property behaviourally: over a valid staged run, record every rel
+        # _read_toml is asked for during _write_ingest_review_bundle and assert inventory.toml is NEVER among
+        # them (only run.toml is re-read in step 3). This leg FAILS if step 3 is reverted to re-read
+        # inventory.toml via _read_toml (the split-read the same-bytes fix closes).
+        with fixture({"legacy/a.md": "source\n"}) as (root, machine):
+            ws = triage(root, ["legacy/a.md"], "keep")
+            run = staged(root, machine, ws, empty, ["legacy/a.md"])
+            if run is not None:
+                run_rel = "{}/{}".format(_opf_import.IMPORTS_REL, run.name)
+                bundle = load_bundle(root, run)
+                run_src = read(run, "run.toml")["source"]
+                expected = {s["path"]: ("sha256:" + s["sha256"], s["size"]) for s in run_src}
+                review_inputs = {
+                    "include": bundle["include"] if bundle["include_declared"] else None,
+                    "worksheet": bundle["worksheet"], "options": bundle["options"],
+                    "crosswalk": bundle["crosswalk"], "migrate": bundle["migrate"],
+                    "expected": expected}
+                (run / _opf_import.INGEST_REVIEW_NAME).unlink()  # clean re-create for the instrumented write
+                reads = []
+                _real_read_toml = _opf_import._read_toml
+                def _recording_read_toml(fd, rel, *a, **k):
+                    reads.append(rel)
+                    return _real_read_toml(fd, rel, *a, **k)
+                _opf_import._read_toml = _recording_read_toml
+                try:
+                    _opf_import._write_ingest_review_bundle(root, run_rel, run.name, review_inputs)
+                finally:
+                    _opf_import._read_toml = _real_read_toml
+                check("bundle-inventory-single-read",
+                      (run_rel + "/inventory.toml") not in reads and (run_rel + "/run.toml") in reads)
 
     registry = (
         [("options-schema-validator", schema_validator), ("keep-unmanaged-exemption", keep),

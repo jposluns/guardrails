@@ -2160,17 +2160,23 @@ def _write_ingest_review_bundle(product_root, run_rel, run_id, review_inputs):
                 raise _cannot("ingest review bundle: required payload {} is missing or unreadable ({}); "
                               "the frozen snapshot is incomplete (fail-closed)".format(name, exc))
             bound[name] = "sha256:" + _sha256_hex(data)
-        # 3. RE-CHECK staged source identities against the frozen resolution crosswalk (A5: the frozen
-        #    snapshot records the identity it froze), over BOTH staged source records: run.toml (the digests
-        #    staging preserved) AND inventory.toml (the review surface a later acceptance binds). Checking
-        #    both here refuses the bundle BEFORE it is finalized when EITHER record drifts under a staging
-        #    race, so a frozen bundle can never describe a drifted snapshot. The plan_ingest-level
-        #    _verify_staged_against_worksheet runs only AFTER plan_import has already staged the bundle, so
-        #    the writer must re-check both lists itself (F-MIG-PR4A-BUNDLE-DRIFT-ORDER).
+            if name == INVENTORY_NAME:
+                _inventory_bytes = data
+        # 3. RE-CHECK staged source identities against the frozen crosswalk over BOTH staged source records.
+        #    inventory.toml's identities are parsed from the SAME bytes bound in step 2 (never a second read),
+        #    so the identities validated are provably the bytes whose digest the bundle binds: a split-read
+        #    between the binding read and the identity read cannot bind one snapshot while validating another.
+        #    run.toml is not digest-bound, so it is read once here. A duplicate source-path row is rejected so
+        #    a last-wins reduction cannot mask a drifted non-final occurrence (F-MIG-PR4A-DUP-PATH-MASK).
         expected = review_inputs["expected"]
-        for _src_name in ("run.toml", "inventory.toml"):
-            src_tbl = _read_toml(store_root_fd, run_rel + "/" + _src_name)
-            srcs = src_tbl.get("source") if isinstance(src_tbl, dict) else None
+        try:
+            _inventory_doc = tomllib.loads(_inventory_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise _cannot("ingest review bundle: staged {} is unreadable ({}); the frozen snapshot is "
+                          "incomplete (fail-closed)".format(INVENTORY_NAME, exc))
+        for _src_name, _src_doc in (("run.toml", _read_toml(store_root_fd, run_rel + "/run.toml")),
+                                    (INVENTORY_NAME, _inventory_doc)):
+            srcs = _src_doc.get("source") if isinstance(_src_doc, dict) else None
             if not isinstance(srcs, list):
                 raise _cannot("ingest review bundle: staged {} carries no source list (cannot re-check "
                               "the frozen source identities)".format(_src_name))
@@ -2181,6 +2187,9 @@ def _write_ingest_review_bundle(product_root, run_rel, run_id, review_inputs):
                     raise _cannot("ingest review bundle: staged {} carries a malformed source row "
                                   "(cannot re-check the frozen source identities)".format(_src_name))
                 staged_ident[s["path"]] = ("sha256:" + s["sha256"], s["size"])
+            if len(staged_ident) != len(srcs):
+                raise _cannot("ingest review bundle: staged {} carries a duplicate source path (a last-wins "
+                              "reduction could mask a drifted row; fail-closed)".format(_src_name))
             if set(staged_ident) != set(expected):
                 raise _cannot("ingest review bundle: staged {} source set {} does not equal the frozen "
                               "crosswalk set {} (the snapshot drifted under staging; fail-closed)".format(

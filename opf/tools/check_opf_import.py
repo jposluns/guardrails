@@ -1080,13 +1080,26 @@ def _self_test():
         expect("proposals-artifact-importer-origin",
                check_staged_run(irun)["proposals-artifact"][0] is True)
         # an origin OUTSIDE the closed proposal-provenance vocabulary is still REJECTED (the widening admits
-        # the declared set, not anything): a "guessed" origin FINDINGs at the vocabulary arm, which runs
-        # before report reproduction, so proposals.toml (not in report's artefact list) is the only mutation.
+        # the declared set, not anything): a "guessed" origin FINDINGs at the vocabulary arm. The staged
+        # IMPORT-REPORT.md is REGENERATED to byte-reproduce the guessed-origin proposals (a coherent report)
+        # and report.toml's digest refreshed, so the report-reproduction arm PASSES and the ONLY remaining
+        # rejection cause is the origin-vocab guard. This isolates the guard: reverting `pr.get("origin") in
+        # imp._PROPOSAL_ORIGIN_VALUES` to True makes this discriminator FLIP to accept (verified). Without the
+        # coherent report a stale-report mismatch would reject independently and mask a reverted guard (codex).
         m = copy_run(irun)
         props = _load_toml(m / "proposals.toml")
         for pr in props["proposal"]:
             pr["origin"] = "guessed"
         (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        m_inv = _load_toml(m / "inventory.toml")
+        m_norm = [{"source_path": pr["source_path"], "span": list(pr["span"]),
+                   "suggested_state": pr["suggested_state"], "note": pr.get("note", ""),
+                   "_origin": pr["origin"]}
+                  for pr in props.get("proposal", [])]
+        (m / "IMPORT-REPORT.md").write_bytes(
+            imp._render_report_md(m_inv.get("inventory_digest"), m_inv.get("fragment"),
+                                  m_norm, m.name).encode("utf-8"))
+        rewrite_report_digest(m, "IMPORT-REPORT.md")
         expect("disc-proposals-origin-unknown", check_staged_run(m)["proposals-artifact"][0] is False)
 
         # --- acceptance.json (conditionally present): absent PASSes, present-and-valid PASSes, and each
