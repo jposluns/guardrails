@@ -1203,8 +1203,9 @@ def validate_lossy_report(report):
 def _validate_candidate(candidate, validate_record):
     """Validate one id-less candidate draft envelope through the REAL record validator (the single record
     schema authority both paths pass). A synthetic well-formed id, and (for a full envelope) a synthetic
-    updated_at, are injected for VALIDATION ONLY (the counter mints the id and the apply clock stamps
-    updated_at at promotion, MIG-PR5), so the draft is proven schema-valid modulo the apply-time mint.
+    updated_at, are injected for VALIDATION ONLY and only where the key is ABSENT (the counter mints the id
+    and the apply clock stamps updated_at at promotion, MIG-PR5), so the draft is proven schema-valid modulo
+    the apply-time mint. A PRESENT id is refused (INVALID) and a PRESENT updated_at is validated as given.
     Returns a RecordValidation."""
     if not (isinstance(candidate, dict) and set(candidate) == {"draft_ref", "type", "record"}):
         return _opf_schema.RecordValidation(_opf_store.CANNOT_EVALUATE,
@@ -1223,12 +1224,37 @@ def _validate_candidate(candidate, validate_record):
     if ns is None:
         return _opf_schema.RecordValidation(_opf_store.CANNOT_EVALUATE,
                                             ["candidate.type {!r} is not a baseline record type".format(ctype)])
+    # ABSENT is distinguished from PRESENT-but-falsy (round-4 F1): a placeholder is synthesized ONLY for a
+    # key the draft does not carry. A draft is id-less by contract (the counter mints at apply), so a PRESENT
+    # `id` of any value (a valid-looking id, or False / 0 / "" / [] / {}) is refused rather than silently
+    # replaced by the synthetic one; a PRESENT `updated_at` is never overwritten, so a falsy or malformed
+    # value reaches the real record validator and is judged there.
+    if "id" in rec:
+        return _opf_schema.RecordValidation(_opf_store.INVALID, [
+            "a candidate draft carries an `id` ({!r}); a draft is id-less, the counter mints the id at "
+            "apply".format(rec["id"])])
     rec = copy.deepcopy(rec)
-    if not rec.get("id"):
-        rec["id"] = "{}-1".format(ns)
-    if ctype != _WORKLOG_TYPE and not rec.get("updated_at"):
+    rec["id"] = "{}-1".format(ns)
+    if ctype != _WORKLOG_TYPE and "updated_at" not in rec:
         rec["updated_at"] = _SYNTH_STAMP
     return validate_record(rec, expected_type=ctype)
+
+
+def candidate_ref_findings(refs):
+    """The candidate draft-reference invariants over ONE importer output's candidate draft_refs (in order):
+    every reference is a string, non-empty, and unique within that output. Returns a findings list (empty
+    == valid). The SINGLE authority for what a legal draft reference is, shared by validate_importer_output
+    (plan time) and the MIG-PR4b review gate over the frozen candidates_draft.toml (grouped per migrate
+    source), so the two cannot drift. Type-validated BEFORE any set construction: a non-string (e.g. a list)
+    reference is unhashable, so the multiplicity check is skipped once the set is known malformed."""
+    if not all(isinstance(r, str) for r in refs):
+        return ["a candidate draft_ref is not a string (a draft_ref must be a string)"]
+    findings = []
+    if any(r == "" for r in refs):
+        findings.append("a candidate draft_ref is empty (a draft_ref must be a non-empty string)")
+    if len(refs) != len(set(refs)):
+        findings.append("a candidate draft-ref is shared by more than one candidate (duplicate candidate)")
+    return findings
 
 
 def validate_importer_output(result, source, validate_record=None):
@@ -1352,15 +1378,14 @@ def validate_importer_output(result, source, validate_record=None):
         # (e.g. a list) draft_ref is unhashable and would raise a TypeError from `set(cand_ref_list)`. A
         # malformed draft-ref is a FINDING, and the multiplicity / bijection comparisons (which need the set)
         # are skipped for this untrusted set once it is known malformed.
-        if not all(isinstance(r, str) for r in cand_ref_list):
-            findings.append("a candidate draft_ref is not a string (a draft_ref must be a string)")
-        else:
+        # The candidate-reference invariants (string, non-empty, unique within this importer output) come from
+        # the SHARED candidate_ref_findings authority the MIG-PR4b review gate also applies to the frozen
+        # drafts, so the plan-time gate and the review gate cannot drift on what a legal draft reference is.
+        findings.extend(candidate_ref_findings(cand_ref_list))
+        if all(isinstance(r, str) for r in cand_ref_list):
             if len(span_ref_list) != len(set(span_ref_list)):
                 findings.append("a candidate record reference is shared by more than one mapped span "
                                 "(duplicate mapping)")
-            if len(cand_ref_list) != len(set(cand_ref_list)):
-                findings.append("a candidate draft-ref is shared by more than one candidate (duplicate "
-                                "candidate)")
             if set(span_ref_list) != set(cand_ref_list):
                 findings.append("candidate draft-refs do not match the mapped spans exactly")
 
@@ -1400,7 +1425,8 @@ def validate_assistant_output(result, source, validate_record=None):
     candidates = (result.candidates if isinstance(result, ImporterResult)
                   and isinstance(result.candidates, list) else [])
     for i, cand in enumerate(candidates):
-        if isinstance(cand, dict) and isinstance(cand.get("record"), dict) and cand["record"].get("id"):
+        # Key PRESENCE, never truthiness (round-4 F1 sibling): a falsy `id` (False, 0, "") is still an id.
+        if isinstance(cand, dict) and isinstance(cand.get("record"), dict) and "id" in cand["record"]:
             findings.append("assistant candidate[{}] carries a permanent id; a deterministic or assistant "
                             "importer assigns no id without human confirmation (spec 6)".format(i))
             if verdict == CLEAN:
@@ -1607,6 +1633,28 @@ def self_test():
     ares2 = import_github_tasklist(asrc)
     ares2.candidates[0]["record"]["id"] = "BI-7"
     check("assistant-permanent-id-refused", validate_assistant_output(ares2, asrc)[0] == FINDING)
+    # 14b. round-4 F1 (ABSENT vs PRESENT-FALSY): the placeholder id / updated_at is synthesized ONLY for an
+    # ABSENT key. A PRESENT falsy id (False, 0, "", [], {}) is refused by the shared _validate_candidate
+    # (INVALID), and so by the validator gate and the assistant contract; a PRESENT falsy updated_at reaches
+    # the real record validator unreplaced. The pre-fix `not rec.get(...)` synthesized over each and passed.
+    fsrc = mk("legacy/falsy.md", "- [ ] falsy item\n")
+    base_cand = import_github_tasklist(fsrc).candidates[0]
+    check("r4f1-absent-id-still-synthesized",
+          _validate_candidate(base_cand, _opf_schema.validate_record).status == _opf_store.VALID)
+    for tag, field, val in (("id-false", "id", False), ("id-zero", "id", 0), ("id-empty-str", "id", ""),
+                            ("id-empty-list", "id", []), ("id-empty-table", "id", {}),
+                            ("updated-at-false", "updated_at", False), ("updated-at-empty-str", "updated_at", "")):
+        fc = copy.deepcopy(base_cand)
+        fc["record"][field] = val
+        check("pr4b-disc-r4f1-validator-" + tag,
+              _validate_candidate(fc, _opf_schema.validate_record).status == _opf_store.INVALID)
+        fres = import_github_tasklist(fsrc)
+        fres.candidates[0]["record"][field] = val
+        check("pr4b-disc-r4f1-gate-" + tag, validate_importer_output(fres, fsrc)[0] == FINDING)
+    fres = import_github_tasklist(fsrc)
+    fres.candidates[0]["record"]["id"] = 0
+    check("pr4b-disc-r4f1-assistant-falsy-id", validate_assistant_output(fres, fsrc)[0] == FINDING
+          and any("permanent id" in f for f in validate_assistant_output(fres, fsrc)[1]))
 
     # 15. malformed source record -> CANNOT-EVALUATE (fail-closed at the boundary), never a silent skip.
     check("malformed-source-cannot-evaluate",

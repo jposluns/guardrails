@@ -1476,15 +1476,7 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
                     raise _finding("{}: span [{}, {}] splits a multi-byte UTF-8 sequence in {!r}; a "
                                    "fragment span must fall on character boundaries ({})".format(
                                        where, start, end, sp, exc))
-                lf = {
-                    "id": rid, "type": LF_TYPE, "status": "quarantined",
-                    "title": "Legacy fragment from {} [{}:{}]".format(sp, start, end),
-                    "created_at": stamp, "updated_at": stamp,
-                    "actor": {"kind": "importer"},
-                    "source_path": sp, "source_digest": source["sha256"],
-                    "span": [start, end], "run_id": run_id,
-                    "body": frag_body,
-                }
+                lf = _lf_record(rid, sp, source["sha256"], start, end, run_id, stamp, frag_body)
                 _validate_lf_provenance(lf, where)
                 rv = _opf_schema.validate_record(lf, expected_type=LF_TYPE, specs=roster)
                 if rv.status != _opf_store.VALID:
@@ -1640,6 +1632,78 @@ def _counters_regressed_below_existing(durable_ids, high_water, where):
     return findings
 
 
+# --- shared staged-run model builders (single authority; MIG-PR4b RE-DERIVATION) ------------------------
+# Each pure builder below is the ONE place a deterministic staged-run artefact's shape is defined. It is
+# called by BOTH the producer (_stage_resolved / _write_run / plan_import) and the MIG-PR4b review gate
+# (check_opf_import._verify_ingest_review_model), which RE-DERIVES the baseline artefacts of an ingest run
+# (run.toml, plan.toml, mappings.toml, the legacy_fragment index, report.toml) from the preserved source bytes
+# and requires the staged bytes to EQUAL the re-derivation, so the producer and the checker cannot drift.
+
+def _baseline_plan(sources):
+    """The deterministic whole-file BASELINE plan over enumerated sources (each a dict carrying `path` and
+    `size`): one fragment per source, span [0, size), classified `unmapped` with the baseline origin (nothing
+    is mechanically mapped, spec 14.1)."""
+    return {"fragments": {s["path"]: [{"span": [0, s["size"]], "state": "unmapped",
+                                       "origin": _BASELINE_ORIGIN}]
+                          for s in sources}}
+
+
+def _run_toml_model(run_id, stamp, run_nonce, sources):
+    """The run.toml model: the run identity, its staging instant and nonce, and each source's identity
+    {path, sha256 (bare hex), size}, sorted by path."""
+    return {"schema": SCHEMA, "run_id": run_id, "staged_at": stamp, "nonce": run_nonce,
+            "source": [{"path": s["path"], "sha256": s["sha256"], "size": s["size"]}
+                       for s in sorted(sources, key=lambda s: s["path"])]}
+
+
+def _mappings_model(mapping_states):
+    """The mappings.toml model from the per-source mapping states (source_path -> [{span, state, target,
+    origin}]): one row per span, sources sorted, a `target` carried only when it is a well-formed id."""
+    mapping_rows = []
+    for sp in sorted(mapping_states):
+        for m in mapping_states[sp]:
+            row = {"source_path": sp, "span": list(m["span"]), "state": m["state"],
+                   "origin": m["origin"]}
+            if _opf_schema._valid_id_shape(m.get("target")) is not None:
+                row["target"] = m["target"]
+            mapping_rows.append(row)
+    return {"schema": SCHEMA, "mapping": mapping_rows}
+
+
+def _counters_model(working_high):
+    """The candidate/counters.toml model: the advanced high-water map."""
+    return {"schema": SCHEMA, "counters": working_high}
+
+
+def _lf_record(rid, sp, source_sha256, start, end, run_id, stamp, frag_body):
+    """One legacy_fragment quarantine record: the minted id, the importer actor, the provenance quad
+    (source_path, source_digest, span, run_id), the staging instant, and the fragment body (the source's raw
+    bytes over [start, end), decoded by the caller)."""
+    return {
+        "id": rid, "type": LF_TYPE, "status": "quarantined",
+        "title": "Legacy fragment from {} [{}:{}]".format(sp, start, end),
+        "created_at": stamp, "updated_at": stamp,
+        "actor": {"kind": "importer"},
+        "source_path": sp, "source_digest": source_sha256,
+        "span": [start, end], "run_id": run_id,
+        "body": frag_body,
+    }
+
+
+def _run_report_model(run_id, plan_bytes, inventory_digest, state_counts, lf_present, all_body):
+    """The report.toml model (the promotion-ready marker): the plan digest over the staged plan.toml bytes,
+    the inventory digest, the non-zero state counts, and the digest of every staged candidate artefact in
+    `all_body` (run-relative suffix -> bytes), sorted by suffix."""
+    return {
+        "schema": SCHEMA, "run_id": run_id, "verdict": CLEAN, "promotion_ready": True,
+        "migration_incomplete": bool(lf_present),
+        "plan_digest": "sha256:" + _sha256_hex(plan_bytes), "inventory_digest": inventory_digest,
+        "counts": {k: v for k, v in state_counts.items() if v},
+        "artifact": [{"path": suffix, "sha256": _sha256_hex(data)}
+                     for suffix, data in sorted(all_body.items())],
+    }
+
+
 def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources, now, run_nonce,
                mapping_states, candidate_records, lf_records, worklog_records, working_high, state_counts,
                active_types, roster, minted_ids, registered_vendors=frozenset()):
@@ -1655,23 +1719,10 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
     stamp = _rfc3339(now)
 
     files = {}   # run-relative-suffix -> byte-canonical U8 TOML bytes
-    files["run.toml"] = _emit_bytes({
-        "schema": SCHEMA, "run_id": run_id, "staged_at": stamp, "nonce": run_nonce,
-        "source": [{"path": s["path"], "sha256": s["sha256"], "size": s["size"]}
-                   for s in sorted(sources, key=lambda s: s["path"])],
-    }, "run.toml")
+    files["run.toml"] = _emit_bytes(_run_toml_model(run_id, stamp, run_nonce, sources), "run.toml")
     files["plan.toml"] = plan_bytes
-    mapping_rows = []
-    for sp in sorted(mapping_states):
-        for m in mapping_states[sp]:
-            row = {"source_path": sp, "span": list(m["span"]), "state": m["state"],
-                   "origin": m["origin"]}
-            if _opf_schema._valid_id_shape(m.get("target")) is not None:
-                row["target"] = m["target"]
-            mapping_rows.append(row)
-    files["mappings.toml"] = _emit_bytes({"schema": SCHEMA, "mapping": mapping_rows}, "mappings.toml")
-    files["candidate/counters.toml"] = _emit_bytes(
-        {"schema": SCHEMA, "counters": working_high}, "candidate/counters.toml")
+    files["mappings.toml"] = _emit_bytes(_mappings_model(mapping_states), "mappings.toml")
+    files["candidate/counters.toml"] = _emit_bytes(_counters_model(working_high), "candidate/counters.toml")
     for rtype in sorted(candidate_records):
         files["candidate/{}.index.toml".format(rtype)] = _emit_bytes(
             {"schema": SCHEMA, "record": candidate_records[rtype]}, "candidate/{}.index.toml".format(rtype))
@@ -1713,17 +1764,10 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
     # authoritative marker, and a regenerated plan (a new run, hence new bytes) invalidates a prior
     # acceptance by construction. inventory_digest is a pure function of the sources (the same value
     # plan_import's scan computes), so report.toml carries it for every stage path.
-    plan_digest = "sha256:" + _sha256_hex(plan_bytes)
     _, inventory_digest, _, _ = _build_inventory(sources)
-    report = {
-        "schema": SCHEMA, "run_id": run_id, "verdict": CLEAN, "promotion_ready": True,
-        "migration_incomplete": bool(lf_records),
-        "plan_digest": plan_digest, "inventory_digest": inventory_digest,
-        "counts": {k: v for k, v in state_counts.items() if v},
-        "artifact": [{"path": suffix, "sha256": _sha256_hex(data)}
-                     for suffix, data in sorted(all_body.items())],
-    }
-    files_report = _emit_bytes(report, "report.toml")
+    files_report = _emit_bytes(
+        _run_report_model(run_id, plan_bytes, inventory_digest, state_counts, bool(lf_records), all_body),
+        "report.toml")
 
     content = {run_rel + "/" + suffix: data for suffix, data in all_body.items()}
 
@@ -1944,6 +1988,25 @@ def _validate_proposals(proposals, source_sizes):
     return out
 
 
+def _sort_proposal_rows(rows):
+    """The producer's DETERMINISTIC proposal order over validated, provenance-tagged rows (each carrying its
+    `_origin`): (source_path bytes, span start, span end, origin). The single ordering authority, shared by
+    plan_import and the MIG-PR4b review gate, which re-derives the staged proposals.toml from it."""
+    return sorted(rows, key=lambda p: (p["source_path"].encode("utf-8"), p["span"][0], p["span"][1],
+                                       p["_origin"]))
+
+
+def _proposals_model(run_id, proposal_rows):
+    """The proposals.toml model the producer stages from validated, sorted rows: each row verbatim as
+    _validate_proposals normalizes it, stamped with its provenance `origin` (default model_proposal). The
+    single construction authority, shared by _write_plan_artifacts and the MIG-PR4b review gate."""
+    return {
+        "schema": SCHEMA, "run_id": run_id,
+        "proposal": [{k: v for k, v in dict(p, origin=p.get("_origin", _MODEL_PROPOSAL_ORIGIN)).items()
+                      if k != "_origin"} for p in proposal_rows],
+    }
+
+
 def _render_report_md(inventory_digest, fragments, proposals, run_id):
     """Render IMPORT-REPORT.md (spec 4.2), the human review surface, DETERMINISTICALLY from the frozen
     inventory and the inert proposals, so regenerating it byte-reproduces it (a derivative, never
@@ -1966,8 +2029,13 @@ def _render_report_md(inventory_digest, fragments, proposals, run_id):
         "",
     ]
     for frag in fragments:
+        # E3 (C1 render fix): the source_path is UNTRUSTED staged data rendered into a Markdown code span, so
+        # it is escaped for the Markdown/terminal sink here in the report BODY exactly as the ingest section
+        # escapes its values (a crafted path could otherwise carry a C0/C1/DEL terminal-control byte, or a
+        # backtick, into the reviewer's terminal). Applied identically at plan and gate time, so byte
+        # reproduction is unaffected (a normal path is unchanged). fragment_id/digest are hex, not attacker text.
         lines.append("- `{}` [{}:{}] state=unmapped fragment_id=`{}` digest=`{}`".format(
-            frag["source_path"], frag["span"][0], frag["span"][1], frag["fragment_id"],
+            _ingest_md_escape(frag["source_path"]), frag["span"][0], frag["span"][1], frag["fragment_id"],
             frag["fragment_digest"]))
     lines += ["", "## Proposals (inert; require attributed acceptance)", ""]
     if not proposals:
@@ -1975,9 +2043,150 @@ def _render_report_md(inventory_digest, fragments, proposals, run_id):
     else:
         for p in proposals:
             suffix = " note={!r}".format(p["note"]) if p["note"] else ""
+            # E3 (C1 render fix): the proposal source_path is UNTRUSTED staged data in a code span, escaped for
+            # the Markdown/terminal sink like the fragment source_path above (note is already repr-escaped).
             lines.append("- `{}` [{}:{}] suggested_state={} origin={}{}".format(
-                p["source_path"], p["span"][0], p["span"][1], p["suggested_state"],
+                _ingest_md_escape(p["source_path"]), p["span"][0], p["span"][1], p["suggested_state"],
                 p.get("_origin", _MODEL_PROPOSAL_ORIGIN), suffix))
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _ingest_md_escape(s):
+    """Display-safety encoder for an UNTRUSTED staged value rendered into IMPORT-REPORT.md: neutralize
+    control / terminal-control bytes (a crafted path could otherwise carry an ANSI escape into the
+    reviewer's terminal) and the Markdown code-span delimiter (a backtick could break out of a `code span`).
+    Deterministic, and applied identically by the plan-time render and the gate recompute, so it never
+    perturbs the byte reproduction the gate asserts (SECI-output-encoding; disclose-guard-residuals: it
+    encodes for the Markdown/terminal sink, it is not a general sanitizer). Applied to the UNTRUSTED
+    source_path values in BOTH renders: the ordinary report body's fragment and proposal source_paths
+    (`_render_report_md`, E3) AND every untrusted value in the ingest review section (`_render_ingest_review_md`),
+    so no untrusted staged value reaches the reviewer's terminal raw from either surface. It does NOT cover
+    hex-only derived fields (fragment_id / digests) or the note (already repr-escaped)."""
+    if not isinstance(s, str):
+        s = str(s)
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch == "`":
+            out.append("\\u0060")
+        elif o < 0x20 or o == 0x7f or 0x80 <= o <= 0x9f:
+            # C0 (< 0x20), DEL (0x7f) AND the C1 control range (0x80-0x9f: CSI 0x9b, OSC 0x9d, etc.), which a
+            # terminal interprets as control sequences no less than C0; a crafted staged value could otherwise
+            # carry a C1-introduced escape into the reviewer's terminal. Applied identically at plan and gate
+            # time, so byte reproduction is unaffected.
+            out.append("\\x{:02x}".format(o))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _ingest_render_model(run_id, crosswalk, migrate):
+    """OPF-MIGRATE MIG-PR4b: build the DETERMINISTIC render model for the ingest review section from the two
+    frozen bundle fields the render displays (the scoped disposition crosswalk and the per-migrate-row
+    importer selection). Called with IDENTICAL inputs at plan time (from `ingest_review_inputs`) and at gate
+    time (from the loaded `ingest-review.toml` bundle, which froze exactly those inputs), so the section
+    byte-reproduces. Rows are re-sorted here so list order never leaks into the render. The A2 decision-unit
+    inventory (what a later attributed review must decide over) is DERIVED from the frozen scoped identities
+    and DISPLAYED only: a per-file disposition unit for every crosswalk row, plus a conversion/loss unit for
+    each migrate row that carries drafts or proposals. It is content-bound and reproducible; 4b persists NO
+    decision schema (the persisted A2/A1 representation is 4c)."""
+    cw = sorted(
+        ({"scope": r["scope"], "source_path": r["source_path"],
+          "resolved_source_path": r["resolved_source_path"], "disposition": r["disposition"]}
+         for r in crosswalk),
+        key=lambda r: (r["source_path"].encode("utf-8"), r["scope"], r["resolved_source_path"]))
+    mig = sorted(
+        ({"scope": m["scope"], "source_path": m["source_path"],
+          "resolved_source_path": m["resolved_source_path"], "importer_kind": m["importer_kind"],
+          "candidate_count": m["candidate_count"], "proposal_count": m["proposal_count"]}
+         for m in migrate),
+        key=lambda m: (m["source_path"].encode("utf-8"), m["scope"]))
+    # Each displayed unit id is KIND-PREFIXED (`<kind>:<scope>:<source_path>`), so a conversion unit and a
+    # disposition unit for a file whose name happens to spell another unit's id (`a.md#conversion` beside
+    # `a.md`) can never share an id; the kind is a closed token without a colon and the scope a closed token,
+    # so the prefix parse is unambiguous. Uniqueness is then ASSERTED, not assumed: a duplicate id (only a
+    # duplicated frozen (scope, source_path) row can yield one) is CANNOT-EVALUATE at plan time and a located
+    # FINDING at the gate, never a report that names two decisions with one id.
+    units = []
+    for r in cw:
+        units.append({"unit_id": "disposition:{}:{}".format(r["scope"], r["source_path"]),
+                      "kind": "disposition", "scope": r["scope"], "source_path": r["source_path"],
+                      "disposition": r["disposition"]})
+    for m in mig:
+        if m["candidate_count"] > 0 or m["proposal_count"] > 0:
+            units.append({"unit_id": "conversion:{}:{}".format(m["scope"], m["source_path"]),
+                          "kind": "conversion", "scope": m["scope"], "source_path": m["source_path"],
+                          "importer_kind": m["importer_kind"], "candidate_count": m["candidate_count"],
+                          "proposal_count": m["proposal_count"]})
+    unit_ids = [u["unit_id"] for u in units]
+    if len(set(unit_ids)) != len(unit_ids):
+        raise _cannot("ingest review decision-unit ids are not unique ({}); a duplicated frozen (scope, "
+                      "source_path) row cannot be rendered as distinct decisions (fail-closed)".format(
+                          sorted({i for i in unit_ids if unit_ids.count(i) > 1})))
+    units.sort(key=lambda u: (u["unit_id"].encode("utf-8"), u["kind"]))
+    return {"run_id": run_id, "crosswalk": cw, "migrate": mig, "decision_units": units}
+
+
+def _render_ingest_review_md(review_model):
+    """OPF-MIGRATE MIG-PR4b: render the DETERMINISTIC ingest review section of IMPORT-REPORT.md from the
+    validated review model ONLY (a pure function of the model, per the acyclic binding graph: the report
+    derives from the model and participates in no digest). Composed with `_render_report_md` at both the
+    plan-time render and the gate byte-reproduction check. Reviewability is displayed SEPARATELY from
+    promotion status (the section claims no validation it did not observe; a gate pass is coherence + sound
+    bindings, never promotable). Disposition-row, migrate/draft/proposal, and decision-unit counts are kept
+    SEPARATE (a count carries its predicate).
+    Every untrusted value is escaped for the Markdown/terminal sink (_ingest_md_escape)."""
+    run_id = review_model["run_id"]
+    cw = review_model["crosswalk"]
+    mig = review_model["migrate"]
+    units = review_model["decision_units"]
+    e = _ingest_md_escape
+    by_disp = {}
+    for r in cw:
+        by_disp[r["disposition"]] = by_disp.get(r["disposition"], 0) + 1
+    disp_summary = " ".join("{}={}".format(e(d), by_disp[d]) for d in sorted(by_disp)) or "none"
+    draft_total = sum(m["candidate_count"] for m in mig)
+    proposal_total = sum(m["proposal_count"] for m in mig)
+    lines = [
+        "## Ingest review: {}".format(e(run_id)),
+        "",
+        "GENERATED from the frozen ingest-review bundle (spec 14.1); do not hand-edit (regenerating this",
+        "section byte-reproduces it). REVIEWABILITY is displayed SEPARATELY from PROMOTION status. This",
+        "section is rendered at plan time and asserts NO validation: the snapshot's coherence and its",
+        "bindings over the staged bytes are established only by running the staged-run import gate, and",
+        "it is never promotable here (ingest acceptance capture and promotion are a later, attributed step).",
+        "",
+        "reviewability: staged; semantic validation required (run the staged-run import gate)",
+        "promotion status: refused (ingest acceptance capture is not available in this build)",
+        "",
+        "### Dispositions ({} rows: {})".format(len(cw), disp_summary),
+        "",
+    ]
+    for r in cw:
+        lines.append("- `{}` scope={} disposition={} resolved=`{}`".format(
+            e(r["source_path"]), e(r["scope"]), e(r["disposition"]), e(r["resolved_source_path"])))
+    lines += ["", "### Migrate importers ({} rows; drafts={} proposals={})".format(
+        len(mig), draft_total, proposal_total), ""]
+    if not mig:
+        lines.append("- (none)")
+    else:
+        for m in mig:
+            lines.append("- `{}` importer={} candidates={} proposals={}".format(
+                e(m["source_path"]), e(m["importer_kind"]), m["candidate_count"], m["proposal_count"]))
+    lines += ["", "### Decision units ({}; derived from the frozen bundle, displayed only)".format(
+        len(units)), ""]
+    if not units:
+        lines.append("- (none)")
+    else:
+        for u in units:
+            if u["kind"] == "disposition":
+                detail = "disposition={}".format(e(u["disposition"]))
+            else:
+                detail = "importer={} candidates={} proposals={}".format(
+                    e(u["importer_kind"]), u["candidate_count"], u["proposal_count"])
+            lines.append("- unit=`{}` kind={} scope={} source=`{}` {}".format(
+                e(u["unit_id"]), e(u["kind"]), e(u["scope"]), e(u["source_path"]), detail))
     lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -2003,11 +2212,7 @@ def _write_plan_artifacts(product_root, run_rel, run_id, inventory, report_md_by
                           INVENTORY_NAME, len(inv_bytes), _opf_store.MAX_STORE_READ_BYTES))
     # proposals.toml: the validated proposal rows exactly as _validate_proposals normalizes them, each
     # stamped origin = "model_proposal" (their machine-readable resting provenance).
-    proposals_model = {
-        "schema": SCHEMA, "run_id": run_id,
-        "proposal": [{k: v for k, v in dict(p, origin=p.get("_origin", _MODEL_PROPOSAL_ORIGIN)).items()
-                      if k != "_origin"} for p in proposal_rows],
-    }
+    proposals_model = _proposals_model(run_id, proposal_rows)
     prop_bytes = _emit_bytes(proposals_model, PROPOSALS_NAME)
     if len(prop_bytes) > _opf_store.MAX_STORE_READ_BYTES:
         raise _cannot("{} is {} bytes, over the {}-byte contained store-read cap; the staged proposals "
@@ -2259,15 +2464,38 @@ def _load_staged_ingest_for_review(store_root_fd, run_rel):
     non-ingest / non-4a run is distinguishable from a malformed one); raises CANNOT-EVALUATE when the bundle
     is present but malformed (fail-closed). Structural validity does NOT imply the run is SEMANTICALLY
     reviewable: this reader proves SHAPE and the presence of the bound identities only, never that the bound
-    digests match the staged artefacts (that binding recompute, and acceptance capture, are PR-4c). It reads
-    the bundle through the same contained TOML reader (bounded by the store-read cap, no-follow) the rest of
-    the review path uses."""
+    digests match the staged artefacts. That binding recompute (recomputing binding.* over the staged bytes)
+    is performed by the MIG-PR4b read-only SEMANTIC gate (the ingest-* checks in
+    check_opf_import.check_staged_run), which closes it upstream of any acceptance; ACCEPTANCE CAPTURE remains
+    PR-4c. It reads the bundle through the same contained TOML reader (bounded by the store-read cap,
+    no-follow) the rest of the review path uses."""
     bundle = _read_toml(store_root_fd, run_rel + "/" + INGEST_REVIEW_NAME)
     if bundle is None:
         return None
-    run_id = run_rel.rsplit("/", 1)[-1]
+    return _validate_staged_ingest_bundle(bundle, run_rel.rsplit("/", 1)[-1])
+
+
+# Round-4 F5: the CLOSED shapes of the frozen ingest-review.toml bundle (the top-level table and its binding
+# table), exactly the keys _write_ingest_review_bundle assembles. The structural validator refuses a key
+# outside them, so a field the producer never writes can never ride along unexamined.
+_INGEST_REVIEW_KEYS = frozenset(("format", "schema", "run_id", "include_declared", "include", "binding",
+                                 "worksheet", "options", "crosswalk", "migrate"))
+_INGEST_BINDING_KEYS = frozenset(("plan_digest", "inventory_digest", "ingest_actions_digest",
+                                  "candidates_draft_digest", "proposals_digest", "inventory_toml_digest"))
+
+
+def _validate_staged_ingest_bundle(bundle, run_id):
+    """MIG-PR4b: the PURE structural validator of a parsed `ingest-review.toml` bundle for the run named
+    `run_id` (no filesystem read), shared by `_load_staged_ingest_for_review` (the store-bound review path)
+    and the staged-run gate, which reads the bundle through its OWN descriptor bound to the SUPPLIED run
+    directory (check_opf_import) so the gate never classifies a run by a reconstructed conventional path.
+    Returns the bundle when structurally well-formed; raises CANNOT-EVALUATE when it is malformed."""
     if not isinstance(bundle, dict):
         raise _cannot("ingest review bundle: {} is not a table (malformed)".format(INGEST_REVIEW_NAME))
+    unknown = set(bundle) - _INGEST_REVIEW_KEYS
+    if unknown:
+        raise _cannot("ingest review bundle: carries field(s) outside the producer's closed shape: {} "
+                      "(malformed)".format(", ".join(_opf_store._sorted_key_names(unknown))))
     if bundle.get("format") != INGEST_REVIEW_FORMAT:
         raise _cannot("ingest review bundle: format is not {!r} (malformed)".format(INGEST_REVIEW_FORMAT))
     if not (type(bundle.get("schema")) is int and bundle.get("schema") == SCHEMA):
@@ -2277,8 +2505,11 @@ def _load_staged_ingest_for_review(store_root_fd, run_rel):
     binding = bundle.get("binding")
     if not isinstance(binding, dict):
         raise _cannot("ingest review bundle: binding is not a table (malformed)")
-    for k in ("plan_digest", "inventory_digest", "ingest_actions_digest", "candidates_draft_digest",
-              "proposals_digest", "inventory_toml_digest"):
+    unknown = set(binding) - _INGEST_BINDING_KEYS
+    if unknown:
+        raise _cannot("ingest review bundle: binding carries field(s) outside the producer's closed shape: {} "
+                      "(malformed)".format(", ".join(_opf_store._sorted_key_names(unknown))))
+    for k in sorted(_INGEST_BINDING_KEYS):
         v = binding.get(k)
         if not (isinstance(v, str) and _DIGEST_RE.match(v)):
             raise _cannot("ingest review bundle: binding.{} is missing or not a 'sha256:'+64-hex "
@@ -2369,22 +2600,26 @@ def plan_import(product_root, import_set, *, proposals=None, importer_proposals=
                                             "(one span, one provenance)".format(r["source_path"], r["span"][0],
                                              r["span"][1], seen_span[key], r["_origin"])])
             seen_span[key] = r["_origin"]
-        all_proposal_rows = sorted(model_rows + imp_rows,
-                                   key=lambda p: (p["source_path"].encode("utf-8"), p["span"][0], p["span"][1],
-                                                  p["_origin"]))
+        all_proposal_rows = _sort_proposal_rows(model_rows + imp_rows)
 
         # Deterministic baseline plan: one whole-file fragment per source, classified `unmapped` (nothing
         # mechanically mapped). Handed to the settled staging classifier, which mints a legacy_fragment
         # quarantine record per fragment and stages the byte-canonical candidate run dir.
-        plan = {"fragments": {s["path"]: [{"span": [0, s["size"]], "state": "unmapped",
-                                           "origin": _BASELINE_ORIGIN}]
-                              for s in scan.sources}}
+        plan = _baseline_plan(scan.sources)
         result = stage_import(product_root, import_set, plan, now=now, run_nonce=run_nonce)
         if result.verdict != CLEAN:
             return PlanResult(result.verdict, result.findings, run_id=result.run_id,
                               run_rel=result.run_rel, migration_incomplete=result.migration_incomplete)
 
         report_md = _render_report_md(scan.inventory_digest, scan.fragments, all_proposal_rows, result.run_id)
+        # MIG-PR4b: for an ingest run, COMPOSE the deterministic ingest review section onto IMPORT-REPORT.md
+        # at plan time, from the SAME frozen inputs the bundle will hold, so the gate's byte-reproduction
+        # check (ingest-report-reproducibility) has a frozen target. The render is a pure function of the
+        # (crosswalk, migrate) inputs; it participates in no digest (acyclic binding graph). Marker-first
+        # staging order below is unchanged (the section is only appended to the report bytes here).
+        if ingest_review_inputs is not None:
+            report_md = report_md + _render_ingest_review_md(_ingest_render_model(
+                result.run_id, ingest_review_inputs["crosswalk"], ingest_review_inputs["migrate"]))
         # P1-1: for an ingest run the identity/refusal marker (ingest-actions.toml, staged as the FIRST
         # ingest artefact inside _write_ingest_artifacts) becomes durable BEFORE the review artefacts
         # (inventory.toml / proposals.toml) exist, so at every point where a partial staging failure can
@@ -3141,6 +3376,50 @@ def _txn_record_rel(run_id):
     """Store-relative path of the per-run transaction record (the gate-readable projection), OUTSIDE
     `.working/` so it survives the terminal run-dir deletion (D2/D3)."""
     return "{}/{}/{}".format(IMPORT_OPS_REL, run_id, TRANSACTION_NAME)
+
+
+def _txn_record_intent_problem(intent_ops, rec_rel, rec_bytes):
+    """Round-7 (codex round-6 MEDIUM): the ONE shared bind of a transaction record to its journal INTENT, used
+    by BOTH apply's idempotency reconcile (R4-C1) and the gate (check_opf_import._journal_binds_record) so the
+    two cannot drift. The sole producer (_build_publication_ops) journals EXACTLY ONE op on the record path: a
+    `create` whose poststate is {kind "file", mode FILE_MODE, content-sha256 of the record bytes}. So the INTENT
+    ops touching `rec_rel` must be exactly that one op. Any other op on the path (a duplicate or conflicting
+    create/write, a later remove/rmdir/mkdir), a create whose poststate is not exactly that shape (kind absent,
+    a missing / changed mode, an extra key), or no op at all is a problem: the journal then contradicts itself
+    or the record, so it cannot certify it. An op path is matched by its segment-normalized form, so a
+    non-canonical alias of the record path ('./', '//', 'x/..') counts as touching it rather than slipping past
+    a literal comparison; a non-object op or a non-string path is a malformed INTENT, also a problem. Returns ''
+    when bound, else the located reason (naming the transaction record)."""
+    import posixpath
+    if not isinstance(intent_ops, list):
+        return "the INTENT carries no op list, so it records no create of the transaction record {}".format(
+            rec_rel)
+    touching = []
+    for op in intent_ops:
+        if not (isinstance(op, dict) and isinstance(op.get("path"), str)):
+            return ("the INTENT carries a malformed op (not an object with a string path), so it cannot bind "
+                    "the transaction record {}".format(rec_rel))
+        path = op["path"]
+        if path == rec_rel or posixpath.normpath(path).lstrip("/") == rec_rel:
+            touching.append(op)
+    if len(touching) != 1:
+        return ("the INTENT records {} ops on the transaction record {} ({}), not exactly the one create the "
+                "producer journals".format(len(touching), rec_rel,
+                                           ", ".join(repr(o.get("op")) for o in touching) or "none"))
+    rec_op = touching[0]
+    post = rec_op.get("poststate")
+    sha = _sha256_hex(rec_bytes)
+    if not (rec_op.get("op") == "create" and rec_op.get("path") == rec_rel and isinstance(post, dict)
+            and set(post) == {"kind", "mode", "content-sha256"} and post.get("kind") == "file"
+            and type(post.get("mode")) is int and post.get("mode") == FILE_MODE
+            and isinstance(post.get("content-sha256"), str) and _HEX64_RE.match(post["content-sha256"])):
+        return ("the INTENT's op on the transaction record {} is not the producer's create (path {!r}, op {!r}, "
+                "poststate {!r}; expected create at exactly that path, of kind 'file', mode {:o}, and a "
+                "content-sha256)".format(rec_rel, rec_op.get("path"), rec_op.get("op"), post, FILE_MODE))
+    if post["content-sha256"] != sha:
+        return ("the transaction record {} bytes do not hash to the create the INTENT recorded (modified after "
+                "publication, or never journaled)".format(rec_rel))
+    return ""
 
 
 def _validate_transaction_record(txn, run_id):
@@ -4007,37 +4286,20 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                         # own fields) no longer matches, so it cannot certify a no-op (reconcile through
                         # recover; fail-closed). capture_preimages adds prestate to each op but leaves the
                         # poststate untouched, so the recorded content-sha256 is the create's own.
-                        noop_intent_ops = noop_intent.get("ops")
-                        noop_rec_op = None
-                        if isinstance(noop_intent_ops, list):
-                            for _iop in noop_intent_ops:
-                                if (isinstance(_iop, dict) and _iop.get("path") == noop_rec_rel
-                                        and _iop.get("op") in ("create", "write")):
-                                    noop_rec_op = _iop
-                                    break
-                        if noop_rec_op is None:
-                            raise _cannot("the durable journal for completed run {} (txn {}) records no create "
-                                          "of this run's transaction record {}; a projection whose publication "
-                                          "the journal does not record cannot certify an idempotent no-op "
-                                          "(reconcile through recover; fail-closed)".format(
-                                              run_id, noop_txn_id, noop_rec_rel))
-                        noop_rec_post = noop_rec_op.get("poststate")
-                        noop_rec_sha = noop_rec_post.get("content-sha256") if isinstance(noop_rec_post, dict) \
-                            else None
-                        if not (isinstance(noop_rec_sha, str) and _HEX64_RE.match(noop_rec_sha)):
-                            raise _cannot("the durable journal's recorded op for the transaction record of "
-                                          "completed run {} carries no valid content hash; a malformed recorded "
-                                          "op cannot bind the record and so cannot certify an idempotent no-op "
-                                          "(reconcile through recover; fail-closed)".format(run_id))
-                        # R5-C1: bind the SINGLE authenticated read captured at step 3/4 (never a second read
-                        # of the live record), so the exact bytes validated for identity and the archive below
-                        # are the bytes the journal authenticates here; a two-read interleaving can no longer
-                        # hand divergent bytes to the archive check and the journal bind.
-                        if _sha256_hex(noop_rec_raw) != noop_rec_sha:
-                            raise _cannot("the retained transaction record for completed run {} does not match "
-                                          "its journal-recorded content hash; the projection was modified after "
-                                          "publication, so it cannot certify an idempotent no-op (reconcile "
-                                          "through recover; fail-closed)".format(run_id))
+                        # Round-7: the INTENT ops on the record path must be EXACTLY the producer's one create
+                        # (kind "file", FILE_MODE, the hash), never a first-match over create/write: a later
+                        # conflicting write/remove, a duplicate, or a create re-kinded "absent" is a journal that
+                        # contradicts itself or the record. The SAME helper binds the gate, so the two cannot
+                        # drift. R5-C1: it binds the SINGLE authenticated read captured at step 3/4 (never a
+                        # second read of the live record), so the exact bytes validated for identity and the
+                        # archive below are the bytes the journal authenticates here; a two-read interleaving
+                        # can no longer hand divergent bytes to the archive check and the journal bind.
+                        noop_bind = _txn_record_intent_problem(noop_intent.get("ops"), noop_rec_rel, noop_rec_raw)
+                        if noop_bind:
+                            raise _cannot("the durable journal for completed run {} (txn {}) does not bind its "
+                                          "retained transaction record: {}; it cannot certify an idempotent "
+                                          "no-op (reconcile through recover; fail-closed)".format(
+                                              run_id, noop_txn_id, noop_bind))
                         # R3-C1: the durable archive must be present AND type/content-valid, not merely exist.
                         # The completed record self-describes its archive (FIX A: archived_sources +
                         # acceptance_sha256); a record lacking either recorded digest cannot certify a no-op. It
@@ -6664,6 +6926,49 @@ def self_test():
         _live_txn_path_d23(rT3, prT3).write_text(_opf_emit.emit(_recT3), encoding="utf-8")
         apT3 = apply_import(rT3, prT3.run_id, now=NOW)
         check("D23-noop-rejects-tampered-record-field", apT3.verdict != 0 and apT3.promoted is False)
+
+        # Round-7 (codex round-6 MEDIUM, class width with the gate): the no-op bind took the FIRST create/write
+        # INTENT op on the record path and checked only its hash, so a genuine terminal journal re-encoded with
+        # ONE INTENT mutation (record and archive untouched) still returned a promoted no-op. The shared helper
+        # now requires EXACTLY the producer's one create (kind "file", FILE_MODE, the hash). The re-encode-only
+        # control proves the harness re-framing alone leaves the no-op clean.
+        def _mutate_intent_r7(nonce, mutate):
+            r, pr, _ap0, ap1 = _fresh_promoted_d23(nonce)
+            rec_rel = _txn_record_rel(pr.run_id)
+            txn_id = tomllib.loads((r / rec_rel).read_text()).get("txn_id")
+            jfd = os.open(str(r / IMPORT_JOURNAL_REL), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                frames, torn, _gl = _journal.read_frames(jfd, txn_id)
+            finally:
+                os.close(jfd)
+            if torn or [t for t, _o in frames] != [_journal.F_INTENT, _journal.F_COMPLETE]:
+                raise OSError("harness: the genuine journal is not a clean [INTENT, COMPLETE] sequence")
+            mutate(frames[0][1]["ops"], rec_rel)
+            (r / IMPORT_JOURNAL_REL / txn_id / "frames.log").write_bytes(b"".join(
+                _journal._frame(ft, json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                                               ensure_ascii=True).encode()) for ft, obj in frames))
+            return ap1, apply_import(r, pr.run_id, now=NOW)
+
+        def _rec_op_r7(ops, rel):
+            return [o for o in ops if o.get("path") == rel][0]
+
+        ap1R7, apR7 = _mutate_intent_r7("apply-r7-ctl", lambda ops, rel: None)
+        check("R7-reencoded-intent-noop-clean",
+              ap1R7.verdict == 0 and apR7.verdict == 0 and apR7.outcome == "noop_already_complete")
+        for _r7name, _r7mut in (
+                ("create-kind-absent", lambda ops, rel: _rec_op_r7(ops, rel)["poststate"].update(kind="absent")),
+                ("second-write", lambda ops, rel: ops.append(
+                    {"op": "write", "path": rel, "poststate": {"kind": "file", "content-sha256": "e" * 64}})),
+                ("duplicate-create", lambda ops, rel: ops.append(json.loads(json.dumps(_rec_op_r7(ops, rel))))),
+                ("later-remove", lambda ops, rel: ops.append(
+                    {"op": "remove", "path": rel, "poststate": {"kind": "absent"}})),
+                ("create-mode-changed", lambda ops, rel: _rec_op_r7(ops, rel)["poststate"].update(mode=0o600)),
+                ("alias-path-remove", lambda ops, rel: ops.append(
+                    {"op": "remove", "path": rel.replace("/", "/./", 1), "poststate": {"kind": "absent"}}))):
+            ap1R7, apR7 = _mutate_intent_r7("apply-r7-" + _r7name, _r7mut)
+            check("R7-noop-rejects-intent-" + _r7name,
+                  ap1R7.verdict == 0 and apR7.verdict != 0 and apR7.promoted is False
+                  and "transaction record" in " ".join(str(f) for f in apR7.findings))
 
         # R5-C1 (round-6): the no-op path reads the retained record EXACTLY ONCE. The prior two-read code
         # parsed the record on a FIRST read (identity + FIX C archive validation) and authenticated a SECOND

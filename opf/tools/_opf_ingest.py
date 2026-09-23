@@ -363,6 +363,42 @@ def _under_any(p, prefixes):
     return False
 
 
+def _store_base_under_product(resolution):
+    """The store root's PRODUCT-root-relative POSIX base (IDENTITY '.' for an inline/default store whose
+    store root IS the product root; 'ops' for a `dir:ops` relocation; '.working/ops' for a store nested under
+    the product's own `.working/`), or None when the store resolves OUTSIDE the product root. This is the
+    SINGLE authority for the re-anchoring base, shared by `_reanchor_declared`, `_declared_to_store_rel`, and
+    (through the shared derivation builders below) the MIG-PR4b review gate, so plan-time derivation and the
+    gate cannot drift on how the base is computed."""
+    try:
+        rel = Path(os.path.abspath(resolution.store_root)).relative_to(
+            Path(os.path.abspath(resolution.product_root)))
+    except ValueError:
+        return None
+    return rel.as_posix()
+
+
+def _reanchor_rel(base, rel):
+    """Re-anchor ONE store-relative POSIX path at `base` (the `_store_base_under_product` base; '.' for an
+    inline store), returning the byte-canonical POSIX spelling the no-follow walk produces (via
+    `posixpath.normpath`). The SINGLE re-anchor formula, so every store-relative entry is re-anchored
+    identically wherever it is derived (guard-input-soundness: no parallel predicate that could drift)."""
+    return posixpath.normpath(posixpath.join(base, rel))
+
+
+def _store_rel_of(base, rel):
+    """The inverse of `_reanchor_rel`: the STORE-relative spelling of a product-relative `rel` under `base`,
+    or None when `rel` does not fall under `base`. Shared by `_declared_to_store_rel` (plan time) and the
+    review gate's keep re-derivation so the inverse cannot drift from the forward re-anchor either."""
+    b = posixpath.normpath(base)
+    p = posixpath.normpath(rel)
+    if b == ".":
+        return p               # inline / default store: the store root IS the product root (identity)
+    if p.startswith(b + "/"):
+        return p[len(b) + 1:]
+    return None
+
+
 def _reanchor_declared(resolution, store_rel_paths):
     """Map STORE-relative POSIX paths to their PRODUCT-root-relative spelling for the DECLARED (product-root)
     scope when the store falls UNDER the product root (IDENTITY for an inline/default store whose store root
@@ -375,13 +411,10 @@ def _reanchor_declared(resolution, store_rel_paths):
     namespaces can never cross-contaminate (F1). Anchored EXACTLY as `_store_working_under_product` anchors
     `.working`; a returned path is the byte-canonical POSIX spelling the no-follow walk produces (via
     `posixpath.normpath`), so it compares against the walk's paths without an aliased-spelling miss."""
-    try:
-        rel = Path(os.path.abspath(resolution.store_root)).relative_to(
-            Path(os.path.abspath(resolution.product_root)))
-    except ValueError:
+    base = _store_base_under_product(resolution)
+    if base is None:
         return ()
-    base = rel.as_posix()
-    return tuple(posixpath.normpath(posixpath.join(base, p)) for p in store_rel_paths)
+    return tuple(_reanchor_rel(base, p) for p in store_rel_paths)
 
 
 def _store_root_control_prefixes(resolution):
@@ -664,6 +697,40 @@ def _pattern_intersects_covered(pat, existing_covered):
     return None
 
 
+def include_scope_prefixes(store_working_rel):
+    """The store-scope prefixes an `--include` pattern may never name: the literal product-root `.working`
+    (the pre-relocation contract) plus the RESOLVED store's `.working` subtree when it falls under the
+    product root (`store_working_rel`; None when it resolves outside). Shared by detection and the MIG-PR4b
+    review gate's frozen-include check."""
+    scope_prefixes = {_opf_store.WORKING_DIRNAME}
+    if store_working_rel is not None:
+        scope_prefixes.add(store_working_rel)
+    return scope_prefixes
+
+
+def validate_include_patterns(include, scope_prefixes):
+    """Validate each `--include` pattern: a contained root-relative pattern (no absolute path, no `..`
+    escape) that never names the auto-detected store scope (`scope_prefixes`). Raises a FINDING
+    _DetectError on the first bad pattern. The SINGLE include-pattern authority, shared by
+    `_detect_declared_scope` and the MIG-PR4b review gate over the frozen include set."""
+    for pat in include:
+        if not (isinstance(pat, str) and _opf_store._is_contained_relpath(pat)):
+            raise _finding("--include pattern {!r} is not a contained root-relative pattern (no absolute "
+                           "path, no '..' escape)".format(pat))
+        named = next((pref for pref in scope_prefixes if pat == pref or pat.startswith(pref + "/")), None)
+        if named is not None:
+            raise _finding("--include pattern {!r} names the {} store scope, which is detected "
+                           "automatically; declared scope is the product root only".format(pat, named))
+
+
+def include_matches(pattern, path):
+    """True when the declared-scope `--include` `pattern` names the product-relative `path` (case-sensitive
+    `fnmatch`, the detection matcher). The SINGLE include matcher, shared by `_detect_declared_scope` and the
+    MIG-PR4b review gate, which requires every frozen declared-scope row to fall inside the frozen include
+    set under exactly this matcher."""
+    return fnmatch.fnmatchcase(path, pattern)
+
+
 def _detect_declared_scope(product_root, include, leaf, subtree, store_working_rel):
     """Enumerate the product-root files an operator `--include` pattern names (the opt-in declared scope,
     OQ-3). Each pattern is validated FIRST (contained, root-relative, and never naming the auto-detected
@@ -688,17 +755,8 @@ def _detect_declared_scope(product_root, include, leaf, subtree, store_working_r
     inside an unmanaged subtree) into declared scope (OQ-3 contract; spec 14.2 never reads an unmanaged path).
     Only the SUBTREE covers feed the R7-1 no-match derivation (an exact-leaf entry is a single file matched in
     results, not an unread covered subtree)."""
-    scope_prefixes = {_opf_store.WORKING_DIRNAME}
-    if store_working_rel is not None:
-        scope_prefixes.add(store_working_rel)
-    for pat in include:
-        if not (isinstance(pat, str) and _opf_store._is_contained_relpath(pat)):
-            raise _finding("--include pattern {!r} is not a contained root-relative pattern (no absolute "
-                           "path, no '..' escape)".format(pat))
-        named = next((pref for pref in scope_prefixes if pat == pref or pat.startswith(pref + "/")), None)
-        if named is not None:
-            raise _finding("--include pattern {!r} names the {} store scope, which is detected "
-                           "automatically; declared scope is the product root only".format(pat, named))
+    scope_prefixes = include_scope_prefixes(store_working_rel)
+    validate_include_patterns(include, scope_prefixes)
     fd = _opf_store._open_root_fd(Path(os.path.abspath(product_root)))
     try:
         files = []
@@ -726,7 +784,7 @@ def _detect_declared_scope(product_root, include, leaf, subtree, store_working_r
         existing_covered = {d for d in pruned_dirs if d in subtree} | {d for d in pruned_nondirs if d in subtree}
         matched = set()
         for pat in include:
-            hits = [f for f in files if fnmatch.fnmatchcase(f, pat)]
+            hits = [f for f in files if include_matches(pat, f)]
             if not hits:
                 # THREE-VALUED no-match derivation (R7-1), never the round-7 literal-ancestor existence
                 # proxy. A declared pattern with no read-space hit is:
@@ -999,6 +1057,245 @@ def validate_options(options):
     return findings
 
 
+# --- shared disposition DERIVATION builders (single authority; MIG-PR4b RE-DERIVATION) -----------------
+# Each pure builder below is the ONE place a deterministic frozen ingest artefact's shape AND formula is
+# defined. It is called by BOTH plan_ingest (to PRODUCE the artefact) and the MIG-PR4b review gate
+# (_verify_ingest_review_model, to RE-DERIVE it and require the frozen artefact to EQUAL the re-derivation).
+# A new field or a changed formula therefore lands in exactly one place and the gate re-derives it
+# automatically, so the producer and the checker cannot drift -- the parallel-predicate hazard the per-field
+# gate suffered from (each finding added one more assertion the checker had to keep exhaustive). The only
+# resolution input these need is the re-anchor `base` (`_store_base_under_product`); the gate has no live
+# store at review time, so it recovers that base as a CONSISTENCY binding over every piece of frozen evidence
+# that observes it (the crosswalk store rows and the declared keep actions; see the gate) rather than from
+# `resolve_store`. The pure ADMISSIBILITY checks below (admit_*) are shared the same way.
+
+def resolve_by_scope(base, scope, rel):
+    """Resolve a SCOPE-relative worksheet source_path to the product-relative path staging reads: IDENTITY
+    for a declared row, `_reanchor_rel(base, rel)` for a store row. Returns None for a store row whose store
+    resolves OUTSIDE the product root (base is None); the caller decides whether that is CANNOT-EVALUATE
+    (plan time) or a located FINDING (gate). The single scope-resolution authority."""
+    if scope != "store":
+        return rel
+    if base is None:
+        return None
+    return _reanchor_rel(base, rel)
+
+
+def keep_unmanaged(base, scope, sp):
+    """The [unmanaged].paths spelling a keep action registers: a store-scope source_path VERBATIM (already
+    store-relative), else the store-relative spelling of the declared product path (`_store_rel_of`; None when
+    it does not fall under the resolved store root). The single keep-exemption spelling authority."""
+    if scope == "store":
+        return sp
+    if base is None:
+        # The store resolves OUTSIDE the product root, so a declared product path has no store-relative
+        # spelling. Returned as None BEFORE _store_rel_of (which cannot normalize a None base), so the caller
+        # refuses it located (plan time: CANNOT-EVALUATE; gate: a FINDING), never an uncaught TypeError.
+        return None
+    return _store_rel_of(base, sp)
+
+
+def admit_keep_unmanaged(base, scope, sp):
+    """The ADMISSIBLE [unmanaged].paths spelling of a keep row, or a raised CANNOT-EVALUATE _DetectError. A
+    declared keep whose product path has no store-relative spelling (the store resolves outside the product
+    root, or the path does not fall under the resolved store root) is refused, and the emitted spelling is
+    round-tripped through the forward re-anchor (`_reanchor_rel`) so the exemption provably re-anchors back to
+    the kept file; the spelling must be a legal contained [unmanaged].paths entry. Pure (no filesystem read):
+    shared by `_keep_action` (plan time) and the MIG-PR4b review gate (single authority)."""
+    unmanaged = keep_unmanaged(base, scope, sp)
+    if scope != "store":
+        if unmanaged is None or _reanchor_rel(base, unmanaged) != sp:
+            raise _cannot("keep row {!r} (declared scope) does not fall under the resolved store root, "
+                          "so no store-relative [unmanaged].paths entry can cover it; emitting the "
+                          "product spelling would exempt a DIFFERENT file once re-anchored at the store "
+                          "root (fail-closed, disclosed residual; retriage the row or relocate the file "
+                          "under the store)".format(sp))
+    if not _opf_store._is_contained_relpath(unmanaged):
+        raise _cannot("keep source {!r} does not yield a legal [unmanaged].paths entry ({!r})".format(
+            sp, unmanaged))
+    return unmanaged
+
+
+def admit_row_binding(r, opt):
+    """The PURE per-row admissibility of a worksheet row against its --ingest-options binding `opt` (None
+    when unbound), raising a _DetectError. A keep/unresolved row binds to NO option (FINDING); a migrate/move
+    row requires a binding (absent: CANNOT-EVALUATE), carries an empty note (the note is never a config
+    channel: CANNOT-EVALUATE), and binds exactly its disposition's fields (a forbidden field present, or a
+    required field absent on a present binding: FINDING). The SINGLE authority, shared by plan_ingest and the
+    MIG-PR4b review gate over the frozen worksheet + options (equality with a constructor does not prove
+    admissibility)."""
+    dispo = r["disposition"]; sp = r["source_path"]
+    if dispo in ("keep", "unresolved") and opt is not None:
+        # round-2 P2-6: a keep/unresolved row binds to NO options row (the ratified "keep/unresolved binds
+        # to none"); a binding here is misdirected configuration, a FINDING exactly like a dangling binding.
+        # (An unresolved row already halted at step 4; the branch keeps the vocabulary closed.)
+        raise _finding("{} row {!r} carries an --ingest-options binding; a keep/unresolved row "
+                       "binds to none (remove the option row or retriage)".format(dispo, sp))
+    if dispo in ("migrate", "move"):
+        if opt is None:
+            raise _cannot("{} row {!r} has no --ingest-options binding (required for a "
+                          "migrate/move row)".format(dispo, sp))
+        if r["note"] != "":
+            raise _cannot("{} row {!r} carries a non-empty note; configuration belongs in "
+                          "--ingest-options, never the worksheet note (decision 1)".format(dispo, sp))
+        # round-2 P2-6 / round-3 F1: REQUIRED + PERMITTED fields per disposition, validated BEFORE any field
+        # is indexed, so an incompatible binding is a structured verdict (a FORBIDDEN field present is a
+        # FINDING, and a REQUIRED field absent on a PRESENT binding is a FINDING too, an invalid options
+        # document the operator must fix; a completely ABSENT binding, opt is None above, stays
+        # CANNOT-EVALUATE, the missing-config class), never an uncaught KeyError and never a silently ignored
+        # field.
+        if dispo == "migrate":
+            if "dest_path" in opt:
+                raise _finding("migrate row {!r} binds a dest_path; a migrate row takes "
+                               "importer_kind only (dest_path belongs to a move row)".format(sp))
+            if "importer_kind" not in opt:
+                raise _finding("migrate row {!r} binds no importer_kind (required for a migrate "
+                               "row)".format(sp))
+        else:
+            if "importer_kind" in opt:
+                raise _finding("move row {!r} binds an importer_kind; a move row takes "
+                               "dest_path only (importer_kind belongs to a migrate "
+                               "row)".format(sp))
+            if not _MOVE_DEST_ARCHIVE_DEFAULT and "dest_path" not in opt:
+                raise _finding("move row {!r} binds no dest_path and the archive default is "
+                               "disabled (ruling 3a requires an explicit dest)".format(sp))
+
+
+def admit_row_scope(scope, sp, base):
+    """The PURE static SCOPE admissibility of one worksheet row's (scope, source_path), raising a FINDING
+    _DetectError: exactly the scope boundaries detection enforces that are decidable from the frozen path
+    and the re-anchor `base` alone (no live tree, no manifest). A STORE-scope row is store-relative and
+    detection emits it only from the mandatory `.working/` subtree (the store walk root), never from the
+    reserved imports tree it prunes. A DECLARED-scope row is product-relative and detection never emits one
+    from the literal product-root `.working/`, from the RESOLVED store working subtree
+    (`include_scope_prefixes`), from the store-root control / VCS dirs re-anchored at `base`
+    (`_opf_store.STORE_ROOT_CONTROL_DIRS`), or at a store pointer control file. `base` is the store-under-
+    product re-anchor base (None when the store resolves outside the product root, or when the review gate
+    cannot observe it: only the base-free boundaries then apply). Shared by plan_ingest (defence in depth
+    behind the fresh-detect reconcile) and the MIG-PR4b review gate over the frozen worksheet, so a row
+    re-scoped across the store / product boundary is refused statically rather than re-derived faithfully.
+    The manifest-dependent covers ([unmanaged].paths, view targets, the machine subtree) are NOT decidable
+    here without the live store and remain the fresh-detect reconcile's (disclosed)."""
+    working = _opf_store.WORKING_DIRNAME
+    if scope == "store":
+        if not sp.startswith(working + "/"):
+            raise _finding("store-scope row {!r} does not lie in the mandatory store subtree {!r}/ (a store "
+                           "row is store-relative and detected only under it)".format(sp, working))
+        if _under_any(sp, (_opf_import.IMPORTS_REL,)):
+            raise _finding("store-scope row {!r} lies in the reserved imports tree {!r}, which detection "
+                           "prunes wholesale".format(sp, _opf_import.IMPORTS_REL))
+    elif scope == "declared":
+        store_working_rel = (None if base is None
+                             else posixpath.normpath(posixpath.join(base, working)))
+        excluded = set(include_scope_prefixes(store_working_rel))
+        if base is not None:
+            excluded.update(_reanchor_rel(base, d) for d in _opf_store.STORE_ROOT_CONTROL_DIRS)
+        hit = next((pref for pref in sorted(excluded) if _under_any(sp, (pref,))), None)
+        if hit is not None:
+            raise _finding("declared-scope row {!r} lies in {!r}, a store subtree declared scope never "
+                           "reads (it belongs to the store scope or the store control area)".format(sp, hit))
+        if sp in (_opf_store.POINTER_REL, _opf_store.LOCAL_POINTER_REL):
+            raise _finding("declared-scope row {!r} is a store pointer control file, which detection never "
+                           "emits".format(sp))
+    else:
+        raise _finding("row {!r} carries an unknown scope {!r}".format(sp, scope))
+
+
+def admit_move_dest(sp, dest, move_dests, sources):
+    """The PURE move-SET admissibility of one move (source `sp`, authorized destination `dest`) against the
+    destinations already admitted (`move_dests`: dest -> source, in worksheet order) and the COMPLETE
+    resolved product-relative source set of the worksheet (`sources`: every row's scope-resolved path, the
+    move's own included), raising a FINDING _DetectError, and recording `dest` on success. Refuses a
+    duplicate destination, a move-to-self, a destination EQUAL to any source, a destination BENEATH a source
+    (a source is a regular file, so it cannot be a directory), a destination that is an ANCESTOR of a source
+    (the source's parent is a directory, so it cannot be the moved file), and two destinations in
+    ancestor/descendant relation. Every source is a file the live tree holds at plan time, so the planner's
+    live no-overwrite lstat refuses each of these too; deciding them here from the frozen set lets the
+    MIG-PR4b review gate (no live tree) refuse them at parity. Shared by plan_ingest and the review gate.
+    Destinations colliding with a product path OUTSIDE the worksheet are decidable only against the live
+    tree (the planner's lstat; a disclosed review-time residual)."""
+    if dest in move_dests:
+        raise _finding("duplicate move destination {!r} ({} and {})".format(dest, move_dests[dest], sp))
+    if dest == sp:
+        raise _finding("move-to-self: {!r} destination equals its source".format(sp))
+    # round-4 F2: the destination against the COMPLETE resolved source set (equality, and the `/`-guarded
+    # component-wise ancestor/descendant relation in both directions, the nesting idiom below). Sorted so
+    # the located finding is deterministic.
+    for src in sorted(sources):
+        if dest == src:
+            raise _finding("move destination {!r} (for {}) equals the worksheet source {!r}; a planned "
+                           "source is an existing file (no-overwrite)".format(dest, sp, src))
+        if dest.startswith(src + "/"):
+            raise _finding("move destination {!r} (for {}) lies beneath the worksheet source {!r}, which is "
+                           "a regular file, not a directory".format(dest, sp, src))
+        if src.startswith(dest + "/"):
+            raise _finding("move destination {!r} (for {}) is an ancestor directory of the worksheet source "
+                           "{!r}; it already exists as a directory (no-overwrite)".format(dest, sp, src))
+    # round-3 F3: two planned destinations in ANCESTOR/DESCENDANT relation are impossible TOGETHER (the
+    # shorter path must be a regular file for one move and a directory for the other), yet each passes the
+    # per-dest boundary check alone because neither exists yet, and the exact-duplicate check above cannot
+    # see the relation, so a nested pair staged an unappliable move set CLEAN. Both dests are canonical
+    # (validate_options and the walk admit no `.`/`..`/empty segment), so the `/`-guarded prefix test is an
+    # exact component-wise ancestor test and a name-prefix sibling (saved/ab beside saved/a) is not swept in
+    # (the `_under_any` idiom).
+    for prior_dest, prior_sp in move_dests.items():
+        if dest.startswith(prior_dest + "/") or prior_dest.startswith(dest + "/"):
+            raise _finding("move destinations {!r} (for {}) and {!r} (for {}) nest: one "
+                           "needs the shorter path as a directory, the other as a regular "
+                           "file, an impossible move set".format(prior_dest, prior_sp, dest, sp))
+    move_dests[dest] = sp
+
+
+def derive_crosswalk_row(r, resolved_sp):
+    """One scoped-crosswalk row {scope, source_path, resolved_source_path, disposition} (the frozen review
+    surface's disposition authority). `r` is a worksheet row; `resolved_sp` its scope-resolved product path."""
+    return {"scope": r["scope"], "source_path": r["source_path"],
+            "resolved_source_path": resolved_sp, "disposition": r["disposition"]}
+
+
+def derive_move_dest(opt, sp):
+    """The authorized move destination: the explicit options dest_path, else the archive default
+    (`_archive_dest`) when the archive default is enabled. The single move-destination formula."""
+    return (opt.get("dest_path") or _archive_dest(sp)) if _MOVE_DEST_ARCHIVE_DEFAULT else opt.get("dest_path")
+
+
+def derive_keep_action(r, unmanaged):
+    """One inert keep pending-action {kind=keep, scope, source_path, unmanaged_path, sha256, size}. PR-C must
+    add `unmanaged_path` to [unmanaged].paths ATOMICALLY with the retention before the "checker never flags
+    it" guarantee holds (R-2; see `_keep_action`). The frozen identity is the worksheet row's own sha256/size."""
+    return {"kind": "keep", "scope": r["scope"], "source_path": r["source_path"],
+            "unmanaged_path": unmanaged, "sha256": r["sha256"], "size": r["size"]}
+
+
+def derive_move_action(r, dest):
+    """One inert move pending-action {kind=move, scope, source_path, dest_path, sha256, size}. The frozen
+    identity is the worksheet row's own sha256/size; `dest` is the authorized `derive_move_dest` value."""
+    return {"kind": "move", "scope": r["scope"], "source_path": r["source_path"],
+            "dest_path": dest, "sha256": r["sha256"], "size": r["size"]}
+
+
+def derive_migrate_scaffold(r, resolved_sp, importer_kind):
+    """The DETERMINISTIC part of a migrate review row {scope, source_path, resolved_source_path,
+    importer_kind}; the importer-derived candidate_count / proposal_count the planner adds are
+    importer-validated by the gate, never re-derived (the importer is never re-run). `importer_kind` is the
+    OPTIONS binding's kind, so the gate binds the frozen migrate row's kind to the options doc, not itself."""
+    return {"scope": r["scope"], "source_path": r["source_path"],
+            "resolved_source_path": resolved_sp, "importer_kind": importer_kind}
+
+
+def sort_candidate_rows(candidates, migrate_rows):
+    """The producer's DETERMINISTIC candidates_draft.toml order (round-4 F6): grouped by migrate row in the
+    order the planner records the migrate rows (worksheet order), then by draft_ref bytes within one importer
+    output (draft_refs are unique per output, so the order is total). The single ordering authority, shared
+    by plan_ingest (which stages the drafts in this order) and the MIG-PR4b review gate (which requires the
+    frozen candidates_draft.toml to EQUAL it), so a reordered draft list is a FINDING rather than an unbound
+    degree of freedom. Each candidate's source_path names a migrate row (the gate validates this first)."""
+    rank = {}
+    for i, m in enumerate(migrate_rows):
+        rank.setdefault(m["source_path"], i)
+    return sorted(candidates, key=lambda c: (rank[c["source_path"]], c["draft_ref"].encode("utf-8")))
+
+
 # --- the disposition PLANNER (MIG-PR3): compose a triaged worksheet + options into a staged inert plan ---
 
 def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonce):
@@ -1106,21 +1403,29 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
         # round-2 P1-3: the move boundary is graded against the RESOLVED store working subtree (the same
         # authority the declared-scope exclusion uses), not only the literal product-root `.working/`.
         store_working_rel = _store_working_under_product(resolution)
+        # The re-anchor base captured ONCE (the single input the shared derivation builders need); the gate
+        # recovers the same base as a consistency binding over the frozen crosswalk store rows and declared
+        # keep actions.
+        reanchor_base = _store_base_under_product(resolution)
 
         def _resolve_by_scope(scope, rel):
-            if scope != "store":
-                return rel
-            re_anchored = _reanchor_declared(resolution, (rel,))
-            if not re_anchored:
+            resolved = resolve_by_scope(reanchor_base, scope, rel)
+            if resolved is None:   # a store row whose store resolves OUTSIDE the product root
                 raise _cannot("store-scope row {!r} belongs to a store that resolves OUTSIDE the product "
                               "root, which this build cannot stage through the product-root import reader "
                               "(fail-closed, disclosed residual)".format(rel))
-            return re_anchored[0]
+            return resolved
 
         product_root_fd = _opf_store._open_root_fd(Path(os.path.abspath(product_root)))
         try:
             import_set, importer_proposals, candidates_draft, actions = [], [], [], []
             move_dests = {}
+            # round-4 F2: the COMPLETE resolved product-relative source set, computed ONCE before the walk so
+            # every move destination is admitted against every source (including a later row's), through the
+            # SAME pure resolve_by_scope the review gate re-derives with. A store row whose store resolves
+            # outside the product root (None) is refused CANNOT-EVALUATE in the walk below.
+            all_sources = {p for p in (resolve_by_scope(reanchor_base, r["scope"], r["source_path"])
+                                       for r in rows) if p is not None}
             expected = {}   # resolved product-relative path -> the reconciled (sha256, size) it must stage
             # MIG-PR4a review evidence: the scoped resolution crosswalk ((scope, source_path) -> resolved
             # product-relative source, per disposition) and each migrate row's importer selection + validated
@@ -1129,41 +1434,14 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
             for r in rows:
                 key = (r["scope"], r["source_path"]); sp = r["source_path"]; dispo = r["disposition"]
                 opt = opt_by_key.get(key)
-                if dispo in ("keep", "unresolved") and opt is not None:
-                    # round-2 P2-6: a keep/unresolved row binds to NO options row (the ratified "keep/
-                    # unresolved binds to none"); a binding here is misdirected configuration, a FINDING
-                    # exactly like a dangling binding. (An unresolved row already halted at step 4; the
-                    # branch keeps the vocabulary closed.)
-                    raise _finding("{} row {!r} carries an --ingest-options binding; a keep/unresolved row "
-                                   "binds to none (remove the option row or retriage)".format(dispo, sp))
-                if dispo in ("migrate", "move"):
-                    if opt is None:
-                        raise _cannot("{} row {!r} has no --ingest-options binding (required for a "
-                                      "migrate/move row)".format(dispo, sp))
-                    if r["note"] != "":
-                        raise _cannot("{} row {!r} carries a non-empty note; configuration belongs in "
-                                      "--ingest-options, never the worksheet note (decision 1)".format(dispo, sp))
-                    # round-2 P2-6 / round-3 F1: REQUIRED + PERMITTED fields per disposition, validated
-                    # BEFORE any field is indexed, so an incompatible binding is a structured verdict (a
-                    # FORBIDDEN field present is a FINDING, and a REQUIRED field absent on a PRESENT binding
-                    # is a FINDING too, an invalid options document the operator must fix; a completely
-                    # ABSENT binding, opt is None above, stays CANNOT-EVALUATE, the missing-config class),
-                    # never an uncaught KeyError and never a silently ignored field.
-                    if dispo == "migrate":
-                        if "dest_path" in opt:
-                            raise _finding("migrate row {!r} binds a dest_path; a migrate row takes "
-                                           "importer_kind only (dest_path belongs to a move row)".format(sp))
-                        if "importer_kind" not in opt:
-                            raise _finding("migrate row {!r} binds no importer_kind (required for a migrate "
-                                           "row)".format(sp))
-                    else:
-                        if "importer_kind" in opt:
-                            raise _finding("move row {!r} binds an importer_kind; a move row takes "
-                                           "dest_path only (importer_kind belongs to a migrate "
-                                           "row)".format(sp))
-                        if not _MOVE_DEST_ARCHIVE_DEFAULT and "dest_path" not in opt:
-                            raise _finding("move row {!r} binds no dest_path and the archive default is "
-                                           "disabled (ruling 3a requires an explicit dest)".format(sp))
+                # The per-disposition binding / note / field admissibility comes from the SHARED pure
+                # admit_row_binding authority the MIG-PR4b review gate also applies to the frozen worksheet +
+                # options (single authority; see admit_row_binding).
+                admit_row_binding(r, opt)
+                # Static scope admissibility (the SHARED admit_row_scope authority the review gate applies to
+                # the frozen worksheet): defence in depth behind the reconcile above, which already requires
+                # every row to be one detection emitted.
+                admit_row_scope(r["scope"], sp, reanchor_base)
                 resolved_sp = _resolve_by_scope(r["scope"], sp)
                 if resolved_sp in expected:
                     raise _cannot("worksheet row {!r} and another row both resolve to product path {!r}; "
@@ -1192,32 +1470,16 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                     # (one journaled transaction; see _keep_action).
                     actions.append(_keep_action(product_root, resolution, r))
                 elif dispo == "move":
-                    dest = (opt.get("dest_path") or _archive_dest(sp)) if _MOVE_DEST_ARCHIVE_DEFAULT \
-                        else opt["dest_path"]
+                    dest = derive_move_dest(opt, sp)
+                    # The PURE admissions first, in the review gate's order (boundary, then the move set:
+                    # duplicate destination / move-to-self / a worksheet-source conflict / nesting, the SHARED
+                    # admit_move_dest authority, recording dest on success), so a frozen-decidable refusal
+                    # carries the SAME verdict here as at review; the live no-overwrite lstat follows.
+                    admit_move_boundary(dest, store_working_rel)
+                    admit_move_dest(sp, dest, move_dests, all_sources)
                     _check_move_boundary(product_root, dest, product_root_fd,
-                                         store_working_rel)   # FINDING on any collision
-                    if dest in move_dests:
-                        raise _finding("duplicate move destination {!r} ({} and {})".format(
-                            dest, move_dests[dest], sp))
-                    if dest == sp:
-                        raise _finding("move-to-self: {!r} destination equals its source".format(sp))
-                    # round-3 F3: two planned destinations in ANCESTOR/DESCENDANT relation are impossible
-                    # TOGETHER (the shorter path must be a regular file for one move and a directory for
-                    # the other), yet each passes the per-dest boundary check alone because neither exists
-                    # yet, and the exact-duplicate check above cannot see the relation, so a nested pair
-                    # staged an unappliable move set CLEAN. Both dests are canonical (validate_options and
-                    # the walk admit no `.`/`..`/empty segment), so the `/`-guarded prefix test is an exact
-                    # component-wise ancestor test and a name-prefix sibling (saved/ab beside saved/a) is
-                    # not swept in (the `_under_any` idiom).
-                    for prior_dest, prior_sp in move_dests.items():
-                        if dest.startswith(prior_dest + "/") or prior_dest.startswith(dest + "/"):
-                            raise _finding("move destinations {!r} (for {}) and {!r} (for {}) nest: one "
-                                           "needs the shorter path as a directory, the other as a regular "
-                                           "file, an impossible move set".format(
-                                               prior_dest, prior_sp, dest, sp))
-                    move_dests[dest] = sp
-                    actions.append({"kind": "move", "scope": r["scope"], "source_path": sp,
-                                    "dest_path": dest, "sha256": r["sha256"], "size": r["size"]})
+                                         store_working_rel)   # FINDING on any live collision
+                    actions.append(derive_move_action(r, dest))
                 elif dispo == "migrate":
                     src = _opf_import._read_sources(product_root_fd, [resolved_sp])[0]
                     if "sha256:" + src["sha256"] != r["sha256"]:
@@ -1234,16 +1496,14 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                     # MIG-PR4a: record the importer selection + its VALIDATED result counts per migrate row,
                     # so a zero-candidate / zero-proposal migrate (a CLEAN importer run that rested nothing)
                     # is preserved as an explicit review-evidence row rather than leaving no trace.
-                    migrate_records.append({
-                        "scope": r["scope"], "source_path": sp, "resolved_source_path": resolved_sp,
-                        "importer_kind": opt["importer_kind"],
-                        "candidate_count": len(ir.candidates), "proposal_count": len(ir.proposals)})
+                    migrate_records.append(dict(
+                        derive_migrate_scaffold(r, resolved_sp, opt["importer_kind"]),
+                        candidate_count=len(ir.candidates), proposal_count=len(ir.proposals)))
                 # keep/migrate/move ALL stay in the import_set so the baseline quarantines them as
                 # legacy_fragment (unmapped); nothing is dropped (decisions 2/3: mapping stays unmapped).
                 # The import_set carries the RESOLVED product-relative path (the identity the staging
                 # reader actually reads), so a relocated store's store-scope row stages the STORE bytes.
-                crosswalk.append({"scope": r["scope"], "source_path": sp,
-                                  "resolved_source_path": resolved_sp, "disposition": dispo})
+                crosswalk.append(derive_crosswalk_row(r, resolved_sp))
                 import_set.append(resolved_sp)
         finally:
             os.close(product_root_fd)
@@ -1253,6 +1513,8 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
         # its recomputed worksheet_digest); the options doc is normalized to its closed shape (a move option's
         # ABSENT dest_path records the archive default vs an explicit dest); include is preserved as declared;
         # `expected` lets the bundle writer re-check the staged source identities before it finalizes.
+        # round-4 F6: the drafts are staged in the SHARED normalized order the review gate re-derives.
+        candidates_draft = sort_candidate_rows(candidates_draft, migrate_records)
         normalized_options = {
             "format": options.get("format"), "schema": options.get("schema"),
             "option": [{k: o[k] for k in _OPTION_ROW_KEYS if k in o} for o in options["option"]]}
@@ -1378,6 +1640,18 @@ def _check_move_boundary(product_root, dest, product_root_fd, store_working_rel)
     refuses a dest exactly as the inline literal does (round-2 P1-3); the literal product-root `.working/`
     stays refused too (the pre-relocation contract, and the inline case where both tests coincide). Uses
     the no-follow lstat so a symlink at dest is seen as a symlink, never followed."""
+    admit_move_boundary(dest, store_working_rel)
+    st = _journal._lstat_contained(product_root_fd, dest)
+    if st is not None:
+        raise _finding("move destination {!r} already exists (no-overwrite); a move-to-an-existing-file or "
+                       "dangling symlink is a collision".format(dest))
+
+
+def admit_move_boundary(dest, store_working_rel):
+    """The PURE part of the decision-3 move boundary (no filesystem read): a destination inside the literal
+    product-root `.working/`, or inside the RESOLVED store working tree `store_working_rel` (None when the
+    store resolves outside the product root), is a FINDING _DetectError. Shared by `_check_move_boundary`
+    (which adds the live no-overwrite lstat) and the MIG-PR4b review gate."""
     if dest.split("/", 1)[0] == _opf_store.WORKING_DIRNAME:
         raise _finding("move destination {!r} lies inside .working/ (the store tree); a move target must "
                        "be beneath the product root but OUTSIDE .working".format(dest))
@@ -1386,10 +1660,6 @@ def _check_move_boundary(product_root, dest, product_root_fd, store_working_rel)
         raise _finding("move destination {!r} lies inside the RESOLVED store working tree {!r}; a move "
                        "target must be beneath the product root but OUTSIDE the store".format(
                            dest, store_working_rel))
-    st = _journal._lstat_contained(product_root_fd, dest)
-    if st is not None:
-        raise _finding("move destination {!r} already exists (no-overwrite); a move-to-an-existing-file or "
-                       "dangling symlink is a collision".format(dest))
 
 
 def _declared_to_store_rel(resolution, rel):
@@ -1401,18 +1671,10 @@ def _declared_to_store_rel(resolution, rel):
     `[unmanaged].paths` entry is a STORE-relative vocabulary (spec 14.2; see `_managed_paths`), so no entry
     can name such a path and the caller must refuse rather than emit a spelling that re-anchors to a
     different file."""
-    try:
-        base = Path(os.path.abspath(resolution.store_root)).relative_to(
-            Path(os.path.abspath(resolution.product_root))).as_posix()
-    except ValueError:
+    base = _store_base_under_product(resolution)
+    if base is None:
         return None
-    base = posixpath.normpath(base)
-    p = posixpath.normpath(rel)
-    if base == ".":
-        return p               # inline / default store: the store root IS the product root (identity)
-    if p.startswith(base + "/"):
-        return p[len(base) + 1:]
-    return None
+    return _store_rel_of(base, rel)
 
 
 def _keep_action(product_root, resolution, r):
@@ -1437,25 +1699,14 @@ def _keep_action(product_root, resolution, r):
     spelling, so it is refused CANNOT-EVALUATE (a disclosed residual, never a wrong-file exemption). The
     emitted spelling is round-tripped through `_reanchor_declared` before it is trusted, so the exemption
     is validated against the SAME authority detection will re-anchor it with (guard-input-soundness)."""
-    sp = r["source_path"]
-    if r["scope"] == "store":
-        unmanaged = sp   # a store-scope source_path is already STORE-relative (detect emits it that way)
-    else:
-        unmanaged = _declared_to_store_rel(resolution, sp)
-        if unmanaged is None or _reanchor_declared(resolution, (unmanaged,)) != (sp,):
-            raise _cannot("keep row {!r} (declared scope) does not fall under the resolved store root, "
-                          "so no store-relative [unmanaged].paths entry can cover it; emitting the "
-                          "product spelling would exempt a DIFFERENT file once re-anchored at the store "
-                          "root (fail-closed, disclosed residual; retriage the row or relocate the file "
-                          "under the store)".format(sp))
-    if not _opf_store._is_contained_relpath(unmanaged):
-        raise _cannot("keep source {!r} does not yield a legal [unmanaged].paths entry ({!r})".format(
-            sp, unmanaged))
-    return {"kind": "keep", "scope": r["scope"], "source_path": sp,
-            "unmanaged_path": unmanaged,   # PR-C must add this to [unmanaged].paths ATOMICALLY with the
-            #                                retention (one journaled transaction) BEFORE the "checker
-            #                                never flags it" guarantee holds (R-2; see the docstring).
-            "sha256": r["sha256"], "size": r["size"]}
+    # The [unmanaged].paths spelling comes from the SHARED admit_keep_unmanaged authority (store: verbatim;
+    # declared: the store-relative spelling, refused when none re-anchors back to the kept file), the same
+    # one the review gate re-derives with. `_reanchor_rel(base, x)` is exactly `_reanchor_declared`'s
+    # per-entry formula, so the round trip is unchanged.
+    unmanaged = admit_keep_unmanaged(_store_base_under_product(resolution), r["scope"], r["source_path"])
+    # PR-C must add unmanaged_path to [unmanaged].paths ATOMICALLY with the retention (one journaled
+    # transaction) BEFORE the "checker never flags it" guarantee holds (R-2; see the docstring).
+    return derive_keep_action(r, unmanaged)
 
 
 # --- self-test ---------------------------------------------------------------------------------------
@@ -1864,6 +2115,15 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 if impostor:
                     check("reloc-impostor-never-staged-" + dispo,
                           not (run / "sources" / imp_hex).exists())
+                # MIG-PR4b: exercise the gate's re-derivation on a RELOCATED STORE-SCOPE run, so the store-row
+                # branch of the base recovery (base = "ops", not ".") and resolve_by_scope re-anchor
+                # are covered (the declared-scope pr4b fixture only ever recovers base "."). A coherent
+                # relocated store-scope run must PASS all six ingest checks: the frozen crosswalk / actions /
+                # migrate scaffold re-derive-and-equal succeed under the recovered "ops" base.
+                import check_opf_import as _chk_reloc
+                _gres = _chk_reloc.check_staged_run(str(run))
+                check("reloc-gate-store-scope-rederive-" + dispo,
+                      all(_gres[cid][0] for cid in ("ingest-run-structure",) + _chk_reloc._INGEST_CHECK_IDS))
             finally:
                 _sh.rmtree(root)
 
@@ -2046,6 +2306,39 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
 
         def dig(run, name):
             return "sha256:" + _opf_import._sha256_hex((run / name).read_bytes())
+
+        def rebind(run, b):
+            """After a mutation, refresh EVERY digest the gate recomputes (report.toml's artefact digests,
+            plan_digest and inventory_digest, and the bundle's six bindings), write the bundle `b`, and
+            regenerate IMPORT-REPORT.md exactly as the planner would, so only the TARGET guard can fire."""
+            rep = read(run, "report.toml")
+            for a in rep["artifact"]:
+                if (run / a["path"]).is_file():
+                    a["sha256"] = _opf_import._sha256_hex((run / a["path"]).read_bytes())
+            rep["plan_digest"] = dig(run, "plan.toml")
+            inv = read(run, "inventory.toml")
+            rep["inventory_digest"] = inv["inventory_digest"]
+            (run / "report.toml").write_bytes(_opf_import._emit_bytes(rep, "report.toml"))
+            b["binding"].update(
+                plan_digest=rep["plan_digest"], inventory_digest=rep["inventory_digest"],
+                ingest_actions_digest=dig(run, "ingest-actions.toml"),
+                candidates_draft_digest=dig(run, "candidates_draft.toml"),
+                proposals_digest=dig(run, "proposals.toml"),
+                inventory_toml_digest=dig(run, "inventory.toml"))
+            (run / _opf_import.INGEST_REVIEW_NAME).write_bytes(
+                _opf_import._emit_bytes(b, _opf_import.INGEST_REVIEW_NAME))
+            norm = [{"source_path": p["source_path"], "span": list(p["span"]),
+                     "suggested_state": p["suggested_state"], "note": p.get("note", ""),
+                     "_origin": p["origin"]} for p in read(run, "proposals.toml")["proposal"]]
+            (run / "IMPORT-REPORT.md").write_bytes((
+                _opf_import._render_report_md(inv["inventory_digest"], inv["fragment"], norm, run.name)
+                + _opf_import._render_ingest_review_md(_opf_import._ingest_render_model(
+                    run.name, b["crosswalk"], b["migrate"]))).encode("utf-8"))
+
+        def restamp(b):
+            """Recompute the embedded worksheet's own digest after a row edit (validate_worksheet stays green)."""
+            payload = {k: v for k, v in b["worksheet"].items() if k != "worksheet_digest"}
+            b["worksheet"]["worksheet_digest"] = "sha256:" + _opf_import._sha256_hex(_worksheet_bytes(payload))
 
         # (a) keep-only / move-only / migrate-only / zero-result-migrate round-trips
         scenarios = [("keep", {"legacy/a.md": "source\n"}, "keep", None),
@@ -2299,7 +2592,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 check("bundle-inventory-single-read",
                       (run_rel + "/inventory.toml") not in reads and (run_rel + "/run.toml") in reads)
 
-        # (h) F-MIG-PR4A-INT-VALUEERROR: a staged inventory.toml carrying an integer literal OVER CPython's
+        # (h0) F-MIG-PR4A-INT-VALUEERROR: a staged inventory.toml carrying an integer literal OVER CPython's
         # 4300-digit string-conversion ceiling makes the step-3 tomllib.loads raise a BARE ValueError (NOT a
         # TOMLDecodeError). The parse converts the whole ValueError family to CANNOT-EVALUATE, matching
         # _read_toml's own parse-locus handling, so the writer fails closed to verdict 2 rather than RAISING.
@@ -2333,6 +2626,922 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 except ValueError:
                     raised_bare = True  # the pre-fix regression: the bare ValueError escaped the writer
                 check("bundle-inventory-hugeint-fail-closed", verdict == CANNOT_EVALUATE and not raised_bare)
+
+        # (h) MIG-PR4b: the read-only SEMANTIC gate over the frozen bundle. Over a COHERENT mixed
+        # keep+move+migrate ingest run all five ingest checks PASS; each new check then FINDINGs on its own
+        # targeted mutation (change-carries-check). The bundle is NOT digest-bound by any artefact (acyclic
+        # graph), so a structurally-valid bundle rewrite exercises the correspondence checks in isolation,
+        # while a staged-report tamper exercises the byte-reproduction check. Every mutation is restored so the
+        # cases are independent.
+        NAME = _opf_import.INGEST_REVIEW_NAME
+        _pr4b_ids = ("ingest-run-structure", "ingest-source-binding", "ingest-disposition-totality",
+                     "ingest-draft-loss-binding", "ingest-report-reproducibility", "ingest-artefact-completeness")
+        pr4b_map = {"legacy/keep.md": "keepme\n", "legacy/move.md": "moveme\n",
+                    "legacy/mig.md": "- [ ] one\n- [x] two\n"}
+        pr4b_by = {"legacy/keep.md": "keep", "legacy/move.md": "move", "legacy/mig.md": "migrate"}
+        pr4b_files = list(pr4b_map)
+        with fixture(pr4b_map) as (root, machine):
+            found = detect(root, include=pr4b_files)
+            ws = stamp([dict(r, disposition=pr4b_by[r["source_path"]], note="") for r in found.rows])
+            opt_rows = []
+            for r in ws["row"]:
+                if pr4b_by[r["source_path"]] == "migrate":
+                    opt_rows.append({"scope": r["scope"], "source_path": r["source_path"],
+                                     "importer_kind": "github-tasklist"})
+                elif pr4b_by[r["source_path"]] == "move":
+                    opt_rows.append({"scope": r["scope"], "source_path": r["source_path"]})
+            opts = {"format": OPTIONS_FORMAT, "schema": SCHEMA, "option": opt_rows}
+            run = staged(root, machine, ws, opts, pr4b_files)
+            if run is not None:
+                rundir = str(run)
+                pristine = load_bundle(root, run)
+                orig_bundle = (run / NAME).read_bytes()
+
+                def write_bundle(b):
+                    (run / NAME).write_bytes(_opf_import._emit_bytes(b, NAME))
+
+                def restore_bundle():
+                    (run / NAME).write_bytes(orig_bundle)
+
+                def flip(name, check_id, mutate):
+                    b = copy.deepcopy(pristine)
+                    mutate(b)
+                    write_bundle(b)
+                    try:
+                        res = _chk.check_staged_run(rundir)
+                        check(name, res[check_id][0] is False)
+                    finally:
+                        restore_bundle()
+
+                # (h0) all five PASS on the coherent run.
+                clean_res = _chk.check_staged_run(rundir)
+                for cid in _pr4b_ids:
+                    check("pr4b-clean-" + cid, clean_res[cid][0] is True)
+
+                # (h1) ingest-source-binding: a stale-but-well-shaped binding.inventory_toml_digest, and a
+                # crosswalk disposition drifted from the worksheet.
+                def _bad_inv_digest(b):
+                    cur = b["binding"]["inventory_toml_digest"]
+                    b["binding"]["inventory_toml_digest"] = "sha256:" + ("0" * 64 if cur != "sha256:"
+                                                                         + "0" * 64 else "1" * 64)
+                flip("pr4b-disc-source-binding-digest", "ingest-source-binding", _bad_inv_digest)
+
+                def _drift_crosswalk_disp(b):
+                    row = b["crosswalk"][0]
+                    row["disposition"] = "move" if row["disposition"] != "move" else "keep"
+                flip("pr4b-disc-source-binding-crosswalk-disp", "ingest-source-binding", _drift_crosswalk_disp)
+
+                # (h2) ingest-disposition-totality: drop the migrate correspondence, and a duplicate migrate row
+                # (duplicate rejection before dictionary construction).
+                flip("pr4b-disc-disposition-totality-drop-migrate", "ingest-disposition-totality",
+                     lambda b: b.__setitem__("migrate", []))
+                flip("pr4b-disc-disposition-totality-dup-migrate", "ingest-disposition-totality",
+                     lambda b: b["migrate"].append(copy.deepcopy(b["migrate"][0])))
+
+                # (h3) ingest-draft-loss-binding: a stale binding.candidates_draft_digest, and a frozen count
+                # that no longer matches the staged evidence.
+                def _bad_draft_digest(b):
+                    cur = b["binding"]["candidates_draft_digest"]
+                    b["binding"]["candidates_draft_digest"] = "sha256:" + ("0" * 64 if cur != "sha256:"
+                                                                           + "0" * 64 else "1" * 64)
+                flip("pr4b-disc-draft-loss-digest", "ingest-draft-loss-binding", _bad_draft_digest)
+                flip("pr4b-disc-draft-loss-count", "ingest-draft-loss-binding",
+                     lambda b: b["migrate"][0].__setitem__("candidate_count",
+                                                           b["migrate"][0]["candidate_count"] + 1))
+
+                # (h4) ingest-report-reproducibility: tamper the staged IMPORT-REPORT.md (bundle untouched).
+                orig_report = (run / "IMPORT-REPORT.md").read_bytes()
+                (run / "IMPORT-REPORT.md").write_bytes(orig_report + b"\n<!-- tampered -->\n")
+                check("pr4b-disc-report-repro",
+                      _chk.check_staged_run(rundir)["ingest-report-reproducibility"][0] is False)
+                (run / "IMPORT-REPORT.md").write_bytes(orig_report)
+
+                # (h5) ingest-run-structure: a present-but-malformed bundle, and an ingest-marked run whose
+                # review bundle is absent (partial run), both a located FINDING at the gate (never a raise).
+                (run / NAME).write_text('format = "wrong"\nschema = 1\n', encoding="utf-8")
+                check("pr4b-disc-structure-malformed",
+                      _chk.check_staged_run(rundir)["ingest-run-structure"][0] is False)
+                restore_bundle()
+                (run / NAME).unlink()
+                check("pr4b-disc-structure-partial",
+                      _chk.check_staged_run(rundir)["ingest-run-structure"][0] is False)
+                restore_bundle()
+
+                # (h6) MIG-PR4b round-2 semantic-correspondence discriminators. Each new gate guard PASSES on
+                # the coherent run above and FINDINGs on its own targeted mutation, and flips (passes) if only
+                # that guard is reverted. Bundle-only mutations use flip(); mutations that touch a STAGED
+                # artefact refresh the matching binding digest so the digest arm stays green and only the
+                # target correspondence guard fires.
+
+                # FIX 1a: a stale-but-well-shaped binding.ingest_actions_digest -> ingest-source-binding.
+                def _bad_actions_digest(b):
+                    cur = b["binding"]["ingest_actions_digest"]
+                    b["binding"]["ingest_actions_digest"] = "sha256:" + ("0" * 64 if cur != "sha256:"
+                                                                         + "0" * 64 else "1" * 64)
+                flip("bundle-action-digest-recompute", "ingest-source-binding", _bad_actions_digest)
+
+                # FIX 2: a worksheet row whose frozen sha256 diverges from the staged source identity, kept
+                # internally consistent (worksheet_digest recomputed) so validate_worksheet still passes and
+                # only the FIX 2 identity guard fires.
+                def _drift_ws_identity(b):
+                    row = b["worksheet"]["row"][0]
+                    cur = row["sha256"]
+                    row["sha256"] = "sha256:" + ("0" * 64 if cur != "sha256:" + "0" * 64 else "1" * 64)
+                    payload = {k: v for k, v in b["worksheet"].items() if k != "worksheet_digest"}
+                    b["worksheet"]["worksheet_digest"] = "sha256:" + _opf_import._sha256_hex(
+                        _worksheet_bytes(payload))
+                flip("bundle-worksheet-identity-vs-source", "ingest-source-binding", _drift_ws_identity)
+
+                # FIX 3a: drop the option for a move/migrate row so options no longer correspond to the
+                # dispositions -> ingest-source-binding. (validate_options still passes: the remaining options
+                # are well-shaped, so only the FIX 3a correspondence guard fires.)
+                flip("bundle-options-vs-disposition", "ingest-source-binding",
+                     lambda b: b["options"]["option"].pop())
+
+                # FIX 3b: a migrate row whose importer_kind is not a registered importer -> ingest-source-binding.
+                flip("bundle-importer-kind-registered", "ingest-source-binding",
+                     lambda b: b["migrate"][0].__setitem__("importer_kind", "no-such-importer"))
+
+                # FIX 1b: a keep worksheet row whose staged ingest-actions action is kind=move to an
+                # unauthorized dest -> ingest-disposition-totality. The staged ingest-actions.toml is mutated
+                # and binding.ingest_actions_digest refreshed so ingest-source-binding stays green and only the
+                # action-kind guard fires.
+                acts = read(run, "ingest-actions.toml")
+                orig_acts = (run / "ingest-actions.toml").read_bytes()
+                for a in acts["action"]:
+                    if a["kind"] == "keep":
+                        a["kind"] = "move"
+                        a["dest_path"] = ".archive/unauthorized.md"
+                        break
+                (run / "ingest-actions.toml").write_bytes(
+                    _opf_import._emit_bytes(acts, "ingest-actions.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["ingest_actions_digest"] = dig(run, "ingest-actions.toml")
+                write_bundle(b)
+                check("bundle-action-kind-vs-disposition",
+                      _chk.check_staged_run(rundir)["ingest-disposition-totality"][0] is False)
+                (run / "ingest-actions.toml").write_bytes(orig_acts)
+                restore_bundle()
+
+                # FIX 4a: a staged candidate whose record.status is not a legal status -> ingest-draft-loss-
+                # binding (through the real record validator). binding.candidates_draft_digest refreshed so the
+                # digest arm stays green and only the envelope-validity guard fires.
+                cds = read(run, "candidates_draft.toml")
+                orig_cds = (run / "candidates_draft.toml").read_bytes()
+                cds["candidate"][0]["record"]["status"] = "not-a-status"
+                (run / "candidates_draft.toml").write_bytes(
+                    _opf_import._emit_bytes(cds, "candidates_draft.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
+                write_bundle(b)
+                check("bundle-candidate-envelope-valid",
+                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                (run / "candidates_draft.toml").write_bytes(orig_cds)
+                restore_bundle()
+
+                # FIX 4b: a candidate whose source_path names no migrate row (a VALID envelope under a ghost
+                # source) -> ingest-draft-loss-binding (the envelope-validity guard passes, only the no-extra-
+                # source guard fires). binding.candidates_draft_digest refreshed so the digest arm stays green.
+                cds = read(run, "candidates_draft.toml")
+                orig_cds = (run / "candidates_draft.toml").read_bytes()
+                ghost = copy.deepcopy(cds["candidate"][0])
+                ghost["source_path"] = "legacy/ghost.md"
+                cds["candidate"].append(ghost)
+                (run / "candidates_draft.toml").write_bytes(
+                    _opf_import._emit_bytes(cds, "candidates_draft.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
+                write_bundle(b)
+                check("bundle-candidate-no-extra-source",
+                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                (run / "candidates_draft.toml").write_bytes(orig_cds)
+                restore_bundle()
+
+                # (h8) MIG-PR4b RE-DERIVATION discriminators: one per re-derived artefact / escape vector
+                # (E1-E8), each PASSING on the coherent run above and FINDING on its single targeted mutation.
+                # These reproduce the codex/gemini/claude round-1/2 escapes the per-vector gate passed; the
+                # re-derive-and-equal mechanism now catches each. Bundle-only mutations use flip(); mutations
+                # that touch a STAGED artefact refresh the matching binding digest so only the target
+                # correspondence arm fires (change-carries-check).
+                other_kind = sorted(k for k in _opf_importers.IMPORTER_KINDS
+                                    if k != "github-tasklist")[0]
+
+                # E1 (importer_kind bound across options / migrate scaffold / candidate stamp). (a) the frozen
+                # migrate row's kind drifts from the OPTIONS kind; (b) the OPTIONS kind drifts from the migrate
+                # row; both -> disposition-totality (scaffold re-derive binds migrate.importer_kind to options).
+                # Each uses a REGISTERED kind so validate_options / the registry arm still pass and only the
+                # scaffold equality fires.
+                flip("pr4b-disc-e1-migrate-kind-vs-options", "ingest-disposition-totality",
+                     lambda b: b["migrate"][0].__setitem__("importer_kind", other_kind))
+
+                def _drift_option_kind(b):
+                    for o in b["options"]["option"]:
+                        if "importer_kind" in o:
+                            o["importer_kind"] = other_kind
+                            break
+                flip("pr4b-disc-e1-options-kind-vs-migrate", "ingest-disposition-totality", _drift_option_kind)
+
+                # E1/E8 (candidate importer_kind STAMP): the staged candidate's importer_kind stamp drifts from
+                # its migrate row -> ingest-draft-loss-binding. Touches candidates_draft.toml; digest refreshed.
+                cds = read(run, "candidates_draft.toml")
+                orig_cds = (run / "candidates_draft.toml").read_bytes()
+                cds["candidate"][0]["importer_kind"] = other_kind
+                (run / "candidates_draft.toml").write_bytes(
+                    _opf_import._emit_bytes(cds, "candidates_draft.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
+                write_bundle(b)
+                check("pr4b-disc-e1-candidate-kind-stamp",
+                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                (run / "candidates_draft.toml").write_bytes(orig_cds)
+                restore_bundle()
+
+                # E8 (candidate NO-SKIP, the real escape the prior gate missed): an EXTRA malformed candidate
+                # (non-string source_path) is APPENDED beside the intact real candidates, so the per-migrate
+                # COUNTS still match and the ghost-source set is unperturbed. The prior gate SILENTLY DROPPED it
+                # (`isinstance(c.get("source_path"), str)`), so the run passed; the re-derivation gate iterates
+                # EVERY candidate fail-closed and FINDINGs the malformed one -> draft-loss. binding digest
+                # refreshed so only the candidate-iteration guard fires.
+                cds = read(run, "candidates_draft.toml")
+                orig_cds = (run / "candidates_draft.toml").read_bytes()
+                _ghost = copy.deepcopy(cds["candidate"][0])
+                _ghost["source_path"] = 123
+                cds["candidate"].append(_ghost)
+                (run / "candidates_draft.toml").write_bytes(
+                    _opf_import._emit_bytes(cds, "candidates_draft.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
+                write_bundle(b)
+                check("pr4b-disc-e8-candidate-noskip-malformed",
+                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                (run / "candidates_draft.toml").write_bytes(orig_cds)
+                restore_bundle()
+
+                # E2 (candidate closed keyset): a candidate carrying an EXTRA key -> draft-loss FINDING.
+                cds = read(run, "candidates_draft.toml")
+                orig_cds = (run / "candidates_draft.toml").read_bytes()
+                cds["candidate"][0]["rogue"] = "x"
+                (run / "candidates_draft.toml").write_bytes(
+                    _opf_import._emit_bytes(cds, "candidates_draft.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
+                write_bundle(b)
+                check("pr4b-disc-e2-candidate-extra-key",
+                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                (run / "candidates_draft.toml").write_bytes(orig_cds)
+                restore_bundle()
+
+                # E4 (inventory identities vs preserved bytes): the frozen inventory.toml source sha256 drifts
+                # from the PRESERVED sources/<sha> bytes, kept self-consistent (its own inventory_digest and the
+                # report + bundle bindings all refreshed) so ONLY the _build_inventory re-derive fires ->
+                # ingest-source-binding.
+                inv = read(run, "inventory.toml")
+                orig_inv = (run / "inventory.toml").read_bytes()
+                orig_report = (run / "report.toml").read_bytes()
+                _old_sha = inv["source"][0]["sha256"]
+                inv["source"][0]["sha256"] = ("1" if _old_sha[0] != "1" else "0") + _old_sha[1:]
+                _inv_payload = {k: v for k, v in inv.items() if k != "inventory_digest"}
+                _new_inv_digest = "sha256:" + _opf_import._sha256_hex(
+                    _opf_import._emit_bytes(_inv_payload, "inventory"))
+                inv["inventory_digest"] = _new_inv_digest
+                (run / "inventory.toml").write_bytes(_opf_import._emit_bytes(inv, "inventory.toml"))
+                rep = read(run, "report.toml")
+                rep["inventory_digest"] = _new_inv_digest
+                (run / "report.toml").write_bytes(_opf_import._emit_bytes(rep, "report.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["inventory_digest"] = _new_inv_digest
+                b["binding"]["inventory_toml_digest"] = dig(run, "inventory.toml")
+                write_bundle(b)
+                check("pr4b-disc-e4-inventory-vs-preserved-bytes",
+                      _chk.check_staged_run(rundir)["ingest-source-binding"][0] is False)
+                (run / "inventory.toml").write_bytes(orig_inv)
+                (run / "report.toml").write_bytes(orig_report)
+                restore_bundle()
+
+                # E5 (keep action RE-DERIVE): the staged keep action's unmanaged_path drifts from the shared
+                # keep_unmanaged spelling -> disposition-totality. Touches ingest-actions.toml; digest refreshed.
+                acts = read(run, "ingest-actions.toml")
+                orig_acts = (run / "ingest-actions.toml").read_bytes()
+                for a in acts["action"]:
+                    if a["kind"] == "keep":
+                        a["unmanaged_path"] = "legacy/forged-exemption.md"
+                        break
+                (run / "ingest-actions.toml").write_bytes(
+                    _opf_import._emit_bytes(acts, "ingest-actions.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["ingest_actions_digest"] = dig(run, "ingest-actions.toml")
+                write_bundle(b)
+                check("pr4b-disc-e5-keep-unmanaged-path",
+                      _chk.check_staged_run(rundir)["ingest-disposition-totality"][0] is False)
+                (run / "ingest-actions.toml").write_bytes(orig_acts)
+                restore_bundle()
+
+                # E5 (move action RE-DERIVE incl identity): the staged move action's sha256 drifts from the
+                # worksheet row identity -> disposition-totality. Touches ingest-actions.toml; digest refreshed.
+                acts = read(run, "ingest-actions.toml")
+                orig_acts = (run / "ingest-actions.toml").read_bytes()
+                for a in acts["action"]:
+                    if a["kind"] == "move":
+                        _os = a["sha256"]
+                        a["sha256"] = "sha256:" + ("0" * 64 if _os != "sha256:" + "0" * 64 else "1" * 64)
+                        break
+                (run / "ingest-actions.toml").write_bytes(
+                    _opf_import._emit_bytes(acts, "ingest-actions.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["ingest_actions_digest"] = dig(run, "ingest-actions.toml")
+                write_bundle(b)
+                check("pr4b-disc-e5-move-action-identity",
+                      _chk.check_staged_run(rundir)["ingest-disposition-totality"][0] is False)
+                (run / "ingest-actions.toml").write_bytes(orig_acts)
+                restore_bundle()
+
+                # E6 (migrate resolved vs crosswalk base): the frozen migrate row's resolved_source_path drifts
+                # from the base-consistent re-derivation -> disposition-totality (scaffold re-derive).
+                flip("pr4b-disc-e6-migrate-resolved", "ingest-disposition-totality",
+                     lambda b: b["migrate"][0].__setitem__("resolved_source_path", "legacy/forged-resolved.md"))
+
+                # E7 (document envelopes): the staged ingest-actions.toml run_id no longer names this run dir ->
+                # disposition-totality envelope FINDING. Touches ingest-actions.toml; digest refreshed.
+                acts = read(run, "ingest-actions.toml")
+                orig_acts = (run / "ingest-actions.toml").read_bytes()
+                acts["run_id"] = "imp-20260101T000000Z-0000000000000000"
+                (run / "ingest-actions.toml").write_bytes(
+                    _opf_import._emit_bytes(acts, "ingest-actions.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["ingest_actions_digest"] = dig(run, "ingest-actions.toml")
+                write_bundle(b)
+                check("pr4b-disc-e7-actions-envelope-run-id",
+                      _chk.check_staged_run(rundir)["ingest-disposition-totality"][0] is False)
+                (run / "ingest-actions.toml").write_bytes(orig_acts)
+                restore_bundle()
+
+                # E7 (candidates_draft envelope): the staged candidates_draft.toml run_id drifts -> draft-loss
+                # envelope FINDING. Touches candidates_draft.toml; digest refreshed.
+                cds = read(run, "candidates_draft.toml")
+                orig_cds = (run / "candidates_draft.toml").read_bytes()
+                cds["run_id"] = "imp-20260101T000000Z-0000000000000000"
+                (run / "candidates_draft.toml").write_bytes(
+                    _opf_import._emit_bytes(cds, "candidates_draft.toml"))
+                b = copy.deepcopy(pristine)
+                b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
+                write_bundle(b)
+                check("pr4b-disc-e7-candidates-envelope-run-id",
+                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                (run / "candidates_draft.toml").write_bytes(orig_cds)
+                restore_bundle()
+
+                # E8 (duplicate crosswalk key): a duplicated crosswalk (scope, source_path) row rejected before
+                # the equality reduction -> ingest-source-binding. Bundle-only.
+                flip("pr4b-disc-e8-crosswalk-dup-key", "ingest-source-binding",
+                     lambda b: b["crosswalk"].append(copy.deepcopy(b["crosswalk"][0])))
+
+                # (h9) MIG-PR4b ROUND-2 discriminators (R1-R10, G1, C2). Each reproduces a confirmed escape the
+                # round-2 gate PASSED: the mutation is applied, then EVERY digest the gate recomputes is refreshed
+                # and IMPORT-REPORT.md regenerated exactly as the planner would (coherent()), so only the target
+                # guard can fire. Where two guards overlap by design, the located detail is asserted so removing
+                # ONLY the target guard flips the discriminator (change-carries-check).
+                def snapshot_run():
+                    return {p.relative_to(run).as_posix(): p.read_bytes()
+                            for p in run.rglob("*") if p.is_file() and not p.is_symlink()}
+
+                def restore_run(snap):
+                    for p in sorted(run.rglob("*"), key=lambda q: len(q.parts), reverse=True):
+                        rel = p.relative_to(run).as_posix()
+                        if p.is_symlink() or p.is_file():
+                            if rel not in snap:
+                                p.unlink()
+                        elif p.is_dir() and not any(k.startswith(rel + "/") for k in snap):
+                            p.rmdir()
+                    for rel, data in snap.items():
+                        (run / rel).parent.mkdir(parents=True, exist_ok=True)
+                        (run / rel).write_bytes(data)
+
+                def coherent(name, check_id, edit, detail=None):
+                    snap = snapshot_run()
+                    try:
+                        b = copy.deepcopy(pristine)
+                        edit(b)
+                        rebind(run, b)
+                        res = _chk.check_staged_run(rundir)[check_id]
+                        check(name, res[0] is False and (detail is None or detail in res[1]))
+                    finally:
+                        restore_run(snap)
+
+                def put(rel, model):
+                    (run / rel).write_bytes(_opf_import._emit_bytes(model, rel))
+
+                def edit_doc(rel, fn):
+                    doc = read(run, rel)
+                    fn(doc)
+                    put(rel, doc)
+
+                def first(rows, **match):
+                    return next(r for r in rows if all(r.get(k) == v for k, v in match.items()))
+
+                # the harness itself is sound: a no-op coherent() rewrite, through the SAME rebind() path every
+                # mutation uses (digest refresh + report regeneration), leaves EVERY gate check PASSING (else
+                # each discriminator below would pass vacuously on a harness-induced failure). Round-5: the probe
+                # previously wrote the bundle without rebind(), so it never exercised that path; its own
+                # discriminator shows a report-corrupting rebind is caught by the same probe.
+                def noop_probe(rebinder):
+                    snap = snapshot_run()
+                    try:
+                        rebinder(run, copy.deepcopy(pristine))
+                        res = _chk.check_staged_run(rundir)
+                        return all(res[cid][0] for cid in _pr4b_ids) and all(ok for ok, _d in res.values())
+                    finally:
+                        restore_run(snap)
+
+                def corrupt_rebind(run_, b):
+                    rebind(run_, b)
+                    with open(run_ / "IMPORT-REPORT.md", "ab") as fh:
+                        fh.write(b"forged trailing line\n")
+
+                check("pr4b-harness-noop-clean", noop_probe(rebind))
+                check("pr4b-disc-harness-noop-detects-corrupt-rebind", not noop_probe(corrupt_rebind))
+
+                # R1 (ARTEFACT COMPLETENESS): plan.toml replaced by a non-plan, a legacy-fragment body forged, an
+                # unexpected staged file, a registered artefact missing, and candidate/counters.toml unparseable.
+                def _r1_plan(b):
+                    (run / "plan.toml").write_text('nonsense = "not a plan"\n', encoding="utf-8")
+                coherent("pr4b-disc-r1-plan-rederive", "ingest-artefact-completeness", _r1_plan, "plan.toml")
+                coherent("pr4b-disc-r1-fragment-body", "ingest-artefact-completeness",
+                         lambda b: edit_doc("fragments/legacy_fragment.index.toml",
+                                            lambda d: d["record"][0].__setitem__("body", "forged")),
+                         "legacy_fragment index does not equal")
+                coherent("pr4b-disc-r1-unexpected-file", "ingest-artefact-completeness",
+                         lambda b: (run / "rogue.txt").write_text("x\n", encoding="utf-8"),
+                         "outside the ingest artefact registry")
+                coherent("pr4b-disc-r1-missing-artefact", "ingest-artefact-completeness",
+                         lambda b: (run / "sources" / first(read(run, "run.toml")["source"],
+                                                           path="legacy/keep.md")["sha256"]).unlink(),
+                         "missing registered artefact")
+                coherent("pr4b-disc-r1-counters-unparseable", "ingest-artefact-completeness",
+                         lambda b: (run / "candidate/counters.toml").write_bytes(b"not valid toml [\n"),
+                         "counters.toml")
+                coherent("pr4b-disc-r1-counters-lf-high-water", "ingest-artefact-completeness",
+                         lambda b: edit_doc("candidate/counters.toml",
+                                            lambda d: d["counters"].__setitem__("LF", d["counters"]["LF"] + 1)),
+                         "LF high-water")
+
+                # R2 (ENVELOPES): run.toml with a bool schema and a foreign run_id, and mappings.toml with a bool
+                # schema, are refused at the registry envelope BEFORE any field is consumed.
+                def _r2_run(b):
+                    edit_doc("run.toml", lambda d: d.update(schema=True, run_id="wrong"))
+                coherent("pr4b-disc-r2-run-envelope", "ingest-artefact-completeness", _r2_run,
+                         "run.toml envelope invalid")
+                coherent("pr4b-disc-r2-mappings-envelope", "ingest-artefact-completeness",
+                         lambda b: edit_doc("mappings.toml", lambda d: d.__setitem__("schema", False)),
+                         "mappings.toml envelope invalid")
+
+                # R3 (MULTIPLICITY): a duplicated run.toml source row with inventory.toml rebuilt to match.
+                def _r3_dup(b):
+                    rd = read(run, "run.toml")
+                    rd["source"].append(dict(rd["source"][0]))
+                    put("run.toml", rd)
+                    put("inventory.toml", _opf_import._build_inventory(rd["source"])[0])
+                coherent("pr4b-disc-r3-duplicate-run-source", "ingest-source-binding", _r3_dup,
+                         "duplicate source path")
+
+                # R4 (PROPOSALS): an importer_proposal on the KEEP source, and a model_proposal on a ghost path
+                # with an out-of-range span (plan_ingest emits zero model-origin proposals).
+                def _r4_keep(b):
+                    edit_doc("proposals.toml", lambda d: d["proposal"].append(
+                        {"origin": _opf_import._IMPORTER_PROPOSAL_ORIGIN, "source_path": "legacy/keep.md",
+                         "span": [0, 1], "suggested_state": "mapped", "note": ""}))
+                coherent("pr4b-disc-r4-importer-proposal-on-keep", "ingest-draft-loss-binding", _r4_keep,
+                         "is not a migrate row's resolved source")
+
+                def _r4_model(b):
+                    edit_doc("proposals.toml", lambda d: d["proposal"].append(
+                        {"origin": _opf_import._MODEL_PROPOSAL_ORIGIN, "source_path": "ghost/outside.md",
+                         "span": [-10, 99999], "suggested_state": "mapped", "note": ""}))
+                coherent("pr4b-disc-r4-model-proposal", "ingest-draft-loss-binding", _r4_model,
+                         "importer proposals only")
+
+                # R5 (CANDIDATE REFS): a duplicated candidate (same draft_ref, candidate_count raised to match),
+                # and an empty draft_ref, both through the SHARED candidate_ref_findings.
+                def _r5_dup(b):
+                    edit_doc("candidates_draft.toml",
+                             lambda d: d["candidate"].append(copy.deepcopy(d["candidate"][0])))
+                    first(b["migrate"], source_path="legacy/mig.md")["candidate_count"] += 1
+                coherent("pr4b-disc-r5-duplicate-draft-ref", "ingest-draft-loss-binding", _r5_dup,
+                         "draft-ref invariants")
+                coherent("pr4b-disc-r5-empty-draft-ref", "ingest-draft-loss-binding",
+                         lambda b: edit_doc("candidates_draft.toml",
+                                            lambda d: d["candidate"][0].__setitem__("draft_ref", "")),
+                         "draft-ref invariants")
+
+                # R6 (ADMISSIBILITY): a move to itself (option + action dest re-derived to match), an importer_kind
+                # on a move option, and a non-empty worksheet note on a move row (worksheet digest refreshed).
+                def _r6_self(b):
+                    first(b["options"]["option"], source_path="legacy/move.md")["dest_path"] = "legacy/move.md"
+                    edit_doc("ingest-actions.toml", lambda d: first(
+                        d["action"], source_path="legacy/move.md").__setitem__("dest_path", "legacy/move.md"))
+                coherent("pr4b-disc-r6-move-to-self", "ingest-disposition-totality", _r6_self, "not admissible")
+                coherent("pr4b-disc-r6-move-importer-kind", "ingest-disposition-totality",
+                         lambda b: first(b["options"]["option"], source_path="legacy/move.md").__setitem__(
+                             "importer_kind", "github-tasklist"), "not admissible")
+
+                def _r6_note(b):
+                    first(b["worksheet"]["row"], source_path="legacy/move.md")["note"] = "configure me"
+                    payload = {k: v for k, v in b["worksheet"].items() if k != "worksheet_digest"}
+                    b["worksheet"]["worksheet_digest"] = "sha256:" + _opf_import._sha256_hex(
+                        _worksheet_bytes(payload))
+                coherent("pr4b-disc-r6-move-note", "ingest-disposition-totality", _r6_note, "not admissible")
+
+                # R9 (TYPE STRICTNESS): a float action size equal-by-value to the worksheet's int size.
+                coherent("pr4b-disc-r9-float-size", "ingest-disposition-totality",
+                         lambda b: edit_doc("ingest-actions.toml", lambda d: first(
+                             d["action"], kind="keep").__setitem__("size", float(first(d["action"], kind="keep")[
+                                 "size"]))), "does not equal the action re-derived")
+
+                # R10 (WHOLE ROW): an extra key on a crosswalk row, and on a migrate row.
+                coherent("pr4b-disc-r10-crosswalk-extra-key", "ingest-source-binding",
+                         lambda b: b["crosswalk"][0].__setitem__("rogue", "ignored"),
+                         "frozen crosswalk does not equal")
+                coherent("pr4b-disc-r10-migrate-extra-key", "ingest-disposition-totality",
+                         lambda b: b["migrate"][0].__setitem__("rogue", "ignored"), "closed scaffold")
+
+                # G1 (INCLUDE): a mutated read-space the declared rows fall outside of, and an undeclared include
+                # that nonetheless carries patterns.
+                coherent("pr4b-disc-g1-include-read-space", "ingest-source-binding",
+                         lambda b: b.__setitem__("include", ["nothing/*"]), "outside the frozen include set")
+                coherent("pr4b-disc-g1-include-declared-flag", "ingest-source-binding",
+                         lambda b: b.__setitem__("include_declared", False), "include_declared is false")
+
+                # C2 (duplicate-resolved guard, isolated): a STORE-scope worksheet row naming the same file as the
+                # declared keep row (an inline store re-anchors it to the SAME product path), with its crosswalk
+                # row appended as the builder derives it, so the crosswalk equality and the set equalities all
+                # hold and ONLY the multiplicity guard over resolved_source_path fires.
+                # A-M3 made this collision statically unreachable: a STORE row lies under `.working/` and a
+                # declared row never does, so no two scope-admissible rows share a resolved path. The twin is now
+                # refused FIRST by the shared scope admissibility (asserted), and the multiplicity guard stays as
+                # defence in depth, isolated here by stubbing ONLY admit_row_scope on the module the gate
+                # imports, so removing the multiplicity guard still flips this discriminator.
+                def _c2(b):
+                    keep_row = first(b["worksheet"]["row"], source_path="legacy/keep.md")
+                    twin = dict(keep_row, scope="store")
+                    b["worksheet"]["row"].append(twin)
+                    restamp(b)
+                    b["crosswalk"].append(derive_crosswalk_row(twin, "legacy/keep.md"))
+                coherent("pr4b-disc-c2-twin-scope-refused", "ingest-source-binding", _c2,
+                         "not scope-admissible")
+                import _opf_ingest as _gate_ing
+                _real_scope = _gate_ing.admit_row_scope
+                _gate_ing.admit_row_scope = lambda *a, **k: None
+                try:
+                    coherent("pr4b-disc-c2-duplicate-resolved", "ingest-source-binding", _c2,
+                             "duplicate resolved_source_path")
+                finally:
+                    _gate_ing.admit_row_scope = _real_scope
+
+                # A-m4 (PROPOSALS DOCUMENT RE-DERIVE-AND-EQUAL): the staged importer proposals REVERSED (each
+                # row still valid, confined, counted, and the report regenerated to match) no longer equal the
+                # producer's sorted construction -> draft-loss. Guarded against a vacuous pass: the fixture's
+                # migrate source must yield at least two proposals whose order a reversal changes.
+                check("pr4b-am4-fixture-two-proposals", len(read(run, "proposals.toml")["proposal"]) >= 2)
+                coherent("pr4b-disc-am4-proposals-order", "ingest-draft-loss-binding",
+                         lambda b: edit_doc("proposals.toml", lambda d: d["proposal"].reverse()),
+                         "proposals.toml does not equal the document the planner constructs")
+
+                # ROUND-4 discriminators (each mutation applied, every digest refreshed and IMPORT-REPORT.md
+                # regenerated by coherent(), so only the target guard can fire; each flips with its fix reverted).
+                # F1 (ABSENT vs PRESENT-FALSY): a staged candidate whose record carries a falsy `id` (False, 0,
+                # "", [], {}) or a falsy `updated_at` is refused by the shared _validate_candidate at the gate; the
+                # pre-fix validator synthesized a placeholder over every falsy value and PASSED it.
+                for _tag, _field, _val, _det in (("id-false", "id", False, "carries an `id`"),
+                                                 ("id-zero", "id", 0, "carries an `id`"),
+                                                 ("id-empty-str", "id", "", "carries an `id`"),
+                                                 ("id-empty-list", "id", [], "carries an `id`"),
+                                                 ("id-empty-table", "id", {}, "carries an `id`"),
+                                                 ("updated-at-false", "updated_at", False, "updated_at"),
+                                                 ("updated-at-empty-str", "updated_at", "", "updated_at")):
+                    coherent("pr4b-disc-r4f1-candidate-" + _tag, "ingest-draft-loss-binding",
+                             lambda b, _field=_field, _val=_val: edit_doc(
+                                 "candidates_draft.toml",
+                                 lambda d: d["candidate"][0]["record"].__setitem__(_field, _val)), _det)
+
+                # F2 (MOVE DEST vs THE COMPLETE SOURCE SET): the move's option + action dest re-pointed at another
+                # worksheet source, beneath it, and at its ancestor directory (plan_ingest refuses all three at
+                # plan time via its live lstat; the pre-fix gate PASSED them, having no source-set admission).
+                def _f2(dest):
+                    def edit(b):
+                        first(b["options"]["option"], source_path="legacy/move.md")["dest_path"] = dest
+                        edit_doc("ingest-actions.toml", lambda d: first(
+                            d["action"], source_path="legacy/move.md").__setitem__("dest_path", dest))
+                    return edit
+                coherent("pr4b-disc-r4f2-dest-equals-source", "ingest-disposition-totality",
+                         _f2("legacy/keep.md"), "equals the worksheet source")
+                coherent("pr4b-disc-r4f2-dest-beneath-source", "ingest-disposition-totality",
+                         _f2("legacy/keep.md/child"), "lies beneath the worksheet source")
+                coherent("pr4b-disc-r4f2-dest-ancestor-of-source", "ingest-disposition-totality",
+                         _f2("legacy"), "is an ancestor directory of the worksheet source")
+
+                # F5 (CLOSED DOCUMENT SHAPES): a field outside the producer's shape on candidates_draft.toml, on
+                # the ingest-review.toml top level, and in its binding table (each pre-fix silently ignored).
+                coherent("pr4b-disc-r4f5-candidates-draft-extra-field", "ingest-draft-loss-binding",
+                         lambda b: edit_doc("candidates_draft.toml", lambda d: d.__setitem__("rogue", "x")),
+                         "outside the producer's closed document shape")
+                coherent("pr4b-disc-r4f5-bundle-extra-field", "ingest-run-structure",
+                         lambda b: b.__setitem__("rogue", "x"), "outside the producer's closed shape")
+                coherent("pr4b-disc-r4f5-bundle-binding-extra-field", "ingest-run-structure",
+                         lambda b: b["binding"].__setitem__("rogue", "sha256:" + "0" * 64),
+                         "binding carries field(s) outside")
+
+                # F6 (CANDIDATE ORDER, within one importer output): the migrate source's two drafts reversed
+                # (each still valid, counted, digest-bound) no longer equal the producer's sorted order.
+                check("pr4b-r4f6-fixture-two-candidates",
+                      len(read(run, "candidates_draft.toml")["candidate"]) >= 2)
+                coherent("pr4b-disc-r4f6-candidates-order", "ingest-draft-loss-binding",
+                         lambda b: edit_doc("candidates_draft.toml", lambda d: d["candidate"].reverse()),
+                         "not in the order the planner stages them")
+
+                # A-M1 (DETECTION THROUGH THE SUPPLIED DIR): a DETACHED copy (outside any conventional
+                # `<store>/.working/imports/<run-id>` ancestry) of the coherent run is still classified an
+                # ingest run from its OWN listing: the clean copy passes all six ingest checks, and with
+                # candidates_draft.toml deleted and an unregistered file added it FINDINGs (the pre-fix gate
+                # read the reconstructed conventional path's absence as "not an ingest run" and passed it).
+                # Nested so the copy's own conventional ancestry (three levels up) holds NO `.working/imports/`
+                # and cannot resolve back to the original run: a conventional-path classifier finds nothing.
+                detached = root / "pr4b-detached" / "elsewhere" / "review" / run.name
+                shutil.copytree(str(run), str(detached))
+                try:
+                    _det_clean = _chk.check_staged_run(str(detached))
+                    (detached / "candidates_draft.toml").unlink()
+                    (detached / "rogue.txt").write_text("x\n", encoding="utf-8")
+                    _det_bad = _chk.check_staged_run(str(detached))
+                    check("pr4b-disc-am1-detached-run",
+                          all(_det_clean[cid][0] for cid in _pr4b_ids)
+                          and _det_bad["ingest-run-structure"][1] != "not an ingest run"
+                          and _det_bad["ingest-artefact-completeness"][0] is False)
+                finally:
+                    shutil.rmtree(str(root / "pr4b-detached"))
+
+                # A-M2 (NON-BLOCKING, REGULAR-FILE-VALIDATED READS): a FIFO in place of candidates_draft.toml (an
+                # ingest artefact) and of mappings.toml (a core artefact), each on its own detached copy, is a
+                # located FINDING, never a read that blocks forever. The gate runs in a CHILD under a timeout
+                # guard (the pre-fix gate hung on the writer-less FIFO open), so a regression fails this check
+                # rather than hanging the suite.
+                fifo_root = root / "pr4b-fifo"
+                try:
+                    fifo_runs = []
+                    for victim in ("candidates_draft.toml", "mappings.toml"):
+                        dest = fifo_root / victim.replace(".", "-") / run.name
+                        shutil.copytree(str(run), str(dest))
+                        (dest / victim).unlink()
+                        os.mkfifo(str(dest / victim))
+                        fifo_runs.append(str(dest))
+                    probe = (
+                        "import sys\nsys.path.insert(0, {tools!r})\nimport check_opf_import as c\n"
+                        "a = c.check_staged_run({ingest!r})\nb = c.check_staged_run({core!r})\n"
+                        "ok = (a['ingest-draft-loss-binding'][0] is False and 'not a regular file' in "
+                        "a['ingest-draft-loss-binding'][1] and b['staged-run-structure'][0] is False and "
+                        "set(b) == set(c.EXPECTED_CHECKS))\nsys.exit(0 if ok else 3)\n").format(
+                            tools=str(Path(__file__).resolve().parent), ingest=fifo_runs[0], core=fifo_runs[1])
+                    try:
+                        _fifo = subprocess.run([sys.executable, "-I", "-B", "-c", probe], timeout=120,
+                                               capture_output=True)
+                        _fifo_ok = _fifo.returncode == 0
+                    except subprocess.TimeoutExpired:
+                        _fifo_ok = False
+                    check("pr4b-disc-am2-fifo-nonblocking", _fifo_ok)
+                finally:
+                    shutil.rmtree(str(fifo_root), ignore_errors=True)
+
+        # (h9b) ROUND-4 F6 (CANDIDATE ORDER ACROSS importer outputs): two migrate sources; the drafts staged
+        # in the shared sort_candidate_rows order (migrate-row order, then draft_ref) pass, and the same drafts
+        # regrouped with the SECOND migrate row's draft first (digests refreshed, report regenerated) are a
+        # FINDING, so a sort keyed on draft_ref alone (ignoring the migrate-row grouping) flips this check.
+        with fixture({"legacy/m1.md": "- [ ] one\n- [x] two\n", "legacy/m2.md": "- [ ] three\n"}) as (root, machine):
+            ws = triage(root, ["legacy/m1.md", "legacy/m2.md"], "migrate")
+            run = staged(root, machine, ws, options(ws, importer_kind="github-tasklist"),
+                         ["legacy/m1.md", "legacy/m2.md"])
+            if run is not None:
+                import check_opf_import as _chk6
+                _f6_clean = _chk6.check_staged_run(str(run))["ingest-draft-loss-binding"]
+                d = read(run, "candidates_draft.toml")
+                order = [(c["source_path"], c["draft_ref"]) for c in d["candidate"]]
+                d["candidate"] = [c for c in d["candidate"] if c["source_path"] == "legacy/m2.md"] + [
+                    c for c in d["candidate"] if c["source_path"] == "legacy/m1.md"]
+                (run / "candidates_draft.toml").write_bytes(_opf_import._emit_bytes(d, "candidates_draft.toml"))
+                rebind(run, load_bundle(root, run))
+                _f6 = _chk6.check_staged_run(str(run))["ingest-draft-loss-binding"]
+                check("pr4b-disc-r4f6-candidates-group-order",
+                      _f6_clean[0] is True
+                      and order == [("legacy/m1.md", "draft-0001"), ("legacy/m1.md", "draft-0002"),
+                                    ("legacy/m2.md", "draft-0001")]
+                      and _f6[0] is False and "not in the order the planner stages them" in _f6[1])
+
+        # (h9c) ROUND-4 F2 PLANNER PARITY: plan_ingest refuses the three frozen-decidable source conflicts with the
+        # SAME FINDING the review gate returns (the shared admit_move_dest, run BEFORE the live lstat), including
+        # a destination beneath a source FILE (pre-fix a CANNOT-EVALUATE from the live walk's ENOTDIR).
+        with fixture({"legacy/keep.md": "k\n", "legacy/move.md": "m\n"}) as (root, machine):
+            found = detect(root, include=["legacy/keep.md", "legacy/move.md"])
+            ws = stamp([dict(r, disposition="keep" if r["source_path"] == "legacy/keep.md" else "move",
+                             note="") for r in found.rows])
+            for _tag, _dest, _det in (("equals", "legacy/keep.md", "equals the worksheet source"),
+                                      ("beneath", "legacy/keep.md/child", "lies beneath the worksheet source"),
+                                      ("ancestor", "legacy", "is an ancestor directory of the worksheet source")):
+                opts = {"format": OPTIONS_FORMAT, "schema": SCHEMA,
+                        "option": [{"scope": "declared", "source_path": "legacy/move.md", "dest_path": _dest}]}
+                pr = plan(root, ws, opts, ["legacy/keep.md", "legacy/move.md"])
+                check("pr4b-disc-r4f2-planner-parity-" + _tag,
+                      pr.verdict == FINDING and any(_det in f for f in pr.findings))
+
+        # (h10) R7 (RE-ANCHOR BASE is a consistency binding over ALL frozen evidence, never "." by default): a
+        # RELOCATED (`dir:ops`) store with a DECLARED keep under it and NO store-scope rows is a clean plan
+        # (unmanaged_path = the store-relative "legacy/a.md"); the gate recovers base "ops" from the declared
+        # keep action and PASSES all six ingest checks (the round-2 gate recovered "." and FALSE-FINDINGed it).
+        # A second declared keep whose frozen unmanaged_path implies a DIFFERENT base (digests refreshed) is a
+        # located contradiction, never a pass.
+        root = build_relocated(product={"ops/legacy/a.md": "kept a\n", "ops/legacy/b.md": "kept b\n"})
+        try:
+            machine = root / "ops/.working/toml"
+            r7_files = ["ops/legacy/a.md", "ops/legacy/b.md"]
+            ws = triage(root, r7_files, "keep")
+            run = staged(root, machine, ws, empty, r7_files)
+            if run is not None:
+                acts = read(run, "ingest-actions.toml")["action"]
+                check("pr4b-r7-fixture-store-relative",
+                      sorted(a["unmanaged_path"] for a in acts) == ["legacy/a.md", "legacy/b.md"])
+                r7_res = _chk.check_staged_run(str(run))
+                check("pr4b-disc-r7-relocated-declared-keep-passes",
+                      all(r7_res[cid][0] for cid in _pr4b_ids))
+                r7_acts = read(run, "ingest-actions.toml")
+                first_act = [a for a in r7_acts["action"] if a["source_path"] == "ops/legacy/b.md"][0]
+                first_act["unmanaged_path"] = "b.md"    # implies base "ops/legacy", contradicting "ops"
+                (run / "ingest-actions.toml").write_bytes(
+                    _opf_import._emit_bytes(r7_acts, "ingest-actions.toml"))
+                r7_bundle = load_bundle(root, run)
+                r7_bundle["binding"]["ingest_actions_digest"] = dig(run, "ingest-actions.toml")
+                (run / NAME).write_bytes(_opf_import._emit_bytes(r7_bundle, NAME))
+                r7_bad = _chk.check_staged_run(str(run))["ingest-disposition-totality"]
+                check("pr4b-disc-r7-contradictory-base",
+                      r7_bad[0] is False and "more than one re-anchor base" in r7_bad[1])
+        finally:
+            shutil.rmtree(root)
+
+        # (h11) R8 (REGRESSION): a DECLARED keep on a store that resolves OUTSIDE the product root has no
+        # store-relative [unmanaged].paths spelling; plan_ingest returns the located verdict 2, never raises
+        # (the round-2 extraction passed a None base into _store_rel_of, a TypeError plan_ingest does not
+        # catch).
+        # The store is a SIBLING of the product root (`dir:../<name>`, resolved against the product root), so
+        # both live under the harness tempdir and are removed here.
+        root = build_relocated(subdir="../r8-external-store", product={"legacy/a.md": "a\n"})
+        try:
+            ws = triage(root, ["legacy/a.md"], "keep")
+            try:
+                r8 = plan(root, ws, empty, ["legacy/a.md"])
+                r8_verdict, r8_raised = r8.verdict, False
+            except Exception:      # noqa: BLE001 - the regression under test is exactly an escape
+                r8_verdict, r8_raised = None, True
+            check("pr4b-disc-r8-external-store-declared-keep",
+                  not r8_raised and r8_verdict == CANNOT_EVALUATE)
+        finally:
+            shutil.rmtree(root)
+            shutil.rmtree(str(root.parent / "r8-external-store"), ignore_errors=True)
+
+        # (h12) A-M3 (STATIC SCOPE ADMISSIBILITY, both directions) on a RELOCATED `dir:ops` store. (a) A STORE
+        # row `.working/a.md` re-scoped as a DECLARED row `ops/.working/a.md` (crosswalk, keep action,
+        # include, and every digest re-derived to match, so each equality holds) lies in the recovered store
+        # working subtree; (b) a DECLARED keep `ops/legacy/a.md` re-scoped as a STORE row `legacy/a.md` lies
+        # outside the mandatory `.working/` subtree. Both pre-fix PASSED the gate; plan_ingest refuses the
+        # SAME frozen inputs with a FINDING (asserted, so the gate's verdict is at parity with the producer).
+        def _am3(name, files, product_key, mutate):
+            root = build_relocated(**{product_key: files})
+            try:
+                machine = root / "ops/.working/toml"
+                paths = list(files)
+                ws = triage(root, paths, "keep")
+                run = staged(root, machine, ws, empty, paths)
+                if run is None:
+                    return
+                b = load_bundle(root, run)
+                acts = read(run, "ingest-actions.toml")
+                mutate(b, acts)
+                restamp(b)
+                (run / "ingest-actions.toml").write_bytes(_opf_import._emit_bytes(acts, "ingest-actions.toml"))
+                rebind(run, b)
+                res = _chk.check_staged_run(str(run))["ingest-source-binding"]
+                replan = plan_ingest(root, b["worksheet"], b["options"],
+                                     include=b["include"] if b["include_declared"] else None,
+                                     now=now, run_nonce="mig-pr4b-am3")
+                check(name, res[0] is False and "not scope-admissible" in res[1] and replan.verdict == FINDING)
+            finally:
+                shutil.rmtree(root)
+
+        def _am3_store_to_declared(b, acts):
+            row = b["worksheet"]["row"][0]
+            row.update(scope="declared", source_path="ops/.working/a.md")
+            b["crosswalk"] = [derive_crosswalk_row(row, "ops/.working/a.md")]
+            b.update(include_declared=True, include=["ops/*"])
+            acts["action"] = [derive_keep_action(row, ".working/a.md")]
+        _am3("pr4b-disc-am3-store-row-as-declared", {".working/a.md": "stray\n"}, "strays",
+             _am3_store_to_declared)
+
+        def _am3_declared_to_store(b, acts):
+            row = b["worksheet"]["row"][0]
+            row.update(scope="store", source_path="legacy/a.md")
+            b["crosswalk"] = [derive_crosswalk_row(row, "ops/legacy/a.md")]
+            b.update(include_declared=False, include=[])
+            acts["action"] = [derive_keep_action(row, "legacy/a.md")]
+        _am3("pr4b-disc-am3-declared-row-as-store", {"ops/legacy/a.md": "kept\n"}, "product",
+             _am3_declared_to_store)
+
+        # (h13) B-m (STORE-SCOPE keep action RE-DERIVE): a store-scope keep's unmanaged_path is emitted VERBATIM
+        # and is NOT base-recovery evidence, so a drifted spelling (ingest_actions_digest and every other
+        # digest refreshed) reaches the action comparator itself: the located re-derivation diagnostic is
+        # REQUIRED, so a comparator that ignored unmanaged_path would pass this mutation and flip the check
+        # (the declared-keep E5 vector above is refused earlier, by base recovery, and cannot prove that).
+        root, machine = build_store(strays={".working/legacy/skeep.md": "store keep\n"})
+        try:
+            ws = triage(root, [".working/legacy/skeep.md"], "keep")
+            run = staged(root, machine, ws, empty, [".working/legacy/skeep.md"])
+            if run is not None:
+                _bm_clean = _chk.check_staged_run(str(run))
+                acts = read(run, "ingest-actions.toml")
+                acts["action"][0]["unmanaged_path"] = ".working/legacy/forged-exemption.md"
+                (run / "ingest-actions.toml").write_bytes(_opf_import._emit_bytes(acts, "ingest-actions.toml"))
+                rebind(run, load_bundle(root, run))
+                _bm = _chk.check_staged_run(str(run))["ingest-disposition-totality"]
+                check("pr4b-disc-bm-store-keep-unmanaged-path",
+                      all(_bm_clean[cid][0] for cid in _pr4b_ids) and _bm[0] is False
+                      and "does not equal the action re-derived" in _bm[1])
+        finally:
+            shutil.rmtree(root)
+
+        # (h14) C-m1 (the report claims NO validation it did not observe): a plan whose ingest-review.toml
+        # creation fails (injected at the bundle writer) leaves a staged IMPORT-REPORT.md behind; it must state
+        # the neutral "semantic validation required" status, never "gate-validated" (the pre-fix render claimed
+        # validation before any bundle existed or any gate ran).
+        with fixture({"legacy/a.md": "source\n"}) as (root, machine):
+            ws = triage(root, ["legacy/a.md"], "keep")
+            _real_bundle_writer = _opf_import._write_ingest_review_bundle
+
+            def _failing_bundle_writer(*_a, **_k):
+                raise _opf_import._StageError(CANNOT_EVALUATE, "injected ingest-review.toml create failure")
+            _opf_import._write_ingest_review_bundle = _failing_bundle_writer
+            try:
+                cm1 = plan(root, ws, empty, ["legacy/a.md"])
+            finally:
+                _opf_import._write_ingest_review_bundle = _real_bundle_writer
+            left = sorted((machine.parent / "imports").iterdir()) if (machine.parent / "imports").is_dir() else []
+            md = (left[0] / "IMPORT-REPORT.md").read_text(encoding="utf-8") if len(left) == 1 else ""
+            check("pr4b-disc-cm1-report-claims-no-validation",
+                  cm1.verdict == CANNOT_EVALUATE and len(left) == 1
+                  and not (left[0] / _opf_import.INGEST_REVIEW_NAME).exists()
+                  and "reviewability: staged; semantic validation required" in md
+                  and "gate-validated" not in md)
+
+        # (h15) C-m2 (decision-unit ids are KIND-PREFIXED and asserted UNIQUE): a migrate row `legacy/a.md` with
+        # drafts beside a keep row for a file literally named `legacy/a.md#conversion` yields three DISTINCT ids
+        # (pre-fix both the conversion unit and the second file's disposition unit displayed as
+        # `declared:legacy/a.md#conversion`), and a duplicated frozen crosswalk row is refused CANNOT-EVALUATE
+        # rather than rendered as two decisions sharing one id.
+        _cm2_cw = [{"scope": "declared", "source_path": "legacy/a.md", "resolved_source_path": "legacy/a.md",
+                    "disposition": "migrate"},
+                   {"scope": "declared", "source_path": "legacy/a.md#conversion",
+                    "resolved_source_path": "legacy/a.md#conversion", "disposition": "keep"}]
+        _cm2_mig = [{"scope": "declared", "source_path": "legacy/a.md", "resolved_source_path": "legacy/a.md",
+                     "importer_kind": "github-tasklist", "candidate_count": 2, "proposal_count": 2}]
+        try:
+            _cm2_ids = [u["unit_id"] for u in _opf_import._ingest_render_model(
+                "imp-20260101T000000Z-0000000000000000", _cm2_cw, _cm2_mig)["decision_units"]]
+        except _opf_import._StageError:
+            _cm2_ids = None   # a colliding id formula is refused by the uniqueness assertion: this leg fails
+        try:
+            _opf_import._ingest_render_model("imp-20260101T000000Z-0000000000000000",
+                                             _cm2_cw + [dict(_cm2_cw[1])], _cm2_mig)
+            _cm2_dup_refused = False
+        except _opf_import._StageError as exc:
+            _cm2_dup_refused = exc.verdict == CANNOT_EVALUATE
+        check("pr4b-disc-cm2-unit-ids-kind-prefixed-unique",
+              _cm2_ids == ["conversion:declared:legacy/a.md", "disposition:declared:legacy/a.md",
+                           "disposition:declared:legacy/a.md#conversion"] and _cm2_dup_refused)
+
+        # (h7c) E3 (C1 render fix in the report BODY): _render_report_md escapes the UNTRUSTED source_path of a
+        # fragment AND a proposal for the Markdown/terminal sink, so a crafted C1 byte cannot reach the
+        # reviewer's terminal raw from the ordinary report body (not only the ingest section). Reverting the
+        # source_path escape in _render_report_md passes the byte through raw (change-carries-check).
+        _rr = _opf_import._render_report_md(
+            "sha256:" + "0" * 64,
+            [{"source_path": "frag\x9b.md", "span": [0, 1], "fragment_id": "frag-0000000000000000",
+              "fragment_digest": "0" * 64}],
+            [{"source_path": "prop\x9b.md", "span": [0, 1], "suggested_state": "unmapped", "note": "",
+              "_origin": _opf_import._MODEL_PROPOSAL_ORIGIN}],
+            "imp-20260101T000000Z-0000000000000000")
+        check("pr4b-disc-e3-report-body-c1-escape",
+              "frag\\x9b.md" in _rr and "prop\\x9b.md" in _rr and "\x9b" not in _rr)
+
+        # (h7) FIX 5: _ingest_md_escape neutralizes the C1 control range (0x80-0x9f: CSI 0x9b, OSC 0x9d, etc.)
+        # as well as C0 / DEL / backtick, so a crafted staged value cannot carry a C1 terminal-control byte
+        # into the reviewer's terminal. Reverting the C1 arm passes the byte through raw (change-carries-check);
+        # 0xa0 (just above C1) stays unescaped, and the C0 / backtick handling is unchanged.
+        esc = _opf_import._ingest_md_escape
+        check("bundle-c1-escape",
+              esc("\x9b") == "\\x9b" and esc("\x80") == "\\x80" and esc("\x9f") == "\\x9f"
+              and esc("\xa0") == "\xa0" and esc("`") == "\\u0060" and esc("\x1b") == "\\x1b")
 
     registry = (
         [("options-schema-validator", schema_validator), ("keep-unmanaged-exemption", keep),
