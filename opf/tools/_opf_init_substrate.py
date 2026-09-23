@@ -12,8 +12,12 @@ module resolves through git itself, or the store root when .git is genuinely abs
 the merged lock facility (_opf_oplock) rather than reinventing it: the control-root resolution
 (_classify_git_entry plus _git_common_dir), the single-component control-home open
 (_open_control_dir, parameterized for this second home), the no-follow dir_fd primitives, and the
-exclusive fsynced control-file creation (_create_control_file, whose torn-write cleanup this
-module inherits) are the lock module's own.
+exclusive fsynced control-file creation (_create_control_file, whose atomic staging-then-link
+publication and failure cleanup this module inherits) are the lock module's own. So a substrate
+writer killed mid-record leaves no torn record at the final name, only a staging leftover
+(".<name>.opf-stage-<32 hex>"); the lock module sweeps such leftovers only from its own control
+directory and machine store, so in an operation directory the classifier reads one as a foreign
+entry (CANNOT-EVALUATE, preserved), never as a record.
 
 Per held operation (an _opf_oplock.OpCapability) the substrate records, under ops/<op_id>/:
 

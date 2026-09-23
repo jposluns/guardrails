@@ -308,12 +308,21 @@ def _open_dir_nofollow(abspath):
     if not parts or parts[0] not in (os.sep, os.sep + os.sep):
         raise OSError("store root {!r} is not an absolute POSIX path".format(str(abspath)))
     fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)   # the filesystem root itself is never a symlink
-    for comp in parts[1:]:
-        try:
+    # Descriptor hand-off: `fd` always names the ONE descriptor this walk still owns. The child is taken
+    # over BEFORE the parent is closed, so a failing parent close (on Linux the number is released even
+    # when close reports an error) can neither leak the child (the except path closes `fd`, now the child)
+    # nor double-close the parent; any failure or interruption closes the owned descriptor and re-raises.
+    try:
+        for comp in parts[1:]:
             nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        finally:
-            os.close(fd)                                    # close the parent whether or not the open raised
-        fd = nfd
+            old, fd = fd, nfd
+            os.close(old)
+    except BaseException as exc:
+        try:
+            os.close(fd)
+        except OSError as cexc:
+            exc.add_note("additionally the no-follow walk descriptor could not be closed ({})".format(cexc))
+        raise
     return fd
 
 
