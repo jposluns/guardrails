@@ -25,9 +25,13 @@ Per held operation (an _opf_oplock.OpCapability) the substrate records, under op
      persistence layer.
   2. Create-only PHASE RECORDS, NNNN-<phase>.json, a strictly contiguous append-only sequence
      (0001 upward) of opf.init.phase/v1 records; a record is never modified or removed, and
-     before each append the on-disk tree is re-verified against the handle's retained identities
-     (device and inode), so a foreign entry, a gap, or a swapped record refuses the append rather
-     than being built upon.
+     before each append the on-disk tree is re-verified against the handle's retained record
+     set: each record is RE-READ and its sha256 content digest checked against the digest
+     recorded at creation. The digest is the authoritative content check (a filesystem may reuse
+     a freed inode, so an unchanged device and inode cannot prove unchanged content, and a
+     byte-identical replacement is definitionally the same record, so it does not refuse); the
+     create-time device and inode are kept as defence-in-depth diagnostics. A foreign entry, a
+     gap, or a record whose content changed refuses the append rather than being built upon.
 
 Every substrate WRITE requires the LIVE held capability: the caller must be the recorded acquirer
 (pid plus /proc start time), the capability must be unreleased, the retained anchor identity must
@@ -37,13 +41,13 @@ one the held flock excludes for.
 
 The RESUME CLASSIFIER (classify_operations) is READ-ONLY and PLAN-AWARE: it enumerates ops/ and
 classifies each operation directory against its own plan.json into INTACT (a valid canonical plan
-plus a contiguous, well-formed phase sequence; the resume input a later dispatch consumes) or
-CANNOT-EVALUATE (anything unreadable, malformed, non-canonical, gapped, duplicated, foreign, or
-symlinked: fail-closed, named, and PRESERVED). It deletes NOTHING, ever. A crashed operation's
-CONTROL legs (the lock's active.toml and lease) are cleared only by the lock module's own
-explicit recovery (acquire_operation(recover=True), whose confirmed-dead gate and _recover_stale
-are reused verbatim, never duplicated here); the substrate tree SURVIVES that recovery, so the
-classifier keeps the evidence a resume decision needs. The journal's recover() and
+plus a contiguous, bounded, well-formed phase sequence; the resume input a later dispatch
+consumes) or CANNOT-EVALUATE (anything unreadable, malformed, non-canonical, gapped, duplicated,
+over-bound, foreign, or symlinked: fail-closed, named, and PRESERVED). It deletes NOTHING, ever.
+A crashed operation's CONTROL legs (the lock's active.toml and lease) are cleared only by the
+lock module's own explicit recovery (acquire_operation(recover=True), whose confirmed-dead gate
+and _recover_stale are reused verbatim, never duplicated here); the substrate tree SURVIVES that
+recovery, so the classifier keeps the evidence a resume decision needs. The journal's recover() and
 reconcile-and-claim path is NEVER routed at init worktree or substrate paths: that path restores
 a created entry by unlinking it back to absence, and a substrate record is resume evidence, so
 its handling is the plan-aware classification above, not an unlink.
@@ -64,6 +68,8 @@ Run: python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 Exit: 0 self-test clean; 1 self-test failure; 2 refused precondition (missing containment
 primitive or git binary), never a clean skip.
 """
+import datetime
+import hashlib
 import json
 import os
 import re
@@ -115,6 +121,12 @@ _PHASE_NAME_PATTERN = r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
 _PHASE_NAME_RE = re.compile(_PHASE_NAME_PATTERN + r"\Z")
 _PHASE_FILE_RE = re.compile(r"([0-9]{4})-(" + _PHASE_NAME_PATTERN + r")\.json\Z")
 
+# A phase record's utc field carries the oplock's _utc_now shape exactly (RFC 3339 UTC, second
+# precision, Z suffix): the grammar is pinned here and the field ranges and calendar validity (no
+# month 13, no February 30) are checked with strptime in _bad_phase_record.
+_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_UTC_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+
 # Per-operation classification statuses, and the survey's own.
 INTACT = "INTACT"
 CANNOT_EVALUATE = "CANNOT-EVALUATE"
@@ -131,12 +143,13 @@ class OpSubstrate:
     """The held per-operation substrate handle: inert data plus the retained descriptors.
 
     Carries the operation id, the retained ops/ and operation-directory descriptors and their
-    identities, the plan's identity and exact bytes, and the already-recorded phase roster the
-    pre-append tree re-verification checks against. Closing releases descriptors ONLY; the
-    substrate tree is the durable record and is never removed by this handle.
+    identities, the plan's identity, sha256 content digest, and exact bytes, and the
+    already-recorded phase roster (sequence, name, identity, digest) the pre-append tree
+    re-verification checks against. Closing releases descriptors ONLY; the substrate tree is the
+    durable record and is never removed by this handle.
     """
     __slots__ = ("op_id", "store_root", "_ops_fd", "_op_fd", "_op_ident", "_plan_ident",
-                 "_plan_bytes", "_phases", "_next_seq", "_closed")
+                 "_plan_digest", "_plan_bytes", "_phases", "_next_seq", "_closed")
 
     def __init__(self, op_id, store_root, ops_fd, op_fd, op_ident, plan_ident, plan_bytes):
         self.op_id = op_id
@@ -145,6 +158,7 @@ class OpSubstrate:
         self._op_fd = op_fd
         self._op_ident = op_ident
         self._plan_ident = plan_ident
+        self._plan_digest = hashlib.sha256(plan_bytes).hexdigest()
         self._plan_bytes = plan_bytes
         self._phases = []
         self._next_seq = 1
@@ -177,17 +191,33 @@ class ResumeSurvey:
 # --- fail-closed record primitives ----------------------------------------------------------------
 
 
-def _listdir_fd(fd):
-    """List an OPEN directory descriptor from offset zero. os.listdir(fd) reads through a dup
-    that SHARES the descriptor's open file description, including its directory read offset and,
-    on btrfs, a readdir upper bound the kernel snapshots when the directory is opened, so a
-    RETAINED dir fd lists a stale view (missing every entry created after the open, or nothing
-    at all) instead of the current tree. The explicit rewind resets the shared offset and
-    refreshes that snapshot, and it stays bound to the trusted descriptor rather than reopening
-    the directory by name, so no symlink-race window is introduced. Raises OSError exactly as
-    os.listdir does; every caller already treats that as fail-closed."""
-    os.lseek(fd, 0, os.SEEK_SET)
-    return os.listdir(fd)
+def _list_dir_fresh(parent_fd, name, ident, label):
+    """List the directory `name` beneath a retained, already-trusted parent descriptor through a
+    FRESH descriptor opened for this listing alone. os.listdir(fd) reads through a dup that
+    SHARES the descriptor's open file description, including its directory read offset and, on
+    btrfs, a readdir upper bound the kernel snapshots when the directory is opened, so a RETAINED
+    dir fd lists a stale view (missing every entry created after the open, or nothing at all);
+    and rewinding the retained descriptor is no cure, because lseek on a directory fd is EINVAL
+    on macOS and a pre-2023 btrfs does not refresh its snapshot on the rewind. The fresh
+    no-follow open beneath the retained parent refreshes the view without ever re-resolving the
+    string path from the root, and the opened object must carry the caller's retained (device,
+    inode) identity before it is trusted, so a swap between the caller's descriptor and this
+    listing refuses rather than listing a different directory. Fail-closed throughout: raises
+    InitSubstrateError, never a silent empty listing."""
+    try:
+        fd = os.open(name, _opf_oplock._DIR_OPEN_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        raise InitSubstrateError("cannot open {} for a fresh listing ({})".format(label, exc))
+    try:
+        st = os.fstat(fd)
+        if (st.st_dev, st.st_ino) != ident:
+            raise InitSubstrateError("{} identity changed under its parent; refusing the "
+                                     "listing".format(label))
+        return os.listdir(fd)
+    except OSError as exc:
+        raise InitSubstrateError("cannot list {} ({})".format(label, exc))
+    finally:
+        os.close(fd)
 
 
 def _strict_json_loads(raw, label):
@@ -221,10 +251,10 @@ def _canonical_or_refuse(doc, label):
         raise InitSubstrateError("{} cannot be canonicalized ({})".format(label, exc))
 
 
-def _read_json_record(dir_fd, name, label, max_bytes):
-    """Read a substrate record beneath dir_fd, no-follow and fail-closed: the OPENED object (not
-    just the name) must be a plain singly-linked regular file within the byte cap, and the content
-    strict JSON. Returns (doc, raw bytes); ANY failure raises, so a record the classifier cannot
+def _read_record_bytes(dir_fd, name, label, max_bytes):
+    """Read a substrate record's BYTES beneath dir_fd, no-follow and fail-closed: the OPENED
+    object (not just the name) must be a plain singly-linked regular file within the byte cap.
+    Returns (raw bytes, the opened object's stat); ANY failure raises, so a record that cannot be
     read is a refusal, never nothing-to-check (check-fails-closed-on-unreadable)."""
     try:
         fd = os.open(name, _opf_oplock._FILE_READ_FLAGS, dir_fd=dir_fd)
@@ -250,7 +280,13 @@ def _read_json_record(dir_fd, name, label, max_bytes):
             raise InitSubstrateError("{} exceeds the {}-byte cap".format(label, max_bytes))
     finally:
         os.close(fd)
-    raw = bytes(data)
+    return bytes(data), st
+
+
+def _read_json_record(dir_fd, name, label, max_bytes):
+    """Read and parse a substrate record beneath dir_fd (the _read_record_bytes no-follow
+    discipline plus strict JSON). Returns (doc, raw bytes); ANY failure raises."""
+    raw, _st = _read_record_bytes(dir_fd, name, label, max_bytes)
     return _strict_json_loads(raw, label), raw
 
 
@@ -314,8 +350,12 @@ def _bad_phase_record(doc, raw, op_id, seq, pname):
     if doc["phase"] != pname:
         return "phase does not equal the file name's phase"
     utc = doc["utc"]
-    if type(utc) is not str or not utc or _opf_init_contract._CONTROL_RE.search(utc):
-        return "utc must be a non-empty control-free string"
+    if type(utc) is not str or not _UTC_RE.match(utc):
+        return "utc is not an RFC 3339 UTC timestamp of the recorded shape"
+    try:
+        datetime.datetime.strptime(utc, _UTC_FORMAT)
+    except ValueError:
+        return "utc is not a real calendar date and time"
     return None
 
 
@@ -494,11 +534,16 @@ def begin_operation(cap, plan_bytes):
 
 
 def _verify_tree(sub):
-    """Re-verify the on-disk operation tree against the handle's retained identities before an
-    append: the ops/ entry still names the retained operation directory, and the directory holds
-    EXACTLY the plan plus the already-recorded phase records, each still a plain singly-linked
-    regular file with its recorded device and inode. Anything else refuses fail-closed and
-    PRESERVES the tree (a substrate record is create-only and never repaired in place)."""
+    """Re-verify the on-disk operation tree against the handle's retained record set before an
+    append: the ops/ entry still names the retained operation directory, the directory holds
+    EXACTLY the plan plus the already-recorded phase records, and each record, re-read no-follow
+    as a plain singly-linked regular file, still carries the sha256 content digest recorded at
+    its creation. The digest is the authoritative content check: a filesystem may reuse a freed
+    inode, so an unchanged (device, inode) cannot prove unchanged content, and a byte-identical
+    replacement is definitionally the same record, so a changed identity with matching content
+    does not refuse; the retained identity stays as defence-in-depth diagnostics, naming an
+    in-place rewrite apart from a replacement in the refusal. Anything else refuses fail-closed
+    and PRESERVES the tree (a substrate record is create-only and never repaired in place)."""
     try:
         name_st = os.stat(sub.op_id, dir_fd=sub._ops_fd, follow_symlinks=False)
     except OSError as exc:
@@ -507,34 +552,31 @@ def _verify_tree(sub):
             or (name_st.st_dev, name_st.st_ino) != sub._op_ident:
         raise InitSubstrateError("operation directory {} identity changed while held".format(
             sub.op_id))
-    expected = {PLAN_NAME: sub._plan_ident}
-    for _seq, rname, rident in sub._phases:
-        expected[rname] = rident
-    try:
-        present = sorted(_listdir_fd(sub._op_fd))
-    except OSError as exc:
-        raise InitSubstrateError("cannot list operation directory {} ({})".format(sub.op_id, exc))
+    expected = {PLAN_NAME: (sub._plan_ident, sub._plan_digest, MAX_PLAN_BYTES)}
+    for _seq, rname, rident, rdigest in sub._phases:
+        expected[rname] = (rident, rdigest, MAX_PHASE_BYTES)
+    present = sorted(_list_dir_fresh(sub._ops_fd, sub.op_id, sub._op_ident,
+                                     "operation directory {}".format(sub.op_id)))
     if sorted(expected) != present:
         raise InitSubstrateError("operation directory {} does not hold exactly the recorded tree "
                                  "(expected {}, found {}); refusing the append".format(
                                      sub.op_id, sorted(expected), present))
-    for rname, rident in expected.items():
-        try:
-            st = os.stat(rname, dir_fd=sub._op_fd, follow_symlinks=False)
-        except OSError as exc:
-            raise InitSubstrateError("cannot stat recorded {} ({})".format(rname, exc))
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 \
-                or (st.st_dev, st.st_ino) != rident:
-            raise InitSubstrateError("recorded {} identity changed while held (a substrate "
-                                     "record is create-only and never replaced)".format(rname))
+    for rname, (rident, rdigest, rcap) in expected.items():
+        raw, st = _read_record_bytes(sub._op_fd, rname, "recorded {}".format(rname), rcap)
+        if hashlib.sha256(raw).hexdigest() != rdigest:
+            how = "rewritten in place" if (st.st_dev, st.st_ino) == rident else "replaced"
+            raise InitSubstrateError("recorded {} content changed while held ({}; a substrate "
+                                     "record is create-only and never modified)".format(
+                                         rname, how))
 
 
 def record_phase(sub, cap, phase):
     """Append the next CREATE-ONLY phase record under the LIVE held capability. The sequence is
     strictly contiguous from 0001, the phase name is filename-safe by construction, the count is
-    bounded, and the on-disk tree is re-verified against the handle's retained identities before
-    the append, so a foreign entry, a gap, or a swapped record refuses rather than being built
-    upon. Returns the record's file name."""
+    bounded, and the on-disk tree is re-verified against the handle's retained record set (the
+    per-record sha256 content digests) before the append, so a foreign entry, a gap, or a record
+    whose content changed refuses rather than being built upon. Returns the record's file
+    name."""
     if not isinstance(sub, OpSubstrate):
         raise InitSubstrateError("record_phase requires an OpSubstrate handle")
     if sub._closed:
@@ -564,7 +606,7 @@ def record_phase(sub, cap, phase):
     except _opf_oplock.OpLockError as exc:
         raise InitSubstrateError(str(exc))
     os.close(fd)
-    sub._phases.append((seq, name, ident))
+    sub._phases.append((seq, name, ident, hashlib.sha256(payload).hexdigest()))
     sub._next_seq = seq + 1
     return name
 
@@ -611,7 +653,7 @@ def _classify_entry(ops_fd, name):
         return ce(str(exc))
     try:
         try:
-            _opf_oplock._validate_ctl_dir_fd(op_fd, "ops/{}".format(name))
+            op_st = _opf_oplock._validate_ctl_dir_fd(op_fd, "ops/{}".format(name))
         except _opf_oplock.OpLockError as exc:
             return ce(str(exc))
         try:
@@ -620,9 +662,13 @@ def _classify_entry(ops_fd, name):
         except InitSubstrateError as exc:
             return ce(str(exc))
         try:
-            entries = sorted(_listdir_fd(op_fd))
-        except OSError as exc:
-            return ce("cannot list the operation directory ({})".format(exc))
+            entries = sorted(_list_dir_fresh(ops_fd, name, (op_st.st_dev, op_st.st_ino),
+                                             "ops/{}".format(name)))
+        except InitSubstrateError as exc:
+            return ce(str(exc))
+        if len(entries) > MAX_PHASES + 1:
+            return ce("{} entries exceed the plan plus {}-phase-record bound".format(
+                len(entries), MAX_PHASES))
         phases = []
         seen = set()
         for entry in entries:
@@ -633,6 +679,9 @@ def _classify_entry(ops_fd, name):
                 return ce("foreign entry {!r} in the operation directory".format(entry))
             seq = int(m.group(1))
             pname = m.group(2)
+            if seq > MAX_PHASES:
+                return ce("phase sequence {:04d} exceeds the {}-record bound".format(
+                    seq, MAX_PHASES))
             if seq in seen:
                 return ce("duplicate phase sequence {:04d}".format(seq))
             seen.add(seq)
@@ -691,13 +740,11 @@ def classify_operations(store_root):
                                      "(manual intervention required)".format(ops_label))
         try:
             ops_fd = _opf_oplock._open_dir_at(home_fd, OPS_DIRNAME, ops_label)
-            _opf_oplock._validate_ctl_dir_fd(ops_fd, ops_label)
+            ops_st = _opf_oplock._validate_ctl_dir_fd(ops_fd, ops_label)
         except _opf_oplock.OpLockError as exc:
             raise InitSubstrateError(str(exc))
-        try:
-            names = sorted(_listdir_fd(ops_fd))
-        except OSError as exc:
-            raise InitSubstrateError("cannot list the substrate ops tree ({})".format(exc))
+        names = sorted(_list_dir_fresh(home_fd, OPS_DIRNAME,
+                                       (ops_st.st_dev, ops_st.st_ino), ops_label))
         if not names:
             return ResumeSurvey(NO_OPERATIONS, ())
         return ResumeSurvey(OPERATIONS, tuple(_classify_entry(ops_fd, n) for n in names))
@@ -743,11 +790,10 @@ def _st_plan_bytes(op_id, mutate=None):
     return _opf_init_contract.canonical_json_bytes(doc)
 
 
-def _st_phase_bytes(op_id, seq, phase):
+def _st_phase_bytes(op_id, seq, phase, utc="2026-01-01T00:00:00Z"):
     """Canonical opf.init.phase/v1 bytes for a synthetic classifier fixture."""
     return _opf_init_contract.canonical_json_bytes(dict(
-        schema=1, format=PHASE_FORMAT, operation_id=op_id, seq=seq, phase=phase,
-        utc="2026-01-01T00:00:00Z"))
+        schema=1, format=PHASE_FORMAT, operation_id=op_id, seq=seq, phase=phase, utc=utc))
 
 
 def _t_s1_sibling_home(d, env):
@@ -877,9 +923,11 @@ def _t_s3_plan_validation(d, env):
 
 
 def _t_s4_phase_discipline(d, env):
-    """T-s4: phase records are create-only and strictly contiguous; the tree is re-verified
-    before each append, so a foreign entry or a swapped record refuses; phase names and the
-    record count are bounded."""
+    """T-s4: phase records are create-only and strictly contiguous; the tree is re-verified by
+    CONTENT DIGEST before each append, so a foreign entry, an in-place rewrite, and a
+    different-bytes replacement each refuse, while a byte-identical replacement (harmless,
+    whatever inode the filesystem hands the copy) does not; phase names and the record count are
+    bounded."""
     root = _opf_oplock._st_git_store(d, "repo", env)
     cap = _opf_oplock.acquire_operation(root, "opf-init")
     sub = begin_operation(cap, _st_plan_bytes(cap.op_id))
@@ -902,14 +950,22 @@ def _t_s4_phase_discipline(d, env):
     _st_expect_refusal(record_phase, sub, cap, "stage", needle="exactly the recorded tree")
     os.unlink(stray)
     record_phase(sub, cap, "stage")
-    p1 = os.path.join(op_dir, n1)         # swap a record: same bytes, new inode
+    p1 = os.path.join(op_dir, n1)         # a byte-identical swap is the same record: no refusal
     with open(p1, "rb") as fh:
         same = fh.read()
     os.unlink(p1)
     with open(p1, "wb") as fh:
         fh.write(same)
     os.chmod(p1, 0o644)
-    _st_expect_refusal(record_phase, sub, cap, "finalize", needle="identity")
+    record_phase(sub, cap, "after-swap")
+    with open(p1, "ab") as fh:            # an IN-PLACE rewrite (the inode unchanged) refuses
+        fh.write(b"\n")
+    _st_expect_refusal(record_phase, sub, cap, "finalize", needle="content changed")
+    os.unlink(p1)                         # a DIFFERENT-bytes replacement refuses, whatever
+    with open(p1, "wb") as fh:            # inode the filesystem hands the new file
+        fh.write(_st_phase_bytes(cap.op_id, 1, "observe", utc="2026-01-01T00:00:01Z"))
+    os.chmod(p1, 0o644)
+    _st_expect_refusal(record_phase, sub, cap, "finalize", needle="content changed")
     sub._next_seq = MAX_PHASES + 1        # the count bound refuses before any further write
     _st_expect_refusal(record_phase, sub, cap, "overflow", needle="bound")
     close_operation(sub)
@@ -1122,14 +1178,110 @@ def _t_s8_fail_closed_roots(d, env):
     assert classify_operations(r3).status == NO_OPERATIONS
 
 
+def _t_s9_classifier_bounds(d, env):
+    """T-s9: the READ-side classifier enforces the substrate's own bounds and timestamp grammar
+    rather than trusting the writer: a phase sequence past MAX_PHASES (a count past the bound, or
+    a single out-of-bound sequence number) is CANNOT-EVALUATE; a phase record whose utc is not a
+    well-formed oplock timestamp (wrong shape, an out-of-range field, or an impossible calendar
+    date) is CANNOT-EVALUATE; and a tree at exactly the bound with valid timestamps stays
+    INTACT."""
+    root = _opf_oplock._st_git_store(d, "repo", env)
+    home = os.path.join(root, ".git", SUBSTRATE_DIRNAME)
+    ops = _st_sub_ops(root)
+    for p in (home, ops):
+        os.mkdir(p)
+        os.chmod(p, 0o755)
+
+    def synth(uid, records):
+        op_dir = os.path.join(ops, uid)
+        os.mkdir(op_dir)
+        os.chmod(op_dir, 0o755)
+        with open(os.path.join(op_dir, PLAN_NAME), "wb") as fh:
+            fh.write(_st_plan_bytes(uid))
+        for rname, payload in records:
+            with open(os.path.join(op_dir, rname), "wb") as fh:
+                fh.write(payload)
+
+    over = "11111111-1111-1111-1111-111111111111"
+    synth(over, [("{:04d}-p.json".format(i), _st_phase_bytes(over, i, "p"))
+                 for i in range(1, MAX_PHASES + 2)])
+    lone = "22222222-2222-2222-2222-222222222222"
+    synth(lone, [("9999-p.json", _st_phase_bytes(lone, 9999, "p"))])
+    badutc = "33333333-3333-3333-3333-333333333333"
+    synth(badutc, [("0001-p.json", _st_phase_bytes(badutc, 1, "p", utc="not-a-time"))])
+    ranges = "44444444-4444-4444-4444-444444444444"
+    synth(ranges, [("0001-p.json",
+                    _st_phase_bytes(ranges, 1, "p", utc="2026-13-01T00:00:00Z"))])
+    feb30 = "55555555-5555-5555-5555-555555555555"
+    synth(feb30, [("0001-p.json",
+                   _st_phase_bytes(feb30, 1, "p", utc="2026-02-30T00:00:00Z"))])
+    full = "66666666-6666-6666-6666-666666666666"
+    synth(full, [("{:04d}-p.json".format(i), _st_phase_bytes(full, i, "p"))
+                 for i in range(1, MAX_PHASES + 1)])
+    survey = classify_operations(root)
+    assert survey.status == OPERATIONS and len(survey.operations) == 6, survey.status
+    by_id = dict((r.op_id, r) for r in survey.operations)
+    assert by_id[over].status == CANNOT_EVALUATE and "bound" in by_id[over].detail, \
+        (by_id[over].status, by_id[over].detail)
+    assert by_id[lone].status == CANNOT_EVALUATE and "bound" in by_id[lone].detail, \
+        (by_id[lone].status, by_id[lone].detail)
+    for uid in (badutc, ranges, feb30):
+        assert by_id[uid].status == CANNOT_EVALUATE and "utc" in by_id[uid].detail, \
+            (by_id[uid].status, by_id[uid].detail)
+    assert by_id[full].status == INTACT, (by_id[full].status, by_id[full].detail)
+    assert len(by_id[full].phases) == MAX_PHASES
+
+
+def _t_s10_fresh_listing(d, env):
+    """T-s10: every substrate listing runs through a FRESH per-listing descriptor and never
+    rewinds a retained one with lseek: with os.lseek shimmed to refuse a directory descriptor
+    exactly as macOS does (EINVAL), the whole write-verify-classify cycle still works, and the
+    listing still observes an entry created after the retained descriptor was opened (no
+    readdir-bound staleness)."""
+    import errno
+    root = _opf_oplock._st_git_store(d, "repo", env)
+    saved_lseek = os.lseek
+
+    def _darwin_lseek(fd, pos, how):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "lseek on a directory fd (macOS behaviour)")
+        return saved_lseek(fd, pos, how)
+
+    os.lseek = _darwin_lseek
+    try:
+        cap = _opf_oplock.acquire_operation(root, "opf-init")
+        sub = begin_operation(cap, _st_plan_bytes(cap.op_id))
+        record_phase(sub, cap, "observe")
+        record_phase(sub, cap, "plan-recorded")
+        op_dir = os.path.join(_st_sub_ops(root), cap.op_id)
+        stray = os.path.join(op_dir, "junk")
+        with open(stray, "w", encoding="utf-8") as fh:
+            fh.write("stray\n")           # created AFTER sub._op_fd was opened: must be seen
+        _st_expect_refusal(record_phase, sub, cap, "stage",
+                           needle="exactly the recorded tree")
+        os.unlink(stray)
+        record_phase(sub, cap, "stage")
+        survey = classify_operations(root)
+        assert survey.status == OPERATIONS and len(survey.operations) == 1
+        rep = survey.operations[0]
+        assert rep.status == INTACT, (rep.status, rep.detail)
+        assert rep.phases == ((1, "observe"), (2, "plan-recorded"), (3, "stage")), rep.phases
+        close_operation(sub)
+        _opf_oplock.release_operation(cap)
+    finally:
+        os.lseek = saved_lseek
+
+
 def self_test():
     """Regression roster (the PR2 resume-substrate T-s witnesses), each a fail-to-pass
     discriminator against a named behaviour: the sibling-home placement under the composed
     authoritative control root (T-s1), the live-capability write gate (T-s2), the
-    validate-before-write create-only plan (T-s3), the contiguous identity-verified phase
+    validate-before-write create-only plan (T-s3), the contiguous content-verified phase
     discipline (T-s4), the read-only plan-aware classifier over the defect matrix (T-s5), the
     crash-then-control-leg-recovery composition with the substrate preserved (T-s6), the torn
-    plan write stranding nothing (T-s7), and the fail-closed classifier roots (T-s8). A missing
+    plan write stranding nothing (T-s7), the fail-closed classifier roots (T-s8), the read-side
+    classifier bounds and utc validity (T-s9), and the lseek-free fresh-descriptor listings
+    (T-s10). A missing
     containment primitive or git binary is a REFUSAL (non-zero), never a clean skip. The git
     fixtures are pinned hermetically exactly as the lock module's self-test pins them."""
     import tempfile
@@ -1149,12 +1301,14 @@ def self_test():
          _t_s1_sibling_home),
         ("T-s2 substrate writes require the live acquirer capability", _t_s2_capability_gate),
         ("T-s3 plan validated before write, persisted create-only", _t_s3_plan_validation),
-        ("T-s4 contiguous, identity-verified, bounded phase records", _t_s4_phase_discipline),
+        ("T-s4 contiguous, content-verified, bounded phase records", _t_s4_phase_discipline),
         ("T-s5 read-only plan-aware classifier over the defect matrix", _t_s5_classifier),
         ("T-s6 crash, classify, recover control legs, substrate preserved",
          _t_s6_crash_resume),
         ("T-s7 a torn plan write strands nothing", _t_s7_torn_plan),
         ("T-s8 classifier roots fail closed", _t_s8_fail_closed_roots),
+        ("T-s9 read-side classifier bounds and utc validity", _t_s9_classifier_bounds),
+        ("T-s10 fresh-descriptor listings, no lseek on a directory fd", _t_s10_fresh_listing),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-substrate-selftest-"))
