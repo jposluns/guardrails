@@ -67,8 +67,10 @@ Under the same cooperating-writer, no-lock model the pre-append re-verification 
 adversarial: the digest verify and the append are two steps, so an out-of-band writer that
 retains an open descriptor to a record can mutate it AFTER the verify (the digest-verify-to-
 append TOCTOU); the type and nlink hard refusals read a point-in-time fstat of the opened
-object, so a hard link added after that fstat goes unobserved (the nlink-check TOCTOU); and a
-same-bytes-different-inode swap is ACCEPTED by design as harmless, the sha256 content digest
+object, so a hard link added after that fstat goes unobserved (the nlink-check TOCTOU); the
+plan-membership re-check in the fresh listing is a NAME check, not a content re-verification, so a
+same-name REPLACE of plan.json between its read and that listing is not detected (the plan-replace
+TOCTOU); and a same-bytes-different-inode swap is ACCEPTED by design as harmless, the sha256 content digest
 being the authoritative check and the retained identity a diagnostic only. Adversarial-grade
 record integrity against a hostile writer with write access to the control root therefore
 requires OS-level isolation of that root (the pack's system-hardening guidance,
@@ -1422,7 +1424,7 @@ def self_test():
     plan write stranding nothing (T-s7), the fail-closed classifier roots (T-s8), the read-side
     classifier bounds and utc validity (T-s9), the lseek-free fresh-descriptor listings (T-s10),
     the plan-membership re-check in the same fresh listing (T-s11), the early entry-count bound
-    refusing before any record read (T-s12), and mid-read OSError containment (T-s13). A missing
+    refusing before any phase record read (T-s12), and mid-read OSError containment (T-s13). A missing
     containment primitive or git binary is a REFUSAL (non-zero), never a clean skip. The git
     fixtures are pinned hermetically exactly as the lock module's self-test pins them."""
     import tempfile
@@ -1451,7 +1453,7 @@ def self_test():
         ("T-s9 read-side classifier bounds and utc validity", _t_s9_classifier_bounds),
         ("T-s10 fresh-descriptor listings, no lseek on a directory fd", _t_s10_fresh_listing),
         ("T-s11 plan membership re-checked in the same fresh listing", _t_s11_plan_membership),
-        ("T-s12 early entry-count bound refuses before any record read",
+        ("T-s12 early entry-count bound refuses before any phase record read",
          _t_s12_early_count_guard),
         ("T-s13 a mid-read OSError contains to one CANNOT-EVALUATE entry",
          _t_s13_midread_containment),
