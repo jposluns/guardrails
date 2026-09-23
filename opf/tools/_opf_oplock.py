@@ -32,6 +32,19 @@ The lock identity is THREE LEGS, held together or the acquisition fails and unwi
      bound to the (st_dev, st_ino) identity and exact bytes the liveness gate read: a record
      replaced after that read is refused and PRESERVED, never deleted. So a live holder whose
      records are exposed under a split anchor can never be recovered into a two-holder state.
+     The active record (schema 2, its own version, independent of the lease's) also persists a
+     [machine_store] table: the path (diagnostic only, never opened) and the (st_dev, st_ino)
+     identity, as canonical decimal strings, of the machine store holding its paired lease. Linked
+     git worktrees SHARE the control root (so the anchor and active record) but each has its OWN
+     machine store (so its own lease); recovery therefore refuses, deleting nothing, when the
+     record's machine store is not the recovering checkout's, so a sibling worktree can never
+     delete the shared active record and strand the owning checkout's lease. A schema-1 record
+     (the earlier format, with no [machine_store]) is refused by recovery with a message naming
+     that cause. Recovery deletes the verified LEASE FIRST (the unlink fsynced on its directory)
+     and only then the active record, so a crash or a failed delete between the two leaves a lone
+     ACTIVE record, which still carries the owner identity the liveness gate reads and is
+     therefore recoverable by a later recover=True; it never leaves the lone owner-less lease that
+     no recovery can confirm dead.
   3. The spec 5.7 LEASE at <machine-store>/lease.toml (O_CREAT|O_EXCL), mandatory: acquisition
      requires a RESOLVED machine store and every capability carries a lease. A capability without
      a lease cannot exist. The lease schema is single-sourced from the store validator and is not
@@ -42,11 +55,16 @@ Both control records are emitted through the checked TOML encoder (_opf_emit.emi
 re-checked for top-key equality against their closed key sets, written with the shared full-write
 loop (_journal._write_all), and fsynced (file and parent directory) before the capability
 returns. The capability retains the open descriptors, the (st_dev, st_ino) identities, and the
-exact payload bytes of everything it created. A control-record write that FAILS mid-way unlinks
-the just-created (O_EXCL, singly-linked) file by verified identity before raising, so a torn
-record is not stranded for a later acquisition to meet; where that cleanup itself fails, the raise
-carries both the write failure and a reason naming the leftover it could not remove, never a
-message that implies a clean unwind.
+exact payload bytes of everything it created. A control-record write that FAILS or is INTERRUPTED
+mid-way (an OSError, or any BaseException such as a KeyboardInterrupt) unlinks the just-created
+(O_EXCL, singly-linked) file by verified identity and closes its descriptor before raising, so a
+torn record is not stranded for a later acquisition to meet; an OSError is normalized to
+OpLockError, while any other BaseException is re-raised as itself with the cleanup outcome
+attached as notes; where that cleanup itself fails, the raise carries both the write failure and a
+reason naming the leftover it could not remove, never a message that implies a clean unwind. Every
+descriptor the acquisition opens, the store-root descriptor included, is closed inside the
+protected acquisition body or its unwind, so a failing close (EIO) runs the full unwind and never
+leaks the still-flocked anchor.
 
 Release is identity-bound. It refuses, FIRST, any caller that is not the recorded acquirer (pid
 plus the /proc start-time identity _journal._pid_start provides); it re-checks the retained
@@ -93,6 +111,7 @@ import errno
 import fcntl
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -122,8 +141,21 @@ ACTIVE_NAME = "active.toml"
 # sub-table that persists the acquirer's full identity so recovery can decide liveness without
 # inferring staleness. PR2 OWNS the active-record schema (PR1 froze the coupled-init contracts,
 # NOT this record), so extending it here is in-scope; the lease schema is NOT ours to change.
-ACTIVE_TOP_KEYS = frozenset(("schema", "op_id", "holder", "operation", "acquired_at", "owner"))
+ACTIVE_TOP_KEYS = frozenset(("schema", "op_id", "holder", "operation", "acquired_at", "owner",
+                             "machine_store"))
 _SCHEMA = 1  # == _opf_schema.SUPPORTED_SCHEMA (the lease payload the doctor validates)
+# The ACTIVE record carries its own schema version, independent of the lease's (which is not ours
+# to change). Version 2 adds the [machine_store] table naming the machine store whose lease is
+# paired with this record, so recovery from a sibling git worktree (which shares the control root
+# but has its OWN machine store) can never delete an active record whose lease lives elsewhere.
+# A version-1 record (no [machine_store]) is refused by recovery with a clear message.
+_ACTIVE_SCHEMA = 2
+_LEGACY_ACTIVE_SCHEMA = 1
+# [machine_store]: the machine-store directory's absolute path (diagnostic only, never opened) and
+# its (st_dev, st_ino) identity as canonical decimal STRINGS (an inode number can exceed the TOML
+# signed 64-bit integer range on some filesystems). The (dev, ino) pair is the binding.
+MACHINE_STORE_KEYS = frozenset(("path", "dev", "ino"))
+_MAX_DECIMAL_DIGITS = 20  # 2**64 - 1 has 20 decimal digits
 
 # Field bounds: single-sourced from the D2b contract's actor-id bound and control-character class
 # (the class already covers C0, DEL, C1, and the BOM).
@@ -517,9 +549,16 @@ def _open_machine_dir(store_root_fd, machine_rel, store_root):
         for comp in parts:
             parent = store_root_fd if fd is None else fd
             nfd = _open_dir_at(parent, comp, "{}/{}".format(store_root, comp))
-            if fd is not None:
-                os.close(fd)
-            fd = nfd
+            # Hand-off FIRST, then close the old descriptor: `fd` always names the one descriptor
+            # this walk still owns, so a failing close of the parent cannot leak the new child fd
+            # (the except path closes `fd`, now the child) nor double-close the parent (on Linux a
+            # close that reports an error has still released the descriptor).
+            old, fd = fd, nfd
+            if old is not None:
+                try:
+                    os.close(old)
+                except OSError as exc:
+                    raise OpLockError("cannot close a machine-store walk descriptor ({})".format(exc))
         try:
             st = os.fstat(fd)
         except OSError as exc:
@@ -533,9 +572,13 @@ def _open_machine_dir(store_root_fd, machine_rel, store_root):
             raise OpLockError("machine store {}/{} is owned by uid {}, not the current uid "
                               "{}".format(store_root, machine_rel, st.st_uid, os.getuid()))
         return fd
-    except BaseException:
+    except BaseException as exc:
         if fd is not None:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError as cexc:
+                exc.add_note("additionally the machine-store walk descriptor could not be closed "
+                             "({})".format(cexc))
         raise
 
 
@@ -568,14 +611,25 @@ def _validate_recovery_active(doc):
     consistency (the owner's session is the record's op_id and the owner's utc is the record's
     acquired_at) are all required; any failure refuses recovery. The [owner] identity fields
     themselves are validated by _journal.owner_confirmed_dead, which reads a malformed owner as
-    possibly-live. Returns the validated [owner] table."""
+    possibly-live. A version-1 record (the earlier format, written before the [machine_store]
+    pairing identity existed) is refused with a message naming that cause, since its paired lease
+    cannot be located safely (it may live in a sibling worktree's machine store). Returns the
+    validated ([owner] table, [machine_store] table)."""
+    if doc.get("schema") == _LEGACY_ACTIVE_SCHEMA and type(doc.get("schema")) is int \
+            and "machine_store" not in doc:
+        raise OpLockError("the stale active record uses the earlier schema {} format, which carries "
+                          "no [machine_store] identity, so the machine store holding its paired "
+                          "lease (possibly a sibling git worktree's) cannot be confirmed; refusing "
+                          "recovery (manual intervention required: remove the active record and the "
+                          "paired lease together once the holder is known dead)".format(
+                              _LEGACY_ACTIVE_SCHEMA))
     if set(doc) != set(ACTIVE_TOP_KEYS):
         raise OpLockError("the stale active record top-level keys {} do not equal the closed set "
                           "{}; refusing recovery (manual intervention required)".format(
                               sorted(doc), sorted(ACTIVE_TOP_KEYS)))
-    if type(doc["schema"]) is not int or doc["schema"] != _SCHEMA:
+    if type(doc["schema"]) is not int or doc["schema"] != _ACTIVE_SCHEMA:
         raise OpLockError("the stale active record schema is not the supported version {}; refusing "
-                          "recovery (manual intervention required)".format(_SCHEMA))
+                          "recovery (manual intervention required)".format(_ACTIVE_SCHEMA))
     for key in ("holder", "operation", "op_id", "acquired_at"):
         val = doc.get(key)
         if type(val) is not str or not val:
@@ -589,7 +643,36 @@ def _validate_recovery_active(doc):
         raise OpLockError("the stale active record [owner] is inconsistent with the record it sits "
                           "in (owner session/utc do not match op_id/acquired_at); refusing recovery "
                           "(manual intervention required)")
-    return owner
+    machine = doc.get("machine_store")
+    if not isinstance(machine, dict) or set(machine) != set(MACHINE_STORE_KEYS):
+        raise OpLockError("the stale active record [machine_store] is missing or its keys do not "
+                          "equal the closed set {}; refusing recovery (manual intervention "
+                          "required)".format(sorted(MACHINE_STORE_KEYS)))
+    if type(machine["path"]) is not str or not machine["path"]:
+        raise OpLockError("the stale active record [machine_store] path is missing or not a "
+                          "non-empty string; refusing recovery (manual intervention required)")
+    for key in ("dev", "ino"):
+        if not _is_canonical_decimal(machine[key]):
+            raise OpLockError("the stale active record [machine_store] {} is not a canonical "
+                              "decimal string; refusing recovery (manual intervention "
+                              "required)".format(key))
+    return owner, machine
+
+
+def _is_canonical_decimal(value):
+    """True for a canonical unsigned decimal string (ASCII digits, no sign, no leading zero, at most
+    _MAX_DECIMAL_DIGITS digits): exactly what str() of a non-negative st_dev/st_ino produces."""
+    if type(value) is not str or not value or len(value) > _MAX_DECIMAL_DIGITS:
+        return False
+    if not all("0" <= ch <= "9" for ch in value):
+        return False
+    return value == "0" or value[0] != "0"
+
+
+def _machine_store_table(machine_path, machine_st):
+    """The [machine_store] table an active record persists: the machine-store path (diagnostic) and
+    its (st_dev, st_ino) identity as canonical decimal strings (the pairing binding)."""
+    return dict(path=machine_path, dev=str(machine_st.st_dev), ino=str(machine_st.st_ino))
 
 
 def _validate_recovery_lease(doc, active_doc):
@@ -621,7 +704,8 @@ def _validate_recovery_lease(doc, active_doc):
                           "intervention required)")
 
 
-def _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease):
+def _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease, machine_st,
+                                   machine_path):
     """The recovery LIVENESS GATE (fail-closed). Under recover=True a stale record is cleared ONLY
     when the recorded holder is CONFIRMED DEAD, reusing the journal's possibly-live-never-seized
     model (_journal.owner_confirmed_dead) over the owner identity the active record persists. A
@@ -632,13 +716,28 @@ def _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease
     for the active record and, when present, the lease, so the caller's delete removes ONLY those
     same objects with those same bytes (DEF-1: a record swapped to a LIVE holder B's after this
     read is refused and preserved, never seized). Called ONLY on the explicit recover=True path,
-    under the held anchor flock, before any _recover_stale delete runs."""
+    under the held anchor flock, before any _recover_stale delete runs.
+
+    Cross-worktree PAIRING: the active record lives under the control root, which linked git
+    worktrees SHARE, while the lease lives in the acquirer's OWN machine store. The active record's
+    [machine_store] (st_dev, st_ino) must therefore equal the recovering acquirer's machine store
+    (`machine_st`, the fstat of `machine_fd`); otherwise the paired lease lives in another checkout's
+    machine store, this recovery cannot see or clear it, and deleting the shared active record would
+    strand that lease with no owner-bearing record. Such a recovery is REFUSED (naming the owning
+    machine-store path) and nothing is deleted; recovery is run from the owning checkout instead."""
     if not stale_active:
         raise OpLockError("a stale lease exists with no paired active record; its holder carries no "
                           "owner identity and cannot be confirmed dead (possibly live); refusing "
                           "recovery (manual intervention required)")
     doc, active_ident, active_bytes = _read_control_record(ctl_fd, ACTIVE_NAME, "active record")
-    owner = _validate_recovery_active(doc)
+    owner, machine = _validate_recovery_active(doc)
+    if (machine["dev"], machine["ino"]) != (str(machine_st.st_dev), str(machine_st.st_ino)):
+        raise OpLockError("the stale active record is paired with a different machine store ({!r}, "
+                          "device/inode {}/{}) than this checkout's ({!r}); its lease is not visible "
+                          "here and deleting the shared active record would strand it; refusing "
+                          "recovery (run recovery from the checkout that owns that machine "
+                          "store)".format(machine["path"], machine["dev"], machine["ino"],
+                                          machine_path))
     node = owner.get("nodename")
     if not isinstance(node, str) or not node:
         raise OpLockError("the stale active record owner has no usable nodename; its holder may be "
@@ -775,13 +874,32 @@ def _create_control_file(dir_fd, name, payload, label):
         os.fsync(fd)
         os.fsync(dir_fd)
         st = os.fstat(fd)
-    except OSError as exc:
+    except BaseException as exc:
+        # ANY interruption (an OSError, but equally a KeyboardInterrupt or another BaseException
+        # landing mid-write) removes the torn record and closes the descriptor HERE, because the
+        # caller never received the fd and cannot unwind it. An OSError is normalized to
+        # OpLockError as before; any other BaseException is re-raised as itself (never swallowed or
+        # converted) with the cleanup outcome attached as notes, so its diagnostics are preserved.
+        problems = []
         strand = _unlink_created_on_failure(dir_fd, name, fd)
-        os.close(fd)
         if strand is not None:
-            raise OpLockError("cannot write {} ({}); additionally the torn record could not be "
-                              "cleaned up: {}".format(label, exc, strand))
-        raise OpLockError("cannot write {} ({})".format(label, exc))
+            problems.append(strand)
+        try:
+            os.close(fd)
+        except OSError as cexc:
+            problems.append("could not close the torn {} descriptor ({})".format(name, cexc))
+        if isinstance(exc, OSError):
+            if problems:
+                raise OpLockError("cannot write {} ({}); additionally the torn record could not be "
+                                  "cleaned up: {}".format(label, exc, "; ".join(problems))) from exc
+            raise OpLockError("cannot write {} ({})".format(label, exc)) from exc
+        if problems:
+            exc.add_note("opf-oplock: interrupted while writing {}; the torn record could not be "
+                         "cleaned up: {}".format(label, "; ".join(problems)))
+        else:
+            exc.add_note("opf-oplock: interrupted while writing {}; the torn record was removed "
+                         "and its descriptor closed".format(label))
+        raise
     return fd, (st.st_dev, st.st_ino)
 
 
@@ -853,7 +971,10 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     possibly-live-never-seized model over the owner identity the active record persists); a
     possibly-live, cross-host, or malformed holder, or a stale lease with no paired active record,
     is refused so a live holder whose records are exposed under a split anchor is never seized into
-    a two-holder state. Returns an OpCapability; raises OpLockError fail-closed on everything else.
+    a two-holder state. Recovery also refuses an active record paired with a different machine
+    store (a sibling git worktree's), and deletes the lease before the active record, so an
+    interrupted recovery leaves only a lone active record that a later recovery can clear. Returns
+    an OpCapability; raises OpLockError fail-closed on everything else.
     """
     if not _containment.probe():
         raise OpLockError("race-free containment primitive absent; fail-closed")
@@ -888,6 +1009,12 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     active_payload = lease_payload = None
     try:
         machine_fd = _open_machine_dir(store_fd, res.machine_rel, store_root_abs)
+        try:
+            machine_st = os.fstat(machine_fd)
+        except OSError as exc:
+            raise OpLockError("cannot fstat machine store {}/{} ({})".format(
+                store_root_abs, res.machine_rel, exc))
+        machine_path = os.path.join(store_root_abs, res.machine_rel)
 
         if _classify_git_entry(store_fd, store_root_abs) == "absent":
             control_root_fd = os.dup(store_fd)
@@ -930,15 +1057,24 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
             # possibly-live, cross-host, or malformed holder, nor a lone owner-less lease). The gate
             # returns the identity and bytes it read for each record so the delete below removes ONLY
             # those same objects with those same bytes (DEF-1: a record swapped to a live holder's
-            # after the liveness read is preserved, never seized).
+            # after the liveness read is preserved, never seized). The gate also refuses an active
+            # record paired with ANOTHER checkout's machine store (a sibling git worktree), so the
+            # shared active record is never deleted out from under a lease this recovery cannot see.
             rec_active_ident, rec_active_bytes, rec_lease_ident, rec_lease_bytes = \
-                _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease)
-            if stale_active:
-                _recover_stale(ctl_fd, ACTIVE_NAME, rec_active_ident, rec_active_bytes,
-                               "active record")
+                _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease,
+                                               machine_st, machine_path)
+            # Delete order: the verified LEASE first (its unlink is fsynced on the machine-store
+            # directory inside _recover_stale), and ONLY THEN the active record. A crash or a failed
+            # delete between the two leaves a LONE ACTIVE RECORD, which still carries the owner
+            # identity the liveness gate reads, so a later recover=True re-confirms the dead holder
+            # and clears it. The reverse order stranded a lone owner-less lease that no recovery
+            # could ever confirm dead.
             if stale_lease:
                 _recover_stale(machine_fd, _opf_check.LEASE_NAME, rec_lease_ident, rec_lease_bytes,
                                "lease")
+            if stale_active:
+                _recover_stale(ctl_fd, ACTIVE_NAME, rec_active_ident, rec_active_bytes,
+                               "active record")
 
         op_id = str(uuid.uuid4())
         _validate_field("op_id", op_id)
@@ -950,9 +1086,12 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
         owner = dict(pid=os.getpid(), uid=os.getuid(), nodename=os.uname().nodename,
                      session=op_id, utc=acquired_at)
         owner["pid-start"] = _journal._pid_start(os.getpid())
+        # The active record also names the machine store its paired lease lives in, so a recovery
+        # from a sibling git worktree (same control root, different machine store) refuses.
         active_payload = _control_payload(
-            dict(schema=_SCHEMA, op_id=op_id, holder=holder, operation=operation,
-                 acquired_at=acquired_at, owner=owner),
+            dict(schema=_ACTIVE_SCHEMA, op_id=op_id, holder=holder, operation=operation,
+                 acquired_at=acquired_at, owner=owner,
+                 machine_store=_machine_store_table(machine_path, machine_st)),
             ACTIVE_TOP_KEYS, "active record")
         lease_payload = _control_payload(
             dict(schema=_SCHEMA, holder=holder, operation=operation, acquired_at=acquired_at),
@@ -966,7 +1105,17 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
         lease_created = True
 
         ctl_st = os.fstat(ctl_fd)
-        machine_st = os.fstat(machine_fd)
+        # Close the store-root descriptor INSIDE the protected body, before ownership of the
+        # retained descriptors transfers to the capability: a failing close (EIO) then runs the
+        # full unwind (records removed, anchor unlocked, every descriptor closed) instead of
+        # escaping after the capability was built and leaking the still-flocked anchor. The name is
+        # cleared FIRST so the unwind never re-closes a number the kernel has already released
+        # (Linux releases the descriptor even when close reports an error).
+        closing_fd, store_fd = store_fd, None
+        try:
+            os.close(closing_fd)
+        except OSError as exc:
+            raise OpLockError("cannot close the store-root descriptor ({})".format(exc))
         return OpCapability(
             op_id=op_id, holder=holder, operation=operation,
             store_root=store_root_abs, machine_rel=res.machine_rel,
@@ -1005,7 +1154,8 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
                     fcntl.flock(anchor_fd, fcntl.LOCK_UN)
                 except OSError as uexc:
                     unwind.append("cannot unlock mutex anchor ({})".format(uexc))
-            for open_fd in (lease_fd, active_fd, anchor_fd, ctl_fd, control_root_fd, machine_fd):
+            for open_fd in (lease_fd, active_fd, anchor_fd, ctl_fd, control_root_fd, machine_fd,
+                            store_fd):
                 if open_fd is not None:
                     try:
                         os.close(open_fd)
@@ -1014,9 +1164,9 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
         if unwind and isinstance(exc, Exception):
             raise OpLockError("{}; additionally the unwind failed: {}".format(
                 exc, "; ".join(unwind))) from exc
+        if unwind:
+            exc.add_note("opf-oplock: additionally the unwind failed: {}".format("; ".join(unwind)))
         raise
-    finally:
-        os.close(store_fd)
 
 
 def release_operation(cap):
@@ -1198,7 +1348,7 @@ def _st_write_active_owned(root, pid, pid_start, nodename, op_id, holder=None):
     if holder is None:
         holder = "opf:{}:{}".format(nodename, pid)
     lines = (
-        'schema = 1',
+        'schema = {}'.format(_ACTIVE_SCHEMA),
         'op_id = "{}"'.format(op_id),
         'holder = "{}"'.format(holder),
         'operation = "recovered-op"',
@@ -1212,10 +1362,22 @@ def _st_write_active_owned(root, pid, pid_start, nodename, op_id, holder=None):
         'utc = "2026-01-01T00:00:00Z"',
         'pid-start = "{}"'.format(pid_start),
         '',
-    )
+    ) + _st_machine_store_lines(root)
     with open(os.path.join(_st_ctl_dir(root), ACTIVE_NAME), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     return holder
+
+
+def _st_machine_store_lines(root):
+    """The [machine_store] table lines pairing a hand-written active record with `root`'s machine
+    store (the default .working/toml location the fixtures resolve to)."""
+    machine = os.path.join(root, ".working", "toml")
+    st = os.stat(machine)
+    return ('[machine_store]',
+            'path = "{}"'.format(machine),
+            'dev = "{}"'.format(st.st_dev),
+            'ino = "{}"'.format(st.st_ino),
+            '')
 
 
 def _st_write_lease_owned(root, holder):
@@ -1355,6 +1517,12 @@ def _t_c3_c11_mandatory_lease_and_bytes(d, env):
     assert owner["nodename"] == os.uname().nodename
     assert isinstance(owner["pid-start"], str)
     assert owner["session"] == cap.op_id and owner["utc"] == active_doc["acquired_at"]
+    assert active_doc["schema"] == _ACTIVE_SCHEMA and type(active_doc["schema"]) is int
+    machine = active_doc["machine_store"]
+    mst = os.stat(os.path.join(root, ".working", "toml"))
+    assert set(machine) == set(MACHINE_STORE_KEYS), machine
+    assert (machine["dev"], machine["ino"]) == (str(mst.st_dev), str(mst.st_ino)), machine
+    assert machine["path"] == os.path.join(os.path.realpath(root), ".working", "toml"), machine
     release_operation(cap)
     assert not os.path.exists(lease) and not os.path.exists(active)
 
@@ -1766,13 +1934,14 @@ def _t_d2_missing_holder_fields(d, env):
     lease = _st_lease_path(root)
 
     def _write_active(holder_line):
-        lines = ["schema = 1", 'op_id = "d2-op-id"']
+        lines = ["schema = {}".format(_ACTIVE_SCHEMA), 'op_id = "d2-op-id"']
         if holder_line is not None:
             lines.append(holder_line)
         lines += ['operation = "recovered-op"', 'acquired_at = "2026-01-01T00:00:00Z"', "",
                   "[owner]", "pid = {}".format(dead_pid), "uid = {}".format(os.getuid()),
                   'nodename = "{}"'.format(node), 'session = "d2-op-id"',
                   'utc = "2026-01-01T00:00:00Z"', 'pid-start = "{}"'.format(dead_start), ""]
+        lines += list(_st_machine_store_lines(root))
         with open(active, "w", encoding="utf-8") as fh:
             fh.write(chr(10).join(lines))
 
@@ -1784,10 +1953,14 @@ def _t_d2_missing_holder_fields(d, env):
         with open(lease, "w", encoding="utf-8") as fh:
             fh.write(chr(10).join(lines))
 
-    # Sub-case A: holder KEY MISSING on both (None == None) -> refused by the keyset check.
+    # Sub-case A: holder KEY MISSING on both (None == None) -> refused by the ACTIVE keyset check.
+    # Every sub-case needle names its ONE check uniquely: the earlier generic "refusing recovery"
+    # also matched the non-empty-field refusal (and "closed set" alone also matches the lease and
+    # [machine_store] keyset refusals), so it could not tell which check stood in the way.
     _write_active(None)
     _write_lease(None)
-    _st_expect_refusal(acquire_operation, root, "op2", recover=True, needle="refusing recovery")
+    _st_expect_refusal(acquire_operation, root, "op2", recover=True,
+                       needle="stale active record top-level keys")
     assert os.path.exists(active) and os.path.exists(lease), \
         "missing-holder records are never seized"
 
@@ -1795,7 +1968,7 @@ def _t_d2_missing_holder_fields(d, env):
     _write_active('holder = ""')
     _write_lease('holder = ""')
     _st_expect_refusal(acquire_operation, root, "op2", recover=True,
-                       needle="holder is missing or not a non-empty string")
+                       needle="stale active record holder is missing or not a non-empty string")
     assert os.path.exists(active) and os.path.exists(lease), "empty-holder records are never seized"
 
     # Sub-case C: complete, equal holders, but the lease is from a DIFFERENT acquisition (its
@@ -1815,8 +1988,9 @@ def _t_d2_missing_holder_fields(d, env):
     with open(active, "r", encoding="utf-8") as fh:
         text = fh.read()
     with open(active, "w", encoding="utf-8") as fh:
-        fh.write(text.replace("schema = 1", "schema = 2", 1))
-    _st_expect_refusal(acquire_operation, root, "op2", recover=True, needle="supported version")
+        fh.write(text.replace("schema = {}".format(_ACTIVE_SCHEMA), "schema = 99", 1))
+    _st_expect_refusal(acquire_operation, root, "op2", recover=True,
+                       needle="stale active record schema is not the supported version")
     assert os.path.exists(active) and os.path.exists(lease), "an unsupported schema is never seized"
     os.unlink(active)
     os.unlink(lease)
@@ -1949,12 +2123,240 @@ def _t_d5_failed_cleanup(d, env):
     release_operation(cap)
 
 
+def _st_open_fds():
+    """The number of descriptors this process holds open (Linux /proc/self/fd, else /dev/fd). The
+    listing's own transient descriptor is present in every measurement alike, so a difference of
+    two readings is exactly the descriptors leaked in between."""
+    for fd_dir in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(fd_dir):
+            return len(os.listdir(fd_dir))
+    raise AssertionError("no descriptor listing (/proc/self/fd or /dev/fd) to count leaks with")
+
+
+def _st_crash_acquire(root):
+    """A REAL crashed holder: a forked child acquires the lock at `root` and exits WITHOUT
+    releasing, and the parent reaps it, so both records are left behind with a confirmed-dead
+    owner (the kernel drops the child's flock at exit)."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            acquire_operation(root, "crashed-op")
+            os._exit(0)                   # no release: the crash leaves both records
+        except BaseException:
+            os._exit(3)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, \
+        "the crashing child must acquire (status {})".format(status)
+
+
+def _t_r2_1_crash_between_recovery_deletes(d, env):
+    """T-r2-1 (recovery delete order): a recovering process is SIGKILLed between its two recovery
+    deletes. The lease is deleted (and fsynced) FIRST, so the crash leaves a LONE ACTIVE record
+    that still carries the dead owner's identity, and a later recover=True re-confirms the holder
+    dead and succeeds. The earlier order (active first) left a lone owner-less lease that every
+    later recovery refused forever. The kill is injected deterministically by wrapping the
+    module's own _recover_stale in the recovering child so the process dies the instant its FIRST
+    delete returns."""
+    root = _st_git_store(d, "repo", env)
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+    _st_crash_acquire(root)
+    assert os.path.exists(active) and os.path.exists(lease)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:                          # the recovering process, killed between the deletes
+        try:
+            mod = sys.modules[__name__]
+            saved = mod._recover_stale
+
+            def _die_after_first_delete(*a, **k):
+                saved(*a, **k)
+                os.kill(os.getpid(), signal.SIGKILL)
+
+            mod._recover_stale = _die_after_first_delete
+            acquire_operation(root, "op", recover=True)
+            os._exit(0)                   # not reached: the first delete kills the process
+        except BaseException:
+            os._exit(3)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL, \
+        "the recovering child must die by the injected SIGKILL (status {})".format(status)
+    assert not os.path.exists(lease), "the lease is deleted FIRST"
+    assert os.path.exists(active), "the owner-bearing active record survives the crash"
+    cap = acquire_operation(root, "op", recover=True)   # the lone active record is recoverable
+    release_operation(cap)
+    assert not os.path.exists(active) and not os.path.exists(lease)
+
+
+def _t_r2_2_cross_worktree_recovery(d, env):
+    """T-r2-2 (cross-worktree pairing): a holder acquires in the MAIN checkout and crashes; a
+    recover=True from a LINKED worktree (same shared control root and active record, but its own
+    machine store) must REFUSE and delete nothing, because the paired lease lives in the main
+    checkout's machine store; recovery from the main checkout then clears both records. Before the
+    fix the worktree recovery deleted the shared active record and stranded the main lease as a
+    lone, unrecoverable leftover. A schema-1 record (the earlier format, no [machine_store]) is
+    refused with a message naming that cause."""
+    main = _st_git_store(d, "main", env)
+    wt = os.path.join(d, "wt")
+    _st_git(["worktree", "add", "--detach", "-q", wt], main, env)
+    active = os.path.join(_st_ctl_dir(main), ACTIVE_NAME)
+    main_lease = _st_lease_path(main)
+    _st_crash_acquire(main)
+    assert os.path.exists(active) and os.path.exists(main_lease)
+    with open(active, "rb") as fh:
+        before = fh.read()
+    _st_expect_refusal(acquire_operation, wt, "op", recover=True,
+                       needle="paired with a different machine store")
+    with open(active, "rb") as fh:
+        assert fh.read() == before, "the shared active record must be PRESERVED byte for byte"
+    assert os.path.exists(main_lease), "the main checkout's lease must be preserved"
+    assert not os.path.exists(_st_lease_path(wt)), "the worktree acquired nothing"
+    cap = acquire_operation(main, "op", recover=True)   # the owning checkout recovers both
+    release_operation(cap)
+    assert not os.path.exists(active) and not os.path.exists(main_lease)
+    # Legacy schema-1 record (no [machine_store]): refused with a clear, specific message.
+    dead_pid, dead_start = _st_reaped_child()
+    holder = _st_write_active_owned(main, dead_pid, dead_start, os.uname().nodename,
+                                    op_id="legacy-op-id")
+    with open(active, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    text = text.replace("schema = {}".format(_ACTIVE_SCHEMA), "schema = 1", 1)
+    text = text[:text.index("[machine_store]")]
+    with open(active, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    _st_write_lease_owned(main, holder=holder)
+    _st_expect_refusal(acquire_operation, main, "op", recover=True,
+                       needle="earlier schema 1 format")
+    assert os.path.exists(active) and os.path.exists(main_lease), "a legacy record is never seized"
+    os.unlink(active)                      # manual intervention, as the refusal instructs
+    os.unlink(main_lease)
+
+
+def _t_r2_3_store_fd_close_eio(d, env):
+    """T-r2-3 (store-root close inside the unwind): an EIO from the final store-root descriptor
+    close must run the full acquisition unwind: an OpLockError, NO leaked descriptor (before the
+    fix five leaked, the flocked anchor among them), no stranded records, and the lock
+    re-acquirable (no phantom contention). The failing close is injected on exactly the store-root
+    descriptor, which is really closed first (as Linux does) and then reported as EIO."""
+    root = _st_git_store(d, "repo", env)
+    cap = acquire_operation(root, "op")    # control dir + anchor exist; git warm
+    release_operation(cap)
+    saved_open = _opf_store._open_dir_nofollow
+    saved_close = os.close
+    store_root_abs = os.path.realpath(root)
+    target = {}
+
+    def _open_recording(path):
+        fd = saved_open(path)
+        if str(path) == store_root_abs and "fd" not in target:
+            target["fd"] = fd
+        return fd
+
+    def _close_eio(fd):
+        saved_close(fd)
+        if target.get("fd") == fd and not target.get("fired"):
+            target["fired"] = True
+            raise OSError(errno.EIO, "simulated store-root close failure (T-r2-3)")
+
+    baseline = _st_open_fds()
+    _opf_store._open_dir_nofollow = _open_recording
+    os.close = _close_eio
+    try:
+        _st_expect_refusal(acquire_operation, root, "op", needle="store-root descriptor")
+    finally:
+        os.close = saved_close
+        _opf_store._open_dir_nofollow = saved_open
+    assert target.get("fired"), "the injected store-root close failure must have fired"
+    assert _st_open_fds() == baseline, "no descriptor may leak (the flocked anchor above all)"
+    assert not os.path.exists(os.path.join(_st_ctl_dir(root), ACTIVE_NAME))
+    assert not os.path.exists(_st_lease_path(root))
+    cap = acquire_operation(root, "op")    # not contention: the anchor was really unlocked
+    release_operation(cap)
+
+
+def _t_r2_4_interrupt_mid_write(d, env):
+    """T-r2-4 (BaseException mid-write): a KeyboardInterrupt landing inside the control-record
+    write loop propagates AS ITSELF, but only after the torn record is unlinked and its descriptor
+    closed, with the cleanup outcome attached as a note. Before the fix the descriptor leaked and
+    the torn active record was stranded, refusing every later acquisition as stale."""
+    root = _st_git_store(d, "repo", env)
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    saved_write_all = _journal._write_all
+
+    def _interrupt(fd, payload):
+        os.write(fd, payload[:5])          # a torn partial write, then the interrupt lands
+        raise KeyboardInterrupt()
+
+    baseline = _st_open_fds()
+    _journal._write_all = _interrupt
+    caught = None
+    try:
+        acquire_operation(root, "op")
+    except KeyboardInterrupt as exc:
+        caught = exc
+    finally:
+        _journal._write_all = saved_write_all
+    assert caught is not None, "the KeyboardInterrupt must propagate as itself"
+    notes = " ".join(getattr(caught, "__notes__", ()))
+    assert "torn record was removed" in notes, notes
+    assert _st_open_fds() == baseline, "the torn record's descriptor must not leak"
+    assert not os.path.exists(active), "the torn active record must not be stranded"
+    cap = acquire_operation(root, "op")    # no stale refusal: nothing was stranded
+    release_operation(cap)
+
+
+def _t_r2_5_machine_walk_close(d, env):
+    """T-r2-5 (machine-store walk hand-off): an EIO from closing an intermediate machine-store
+    walk descriptor must leak NEITHER descriptor and must not double-close: the refusal is an
+    OpLockError naming the walk. Before the fix the newly opened child descriptor leaked and the
+    already-released parent was closed a second time (EBADF masking the real failure)."""
+    root = _st_git_store(d, "repo", env)
+    saved_open_at = sys.modules[__name__]._open_dir_at
+    saved_close = os.close
+    targets = set()
+    fired = []
+    mod = sys.modules[__name__]
+
+    def _open_recording(parent, name, label):
+        fd = saved_open_at(parent, name, label)
+        if name == ".working":
+            targets.add(fd)
+        return fd
+
+    def _close_eio(fd):
+        saved_close(fd)
+        if fd in targets:
+            targets.discard(fd)
+            fired.append(fd)
+            raise OSError(errno.EIO, "simulated walk close failure (T-r2-5)")
+
+    baseline = _st_open_fds()
+    mod._open_dir_at = _open_recording
+    os.close = _close_eio
+    try:
+        _st_expect_refusal(acquire_operation, root, "op", needle="machine-store walk descriptor")
+    finally:
+        os.close = saved_close
+        mod._open_dir_at = saved_open_at
+    assert fired, "the injected walk close failure must have fired"
+    assert _st_open_fds() == baseline, "neither walk descriptor may leak"
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+
+
 def self_test():
     """Regression roster (plan section (e)): the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
     round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
     T-r3-crosshost-refuses), the LOW-4 coverage tests (T-c2-dirperms, T-c3-companion, T-h4-quote,
     T-c6-diffinode), the LOW-1 torn-write witness (T-low1-torn), and the recovery-hardening
-    witnesses T-d1 to T-d5 (DEF-1 to DEF-5), each a witness against a named defect. A missing containment primitive or git binary is a REFUSAL (non-zero), never a clean
+    witnesses T-d1 to T-d5 (DEF-1 to DEF-5), and the round-2 witnesses T-r2-1 to T-r2-5 (recovery
+    delete order, cross-worktree pairing, store-root close, interrupted write, walk hand-off),
+    each a witness against a named defect. A missing containment primitive or git binary is a REFUSAL (non-zero), never a clean
     skip. The git fixtures are pinned hermetically (LOW-5)."""
     import tempfile
     import traceback
@@ -2006,6 +2408,16 @@ def self_test():
          _t_d4_gitdir_trailing_space),
         ("T-d5 (DEF-5) a failed torn-record cleanup names the stranded leftover",
          _t_d5_failed_cleanup),
+        ("T-r2-1 a crash between the recovery deletes leaves a recoverable lone active record",
+         _t_r2_1_crash_between_recovery_deletes),
+        ("T-r2-2 recovery from a sibling worktree refuses; legacy schema-1 refuses",
+         _t_r2_2_cross_worktree_recovery),
+        ("T-r2-3 an EIO store-root close runs the full unwind (no leaked anchor)",
+         _t_r2_3_store_fd_close_eio),
+        ("T-r2-4 a KeyboardInterrupt mid-write strands no torn record or descriptor",
+         _t_r2_4_interrupt_mid_write),
+        ("T-r2-5 a failing machine-store walk close leaks and double-closes nothing",
+         _t_r2_5_machine_walk_close),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-oplock-selftest-"))
