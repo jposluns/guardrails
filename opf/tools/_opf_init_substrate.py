@@ -63,6 +63,16 @@ validation of the plan's composite members (versions, binding, head, acceptance,
 rest) is likewise the producer's; the phase-name vocabulary is not fixed here (PR3 names the
 mutation phases); and everything the lock module itself discloses (advisory locking, the
 stat-to-unlink adjacency, non-Linux identity degradation) applies unchanged to the composed legs.
+Under the same cooperating-writer, no-lock model the pre-append re-verification is bounded, not
+adversarial: the digest verify and the append are two steps, so an out-of-band writer that
+retains an open descriptor to a record can mutate it AFTER the verify (the digest-verify-to-
+append TOCTOU); the type and nlink hard refusals read a point-in-time fstat of the opened
+object, so a hard link added after that fstat goes unobserved (the nlink-check TOCTOU); and a
+same-bytes-different-inode swap is ACCEPTED by design as harmless, the sha256 content digest
+being the authoritative check and the retained identity a diagnostic only. Adversarial-grade
+record integrity against a hostile writer with write access to the control root therefore
+requires OS-level isolation of that root (the pack's system-hardening guidance,
+SYSTEM-HARDENING.md), which this layer does not provide.
 
 Run: python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 Exit: 0 self-test clean; 1 self-test failure; 2 refused precondition (missing containment
@@ -255,7 +265,9 @@ def _read_record_bytes(dir_fd, name, label, max_bytes):
     """Read a substrate record's BYTES beneath dir_fd, no-follow and fail-closed: the OPENED
     object (not just the name) must be a plain singly-linked regular file within the byte cap.
     Returns (raw bytes, the opened object's stat); ANY failure raises, so a record that cannot be
-    read is a refusal, never nothing-to-check (check-fails-closed-on-unreadable)."""
+    read is a refusal, never nothing-to-check (check-fails-closed-on-unreadable); a mid-read
+    OSError (an fstat or read failure AFTER a successful open) is contained as the same refusal,
+    so a survey caller can CANNOT-EVALUATE the one record rather than abort whole."""
     try:
         fd = os.open(name, _opf_oplock._FILE_READ_FLAGS, dir_fd=dir_fd)
     except OSError as exc:
@@ -278,6 +290,8 @@ def _read_record_bytes(dir_fd, name, label, max_bytes):
             data += chunk
         if len(data) > max_bytes:
             raise InitSubstrateError("{} exceeds the {}-byte cap".format(label, max_bytes))
+    except OSError as exc:
+        raise InitSubstrateError("cannot read {} ({})".format(label, exc))
     finally:
         os.close(fd)
     return bytes(data), st
@@ -669,6 +683,9 @@ def _classify_entry(ops_fd, name):
         if len(entries) > MAX_PHASES + 1:
             return ce("{} entries exceed the plan plus {}-phase-record bound".format(
                 len(entries), MAX_PHASES))
+        if PLAN_NAME not in entries:
+            return ce("plan record is absent from the fresh listing (removed after it was "
+                      "read); refusing the stale plan")
         phases = []
         seen = set()
         for entry in entries:
@@ -1272,6 +1289,129 @@ def _t_s10_fresh_listing(d, env):
         os.lseek = saved_lseek
 
 
+def _t_s11_plan_membership(d, env):
+    """T-s11: the classifier checks plan.json is a MEMBER of the SAME fresh listing the phase
+    scan uses: a plan removed between the plan read and the listing is CANNOT-EVALUATE, never
+    INTACT on the earlier stale bytes."""
+    global _list_dir_fresh
+    root = _opf_oplock._st_git_store(d, "repo", env)
+    cap = _opf_oplock.acquire_operation(root, "opf-init")
+    sub = begin_operation(cap, _st_plan_bytes(cap.op_id))
+    record_phase(sub, cap, "observe")
+    close_operation(sub)
+    _opf_oplock.release_operation(cap)
+    plan = os.path.join(_st_sub_ops(root), cap.op_id, PLAN_NAME)
+    saved_list = _list_dir_fresh
+
+    def _racing(parent_fd, name, ident, label):
+        if name == cap.op_id and os.path.exists(plan):
+            os.unlink(plan)               # raced away AFTER the plan read, BEFORE the listing
+        return saved_list(parent_fd, name, ident, label)
+
+    _list_dir_fresh = _racing
+    try:
+        survey = classify_operations(root)
+    finally:
+        _list_dir_fresh = saved_list
+    assert survey.status == OPERATIONS and len(survey.operations) == 1
+    rep = survey.operations[0]
+    assert rep.status == CANNOT_EVALUATE and "absent from the fresh listing" in rep.detail, \
+        (rep.status, rep.detail)
+
+
+def _t_s12_early_count_guard(d, env):
+    """T-s12: the EARLY whole-directory entry-count bound refuses an over-bound operation
+    directory BEFORE any phase record is opened, on a shape the per-sequence bound alone never
+    catches (every sequence within bound, the sole excess entry sorting last): the pre-read
+    resource bound is the early guard's own coverage."""
+    global _read_record_bytes
+    root = _opf_oplock._st_git_store(d, "repo", env)
+    home = os.path.join(root, ".git", SUBSTRATE_DIRNAME)
+    ops = _st_sub_ops(root)
+    for p in (home, ops):
+        os.mkdir(p)
+        os.chmod(p, 0o755)
+    uid = "11111111-1111-1111-1111-111111111111"
+    op_dir = os.path.join(ops, uid)
+    os.mkdir(op_dir)
+    os.chmod(op_dir, 0o755)
+    with open(os.path.join(op_dir, PLAN_NAME), "wb") as fh:
+        fh.write(_st_plan_bytes(uid))
+    for i in range(1, MAX_PHASES + 1):    # every sequence IN bound and unique
+        with open(os.path.join(op_dir, "{:04d}-p.json".format(i)), "wb") as fh:
+            fh.write(_st_phase_bytes(uid, i, "p"))
+    with open(os.path.join(op_dir, "zzzz-foreign"), "w", encoding="utf-8") as fh:
+        fh.write("late\n")                # the count breaker, sorting AFTER every record
+    saved_read = _read_record_bytes
+    opened = []
+
+    def _counting(dir_fd, name, label, max_bytes):
+        if name != PLAN_NAME:
+            opened.append(name)
+        return saved_read(dir_fd, name, label, max_bytes)
+
+    _read_record_bytes = _counting
+    try:
+        survey = classify_operations(root)
+    finally:
+        _read_record_bytes = saved_read
+    assert survey.status == OPERATIONS and len(survey.operations) == 1
+    rep = survey.operations[0]
+    assert rep.status == CANNOT_EVALUATE and "entries exceed" in rep.detail, \
+        (rep.status, rep.detail)
+    assert opened == [], "the early bound must refuse before any phase record is opened"
+
+
+def _t_s13_midread_containment(d, env):
+    """T-s13: a mid-read OSError (an EIO AFTER a successful open) is contained as the declared
+    InitSubstrateError: the classifier CANNOT-EVALUATEs the ONE affected entry while the survey
+    continues, and the write path's pre-append re-verification refuses with the declared type,
+    never a raw OSError."""
+    import errno
+    root = _opf_oplock._st_git_store(d, "repo", env)
+    cap = _opf_oplock.acquire_operation(root, "opf-init")
+    sub = begin_operation(cap, _st_plan_bytes(cap.op_id))
+    record_phase(sub, cap, "observe")
+    close_operation(sub)
+    _opf_oplock.release_operation(cap)
+    victim_id = cap.op_id
+    cap = _opf_oplock.acquire_operation(root, "opf-init")
+    sub = begin_operation(cap, _st_plan_bytes(cap.op_id))
+    record_phase(sub, cap, "observe")
+    saved_read = os.read
+
+    def _eio_on(path):
+        vst = os.lstat(path)
+
+        def _reader(fd, n):
+            st = os.fstat(fd)
+            if (st.st_dev, st.st_ino) == (vst.st_dev, vst.st_ino):
+                raise OSError(errno.EIO, "simulated mid-read I/O error (T-s13)")
+            return saved_read(fd, n)
+        return _reader
+
+    os.read = _eio_on(os.path.join(_st_sub_ops(root), victim_id, "0001-observe.json"))
+    try:
+        survey = classify_operations(root)
+    finally:
+        os.read = saved_read
+    assert survey.status == OPERATIONS and len(survey.operations) == 2
+    by_id = dict((r.op_id, r) for r in survey.operations)
+    assert by_id[victim_id].status == CANNOT_EVALUATE \
+        and "cannot read" in by_id[victim_id].detail, \
+        (by_id[victim_id].status, by_id[victim_id].detail)
+    assert by_id[cap.op_id].status == INTACT, \
+        (by_id[cap.op_id].status, by_id[cap.op_id].detail)
+    os.read = _eio_on(os.path.join(_st_sub_ops(root), cap.op_id, "0001-observe.json"))
+    try:                                  # the write path refuses with the DECLARED type
+        _st_expect_refusal(record_phase, sub, cap, "stage", needle="cannot read")
+    finally:
+        os.read = saved_read
+    record_phase(sub, cap, "stage")
+    close_operation(sub)
+    _opf_oplock.release_operation(cap)
+
+
 def self_test():
     """Regression roster (the PR2 resume-substrate T-s witnesses), each a fail-to-pass
     discriminator against a named behaviour: the sibling-home placement under the composed
@@ -1280,8 +1420,9 @@ def self_test():
     discipline (T-s4), the read-only plan-aware classifier over the defect matrix (T-s5), the
     crash-then-control-leg-recovery composition with the substrate preserved (T-s6), the torn
     plan write stranding nothing (T-s7), the fail-closed classifier roots (T-s8), the read-side
-    classifier bounds and utc validity (T-s9), and the lseek-free fresh-descriptor listings
-    (T-s10). A missing
+    classifier bounds and utc validity (T-s9), the lseek-free fresh-descriptor listings (T-s10),
+    the plan-membership re-check in the same fresh listing (T-s11), the early entry-count bound
+    refusing before any record read (T-s12), and mid-read OSError containment (T-s13). A missing
     containment primitive or git binary is a REFUSAL (non-zero), never a clean skip. The git
     fixtures are pinned hermetically exactly as the lock module's self-test pins them."""
     import tempfile
@@ -1309,6 +1450,11 @@ def self_test():
         ("T-s8 classifier roots fail closed", _t_s8_fail_closed_roots),
         ("T-s9 read-side classifier bounds and utc validity", _t_s9_classifier_bounds),
         ("T-s10 fresh-descriptor listings, no lseek on a directory fd", _t_s10_fresh_listing),
+        ("T-s11 plan membership re-checked in the same fresh listing", _t_s11_plan_membership),
+        ("T-s12 early entry-count bound refuses before any record read",
+         _t_s12_early_count_guard),
+        ("T-s13 a mid-read OSError contains to one CANNOT-EVALUATE entry",
+         _t_s13_midread_containment),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-substrate-selftest-"))
