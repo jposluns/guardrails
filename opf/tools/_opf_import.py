@@ -2171,7 +2171,13 @@ def _write_ingest_review_bundle(product_root, run_rel, run_id, review_inputs):
         expected = review_inputs["expected"]
         try:
             _inventory_doc = tomllib.loads(_inventory_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        except ValueError as exc:
+            # ValueError family, at the PARSE locus (decode + tomllib.loads over the in-memory staged bytes):
+            # UnicodeDecodeError and tomllib.TOMLDecodeError are ValueError subclasses, and tomllib ALSO
+            # raises a BARE ValueError on an integer literal over CPython's 4300-digit string-conversion
+            # ceiling. _read_toml converts the same family to CANNOT-EVALUATE at its own parse locus; match it
+            # so a huge-integer staged inventory.toml fails closed to verdict 2 rather than raising. The try
+            # wraps only the parse, so no unrelated internal ValueError is laundered (no-concealed-failure).
             raise _cannot("ingest review bundle: staged {} is unreadable ({}); the frozen snapshot is "
                           "incomplete (fail-closed)".format(INVENTORY_NAME, exc))
         for _src_name, _src_doc in (("run.toml", _read_toml(store_root_fd, run_rel + "/run.toml")),
