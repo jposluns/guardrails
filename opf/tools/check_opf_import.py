@@ -408,18 +408,29 @@ def check_staged_run(run_dir):
                 # not a [start, end] int pair ([] or [5]) is a located row FINDING here rather than an
                 # uncaught IndexError when _render_report_md below indexes span[0]/span[1] over this UNTRUSTED
                 # staged proposal (R6-F1, the exception-coverage class sibling of the artifact-list guard).
+                # MIG-PR4a: admit the DECLARED proposal-provenance vocabulary (imp._PROPOSAL_ORIGIN_VALUES:
+                # model_proposal AND the MIG-PR3 importer_proposal), not model_proposal alone. Pre-fix a real
+                # staged MIGRATE run (whose importer suggestions rest as origin=importer_proposal) failed this
+                # check, so no migrate run could ever pass the gate and thus could never be reviewed. An origin
+                # OUTSIDE the closed vocabulary is still rejected here (reject unknown/conflicting origins).
                 span = pr.get("span") if isinstance(pr, dict) else None
-                if not (isinstance(pr, dict) and pr.get("origin") == imp._MODEL_PROPOSAL_ORIGIN
+                if not (isinstance(pr, dict) and pr.get("origin") in imp._PROPOSAL_ORIGIN_VALUES
                         and isinstance(pr.get("source_path"), str)
                         and isinstance(span, list) and len(span) == 2 and all(type(x) is int for x in span)
                         and isinstance(pr.get("suggested_state"), str)
                         and pr.get("suggested_state") in imp.MAPPING_STATES):
-                    pa_ok, pa_detail = False, "a proposals.toml row is malformed or not origin=model_proposal"
+                    pa_ok, pa_detail = False, ("a proposals.toml row is malformed or carries an origin "
+                                               "outside the proposal-provenance vocabulary")
                     break
     if pa_ok:
         try:
+            # MIG-PR4a: RETAIN each row's provenance during report normalization. _render_report_md renders
+            # `origin=<p._origin>` per proposal, so the reproduced report must carry the SAME per-row origin
+            # the staged proposals.toml records; without it every row reproduced as the default model_proposal
+            # and an importer_proposal row's report line no longer byte-matched the staged IMPORT-REPORT.md.
             norm = [{"source_path": pr["source_path"], "span": list(pr["span"]),
-                     "suggested_state": pr["suggested_state"], "note": pr.get("note", "")}
+                     "suggested_state": pr["suggested_state"], "note": pr.get("note", ""),
+                     "_origin": pr["origin"]}
                     for pr in proposals.get("proposal", [])]
             expected_md = imp._render_report_md(inventory.get("inventory_digest"),
                                                 inventory.get("fragment"), norm, run_dir.name)
@@ -1046,6 +1057,50 @@ def _self_test():
         pa = check_staged_run(m)["proposals-artifact"]
         expect("disc-proposals-artifact-fragment-span-index",
                pa[0] is False and "cannot reproduce" in pa[1])
+
+        # proposals-artifact (MIG-PR4a proposal-provenance vocabulary): the gate admits the DECLARED
+        # vocabulary (imp._PROPOSAL_ORIGIN_VALUES: model_proposal AND the MIG-PR3 importer_proposal), so a
+        # real staged run whose proposals rest as origin=importer_proposal PASSes; an origin OUTSIDE the
+        # closed vocabulary is still rejected. Co-locates the vocabulary widening's fail-without-it in this
+        # gate's OWN self-test (change-carries-check): pre-fix (model_proposal alone admitted) the
+        # importer_proposal run FINDINGs, so the PASS leg FAILS without the widening.
+        iroot, imachine = build_store({"a.txt": "aaaa"})
+        importer = {"source_path": "a.txt", "span": [0, 2], "suggested_state": "mapped"}
+        ipr = imp.plan_import(iroot, ["a.txt"], importer_proposals=[importer],
+                              now=NOW, run_nonce="gate-nonce")
+        if ipr.verdict != 0 or not ipr.run_id:
+            raise OSError("harness: could not stage an importer-proposal run ({}: {})".format(
+                ipr.verdict, ipr.findings))
+        irun = imachine.parent / "imports" / ipr.run_id
+        # guard against a vacuous pass: the staged proposals really carry the importer_proposal origin.
+        iprops = _load_toml(irun / "proposals.toml")
+        expect("proposals-artifact-importer-origin-row-present",
+               any(p.get("origin") == imp._IMPORTER_PROPOSAL_ORIGIN
+                   for p in iprops.get("proposal", [])))
+        expect("proposals-artifact-importer-origin",
+               check_staged_run(irun)["proposals-artifact"][0] is True)
+        # an origin OUTSIDE the closed proposal-provenance vocabulary is still REJECTED (the widening admits
+        # the declared set, not anything): a "guessed" origin FINDINGs at the vocabulary arm. The staged
+        # IMPORT-REPORT.md is REGENERATED to byte-reproduce the guessed-origin proposals (a coherent report)
+        # and report.toml's digest refreshed, so the report-reproduction arm PASSES and the ONLY remaining
+        # rejection cause is the origin-vocab guard. This isolates the guard: reverting `pr.get("origin") in
+        # imp._PROPOSAL_ORIGIN_VALUES` to True makes this discriminator FLIP to accept (verified). Without the
+        # coherent report a stale-report mismatch would reject independently and mask a reverted guard (codex).
+        m = copy_run(irun)
+        props = _load_toml(m / "proposals.toml")
+        for pr in props["proposal"]:
+            pr["origin"] = "guessed"
+        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        m_inv = _load_toml(m / "inventory.toml")
+        m_norm = [{"source_path": pr["source_path"], "span": list(pr["span"]),
+                   "suggested_state": pr["suggested_state"], "note": pr.get("note", ""),
+                   "_origin": pr["origin"]}
+                  for pr in props.get("proposal", [])]
+        (m / "IMPORT-REPORT.md").write_bytes(
+            imp._render_report_md(m_inv.get("inventory_digest"), m_inv.get("fragment"),
+                                  m_norm, m.name).encode("utf-8"))
+        rewrite_report_digest(m, "IMPORT-REPORT.md")
+        expect("disc-proposals-origin-unknown", check_staged_run(m)["proposals-artifact"][0] is False)
 
         # --- acceptance.json (conditionally present): absent PASSes, present-and-valid PASSes, and each
         #     new acceptance check FINDINGs on its single mutation (acceptance.json is not in report's
