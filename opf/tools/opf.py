@@ -2405,46 +2405,61 @@ def _import_read_options(path):
         raise ValueError("--ingest-options file unreadable or malformed ({}): {}".format(path, exc))
 
 
+def _import_decode_decisions(raw, run_id):
+    """Decode the closed ordinary or ingest envelope without accepting any decision implicitly."""
+    import _opf_import as imp
+    doc = imp._strict_json(raw)
+    if not isinstance(doc, dict) or type(doc.get("schema")) is not int or doc["schema"] not in (1, 2):
+        raise ValueError("--decisions requires integer schema 1 or 2")
+    keys = {"schema", "run_id", "decisions"} | ({"ingest"} if doc["schema"] == 2 else set())
+    if set(doc) != keys or doc["run_id"] != run_id or not isinstance(doc["decisions"], list):
+        raise ValueError("--decisions envelope keys, run binding, or decisions array are invalid")
+    if doc["schema"] == 2:
+        block = doc["ingest"]
+        if not (isinstance(block, dict) and set(block) == {"format", "binding", "units"}
+                and block["format"] == imp.INGEST_ACCEPTANCE_BLOCK
+                and isinstance(block["binding"], dict) and isinstance(block["units"], list)):
+            raise ValueError("--decisions ingest block is malformed")
+        return doc
+    return doc["decisions"]
+
+
 def _import_read_decisions(path, run_id):
-    """Read the `--decisions` batch file (canonical JSON), fail-closed. Returns the decisions list. The file
-    is CALLER input (it may live outside the store); its envelope (surfaced for maintainer sign-off,
-    PD-OPF-IMPORT-VERB-APPLY-SEAMS) is `{"schema": 1, "run_id": ..., "decisions": [ {fragment_id, decision,
-    origin, proposed_state, note}, ... ]}`. `run_id` MUST equal the CLI `--review` operand
-    (explicit-binding-over-ambient-context: the file is bound to the exact run under review, never trusted
-    to name a different one). Each decision table's own shape is validated at the operation layer
-    (`review_import`), never here. A missing/unreadable/malformed file, a schema or run-id mismatch, or a
-    non-list `decisions` is a ValueError (cannot-evaluate exit 2)."""
+    """Read a bounded batch envelope, rejecting duplicates and excessive nesting."""
+    import _opf_store
     try:
         with open(path, "rb") as fh:
-            raw = fh.read()
+            raw = fh.read(_opf_store.MAX_STORE_READ_BYTES + 1)
+        return _import_decode_decisions(raw, run_id)
     except (OSError, ValueError, RecursionError) as exc:
         raise ValueError("--decisions file unreadable or malformed ({}): {}".format(path, exc))
+
+
+def _cmd_import_review_aid(rest):
+    """Read-only template and stale-acceptance comparison; no decision is copied."""
+    import argparse
+    parser = argparse.ArgumentParser(prog="opf import")
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--review", required=True)
+    choice = parser.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--show-review", action="store_true")
+    choice.add_argument("--diff-review", metavar="OLD_RUN")
     try:
-        doc = json.loads(raw)
-    except (ValueError, RecursionError) as exc:
-        # A deeply-nested --decisions JSON raises RecursionError from json.loads (not fh.read); catch it at
-        # the reader so it fails closed with a LOCATED message (R8-F1 read-boundary parity with
-        # _import_read_set's tomllib.load guard), never only at _cmd_import's outer backstop.
-        raise ValueError("--decisions file is not valid JSON or is too deeply nested ({}): {}".format(
-            path, exc))
-    if not (isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 1):
-        raise ValueError("--decisions file must be a JSON object carrying \"schema\": 1 (an integer 1, not "
-                         "a bool or float)")
-    if doc.get("run_id") != run_id:
-        raise ValueError("--decisions file run_id {!r} does not match the --review run-id {!r}; the "
-                         "decisions file is bound to the exact run under review".format(
-                             doc.get("run_id"), run_id))
-    decisions = doc.get("decisions")
-    if not isinstance(decisions, list):
-        raise ValueError("--decisions file \"decisions\" must be an array")
-    extra = set(doc) - {"schema", "run_id", "decisions"}
-    if extra:
-        raise ValueError("--decisions file carries unknown key(s): {} (the envelope is a closed {{schema, "
-                         "run_id, decisions}})".format(", ".join(sorted(extra))))
-    return decisions
+        args = parser.parse_args(rest)
+        result = _opf_import.ingest_review_aid(os.path.abspath(args.root), args.review, args.diff_review)
+        print(json.dumps(result, sort_keys=True, indent=2, ensure_ascii=True))
+        return EXIT_OK
+    except SystemExit as exc:
+        return exc.code
+    except Exception as exc:
+        print("opf import: review aid cannot be evaluated ({})".format(
+            _opf_import._ingest_md_escape(str(exc))), file=sys.stderr)
+        return EXIT_MALFORMED
 
 
 def _cmd_import(rest):
+    if "--show-review" in rest or "--diff-review" in rest:
+        return _cmd_import_review_aid(rest)
     """`opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
     (--decisions FILE | --interactive) | --apply <run-id>)`: the store import verb.
 
@@ -2691,7 +2706,11 @@ def _cmd_import(rest):
                 res = _opf_import.review_import_interactive(root_abs, run_id, actor=actor, now=now)
             else:
                 decisions = _import_read_decisions(decisions_file, run_id)
-                res = _opf_import.review_import(root_abs, run_id, actor=actor, decisions=decisions, now=now)
+                if isinstance(decisions, dict):
+                    res = _opf_import.review_import(root_abs, run_id, actor=actor, now=now,
+                                                    decisions=decisions["decisions"], ingest=decisions["ingest"])
+                else:
+                    res = _opf_import.review_import(root_abs, run_id, actor=actor, decisions=decisions, now=now)
             if res.verdict == _opf_import.CLEAN:
                 print("opf import: acceptance captured: run {}; acceptance {}; {} decision(s)".format(
                     res.run_id, res.acceptance_rel, res.decisions_count))

@@ -79,8 +79,8 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
                            and confined to a migrate row's resolved source, each migrate row's candidate/proposal
                            counts correspond to the staged evidence, ALL proposals validate through plan_import's
                            own _validate_proposals, and the whole proposals.toml EQUALS the producer's shared
-                           _proposals_model over the sorted validated rows; the importer is never re-run (loss-tiling
-                           residual PD-MIG-PR4B-LOSS-EVIDENCE, PR 1B).
+                           _proposals_model over the sorted validated rows; frozen loss validates byte tiling,
+                           proposal/span and candidate/span correspondence. The importer is never re-run.
   - ingest-report-reproducibility : the staged IMPORT-REPORT.md (with its ingest section) byte-reproduces
                            from the validated model via _render_report_md + _render_ingest_review_md.
   - ingest-artefact-completeness : the staged run dir, enumerated by a fail-closed no-follow listing, is
@@ -178,6 +178,7 @@ EXPECTED_CHECKS = (
     # applied). transaction-schema validates its shape; transaction-consistency validates the state machine
     # and that the archived acceptance exists once the record's state reaches published (spec 14.1 / apply).
     "transaction-schema", "transaction-consistency",
+    "ingest-acceptance-binding", "ingest-acceptance-completeness",
 )
 
 
@@ -713,16 +714,9 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
     and the relocated-store working-tree arm of the move boundary and of the include check falls back to the
     literal product-root `.working` only (disclosed).
 
-    Named F6 residual, deliberately NOT closed this round (PD-MIG-PR4B-LOSS-EVIDENCE / PR 1B): the review
-    verifies each migrate row's proposal COUNT, proposal CONFINEMENT (via _validate_proposals: span within
-    [0, size], state vocabulary, a migrate source) and the proposals_digest, but NOT the proposal<->loss-span
-    TILING correspondence, because MIG-PR4a freezes the drafts and proposals but NOT the importer LOSS (lossy)
-    entry, so the loss-tiling arm of _opf_importers.validate_importer_output has no frozen input to re-derive
-    from and the importer must never be re-run. So a fully self-consistent rewrite that SHRINKS a proposal
-    span (still confined, still counted, digest refreshed) PASSES the gate. This is bounded: such a run is
-    NON-PROMOTING (apply refuses an ingest run, PR-4c/P1-1), so the escape cannot reach a live store; closing
-    it needs the loss evidence frozen in the 4a bundle (an Architect-weighable format extension), tracked as
-    PD-MIG-PR4B-LOSS-EVIDENCE. Disclosed here as the honest boundary, not a silent gap.
+    Frozen loss entries now drive byte tiling, physical line ranges, proposal/span bijection, and candidate
+    references through validate_importer_output over staged source bytes. This proves internal consistency,
+    not that the named importer produced the frozen result.
 
     Residual boundaries (authenticity vs consistency; disclose-guard-residuals): even the full re-derivation
     proves CONSISTENCY and FAITHFULNESS-TO-THE-DETERMINISTIC-PRODUCER, never AUTHENTICITY. It cannot prove the
@@ -1172,7 +1166,7 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
                                     expected_scaffold = ing.derive_migrate_scaffold(
                                         r, ing.resolve_by_scope(base, r["scope"], r["source_path"]),
                                         opt_by_key[key].get("importer_kind"))
-                                    counts = {"candidate_count", "proposal_count"}
+                                    counts = {"candidate_count", "proposal_count", "loss"}
                                     if set(m) != set(expected_scaffold) | counts:
                                         ok, detail = False, ("migrate row {!r} is not the closed scaffold + "
                                                              "counts keyset".format(r["source_path"]))
@@ -1329,6 +1323,11 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
             IndexError) as exc:
         ok, detail = False, "ingest-draft-loss-binding failed closed ({!r})".format(exc)
     if ok:
+        try:
+            imp._validate_frozen_losses(rd, bundle, docs)
+        except Exception as exc:
+            ok, detail = False, "frozen loss validation failed ({})".format(exc)
+    if ok:
         covered.update({imp.CANDIDATES_DRAFT_NAME, imp.PROPOSALS_NAME})
     out["ingest-draft-loss-binding"] = (ok, detail)
 
@@ -1343,7 +1342,8 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
         ordinary = imp._render_report_md(inventory.get("inventory_digest"), inventory.get("fragment"),
                                          norm, run_dir.name)
         section = imp._render_ingest_review_md(imp._ingest_render_model(
-            run_dir.name, bundle["crosswalk"], bundle["migrate"]))
+            run_dir.name, bundle["crosswalk"], bundle["migrate"],
+            docs[imp.INGEST_ACTIONS_NAME]["action"], docs[imp.CANDIDATES_DRAFT_NAME]["candidate"]))
         expected = (ordinary + section).encode("utf-8")
         actual = rd.read_bytes("IMPORT-REPORT.md")
         if expected != actual:
@@ -1525,6 +1525,66 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
     return out
 
 
+# Durable acceptance is outside the staged registry. A staged copy remains an unexpected artefact.
+_INGEST_EVIDENCE_REGISTRY = (("acceptance.json", "VALIDATE", "ingest-acceptance-binding", "if-reviewed"),)
+_INGEST_ACCEPTANCE_CHECKS = ("ingest-acceptance-binding", "ingest-acceptance-completeness")
+
+
+def _ingest_store_fd(rd):
+    """Bind the store to this opened run, through a recognized constructor and inode comparison.
+    A detached copy without its store-relative home cannot establish absence of durable acceptance;
+    its durable checks refuse. Staged snapshot checks still evaluate the supplied bytes.
+    """
+    import _journal
+    import _opf_import as imp
+    import _opf_store as store
+    candidates = (imp.IMPORTS_REL + "/" + rd.path.name,
+                  store.stage_run("ingest", rd.path.name), store.stage_run("import", rd.path.name))
+    for rel in candidates:
+        if tuple(rd.path.parts[-len(rel.split("/")):]) != tuple(rel.split("/")):
+            continue
+        depth = len(rel.split("/"))
+        fd = os.open("/".join([".."] * depth), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)
+        try:
+            check_fd = _journal._open_dir_contained(fd, rel)
+            try:
+                a, b = os.fstat(check_fd), os.fstat(rd.fd)
+                if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+                    raise _GateError("run identity changed while locating durable evidence")
+            finally:
+                os.close(check_fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+    raise _GateError("durable acceptance cannot be located from a detached run; retain its store-relative home")
+
+
+def _ingest_acceptance_checks(rd):
+    import _opf_import as imp
+    ids = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
+    ids += _INGEST_ACCEPTANCE_CHECKS
+    try:
+        if _INGEST_EVIDENCE_REGISTRY != ((imp.ACCEPTANCE_NAME, "VALIDATE",
+                                        "ingest-acceptance-binding", "if-reviewed"),):
+            raise _GateError("durable acceptance registry does not match its validator")
+        fd = _ingest_store_fd(rd)
+        try:
+            acceptance = imp._read_ingest_acceptance(fd, rd.path.name)
+        finally:
+            os.close(fd)
+        if acceptance is None:
+            return {cid: (True, "not yet reviewed") for cid in ids}
+        snapshot = imp._ingest_snapshot(rd)
+        binding, complete, rejected = imp.validate_ingest_acceptance(snapshot, acceptance)
+        detail = "recorded rejection; not promotable" if rejected else "review recorded; execution unavailable"
+        return {cid: (not (complete if cid.endswith("completeness") else binding),
+                      "; ".join(complete if cid.endswith("completeness") else binding) or detail) for cid in ids}
+    except Exception as exc:
+        return {cid: (False, "durable acceptance cannot be evaluated ({}); create a fresh run".format(exc))
+                for cid in ids}
+
+
 def check_staged_run(run_dir, homes=None):
     """Run the explicit check registry over one staged run directory. Returns an ordered dict
     check-id -> (ok: bool, detail: str). Each check fails closed on an artefact it cannot read: an
@@ -1598,7 +1658,24 @@ def _check_staged_run(rd, homes=None):
     ingest_is_run = False
     ingest_load_failed = False
     ingest_load_detail = ""
+    durable_unavailable = ""
     marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)
+    if marker is None:
+        try:
+            fd = _ingest_store_fd(rd)
+            try:
+                import _journal
+                if _journal._lstat_contained(fd, imp._ingest_acceptance_home(run_dir.name)) is not None:
+                    marker = "durable import evidence"
+            finally:
+                os.close(fd)
+            if marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":
+                acc_marker = imp._strict_json(rd.read_bytes(imp.ACCEPTANCE_NAME))
+                if isinstance(acc_marker, dict) and ("ingest" in acc_marker
+                                                     or acc_marker.get("format") == imp.INGEST_ACCEPTANCE_FORMAT):
+                    marker = imp.ACCEPTANCE_NAME
+        except Exception as exc:
+            durable_unavailable = "durable acceptance cannot be located ({})".format(exc)
     if marker is not None:
         ingest_is_run = True
         if rd.kind(imp.INGEST_REVIEW_NAME) is None:
@@ -1905,7 +1982,10 @@ def _check_staged_run(rd, homes=None):
     # through the regular-file-validated reader); a symlink or any other non-regular entry is a FINDING
     # (fail-closed), never pass-as-absent. An unclassifiable entry already failed the listing closed.
     acc_kind = rd.kind(imp.ACCEPTANCE_NAME)
-    if acc_kind is None:
+    if ingest_is_run:
+        for cid, (ok, detail) in _ingest_acceptance_checks(rd).items():
+            record(cid, ok, detail)
+    elif acc_kind is None:
         for cid in acc_checks:
             record(cid, True, "not yet reviewed")
     elif acc_kind != "file":
@@ -1915,7 +1995,7 @@ def _check_staged_run(rd, homes=None):
         acc = None
         acc_err = ""
         try:
-            acc = json.loads(rd.read_bytes(imp.ACCEPTANCE_NAME).decode("utf-8"))
+            acc = imp._strict_json(rd.read_bytes(imp.ACCEPTANCE_NAME))
         except (_GateError, ValueError, RecursionError) as exc:
             # RecursionError joins the tuple (R8-F1): deeply-nested JSON (a malicious staged acceptance.json,
             # even under the size cap) drives json.loads into unbounded recursion, which is neither an OSError
@@ -2039,8 +2119,8 @@ def _check_staged_run(rd, homes=None):
     # CONDITIONALLY PRESENT. On an ordinary run (no ingest markers) all six are non-applicable PASSes. On an
     # ingest run whose bundle is absent/malformed/unclassifiable the whole ingest surface is a located FINDING
     # (fail-closed, never nothing-to-check). On a well-formed bundle, ingest-run-structure PASSes and the
-    # shared validator performs the binding-digest RECOMPUTE + correspondence for the other five. Read-only:
-    # this enables no acceptance capture (that stays refused at the review entry points, PR-4c).
+    # shared validator performs the binding-digest recompute and correspondence for the other five.
+    # Acceptance has a separate durable home and its own read-only checks.
     _ingest_ids = ("ingest-run-structure",) + _INGEST_CHECK_IDS
     if not ingest_is_run:
         for cid in _ingest_ids:
@@ -2067,6 +2147,10 @@ def _check_staged_run(rd, homes=None):
                 record(cid, ok, detail)
             else:
                 record(cid, False, _vfail or "ingest check did not run (fail-closed)")
+
+    if not ingest_is_run:
+        for cid in _INGEST_ACCEPTANCE_CHECKS:
+            record(cid, not durable_unavailable, durable_unavailable or "not an ingest run")
 
     # --- Group C: the per-run transaction record (apply-promotion, PR-C) --------------------------------
     # The record lives OUTSIDE .working/ at the store-root `.aiqt/import/<run-id>/transaction.toml` (D2/D3:

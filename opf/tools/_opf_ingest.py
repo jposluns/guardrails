@@ -1505,7 +1505,7 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                     # is preserved as an explicit review-evidence row rather than leaving no trace.
                     migrate_records.append(dict(
                         derive_migrate_scaffold(r, resolved_sp, opt["importer_kind"]),
-                        candidate_count=len(ir.candidates), proposal_count=len(ir.proposals)))
+                        candidate_count=len(ir.candidates), proposal_count=len(ir.proposals), loss=ir.lossy))
                 # keep/migrate/move ALL stay in the import_set so the baseline quarantines them as
                 # legacy_fragment (unmapped); nothing is dropped (decisions 2/3: mapping stays unmapped).
                 # The import_set carries the RESOLVED product-relative path (the identity the staging
@@ -2340,7 +2340,9 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             (run / "IMPORT-REPORT.md").write_bytes((
                 _opf_import._render_report_md(inv["inventory_digest"], inv["fragment"], norm, run.name)
                 + _opf_import._render_ingest_review_md(_opf_import._ingest_render_model(
-                    run.name, b["crosswalk"], b["migrate"]))).encode("utf-8"))
+                    run.name, b["crosswalk"], b["migrate"],
+                    read(run, "ingest-actions.toml")["action"],
+                    read(run, "candidates_draft.toml")["candidate"]))).encode("utf-8"))
 
         def restamp(b):
             """Recompute the embedded worksheet's own digest after a row edit (validate_worksheet stays green)."""
@@ -2406,6 +2408,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                     check("bundle-no-migrate-" + tag, bundle["migrate"] == [])
                 rev = _opf_import.review_import(root, run.name, actor="tester", decisions=[], now=now)
                 check("review-refused-" + tag, rev.verdict == CANNOT_EVALUATE)
+                _opf_import._self_test_ingest_capture_run(root, run, now, check)
 
         # (b) a MIXED keep+move+migrate run: crosswalk carries every row's disposition; migrate list carries
         # ONLY the migrate row (importer selection is per migrate row).
@@ -2435,6 +2438,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                     check("mixed-review-refused",
                           _opf_import.review_import(root, run.name, actor="t", decisions=[],
                                                     now=now).verdict == CANNOT_EVALUATE)
+                _opf_import._self_test_ingest_capture_run(root, run, now, check)
 
         # (c) the bounded structural reader: a genuinely ABSENT bundle -> None (a non-4a run is
         # distinguishable), a present-but-MALFORMED bundle -> CANNOT-EVALUATE (fail-closed); and the bundle
@@ -3585,7 +3589,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                    {"scope": "declared", "source_path": "legacy/a.md#conversion",
                     "resolved_source_path": "legacy/a.md#conversion", "disposition": "keep"}]
         _cm2_mig = [{"scope": "declared", "source_path": "legacy/a.md", "resolved_source_path": "legacy/a.md",
-                     "importer_kind": "github-tasklist", "candidate_count": 2, "proposal_count": 2}]
+                     "importer_kind": "github-tasklist", "candidate_count": 2, "proposal_count": 2, "loss": {}}]
         try:
             _cm2_ids = [u["unit_id"] for u in _opf_import._ingest_render_model(
                 "imp-20260101T000000Z-0000000000000000", _cm2_cw, _cm2_mig)["decision_units"]]
