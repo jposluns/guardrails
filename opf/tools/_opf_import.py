@@ -7243,7 +7243,8 @@ def self_test():
         class _PreviewReached(BaseException):
             pass
 
-        def _a11_generation(generation):
+        def _a11_generation(generation, supported=None):
+            # `generation` selects the manifest; `supported` (default: the same) is the activated tooling.
             root, mdir = build_apply_store()
             planned = plan_import(root, ["a.txt"], now=NOW, run_nonce="apply-a11-{}".format(generation))
             review_accept_all(root, planned.run_id)
@@ -7265,7 +7266,7 @@ def self_test():
                     data = dict(data, opf=dict((k, v) for k, v in opf.items() if k != "homes"))
                 return real_validate(data, *args, **kwargs)
 
-            with _patch_a11.object(_opf_store, "SUPPORTED_HOMES", generation), \
+            with _patch_a11.object(_opf_store, "SUPPORTED_HOMES", generation if supported is None else supported), \
                     _patch_a11.object(_opf_store, "HOMES2_SPEC_VERSION", _opf_store.SUPPORTED_SPEC_VERSION), \
                     _patch_a11.object(_opf_store, "validate_manifest", validate_declared), \
                     _patch_a11.object(sys.modules[__name__], "_assemble_preview", spy):
@@ -7277,6 +7278,8 @@ def self_test():
 
         check("A11-legacy-preview-generation", _a11_generation(1) == [1])
         check("A11-homes2-preview-generation", _a11_generation(2) == [2])
+        # Activated tooling alone activates nothing: a legacy manifest still hands the preview generation 1.
+        check("A11-activated-legacy-preview-generation", _a11_generation(1, supported=2) == [1])
 
         # ======================= round-4 fix discriminators (change-carries-check) =======================
         # The round-4 fixes (N1 TOML-aware manifest flip, F5b store-root imports anchor, N2 close-quietly

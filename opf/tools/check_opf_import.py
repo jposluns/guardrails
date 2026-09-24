@@ -632,12 +632,15 @@ def _row_scope_error(ing, ws_rows, base, homes):
     (_opf_ingest.admit_row_scope) under the recovered re-anchor `base` and the store's homes generation
     `homes`, as a located finding, else "". This gate reads no manifest, so the generation is the caller's;
     an unsupplied one (None) is the legacy generation only while no later generation can be active, and
-    otherwise cannot evaluate rather than grade a store by the wrong reserved roots."""
+    otherwise cannot evaluate rather than grade a store by the wrong reserved roots. A supplied generation
+    other than the integer 1 or 2 (a bool, a float, NaN, or any other value) cannot evaluate either."""
     import _opf_store
     if homes is None:
         if _opf_store.SUPPORTED_HOMES >= 2:
             return "cannot evaluate: the store's homes generation was not supplied to this manifest-free gate"
         homes = 1
+    elif type(homes) is not int or homes not in (1, 2):
+        return "cannot evaluate: the supplied homes generation {!r} is not 1 or 2".format(homes)
     for r in ws_rows:
         try:
             ing.admit_row_scope(r["scope"], r["source_path"], base, homes=homes)

@@ -151,6 +151,7 @@ def boundary_self_test():
                            ("string", {"homes": "2", "spec_version": "2.0.0"})):
             check("activation-gated-" + label, lambda o=opf: store.homes_generation({"opf": o}) == 1)
     with active():
+        check("classifier-activated-legacy", lambda: doctor.classify_containment(manifest, machine).homes == 1)
         cls2 = doctor.classify_containment(manifest2, machine)
         check("classifier-roster", lambda: cls2.homes == 2 and cls2.control_roots == homes)
         check("evidence-roots-disjoint", lambda: cls2.evidence_roots ==
@@ -195,7 +196,7 @@ def boundary_self_test():
             patch.object(ingest.os, "listdir", return_value=[h.split("/")[-1] for h in homes]), \
             patch.object(ingest.os, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFREG)), \
             patch.object(ingest, "_digest_of", return_value=("sha256:" + "0" * 64, 0)):
-        # Main's legacy walk prunes directories only, so a regular FILE named like a home is a row.
+        # The legacy (homes 1) walk prunes directories only, so a regular FILE named like a home is a row.
         check("detect-legacy-control-file-rows", lambda: len(ingest._detect_store_scope(
             -1, ingest._managed_paths(resolution, manifest)[0], set(), set())) == len(homes))
     for home in homes:
@@ -206,6 +207,26 @@ def boundary_self_test():
           "wholesale".format(legacy_root))
     for home in homes[1:]:
         check("frozen-row-legacy-" + home, lambda h=home: ingest.admit_row_scope("store", h + "/file", "") is None)
+    # The manifest-free review gate accepts a supplied generation only as the integer 1 or 2. Any other
+    # value (a bool, a float, NaN) cannot evaluate, whatever the tooling supports and whatever the row.
+    import check_opf_import as gate
+    journal_row = dict(scope="store", source_path=".working/journals/x")
+    imports_row = dict(scope="store", source_path=legacy_root + "/x")
+
+    def gated(row, generation):
+        return gate._row_scope_error(ingest, [row], None, generation)
+
+    for supported in (1, 2):
+        with patch.object(store, "SUPPORTED_HOMES", supported):
+            for bad in (0, False, True, 1.5, float("nan"), "2", 3):
+                for label, gated_row in (("journals", journal_row), ("imports", imports_row)):
+                    check("gate-generation-cannot-{}-{}-{!r}".format(supported, label, bad),
+                          lambda r=gated_row, b=bad: gated(r, b).startswith("cannot evaluate"))
+    with active():
+        check("gate-generation-homes2-journal-refused",
+              lambda: "reserved store control area" in gated(journal_row, 2))
+        check("gate-generation-legacy-journal-admitted", lambda: gated(journal_row, 1) == "")
+        check("gate-generation-legacy-imports-refused", lambda: "reserved imports tree" in gated(imports_row, 1))
     check("move-outside-preserved", lambda: ingest.admit_move_boundary("outside/file", "ops/.working") is None)
     check("move-store-refused", lambda: refuses(lambda: ingest.admit_move_boundary("ops/.working/x", "ops/.working")))
 
@@ -457,12 +478,17 @@ def boundary_self_test():
     def contained(result, path):
         return any(repr(path) in message for message in result.by_check.get("C-CONTAINMENT", []))
 
-    # A legacy report is exactly main's: its roster, order, count and residuals, with the homes-2
-    # names graded as ordinary paths and no evidence read.
+    # A legacy (homes 1) report keeps the legacy roster, order and count and the pinned legacy residual
+    # text, with the homes-2 names graded as ordinary paths and no evidence read.
     legacy_report, legacy_listed = dispatch(full_manifest)
     check("doctor-legacy-roster-exact", lambda: tuple(legacy_report.checks) == doctor.REQUIRED_CHECKS
           and "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS and len(legacy_report.checks) == 29)
-    check("doctor-legacy-residuals-unchanged", lambda: legacy_report.residuals == list(doctor._RESIDUALS)
+    # The pin is independent of the live _RESIDUALS constant: sha256 over the 12 legacy residuals joined by
+    # a newline, UTF-8. Any added, removed, reordered or reworded legacy residual changes it.
+    legacy_residuals_sha256 = "6901f8734d2293e714c521e9b74836a188627839d7d8a08a3888b4a9cc7a8a0b"
+    check("doctor-legacy-residuals-unchanged", lambda: len(legacy_report.residuals) == 12
+          and hashlib.sha256("\n".join(legacy_report.residuals).encode("utf-8")).hexdigest()
+          == legacy_residuals_sha256
           and not any(r in legacy_report.residuals for r in doctor._HOMES2_RESIDUALS))
     check("doctor-legacy-evidence-inert", lambda: not any(
         path.startswith(".working/imported/") for path in legacy_listed))
@@ -476,6 +502,11 @@ def boundary_self_test():
     check("doctor-homes2-residual", lambda: all(r in report.residuals for r in doctor._HOMES2_RESIDUALS))
     check("doctor-skips-journals", lambda: not contained(report, ".working/journals")
           and not any(p == ".working/journals" or p.startswith(".working/journals/") for p in homes2_listed))
+    # Activated tooling alone widens nothing: a legacy manifest keeps the legacy roster and residuals.
+    with active():
+        activated_legacy, _ = dispatch(full_manifest)
+    check("doctor-activated-legacy-roster", lambda: tuple(activated_legacy.checks) == doctor.REQUIRED_CHECKS
+          and len(activated_legacy.checks) == 29 and activated_legacy.residuals == legacy_report.residuals)
     # The render source gate follows the report's roster: a homes-2 evidence finding refuses it, and a
     # legacy report is gated on exactly SOURCE_INTEGRITY_CHECKS.
     flagged = dict.fromkeys(doctor.required_checks(2), "PASS")
@@ -497,8 +528,8 @@ def boundary_self_test():
     check("roster-legacy-evidence-unknown", lambda: any("C-EVIDENCE-ENUM" in m for m in roster(
         1, doctor.required_checks(2)).unattributed))
 
-    # Homes 1 behaves exactly as main: the legacy engine applies no journal-operand refusal, so each
-    # legacy entry point reaches its first I/O whatever the operand.
+    # Homes 1 keeps the legacy operand handling: the legacy engine applies no journal-operand refusal,
+    # so each legacy entry point reaches its first I/O whatever the operand.
     targets = (".working", ".working/journals", ".working/journals/import/journal/frame")
 
     def reached(thunk):
@@ -543,7 +574,7 @@ def boundary_self_test():
                 patch.object(journal, "_restore_preimage"), patch.object(journal, "publish"):
             return journal.recover(-1, run, -1), len(truncated)
 
-    # Main's legacy recovery truncates the torn tail and acts on an open transaction's operands.
+    # Legacy (homes 1) recovery truncates the torn tail and acts on an open transaction's operands.
     check("legacy-recovery-open-rolls-forward", lambda: legacy_recovery([journal.F_INTENT]) == ("rolled-forward", 1))
     check("legacy-recovery-rollback-open-rolls-back",
           lambda: legacy_recovery([journal.F_INTENT, journal.F_RIP]) == ("rolled-back", 1))
@@ -676,10 +707,11 @@ def boundary_self_test():
     control_op = dict(create, path=".working/journals/file")
     utc = datetime.datetime(2026, 9, 17, 12, tzinfo=datetime.timezone.utc)
 
-    def planned(generation, op):
+    def planned(generation, op, supported=None):
+        # `generation` selects the manifest; `supported` (default: the same) is the activated tooling.
         model = manifest2 if generation == 2 else manifest
         resolved = SimpleNamespace(status=store.RESOLVED, machine_rel=machine, detail="", pointer_source="default")
-        with patch.object(store, "SUPPORTED_HOMES", generation), \
+        with patch.object(store, "SUPPORTED_HOMES", generation if supported is None else supported), \
                 patch.object(store._journal, "require_containment"), \
                 patch.object(store, "_open_dir_nofollow", return_value=-1), \
                 patch.object(planning.os, "fstat", return_value=same), \
@@ -712,6 +744,9 @@ def boundary_self_test():
           and retired.findings == tuple(adopt.validate_op(control_retire, homes=2).findings) != ())
     check("plan-legacy-control-disposition-planned", lambda: legacy_retired.status == store.VALID)
     check("plan-legacy-control-op-planned", lambda: legacy_plan.status == store.VALID and legacy_frozen == [1])
+    activated_plan, activated_frozen = planned(1, control_op, supported=2)
+    check("plan-activated-legacy-generation", lambda: activated_plan.status == store.VALID
+          and activated_frozen == [1])
     check("plan-homes2-frozen-plan-bound", lambda: ordinary_plan.status == store.VALID and ordinary_frozen == [2])
     check("plan-validate-homes2-refused", lambda: adopt.validate_plan(
         tomllib.loads(legacy_plan.plan.decode()), homes=2).status == store.INVALID)
@@ -721,10 +756,10 @@ def boundary_self_test():
     same_root = SimpleNamespace(status=store.RESOLVED, machine_rel=machine, store_root=Path("/store"),
                                 product_root=Path("/store"), pointer_source="default", detail="")
 
-    def detected_rows(generation):
+    def detected_rows(generation, model=manifest2):
         with patch.object(store, "SUPPORTED_HOMES", generation), \
                 patch.object(store, "_open_store_root_fd", return_value=-1), patch.object(ingest.os, "close"), \
-                patch.object(store, "_read_toml_contained", return_value=copy.deepcopy(manifest2)), \
+                patch.object(store, "_read_toml_contained", return_value=copy.deepcopy(model)), \
                 patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
                 patch.object(ingest, "_managed_paths", return_value=(set(), set(), set(), set(), set())), \
                 patch.object(ingest, "_detect_store_scope", return_value=[]) as walked:
@@ -732,6 +767,7 @@ def boundary_self_test():
 
     check("detect-rows-homes2-generation", lambda: detected_rows(2) == (([], 2), 2))
     check("detect-rows-legacy-generation", lambda: detected_rows(1) == (([], 1), 1))
+    check("detect-rows-activated-legacy-generation", lambda: detected_rows(2, manifest) == (([], 1), 1))
     with patch.object(journal, "require_containment"), patch.object(store, "resolve_store", return_value=same_root), \
             patch.object(store, "load_manifest", return_value=SimpleNamespace(status=store.VALID, findings=[])), \
             patch.object(ingest, "_detect_rows", return_value=([], 2)), \
