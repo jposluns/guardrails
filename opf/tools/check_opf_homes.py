@@ -208,7 +208,8 @@ def boundary_self_test():
     for home in homes[1:]:
         check("frozen-row-legacy-" + home, lambda h=home: ingest.admit_row_scope("store", h + "/file", "") is None)
     # The manifest-free review gate accepts a supplied generation only as the integer 1 or 2. Any other
-    # value (a bool, a float, NaN) cannot evaluate, whatever the tooling supports and whatever the row.
+    # value (a bool, a float, NaN) cannot evaluate, whatever the tooling supports and whatever the row, and so
+    # does a supplied 2 on tooling that does not support homes 2.
     import check_opf_import as gate
     journal_row = dict(scope="store", source_path=".working/journals/x")
     imports_row = dict(scope="store", source_path=legacy_root + "/x")
@@ -222,6 +223,9 @@ def boundary_self_test():
                 for label, gated_row in (("journals", journal_row), ("imports", imports_row)):
                     check("gate-generation-cannot-{}-{}-{!r}".format(supported, label, bad),
                           lambda r=gated_row, b=bad: gated(r, b).startswith("cannot evaluate"))
+    with patch.object(store, "SUPPORTED_HOMES", 1):
+        check("gate-generation-unsupported-2-cannot",
+              lambda: gated(journal_row, 2).startswith("cannot evaluate"))
     with active():
         check("gate-generation-homes2-journal-refused",
               lambda: "reserved store control area" in gated(journal_row, 2))
@@ -481,8 +485,15 @@ def boundary_self_test():
     # A legacy (homes 1) report keeps the legacy roster, order and count and the pinned legacy residual
     # text, with the homes-2 names graded as ordinary paths and no evidence read.
     legacy_report, legacy_listed = dispatch(full_manifest)
-    check("doctor-legacy-roster-exact", lambda: tuple(legacy_report.checks) == doctor.REQUIRED_CHECKS
-          and "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS and len(legacy_report.checks) == 29)
+    # The roster is pinned independently of the live REQUIRED_CHECKS constant: sha256 over the 29 legacy check
+    # ids in report order joined by a newline, UTF-8, so an added, removed or reordered check changes it.
+    legacy_roster_sha256 = "38de4ed345c62237a4f01e194a72b3d7af13d552717ba3db3363abbbacd30eee"
+
+    def legacy_roster(rep):
+        return len(rep.checks) == 29 and hashlib.sha256("\n".join(rep.checks).encode("utf-8")).hexdigest() \
+            == legacy_roster_sha256
+    check("doctor-legacy-roster-exact", lambda: legacy_roster(legacy_report)
+          and tuple(legacy_report.checks) == doctor.REQUIRED_CHECKS and "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS)
     # The pin is independent of the live _RESIDUALS constant: sha256 over the 12 legacy residuals joined by
     # a newline, UTF-8. Any added, removed, reordered or reworded legacy residual changes it.
     legacy_residuals_sha256 = "6901f8734d2293e714c521e9b74836a188627839d7d8a08a3888b4a9cc7a8a0b"
@@ -505,8 +516,8 @@ def boundary_self_test():
     # Activated tooling alone widens nothing: a legacy manifest keeps the legacy roster and residuals.
     with active():
         activated_legacy, _ = dispatch(full_manifest)
-    check("doctor-activated-legacy-roster", lambda: tuple(activated_legacy.checks) == doctor.REQUIRED_CHECKS
-          and len(activated_legacy.checks) == 29 and activated_legacy.residuals == legacy_report.residuals)
+    check("doctor-activated-legacy-roster", lambda: legacy_roster(activated_legacy)
+          and activated_legacy.residuals == legacy_report.residuals)
     # The render source gate follows the report's roster: a homes-2 evidence finding refuses it, and a
     # legacy report is gated on exactly SOURCE_INTEGRITY_CHECKS.
     flagged = dict.fromkeys(doctor.required_checks(2), "PASS")
