@@ -3224,6 +3224,259 @@ def _sibling_or_skip(name, env=None):
     return path
 
 
+def _wall_clock_asserts(source, exempt=()):
+    """Self-test helper, kept identical across the three hooks: [(function, line)] of every assertion in
+    `source` whose operand is a TIME figure, so no test's verdict rests on a wall-clock bound, which depends on
+    the host's speed. A time figure is a clock reading (time.time, perf_counter, monotonic, process_time,
+    thread_time, clock_gettime, or an _ns variant; datetime.now, utcnow, or today), a result of a timing
+    harness (run_timed, growth_in_child), a name assigned from one (a for target or unpacking included), or
+    arithmetic, a comparison, a subscript, an attribute, min, max, abs, sum, int, float, round, or a method
+    call on one; a quotient of two time figures is a dimensionless ratio and may be bounded. A tuple or list
+    literal assigned to a tuple or list target is matched element by element, so only the names that receive
+    a time figure are tainted, and a shape it cannot match (a starred element, a length mismatch) taints
+    nothing, the not-flagging direction. A clock read through an alias
+    counts too: a module alias (`import time as t`, `import datetime as d`), an imported one (`from time import
+    X as Y`, or `*`; `from datetime import datetime as Y`), and an assigned one (a plain `name = time.X` or
+    `name = X` of a clock or alias), each bound at module level or within the function. An assertion's operands
+    are its leading positional arguments and every keyword argument but msg. Every assertion in the source is
+    scanned, under its enclosing test_ function (else its innermost function); `exempt` names the hang-guard
+    tests, whose bound on elapsed time is their point. Residual (disclosed): the taint is by name within one
+    test_ function and its nested functions, so a time figure passed through a container mutation, a global, a
+    call to another helper, or a harness this list does not name escapes the scan; so does one routed through
+    an expression form the scan does not follow: an assignment expression (walrus) in an asserted operand, a
+    dict literal, a container built by a comprehension or filled by a store into a subscript, or any other
+    routing not listed above; so does the time figure in a starred or mismatched unpacking; a clock this list does not
+    name (os.times, date.today, time.localtime or gmtime, a third-party clock, a file's mtime) escapes too, as
+    does an alias bound any other way (an attribute, a tuple target, getattr, a module or class assigned to a
+    name); a subprocess timeout is not an assertion and is not scanned."""
+    import ast
+    clocks = {"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns", "process_time", "process_time_ns",
+              "thread_time", "thread_time_ns", "clock_gettime", "clock_gettime_ns", "run_timed", "growth_in_child"}
+    stdclocks = {"time", "time_ns", "perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns",
+                 "process_time", "process_time_ns", "thread_time", "thread_time_ns", "clock_gettime",
+                 "clock_gettime_ns"}
+    dtclocks = ("now", "utcnow", "today")
+    single = {"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"}
+
+    def dtclass(node, al):  # a reference to the datetime class: a class alias, or <datetime module>.datetime
+        if isinstance(node, ast.Name):
+            return node.id in al["dtclass"]
+        return isinstance(node, ast.Attribute) and node.attr == "datetime" and \
+            isinstance(node.value, ast.Name) and node.value.id in al["datetime"]
+
+    def timed(node, names, al):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name):
+                if f.id in clocks or f.id in al["clock"]:
+                    return True
+                return f.id in ("min", "max", "abs", "sum", "int", "float", "round") and any(
+                    timed(a, names, al) for a in node.args)
+            if isinstance(f, ast.Attribute):
+                if f.attr in ("time", "time_ns"):
+                    return isinstance(f.value, ast.Name) and f.value.id in al["time"]
+                if f.attr in dtclocks and dtclass(f.value, al):
+                    return True
+                return f.attr in clocks or timed(f.value, names, al)
+            return False
+        if isinstance(node, ast.Name):
+            return node.id in names
+        if isinstance(node, ast.BinOp):
+            left, right = timed(node.left, names, al), timed(node.right, names, al)
+            return left != right if isinstance(node.op, ast.Div) else left or right
+        if isinstance(node, ast.Compare):
+            return any(timed(x, names, al) for x in [node.left] + node.comparators)
+        if isinstance(node, ast.BoolOp):
+            return any(timed(x, names, al) for x in node.values)
+        if isinstance(node, ast.UnaryOp):
+            return timed(node.operand, names, al)
+        if isinstance(node, (ast.Subscript, ast.Starred, ast.Attribute)):
+            return timed(node.value, names, al)
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return any(timed(e, names, al) for e in node.elts)
+        if isinstance(node, ast.IfExp):
+            return timed(node.body, names, al) or timed(node.orelse, names, al)
+        return False
+
+    def targets(node):
+        if isinstance(node, ast.Name):
+            yield node.id
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            for e in node.elts:
+                yield from targets(e)
+        elif isinstance(node, ast.Starred):
+            yield from targets(node.value)
+
+    def split(target, value):  # an assignment's (target, value) pairs, a tuple or list literal matched in step
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+            if len(target.elts) == len(value.elts) and not any(
+                    isinstance(e, ast.Starred) for e in target.elts + value.elts):
+                for t, v in zip(target.elts, value.elts):
+                    yield from split(t, v)
+            return  # otherwise a shape it cannot match: nothing is tainted, the not-flagging direction
+        yield target, value
+
+    def aliases(node, al):  # the (kind, name) aliases node binds; kind: time, datetime (modules), dtclass, clock
+        if isinstance(node, ast.Import):
+            return [(a.name, a.asname or a.name) for a in node.names if a.name in ("time", "datetime")]
+        if isinstance(node, ast.ImportFrom) and node.module == "time" and not node.level:
+            bound = []
+            for a in node.names:
+                if a.name == "*":
+                    bound += [("clock", c) for c in stdclocks]
+                elif a.name in stdclocks:
+                    bound.append(("clock", a.asname or a.name))
+            return bound
+        if isinstance(node, ast.ImportFrom) and node.module == "datetime" and not node.level:
+            return [("dtclass", a.asname or "datetime") for a in node.names if a.name in ("datetime", "*")]
+        if isinstance(node, ast.Assign) and (
+                isinstance(node.value, ast.Name) and (node.value.id in clocks or node.value.id in al["clock"]) or
+                isinstance(node.value, ast.Attribute) and node.value.attr in stdclocks and
+                isinstance(node.value.value, ast.Name) and node.value.value.id in al["time"] or
+                isinstance(node.value, ast.Attribute) and node.value.attr in dtclocks and
+                dtclass(node.value.value, al)):
+            return [("clock", t.id) for t in node.targets if isinstance(t, ast.Name)]
+        return []
+
+    tree, parent, cache = ast.parse(source), {}, {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    def scope(node):  # the enclosing test_ function, else the innermost function (None at module level)
+        inner, up = None, parent.get(node)
+        while up is not None:
+            if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if up.name.startswith("test_"):
+                    return up
+                inner = inner or up
+            up = parent.get(up)
+        return inner
+
+    def bind(nodes, al):  # add the aliases nodes bind to al, to a fixed point; True if any was new
+        grew, changed = False, True
+        while changed:
+            changed = False
+            for node in nodes:
+                for kind, name in aliases(node, al):
+                    if name not in al[kind]:
+                        al[kind].add(name)
+                        grew = changed = True
+        return grew
+
+    binders = [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign))]
+    top = {"time": {"time"}, "datetime": {"datetime"}, "dtclass": {"datetime"}, "clock": set()}
+    bind([node for node in binders if scope(node) is None], top)
+
+    def tainted(fn):  # (names, al): the time figures and aliases fn (nested functions included) binds
+        if fn not in cache:
+            names, al = set(), {kind: set(bound) for kind, bound in top.items()}
+            nodes = list(ast.walk(fn))
+            changed = True
+            while changed:
+                changed = bind(nodes, al)
+                for node in nodes:
+                    if isinstance(node, ast.Assign):
+                        pairs = [pair for t in node.targets for pair in split(t, node.value)]
+                    elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)) and \
+                            node.value is not None:
+                        pairs = [(node.target, node.value)]
+                    elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                        pairs = [(node.target, node.iter)]
+                    elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                        pairs = [(node.optional_vars, node.context_expr)]
+                    else:
+                        continue
+                    for target, value in pairs:
+                        new = set(targets(target)) - names if timed(value, names, al) else set()
+                        if new:
+                            names |= new
+                            changed = True
+            cache[fn] = names, al
+        return cache[fn]
+
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            operands = [node.test]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+                node.func.attr.startswith("assert"):
+            operands = node.args[:1] if node.func.attr in single else node.args[:2]
+            operands = operands + [k.value for k in node.keywords if k.arg != "msg"]
+        else:
+            continue
+        fn = scope(node)
+        name = fn.name if fn is not None else "<module>"
+        names, al = tainted(fn) if fn is not None else (set(), top)
+        if name not in exempt and any(timed(x, names, al) for x in operands):
+            found.append((name, node.lineno))
+    return sorted(found, key=lambda item: item[1])
+
+
+def _wall_clock_alias_fixtures():
+    """Self-test data, kept identical across the three hooks: (bad, flagged, good) for _wall_clock_asserts.
+    `bad` bounds a time figure read through each alias form, through keyword operands, and from each added
+    clock (datetime.now, utcnow, today; clock_gettime), and every function it names in `flagged` must be
+    flagged; `good` uses the same alias forms and clocks only for a hang-guard timeout, an assertion on a count,
+    a msg keyword, a ratio, a datetime constructor, or a name that is an alias only in another function, and
+    nothing in it may be flagged."""
+    bad = ("import time as tm\nfrom time import perf_counter as clock\ntick = tm.monotonic_ns\n"
+           "import datetime as dt\n"
+           "def test_i(self):\n    t = clock()\n    self.assertLess(clock() - t, 0.5)\n"
+           "def test_j(self):\n    my_time = time.time\n    t0 = my_time()\n    self.assertLess(my_time() - t0, 1)\n"
+           "def test_k(self):\n    t0 = tm.time()\n    self.assertLessEqual(tm.time() - t0, 1)\n"
+           "def test_l(self):\n    self.assertLess(tick() - start, 10)\n"
+           "def test_m(self):\n    from time import process_time as cpu\n    c0 = cpu()\n"
+           "    assert cpu() - c0 < 2\n"
+           "def test_n(self):\n    c1 = clock\n    c2 = c1\n    self.assertGreater(1.0, c2() - base)\n"
+           "def test_o(self):\n    from time import time\n    self.assertTrue(time() - t0 < 1)\n"
+           "def test_p(self):\n    from time import *\n    self.assertLess(time_ns() - t0, 5)\n"
+           "def test_q(self):\n    t = time.monotonic()\n    self.assertLess(a=time.monotonic()-t, b=0.5)\n"
+           "def test_r(self):\n    self.assertTrue(expr=time.perf_counter() - t0 < 1, msg='slow')\n"
+           "def test_s(self):\n    now = tm.perf_counter\n    elapsed = now() - t0\n"
+           "    self.assertLessEqual(first=elapsed, second=2)\n"
+           "def test_t(self):\n    pc = perf_counter\n    self.assertLess(pc() - t, 1)\n"
+           "def test_ba(self):\n    t0 = datetime.datetime.now()\n"
+           "    self.assertLess((datetime.datetime.now() - t0).total_seconds(), 2.0)\n"
+           "def test_bb(self):\n    from datetime import datetime as DT\n    t0 = DT.utcnow()\n"
+           "    self.assertLess((DT.utcnow() - t0).total_seconds(), 2)\n"
+           "def test_bc(self):\n    stamp = dt.datetime.now\n    t0 = stamp()\n"
+           "    self.assertLess((stamp() - t0).seconds, 2)\n"
+           "def test_bd(self):\n    t0 = time.clock_gettime(time.CLOCK_MONOTONIC)\n"
+           "    self.assertLess(time.clock_gettime(time.CLOCK_MONOTONIC) - t0, 1)\n"
+           "def test_be(self):\n    from time import clock_gettime_ns as cg\n    t0 = cg(1)\n"
+           "    assert cg(1) - t0 < 10\n"
+           "def test_bf(self):\n    from datetime import *\n    self.assertLess((datetime.today() - t0).seconds, 5)\n"
+           "def test_bj(self):\n    elapsed, n = clock() - t0, 3\n    self.assertLess(elapsed, 1)\n"
+           "def test_bk(self):\n    t0 = time.monotonic()\n    e = int((time.monotonic() - t0) * 1000)\n"
+           "    self.assertLess(e, 500)\n")
+    flagged = ["test_i", "test_j", "test_k", "test_l", "test_m", "test_n", "test_o", "test_p", "test_q", "test_r",
+               "test_s", "test_t", "test_ba", "test_bb", "test_bc", "test_bd", "test_be", "test_bf", "test_bj",
+               "test_bk"]
+    good = ("import time as tm\nfrom time import perf_counter as clock\ntick = tm.monotonic\n"
+            "import datetime as dt\n"
+            "def test_u(self):\n    deadline = clock() + HANG_TIMEOUT\n    out = run(timeout=deadline - clock())\n"
+            "    proc.wait(timeout=tick() + 1)\n    self.assertEqual(len(out), 3)\n"
+            "def test_v(self):\n    my_time = tm.time\n    proc.wait(timeout=my_time() + 30)\n"
+            "    self.assertEqual(proc.returncode, 0, msg=my_time())\n"
+            "def test_w(self):\n    from time import process_time as cpu\n    limit = cpu() + 5\n"
+            "    calls = count_calls(limit)\n    self.assertEqual(first=calls, second=2, msg=cpu() - limit)\n"
+            "def test_x(self):\n    from time import time\n    subprocess.run(cmd, timeout=time() + 5)\n"
+            "    self.assertEqual(n_lines, 4)\n"
+            "def test_y(self):\n    my_time = len\n    self.assertEqual(my_time([1, 2]), 2)\n"
+            "def test_z(self):\n    a, b = clock(), clock()\n    self.assertLess(b / max(a, 1e-3), LIMIT)\n"
+            "def test_bg(self):\n    stamp = dt.datetime.now(dt.timezone.utc)\n"
+            "    self.assertEqual(len(render(stamp)), 17)\n    self.assertEqual(dt.time(12, 0).hour, 12)\n"
+            "    self.assertEqual(datetime.date(2026, 9, 24).day, 24)\n"
+            "def test_bh(self):\n    t0 = time.clock_gettime(time.CLOCK_MONOTONIC)\n"
+            "    lines = run(timeout=HANG_TIMEOUT - (time.clock_gettime(time.CLOCK_MONOTONIC) - t0))\n"
+            "    self.assertEqual(lines.count, 2)\n"
+            "def test_bi(self):\n    started, count = clock(), 3\n    self.assertEqual(count, 3)\n"
+            "    [(t1, n), m] = [(tick(), 4), 5]\n    self.assertEqual(n + m, 9)\n"
+            "    first, *rest = clock(), 1, 2\n    self.assertEqual(rest, [1, 2])\n")
+    return bad, flagged, good
+
+
 def main(argv):
     try:
         self_test = len(argv) > 1 and argv[1] == "--self-test"
@@ -3269,6 +3522,17 @@ def _self_test():
     PROJ = os.path.join(_BASE, "proj")
     STORE = os.path.join(PROJ, "private")
     HANG_TIMEOUT = 120  # seconds: far above the timed runs' own total (a few seconds), so only a hang reaches it
+    # A timing verdict compares the same code with itself on the same host, never with a wall-clock figure (a
+    # 2.0 s ceiling failed at 2.53 s on a slower CI runner). A GROWTH check (ratio in TIMED_PRELUDE) times one run
+    # at GROWTH * n against GROWTH runs at n, so the two samples do the same work when the pass is linear and
+    # span about the same time, and a preemption or load spike lands on both alike (a sample shorter than a
+    # scheduler slice escaped the preemption a longer one took, observed at 22 times on a pinned, loaded CPU);
+    # the sizes are interleaved, best of N. A PEER check bounds an adversarial command's time by an ORDINARY
+    # command of about the same size that the analysis judges in full (see TIMED_PRELUDE).
+    GROWTH = 8
+    LINEAR_LIMIT = 2.0  # GROWTH growth: about 1 when linear, about GROWTH when quadratic
+    FLAT_LIMIT = 3.0  # a pass independent of the varied size stays near 1; one linear in it grows by the step
+    PEER_LIMIT = 4.0  # adversarial over ordinary: about 1 to 2 on the development host
     TIMED_PRELUDE = (
         "import importlib.util as u, datetime, json, os, time\n"
         "os.environ['TZ'] = 'EST5EDT,M3.2.0,M11.1.0'\n"
@@ -3298,7 +3562,22 @@ def _self_test():
         "            out.append(time.monotonic() - t0)\n"
         "    return [min(t) for t in times]\n"
         "def ratio(n, run, reps=5):\n"
-        "    return interleaved((n, 2 * n), run, reps)\n") % (STORE, os.path.abspath(__file__))
+        "    def same_work(k):\n"
+        "        for _ in range(GROWTH * n // k):\n"
+        "            run(k)\n"
+        "    return interleaved((n, GROWTH * n), same_work, reps)\n"
+        "def versus(subject, reference, reps=5):\n"
+        "    return interleaved((0, 1), lambda k: (subject, reference)[k](), reps)\n"
+        # the PEER reference: about 64 KiB of ordinary audit-log appends and a future write into `store`, which
+        # the analysis judges in full (denied), so an adversarial command's time is compared with it
+        "def ordinary(cwd, store):\n"
+        "    c = ''.join(\"echo 'line %%d of the audit log' >> /dev/shm/x%%d\\n\" %% (i, i %% 7)\n"
+        "                for i in range(1400))\n"
+        "    c += \"printf 'hb 2099-01-01T00:00Z' > \" + store + '/state.md'\n"
+        "    def run():\n"
+        "        assert m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': cwd}, now)\n"
+        "    return run\n"
+        "GROWTH = %d\n") % (STORE, os.path.abspath(__file__), GROWTH)
 
     def run_timed(code, timeout):
         """Run `code` in a fresh isolated interpreter, killed at `timeout` seconds (raising TimeoutExpired); return
@@ -3473,7 +3752,8 @@ def _self_test():
             os.mkfifo(fifo)
             code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print(repr(m.read_existing(%r, 10)))" % (os.path.abspath(__file__), fifo))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=5)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard: a blocking FIFO open never returns
             self.assertEqual(r.stdout.strip(), "('', False)")
 
         def test_store_root_env_override(self):
@@ -3609,15 +3889,16 @@ def _self_test():
             self.assertTrue(bash_writes("cat f >"))
 
         def test_r7_bash_writes_is_linear(self):
-            # round 32: best of 3 in a child under the hang ceiling (one in-process run flaked on a loaded host)
+            # round 32: best of 3 in a child under the hang ceiling (one in-process run flaked on a loaded host).
+            # The verdict is the growth from n to GROWTH * n (up to the former sizes), not a wall-clock ceiling
             code = TIMED_PRELUDE + (
-                "def run(_n):\n"
-                "    for cmd in (\"'\" + 'a' * 400000, 'x ' * 200000, '2>&1 ' * 100000, '\\\\' * 400000,\n"
-                "                \"$'\\\\'\" * 100000):\n"
+                "def run(n):\n"
+                "    for cmd in (\"'\" + 'a' * (4 * n), 'x ' * (2 * n), '2>&1 ' * n, '\\\\' * (4 * n),\n"
+                "                \"$'\\\\'\" * n):\n"
                 "        m.bash_writes(cmd)\n"
-                "print(json.dumps(interleaved((1,), run, 3)))\n")
-            (t,) = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(t, 2.0)
+                "print(json.dumps(ratio(12500, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_bash_date_substitution_passes(self):
             for cmd in ('echo "hb: $(date -u +%Y-%m-%dT%H:%M:%SZ) $(date -d \'2099-01-01 10:00\')" >> '
@@ -3652,15 +3933,24 @@ def _self_test():
         def test_bash_scan_is_linear(self):
             # finding (codex r2): unmatched $( openers rescanned the suffix quadratically
             # round 31: at this size (1.35 MB) the analysis spends BASH_WORK_BUDGET and fails OPEN (allowed), still
-            # within the timeout; a hundredth of it stays inside the budget and is still denied (unparseable)
+            # within the timeout; a hundredth of it stays inside the budget and is still denied (unparseable).
+            # The timeout is the hang guard only; linearity is the growth from n to GROWTH * n (up to that size)
             for scale, want in ((100, True), (1, False)):
                 code = ("import importlib.util as u,datetime;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                         "s.loader.exec_module(m);n=datetime.datetime(2026,9,23,17,45,tzinfo=datetime.timezone.utc);"
                         f"c=': > {PROJ}/private/s; echo '+'$('*(500000//%d)+'`'*(100001//%d)+'$(A=B'*(50000//%d)"
                         "+' 2099-01-01T00:00Z';print(m.evaluate({'tool_name':'Bash','tool_input':{'command':c}},n))"
                         % (os.path.abspath(__file__), scale, scale, scale))
-                r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=5)
+                r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                                   timeout=HANG_TIMEOUT)
                 self.assertEqual("2099-01-01T00:00Z" in r.stdout, want, (scale, r.stdout, r.stderr))
+            code = TIMED_PRELUDE + (
+                "def run(n):\n"
+                f"    c = ': > {PROJ}/private/s; echo ' + '$(' * (5 * n) + '`' * (n + 1) + '$(A=B' * (n // 2)\n"
+                "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': c + ' 2099-01-01T00:00Z'}}, now)\n"
+                "print(json.dumps(ratio(12500, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_main_deny_shape_and_fail_open(self):
             payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": self.store,
@@ -3705,7 +3995,8 @@ def _self_test():
             self.assertEqual((mod._TOKEN_RE.pattern, mod._WORDCH_RE.pattern), (_TOKEN_RE.pattern, _WORDCH_RE.pattern))
             self.assertEqual(inspect.getsource(mod.sched_exempter), inspect.getsource(sched_exempter))
             # the configuration and kill-switch helpers are shared verbatim across the three hooks
-            for name in ("_cfg", "_is_worker", "_sibling_or_skip"):
+            for name in ("_cfg", "_is_worker", "_sibling_or_skip", "_wall_clock_asserts",
+                         "_wall_clock_alias_fixtures"):
                 self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
 
         # -- round 4 --
@@ -3756,21 +4047,40 @@ def _self_test():
                 "def future(n):\n"
                 "    got = ev('Write', file_path=S, content='next ' + '2099-01-01T00:00Z x ' * n)\n"
                 "    assert got == ['2099-01-01T00:00Z'], got\n"
-                "print(json.dumps({r.__name__: ratio(n, r) for r, n in ((past, 50000), (future, 25000))}))\n")
+                "print(json.dumps({r.__name__: ratio(n, r) for r, n in ((past, 12500), (future, 6250))}))\n")
+            # the step is now GROWTH (N to 8N, up to the former sizes, equal work per sample): a 2N step bounded
+            # at 3.0 left little room between a linear pass (about 2) and a quadratic one (about 4)
             for name, (small, large) in run_timed(code, HANG_TIMEOUT).items():
-                self.assertLess(large / max(small, 1e-3), 3.0, (name, small, large))
+                self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (name, small, large))
 
         def test_r5_many_distinct_literals_linear_and_bounded(self):
             # finding (codex r4, sibling pattern): the fragment path scanned the growing list per literal
             lits = [f"2099-{1 + i % 12:02d}-{1 + (i // 12) % 28:02d}T{(i // 336) % 24:02d}:{(i // 8064) % 60:02d}Z"
                     for i in range(40000)]
             fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2 + 1))  # over the cap: the fragment path
-            t0 = time.monotonic()
             r = self.ev("MultiEdit", file_path=fp, edits=[{"old_string": "x", "new_string": "\n".join(lits[:20000])},
                                                           {"old_string": "x", "new_string": "\n".join(lits[20000:])}])
             w = self.ev("Write", file_path=os.path.join(self.tmp, "w.md"), content=" ".join(lits))
-            self.assertLess(time.monotonic() - t0, 1.0)
             self.assertEqual((len(r), len(w)), (40000, 40000))
+            # linear: the growth from n to GROWTH * n literals (up to 40,000) in a child under the hang ceiling,
+            # not a wall-clock ceiling (a 1.0 s one depended on the host's speed)
+            code = TIMED_PRELUDE + (
+                "fp = %r\n"
+                "os.environ['AIQT_STORE_ROOT'] = os.path.dirname(fp)\n"
+                "lits = [f'2099-{1 + i %% 12:02d}-{1 + (i // 12) %% 28:02d}T{(i // 336) %% 24:02d}:"
+                "{(i // 8064) %% 60:02d}Z' for i in range(40000)]\n"
+                "def ev(tool, **ti):\n"
+                "    return m.evaluate({'tool_name': tool, 'tool_input': ti, 'cwd': %r}, now)\n"
+                "def run(n):\n"
+                "    edits = [{'old_string': 'x', 'new_string': '\\n'.join(lits[:n // 2])},\n"
+                "             {'old_string': 'x', 'new_string': '\\n'.join(lits[n // 2:n])}]\n"
+                "    wp = os.path.join(os.path.dirname(fp), 'w.md')\n"
+                "    got = (len(ev('MultiEdit', file_path=fp, edits=edits)),\n"
+                "           len(ev('Write', file_path=wp, content=' '.join(lits[:n]))))\n"
+                "    assert got == (n, n), got\n"
+                "print(json.dumps(ratio(5000, run, 3)))\n") % (fp, f"{PROJ}/repo")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
             old_out = sys.stdout
             sys.stdout = io.StringIO()
             try:
@@ -3837,10 +4147,20 @@ def _self_test():
 
         def test_r6_table_scan_is_linear(self):
             rows = ["| x | 2099-01-01T00:00Z |"] * 50000
-            t0 = time.monotonic()
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", *rows), [])
             self.assertEqual(self.tw(*(["| a | b |"] * 50000)), [])
-            self.assertLess(time.monotonic() - t0, 1.0)
+            # linear: the growth from n to GROWTH * n rows (up to 50,000) in a child under the hang ceiling, not
+            # a wall-clock ceiling (a 1.0 s one depended on the host's speed)
+            code = TIMED_PRELUDE + (
+                "def tw(*lines):\n"
+                f"    ti = {{'file_path': '{PROJ}/private/state.md', 'content': '\\n'.join(lines) + '\\n'}}\n"
+                f"    return m.evaluate({{'tool_name': 'Write', 'tool_input': ti, 'cwd': '{PROJ}/repo'}}, now)\n"
+                "def run(n):\n"
+                "    assert tw('| Item | Due |', '|---|---|', *(['| x | 2099-01-01T00:00Z |'] * n)) == []\n"
+                "    assert tw(*(['| a | b |'] * n)) == []\n"
+                "print(json.dumps(ratio(6250, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         # -- round 7 (codex round-6 findings) --
         def test_r7_dq_substitution_write_seen(self):
@@ -3936,15 +4256,16 @@ def _self_test():
             self.assertIn("DELIBERATELY checked", __doc__)
 
         def test_r7_shell_tokens_linear(self):
-            # round 32: best of 3 in a child under the hang ceiling (2.08 s in-process was observed at load 30)
+            # round 32: best of 3 in a child under the hang ceiling (2.08 s in-process was observed at load 30,
+            # and a 2.0 s ceiling failed at 2.53 s on a slower CI runner). The verdict is the growth from n to
+            # GROWTH * n (up to the former sizes), not a wall-clock ceiling
             code = TIMED_PRELUDE + (
-                "def run(_n):\n"
-                "    for cmd in ('\"$(' * 100000, '\"$(x)\"' * 100000, '\"`x`\"' * 100000,\n"
-                "                '$((' * 100000 + '))' * 100000, '1>& 2 ' * 100000):\n"
+                "def run(n):\n"
+                "    for cmd in ('\"$(' * n, '\"$(x)\"' * n, '\"`x`\"' * n, '$((' * n + '))' * n, '1>& 2 ' * n):\n"
                 "        m.bash_writes(cmd)\n"
-                "print(json.dumps(interleaved((1,), run, 3)))\n")
-            (t,) = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(t, 2.0)
+                "print(json.dumps(ratio(12500, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         # -- round 8 (codex round-7 findings) --
         def test_r8_new_block_ends_table(self):
@@ -4047,8 +4368,8 @@ def _self_test():
                 "    assert m.future_in_changed_lines(old, old, 0) == []\n"
                 "print(json.dumps(interleaved((10000, 160000), run, 3)))\n")
             times = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(times[1], 3.0)
-            self.assertLess(times[1], 2.0 * times[0] + 0.2, times)  # flat in header length
+            # flat in header length (16 times longer): a ratio, with no wall-clock ceiling or absolute slack
+            self.assertLess(times[1] / max(times[0], 1e-3), FLAT_LIMIT, times)
 
         def test_r8_case_pattern_paren_in_substitution(self):
             # finding 3 (HIGH, exotic): a case pattern `)` closed the $(...) frame early, hiding the write
@@ -4929,9 +5250,10 @@ def _self_test():
                 "    got = m.evaluate({'tool_name': 'Edit', 'tool_input': {'file_path': fifo, 'old_string': old,"
                 " 'new_string': new}}, now)\n"
                 "    assert len(got) == n, len(got)\n"
-                "print(json.dumps(ratio(16000, run)))\n") % os.path.join(self.tmp, "fifo")
+                "print(json.dumps(ratio(4000, run)))\n") % os.path.join(self.tmp, "fifo")
             small, large = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(large / max(small, 1e-3), 3.0, (small, large))  # ~2 when linear; ~4 was quadratic
+            # N to GROWTH * N (up to the former 32,000): about 1 when linear, about GROWTH when quadratic
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_r26_item6_hang_guard_interrupts(self):
             # finding 6 (LOW): the growth test's ceiling was asserted only after every run returned, so it could
@@ -5421,8 +5743,10 @@ def _self_test():
             ordinary = "".join(f"echo 'line {i} of the audit log' >> /dev/shm/x{i % 7}\n" for i in range(1400)) + tail
             self.assertGreater(len(ordinary), 60000)
             self.assertEqual(self.ev("Bash", command=ordinary), [F])  # 64 KiB of ordinary lines stays inside it
-            # load-robust timing: the growth ratio from N to 2N (best of 3 each) of an in-budget command, and a
-            # subprocess ceiling (a hang or a runaway is interrupted, never waited out)
+            # load-robust timing: the growth ratio from N to GROWTH * N (interleaved, best of 5) of an in-budget
+            # command, and a subprocess ceiling (a hang or a runaway is interrupted, never waited out). The dense
+            # command's latency is bounded by an ORDINARY 64 KiB command judged in full on the same host (a PEER
+            # check), not by a wall-clock ceiling
             code = TIMED_PRELUDE + (
                 f"S = '{PROJ}/private/state.md'\n"
                 "def run(n):\n"
@@ -5430,12 +5754,12 @@ def _self_test():
                 "\"printf 'hb 2099-01-01T00:00Z' > \" + S\n"
                 "    assert m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': '/'}, now), n\n"
                 "t = ': > x;' * 10900 + \"printf 'hb 2099-01-01T00:00Z' > \" + S\n"
-                "def dense(_n):\n"
+                "def dense():\n"
                 "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': t}, 'cwd': '/'}, now)\n"
-                "print(json.dumps(ratio(1000, run) + [best(1, dense)]))\n")
-            small_t, large_t, dense_t = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(large_t / max(small_t, 1e-3), 3.0, (small_t, large_t))
-            self.assertLess(dense_t, 0.5, dense_t)  # a generous ceiling: about 20 to 40 ms on the development host
+                "print(json.dumps(ratio(250, run) + versus(dense, ordinary('/', os.path.dirname(S)))))\n")
+            small_t, large_t, dense_t, ref_t = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large_t / max(small_t, 1e-3), LINEAR_LIMIT, (small_t, large_t))
+            self.assertLess(dense_t / max(ref_t, 1e-3), PEER_LIMIT, (dense_t, ref_t))
             doc = " ".join(__doc__.split())
             for s in ("WORK BUDGET (round 31)", "is ALLOWED unchecked (fail OPEN", "an EXOTIC, disclosed miss"):
                 self.assertIn(s, doc)
@@ -5687,7 +6011,9 @@ def _self_test():
             self.assertGreater(BASH_WORK_BUDGET - b.left, 50 * cost * cap)
             self.assertEqual(self.ev("Bash", cwd=self.tmp, command=few), [F])  # still judged
             # the codex construct: 400 directories, 800 `(cd .);`, a future store write, padded to 65,536 bytes:
-            # analysed in-process well under the latency bound, or the budget is spent (best of 5 in a child)
+            # analysed in-process well under the latency bound, or the budget is spent (best of 5 in a child). The
+            # bound is a PEER check: at most PEER_LIMIT times an ordinary 64 KiB command judged in full on the same
+            # host (round 31's uncharged directory work took about 200 ms), not a wall-clock ceiling
             code = TIMED_PRELUDE + (
                 "D = %r\n"
                 "os.environ['AIQT_STORE_ROOT'] = os.path.join(D, 'store')\n"
@@ -5700,11 +6026,11 @@ def _self_test():
                 "tail = \"printf '%%s\\\\n' 'heartbeat: 2099-01-01T00:00Z' > \" + D + '/store/state.md'\n"
                 "c = body + ' ' * (65536 - len(body) - len(tail)) + tail\n"
                 "assert len(c) == 65536\n"
-                "def run(_n):\n"
+                "def run():\n"
                 "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': D}, now)\n"
-                "print(json.dumps(interleaved((1,), run, 5)))\n") % self.tmp
-            (t,) = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(t, 0.1, t)  # about 20 to 30 ms on the development host (round 31: about 200 ms)
+                "print(json.dumps(versus(run, ordinary(D, os.path.join(D, 'store')))))\n") % self.tmp
+            t, ref_t = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(t / max(ref_t, 1e-3), PEER_LIMIT, (t, ref_t))  # about 1.7 on the development host
             self.assertEqual((globals().get("CWD_COST"), globals().get("MAX_CWDS")), (6, 32))
 
         def test_r32_item3_subshell_scopes_directory_state(self):
@@ -5794,16 +6120,24 @@ def _self_test():
             # the load-sensitive growth-ratio tests (one flaked at load 34) now interleave their sizes, best of N,
             # at larger sizes, in a child under the hang ceiling
             self.assertIn("def interleaved(sizes, run, reps=5)", TIMED_PRELUDE)
+            self.assertIn("return interleaved((n, GROWTH * n), same_work, reps)", TIMED_PRELUDE)
+            self.assertIn("GROWTH = %d\n" % GROWTH, TIMED_PRELUDE)
             for test, needle in ((T.test_r4_scan_is_linear, "ratio(n, r)"),
-                                 (T.test_r26_item5_unreadable_edit_literal_index_is_linear, "ratio(16000, run)"),
-                                 (T.test_r31_work_budget_bounds_the_bash_analysis, "ratio(1000, run)"),
+                                 (T.test_r26_item5_unreadable_edit_literal_index_is_linear, "ratio(4000, run)"),
+                                 (T.test_r31_work_budget_bounds_the_bash_analysis, "ratio(250, run)"),
                                  (T.test_r8_table_context_carry_over_scales, "interleaved((10000, 160000), run, 3)"),
-                                 (T.test_r7_bash_writes_is_linear, "interleaved((1,), run, 3)"),
-                                 (T.test_r7_shell_tokens_linear, "interleaved((1,), run, 3)")):
+                                 (T.test_r7_bash_writes_is_linear, "ratio(12500, run, 3)"),
+                                 (T.test_r7_shell_tokens_linear, "ratio(12500, run, 3)"),
+                                 (T.test_bash_scan_is_linear, "ratio(12500, run, 3)"),
+                                 (T.test_r5_many_distinct_literals_linear_and_bounded, "ratio(5000, run, 3)"),
+                                 (T.test_r6_table_scan_is_linear, "ratio(6250, run, 3)"),
+                                 (T.test_r32_item2_directory_work_is_budgeted, "versus(run, ordinary("),
+                                 (T.test_r33_wrapper_check_is_constant_per_wrapper, "versus(run_codex, ordinary(")):
                 src = inspect.getsource(test)
                 self.assertIn(needle, src)
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
                 self.assertNotIn("best(2 * n, r)", src)
+            # a wall-clock bound in any test is rejected by test_no_wall_clock_verdict (an AST scan)
 
         def test_r32_disclosures(self):
             doc = " ".join(__doc__.split())
@@ -5844,8 +6178,10 @@ def _self_test():
                 c = build(w, 3 * w)
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=c), [F])
                 self.assertGreaterEqual(spend(c), 4 * 4 * w)
-            # in a child under the hang ceiling: the codex construction in-process, and the growth from 150 to 300
-            # wrappers (interleaved, best of 5; round 32's per-wrapper rescan grew it by about 3.2 times)
+            # in a child under the hang ceiling: the codex construction in-process against an ordinary 64 KiB
+            # command judged in full (a PEER check, about 1.2 on the development host; round 32 took about 107 ms),
+            # and the growth from 37 to GROWTH * 37 wrappers (interleaved, best of 5; round 32's per-wrapper
+            # rescan grew it by about 3.2 times per doubling)
             code = TIMED_PRELUDE + (
                 "D = %r\n"
                 "os.environ['AIQT_STORE_ROOT'] = os.path.join(D, 'store')\n"
@@ -5854,14 +6190,61 @@ def _self_test():
                 "    return ' |\\n'.join([\"sh -c 'echo 2099-01-01T00:00Z'\"] * w + [':'] * n) + tail\n"
                 "codex = build(450, 1050).ljust(65536)\n"
                 "def run(w):\n"
-                "    c = codex if w == 0 else build(w, 3 * w)\n"
-                "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': D}, now)\n"
-                "print(json.dumps(interleaved((0, 150, 300), run, 5)))\n") % self.tmp
-            t_codex, small, large = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(t_codex, 0.05, t_codex)  # about 15 ms on the development host (round 32: about 107 ms)
-            self.assertLess(large / max(small, 1e-3), 2.6, (small, large))
+                "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': build(w, 3 * w)}, 'cwd': D}, now)\n"
+                "def run_codex():\n"
+                "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': codex}, 'cwd': D}, now)\n"
+                "print(json.dumps(versus(run_codex, ordinary(D, os.path.join(D, 'store'))) + ratio(37, run)))\n"
+                ) % self.tmp
+            t_codex, ref_t, small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(t_codex / max(ref_t, 1e-3), PEER_LIMIT, (t_codex, ref_t))
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
             doc = " ".join(__doc__.split())
             self.assertIn("Round 33: the shell -c WRAPPER check is charged too", doc)
+
+        # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
+        HANG_GUARD_TESTS = ("test_r26_item6_hang_guard_interrupts",)
+
+        def test_no_wall_clock_verdict(self):
+            """Residual (disclosed): the scan covers direct calls, imported aliases, and assigned aliases within a
+            function, not values passed between functions, so a time figure handed to a helper that asserts on it
+            is not flagged. Nor is a reading from a clock the scan does not name (os.times, date.today,
+            time.localtime or gmtime, a third-party clock, a file's mtime), nor a time figure routed through an
+            expression form the scan does not follow: an assignment expression (walrus), a dict literal, a
+            container built by a comprehension or filled by a store into a subscript, a starred or mismatched
+            unpacking, or any other routing; see _wall_clock_asserts."""
+            # every assertion of this file is scanned (see _wall_clock_asserts): none bounds a time figure, a
+            # ratio of two time figures excepted, outside the hang-guard tests named in HANG_GUARD_TESTS
+            with open(os.path.abspath(__file__), encoding="utf-8") as f:
+                src = f.read()
+            self.assertEqual(_wall_clock_asserts(src, self.HANG_GUARD_TESTS), [])
+            flagged = [name for name, _line in _wall_clock_asserts(src)]
+            for name in self.HANG_GUARD_TESTS:  # an exemption names a real hang guard the scan would flag
+                self.assertIn(name, flagged)
+            # the forms a substring check missed are caught: a harness result, an elapsed name, a bare assert, a
+            # for target, a time.time difference, and a comparison inside assertTrue
+            bad = ("def test_a(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
+                   "    self.assertLess(large, 2.0)\n"
+                   "def test_b(self):\n    started = time.monotonic()\n    run()\n"
+                   "    elapsed = time.monotonic() - started\n    self.assertLess(elapsed, 0.5)\n"
+                   "def test_c(self):\n    t0 = time.perf_counter()\n    assert time.perf_counter() - t0 < 1\n"
+                   "def test_d(self):\n    for name, (s, big) in run_timed(c, 9).items():\n"
+                   "        self.assertTrue(big < 3, name)\n"
+                   "def test_e(self):\n    t = time.time()\n    self.assertLessEqual(time.time() - t, 1)\n"
+                   "def test_f(self):\n    def inner():\n        self.assertLess(growth_in_child(src, 9)[1], 1)\n")
+            self.assertEqual([name for name, _line in _wall_clock_asserts(bad)],
+                             ["test_a", "test_b", "test_c", "test_d", "test_e", "test_f"])
+            # a ratio of two time figures, a time figure in the message only, and an exempt hang guard pass
+            good = ("def test_g(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
+                    "    self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))\n"
+                    "    self.assertTrue(large / small < 2, (small, large))\n"
+                    "def test_h(self):\n    t0 = time.monotonic()\n    self.assertLess(time.monotonic() - t0, 30.0)\n")
+            self.assertEqual(_wall_clock_asserts(good, ("test_h",)), [])
+            self.assertEqual(_wall_clock_asserts(good), [("test_h", 7)])
+            # a clock read through an alias (import-as, from-import, an assigned name) or a keyword operand is
+            # caught; the same aliases used for a hang-guard timeout, a count, or a msg keyword are not
+            bad, want, good = _wall_clock_alias_fixtures()
+            self.assertEqual([name for name, _line in _wall_clock_asserts(bad)], want)
+            self.assertEqual(_wall_clock_asserts(good), [])
 
         # -- sibling parity on a single-hook install --
         PARITY_TESTS = ("test_shared_grammar_identical_to_sibling",

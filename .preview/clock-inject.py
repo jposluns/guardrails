@@ -129,6 +129,259 @@ def _sibling_or_skip(name, env=None):
     return path
 
 
+def _wall_clock_asserts(source, exempt=()):
+    """Self-test helper, kept identical across the three hooks: [(function, line)] of every assertion in
+    `source` whose operand is a TIME figure, so no test's verdict rests on a wall-clock bound, which depends on
+    the host's speed. A time figure is a clock reading (time.time, perf_counter, monotonic, process_time,
+    thread_time, clock_gettime, or an _ns variant; datetime.now, utcnow, or today), a result of a timing
+    harness (run_timed, growth_in_child), a name assigned from one (a for target or unpacking included), or
+    arithmetic, a comparison, a subscript, an attribute, min, max, abs, sum, int, float, round, or a method
+    call on one; a quotient of two time figures is a dimensionless ratio and may be bounded. A tuple or list
+    literal assigned to a tuple or list target is matched element by element, so only the names that receive
+    a time figure are tainted, and a shape it cannot match (a starred element, a length mismatch) taints
+    nothing, the not-flagging direction. A clock read through an alias
+    counts too: a module alias (`import time as t`, `import datetime as d`), an imported one (`from time import
+    X as Y`, or `*`; `from datetime import datetime as Y`), and an assigned one (a plain `name = time.X` or
+    `name = X` of a clock or alias), each bound at module level or within the function. An assertion's operands
+    are its leading positional arguments and every keyword argument but msg. Every assertion in the source is
+    scanned, under its enclosing test_ function (else its innermost function); `exempt` names the hang-guard
+    tests, whose bound on elapsed time is their point. Residual (disclosed): the taint is by name within one
+    test_ function and its nested functions, so a time figure passed through a container mutation, a global, a
+    call to another helper, or a harness this list does not name escapes the scan; so does one routed through
+    an expression form the scan does not follow: an assignment expression (walrus) in an asserted operand, a
+    dict literal, a container built by a comprehension or filled by a store into a subscript, or any other
+    routing not listed above; so does the time figure in a starred or mismatched unpacking; a clock this list does not
+    name (os.times, date.today, time.localtime or gmtime, a third-party clock, a file's mtime) escapes too, as
+    does an alias bound any other way (an attribute, a tuple target, getattr, a module or class assigned to a
+    name); a subprocess timeout is not an assertion and is not scanned."""
+    import ast
+    clocks = {"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns", "process_time", "process_time_ns",
+              "thread_time", "thread_time_ns", "clock_gettime", "clock_gettime_ns", "run_timed", "growth_in_child"}
+    stdclocks = {"time", "time_ns", "perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns",
+                 "process_time", "process_time_ns", "thread_time", "thread_time_ns", "clock_gettime",
+                 "clock_gettime_ns"}
+    dtclocks = ("now", "utcnow", "today")
+    single = {"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"}
+
+    def dtclass(node, al):  # a reference to the datetime class: a class alias, or <datetime module>.datetime
+        if isinstance(node, ast.Name):
+            return node.id in al["dtclass"]
+        return isinstance(node, ast.Attribute) and node.attr == "datetime" and \
+            isinstance(node.value, ast.Name) and node.value.id in al["datetime"]
+
+    def timed(node, names, al):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name):
+                if f.id in clocks or f.id in al["clock"]:
+                    return True
+                return f.id in ("min", "max", "abs", "sum", "int", "float", "round") and any(
+                    timed(a, names, al) for a in node.args)
+            if isinstance(f, ast.Attribute):
+                if f.attr in ("time", "time_ns"):
+                    return isinstance(f.value, ast.Name) and f.value.id in al["time"]
+                if f.attr in dtclocks and dtclass(f.value, al):
+                    return True
+                return f.attr in clocks or timed(f.value, names, al)
+            return False
+        if isinstance(node, ast.Name):
+            return node.id in names
+        if isinstance(node, ast.BinOp):
+            left, right = timed(node.left, names, al), timed(node.right, names, al)
+            return left != right if isinstance(node.op, ast.Div) else left or right
+        if isinstance(node, ast.Compare):
+            return any(timed(x, names, al) for x in [node.left] + node.comparators)
+        if isinstance(node, ast.BoolOp):
+            return any(timed(x, names, al) for x in node.values)
+        if isinstance(node, ast.UnaryOp):
+            return timed(node.operand, names, al)
+        if isinstance(node, (ast.Subscript, ast.Starred, ast.Attribute)):
+            return timed(node.value, names, al)
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return any(timed(e, names, al) for e in node.elts)
+        if isinstance(node, ast.IfExp):
+            return timed(node.body, names, al) or timed(node.orelse, names, al)
+        return False
+
+    def targets(node):
+        if isinstance(node, ast.Name):
+            yield node.id
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            for e in node.elts:
+                yield from targets(e)
+        elif isinstance(node, ast.Starred):
+            yield from targets(node.value)
+
+    def split(target, value):  # an assignment's (target, value) pairs, a tuple or list literal matched in step
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+            if len(target.elts) == len(value.elts) and not any(
+                    isinstance(e, ast.Starred) for e in target.elts + value.elts):
+                for t, v in zip(target.elts, value.elts):
+                    yield from split(t, v)
+            return  # otherwise a shape it cannot match: nothing is tainted, the not-flagging direction
+        yield target, value
+
+    def aliases(node, al):  # the (kind, name) aliases node binds; kind: time, datetime (modules), dtclass, clock
+        if isinstance(node, ast.Import):
+            return [(a.name, a.asname or a.name) for a in node.names if a.name in ("time", "datetime")]
+        if isinstance(node, ast.ImportFrom) and node.module == "time" and not node.level:
+            bound = []
+            for a in node.names:
+                if a.name == "*":
+                    bound += [("clock", c) for c in stdclocks]
+                elif a.name in stdclocks:
+                    bound.append(("clock", a.asname or a.name))
+            return bound
+        if isinstance(node, ast.ImportFrom) and node.module == "datetime" and not node.level:
+            return [("dtclass", a.asname or "datetime") for a in node.names if a.name in ("datetime", "*")]
+        if isinstance(node, ast.Assign) and (
+                isinstance(node.value, ast.Name) and (node.value.id in clocks or node.value.id in al["clock"]) or
+                isinstance(node.value, ast.Attribute) and node.value.attr in stdclocks and
+                isinstance(node.value.value, ast.Name) and node.value.value.id in al["time"] or
+                isinstance(node.value, ast.Attribute) and node.value.attr in dtclocks and
+                dtclass(node.value.value, al)):
+            return [("clock", t.id) for t in node.targets if isinstance(t, ast.Name)]
+        return []
+
+    tree, parent, cache = ast.parse(source), {}, {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    def scope(node):  # the enclosing test_ function, else the innermost function (None at module level)
+        inner, up = None, parent.get(node)
+        while up is not None:
+            if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if up.name.startswith("test_"):
+                    return up
+                inner = inner or up
+            up = parent.get(up)
+        return inner
+
+    def bind(nodes, al):  # add the aliases nodes bind to al, to a fixed point; True if any was new
+        grew, changed = False, True
+        while changed:
+            changed = False
+            for node in nodes:
+                for kind, name in aliases(node, al):
+                    if name not in al[kind]:
+                        al[kind].add(name)
+                        grew = changed = True
+        return grew
+
+    binders = [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign))]
+    top = {"time": {"time"}, "datetime": {"datetime"}, "dtclass": {"datetime"}, "clock": set()}
+    bind([node for node in binders if scope(node) is None], top)
+
+    def tainted(fn):  # (names, al): the time figures and aliases fn (nested functions included) binds
+        if fn not in cache:
+            names, al = set(), {kind: set(bound) for kind, bound in top.items()}
+            nodes = list(ast.walk(fn))
+            changed = True
+            while changed:
+                changed = bind(nodes, al)
+                for node in nodes:
+                    if isinstance(node, ast.Assign):
+                        pairs = [pair for t in node.targets for pair in split(t, node.value)]
+                    elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)) and \
+                            node.value is not None:
+                        pairs = [(node.target, node.value)]
+                    elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                        pairs = [(node.target, node.iter)]
+                    elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                        pairs = [(node.optional_vars, node.context_expr)]
+                    else:
+                        continue
+                    for target, value in pairs:
+                        new = set(targets(target)) - names if timed(value, names, al) else set()
+                        if new:
+                            names |= new
+                            changed = True
+            cache[fn] = names, al
+        return cache[fn]
+
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            operands = [node.test]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+                node.func.attr.startswith("assert"):
+            operands = node.args[:1] if node.func.attr in single else node.args[:2]
+            operands = operands + [k.value for k in node.keywords if k.arg != "msg"]
+        else:
+            continue
+        fn = scope(node)
+        name = fn.name if fn is not None else "<module>"
+        names, al = tainted(fn) if fn is not None else (set(), top)
+        if name not in exempt and any(timed(x, names, al) for x in operands):
+            found.append((name, node.lineno))
+    return sorted(found, key=lambda item: item[1])
+
+
+def _wall_clock_alias_fixtures():
+    """Self-test data, kept identical across the three hooks: (bad, flagged, good) for _wall_clock_asserts.
+    `bad` bounds a time figure read through each alias form, through keyword operands, and from each added
+    clock (datetime.now, utcnow, today; clock_gettime), and every function it names in `flagged` must be
+    flagged; `good` uses the same alias forms and clocks only for a hang-guard timeout, an assertion on a count,
+    a msg keyword, a ratio, a datetime constructor, or a name that is an alias only in another function, and
+    nothing in it may be flagged."""
+    bad = ("import time as tm\nfrom time import perf_counter as clock\ntick = tm.monotonic_ns\n"
+           "import datetime as dt\n"
+           "def test_i(self):\n    t = clock()\n    self.assertLess(clock() - t, 0.5)\n"
+           "def test_j(self):\n    my_time = time.time\n    t0 = my_time()\n    self.assertLess(my_time() - t0, 1)\n"
+           "def test_k(self):\n    t0 = tm.time()\n    self.assertLessEqual(tm.time() - t0, 1)\n"
+           "def test_l(self):\n    self.assertLess(tick() - start, 10)\n"
+           "def test_m(self):\n    from time import process_time as cpu\n    c0 = cpu()\n"
+           "    assert cpu() - c0 < 2\n"
+           "def test_n(self):\n    c1 = clock\n    c2 = c1\n    self.assertGreater(1.0, c2() - base)\n"
+           "def test_o(self):\n    from time import time\n    self.assertTrue(time() - t0 < 1)\n"
+           "def test_p(self):\n    from time import *\n    self.assertLess(time_ns() - t0, 5)\n"
+           "def test_q(self):\n    t = time.monotonic()\n    self.assertLess(a=time.monotonic()-t, b=0.5)\n"
+           "def test_r(self):\n    self.assertTrue(expr=time.perf_counter() - t0 < 1, msg='slow')\n"
+           "def test_s(self):\n    now = tm.perf_counter\n    elapsed = now() - t0\n"
+           "    self.assertLessEqual(first=elapsed, second=2)\n"
+           "def test_t(self):\n    pc = perf_counter\n    self.assertLess(pc() - t, 1)\n"
+           "def test_ba(self):\n    t0 = datetime.datetime.now()\n"
+           "    self.assertLess((datetime.datetime.now() - t0).total_seconds(), 2.0)\n"
+           "def test_bb(self):\n    from datetime import datetime as DT\n    t0 = DT.utcnow()\n"
+           "    self.assertLess((DT.utcnow() - t0).total_seconds(), 2)\n"
+           "def test_bc(self):\n    stamp = dt.datetime.now\n    t0 = stamp()\n"
+           "    self.assertLess((stamp() - t0).seconds, 2)\n"
+           "def test_bd(self):\n    t0 = time.clock_gettime(time.CLOCK_MONOTONIC)\n"
+           "    self.assertLess(time.clock_gettime(time.CLOCK_MONOTONIC) - t0, 1)\n"
+           "def test_be(self):\n    from time import clock_gettime_ns as cg\n    t0 = cg(1)\n"
+           "    assert cg(1) - t0 < 10\n"
+           "def test_bf(self):\n    from datetime import *\n    self.assertLess((datetime.today() - t0).seconds, 5)\n"
+           "def test_bj(self):\n    elapsed, n = clock() - t0, 3\n    self.assertLess(elapsed, 1)\n"
+           "def test_bk(self):\n    t0 = time.monotonic()\n    e = int((time.monotonic() - t0) * 1000)\n"
+           "    self.assertLess(e, 500)\n")
+    flagged = ["test_i", "test_j", "test_k", "test_l", "test_m", "test_n", "test_o", "test_p", "test_q", "test_r",
+               "test_s", "test_t", "test_ba", "test_bb", "test_bc", "test_bd", "test_be", "test_bf", "test_bj",
+               "test_bk"]
+    good = ("import time as tm\nfrom time import perf_counter as clock\ntick = tm.monotonic\n"
+            "import datetime as dt\n"
+            "def test_u(self):\n    deadline = clock() + HANG_TIMEOUT\n    out = run(timeout=deadline - clock())\n"
+            "    proc.wait(timeout=tick() + 1)\n    self.assertEqual(len(out), 3)\n"
+            "def test_v(self):\n    my_time = tm.time\n    proc.wait(timeout=my_time() + 30)\n"
+            "    self.assertEqual(proc.returncode, 0, msg=my_time())\n"
+            "def test_w(self):\n    from time import process_time as cpu\n    limit = cpu() + 5\n"
+            "    calls = count_calls(limit)\n    self.assertEqual(first=calls, second=2, msg=cpu() - limit)\n"
+            "def test_x(self):\n    from time import time\n    subprocess.run(cmd, timeout=time() + 5)\n"
+            "    self.assertEqual(n_lines, 4)\n"
+            "def test_y(self):\n    my_time = len\n    self.assertEqual(my_time([1, 2]), 2)\n"
+            "def test_z(self):\n    a, b = clock(), clock()\n    self.assertLess(b / max(a, 1e-3), LIMIT)\n"
+            "def test_bg(self):\n    stamp = dt.datetime.now(dt.timezone.utc)\n"
+            "    self.assertEqual(len(render(stamp)), 17)\n    self.assertEqual(dt.time(12, 0).hour, 12)\n"
+            "    self.assertEqual(datetime.date(2026, 9, 24).day, 24)\n"
+            "def test_bh(self):\n    t0 = time.clock_gettime(time.CLOCK_MONOTONIC)\n"
+            "    lines = run(timeout=HANG_TIMEOUT - (time.clock_gettime(time.CLOCK_MONOTONIC) - t0))\n"
+            "    self.assertEqual(lines.count, 2)\n"
+            "def test_bi(self):\n    started, count = clock(), 3\n    self.assertEqual(count, 3)\n"
+            "    [(t1, n), m] = [(tick(), 4), 5]\n    self.assertEqual(n + m, 9)\n"
+            "    first, *rest = clock(), 1, 2\n    self.assertEqual(rest, [1, 2])\n")
+    return bad, flagged, good
+
+
 # ---- lease / elapsed (kept identical to stamp-truth-stop.py; python3 -I forbids a sibling import) ----
 
 def read_regular(path, limit):
@@ -336,6 +589,9 @@ def _self_test():
     import unittest
 
     utc = datetime.timezone.utc
+    # a FIFO test's child timeout is a hang guard only (a blocking open never returns), far above the child's own
+    # run (well under a second), so the verdict never depends on the host's speed
+    HANG_TIMEOUT = 120
     line_re = re.compile(r"^CLOCK \(read by hook, authoritative\): \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \| "
                          r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z( \| session elapsed \d{2,}:\d{2})?$")
 
@@ -412,7 +668,8 @@ def _self_test():
             os.mkfifo(fifo)
             code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print(m.lease_start(%r))" % (os.path.abspath(__file__), fifo))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=5)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)
             self.assertEqual(r.stdout.strip(), "None")
 
         def test_lease_file_derivation(self):
@@ -568,7 +825,8 @@ def _self_test():
             self.write_lease("**Active-session:** sess-2026-09-23-opus55-r1\n")
             code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print(m.lease_start(%r, %r))" % (os.path.abspath(__file__), self.lease, fifo))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=5)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)
             self.assertEqual(r.stdout.strip(), "None")
 
         def test_r13_shared_lease_code_identical_to_stop_hook(self):
@@ -579,7 +837,7 @@ def _self_test():
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             for name in ("read_regular", "lease_file", "_utc_field", "transcript_start", "lease_start", "_is_worker",
-                     "_cfg", "_sibling_or_skip"):
+                     "_cfg", "_sibling_or_skip", "_wall_clock_asserts", "_wall_clock_alias_fixtures"):
                 self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
             for name in ("_SESS_RE", "_LEASE_FIELD_RE", "_START_VALUE_RE", "_HEADING_RE"):
                 self.assertEqual((getattr(mod, name).pattern, getattr(mod, name).flags),
@@ -643,6 +901,51 @@ def _self_test():
                 self.assertRegex(obj["additionalContext"], line_re)
             for argv in (None, 7):  # argv that cannot be inspected fails open: exit 0, silent, nothing evaluated
                 self.assertEqual(run_main("{}", argv=argv), (0, ""), argv)
+
+        # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
+        HANG_GUARD_TESTS = ()
+
+        def test_no_wall_clock_verdict(self):
+            """Residual (disclosed): the scan covers direct calls, imported aliases, and assigned aliases within a
+            function, not values passed between functions, so a time figure handed to a helper that asserts on it
+            is not flagged. Nor is a reading from a clock the scan does not name (os.times, date.today,
+            time.localtime or gmtime, a third-party clock, a file's mtime), nor a time figure routed through an
+            expression form the scan does not follow: an assignment expression (walrus), a dict literal, a
+            container built by a comprehension or filled by a store into a subscript, a starred or mismatched
+            unpacking, or any other routing; see _wall_clock_asserts."""
+            # every assertion of this file is scanned (see _wall_clock_asserts): none bounds a time figure, a
+            # ratio of two time figures excepted, outside the hang-guard tests named in HANG_GUARD_TESTS
+            with open(os.path.abspath(__file__), encoding="utf-8") as f:
+                src = f.read()
+            self.assertEqual(_wall_clock_asserts(src, self.HANG_GUARD_TESTS), [])
+            flagged = [name for name, _line in _wall_clock_asserts(src)]
+            for name in self.HANG_GUARD_TESTS:  # an exemption names a real hang guard the scan would flag
+                self.assertIn(name, flagged)
+            # the forms a substring check missed are caught: a harness result, an elapsed name, a bare assert, a
+            # for target, a time.time difference, and a comparison inside assertTrue
+            bad = ("def test_a(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
+                   "    self.assertLess(large, 2.0)\n"
+                   "def test_b(self):\n    started = time.monotonic()\n    run()\n"
+                   "    elapsed = time.monotonic() - started\n    self.assertLess(elapsed, 0.5)\n"
+                   "def test_c(self):\n    t0 = time.perf_counter()\n    assert time.perf_counter() - t0 < 1\n"
+                   "def test_d(self):\n    for name, (s, big) in run_timed(c, 9).items():\n"
+                   "        self.assertTrue(big < 3, name)\n"
+                   "def test_e(self):\n    t = time.time()\n    self.assertLessEqual(time.time() - t, 1)\n"
+                   "def test_f(self):\n    def inner():\n        self.assertLess(growth_in_child(src, 9)[1], 1)\n")
+            self.assertEqual([name for name, _line in _wall_clock_asserts(bad)],
+                             ["test_a", "test_b", "test_c", "test_d", "test_e", "test_f"])
+            # a ratio of two time figures, a time figure in the message only, and an exempt hang guard pass
+            good = ("def test_g(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
+                    "    self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))\n"
+                    "    self.assertTrue(large / small < 2, (small, large))\n"
+                    "def test_h(self):\n    t0 = time.monotonic()\n    self.assertLess(time.monotonic() - t0, 30.0)\n")
+            self.assertEqual(_wall_clock_asserts(good, ("test_h",)), [])
+            self.assertEqual(_wall_clock_asserts(good), [("test_h", 7)])
+            # a clock read through an alias (import-as, from-import, an assigned name) or a keyword operand is
+            # caught; the same aliases used for a hang-guard timeout, a count, or a msg keyword are not
+            bad, want, good = _wall_clock_alias_fixtures()
+            self.assertEqual([name for name, _line in _wall_clock_asserts(bad)], want)
+            self.assertEqual(_wall_clock_asserts(good), [])
 
         # -- sibling parity on a single-hook install --
         PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",)
