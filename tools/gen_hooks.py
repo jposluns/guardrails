@@ -196,18 +196,32 @@ def load_manifest(path):
     return plugin, hooks
 
 
-def _binds_name(target, name):
-    """Whether an assignment or deletion TARGET binds or mutates the module-level `name`: the name itself,
-    an element of a tuple/list unpack, a starred element, or a subscript/attribute whose base is the name
-    (a mutation). A name that appears only inside a subscript's SLICE (d[name] = ..) is NOT a binding of it."""
-    if isinstance(target, ast.Name):
-        return target.id == name
-    if isinstance(target, (ast.Tuple, ast.List)):
-        return any(_binds_name(el, name) for el in target.elts)
-    if isinstance(target, ast.Starred):
-        return _binds_name(target.value, name)
-    if isinstance(target, (ast.Subscript, ast.Attribute)):
-        return isinstance(target.value, ast.Name) and target.value.id == name
+# Read-only uses a dispatcher map may appear in besides its one binding: a method call that only reads, and
+# a builtin call that only reads its argument (the dispatcher's own `sorted(HANDLERS)` usage line).
+_DISPATCH_READ_METHODS = frozenset(("get", "keys", "values", "items"))
+_DISPATCH_READ_BUILTINS = frozenset(("sorted", "len", "set", "frozenset", "list", "tuple"))
+
+
+def _dispatch_load_is_read_only(node, parents):
+    """Whether a Load of the dispatcher name is a PURE READ that cannot mutate or alias the map: the value
+    of a Load-context subscript (HANDLERS[k]), the right side of an `in`/`not in` membership test, the
+    receiver of a read-only method call (HANDLERS.get(k), .keys(), .values(), .items()), or the sole
+    positional argument of a read-only builtin (sorted/len/set/frozenset/list/tuple). Every other Load (an
+    alias `x = HANDLERS`, a mutating method `.update()`/`.clear()`/`.pop()`/`.setdefault()`, an attribute
+    read, an argument to an arbitrary call, a return, a container element) can let the map change after
+    its literal, so it is not read-only."""
+    parent = parents.get(id(node))
+    if isinstance(parent, ast.Subscript) and parent.value is node:
+        return isinstance(parent.ctx, ast.Load)
+    if isinstance(parent, ast.Compare) and node in parent.comparators:
+        idx = parent.comparators.index(node)
+        return isinstance(parent.ops[idx], (ast.In, ast.NotIn))
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        call = parents.get(id(parent))
+        return (parent.attr in _DISPATCH_READ_METHODS and isinstance(call, ast.Call)
+                and call.func is parent)
+    if isinstance(parent, ast.Call) and parent.args == [node] and not parent.keywords:
+        return isinstance(parent.func, ast.Name) and parent.func.id in _DISPATCH_READ_BUILTINS
     return False
 
 
@@ -216,47 +230,76 @@ def _module_dict(script_text, dict_name):
     from the parsed script. ast.parse only builds the syntax tree; it does NOT execute or import the
     script, so this honours SECI-config-is-executable (the dispatcher is never run to read its keys).
 
-    Fails closed (returns None, so the caller reads the handler as undispatchable) unless the name is
-    bound EXACTLY ONCE at module level AND that sole binding is a plain `Name = {...}` (ast.Assign) or an
-    annotated `Name: T = {...}` (ast.AnnAssign) of a dict LITERAL. Round 11 (FIX 2): the binding count is
-    taken over EVERY module-level (re)binding of the name BEFORE any value-shape filter, closing the r10
-    fail-open where `HANDLERS = {..}` followed by `HANDLERS = make()` left the runtime dict empty
-    (undispatchable) yet still read the stale literal's keys as dispatchable, because the r10 code filtered
-    for an ast.Dict value FIRST and so counted only the one literal. A binding is any module-level statement
-    that (re)binds or mutates the name: an Assign/AnnAssign target, a tuple/list-unpack element
-    (`HANDLERS, HANDLER_EVENT = ..`; intentionally UNSUPPORTED - a dispatcher is bound once as its own dict
-    literal - so it counts and fails closed), an AugAssign (`HANDLERS += ..`), a subscript/attribute
-    mutation (`HANDLERS[..] = ..`), or a Delete (`del HANDLERS`). More than one such binding, or a single
-    binding whose value is not a dict literal (a call, comprehension, name, or merge), returns None."""
+    WHOLE-AST SINGLE-BINDING CHECK (round 12, the same shape as gen_gensrc._read_declaration). The ONLY
+    accepted binding is ONE top-level plain `Name = {...}` (ast.Assign with a single Name target) or
+    annotated `Name: T = {...}` (ast.AnnAssign) whose value is a dict LITERAL. The WHOLE tree is then
+    walked, at every depth (module control flow, functions, classes, comprehensions), and the map fails
+    closed (None, so the caller reads every handler as undispatchable) on ANY other binding or mutation of
+    the name: a Store- or Del-context Name (a second, nested, or conditional assignment, an augmented or
+    annotated assignment, a del, a walrus, a tuple or star unpack, a for, with, or comprehension target);
+    an import alias, including a dotted-root `import HANDLERS.x` and a wildcard `from x import *`; a
+    def or class; an except-as; a match capture, including a mapping rest; a parameter; a global or
+    nonlocal declaration; and ANY Load of the name that is not a pure read (see
+    _dispatch_load_is_read_only), which closes a subscript or attribute store (`HANDLERS[k] = v`), a
+    mutating method call (`HANDLERS.update(..)`, `.clear()`, `.pop(..)`), and an alias that could be
+    mutated later (`x = HANDLERS`). A chained `A = HANDLERS = {...}` is rejected (its sibling target is
+    an alias), and a single binding whose value is not a dict literal (a call, comprehension, name, or
+    merge) returns None.
+
+    DISCLOSED RESIDUAL: the name is treated as RESERVED, so an unrelated local reuse of it inside a
+    function is also rejected (an over-catch in the safe direction). Truly DYNAMIC binding
+    (globals()["HANDLERS"] = .., exec, setattr on the module, a mutation through an object obtained
+    without naming the map) is beyond static analysis and not claimed; the dispatch-path self-tests,
+    which run the real dispatcher, are the compensating layer."""
     try:
         tree = ast.parse(script_text)
     except (SyntaxError, ValueError):
         return None
-    bind_count = 0
-    literal = None
-    for node in tree.body:  # MODULE LEVEL only: a dict built inside a def/class is not the dispatcher
-        if isinstance(node, ast.Assign):
-            if any(_binds_name(t, dict_name) for t in node.targets):
-                bind_count += 1
-                if isinstance(node.value, ast.Dict) and any(
-                        isinstance(t, ast.Name) and t.id == dict_name for t in node.targets):
-                    literal = node.value
-        elif isinstance(node, ast.AnnAssign) and node.target is not None:
-            if isinstance(node.target, ast.Name) and node.target.id == dict_name:
-                bind_count += 1
-                if node.value is not None and isinstance(node.value, ast.Dict):
-                    literal = node.value
-            elif _binds_name(node.target, dict_name):  # annotated subscript/attribute mutation
-                bind_count += 1
-        elif isinstance(node, ast.AugAssign):
-            if _binds_name(node.target, dict_name):
-                bind_count += 1
-        elif isinstance(node, ast.Delete):
-            if any(_binds_name(t, dict_name) for t in node.targets):
-                bind_count += 1
-    if bind_count == 1 and literal is not None:
-        return literal
-    return None
+    literal_assign = [
+        node for node in tree.body
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) and node.targets[0].id == dict_name)
+        or (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+            and node.target.id == dict_name and node.value is not None)]
+    if len(literal_assign) != 1 or not isinstance(literal_assign[0].value, ast.Dict):
+        return None
+    binding = literal_assign[0]
+    allowed = {id(binding.targets[0] if isinstance(binding, ast.Assign) else binding.target)}
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == dict_name:
+            if id(node) in allowed:
+                continue
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                return None
+            if not _dispatch_load_is_read_only(node, parents):
+                return None
+        elif isinstance(node, ast.alias):
+            bound = node.asname if node.asname is not None else node.name.partition(".")[0]
+            if bound == dict_name or (node.asname is None and node.name == "*"):
+                return None
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == dict_name:
+                return None
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == dict_name:
+                return None
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name == dict_name:
+                return None
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest == dict_name:
+                return None
+        elif isinstance(node, ast.arg):
+            if node.arg == dict_name:
+                return None
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if dict_name in node.names:
+                return None
+    return binding.value
 
 
 def _dispatch_keys(script_text, dict_name):
@@ -729,6 +772,54 @@ def self_test_main():
                    'HANDLERS, HANDLER_EVENT = _pair()\n')
         if _dispatch_keys(_unpack, "HANDLERS") != set():
             failures.append("a tuple-unpack rebinding of HANDLERS (alongside its literal) must fail closed")
+
+        # N8 (round 12, whole-AST single binding): EVERY other binding or mutation of the dispatcher name,
+        #     at any depth, fails the map closed, not only a top-level statement. Each form below slipped
+        #     the round-11 top-level scan (a nested rebinding, a walrus, an import binder, a for/with/
+        #     except/match/comprehension target, a global rebinding in a function, a def, a parameter, a
+        #     mutating method call, an alias that is mutated later, a chained assignment, an argument to an
+        #     arbitrary call). The literal line is shared; each case appends its own binding.
+        _lit = 'HANDLERS = {\n    "test_handler": test_handler,\n}\n'
+        for _label, _tail in (
+                ("nested-if", "if True:\n    HANDLERS = {'x': x}\n"),
+                ("nested-try", "try:\n    HANDLERS = {}\nexcept E:\n    pass\n"),
+                ("walrus", "(HANDLERS := {})\n"),
+                ("from-import", "from elsewhere import HANDLERS\n"),
+                ("dotted-import", "import HANDLERS.child\n"),
+                ("wildcard-import", "from elsewhere import *\n"),
+                ("for-target", "for HANDLERS in rows:\n    pass\n"),
+                ("with-target", "with ctx() as HANDLERS:\n    pass\n"),
+                ("except-as", "try:\n    pass\nexcept E as HANDLERS:\n    pass\n"),
+                ("match-capture", "match v:\n    case HANDLERS:\n        pass\n"),
+                ("match-rest", "match v:\n    case {**HANDLERS}:\n        pass\n"),
+                ("comprehension", "[1 for HANDLERS in rows]\n"),
+                ("global-rebind", "def f():\n    global HANDLERS\n    HANDLERS = {}\n"),
+                ("def", "def HANDLERS():\n    pass\n"),
+                ("parameter", "def f(HANDLERS):\n    pass\n"),
+                ("del", "del HANDLERS\n"),
+                ("update-method", "HANDLERS.update(late=late)\n"),
+                ("clear-in-function", "def f():\n    HANDLERS.clear()\n"),
+                ("alias-mutation", "alias = HANDLERS\nalias['late'] = late\n"),
+                ("call-argument", "register(HANDLERS)\n"),
+                ("attribute-store", "HANDLERS.extra = 1\n")):
+            if _dispatch_keys(_lit + _tail, "HANDLERS") != set():
+                failures.append("a {} binding or mutation of HANDLERS must fail closed (empty key set)"
+                                .format(_label))
+        if _dispatch_keys("X = " + _lit, "HANDLERS") != set():
+            failures.append("a chained X = HANDLERS = {...} (an alias target) must fail closed")
+        # the dispatcher's own pure reads stay accepted (no over-fire on the real usage shape)
+        _reads = (_lit + "def main(mode):\n    if mode not in HANDLERS:\n        print(sorted(HANDLERS))\n"
+                  "    return HANDLERS[mode](None), HANDLERS.get(mode)\n")
+        if _dispatch_keys(_reads, "HANDLERS") != {"test_handler"}:
+            failures.append("the dispatcher's pure reads (in, sorted, subscript, get) must stay accepted")
+        # N8b: the same mutation in a BUILT tree fails the generator closed end-to-end (exit 2).
+        mutated = tmp / "mutated"
+        mutated.mkdir()
+        _build_tree(mutated)
+        _mpath = mutated / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+        _mpath.write_text(_mpath.read_text(encoding="utf-8") + "\nHANDLERS.clear()\n", encoding="utf-8")
+        if run_quiet(mutated, check=False) != 2:
+            failures.append("a HANDLERS.clear() mutation in the built script must fail closed (exit 2)")
 
         # 3. An unknown corpus-id in the manifest fails closed.
         badid = tmp / "badid"

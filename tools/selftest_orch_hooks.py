@@ -2402,11 +2402,10 @@ def main(report_path=None):
         w.set_turn_state({})
         check("wait/ordinary-bash-inert-allow", _verdict(waitcall("git status --short")), "allow")
         check("wait/ordinary-bash-ls-inert-allow", _verdict(waitcall("ls -la /tmp")), "allow")
-        # a GENUINE wait (a plain sleep, a while-poll loop, a bare wait builtin) is JUDGED -> DENY (livbak)
+        # a PROVABLY-SIMPLE wait (one bare sleep, one bare wait builtin) is JUDGED -> DENY (livbak)
         check("wait/genuine-sleep-denies", _verdict(waitcall("sleep 600")), "deny")
-        check("wait/genuine-poll-loop-denies",
-              _verdict(waitcall("while true; do sleep 5; done")), "deny")
         check("wait/bare-wait-builtin-denies", _verdict(waitcall("wait")), "deny")
+        check("wait/simple-wait-surrounding-space-denies", _verdict(waitcall("  sleep 5\n")), "deny")
         # r10 FIX 1: the discriminator judges the COMMAND WORD over the lexer, so a while/sleep token in
         # ARGUMENT position is NOT a wait (the r9 token-correlation over-fire), while a sleep inside an
         # if/then branch or a for-loop body IS a wait (the r9 body-keyword miss). Actionable item present.
@@ -2415,9 +2414,12 @@ def main(report_path=None):
               _verdict(waitcall("git commit -m while -m sleep")), "allow")
         check("wait/arg-grep-pipe-while-sleep-inert-allow",
               _verdict(waitcall("grep -rn sleep . | grep -i while")), "allow")
-        check("wait/if-then-sleep-denies", _verdict(waitcall("if true; then sleep 600; fi")), "deny")
-        check("wait/for-loop-sleep-denies",
-              _verdict(waitcall("for i in 1 2 3; do sleep 10; done")), "deny")
+        # r12 FIX 1 (fail-safe by construction): a wait inside ANY compound is out of the closed form and
+        # INERT-ALLOWS (a disclosed missed wait, never a wedge). These were judged (deny) through r11.
+        check("wait/if-then-sleep-inert-allow", _verdict(waitcall("if true; then sleep 600; fi")), "allow")
+        check("wait/for-loop-sleep-inert-allow",
+              _verdict(waitcall("for i in 1 2 3; do sleep 10; done")), "allow")
+        check("wait/poll-loop-inert-allow", _verdict(waitcall("while true; do sleep 5; done")), "allow")
         # r11 FIX 1: the r10 UNCONDITIONAL body-keyword skip wedged an ordinary command literally named
         # do/then (a bare, quoted, or path-qualified `do`) - it read `do` as a shell keyword and skipped to
         # the following sleep. A body keyword is a keyword ONLY when a PRIOR segment opened a compound
@@ -2430,6 +2432,37 @@ def main(report_path=None):
         check("wait/while-condition-sleep-inert-allow",
               _verdict(waitcall("while sleep 60; do :; done")), "allow")
         check("wait/modifier-time-sleep-inert-allow", _verdict(waitcall("time sleep 5")), "allow")
+        # r12 FIX 1: every r11 QA counterexample is out of the closed form and INERT-ALLOWS (the wedge and
+        # the async misclassification are impossible by construction; the misses are disclosed): a quoted
+        # or path-qualified opener or body keyword, a do/then after a COMPLETED compound, a backgrounded
+        # sleep (which does not wait), a sleep behind exec, in an if condition, in a select body, in a
+        # subshell, a quoted or path-qualified sleep, a leading assignment, and an option argument.
+        for _cid, _cmd in (
+                ("wait/r11-quoted-opener-inert-allow", "'while' true; 'do' sleep"),
+                ("wait/r11-path-opener-inert-allow", "dir/while true; dir/do sleep"),
+                ("wait/r11-sticky-compound-inert-allow", "while false; do :; done; 'do' sleep"),
+                ("wait/r11-do-after-loop-inert-allow", "while true; do :; done; \\do sleep 5"),
+                ("wait/r11-then-after-if-inert-allow", "if true; then :; fi; /bin/do sleep 5"),
+                ("wait/async-sleep-inert-allow", "sleep 600 &"),
+                ("wait/async-sleep-list-inert-allow", "sleep 600 & echo done"),
+                ("wait/async-then-wait-inert-allow", "sleep 5 & wait"),
+                ("wait/exec-sleep-inert-allow", "exec sleep 600"),
+                ("wait/if-condition-sleep-inert-allow", "if sleep 600; then :; fi"),
+                ("wait/select-body-sleep-inert-allow", "select x in a; do sleep 600; done"),
+                ("wait/subshell-sleep-inert-allow", "( sleep 5 )"),
+                ("wait/quoted-sleep-inert-allow", "'sleep' 5"),
+                ("wait/path-sleep-inert-allow", "/bin/sleep 5"),
+                ("wait/assignment-prefix-inert-allow", "FOO=1 sleep 5"),
+                ("wait/option-arg-inert-allow", "wait -n"),
+                ("wait/redirect-inert-allow", "sleep 5 > /dev/null"),
+                ("wait/expansion-arg-inert-allow", "sleep $DELAY"),
+                ("wait/nonascii-space-inert-allow", "sleep\u00a05")):
+            check(_cid, _verdict(waitcall(_cmd)), "allow")
+        # the closed form is decided over the WHOLE string: a direct discriminator probe on a non-string
+        # and on a trailing-list form (never a wait), and on a named wait (a wait)
+        check("wait/discriminator-non-string-false", aiqt_hooks._orch_command_waits(None), False)
+        check("wait/discriminator-trailing-list-false", aiqt_hooks._orch_command_waits("sleep 5; ls"), False)
+        check("wait/discriminator-named-wait-true", aiqt_hooks._orch_command_waits("wait T-1"), True)
         # wait_tools = [] (an EMPTY list) is fully inert even for a genuine wait command
         _wr_empty = json.loads((w.root / ".aiqt" / "orchestration.local.json").read_text())
         _wr_empty["wait_tools"] = []
@@ -2500,6 +2533,91 @@ def main(report_path=None):
         check("enum/clean-graphic-ascii-passes", _cle is None and _cli is not None, True)
         _cpi, _cpe = aiqt_hooks.validate_enumeration(_pref("plan.md"))
         check("enum/clean-prep-ref-passes", _cpe is None and _cpi is not None, True)
+
+        # ---------- round 12 MAJOR-5: an item ID is verdict-bearing and takes the ASCII allowlist ----------
+        # A look-alike id (a combining grapheme joiner, a zero-width space, a variation selector) emitted by
+        # an ALTERNATE JSON enumerator (the Markdown parser's ASCII id grammar never admits one) could join
+        # a covering register row and launder a terminal close or a visible deferral. Direct-JSON vectors:
+        # validate_enumeration rejects each, and the real stop guard over the same JSON HOLDS (block2)
+        # instead of reading the item terminal or deferred. Python ESCAPES, no literal invisible byte.
+        for _cid, _bad in (("enum/cgj-item-id-rejected", "A\u034f-1"),
+                           ("enum/zwsp-item-id-rejected", "A\u200b-1"),
+                           ("enum/vs-item-id-rejected", "A-1\ufe0f"),
+                           ("enum/space-item-id-rejected", "A 1")):
+            _ii, _ie = aiqt_hooks.validate_enumeration(_r10env([
+                {"id": _bad, "title": "t", "state": "closed", "granted": True, "blocker": None,
+                 "close": {"reason": "no-fix-needed", "ref": "R-1"}}]))
+            check(_cid, _ii is None and bool(_ie), True)
+        _ok_i, _ok_e = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "A-1.x_y", "title": "t", "state": "open", "granted": True, "blocker": None}]))
+        check("enum/ascii-item-id-passes", _ok_e is None and _ok_i is not None, True)
+        # terminal join: a covering dispositions row keyed on the SAME look-alike id; before round 12 the
+        # stop read the close as terminal and ALLOWED (warn); now the enumeration is refused -> HOLD.
+        _cgj = "C\u034f-1"
+        mj = Fixture(tmp, "major5-terminal")
+        mj.write_ground("dispositions", "dispositions-validated.json", "DS-",
+                        [{"item": _cgj, "ground": "no-fix-needed", "ref": "R-1",
+                          "status": "accepted", "ts": now_iso(0), "check_ref": "seed.txt"}])
+        mj.set_items([item(_cgj, state="closed", close={"reason": "no-fix-needed", "ref": "R-1"})],
+                     version=2)
+        mj.set_turn_state({})
+        check("major5/lookalike-terminal-join-holds",
+              _verdict(aiqt_hooks.orch_stop_guard(mj.payload("Stop"))), "block2")
+        # deferral join: a covering deferrals row on the look-alike id; before round 12 it read as a visible
+        # granted deferral and the stop ALLOWED (warn); now the enumeration is refused -> HOLD.
+        _dcgj = "D\u034f-1"
+        md = Fixture(tmp, "major5-deferral")
+        md.write_ground("deferrals", "deferrals-validated.json", "DF-",
+                        [{"item": _dcgj, "ref": "PD-1", "status": "accepted",
+                          "ts": now_iso(0), "check_ref": "seed.txt"}], weak=True)
+        md.set_items([item(_dcgj, state="closed",
+                           close={"reason": "maintainer-deferred", "ref": "PD-1"})], version=2)
+        md.set_turn_state({})
+        check("major5/lookalike-deferral-join-holds",
+              _verdict(aiqt_hooks.orch_stop_guard(md.payload("Stop"))), "block2")
+        # the same joins on a plain ASCII id still reach their verdicts (no over-fire)
+        md.write_ground("deferrals", "deferrals-validated.json", "DF-",
+                        [{"item": "D-1", "ref": "PD-1", "status": "accepted",
+                          "ts": now_iso(0), "check_ref": "seed.txt"}], weak=True)
+        md.set_items([item("D-1", state="closed",
+                           close={"reason": "maintainer-deferred", "ref": "PD-1"})], version=2)
+        md.set_turn_state({})
+        check("major5/ascii-deferral-join-visible",
+              _verdict(aiqt_hooks.orch_stop_guard(md.payload("Stop"))), "warn")
+
+        # ---------- round 12: blocker EVIDENCE and register POINTERS take the printable-ASCII allowlist ----
+        # evidence is free text but it substantiates a block: an invisible-bearing evidence is refused at
+        # the engine surface, and an evidence with no ASCII letter or digit is EMPTY (unsubstantiated), so
+        # the stop DENIES instead of reading the block as proven.
+        _evi, _eve = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "E-1", "title": "t", "state": "open", "granted": True,
+             "blocker": {"kind": "external", "ref": "ci", "evidence": "\u200b",
+                         "observed_at_utc": now_iso(1)}}]))
+        check("enum/invisible-evidence-rejected", _evi is None and bool(_eve), True)
+        _evv, _eve2 = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "E-1", "title": "t", "state": "open", "granted": True,
+             "blocker": {"kind": "external", "ref": "ci", "evidence": "run\ufe0f 42",
+                         "observed_at_utc": now_iso(1)}}]))
+        check("enum/vs-evidence-rejected", _evv is None and bool(_eve2), True)
+        ev = Fixture(tmp, "evidence12")
+        ev.set_items([item("E-2", blocker={"kind": "external", "ref": "ci", "evidence": " -- ",
+                                           "observed_at_utc": now_iso(1)})], version=2)
+        ev.set_turn_state({})
+        check("evidence/punctuation-only-unsubstantiated",
+              _verdict(aiqt_hooks.orch_stop_guard(ev.payload("Stop"))), "block2")
+        ev.set_items([item("E-3", blocker={"kind": "external", "ref": "ci", "evidence": "run 42 pending",
+                                           "observed_at_utc": now_iso(1)})], version=2)
+        ev.set_turn_state({})
+        check("evidence/plain-ascii-substantiates",
+              _verdict(aiqt_hooks.orch_stop_guard(ev.payload("Stop"))), "warn")
+        # a register POINTER carrying an invisible never resolves, even when a file of that exact look-alike
+        # name EXISTS (the filesystem would otherwise resolve it); the plain pointer still resolves.
+        _evsd = str(ev.root / ".aiqt" / "state")
+        (ev.root / "seed.txt\u200b").write_text("x\n", encoding="utf-8")
+        check("pointer/invisible-pointer-unresolved",
+              aiqt_hooks._orch_pointer_resolves(str(ev.root), _evsd, "seed.txt\u200b"), False)
+        check("pointer/plain-pointer-resolves",
+              aiqt_hooks._orch_pointer_resolves(str(ev.root), _evsd, "seed.txt"), True)
 
         # ---------- GD-164: surface-N and emission ----------
         s = Fixture(tmp, "surface")

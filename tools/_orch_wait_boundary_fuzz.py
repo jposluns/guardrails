@@ -36,6 +36,7 @@ import itertools
 import json
 import os
 import random
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -391,8 +392,80 @@ def sweep_boundary():
     return breaches
 
 
+# Round 12 (FIX 1): fragments the discriminator sweep composes into commands. They cover the shell grammar
+# the r9-r11 QA used against the old lexer-based discriminator (quoting, escapes, path-qualified words,
+# compound openers and body keywords, separators, background, redirects, expansions, groups, modifiers,
+# assignments, non-ASCII and invisible characters), beside the plain words a simple wait is built from.
+_DISC_WORDS = ("sleep", "wait", "do", "then", "while", "until", "if", "fi", "done", "select", "exec",
+               "time", "env", "nohup", "echo", "git", "ls", "true", ":", "600", "5", "1m", "T-1", "WA-1",
+               "%1", "-n", "x", "in", "a")
+_DISC_ODD = ("'sleep'", '"wait"', "\\sleep", "/bin/sleep", "dir/do", "'do'", "FOO=1", "$DELAY", "`x`",
+             "*", "?", "[a]", "{", "}", "(", ")", ";", "&", "&&", "||", "|", ">", "<", "2>&1", "#c",
+             "~", "!", "\n", "\u00a0", "\u200b", "\ufe0f", "\t")
+
+
+def _plain_simple_wait(cmd):
+    """An INDEPENDENT oracle for a provably-simple wait, built on POSIX shlex rather than the engine's
+    regex: ASCII, no control character but tab, no quoting, escaping, expansion, glob, comment, or history
+    character, no shell operator token, and a first word of exactly sleep or wait whose shlex word list
+    equals the plain whitespace split (so no quoting or escaping changed a word)."""
+    s = cmd.strip(" \t\n")
+    if not s or not s.isascii() or any(ord(ch) < 32 and ch != "\t" for ch in s):
+        return False
+    if any(ch in "$`*?[]{}~#!\\'\"" for ch in s):
+        return False
+    lex = shlex.shlex(s, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        toks = list(lex)
+    except ValueError:
+        return False
+    if any(tok and set(tok) <= set("();<>|&") for tok in toks):
+        return False
+    return bool(toks) and toks[0] in ("sleep", "wait") and toks == s.split()
+
+
+def sweep_discriminator(rounds):
+    """Round 12 (FIX 1) WEDGE-FREEDOM by construction: over a deterministic mutation sweep of composed
+    commands, the engine discriminator may call a command a wait ONLY when the independent shlex oracle
+    agrees it is a plain simple sleep or wait (soundness: an ambiguous command is never judged, so it can
+    never be wedged), and every oracle-simple command built from plain words is recognized. A sample of the
+    non-wait commands is then driven through orch_wait_guard with an actionable item present and wait_tools
+    declaring Bash, and each must be an inert allow (never a deny)."""
+    breaches = []
+    rng = random.Random(_SEED)
+    n = rounds or 4000
+    non_waits = []
+    for _ in range(n):
+        size = rng.randint(1, 5)
+        pool = _DISC_WORDS if rng.random() < 0.5 else _DISC_WORDS + _DISC_ODD
+        cmd = " ".join(rng.choice(pool) for _ in range(size))
+        if rng.random() < 0.3:
+            cmd = rng.choice(("sleep ", "wait ")) + cmd
+        judged = aiqt_hooks._orch_command_waits(cmd)
+        oracle = _plain_simple_wait(cmd)
+        if judged and not oracle:
+            breaches.append("FIX1 BREACH: the discriminator judged a non-simple command as a wait: "
+                            "{!r}".format(cmd))
+        if not judged:
+            non_waits.append(cmd)
+        plain = all(tok in _DISC_WORDS for tok in cmd.split())
+        if oracle and plain and not cmd.split()[1:] and not judged:
+            breaches.append("FIX1 BREACH: a bare simple wait was not recognized: {!r}".format(cmd))
+    with tempfile.TemporaryDirectory(prefix="aiqt-wbf-disc-") as tmp:
+        root = _mkrepo(tmp, {}, [{"id": "A-1", "state": "open", "granted": True}])
+        for cmd in non_waits[:60]:
+            if _wait_verdict(root, cmd) != "allow":
+                breaches.append("FIX1 BREACH: an out-of-form command was not an inert allow: "
+                                "{!r}".format(cmd))
+        if _wait_verdict(root, "sleep 600") != "deny":
+            breaches.append("FIX1 BREACH: a provably-simple wait with actionable work was not judged")
+    return breaches
+
+
 def run(rounds):
-    breaches = sweep_pure(rounds) + sweep_tool_succeeded() + sweep_boundary()
+    breaches = (sweep_pure(rounds) + sweep_tool_succeeded() + sweep_boundary()
+                + sweep_discriminator(rounds))
     return breaches
 
 
@@ -410,7 +483,7 @@ def main():
             print("FUZZ FAIL: " + b, file=sys.stderr)
         return 1
     print("wait-boundary fuzz: invariant held across the sweep "
-          "(pure-core combos + read/parse boundary cases)")
+          "(pure-core combos + read/parse boundary cases + discriminator wedge-freedom)")
     return 0
 
 

@@ -139,6 +139,15 @@ def _ref_unsafe(s):
     return not all("\u0021" <= ch <= "\u007e" for ch in s)
 
 
+def _text_unsafe(s):
+    """True when a verdict-bearing FREE-TEXT span (a blocker's evidence text) is NOT entirely printable
+    ASCII (every char in U+0020..U+007E). Round 12: the _ref_unsafe allowlist widened only by the ordinary
+    space, since evidence is prose; an invisible, a variation selector, a combining mark, a filler, or any
+    other non-ASCII char is an enumeration error (exit 3) rather than evidence that merely looks present.
+    Mirrors the engine _orch_text_unsafe."""
+    return not all("\u0020" <= ch <= "\u007e" for ch in s)
+
+
 def parse(text, version=2):
     """(items, errors). Errors are strings; any error means the enumeration must not be emitted. Under
     version 2 the close/prep annotations are strict; under version 1 they are ignored and the v1 item
@@ -229,6 +238,9 @@ def parse(text, version=2):
                 blocker["observed_at_utc"] = om.group("t")
             em = EVIDENCE_RE.search(rest)
             if em:
+                if _text_unsafe(em.group("e").strip()):
+                    errors.append("line {}: blocker evidence carries a non printable-ASCII char".format(n))
+                    continue
                 blocker["evidence"] = em.group("e").strip()
             pm = PREP_RE.search(rest)
             prm = PREP_REF_RE.search(rest)
@@ -523,6 +535,16 @@ def self_test():
         ok_fail.append("a VS-bearing close.paths entry must fail closed (allowlist)")
     if not parse("- A-1 [x] done :: close:fixed=abc :: paths=tools/gen_hooks.py\u200b\n", version=2)[1]:
         ok_fail.append("a ZWSP-bearing close.paths entry must fail closed (allowlist)")
+    # r12: blocker EVIDENCE is free text but verdict-bearing (it substantiates a block), so it takes the
+    # printable-ASCII allowlist: an invisible-only or look-alike evidence fails closed, plain prose passes.
+    if not parse("- B-1 [BLOCKED] w :: blocker:external=ci-42 :: evidence=\u200b\n", version=2)[1]:
+        ok_fail.append("a ZWSP-only evidence must fail closed (allowlist)")
+    if not parse("- B-1 [BLOCKED] w :: blocker:external=ci-42 :: evidence=run\ufe0f pending\n",
+                 version=2)[1]:
+        ok_fail.append("a VS-bearing evidence must fail closed (allowlist)")
+    _ev = parse("- B-1 [BLOCKED] w :: blocker:external=ci-42 :: evidence=run 42 pending\n", version=2)
+    if _ev[1] or _ev[0][0]["blocker"].get("evidence") != "run 42 pending":
+        ok_fail.append("a printable-ASCII evidence must pass verbatim (got {})".format(_ev))
     _clean = parse("- A-1 [x] done :: close:fixed=commit-abc123 :: paths=tools/gen_hooks.py,a/b.py\n",
                    version=2)
     if _clean[1] or _clean[0][0].get("close", {}).get("paths") != ["tools/gen_hooks.py", "a/b.py"]:

@@ -8007,6 +8007,24 @@ def _orch_ref_unsafe(s):
     return not all("\u0021" <= ch <= "\u007e" for ch in s)
 
 
+def _orch_text_unsafe(s):
+    """True when a verdict-bearing FREE-TEXT span (a blocker's evidence text, a register row's check_ref or
+    evidence pointer) is NOT entirely printable ASCII (every char in U+0020..U+007E). Round 12: the same
+    allowlist as _orch_ref_unsafe, widened only by the ordinary space, since evidence is prose. Any other
+    char (a control, a format or zero-width char, a variation selector, a combining mark, a filler, any
+    non-ASCII codepoint) is rejected by construction rather than enumerated, so no invisible can make an
+    empty-looking span read as present or steer a pointer check onto a look-alike."""
+    return not all("\u0020" <= ch <= "\u007e" for ch in s)
+
+
+def _orch_evidence_substantive(ev):
+    """True when a blocker's evidence text can substantiate the block: printable ASCII carrying at least
+    one ASCII letter or digit. Whitespace-only or punctuation-only evidence is EMPTY (unsubstantiated), so
+    it can never prove a block; a non-string is never evidence."""
+    return (isinstance(ev, str) and not _orch_text_unsafe(ev)
+            and any(ch.isascii() and ch.isalnum() for ch in ev))
+
+
 def _orch_now():
     """The clock-read UTC now (tstamp: a recorded timestamp is read from the clock, never recalled)."""
     return datetime.datetime.now(datetime.timezone.utc)
@@ -8469,6 +8487,13 @@ def validate_enumeration(obj):
         iid = raw.get("id")
         if not isinstance(iid, str) or not iid:
             return (None, "an item has no string id")
+        if _orch_ref_unsafe(iid):
+            # Round 12 (MAJOR-5): an item id is verdict-bearing (it is joined against the disposition and
+            # deferral registers and the checkpoint), so it takes the same graphic-ASCII allowlist as a ref,
+            # matching the Markdown surface, whose id grammar is ASCII. A look-alike id (an invisible or a
+            # combining mark inside it) could otherwise launder a terminal verdict through an alternate JSON
+            # enumerator that the Markdown parser would have refused.
+            return (None, "an item id carries a non graphic-ASCII char")
         if iid in seen:
             return (None, "duplicate item id {!r}".format(iid))
         seen.add(iid)
@@ -8528,6 +8553,8 @@ def validate_enumeration(obj):
                     or (obs is not None and not isinstance(obs, str)):
                 return (None, "item {} has a malformed blocker field (evidence/observed_at_utc)"
                         .format(iid))
+            if isinstance(ev, str) and _orch_text_unsafe(ev):
+                return (None, "item {} blocker evidence carries a non printable-ASCII char".format(iid))
             if version == 2 and blocker.get("kind") == "human-decision":
                 pc = blocker.get("prep_complete")
                 if not isinstance(pc, bool):
@@ -8911,7 +8938,7 @@ def classify_backlog(items, live_ids, ledger_readable, pending_haystack, stalene
                 out["actionable"].append((it["id"], it["title"],
                                           "{} blocker ref {} is covered by no fresh validated "
                                           "attestation".format(kind, ref)))
-            elif (blocker.get("evidence") or "").strip() and fresh:
+            elif _orch_evidence_substantive(blocker.get("evidence")) and fresh:
                 out["blocked"].append((it["id"], kind, ref))
             else:
                 out["actionable"].append((it["id"], it["title"],
@@ -9988,46 +10015,35 @@ def orch_route_guard(data):
     return _allow()
 
 
-_ORCH_WAIT_COMMANDS = frozenset(("sleep", "wait"))
-_ORCH_WAIT_BODY_KEYWORDS = frozenset(("do", "then", "else", "elif"))
-# Compound openers: a body keyword (do/then/else/elif) is only a shell keyword INSIDE one of these; a bare or
-# quoted `do` with no opener is a command name, not a keyword (round 11: the r10 unconditional skip wedged an
-# ordinary command whose name is do/then).
-_ORCH_WAIT_COMPOUND_OPENERS = frozenset(("while", "until", "for", "if"))
+# FAIL-SAFE BY CONSTRUCTION (round 12): a Bash command is judged as a wait ONLY when the WHOLE command,
+# less surrounding whitespace, is ONE bare simple command whose command word is exactly the unquoted word
+# sleep or wait, followed by zero or more plain arguments. Every character outside that closed form (a
+# quote, an escape, a path separator in the command word, a shell operator or separator, a newline, a
+# redirect, an expansion, a group, a leading assignment or modifier, a non-ASCII character) takes the
+# command out of the form, and anything out of the form is an INERT ALLOW. No shell grammar is parsed, so
+# no grammar edge can turn an ordinary command into a judged wait (the wedge is impossible by
+# construction); the price is under-detection, disclosed on the discriminator and in the manifest.
+_ORCH_SIMPLE_WAIT_RE = re.compile(r"(?:sleep|wait)(?:[ \t]+[A-Za-z0-9_.:%+,=@][A-Za-z0-9_.:%+,=@/-]*)*")
 
 
 def _orch_command_waits(command):
-    """A1 wait-intent discriminator (round 11): True only for a HIGH-CONFIDENCE Bash wait, judged over the
-    quote/redirect-aware lexer. A segment is a wait when its COMMAND WORD is `sleep` or `wait`, INCLUDING a
-    sleep/wait inside a while/until/for loop body or an if/then branch (its leading do/then/else/elif body
-    keyword is skipped ONLY when a prior segment opened a compound while/until/for/if, so a bare or quoted
-    command literally named do/then is NOT mistaken for a keyword - the round-10 wedge). It NEVER fires on a
-    while/sleep token in ARGUMENT position (echo while sleep). An unparseable command is NOT recognizably a
-    wait (fail-safe: caller inert-allows, never wedges). DISCLOSED RESIDUAL (fail-safe to inert allow, never a
-    wedge): an obfuscated wait (alias/rename; a sleep/loop in a nested shell string bash -c '... sleep ...'; a
-    wait via another program python -c 'time.sleep(...)'; a no-sleep spin loop; a stdin-blocking read; an
-    unparseable construct such as a here-string or process substitution that raises ValueError); AND a genuine
-    wait the discriminator does not structurally recognize: a sleep in a while/until loop CONDITION (while
-    sleep 60; do :; done), a sleep behind a command-modifier prefix (command/builtin/time/! and nice/nohup/
-    timeout/env wrappers), and a sleep inside a brace or subshell group ({ sleep 5; } / ( sleep 5 )). These
-    are NOT caught (they inert-allow) and are disclosed here; the schedule-denial cap and stop-guard
-    re-enumeration are the compensating layers."""
-    try:
-        segments = _segments(command)
-    except ValueError:
+    """A1 wait-intent discriminator, FAIL-SAFE BY CONSTRUCTION (round 12): True ONLY for a provably-simple
+    wait, a command that is exactly one bare top-level `sleep` or `wait` with plain arguments (for example
+    `sleep 600`, `wait`, `wait T-1`), matched as a WHOLE-STRING closed form over the raw text after
+    stripping surrounding whitespace. Everything ambiguous is NOT a wait and the caller INERT-ALLOWS it, so
+    an ordinary command can never be wedged. DISCLOSED RESIDUAL (it catches ONLY simple waits; each case
+    below inert-allows, a missed wait, never a wedge): a sleep or wait inside a loop, an if/then branch, a
+    case, a select, a brace or subshell group, a pipeline, or a list (`;`, `&&`, `||`, a newline); a
+    backgrounded `sleep 600 &` (which does not wait) and a `sleep 5 & wait` list; a quoted, escaped, or
+    path-qualified command word (`'sleep' 5`, `\\sleep 5`, `/bin/sleep 5`); a leading assignment or modifier
+    (`FOO=1 sleep 5`, `exec`, `command`, `time`, `nice`, `nohup`, `timeout`, `env`); an argument that is
+    an option (`wait -n`) or carries a quote, expansion, glob, or redirect; a wait in a nested shell
+    string or another program (`bash -c '...'`, `python -c 'time.sleep(...)'`); a no-sleep spin loop; a
+    stdin-blocking read; and any non-string or non-ASCII command. The schedule-denial cap and the
+    stop-guard re-enumeration are the compensating layers."""
+    if not isinstance(command, str):
         return False
-    compound = False
-    for argv, _sep in segments:
-        cw = _command_word(argv)
-        if cw in _ORCH_WAIT_COMPOUND_OPENERS:
-            compound = True
-        if compound and cw in _ORCH_WAIT_BODY_KEYWORDS:
-            idx = _command_word_index(argv)
-            if idx is not None:
-                cw = _command_word(argv[idx + 1:])
-        if cw in _ORCH_WAIT_COMMANDS:
-            return True
-    return False
+    return _ORCH_SIMPLE_WAIT_RE.fullmatch(command.strip(" \t\n")) is not None
 
 
 def orch_wait_guard(data):
@@ -10063,11 +10079,11 @@ def orch_wait_guard(data):
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     # A1 WAIT-INTENT DISCRIMINATOR: a declared wait tool is judged as a wait ONLY when the call genuinely
     # WAITS, never on any invocation of the tool. A Bash call is a wait only when its command actually
-    # waits (_orch_command_waits); an ordinary Bash command (git status, ls, a build step) is NOT a wait
-    # and is an INERT ALLOW, so declaring Bash in wait_tools never wedges an ordinary command (the r8
-    # production wedge). A NON-Bash declared wait tool is a dedicated wait tool, inherently a wait, matched
-    # by name. Fail-safe direction: a command that is not RECOGNIZABLY a wait (including an unreadable or
-    # unparseable command) allows; only a genuine wait is judged, and (when work is actionable) denied.
+    # is a provably-simple wait (_orch_command_waits: one bare sleep or wait with plain arguments); every
+    # other Bash command, an ordinary one (git status, ls, a build step) and an ambiguous one alike, is an
+    # INERT ALLOW, so declaring Bash in wait_tools never wedges an ordinary command (the r8 production
+    # wedge). A NON-Bash declared wait tool is a dedicated wait tool, inherently a wait, matched by name.
+    # Fail-safe direction: only a provably-simple wait is judged, and (when work is actionable) denied.
     if tool == "Bash":
         command = tool_input.get("command")
         if not isinstance(command, str) or not _orch_command_waits(command):
@@ -11185,6 +11201,8 @@ def _orch_pointer_resolves(root, sd, pointer):
     resolution, a disclosed residual that triage refutes."""
     if not isinstance(pointer, str) or not pointer.strip():
         return False
+    if _orch_text_unsafe(pointer):
+        return False  # round 12: an invisible or non-ASCII pointer never reaches the filesystem or ledger
     if pointer.startswith("guard-events:"):
         token = pointer[len("guard-events:"):].strip()
         rows, _bad = _orch_read_jsonl(os.path.join(sd, "guard-events.jsonl"))
