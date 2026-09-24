@@ -165,6 +165,11 @@ class Fixture:
             "yield_tools": ["ScheduleWakeup", "CronCreate"],
             "dispatch_tools": [],
             "staleness": {"external_hours": 24, "task_hours": 24},
+            "dispositions": None,           # a leg opts in by setting reg["dispositions"]
+            "deferrals": None,
+            "route": None,
+            "wait_tools": [],               # empty: the wait guard is inert by default
+            "surface_n": 10,
         }
         (self.root / ".aiqt").mkdir()
         (self.root / ".aiqt" / "orchestration.local.json").write_text(
@@ -210,12 +215,57 @@ class Fixture:
         sd.mkdir(parents=True, exist_ok=True)
         (sd / "turn-state.json").write_text(json.dumps(st), encoding="utf-8")
 
+    def write_ground(self, reg_key, snap_name, prefix, rows, status="ok", weak=False):
+        """Write a chained ground register (DS-/DF-), its .anchor, a bound validated snapshot, and
+        point the registry at it. rows are dicts with item/[ground]/ref/status/ts/check_ref."""
+        import hashlib as _h
+        reg_path = self.root / (reg_key + ".jsonl")
+        out, prev = [], "0" * 64
+        for i, r in enumerate(rows, 1):
+            line = json.dumps(dict(r, prev=prev, seq=i, id="{}{}".format(prefix, i)), sort_keys=True)
+            out.append(line)
+            prev = _h.sha256(line.encode("utf-8")).hexdigest()
+        text = ("\n".join(out) + "\n") if out else ""
+        reg_path.write_text(text, encoding="utf-8")
+        lines = text.splitlines()
+        anchor = ({"seq": len(lines), "digest": _h.sha256(lines[-1].encode("utf-8")).hexdigest()}
+                  if lines else {"seq": 0, "digest": "0" * 64})
+        Path(str(reg_path) + ".anchor").write_text(json.dumps(anchor), encoding="utf-8")
+        sd = Path(aiqt_hooks._state_dir_from_registry(str(self.root),
+                  aiqt_hooks._orch_registry(str(self.root))[1]))
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / snap_name).write_text(json.dumps({
+            "version": 1, "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "status": status, "register": os.path.realpath(str(reg_path)),
+            "seq": anchor["seq"], "digest": anchor["digest"], "rows": []}), encoding="utf-8")
+        _regp = self.root / ".aiqt" / "orchestration.local.json"
+        _reg = json.loads(_regp.read_text(encoding="utf-8"))
+        _reg[reg_key] = ({"path": str(reg_path), "weak_proof_accepted": True} if weak
+                         else str(reg_path))
+        _regp.write_text(json.dumps(_reg), encoding="utf-8")
+        return reg_path
 
-def item(iid, state="open", granted=True, blocker=None, title=None):
+
+def item(iid, state="open", granted=True, blocker=None, title=None,
+         close=None, advance=None):
     it = {"id": iid, "title": title or iid, "state": state, "granted": granted}
     if blocker:
         it["blocker"] = blocker
+    if close is not None:
+        it["close"] = close
+    if advance is not None:
+        it["advance"] = advance
     return it
+
+
+def hd_blocker(ref, prep_complete=None, prep_ref=None):
+    """A human-decision blocker, optionally carrying v2 prep fields."""
+    b = {"kind": "human-decision", "ref": ref}
+    if prep_complete is not None:
+        b["prep_complete"] = prep_complete
+    if prep_ref is not None:
+        b["prep_ref"] = prep_ref
+    return b
 
 
 def now_iso(hours_ago=0):
@@ -243,6 +293,30 @@ def main(report_path=None):
         check("stop/registry-absent", _verdict(aiqt_hooks.orch_stop_guard(
             {"hook_event_name": "Stop", "cwd": str(bare)})), "allow")
 
+        # FLAG B: a present-but-unreadable ('bad') registry is CANNOT-EVALUATE, DISTINCT from ABSENT. The
+        # stop family DENIES the wind-down fail-closed (never treating unreadable config as absence); the
+        # ABSENT registry stays the inert allow; and the INDEPENDENT operator escape (resolved without the
+        # unreadable registry) releases the wind-down.
+        badroot = tmp / "bad-registry"
+        badroot.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(badroot)],
+                       check=True, capture_output=True, timeout=30)
+        (badroot / ".aiqt").mkdir()
+        (badroot / ".aiqt" / "orchestration.local.json").write_text("{ not json", encoding="utf-8")
+        badstop = lambda: aiqt_hooks.orch_stop_guard({"hook_event_name": "Stop", "cwd": str(badroot)})
+        check("flagB/bad-registry-denies", _verdict(badstop()), "block2")
+        check("flagB/absent-registry-inert-allows", _verdict(aiqt_hooks.orch_stop_guard(
+            {"hook_event_name": "Stop", "cwd": str(bare)})), "allow")
+        # the honored-escape path needs a foreign-uid sentinel not creatable on a single-uid host, so the
+        # independent-escape resolution is injected; the point under test is that a bad registry with an
+        # escape present RELEASES (warn) rather than denying.
+        _real_escape_fb = aiqt_hooks._orch_escape_active
+        try:
+            aiqt_hooks._orch_escape_active = lambda reg, root, state_dir=None: (True, None)
+            check("flagB/bad-registry-with-operator-escape-allows", _verdict(badstop()), "warn")
+        finally:
+            aiqt_hooks._orch_escape_active = _real_escape_fb
+
         # no live lease -> allow (scope)
         f.lease.unlink()
         f.set_items([item("A-1")])
@@ -266,7 +340,7 @@ def main(report_path=None):
                                           "evidence": "run 42 pending",
                                           "observed_at_utc": now_iso(1)})])
         f.set_turn_state({})
-        check("stop/proven-blockers-allow", _verdict(stop()), "allow")
+        check("stop/proven-blockers-allow", _verdict(stop()), "warn")
 
         # stale external evidence -> deny
         f.set_items([item("A-4", blocker={"kind": "external", "ref": "ci",
@@ -274,10 +348,25 @@ def main(report_path=None):
         f.set_turn_state({})
         check("stop/stale-evidence-denies", _verdict(stop()), "block2")
 
-        # proposed-only backlog -> allow
-        f.set_items([item("P-1", state="proposed")])
+        # B4/FLAG A (v2): an ordinary proposed/ungranted item is ASSISTANT-WRITABLE label text and cannot
+        # remove buildable work from the actionable set (a self-authored proposal is not a grant and
+        # licenses no wind-down; cntdef/deccls). A v2 proposed-only backlog is ACTIONABLE -> the stop
+        # DENIES (its preparatory work continues; only a maintainer-provenance park holds).
+        f.set_items([item("P-1", state="proposed")], version=2)
         f.set_turn_state({})
-        check("stop/proposed-never-compels", _verdict(stop()), "allow")
+        check("stop/proposed-is-actionable", _verdict(stop()), "block2")
+        f.set_items([item("P-2", granted=False)], version=2)
+        f.set_turn_state({})
+        check("stop/ungranted-is-actionable", _verdict(stop()), "block2")
+        # B6: a v1 (any non-v2) proposed/ungranted item keeps the shipped BYTE-IDENTICAL non-compelling
+        # `proposed` bucket AND decision to main: it does NOT block the wind-down (stop ALLOWS -> warn).
+        # This is the v1 compatibility regression vector: the proposed->actionable change is v2-only.
+        f.set_items([item("P-1", state="proposed")], version=1)
+        f.set_turn_state({})
+        check("v1/proposed-non-compelling-allows", _verdict(stop()), "warn")
+        f.set_items([item("P-2", granted=False)], version=1)
+        f.set_turn_state({})
+        check("v1/ungranted-non-compelling-allows", _verdict(stop()), "warn")
 
         # live ledger task -> allow; past staleness -> deny
         sd = Path(aiqt_hooks._orch_state_dir_for_root(str(f.root)))
@@ -287,7 +376,7 @@ def main(report_path=None):
                                       "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
         f.set_items([item("A-5", blocker={"kind": "tracked-task", "ref": "T-9"})])
         f.set_turn_state({})
-        check("stop/live-task-allows", _verdict(stop()), "allow")
+        check("stop/live-task-allows", _verdict(stop()), "warn")
         ledger.write_text(json.dumps({"ts": now_iso(48), "event": "launch", "task_id": "T-9",
                                       "tool": "Bash", "wake": True}) + "\n", encoding="utf-8")
         f.set_turn_state({})
@@ -304,7 +393,7 @@ def main(report_path=None):
         f.pending.write_text("| PD-7 | 2026-01-01 | which licence | RAISED |\n", encoding="utf-8")
         f.set_items([item("A-7", blocker={"kind": "human-decision", "ref": "PD-7"})])
         f.set_turn_state({})
-        check("stop/pending-decision-allows", _verdict(stop()), "allow")
+        check("stop/pending-decision-allows", _verdict(stop()), "warn")
         f.set_items([item("A-8", blocker={"kind": "human-decision", "ref": "PD-404"})])
         f.set_turn_state({})
         check("stop/missing-pending-denies", _verdict(stop()), "block2")
@@ -351,7 +440,7 @@ def main(report_path=None):
         # not-before: unmet -> allow, met -> deny
         f.set_items([item("A-9", blocker={"kind": "not-before", "ref": now_iso(-24)})])
         f.set_turn_state({})
-        check("stop/not-before-unmet-allows", _verdict(stop()), "allow")
+        check("stop/not-before-unmet-allows", _verdict(stop()), "warn")
         f.set_items([item("A-9", blocker={"kind": "not-before", "ref": now_iso(24)})])
         f.set_turn_state({})
         check("stop/not-before-met-denies", _verdict(stop()), "block2")
@@ -461,7 +550,7 @@ def main(report_path=None):
             # honour leg: different uid, regular file, owner-only mode -> the clean ALLOW stands
             aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o600, os.geteuid() + 1)
             f.set_turn_state({})
-            check("stop/operator-owned-escape-allows", _verdict(stop()), "allow")
+            check("stop/operator-owned-escape-allows", _verdict(stop()), "warn")
             # a group-writable different-uid sentinel is ignored (any writer could have widened it)
             aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o664, os.geteuid() + 1)
             f.set_turn_state({})
@@ -476,7 +565,7 @@ def main(report_path=None):
             aiqt_hooks._orch_escape_stat = lambda path: None
             f.set_items([])
             f.set_turn_state({})
-            check("stop/escape-oserror-no-new-deny", _verdict(stop()), "allow")
+            check("stop/escape-oserror-no-new-deny", _verdict(stop()), "warn")
         finally:
             aiqt_hooks._orch_escape_stat = _orig_escape_stat
         if (sd / "escape-spoof.json").exists():
@@ -525,10 +614,21 @@ def main(report_path=None):
         g.enum_exit.write_text("3", encoding="utf-8")
         check("yield/enum-error-denies", _verdict(sched({"prompt": "recheck"})), "deny")
 
-        # 4th denial on an unchanged basis -> allow with findings
+        # B1: the enum-error IGNORANCE path is NEVER cap-relieved. Even primed at the cap on an
+        # enum-error basis the schedule still DENIES (ignorance refuses the wind-down), never a warn.
         g.set_turn_state({"schedule_denials": 3, "schedule_basis": "ENUMERATOR_ERROR"})
-        check("yield/denial-cap", _verdict(sched({"prompt": "recheck"})), "warn")
+        check("yield/enum-error-not-cap-relieved", _verdict(sched({"prompt": "recheck"})), "deny")
         g.enum_exit.write_text("0", encoding="utf-8")
+
+        # B1: the ONLY sanctioned cap relief is the repeated-same-basis ACTIONABLE-work wedge. Prime the
+        # cap on the exact actionable basis -> the 4th call is cap-relieved (allow with findings).
+        g.set_items([item("AW-9")])
+        _gc, _gts, _gbasis = aiqt_hooks._orch_build_ctx(
+            aiqt_hooks._orch_registry(str(g.root))[1], str(g.root), "schedule_idle",
+            g.payload("PreToolUse", "ScheduleWakeup", {"prompt": "recheck AW-9"}),
+            wake_text="recheck AW-9", record_checkpoint=False)
+        g.set_turn_state({"schedule_denials": 3, "schedule_basis": _gbasis})
+        check("yield/actionable-denial-cap", _verdict(sched({"prompt": "recheck AW-9"})), "warn")
 
         # waiting item: a wake naming it allows; one naming nothing denies (hygiene)
         gsd = Path(aiqt_hooks._orch_state_dir_for_root(str(g.root)))
@@ -539,7 +639,7 @@ def main(report_path=None):
         g.set_items([item("W-1", blocker={"kind": "tracked-task", "ref": "T-1"})])
         g.set_turn_state({})
         check("yield/wake-names-item-allows",
-              _verdict(sched({"prompt": "recheck T-1 completion"})), "allow")
+              _verdict(sched({"prompt": "recheck T-1 completion"})), "warn")
         g.set_turn_state({})
         check("yield/wake-names-nothing-denies", _verdict(sched({"prompt": "just waiting"})), "deny")
 
@@ -1118,13 +1218,55 @@ def main(report_path=None):
         v, _r, _d = aiqt_hooks.decide_yield(
             dict(base, enum_status="ENUMERATOR_ERROR", counter=2))
         check("core/stop-enum-error-loop-bound-findings", v, "ALLOW_WITH_FINDINGS")
-        # CONV2-CX2: wake-hygiene denials are cap-relieved like every other schedule DENY
+        # B1: wake-hygiene (an idle naming no live target) is an IGNORANCE path, denied UNCONDITIONALLY
+        # and NEVER cap-relieved (the old behaviour cap-relieved it, which this now refutes).
         wake_ctx = dict(base, kind="schedule_idle", waiting=[("W-1", "tracked-task", "t9")],
                         wake_named=False, basis_unchanged=True)
         v, _r, _d = aiqt_hooks.decide_yield(dict(wake_ctx, schedule_denials=1))
         check("core/wake-hygiene-below-cap-denies", v, "DENY")
         v, _r, _d = aiqt_hooks.decide_yield(dict(wake_ctx, schedule_denials=3))
-        check("core/wake-hygiene-at-cap-findings", v, "ALLOW_WITH_FINDINGS")
+        check("core/wake-hygiene-at-cap-still-denies", v, "DENY")
+        # B1: the ignorance paths (enum!=ok, item cannot-evaluate) are likewise NEVER cap-relieved on
+        # the schedule OR wait path, even at the cap on an unchanged basis.
+        capd = dict(base, kind="schedule_idle", schedule_denials=3, basis_unchanged=True)
+        v, _r, _d = aiqt_hooks.decide_yield(dict(capd, enum_status="ENUMERATOR_ERROR"))
+        check("core/schedule-enum-error-not-cap-relieved", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(capd, cannot_evaluate=[("CE", "cannot-evaluate", "held")]))
+        check("core/schedule-cannot-evaluate-not-cap-relieved", v, "DENY")
+        wcapd = dict(base, kind="wait", schedule_denials=3, basis_unchanged=True)
+        v, _r, _d = aiqt_hooks.decide_yield(dict(wcapd, enum_status="ENUMERATOR_ERROR"))
+        check("core/wait-enum-error-not-cap-relieved", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(wcapd, cannot_evaluate=[("CE", "cannot-evaluate", "held")]))
+        check("core/wait-cannot-evaluate-not-cap-relieved", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(wcapd, waiting=[("W-1", "tracked-task", "t9")], wake_named=False))
+        check("core/wait-unnamed-target-not-cap-relieved", v, "DENY")
+        # B1: the ONE sanctioned cap relief - the actionable-work wedge - survives on both parkish kinds.
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(base, kind="schedule_idle", actionable=[("A", "t", "w")], schedule_denials=3,
+                 basis_unchanged=True))
+        check("core/schedule-actionable-wedge-cap-relieved", v, "ALLOW_WITH_FINDINGS")
+        # B1: the wait cap relief is SANCTIONED ONLY in the single-live-waiting-row wedge (a named live
+        # waiting row present). The relief survives WITH such a target...
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(base, kind="wait", actionable=[("A", "t", "w")],
+                 waiting=[("W-1", "tracked-task", "t9")], wake_named=True,
+                 schedule_denials=3, basis_unchanged=True))
+        check("core/wait-actionable-wedge-cap-relieved", v, "ALLOW_WITH_FINDINGS")
+        # ...but an actionable-work wait with an ABSENT/UNNAMED wait target is an ignorance path DENIED
+        # UNCONDITIONALLY even at the cap on an unchanged basis (the exact B1 residual: the old code
+        # cap-relieved it before requiring a live wait target).
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(base, kind="wait", actionable=[("A", "t", "w")], schedule_denials=3,
+                 basis_unchanged=True))
+        check("core/wait-actionable-absent-target-not-cap-relieved", v, "DENY")
+        v, _r, _d = aiqt_hooks.decide_yield(
+            dict(base, kind="wait", actionable=[("A", "t", "w")],
+                 waiting=[("W-1", "tracked-task", "t9")], wake_named=False,
+                 schedule_denials=3, basis_unchanged=True))
+        check("core/wait-actionable-unnamed-target-not-cap-relieved", v, "DENY")
 
         # ---------- C.2: the attestation register for blocker evidence ----------
         # The no-register behaviour stays byte-identical and is already covered above by the fixture-f
@@ -1187,7 +1329,7 @@ def main(report_path=None):
              "guardrail": "n/a", "ref": "ci", "check_ref": "seed.txt"}))
         aiqt_hooks._orch_validate_attestations(areg, str(a.root))
         a.set_turn_state({})
-        check("attest/attested-ref-allows", _verdict(astop()), "allow")
+        check("attest/attested-ref-allows", _verdict(astop()), "warn")
         # a row whose pointer resolves to nothing is unsubstantiated: a finding, attesting nothing
         write_at(chained(
             {"seq": 1, "id": "AT-1", "ts": now_iso(0), "status": "accepted",
@@ -1254,7 +1396,7 @@ def main(report_path=None):
         # control: the genuinely substantiated 'ci' ref from that same re-derivation still blocks
         a.set_items([ext("AT-I1", "ci")])
         a.set_turn_state({})
-        check("attest/rederived-real-ref-still-allows", _verdict(astop()), "allow")
+        check("attest/rederived-real-ref-still-allows", _verdict(astop()), "warn")
         # A2 residual (DISCLOSED, not a HOLD): an fs-write actor who APPENDS a valid approved row (and,
         # for an anchor-authority register, advances the companion anchor, both filesystem writes, no
         # git) DOES substantiate the appended ref. This records the TRUE behaviour so the suite is not
@@ -1269,7 +1411,7 @@ def main(report_path=None):
         aiqt_hooks._orch_validate_attestations(areg, str(a.root))
         a.set_items([ext("AT-I1", "dep")])
         a.set_turn_state({})
-        check("attest/appended-approved-row-substantiates", _verdict(astop()), "allow")
+        check("attest/appended-approved-row-substantiates", _verdict(astop()), "warn")
         # FIX 3: a failed snapshot write invalidates any prior 'ok' snapshot (delete-then-hold)
         write_at(good_ci)
         aiqt_hooks._orch_validate_attestations(areg, str(a.root))  # fresh ok snapshot present
@@ -1315,20 +1457,59 @@ def main(report_path=None):
         a.set_items(lapse_items + [item("A-20")])
         a.set_turn_state({})
         check("lapse/no-bypass-still-denies", _verdict(astop()), "block2")
-        # (b) the park: the lapse row stays proposed while the other item is blocked on a recorded
-        # pending decision, reaching the existing no-actionable ALLOW (quiescence, not an escape)
+        # (b) FLAG A / B6: the orch_register projection emits proposed mistake-register rows as v1
+        # NON-COMPELLING items (orch_register.py:71). Under the v1 byte-identity contract a proposed
+        # lapse row sits in the `proposed` bucket and does not itself compel a stop; with only a parked
+        # (human-decision-blocked) sibling present, the stop ALLOWS (warn). This IS GD-127's
+        # recorded-wind-down park: the lapse is recorded in the register and parked behind the maintainer
+        # decision it awaits. The stricter proposed->actionable treatment is a v2 behaviour (FLAG A
+        # vectors below).
         a.pending.write_text("| DEC-1 | 2026-09-03 | lapse triage | RAISED |\n", encoding="utf-8")
         a.set_items(lapse_items + [item("A-21",
                                         blocker={"kind": "human-decision", "ref": "DEC-1"})])
         a.set_turn_state({})
-        check("lapse/park-allows-with-disposition", _verdict(astop()), "allow")
-        # (c) a lapse row whose pointer resolves to nothing is unsubstantiated (a resume-audit
-        # finding) and blocks nothing
+        check("lapse/v1-proposed-lapse-non-compelling", _verdict(astop()), "warn")
+        # (c) a lapse row whose pointer resolves to nothing is still surfaced as a resume-audit finding
+        # (the audit carries that, not the stop verdict); the v1 proposed lapse stays non-compelling.
         mr_append("MR-2", "nosuch-integrity-signal.txt")
         l_findings = aiqt_hooks._orch_validate_attestations(areg, str(a.root))
         check("lapse/unsubstantiated-lapse-finding", any("MR-2" in x for x in l_findings), True)
         a.set_turn_state({})
-        check("lapse/unsubstantiated-blocks-nothing", _verdict(astop()), "allow")
+        check("lapse/v1-unsubstantiated-lapse-non-compelling", _verdict(astop()), "warn")
+
+        # ---------- FLAG A: the v2 provenance-backed proposed distinction ----------
+        fa = Fixture(tmp, "flagA")
+        fastop = lambda: aiqt_hooks.orch_stop_guard(fa.payload("Stop"))
+        # ordinary-proposal-actionable: a v2 self-authored proposed item with NO maintainer-provenance
+        # blocker is ACTIONABLE (a self-authored label licenses no wind-down; cntdef) -> the stop DENIES.
+        fa.set_items([item("FA-1", state="proposed")], version=2)
+        fa.set_turn_state({})
+        check("flagA/ordinary-proposal-actionable", _verdict(fastop()), "block2")
+        # self-authored-proposal-with-self-blocker-actionable (F-331): a v2 proposed item that
+        # manufactures a human-decision blocker AND a self-authored pending-decisions label
+        # ('| PD-A | ... | RAISED |') does NOT park. The pending-decisions surface is assistant-writable,
+        # so it substantiates no proposed park; the item stays ACTIONABLE (its preparatory work
+        # continues) -> the stop DENIES. Only maintainer-controlled provenance can honor the park.
+        fa.pending.write_text("| PD-A | 2026-09-05 | lapse park | RAISED |\n", encoding="utf-8")
+        fa.set_items([item("FA-2", state="proposed",
+                           blocker=hd_blocker("PD-A", prep_complete=True, prep_ref="PD-A"))], version=2)
+        fa.set_turn_state({})
+        check("flagA/self-authored-proposal-with-self-blocker-actionable",
+              _verdict(fastop()), "block2")
+        # maintainer-provenance-park-honored (F-331): GD-127's confirmed-lapse park IS honored when the
+        # proposed item's human-decision blocker ref is covered by a validated, ownership-passing
+        # deferrals register row keyed (item, ref) - the maintainer-controlled rail the assistant cannot
+        # self-author. Then the item PARKS (blocked) -> actionable empty, a visible blocked row -> warn.
+        fa.write_ground("deferrals", "deferrals-validated.json", "DF-",
+                        [{"item": "FA-3", "ref": "PD-B", "status": "accepted",
+                          "ts": now_iso(0), "check_ref": "seed.txt"}], weak=True)
+        # prep fields are set only to satisfy the v2 enumerator schema (a human-decision blocker requires
+        # a boolean prep_complete); the proposed park is honored on the MAINTAINER deferrals provenance,
+        # not on the assistant-writable prep_ref, so the park does not rest on these fields.
+        fa.set_items([item("FA-3", state="proposed",
+                           blocker=hd_blocker("PD-B", prep_complete=True, prep_ref="PD-B"))], version=2)
+        fa.set_turn_state({})
+        check("flagA/maintainer-provenance-park-honored", _verdict(fastop()), "warn")
 
         # ---------- C.3: the anti-shrinkage checkpoint union ----------
         c = Fixture(tmp, "ckpt")
@@ -1340,7 +1521,7 @@ def main(report_path=None):
         # first window: no checkpoint yet, no comparison (the disclosed residual)
         c.set_items([cblocked("CK-A"), cblocked("CK-B")])
         c.set_turn_state({})
-        check("ckpt/first-window-allows", _verdict(cstop()), "allow")
+        check("ckpt/first-window-allows", _verdict(cstop()), "warn")
         # CK-B vanishes with no close receipt: held as cannot-evaluate (FIX 1 DENIES -> block2, never a clean allow);
         # reverting C.3 makes this leg fail on "allow"
         c.set_items([cblocked("CK-A")], keep_checkpoint=True)
@@ -1351,16 +1532,16 @@ def main(report_path=None):
         # a closed row is the receipt: CK-B leaves the checkpoint and clean behaviour returns
         c.set_items([cblocked("CK-A"), item("CK-B", state="closed")], keep_checkpoint=True)
         c.set_turn_state({})
-        check("ckpt/receipt-allows", _verdict(cstop()), "allow")
+        check("ckpt/receipt-allows", _verdict(cstop()), "warn")
         c.set_items([cblocked("CK-A")], keep_checkpoint=True)
         c.set_turn_state({})
-        check("ckpt/receipted-absence-allows", _verdict(cstop()), "allow")
+        check("ckpt/receipted-absence-allows", _verdict(cstop()), "warn")
         # an unreadable checkpoint injects one marker row and is rewritten fresh
         (c.state / "backlog-checkpoint.json").write_text("{broken", encoding="utf-8")
         c.set_turn_state({})
         check("ckpt/malformed-holds-once", _verdict(cstop()), "block2")
         c.set_turn_state({})
-        check("ckpt/rewritten-fresh-allows", _verdict(cstop()), "allow")
+        check("ckpt/rewritten-fresh-allows", _verdict(cstop()), "warn")
         # FIX 4: a checkpoint deleted after a prior window (init marker present) is a possible reset ->
         # cannot-evaluate, never a silent fresh first window. Reverting FIX 4 makes this allow.
         check("ckpt/marker-written", (c.state / "checkpoint-init.marker").exists(), True)
@@ -1373,7 +1554,7 @@ def main(report_path=None):
         c2stop = lambda: aiqt_hooks.orch_stop_guard(c2.payload("Stop"))
         c2.set_items([cblocked("CK-A")])
         c2.set_turn_state({})
-        check("ckpt/never-init-first-window-allows", _verdict(c2stop()), "allow")
+        check("ckpt/never-init-first-window-allows", _verdict(c2stop()), "warn")
         # FIX 2: the OTHER incident variant - a previously-actionable id DEMOTED to proposed/ungranted
         # (not vanished) routes to the harmless proposed bucket and evades both the deny and the vanish
         # check. The checkpoint now stores an eligibility label, detects the demotion, and injects a
@@ -1382,22 +1563,22 @@ def main(report_path=None):
         cdstop = lambda: aiqt_hooks.orch_stop_guard(cd.payload("Stop"))
         cd.set_items([cblocked("CK-D")])                                     # window 1: eligible, clean
         cd.set_turn_state({})
-        check("ckpt/demote-window1-allows", _verdict(cdstop()), "allow")
+        check("ckpt/demote-window1-allows", _verdict(cdstop()), "warn")
         cd.set_items([item("CK-D", state="proposed")], keep_checkpoint=True) # demote: state proposed
         cd.set_turn_state({})
         check("ckpt/demote-to-proposed-denies", _verdict(cdstop()), "block2")
         cd.set_items([cblocked("CK-D")], keep_checkpoint=False)              # fresh eligible window
         cd.set_turn_state({})
-        check("ckpt/demote-reset-window1-allows", _verdict(cdstop()), "allow")
+        check("ckpt/demote-reset-window1-allows", _verdict(cdstop()), "warn")
         cd.set_items([item("CK-D", granted=False)], keep_checkpoint=True)    # demote: ungranted (state
         cd.set_turn_state({})                                                # still open; state alone
         check("ckpt/demote-ungranted-denies", _verdict(cdstop()), "block2")  # would miss it)
         cd.set_items([cblocked("CK-D")], keep_checkpoint=False)              # discriminating: NO demote
         cd.set_turn_state({})
-        check("ckpt/demote-window1b-allows", _verdict(cdstop()), "allow")
+        check("ckpt/demote-window1b-allows", _verdict(cdstop()), "warn")
         cd.set_items([cblocked("CK-D")], keep_checkpoint=True)               # stays eligible -> allow
         cd.set_turn_state({})                                                # (mere presence never denies)
-        check("ckpt/no-demote-still-allows", _verdict(cdstop()), "allow")
+        check("ckpt/no-demote-still-allows", _verdict(cdstop()), "warn")
         # FIX C: a failed init-marker write is fail-loud, not a silent gap. Patch the atomic writer to
         # fail ONLY the marker (the checkpoint write still succeeds) on a never-initialised dir so the
         # marker path is reached; assert a cannot-evaluate injection (FIX 1 DENIES -> block2, not a clean
@@ -1483,23 +1664,25 @@ def main(report_path=None):
         finally:
             aiqt_hooks._orch_append_jsonl = _orig_append
 
-        # ---------- C.4 FIX 5: cap-relief over a BLOCKED row + append-only no-clobber ----------
+        # ---------- C.4 FIX 5: forced-exit record over the actionable-wedge cap relief + no-clobber ----
+        # B1: cap relief now fires ONLY on the repeated-same-basis ACTIONABLE-work wedge (an ignorance
+        # path never cap-relieves), so the wedge here is an actionable item AW-1 alongside a blocked
+        # BW-1; the forced-exit record must still capture the BLOCKED row's id (FIX 5), not only AW-1.
         e = Fixture(tmp, "forced5")
         esched = lambda ti: aiqt_hooks.orch_yield_tool(
             e.payload("PreToolUse", "ScheduleWakeup", ti))
         esd = Path(aiqt_hooks._orch_state_dir_for_root(str(e.root)))
-        # a not-before blocker 48h in the future -> blocked (no actionable, no cannot-evaluate)
-        e.set_items([item("BW-1", blocker={"kind": "not-before", "ref": now_iso(-48)})])
+        e.set_items([item("AW-1"), item("BW-1", blocker={"kind": "not-before", "ref": now_iso(-48)})])
         e.set_turn_state({})
         check("forced5/deny-1", _verdict(esched({"prompt": "waiting"})), "deny")
         check("forced5/deny-2", _verdict(esched({"prompt": "waiting"})), "deny")
         check("forced5/deny-3", _verdict(esched({"prompt": "waiting"})), "deny")
-        # the 4th call is cap-relieved (ALLOW_WITH_FINDINGS) over a BLOCKED row: the OLD gate left this
-        # unrecorded; FIX 5 records it.
+        # the 4th call is cap-relieved (ALLOW_WITH_FINDINGS) over the actionable wedge; FIX 5 records the
+        # complete open set (the actionable AND the blocked row), which the OLD gate left unrecorded.
         check("forced5/cap-exit-warns", _verdict(esched({"prompt": "waiting"})), "warn")
         check("forced5/recorded-over-blocked", (esd / "forced-exit.jsonl").exists(), True)
         e1, _b1 = aiqt_hooks._orch_read_jsonl(str(esd / "forced-exit.jsonl"))
-        check("forced5/blocked-id-recorded", e1[-1].get("open_ids"), ["BW-1"])
+        check("forced5/blocked-id-recorded", e1[-1].get("open_ids"), ["AW-1", "BW-1"])
         # a SECOND forced exit appends (append-only), never clobbering the first
         check("forced5/cap-exit-warns-2", _verdict(esched({"prompt": "waiting"})), "warn")
         e2, _b2 = aiqt_hooks._orch_read_jsonl(str(esd / "forced-exit.jsonl"))
@@ -1523,7 +1706,7 @@ def main(report_path=None):
             check("stop/enum-error-denies-without-escape", _verdict(stop()), "block2")
             aiqt_hooks._orch_escape_stat = lambda path: _St(_stat.S_IFREG | 0o600, os.geteuid() + 1)
             f.set_turn_state({})
-            check("stop/escape-releases-under-enum-error", _verdict(stop()), "allow")
+            check("stop/escape-releases-under-enum-error", _verdict(stop()), "warn")
         finally:
             aiqt_hooks._orch_escape_stat = _orig_es2
             f.enum_exit.write_text("0", encoding="utf-8")
@@ -1559,8 +1742,9 @@ def main(report_path=None):
         _o_active = aiqt_hooks._orch_escape_active
         _o_spoof = aiqt_hooks._orch_record_escape_spoof
         try:
-            aiqt_hooks._orch_escape_active = lambda reg, root: (False, "forced-spoof-detail")
-            aiqt_hooks._orch_record_escape_spoof = lambda root, detail: "SPOOF-UNRECORDED"
+            aiqt_hooks._orch_escape_active = lambda reg, root, state_dir=None: (False,
+                                                                               "forced-spoof-detail")
+            aiqt_hooks._orch_record_escape_spoof = lambda root, detail, state_dir=None: "SPOOF-UNRECORDED"
             # (1) stop DENY over an actionable item: warning rides the block reason (err)
             g.set_items([item("SP-1")])
             g.set_turn_state({})
@@ -1618,6 +1802,893 @@ def main(report_path=None):
               set(json.loads((hsd / "forced-exit-surfaced.json").read_text(
                   encoding="utf-8")).get("keys", [])), {"k1", "k2"})
         check("forced5/second-pass-clean", aiqt_hooks._orch_forced_exit_findings(str(hsd)), [])
+
+        # ---------- GD-164: the close-disposition split ----------
+        c = Fixture(tmp, "close")
+        cstop = lambda: aiqt_hooks.orch_stop_guard(c.payload("Stop"))
+        # v2 closed no-fix-needed, NO dispositions register declared -> cannot-evaluate -> stop DENIES
+        c.set_items([item("C-1", state="closed",
+                          close={"reason": "no-fix-needed", "ref": "R-1"})], version=2)
+        c.set_turn_state({})
+        check("close/no-fix-undeclared-holds", _verdict(cstop()), "block2")
+        # with a covering validated dispositions row -> terminal -> stop ALLOWS (warn per Step 17)
+        c.write_ground("dispositions", "dispositions-validated.json", "DS-",
+                       [{"item": "C-1", "ground": "no-fix-needed", "ref": "R-1",
+                         "status": "accepted", "ts": now_iso(0), "check_ref": "seed.txt"}])
+        c.set_items([item("C-1", state="closed",
+                          close={"reason": "no-fix-needed", "ref": "R-1"})], version=2)
+        c.set_turn_state({})
+        check("close/no-fix-covered-terminal", _verdict(cstop()), "warn")
+        # covered but ref-mismatched -> actionable -> DENY
+        c.set_items([item("C-1", state="closed",
+                          close={"reason": "no-fix-needed", "ref": "WRONG"})], version=2)
+        c.set_turn_state({})
+        check("close/no-fix-uncovered-actionable", _verdict(cstop()), "block2")
+        # not-buildable: same pair (undeclared holds; covered terminal)
+        c2 = Fixture(tmp, "close-nb")
+        c2stop = lambda: aiqt_hooks.orch_stop_guard(c2.payload("Stop"))
+        c2.set_items([item("C-2", state="closed",
+                           close={"reason": "not-buildable", "ref": "R-2"})], version=2)
+        c2.set_turn_state({})
+        check("close/not-buildable-undeclared-holds", _verdict(c2stop()), "block2")
+        c2.write_ground("dispositions", "dispositions-validated.json", "DS-",
+                        [{"item": "C-2", "ground": "not-buildable", "ref": "R-2",
+                          "status": "accepted", "ts": now_iso(0), "check_ref": "seed.txt"}])
+        c2.set_items([item("C-2", state="closed",
+                           close={"reason": "not-buildable", "ref": "R-2"})], version=2)
+        c2.set_turn_state({})
+        check("close/not-buildable-covered-terminal", _verdict(c2stop()), "warn")
+        # maintainer-deferred: no deferrals register -> held; unreadable snapshot -> held; self-owned
+        # register absent weak_proof_accepted -> held; covered+ownership-passing -> blocked (visible);
+        # (ownership-passing on a single-uid host requires weak_proof_accepted=True)
+        d = Fixture(tmp, "defer")
+        dstop = lambda: aiqt_hooks.orch_stop_guard(d.payload("Stop"))
+        d.set_items([item("D-1", state="closed",
+                          close={"reason": "maintainer-deferred", "ref": "PD-1"})], version=2)
+        d.set_turn_state({})
+        check("close/deferred-undeclared-holds", _verdict(dstop()), "block2")
+        # a self-owned register WITHOUT weak_proof_accepted -> "unreadable" -> held
+        d.write_ground("deferrals", "deferrals-validated.json", "DF-",
+                       [{"item": "D-1", "ref": "PD-1", "status": "accepted",
+                         "ts": now_iso(0), "check_ref": "seed.txt"}], weak=False)
+        d.set_items([item("D-1", state="closed",
+                          close={"reason": "maintainer-deferred", "ref": "PD-1"})], version=2)
+        d.set_turn_state({})
+        check("close/deferred-self-owned-holds", _verdict(dstop()), "block2")
+        # weak_proof_accepted=True bypasses ownership -> covered -> blocked (a visible granted blocker):
+        # actionable is empty, blocked present, so the stop ALLOWS (warn) showing the blocked row
+        d.write_ground("deferrals", "deferrals-validated.json", "DF-",
+                       [{"item": "D-1", "ref": "PD-1", "status": "accepted",
+                         "ts": now_iso(0), "check_ref": "seed.txt"}], weak=True)
+        d.set_items([item("D-1", state="closed",
+                          close={"reason": "maintainer-deferred", "ref": "PD-1"})], version=2)
+        d.set_turn_state({})
+        check("close/deferred-covered-blocked-visible", _verdict(dstop()), "warn")
+        # deferrals snapshot marked not-ok -> unreadable -> held
+        d.write_ground("deferrals", "deferrals-validated.json", "DF-",
+                       [{"item": "D-1", "ref": "PD-1", "status": "accepted",
+                         "ts": now_iso(0), "check_ref": "seed.txt"}], status="unreadable", weak=True)
+        d.set_items([item("D-1", state="closed",
+                          close={"reason": "maintainer-deferred", "ref": "PD-1"})], version=2)
+        d.set_turn_state({})
+        check("close/deferred-unreadable-snapshot-holds", _verdict(dstop()), "block2")
+        # a v2 closed item with a MALFORMED close (missing reason) -> ENUMERATOR_ERROR -> DENY
+        c.enum_payload.write_text(json.dumps(
+            {"version": 2, "generated_at_utc": now_iso(0),
+             "source": {"locator": "f"}, "items": [
+                 {"id": "C-3", "state": "closed", "granted": True, "close": {"ref": "x"}}]}),
+            encoding="utf-8")
+        c.set_turn_state({})
+        check("close/malformed-close-enumerator-error", _verdict(cstop()), "block2")
+        # unknown close reason -> ENUMERATOR_ERROR -> DENY
+        c.enum_payload.write_text(json.dumps(
+            {"version": 2, "generated_at_utc": now_iso(0),
+             "source": {"locator": "f"}, "items": [
+                 {"id": "C-4", "state": "closed", "granted": True,
+                  "close": {"reason": "wont-fix", "ref": "x"}}]}), encoding="utf-8")
+        c.set_turn_state({})
+        check("close/unknown-close-reason-enumerator-error", _verdict(cstop()), "block2")
+        # v1 regression pin: a v1 closed item (no close object) is skipped exactly as today
+        c.set_items([item("C-5", state="closed")], version=1)
+        c.set_turn_state({})
+        check("close/v1-closed-skipped-allows", _verdict(cstop()), "warn")   # FLAG: was "allow" pre-Step17
+        # v1 advisory guard-event fires when a disposition register is declared under v1
+        c.write_ground("dispositions", "dispositions-validated.json", "DS-",
+                       [{"item": "z", "ground": "no-fix-needed", "ref": "z",
+                         "status": "accepted", "ts": now_iso(0), "check_ref": "seed.txt"}])
+        c.set_items([item("C-6")], version=1)
+        c.set_turn_state({})
+        cstop()
+        csd = Path(aiqt_hooks._state_dir_from_registry(str(c.root),
+                   aiqt_hooks._orch_registry(str(c.root))[1]))
+        check("close/v1-advisory-guard-event",
+              "aei-v1-advisory" in (csd / "guard-events.jsonl").read_text(encoding="utf-8"), True)
+
+        # ---------- GD-164 B2/B3: terminal `fixed` verification + complete enumeration ----------
+        cf = Fixture(tmp, "close-fixed")
+        cfstop = lambda: aiqt_hooks.orch_stop_guard(cf.payload("Stop"))
+        _cfhead = subprocess.run(["git", "-C", str(cf.root), "rev-parse", "HEAD"],
+                                 check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+        # B3: a `fixed` close whose ref does NOT resolve to a real commit is NOT terminal (unrelated, no
+        # commit); it is closed-unjustified + actionable, so the stop DENIES (ignorance refuses the
+        # wind-down).
+        cf.set_items([item("CF-1", state="closed", close={"reason": "fixed", "ref": "fabricated-ref"})],
+                     version=2)
+        cf.set_turn_state({})
+        check("close/fixed-fabricated-ref-holds", _verdict(cfstop()), "block2")
+        # B3 matching-commit-terminal (declared paths): a `fixed` close whose commit's CHANGED SET
+        # intersects the item's declared close.paths is bound to the item -> terminal -> stop ALLOWS
+        # (warn). The seed commit changed seed.txt, so CF-1 declaring paths ["seed.txt"] reconciles.
+        cf.set_items([item("CF-1", state="closed",
+                           close={"reason": "fixed", "ref": _cfhead, "paths": ["seed.txt"]})],
+                     version=2)
+        cf.set_turn_state({})
+        check("close/fixed-verified-terminal", _verdict(cfstop()), "warn")
+        # B2: the terminal item is PRESENT and COUNTED in the durable liveness row (never an empty
+        # backlog when the authoritative index had a closed row), tagged as a distinct terminal class.
+        cfsd = Path(aiqt_hooks._state_dir_from_registry(
+            str(cf.root), aiqt_hooks._orch_registry(str(cf.root))[1]))
+        cfrows = [json.loads(x) for x in
+                  (cfsd / "liveness-evaluations.jsonl").read_text(encoding="utf-8").splitlines()
+                  if x.strip()]
+        check("close/fixed-terminal-counted", cfrows[-1]["item_count"], 1)
+        check("close/fixed-terminal-in-table",
+              any(r["class"] == "terminal" and r["id"] == "CF-1" for r in cfrows[-1]["disposition"]),
+              True)
+        # B3 unrelated-real-commit-holds (the codex residual): a `fixed` close on a REAL commit that is
+        # UNRELATED to the item (no declared paths to reconcile, and the commit message does not name the
+        # item id) cannot be bound to the item, so it is HELD cannot-evaluate -> the stop DENIES, never
+        # accepted merely because the ref resolves to some commit.
+        cf.set_items([item("CF-2", state="closed", close={"reason": "fixed", "ref": _cfhead})],
+                     version=2)
+        cf.set_turn_state({})
+        check("close/fixed-unrelated-commit-holds", _verdict(cfstop()), "block2")
+        # B3 declared-paths mismatch: a commit that does NOT touch the item's declared paths is unrelated
+        # -> closed-unjustified + actionable -> the stop DENIES.
+        cf.set_items([item("CF-3", state="closed",
+                           close={"reason": "fixed", "ref": _cfhead, "paths": ["nowhere/x.py"]})],
+                     version=2)
+        cf.set_turn_state({})
+        check("close/fixed-declared-paths-mismatch-actionable", _verdict(cfstop()), "block2")
+        # B3 id-in-message-only-holds (F-331): with NO declared close.paths, a commit whose message
+        # merely NAMES the item id is NOT bound to the item by content (an id-in-message match is
+        # assistant-writable text, not evidence the fix is in the commit; vfxcmt). The close cannot be
+        # strong-verified -> HELD (unreconcilable) -> the stop DENIES, never terminal on id-in-message.
+        (cf.root / "unrelated.txt").write_text("x\n", encoding="utf-8")
+        cf._git("add", "unrelated.txt")
+        cf._git("-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fix CF-9: land the guardrail")
+        _cfnamed = subprocess.run(["git", "-C", str(cf.root), "rev-parse", "HEAD"],
+                                  check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+        cf.set_items([item("CF-9", state="closed", close={"reason": "fixed", "ref": _cfnamed})],
+                     version=2)
+        cf.set_turn_state({})
+        check("close/fixed-id-in-message-only-holds", _verdict(cfstop()), "block2")
+        # B3 no-paths-holds (F-331): a `fixed` close on a REAL resolving commit with NO declared paths is
+        # HELD irrespective of the message, because a `fixed` terminal binds to the item ONLY by content
+        # (its changed set intersecting declared close.paths). CF-10's id is not named in _cfnamed either,
+        # but the id would not have helped: no declared paths always holds.
+        cf.set_items([item("CF-10", state="closed", close={"reason": "fixed", "ref": _cfnamed})],
+                     version=2)
+        cf.set_turn_state({})
+        check("close/fixed-no-paths-holds", _verdict(cfstop()), "block2")
+
+        # ---------- GD-164 B5: _orch_tool_succeeded is strict (no A2 orphan on a failed schedule) ----
+        check("a2/succeeded-false-on-FAILED-string",
+              aiqt_hooks._orch_tool_succeeded("FAILED"), False)
+        check("a2/succeeded-false-on-status-failed",
+              aiqt_hooks._orch_tool_succeeded({"status": "failed"}), False)
+        check("a2/succeeded-false-on-ok-false",
+              aiqt_hooks._orch_tool_succeeded({"ok": False}), False)
+        check("a2/succeeded-false-on-content-failed",
+              aiqt_hooks._orch_tool_succeeded({"content": [{"type": "text", "text": "FAILED"}]}), False)
+        check("a2/succeeded-false-on-ambiguous",
+              aiqt_hooks._orch_tool_succeeded({"note": "scheduled maybe"}), False)
+        check("a2/succeeded-true-on-ok-true",
+              aiqt_hooks._orch_tool_succeeded({"ok": True}), True)
+        # B5 residual: a POSITIVE-SHAPED field beside NEGATED-success content registers NO wake (strict
+        # positive confirmation; a positive field never overrides contradicting content). The two codex
+        # counterexamples:
+        check("a2/succeeded-false-on-ok-true-negated-content",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "Wake was not scheduled"}]}), False)
+        check("a2/succeeded-false-on-is-error-false-unsuccessful-content",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"is_error": False, "content": [{"text": "Request was unsuccessful"}]}), False)
+        # a genuinely positive content beside a positive field still registers (no false negative)
+        check("a2/succeeded-true-on-ok-true-positive-content",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "Wake scheduled for 5pm"}]}), True)
+        # B5 by construction (F-331): SIBLING negation/absence phrasings the round-3 denylist let slip
+        # (skip/zero/absent/omit/never/nothing) register NO wake even beside a positive field. Do not
+        # rely on the exact phrases; the veto + ambiguity screen catch the whole family. (Loop-literal
+        # ids: the check id is the loop variable bound to a string literal, so the static execution gate
+        # resolves it.)
+        for check_id, _sib in (
+                ("a2/succeeded-false-sibling-1", "Wake scheduling was skipped"),
+                ("a2/succeeded-false-sibling-2", "Zero wakes were scheduled"),
+                ("a2/succeeded-false-sibling-3", "The wake remains absent"),
+                ("a2/succeeded-false-sibling-4", "Wake scheduling was omitted"),
+                ("a2/succeeded-false-sibling-5", "the wake was never confirmed"),
+                ("a2/succeeded-false-sibling-6", "nothing was scheduled")):
+            check(check_id,
+                  aiqt_hooks._orch_tool_succeeded({"ok": True, "content": [{"text": _sib}]}), False)
+        # B5 ambiguity screen (F-331): content that neither negates NOR affirmatively confirms is
+        # AMBIGUOUS and fails safe to no register, EVEN beside a positive-shaped field (the by-construction
+        # partner to the veto: a positive field does not confirm an unconfirming content).
+        for check_id, _amb in (
+                ("a2/succeeded-false-ambiguous-with-field-1", "under review"),
+                ("a2/succeeded-false-ambiguous-with-field-2", "in progress"),
+                ("a2/succeeded-false-ambiguous-with-field-3", "status uncertain"),
+                ("a2/succeeded-false-ambiguous-with-field-4", "processing at node-7")):
+            check(check_id,
+                  aiqt_hooks._orch_tool_succeeded({"ok": True, "content": [{"text": _amb}]}), False)
+        # the same ambiguous content with NO positive field is likewise never a wake.
+        for check_id, _amb in (
+                ("a2/succeeded-false-ambiguous-no-field-1", "under review"),
+                ("a2/succeeded-false-ambiguous-no-field-2", "in progress"),
+                ("a2/succeeded-false-ambiguous-no-field-3", "status uncertain"),
+                ("a2/succeeded-false-ambiguous-no-field-4", "processing at node-7")):
+            check(check_id,
+                  aiqt_hooks._orch_tool_succeeded({"content": [{"text": _amb}]}), False)
+        # ---------- FIX 3 (round-5 premise review): the round-4 BLOCKER counterexamples ----------
+        # By construction (unbounded structured+phrase scan), each reads NOT-success. A mutation
+        # restoring the depth-6 cap fails the nested-deep case; restoring the top-level-only structured
+        # check fails the nested-structured case; dropping the 'failure' key fails the top-level case;
+        # dropping 'fell through' from the lexicon fails the soft-failure case.
+        check("a2/succeeded-false-nested-deep-failure",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "scheduled"}],
+                   "nested": {"a": {"b": {"c": {"d": {"e": {"f": {"g": "FAILED"}}}}}}}}), False)
+        check("a2/succeeded-false-nested-structured-negative",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "scheduled"}], "result": {"success": False}}), False)
+        check("a2/succeeded-false-soft-failure-phrase",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "Scheduling fell through"}]}), False)
+        check("a2/succeeded-false-top-level-failure-field",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "scheduled"}], "failure": True}), False)
+        # positive control: a DEEPLY-nested CLEAN structure still registers, so the unbounded walk did
+        # not break the affirmative path (no false negative introduced by the walk itself).
+        check("a2/succeeded-true-deep-clean",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"text": "scheduled"}],
+                   "meta": {"a": {"b": {"c": {"d": {"e": {"f": {"g": "all good"}}}}}}}}), True)
+        # ---------- FIX C (round-6): the G3 ambiguity screen normalizes ANY content shape ----------
+        # By construction the screen judges the free-text of a content STR, DICT, or bare-string LIST, not
+        # only a list of text blocks. A mutation restoring the list-only guard fails the dict and
+        # bare-string-list cases (they would bypass the screen and register an orphan wake).
+        check("a2/succeeded-false-content-dict-ambiguous",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"type": "text", "text": "under review"}}), False)
+        check("a2/succeeded-false-content-bare-string-list-ambiguous",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": ["under review"]}), False)
+        check("a2/succeeded-false-content-str-ambiguous",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": "under review"}), False)
+        check("a2/succeeded-false-content-dict-no-text-ambiguous",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"note": "under review"}}), False)
+        # a content dict / str that DOES affirmatively confirm still registers (no false negative).
+        check("a2/succeeded-true-content-dict-confirms",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"type": "text", "text": "scheduled"}}), True)
+        check("a2/succeeded-true-content-str-confirms",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": "Wake scheduled"}), True)
+        # ---------- FIX C (round 7): a NESTED container of text must be walked, not bypassed ----------
+        # A shallow reader let a nested block yield NO texts, so the caller's `if texts and ...` fell
+        # through to success (an orphan wake). The full walk finds nested text; a present, non-empty
+        # content that yields no judgeable text is declined by the no-text fail-safe. Each reads NOT-success.
+        check("a2/succeeded-false-content-nested-dict-parts",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"parts": [{"text": "under review"}]}}), False)
+        check("a2/succeeded-false-content-nested-dict-blocks-barestr",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"blocks": ["under review"]}}), False)
+        check("a2/succeeded-false-content-nested-list-list",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [["under review"]]}), False)
+        check("a2/succeeded-false-content-list-dict-note",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"note": "under review"}]}), False)
+        check("a2/succeeded-false-content-dict-blank-text-note",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"text": "", "note": "under review"}}), False)
+        # recursion SENTINEL: a nested CONFIRMING block still registers (reverting the walk to shallow
+        # makes this yield no texts -> the no-text fail-safe declines it, flipping True -> False).
+        check("a2/succeeded-true-content-nested-confirms",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": {"blocks": [{"text": "scheduled successfully"}]}}), True)
+        # no-text fail-safe SENTINEL: a present, non-empty content with NO judgeable string declines
+        # (removing the `elif content:` fail-safe flips this False -> True, an orphan wake).
+        check("a2/succeeded-false-content-nonempty-no-text",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [[1, 2]]}), False)
+        # metadata-poison SENTINEL: a content-block metadata value ('type': 'scheduled') matching the
+        # positive vocabulary must NOT confirm; only the block's 'text' is judged, which is ambiguous ->
+        # decline. Collecting every scalar (the literal 'collect every string') flips this False -> True.
+        check("a2/succeeded-false-content-metadata-not-poison",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"type": "scheduled", "text": "under review"}]}), False)
+        # metadata-poison, no 'text': the block's confirming metadata is likewise not judged; the item has
+        # no judgeable text at all, so the no-text fail-safe declines it.
+        check("a2/succeeded-false-content-metadata-notext-not-poison",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"ok": True, "content": [{"type": "scheduled", "note": "under review"}]}), False)
+        # ---------- FIX D (round-6): the negative-walk cycle guard fails SAFE to declined ----------
+        # A self-referential dict with an otherwise-POSITIVE shape reads NOT-success: the cycle returns
+        # True from the negative walk, declining the wake (its stated contract, now literal). A JSON
+        # tool_response cannot be cyclic, so this never mis-declines a real response.
+        _cyc = {"ok": True, "content": [{"text": "scheduled"}]}
+        _cyc["self"] = _cyc
+        check("a2/succeeded-false-self-referential-cycle",
+              aiqt_hooks._orch_tool_succeeded(_cyc), False)
+
+        # ---------- FIX 2 (round 8): the REAL wake-tool success contracts (grounded, not synthetic) ----
+        # The real ScheduleWakeup/CronCreate objects carry NONE of the generic ok/success/is_error/status
+        # markers, so recognition is TOOL-AWARE. A mutation removing the scheduledFor/id recognition in
+        # _orch_wake_tool_positive flips every "true" case below to False (the load-bearing proof).
+        check("a2/succeeded-true-real-schedulewakeup",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"scheduledFor": 90000, "clampedDelaySeconds": 90, "wasClamped": False},
+                  "ScheduleWakeup"), True)
+        check("a2/succeeded-false-real-schedulewakeup-cancel",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"scheduledFor": 0, "clampedDelaySeconds": 0, "wasClamped": False,
+                   "stopped": True, "cancelledWakeups": 2}, "ScheduleWakeup"), False)
+        check("a2/succeeded-true-real-croncreate",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"id": "cron-7f3", "humanSchedule": "every day at 09:00",
+                   "recurring": True, "durable": True}, "CronCreate"), True)
+        # G1/G2 still governs a real object: a negative token beside the real success shape declines.
+        check("a2/succeeded-false-real-schedulewakeup-negtoken",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"scheduledFor": 90000, "clampedDelaySeconds": 90, "wasClamped": False,
+                   "reason": "clamp failed"}, "ScheduleWakeup"), False)
+        check("a2/succeeded-false-real-croncreate-negtoken",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"id": "cron-x", "humanSchedule": "cancelled daily",
+                   "recurring": True, "durable": True}, "CronCreate"), False)
+        # tool-awareness is REQUIRED: the SAME real success object with NO tool name cannot be recognized
+        # by the generic predicate, so it declines. This is why the register site must thread the tool name.
+        check("a2/succeeded-false-real-schedulewakeup-no-toolname",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"scheduledFor": 90000, "clampedDelaySeconds": 90, "wasClamped": False}), False)
+        # ---------- FIX 4 (round 9, A2/B1): a tool-specific cancel/invalid VETOES a generic ok ----------
+        # For a KNOWN wake tool the tool-specific contract is authoritative; a generic ok:true beside a
+        # cancel/invalid schedule must NOT register (the OR manufactured the orphan wake). The no-stopped
+        # cases are load-bearing for the tool-aware fix (the stopped case is also caught by the defence).
+        check("a2/succeeded-false-cancel-generic-ok-override",
+              aiqt_hooks._orch_tool_succeeded(
+                  {"scheduledFor": 0, "stopped": True, "ok": True}, "ScheduleWakeup"), False)
+        check("a2/succeeded-false-zero-scheduledfor-generic-ok",
+              aiqt_hooks._orch_tool_succeeded({"scheduledFor": 0, "ok": True}, "ScheduleWakeup"), False)
+        check("a2/succeeded-false-neg-scheduledfor-generic-ok",
+              aiqt_hooks._orch_tool_succeeded({"scheduledFor": -1, "ok": True}, "ScheduleWakeup"), False)
+        check("a2/succeeded-false-bool-scheduledfor-generic-ok",
+              aiqt_hooks._orch_tool_succeeded({"scheduledFor": True, "ok": True}, "ScheduleWakeup"), False)
+        # the generic path is UNAFFECTED for a tool that is NOT a known wake tool: a bare ok:true registers.
+        check("a2/succeeded-true-generic-ok-nonwake-tool",
+              aiqt_hooks._orch_tool_succeeded({"ok": True}, "SomeOtherTool"), True)
+        # defence-in-depth SENTINEL: stopped:true is a structured negative in the negative walk, so a
+        # generic ok:true beside it declines even on a non-wake tool (removing the stopped:true negative
+        # flips this False -> True).
+        check("a2/succeeded-false-stopped-defence-in-depth",
+              aiqt_hooks._orch_tool_succeeded({"ok": True, "stopped": True}, "SomeOtherTool"), False)
+        # dispatchability SENTINELS: a DEFINED handler must be a dispatchable one, or main() rejects the
+        # mode (exit 2) and the control never runs. The direct-call tests above stay green either way, so
+        # these observe the wired path explicitly (removing a handler from HANDLERS flips its check).
+        check("dispatch/wake-register-wired",
+              "orch_wake_register" in aiqt_hooks.HANDLERS
+              and aiqt_hooks.HANDLER_EVENT.get("orch_wake_register") == "PostToolUse", True)
+        check("dispatch/route-guard-wired",
+              "orch_route_guard" in aiqt_hooks.HANDLERS
+              and aiqt_hooks.HANDLER_EVENT.get("orch_route_guard") == aiqt_hooks.PRETOOL, True)
+        check("dispatch/wait-guard-wired",
+              "orch_wait_guard" in aiqt_hooks.HANDLERS
+              and aiqt_hooks.HANDLER_EVENT.get("orch_wait_guard") == aiqt_hooks.PRETOOL, True)
+
+        # ---------- GD-164: the prep discipline ----------
+        p2 = Fixture(tmp, "prep")
+        p2.pending.write_text("| PD-9 | 2026-01-01 | which db | RAISED |\n", encoding="utf-8")
+        p2stop = lambda: aiqt_hooks.orch_stop_guard(p2.payload("Stop"))
+        # human-decision, prep_complete false -> actionable -> DENY (prep remains)
+        p2.set_items([item("H-1", blocker=hd_blocker("PD-9", prep_complete=False))], version=2)
+        p2.set_turn_state({})
+        check("prep/incomplete-actionable-denies", _verdict(p2stop()), "block2")
+        # the wait guard also DENIES an incomplete-prep item (needs wait_tools declared)
+        _pr = json.loads((p2.root / ".aiqt" / "orchestration.local.json").read_text())
+        _pr["wait_tools"] = ["Bash"]
+        (p2.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_pr))
+        p2.set_turn_state({})
+        check("prep/incomplete-wait-denies", _verdict(aiqt_hooks.orch_wait_guard(
+            p2.payload("PreToolUse", "Bash", {"command": "wait PD-9"}))), "deny")
+        # B4: prep_complete true blocks ONLY with an ATTESTED prep (prep_ref resolving to a real
+        # pending-decision row) AND a genuinely-pending (not resolved) decision row. prep_ref="PD-9"
+        # resolves to the pending row -> blocked -> warn.
+        p2.set_items([item("H-2", blocker=hd_blocker("PD-9", prep_complete=True,
+                                                     prep_ref="PD-9"))], version=2)
+        p2.set_turn_state({})
+        check("prep/complete-attested-blocked-visible", _verdict(p2stop()), "warn")
+        # B4 prep/complete-unattested-ref-actionable: a prep_ref that resolves to NO pending row
+        # ('plan.md') does NOT attest the prep, so the item stays ACTIONABLE (the stop DENIES). This is
+        # the codex counterexample: assistant-writable label text cannot manufacture a hold.
+        p2.set_items([item("H-2b", blocker=hd_blocker("PD-9", prep_complete=True,
+                                                      prep_ref="plan.md"))], version=2)
+        p2.set_turn_state({})
+        check("prep/complete-unattested-ref-actionable", _verdict(p2stop()), "block2")
+        # B4 prep/declined-row-actionable: a decision row marked DECLINED is not a pending decision and
+        # holds nothing, even with prep_complete true and a resolving prep_ref -> ACTIONABLE (deny).
+        p2.pending.write_text("| PD-9 | 2026-01-01 | which db | DECLINED |\n", encoding="utf-8")
+        p2.set_items([item("H-2c", blocker=hd_blocker("PD-9", prep_complete=True,
+                                                      prep_ref="PD-9"))], version=2)
+        p2.set_turn_state({})
+        check("prep/declined-row-actionable", _verdict(p2stop()), "block2")
+        # B4 residual: pending is established by an ALLOWLISTED pending status, NOT by the ABSENCE of a
+        # resolved token. A row the OLD denylist never enumerated (APPROVED, ACCEPTED, DECIDED) is a
+        # RESOLVED decision that holds NOTHING -> the item stays ACTIONABLE (deny), even with a resolving
+        # prep_ref. These are the codex counterexamples the denylist let slip through as pending.
+        for _st, _cid in (("APPROVED", "prep/approved-row-actionable"),
+                          ("ACCEPTED", "prep/accepted-row-actionable"),
+                          ("DECIDED", "prep/decided-row-actionable")):
+            p2.pending.write_text("| PD-9 | 2026-01-01 | which db | {} |\n".format(_st),
+                                  encoding="utf-8")
+            p2.set_items([item("H-2r", blocker=hd_blocker("PD-9", prep_complete=True,
+                                                          prep_ref="PD-9"))], version=2)
+            p2.set_turn_state({})
+            check(_cid, _verdict(p2stop()), "block2")
+        # B4 prep-ref-to-resolved-row-actionable: the DECISION row is genuinely pending, but the prep_ref
+        # points to a RESOLVED row -> the prep is not attested against a pending row -> ACTIONABLE (deny).
+        p2.pending.write_text("| PD-9 | 2026-01-01 | which db | RAISED |\n"
+                              "| PD-10 | 2026-01-02 | prep note | APPROVED |\n", encoding="utf-8")
+        p2.set_items([item("H-2p", blocker=hd_blocker("PD-9", prep_complete=True,
+                                                      prep_ref="PD-10"))], version=2)
+        p2.set_turn_state({})
+        check("prep/prep-ref-to-resolved-row-actionable", _verdict(p2stop()), "block2")
+        p2.pending.write_text("| PD-9 | 2026-01-01 | which db | RAISED |\n", encoding="utf-8")
+        # prep_complete true but blank/missing prep_ref -> ENUMERATOR_ERROR -> DENY
+        p2.enum_payload.write_text(json.dumps(
+            {"version": 2, "generated_at_utc": now_iso(0), "source": {"locator": "f"},
+             "items": [{"id": "H-3", "state": "open", "granted": True,
+                        "blocker": {"kind": "human-decision", "ref": "PD-9",
+                                    "prep_complete": True, "prep_ref": "   "}}]}), encoding="utf-8")
+        p2.set_turn_state({})
+        check("prep/complete-blank-ref-enumerator-error", _verdict(p2stop()), "block2")
+        # v1 human-decision (no prep fields) stays blocked byte-identically
+        p2.set_items([item("H-4", blocker={"kind": "human-decision", "ref": "PD-9"})], version=1)
+        p2.set_turn_state({})
+        check("prep/v1-human-decision-blocked", _verdict(p2stop()), "warn")  # FLAG: was "allow"
+
+        # ---------- GD-164: the checkpoint eligible->closed-unjustified hold ----------
+        k = Fixture(tmp, "ckpt164")
+        kstop = lambda: aiqt_hooks.orch_stop_guard(k.payload("Stop"))
+        # window 1: K-1 eligible (records it into the checkpoint), a plain open item present
+        k.set_items([item("K-1")], version=2)
+        k.set_turn_state({})
+        kstop()
+        # window 2: K-1 now closed-unjustified (v2 close, no register) -> cannot-evaluate injected -> DENY
+        k.set_items([item("K-1", state="closed",
+                          close={"reason": "no-fix-needed", "ref": "R-1"})],
+                    version=2, keep_checkpoint=True)
+        k.set_turn_state({})
+        check("ckpt164/eligible-to-closed-unjustified-holds", _verdict(kstop()), "block2")
+        # a fresh window: K-2 eligible, then closed-TERMINAL (covered) -> leaves cleanly (warn, no CE)
+        k2 = Fixture(tmp, "ckpt164-term")
+        k2stop = lambda: aiqt_hooks.orch_stop_guard(k2.payload("Stop"))
+        k2.write_ground("dispositions", "dispositions-validated.json", "DS-",
+                        [{"item": "K-2", "ground": "no-fix-needed", "ref": "R-2",
+                          "status": "accepted", "ts": now_iso(0), "check_ref": "seed.txt"}])
+        k2.set_items([item("K-2")], version=2)
+        k2.set_turn_state({})
+        k2stop()
+        k2.set_items([item("K-2", state="closed",
+                           close={"reason": "no-fix-needed", "ref": "R-2"})],
+                     version=2, keep_checkpoint=True)
+        k2.set_turn_state({})
+        check("ckpt164/eligible-to-closed-terminal-leaves", _verdict(k2stop()), "warn")
+        # B2 residual: EXACTLY ONE classification per indexed id. A closed-unjustified transition puts an
+        # id in ACTIONABLE (classify: a declared dispositions register with the WRONG ref) while the
+        # anti-shrinkage checkpoint ALSO injects a CANNOT-EVALUATE hold for the SAME id. The emitted
+        # enumeration must dedup so item_count == the authoritative unique-id count (1), never double-count.
+        kd = Fixture(tmp, "ckpt164-dedup")
+        kdstop = lambda: aiqt_hooks.orch_stop_guard(kd.payload("Stop"))
+        kd.write_ground("dispositions", "dispositions-validated.json", "DS-",
+                        [{"item": "K-9", "ground": "no-fix-needed", "ref": "R-OK",
+                          "status": "accepted", "ts": now_iso(0), "check_ref": "seed.txt"}])
+        kd.set_items([item("K-9")], version=2)                      # window 1: eligible
+        kd.set_turn_state({})
+        kdstop()
+        kd.set_items([item("K-9", state="closed",
+                           close={"reason": "no-fix-needed", "ref": "WRONG"})],
+                     version=2, keep_checkpoint=True)               # window 2: closed-unjustified
+        kd.set_turn_state({})
+        check("ckpt164/dedup-transition-denies", _verdict(kdstop()), "block2")
+        kdsd = Path(aiqt_hooks._state_dir_from_registry(
+            str(kd.root), aiqt_hooks._orch_registry(str(kd.root))[1]))
+        kdrows = [json.loads(x) for x in
+                  (kdsd / "liveness-evaluations.jsonl").read_text(encoding="utf-8").splitlines()
+                  if x.strip()]
+        check("ckpt164/dedup-item-count-unique", kdrows[-1]["item_count"], 1)
+        check("ckpt164/dedup-single-row-for-id",
+              sum(1 for r in kdrows[-1]["disposition"] if r["id"] == "K-9"), 1)
+
+        # ---------- GD-164: the wait boundary ----------
+        w = Fixture(tmp, "wait")
+        _wr = json.loads((w.root / ".aiqt" / "orchestration.local.json").read_text())
+        _wr["wait_tools"] = ["Bash"]
+        (w.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_wr))
+        wsd = Path(aiqt_hooks._state_dir_from_registry(str(w.root),
+                   aiqt_hooks._orch_registry(str(w.root))[1]))
+        wsd.mkdir(parents=True, exist_ok=True)
+        waitcall = lambda text: aiqt_hooks.orch_wait_guard(
+            w.payload("PreToolUse", "Bash", {"command": text}))
+        # a wait over a non-empty actionable set -> DENY redirect naming the actionable item
+        (wsd / "dispatch-ledger.jsonl").write_text(json.dumps(
+            {"ts": now_iso(1), "event": "launch", "task_id": "T-1", "tool": "Bash",
+             "wake": True}) + "\n", encoding="utf-8")
+        w.set_items([item("WA-1", blocker={"kind": "tracked-task", "ref": "T-1"}),
+                     item("WA-2")], version=2)          # one live waiting, one seedable actionable
+        w.set_turn_state({})
+        code, obj, _e = waitcall("wait on T-1")
+        rr = obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        check("wait/actionable-redirect-denies", _verdict((code, obj, _e)), "deny")
+        check("wait/actionable-redirect-names-item", "WA-2" in rr, True)
+        # zero waiting, zero actionable -> DENY as a manufactured wait ("nothing to wait for")
+        (wsd / "dispatch-ledger.jsonl").unlink()
+        w.set_items([], version=2)
+        w.set_turn_state({})
+        check("wait/nothing-running-denies", _verdict(waitcall("wait")), "deny")
+        # one live waiting, but the wait text names none of them -> DENY manufactured wait
+        (wsd / "dispatch-ledger.jsonl").write_text(json.dumps(
+            {"ts": now_iso(1), "event": "launch", "task_id": "T-1", "tool": "Bash",
+             "wake": True}) + "\n", encoding="utf-8")
+        w.set_items([item("WA-1", blocker={"kind": "tracked-task", "ref": "T-1"})], version=2)
+        w.set_turn_state({})
+        check("wait/unnamed-target-denies", _verdict(waitcall("sleep 600")), "deny")
+        # exactly one live waiting row, named as a whole token, zero actionable/CE -> ALLOW + surface
+        w.set_turn_state({})
+        code, obj, _e = waitcall("wait WA-1")
+        check("wait/single-live-named-allows", _verdict((code, obj, _e)), "warn")  # ALLOW -> systemMessage
+        check("wait/allow-carries-surface",
+              "liveness:" in (obj.get("systemMessage", "") if isinstance(obj, dict) else ""), True)
+        # enum failure -> wait DENIES
+        w.enum_exit.write_text("3", encoding="utf-8")
+        w.set_turn_state({})
+        check("wait/enum-error-denies", _verdict(waitcall("sleep 600")), "deny")
+        w.enum_exit.write_text("0", encoding="utf-8")
+        # item-level cannot-evaluate (unreadable ledger) -> wait DENIES
+        (wsd / "dispatch-ledger.jsonl").write_text("null\n{broken\n", encoding="utf-8")
+        w.set_items([item("WA-1", blocker={"kind": "tracked-task", "ref": "T-1"})], version=2)
+        w.set_turn_state({})
+        check("wait/cannot-evaluate-denies", _verdict(waitcall("sleep 600")), "deny")
+        (wsd / "dispatch-ledger.jsonl").unlink()
+        # anti-wedge (the B1 SANCTIONED single-live-waiting-row wedge): a NAMED LIVE WAITING ROW plus an
+        # actionable item, denied repeatedly on an unchanged basis past the cap -> ALLOW_WITH_FINDINGS +
+        # forced-exit. The relief requires the live waiting target (an absent/unnamed target denies, per
+        # wait/unnamed-target-denies above); it is NOT the bare-actionable relief the old code granted.
+        (wsd / "dispatch-ledger.jsonl").write_text(json.dumps(
+            {"ts": now_iso(1), "event": "launch", "task_id": "T-1", "tool": "Bash",
+             "wake": True}) + "\n", encoding="utf-8")
+        w.set_items([item("WA-1", blocker={"kind": "tracked-task", "ref": "T-1"}),
+                     item("WA-9")], version=2)   # one live waiting (named), one actionable -> DENY basis
+        # prime the schedule counter to the cap on this exact basis (wait naming the live waiting row)
+        _ctx, _ts, _basis = aiqt_hooks._orch_build_ctx(
+            aiqt_hooks._orch_registry(str(w.root))[1], str(w.root), "wait",
+            w.payload("PreToolUse", "Bash", {"command": "wait WA-1"}),
+            wake_text="wait WA-1", record_checkpoint=False)
+        w.set_turn_state({"schedule_denials": 3, "schedule_basis": _basis})
+        check("wait/cap-relief-warns", _verdict(waitcall("wait WA-1")), "warn")
+        check("wait/cap-relief-forced-exit",
+              (wsd / "forced-exit.jsonl").exists(), True)
+        (wsd / "dispatch-ledger.jsonl").unlink()
+        # NO-ASK: a present-but-unreadable registry cannot say which tools are wait tools, so a DENY here
+        # would wedge every matched call; the call proceeds WITH a surfaced cannot-evaluate note (never a
+        # silent allow, never an ask). The Stop family's exit-2 deny is the compensating layer.
+        _wgood = (w.root / ".aiqt" / "orchestration.local.json").read_text()
+        (w.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
+        _wc, _wo, _we = waitcall("sleep 600")
+        check("wait/bad-registry-allows-note", _verdict((_wc, _wo, _we)), "warn")
+        check("wait/bad-registry-note-names-cannot-evaluate",
+              "cannot-evaluate" in (_wo or {}).get("systemMessage", ""), True)
+        (w.root / ".aiqt" / "orchestration.local.json").write_text(_wgood)
+        # ---------- GD-164 r9 FIX 1: the wait-intent discriminator (A1 anti-wedge) ----------
+        # An actionable item is present, so under the OLD tool-name-only classification EVERY Bash call
+        # would DENY (the production wedge); the discriminator makes an ordinary command an inert allow
+        # while a genuine wait is still judged and denied.
+        w.set_items([item("WA-9")], version=2)   # one actionable item; no live waiting row
+        w.set_turn_state({})
+        check("wait/ordinary-bash-inert-allow", _verdict(waitcall("git status --short")), "allow")
+        check("wait/ordinary-bash-ls-inert-allow", _verdict(waitcall("ls -la /tmp")), "allow")
+        # a GENUINE wait (a plain sleep, a while-poll loop, a bare wait builtin) is JUDGED -> DENY (livbak)
+        check("wait/genuine-sleep-denies", _verdict(waitcall("sleep 600")), "deny")
+        check("wait/genuine-poll-loop-denies",
+              _verdict(waitcall("while true; do sleep 5; done")), "deny")
+        check("wait/bare-wait-builtin-denies", _verdict(waitcall("wait")), "deny")
+        # r10 FIX 1: the discriminator judges the COMMAND WORD over the lexer, so a while/sleep token in
+        # ARGUMENT position is NOT a wait (the r9 token-correlation over-fire), while a sleep inside an
+        # if/then branch or a for-loop body IS a wait (the r9 body-keyword miss). Actionable item present.
+        check("wait/arg-while-sleep-inert-allow", _verdict(waitcall("echo while sleep")), "allow")
+        check("wait/arg-commit-while-sleep-inert-allow",
+              _verdict(waitcall("git commit -m while -m sleep")), "allow")
+        check("wait/arg-grep-pipe-while-sleep-inert-allow",
+              _verdict(waitcall("grep -rn sleep . | grep -i while")), "allow")
+        check("wait/if-then-sleep-denies", _verdict(waitcall("if true; then sleep 600; fi")), "deny")
+        check("wait/for-loop-sleep-denies",
+              _verdict(waitcall("for i in 1 2 3; do sleep 10; done")), "deny")
+        # r11 FIX 1: the r10 UNCONDITIONAL body-keyword skip wedged an ordinary command literally named
+        # do/then (a bare, quoted, or path-qualified `do`) - it read `do` as a shell keyword and skipped to
+        # the following sleep. A body keyword is a keyword ONLY when a PRIOR segment opened a compound
+        # (while/until/for/if); a bare `do` with no opener is a COMMAND WORD -> not a wait -> inert allow.
+        check("wait/quoted-do-sleep-inert-allow", _verdict(waitcall("'do' sleep")), "allow")
+        check("wait/path-do-sleep-inert-allow", _verdict(waitcall("dir/do sleep")), "allow")
+        # r11 FIX 1 DISCLOSED RESIDUAL (fail-safe, inert-allow, documented in the docstring + manifest): a
+        # sleep in a while/until loop CONDITION, or behind a command-modifier prefix (command/time/!/env),
+        # is NOT structurally recognized and inert-allows (a missed wait -> allow, never a wedge).
+        check("wait/while-condition-sleep-inert-allow",
+              _verdict(waitcall("while sleep 60; do :; done")), "allow")
+        check("wait/modifier-time-sleep-inert-allow", _verdict(waitcall("time sleep 5")), "allow")
+        # wait_tools = [] (an EMPTY list) is fully inert even for a genuine wait command
+        _wr_empty = json.loads((w.root / ".aiqt" / "orchestration.local.json").read_text())
+        _wr_empty["wait_tools"] = []
+        (w.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_wr_empty))
+        w.set_turn_state({})
+        check("wait/empty-wait-tools-inert", _verdict(waitcall("sleep 600")), "allow")
+        # an adopter registry with NO wait_tools key -> byte-identical inertness (allow)
+        _wr2 = json.loads((w.root / ".aiqt" / "orchestration.local.json").read_text())
+        del _wr2["wait_tools"]
+        (w.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_wr2))
+        w.set_items([item("WA-9")], version=2)
+        w.set_turn_state({})
+        check("wait/no-wait-tools-inert", _verdict(waitcall("x")), "allow")
+
+        # ---------- GD-164 r10 FIX 5(b): validate_enumeration rejects an invisible verdict-bearing ref ---
+        # A Cf/zero-width char inside a CLOSE or BLOCKER ref is non-whitespace, so the enumerator ref
+        # grammar accepted it, laundering a distinct ref into a valid terminal close / substantiated blocker
+        # (fail-OPEN). The engine validator rejects it too (defence in depth: an alternate enumerator could
+        # emit such JSON directly). Python ESCAPE, no literal invisible byte.
+        _zwsp = "\u200b"
+        _r10now = now_iso(0)
+        _r10env = lambda its: {"version": 2, "generated_at_utc": _r10now,
+                               "source": {"locator": "fixture", "revision": "sha256:x",
+                                          "observed_at_utc": _r10now}, "items": its}
+        _c_items, _c_err = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "Z-1", "title": "t", "state": "closed", "granted": True, "blocker": None,
+             "close": {"reason": "no-fix-needed", "ref": "R-" + _zwsp + "1"}}]))
+        check("enum/invisible-close-ref-rejected", _c_items is None and bool(_c_err), True)
+        _b_items, _b_err = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "Z-2", "title": "t", "state": "open", "granted": True,
+             "blocker": {"kind": "external", "ref": "ci-" + _zwsp + "42"}}]))
+        check("enum/invisible-blocker-ref-rejected", _b_items is None and bool(_b_err), True)
+        # ---------- GD-164 r11 FIX 5: allowlist replaces the invisible DENYLIST, extended to prep_ref +
+        #            close.paths, at the engine surface too. codex REFUTED the r10 scope: _orch_has_invisible
+        #            rejected only Cf + a fixed zero-width set, so a VARIATION SELECTOR / CGJ / filler /
+        #            Braille blank laundered a distinct close ref, blocker ref, prep_ref, or close.paths entry
+        #            into a terminal or BLOCKED verdict; prep_ref + close.paths had NO check at all. Every
+        #            verdict-bearing span must be pure graphic-ASCII. Python ESCAPE, no literal invisible byte.
+        _vs = "\ufe0f"   # VARIATION SELECTOR-16, category Mn, NOT Cf: the r10 denylist passed it
+        _v1i, _v1e = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "V-1", "title": "t", "state": "closed", "granted": True, "blocker": None,
+             "close": {"reason": "no-fix-needed", "ref": "R-" + _vs + "1"}}]))
+        check("enum/vs-close-ref-rejected", _v1i is None and bool(_v1e), True)
+        _v2i, _v2e = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "V-2", "title": "t", "state": "open", "granted": True,
+             "blocker": {"kind": "external", "ref": "ci-" + _vs + "42"}}]))
+        check("enum/vs-blocker-ref-rejected", _v2i is None and bool(_v2e), True)
+        _pref = lambda ref: _r10env([
+            {"id": "V-3", "title": "t", "state": "open", "granted": True,
+             "blocker": {"kind": "human-decision", "ref": "PD-9", "prep_complete": True,
+                         "prep_ref": ref}}])
+        _p1i, _p1e = aiqt_hooks.validate_enumeration(_pref("plan" + _vs + ".md"))
+        check("enum/vs-prep-ref-rejected", _p1i is None and bool(_p1e), True)
+        _p2i, _p2e = aiqt_hooks.validate_enumeration(_pref("plan" + _zwsp + ".md"))
+        check("enum/invisible-prep-ref-rejected", _p2i is None and bool(_p2e), True)
+        _cpath = lambda p: _r10env([
+            {"id": "V-4", "title": "t", "state": "closed", "granted": True, "blocker": None,
+             "close": {"reason": "fixed", "ref": "commit-abc", "paths": ["tools/gen_hooks.py", p]}}])
+        _q1i, _q1e = aiqt_hooks.validate_enumeration(_cpath("tools/gen_hooks.py" + _vs))
+        check("enum/vs-close-path-rejected", _q1i is None and bool(_q1e), True)
+        _q2i, _q2e = aiqt_hooks.validate_enumeration(_cpath("tools/gen_hooks.py" + _zwsp))
+        check("enum/invisible-close-path-rejected", _q2i is None and bool(_q2e), True)
+        # clean graphic-ASCII ref/path/prep still VALIDATES: proves the rejections above are caused by the
+        # invisible, not an unrelated envelope defect (no false rejection).
+        _cli, _cle = aiqt_hooks.validate_enumeration(_r10env([
+            {"id": "V-5", "title": "t", "state": "closed", "granted": True, "blocker": None,
+             "close": {"reason": "fixed", "ref": "commit-abc123", "paths": ["tools/gen_hooks.py"]}}]))
+        check("enum/clean-graphic-ascii-passes", _cle is None and _cli is not None, True)
+        _cpi, _cpe = aiqt_hooks.validate_enumeration(_pref("plan.md"))
+        check("enum/clean-prep-ref-passes", _cpe is None and _cpi is not None, True)
+
+        # ---------- GD-164: surface-N and emission ----------
+        s = Fixture(tmp, "surface")
+        sstop = lambda: aiqt_hooks.orch_stop_guard(s.payload("Stop"))
+        ssd = Path(aiqt_hooks._state_dir_from_registry(str(s.root),
+                   aiqt_hooks._orch_registry(str(s.root))[1]))
+        s.set_items([item("S-{}".format(i)) for i in range(15)], version=2)
+        s.set_turn_state({})
+        sstop()
+        srows = [json.loads(x) for x in
+                 (ssd / "liveness-evaluations.jsonl").read_text(encoding="utf-8").splitlines() if x]
+        # the durable row's disposition table is UNTRUNCATED (15), carrying digest+locator+item_count
+        check("surface/liveness-row-untruncated", srows[-1]["item_count"], 15)
+        check("surface/liveness-row-digest", len(srows[-1]["digest"]), 64)
+        check("surface/liveness-row-locator", srows[-1]["source_locator"], "fixture")
+        # the human-facing block is BOUNDED to N (10) with "and 5 more"
+        code, _o, err = sstop()
+        check("surface/message-bounded", "and 5 more" in (err or ""), True)
+        # surface_n honoured when a valid int; fallback to 10 on malformed
+        _sr = json.loads((s.root / ".aiqt" / "orchestration.local.json").read_text())
+        _sr["surface_n"] = 3
+        (s.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_sr))
+        s.set_turn_state({})
+        _c, _o, err = sstop()
+        check("surface/surface-n-honoured", "and 12 more" in (err or ""), True)
+        _sr["surface_n"] = "nope"
+        (s.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_sr))
+        s.set_turn_state({})
+        _c, _o, err = sstop()
+        check("surface/surface-n-malformed-falls-back", "and 5 more" in (err or ""), True)
+        # clean-ALLOW on Stop now emits the surface block (not a bare allow) and a durable row
+        s.set_items([item("S-b", blocker={"kind": "external", "ref": "ci",
+                                          "evidence": "pending", "observed_at_utc": now_iso(1)})],
+                    version=2)
+        s.set_turn_state({})
+        _c, obj, err = sstop()
+        check("surface/clean-allow-emits-block",
+              "liveness:" in (obj.get("systemMessage", "") if isinstance(obj, dict) else ""),
+              True)  # FLAG allow->warn: the surface rides the systemMessage, not stderr
+        check("surface/clean-allow-verdict", _c, 0)
+        # enumeration failure: the surfaced block names the failure, never an empty clean list
+        s.enum_exit.write_text("3", encoding="utf-8")
+        s.set_turn_state({})
+        _c, _o, err = sstop()
+        check("surface/enum-failure-named", "could not be enumerated" in (err or ""), True)
+        s.enum_exit.write_text("0", encoding="utf-8")
+        # a failed liveness append surfaces in the returned message (fail-loud): assert the emitter's
+        # fail-loud contract at the unit level with a state dir that is a FILE, not a dir.
+        _ctx = {"enum_status": "ok", "actionable": [("S-x", "S-x", "no blocker recorded")],
+                "waiting": [], "blocked": [], "cannot_evaluate": [], "proposed": [],
+                "source": {"locator": "f", "revision": "r"}, "generated_at_utc": now_iso(0)}
+        _blk, _warn = aiqt_hooks._orch_liveness_row(str(s.root), "Stop", _ctx, "ALLOW", "r",
+            aiqt_hooks._orch_disposition_table(_ctx), 10,
+            state_dir=str(s.root / "seed.txt"))  # a FILE, not a dir -> append fails
+        check("surface/failed-append-fail-loud", "could not be fully persisted" in _warn, True)
+
+        # ---------- GD-164: the route hook ----------
+        rt = Fixture(tmp, "route")
+        _rr = json.loads((rt.root / ".aiqt" / "orchestration.local.json").read_text())
+        _rr["route"] = {"surfaces": ["backlog.md"], "argv": ["python3", "tools/orch_route.py"]}
+        (rt.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_rr))
+        (rt.root / "backlog.md").write_text("- [ ] item\n", encoding="utf-8")
+        rt._git("add", "backlog.md")
+        rt._git("-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                "-c", "commit.gpgsign=false", "commit", "-q", "-m", "backlog")
+        route = lambda tool, fp: aiqt_hooks.orch_route_guard(
+            rt.payload("PreToolUse", tool, {"file_path": str(rt.root / fp)}))
+        # NO-ASK: a declared-surface hand-edit PROCEEDS with a steering note (never an ask).
+        check("route/declared-surface-allows-note", _verdict(route("Write", "backlog.md")), "warn")
+        _rn = route("Write", "backlog.md")[1] or {}
+        check("route/declared-surface-note-steers", "tools/orch_route.py" in _rn.get("systemMessage", ""),
+              True)
+        check("route/undeclared-target-allows", _verdict(route("Write", "other.md")), "allow")
+        # undeclared registry (no route key) keeps the hook inert
+        _rr2 = json.loads((rt.root / ".aiqt" / "orchestration.local.json").read_text())
+        del _rr2["route"]
+        (rt.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_rr2))
+        check("route/no-route-key-inert", _verdict(route("Write", "backlog.md")), "allow")
+        # an unresolvable target is cannot-evaluate and DENIES, fail-closed (restore route key first)
+        _rr2["route"] = {"surfaces": ["backlog.md"]}
+        (rt.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_rr2))
+        check("route/unresolvable-target-denies",
+              _verdict(aiqt_hooks.orch_route_guard(
+                  rt.payload("PreToolUse", "Write", {"file_path": "\x00bad"}))), "deny")
+        # a present-but-unreadable registry is cannot-evaluate and DENIES a route-surface edit
+        (rt.root / ".aiqt" / "orchestration.local.json").write_text("{not json", encoding="utf-8")
+        check("route/bad-registry-denies", _verdict(route("Write", "backlog.md")), "deny")
+        (rt.root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(_rr2))
+
+        # ---------- GD-164: the ask-guard ACT sentence ----------
+        aq = Fixture(tmp, "ask164")
+        aq.mode.write_text("Operating-mode: overnight-unattended\n", encoding="utf-8")
+        _c, obj, _e = aiqt_hooks.orch_ask_guard(
+            aq.payload("PreToolUse", "AskUserQuestion", {"questions": [{"q": "which?"}]}))
+        rr = obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "") \
+            if isinstance(obj, dict) else ""
+        check("ask/act-sentence-present", "ACT, not ASK (deccls)" in rr, True)
+
+        # ---------- Addendum A1: state-dir READ-path fail-closed ----------
+        a1 = Fixture(tmp, "a1")
+        a1stop = lambda: aiqt_hooks.orch_stop_guard(a1.payload("Stop"))
+        a1.set_items([item("A1-1")], version=2)         # one actionable -> DENY basis
+        a1sd = Path(aiqt_hooks._state_dir_from_registry(str(a1.root),
+                    aiqt_hooks._orch_registry(str(a1.root))[1]))
+        a1sd.mkdir(parents=True, exist_ok=True)
+        # a valid registry reads the correct (declared) state dir (regression pin)
+        a1.set_turn_state({})
+        check("a1/valid-registry-reads-correct-state-dir", _verdict(a1stop()), "block2")
+        # mid-turn bad registry on a SECOND read must NOT relieve the cap: seam _orch_registry to
+        # return ok on the first call, bad thereafter. Under the fix no second read happens, so the
+        # verdict stays a cap-bounded DENY.
+        _real_reg = aiqt_hooks._orch_registry
+        _calls = {"n": 0}
+        def _ok_then_bad(root):
+            _calls["n"] += 1
+            return _real_reg(root) if _calls["n"] <= 1 else ("bad", "seam: mid-turn fault")
+        a1.set_turn_state({"schedule_denials": 3, "schedule_basis": "stale"})
+        try:
+            aiqt_hooks._orch_registry = _ok_then_bad
+            v = _verdict(a1stop())
+        finally:
+            aiqt_hooks._orch_registry = _real_reg
+        check("a1/read-path-holds-under-midturn-bad-registry", v, "block2")
+
+        # ---------- Addendum A2: wake registration on scheduling-tool success ----------
+        a2 = Fixture(tmp, "a2")
+        a2sd = Path(aiqt_hooks._state_dir_from_registry(str(a2.root),
+                    aiqt_hooks._orch_registry(str(a2.root))[1]))
+        a2sd.mkdir(parents=True, exist_ok=True)
+        post = lambda resp: aiqt_hooks.orch_wake_register(
+            {"hook_event_name": "PostToolUse", "cwd": str(a2.root), "session_id": "s1",
+             "tool_name": "ScheduleWakeup", "tool_input": {"prompt": "recheck A2"},
+             "tool_response": resp})
+        a2.set_items([item("A2-1")], version=2)
+        # a FAILED scheduling tool registers NO wake digest (no orphan)
+        a2.set_turn_state({})
+        post({"is_error": True, "error": "quota"})
+        check("a2/failed-schedule-no-orphan",
+              a2.turn_state().get("wake_digests", []), [])
+        # a SUCCESSFUL scheduling tool registers exactly one wake
+        a2.set_turn_state({})
+        # FIX 4 (round 9): a wake tool's real success contract (a positive scheduledFor), not a bare
+        # generic ok:true, is what registers; a bare ok carries no confirmed schedule, so under the
+        # tool-authoritative rule it correctly declines. Assert the positive with a real (clamped)
+        # ScheduleWakeup success shape.
+        post({"scheduledFor": 60000, "clampedDelaySeconds": 60, "wasClamped": True})
+        check("a2/successful-schedule-registers-one",
+              len(a2.turn_state().get("wake_digests", [])), 1)
+        # FIX 2 (round 8): the REAL success objects REGISTER through the wired, tool-aware register path.
+        a2.set_turn_state({})
+        post({"scheduledFor": 90000, "clampedDelaySeconds": 90, "wasClamped": False})
+        check("a2/real-schedulewakeup-registers",
+              len(a2.turn_state().get("wake_digests", [])), 1)
+        # a real ScheduleWakeup CANCEL carried in the RESPONSE (not via tool_input.stop) registers NO
+        # digest: the response-level cancel check declines even when tool_input has no stop flag.
+        a2.set_turn_state({})
+        post({"scheduledFor": 0, "clampedDelaySeconds": 0, "wasClamped": False,
+              "stopped": True, "cancelledWakeups": 1})
+        check("a2/real-schedulewakeup-cancel-no-register",
+              a2.turn_state().get("wake_digests", []), [])
+        # FIX 4 (round 9): a cancel/invalid carrying a GENERIC ok:true registers NO digest through the
+        # WIRED register path (the generic marker must not override the tool-specific veto).
+        for _cid, _resp in (
+                ("a2/cancel-generic-ok-no-register", {"scheduledFor": 0, "stopped": True, "ok": True}),
+                ("a2/zero-scheduledfor-ok-no-register", {"scheduledFor": 0, "ok": True}),
+                ("a2/neg-scheduledfor-ok-no-register", {"scheduledFor": -1, "ok": True}),
+                ("a2/bool-scheduledfor-ok-no-register", {"scheduledFor": True, "ok": True})):
+            a2.set_turn_state({})
+            post(_resp)
+            check(_cid, a2.turn_state().get("wake_digests", []), [])
+        # a real CronCreate success registers through the CronCreate matcher (yield_tools already lists it).
+        post_cron = lambda resp: aiqt_hooks.orch_wake_register(
+            {"hook_event_name": "PostToolUse", "cwd": str(a2.root), "session_id": "s1",
+             "tool_name": "CronCreate", "tool_input": {"prompt": "cron A2"},
+             "tool_response": resp})
+        a2.set_turn_state({})
+        post_cron({"id": "cron-7f3", "humanSchedule": "every day at 09:00",
+                   "recurring": True, "durable": True})
+        check("a2/real-croncreate-registers",
+              len(a2.turn_state().get("wake_digests", [])), 1)
+        # after a FAILED schedule, a later byte-identical human prompt DOES reset the counters (not
+        # misclassified timer-originated), because no orphan digest was registered
+        a2.set_turn_state({"stop_denials": 2, "schedule_denials": 2})
+        post({"is_error": True})
+        rc, _o, _e = aiqt_hooks.orch_prompt_stamp(
+            {"hook_event_name": "UserPromptSubmit", "cwd": str(a2.root), "session_id": "s1",
+             "prompt": "recheck A2"})
+        check("a2/failed-then-human-prompt-resets",
+              a2.turn_state().get("stop_denials"), 0)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1657,7 +2728,8 @@ def main(report_path=None):
           "tools/selftest_checks.toml".format(len(EXECUTED)))
     print("Coverage narrative (human orientation, not evidence): the stop guard denies enumerated "
           "actionable work and unproven or stale "
-          "blockers, allows proven blockers, live tracked tasks, proposed-only backlogs, absent "
+          "blockers, allows proven blockers, live tracked tasks, denies over a proposed/ungranted "
+          "item (assistant-writable label text is actionable, never a park), absent "
           "registry/lease scope, a genuinely operator-owned escape sentinel, and DENIES a BELOW-BOUND "
           "cannot-evaluate (ignorance refuses the wind-down; the operator escape OR the bounded loop-exit "
           "releases); the "

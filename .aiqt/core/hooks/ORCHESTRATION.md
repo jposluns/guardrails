@@ -122,8 +122,37 @@ Output on stdout:
  "source": {"locator": "...", "revision": "...", "observed_at_utc": "..."},
  "items": [{"id": "...", "title": "...", "state": "open|closed|proposed", "granted": true,
             "blocker": {"kind": "tracked-task|human-decision|external|foreign-lease|not-before",
-                        "ref": "...", "evidence": "...", "observed_at_utc": "..."}}]}
+                        "ref": "...", "evidence": "...", "observed_at_utc": "..."},
+            "close": {"reason": "fixed|no-fix-needed|not-buildable|maintainer-deferred",
+                      "ref": "...", "paths": ["..."]}}]}
 ```
+
+Under AEI v2 a `closed` item MUST carry a `close` object (a `reason` in the closed vocabulary and a
+non-blank `ref`). A `fixed` close is terminal ONLY when the cited commit is BOUND TO THE ITEM BY
+CONTENT: its changed set intersects the item's declared close `paths` (the repo-relative path(s) the fix
+touched). This binding is by content alone: an item id merely named in a commit message is
+assistant-writable text, not evidence the fix is in the commit, so it never makes a close terminal. A
+`fixed` close that declares NO `paths` therefore cannot be strong-verified and HOLDS (cannot-evaluate),
+as does an unavailable git rail; a real-but-unrelated commit, or one whose declared paths the commit did
+not touch, stays actionable; resolving to some commit is not enough.
+
+ADOPTER REQUIREMENT (close `paths`): to have a `fixed` close read as a TERMINAL disposition (rather than
+held or found unjustified), the enumeration MUST declare the item's close `paths`, and the cited commit
+must actually touch them. BOTH surfaces can express `paths`: a JSON AEI enumeration carries them in the
+close object, and the committed-backlog markdown grammar (`tools/aei_backlog_md.py`) carries them as a
+trailing `:: paths=<comma-separated repo-relative paths>` on the fixed close, the same close.paths field
+the JSON surface and the liveness join read. The reconciliation resolves to exactly three cases, identical
+at the yield boundary and at the committed-state liveness join (`tools/check_liveness_joins.py`): a `fixed`
+close that declares `paths` whose cited commit's changed set INTERSECTS them is TERMINAL; a `fixed` close
+that declares NO `paths` HOLDS (cannot-evaluate, unreconcilable), because the commit cannot be bound to the
+item by content and the close cannot be strong-verified; and a `fixed` close that declares `paths` whose
+cited commit does NOT touch them, or whose ref resolves to no commit, is an UNJUSTIFIED FINDING that stays
+ACTIONABLE (the fix did not land, so the item keeps being worked), never a hold. An unavailable git rail
+HOLDS every `fixed` close (cannot-evaluate). The distinction is material: a held close and an actionable
+unjustified finding both keep working the item safely, but only a hold is cannot-evaluate while an
+unjustified finding stays in the actionable set, and an actionable wait-denial can reach cap relief where a
+cannot-evaluate cannot. Declaring accurate `paths` that the fix actually touched is what lets a genuine fix
+count as terminal rather than hold or read as unjustified.
 
 A nonzero exit, malformed JSON, a duplicate id, or an unknown version is ENUMERATOR_ERROR, never an
 empty backlog; an empty `items` array is a valid enumeration, a parse failure never is. On the stop
@@ -171,4 +200,4 @@ The stop guard's blocker substantiation is itself largely ACTOR-AUTHORABLE: the 
 
 The escape sentinel opens the clean-ALLOW channel only as an operator-created artefact: a regular file with a single hard link, reached without following any symlinked path component, resolved under the state-dir anchor (an absolute or '..' path outside it is rejected), owned by a uid other than this guard's, and not group- or other-writable; any other present file is ignored, recorded, and surfaced once at the next resume. Uid inequality proves not-self, never operator identity; component resolution is a best-effort lstat walk under the anchor, so a narrow window between the walk and the descriptor-bound stat remains.
 
-The registry file is the confinement's trust root (a guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's first window has no union to compare; an init marker distinguishes that genuine first window from a checkpoint deleted after a prior window (held as a possible reset), and the bound logs what it drops, never silently. The checkpoint also records each open id's eligibility (granted-and-open vs proposed/ungranted), so a demotion of a previously-actionable id to proposed or ungranted with no closed receipt is held (cannot-evaluate) rather than silently routed to the harmless proposed bucket; that eligibility memory lives in the same actor-writable state dir, raising the bar without being categorical. Deleting the marker and the checkpoint together, like deleting the turn state to restart the loop bound, is the same actor-writable-state residual. The loop bound remains a deliberate, exhaustible, marked exit, with each denial and each forced exit individually recorded in guard-events and an append-only forced-exit log that the next resume surfaces exactly once. Host clock control defeats every freshness check here (out of threat model). The roster of yield primitives is fixed at generation and re-reconciled when the toolchain changes.
+The registry file is the confinement's trust root (a guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's first window has no union to compare; an init marker distinguishes that genuine first window from a checkpoint deleted after a prior window (held as a possible reset), and the bound logs what it drops, never silently. A `proposed` or ungranted item is ASSISTANT-WRITABLE label text. Under AEI v2 the classifier treats an ORDINARY proposal as ACTIONABLE (a self-authored proposal is not a grant and licenses no wind-down; its preparatory pipeline is buildable work): it never removes buildable work from the actionable set even on a first observation. The one exception is a maintainer/provenance-confirmed park: a proposed item carrying a human-decision blocker parks at its final step ONLY when its blocker ref is covered by a validated, ownership-passing DEFERRALS register row keyed (item, ref), the same maintainer-controlled rail the maintainer-deferred close requires and one the assistant cannot self-author. A self-authored proposal plus a self-authored pending-decisions label never parks: the pending-decisions surface is assistant-writable, so it substantiates no proposed park (F-331). Only that maintainer-controlled deferrals provenance honours the GD-127 recorded-wind-down park rather than forcing the item to prep. Under AEI v1 (the shipped compatibility contract) a proposed or ungranted item keeps the byte-identical NON-COMPELLING `proposed` bucket, unchanged in bucket and decision; the stricter proposed-is-actionable treatment is a v2 behaviour, so a v1 adopter's classification is preserved exactly. A present-but-unreadable orchestration registry is a cannot-evaluate DISTINCT from an absent one: the stop and teammate-idle family DENIES the wind-down fail-closed (never treating unreadable config as absence), and the operator-owned escape sentinel, resolved independently of the unreadable registry, is the release. The checkpoint additionally records each open id's eligibility (granted-and-open vs proposed/ungranted), so a cross-window demotion of a previously-actionable id to proposed or ungranted with no closed receipt is also held (cannot-evaluate); that eligibility memory lives in the same actor-writable state dir, raising the bar without being categorical. Deleting the marker and the checkpoint together, like deleting the turn state to restart the loop bound, is the same actor-writable-state residual. The loop bound remains a deliberate, exhaustible, marked exit, with each denial and each forced exit individually recorded in guard-events and an append-only forced-exit log that the next resume surfaces exactly once. Host clock control defeats every freshness check here (out of threat model). The roster of yield primitives is fixed at generation and re-reconciled when the toolchain changes.

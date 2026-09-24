@@ -5,7 +5,7 @@
 # enforces bidirectional coverage: every corpus-id in the corpus has exactly one entry here, no orphan
 # entry, and every condition is drawn from the vocabulary.
 #
-# Synthesized tri-family (claude/codex/gemini) -> Fable, then finalized at source; always subsumes
+# Synthesized from independent tri-family review, then finalized at source; always subsumes
 # other tags (a floor rule is in every set).
 
 version = 1
@@ -52,6 +52,7 @@ hiasrv = ["writes-code"]
 humovs = ["writes-code", "tools-retrieval", "agent-harness"]
 kltwat = ["writes-code", "tools-retrieval", "agent-harness"]
 liccmp = ["writes-code"]
+livbak = ["agent-harness"]
 lvw001 = ["writes-code", "multi-agent"]
 mindep = ["writes-code"]
 mstreg = ["agent-harness"]

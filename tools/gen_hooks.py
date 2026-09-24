@@ -22,6 +22,7 @@ control.
   gen_hooks.py --check     fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
   gen_hooks.py --self-test build synthetic trees and assert the generator's own fail-closed invariants
 """
+import ast
 import json
 import os
 import re
@@ -195,10 +196,116 @@ def load_manifest(path):
     return plugin, hooks
 
 
+def _binds_name(target, name):
+    """Whether an assignment or deletion TARGET binds or mutates the module-level `name`: the name itself,
+    an element of a tuple/list unpack, a starred element, or a subscript/attribute whose base is the name
+    (a mutation). A name that appears only inside a subscript's SLICE (d[name] = ..) is NOT a binding of it."""
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_binds_name(el, name) for el in target.elts)
+    if isinstance(target, ast.Starred):
+        return _binds_name(target.value, name)
+    if isinstance(target, (ast.Subscript, ast.Attribute)):
+        return isinstance(target.value, ast.Name) and target.value.id == name
+    return False
+
+
+def _module_dict(script_text, dict_name):
+    """The single module-level `<dict_name> = { ... }` assignment's ast.Dict node, extracted STATICALLY
+    from the parsed script. ast.parse only builds the syntax tree; it does NOT execute or import the
+    script, so this honours SECI-config-is-executable (the dispatcher is never run to read its keys).
+
+    Fails closed (returns None, so the caller reads the handler as undispatchable) unless the name is
+    bound EXACTLY ONCE at module level AND that sole binding is a plain `Name = {...}` (ast.Assign) or an
+    annotated `Name: T = {...}` (ast.AnnAssign) of a dict LITERAL. Round 11 (FIX 2): the binding count is
+    taken over EVERY module-level (re)binding of the name BEFORE any value-shape filter, closing the r10
+    fail-open where `HANDLERS = {..}` followed by `HANDLERS = make()` left the runtime dict empty
+    (undispatchable) yet still read the stale literal's keys as dispatchable, because the r10 code filtered
+    for an ast.Dict value FIRST and so counted only the one literal. A binding is any module-level statement
+    that (re)binds or mutates the name: an Assign/AnnAssign target, a tuple/list-unpack element
+    (`HANDLERS, HANDLER_EVENT = ..`; intentionally UNSUPPORTED - a dispatcher is bound once as its own dict
+    literal - so it counts and fails closed), an AugAssign (`HANDLERS += ..`), a subscript/attribute
+    mutation (`HANDLERS[..] = ..`), or a Delete (`del HANDLERS`). More than one such binding, or a single
+    binding whose value is not a dict literal (a call, comprehension, name, or merge), returns None."""
+    try:
+        tree = ast.parse(script_text)
+    except (SyntaxError, ValueError):
+        return None
+    bind_count = 0
+    literal = None
+    for node in tree.body:  # MODULE LEVEL only: a dict built inside a def/class is not the dispatcher
+        if isinstance(node, ast.Assign):
+            if any(_binds_name(t, dict_name) for t in node.targets):
+                bind_count += 1
+                if isinstance(node.value, ast.Dict) and any(
+                        isinstance(t, ast.Name) and t.id == dict_name for t in node.targets):
+                    literal = node.value
+        elif isinstance(node, ast.AnnAssign) and node.target is not None:
+            if isinstance(node.target, ast.Name) and node.target.id == dict_name:
+                bind_count += 1
+                if node.value is not None and isinstance(node.value, ast.Dict):
+                    literal = node.value
+            elif _binds_name(node.target, dict_name):  # annotated subscript/attribute mutation
+                bind_count += 1
+        elif isinstance(node, ast.AugAssign):
+            if _binds_name(node.target, dict_name):
+                bind_count += 1
+        elif isinstance(node, ast.Delete):
+            if any(_binds_name(t, dict_name) for t in node.targets):
+                bind_count += 1
+    if bind_count == 1 and literal is not None:
+        return literal
+    return None
+
+
+def _dispatch_keys(script_text, dict_name):
+    """The handler keys registered in a dispatcher dict literal (HANDLERS / HANDLER_EVENT), extracted
+    STRUCTURALLY from the parsed AST rather than by regex, so a string-literal VALUE that merely LOOKS
+    like a `"name": name,` entry can never contribute a phantom key (round 10: a regex over raw text read
+    such a phantom and let cross_check accept a manifest handler the runtime HANDLERS lacks, fail-OPEN). A
+    dict that cannot be located, is duplicated, or carries ANY non-string-literal key (a computed key or a
+    `**` spread, whose key node is not a str Constant) yields the empty set, failing the membership check
+    closed per check-fails-closed-on-unreadable. ast.parse is a static parse; it does not run the
+    script."""
+    node = _module_dict(script_text, dict_name)
+    if node is None:
+        return set()
+    keys = set()
+    for k in node.keys:
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            return set()  # a non-string-literal key / ** spread: ambiguous dict form, fail whole closed
+        keys.add(k.value)
+    return keys
+
+
+def _dispatch_event_map(script_text):
+    """Map handler name -> the event STRING its HANDLER_EVENT entry resolves to, for the value-equality
+    half of the dispatchability gate (A2), extracted STRUCTURALLY. A value is either the bare PRETOOL Name
+    (-> 'PreToolUse') or a string literal (-> its value); a value in neither form contributes no mapping,
+    so the caller's equality check fails closed. A non-string-literal key or an ambiguous dict form yields
+    the empty map (fail closed). ast.parse does not execute the script."""
+    node = _module_dict(script_text, "HANDLER_EVENT")
+    if node is None:
+        return {}
+    mapping = {}
+    for k, v in zip(node.keys, node.values):
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            return {}
+        if isinstance(v, ast.Name) and v.id == "PRETOOL":
+            mapping[k.value] = "PreToolUse"
+        elif isinstance(v, ast.Constant) and isinstance(v.value, str):
+            mapping[k.value] = v.value
+    return mapping
+
+
 def cross_check(hooks, corpus_ids, script_text, name):
     """The manifest's outward references, fail-closed: every cited corpus-id exists in the loaded
     corpus (the check_mappings no-orphan pattern), and every named handler is defined in the source
     script, so a rename can never silently orphan an enforcement control."""
+    dispatch = _dispatch_keys(script_text, "HANDLERS")
+    dispatch_events = _dispatch_keys(script_text, "HANDLER_EVENT")
+    event_map = _dispatch_event_map(script_text)
     for hook in hooks:
         where = "{}: [[hook]] {}".format(name, hook["id"])
         for rule in hook["rules"]:
@@ -208,6 +315,26 @@ def cross_check(hooks, corpus_ids, script_text, name):
         if not re.search(r"^def {}\(".format(re.escape(hook["handler"])), script_text, re.M):
             raise ValueError("{}: handler '{}' is not defined in scripts/{}"
                              .format(where, hook["handler"], SCRIPT_NAME))
+        # grdinp/observe-before-asserting-behaviour: a DEFINED handler is not a DISPATCHABLE one. The
+        # manifest declares the platform's invocation (python3 -I aiqt_hooks.py <handler>), so the handler
+        # MUST be a key in the dispatcher's HANDLERS and HANDLER_EVENT maps, or main() rejects the mode
+        # (exit 2) and the control never runs though its `def` and its direct-call self-tests are green.
+        if hook["handler"] not in dispatch:
+            raise ValueError("{}: handler '{}' is defined but not registered in HANDLERS in scripts/{}; "
+                             "the dispatcher cannot route to it".format(
+                                 where, hook["handler"], SCRIPT_NAME))
+        if hook["handler"] not in dispatch_events:
+            raise ValueError("{}: handler '{}' is not registered in HANDLER_EVENT in scripts/{}".format(
+                where, hook["handler"], SCRIPT_NAME))
+        declared_event = event_map.get(hook["handler"])
+        if declared_event != hook["event"]:
+            # grdinp: a DEFINED, key-registered handler under the WRONG event still mis-routes. Compare
+            # the registered event VALUE to the manifest's declared event; a value that cannot be resolved
+            # (absent from the map) fails closed here too.
+            raise ValueError(
+                "{}: handler '{}' is registered in HANDLER_EVENT as {!r} but the manifest declares "
+                "event {!r}; the dispatcher would route it under the wrong event".format(
+                    where, hook["handler"], declared_event, hook["event"]))
 
 
 def render_hooks_json(hooks):
@@ -383,6 +510,15 @@ _SCRIPT = """#!/usr/bin/env python3
 # self-test dispatcher stub
 def test_handler(data):
     return (0, None, None)
+
+
+HANDLERS = {
+    "test_handler": test_handler,
+}
+
+HANDLER_EVENT = {
+    "test_handler": "PreToolUse",
+}
 """
 
 _MANIFEST = """[plugin]
@@ -415,6 +551,17 @@ def _build_tree(base, cid="tsthk1", residue="A self-test control catches nothing
     (src / "hooks" / "scripts" / SCRIPT_NAME).write_text(_SCRIPT, encoding="utf-8")
     (src / "hooks" / "manifest.toml").write_text(
         _MANIFEST.format(cid=cid, residue=residue), encoding="utf-8")
+
+
+def _set_script_event(tree, event):
+    """Round 9 (A2): keep a fixture script's HANDLER_EVENT value in step with a retargeted manifest
+    event. The pre-round-9 event-retargeting tests mutated only the manifest, leaving the script's
+    HANDLER_EVENT at PreToolUse; the round-9 value-equality dispatchability gate correctly rejects that
+    mismatch, so an event-retargeting fixture must set both surfaces to stay conformant (and so a masked
+    exit-2 does not stand in for the behaviour the test means to prove)."""
+    sp = tree / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+    sp.write_text(sp.read_text(encoding="utf-8").replace(
+        '"test_handler": "PreToolUse",', '"test_handler": "{}",'.format(event)), encoding="utf-8")
 
 
 def self_test_main():
@@ -483,6 +630,105 @@ def self_test_main():
         if run_quiet(good, check=True) != 1:
             failures.append("orphan under the plugin hooks/ expected exit 1")
         stray.unlink()
+
+        # N. Dispatchability gate: a handler DEFINED but not registered in the script's HANDLERS fails
+        #    closed (round 8, F-339). The conformant fixture wires test_handler; unwiring it must exit 2.
+        undispatch = tmp / "undispatch"
+        undispatch.mkdir()
+        _build_tree(undispatch)
+        _spath = undispatch / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+        _stext = _spath.read_text(encoding="utf-8")
+        if '"test_handler": test_handler,' not in _stext:
+            failures.append("self-test setup: fixture HANDLERS entry not found to unwire")
+        _spath.write_text(_stext.replace('"test_handler": test_handler,', ""), encoding="utf-8")
+        if run_quiet(undispatch, check=False) != 2:
+            failures.append("a handler defined but absent from HANDLERS must fail closed (exit 2)")
+
+        # N2 (round 9, A2): a COMMENTED-OUT HANDLERS entry must NOT read as a live handler. A regex over
+        #     raw source counted '# "x": x,' as a key (the control then never dispatches though --check is
+        #     green); stripping comments before key extraction fails it closed (exit 2).
+        commented = tmp / "commented"
+        commented.mkdir()
+        _build_tree(commented)
+        _cpath = commented / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+        _ctext = _cpath.read_text(encoding="utf-8")
+        _cpath.write_text(_ctext.replace('"test_handler": test_handler,',
+                                         '# "test_handler": test_handler,'), encoding="utf-8")
+        if run_quiet(commented, check=False) != 2:
+            failures.append("a commented-out HANDLERS entry must fail closed (exit 2)")
+
+        # N3 (round 9, A2): a HANDLER_EVENT VALUE disagreeing with the manifest event must fail closed.
+        #     Key-membership alone let a PreToolUse hook register under PostToolUse (a mis-triggered
+        #     control); comparing the registered event to the manifest event catches it.
+        wrongevent = tmp / "wrongevent"
+        wrongevent.mkdir()
+        _build_tree(wrongevent)
+        _wpath = wrongevent / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+        _wtext = _wpath.read_text(encoding="utf-8")
+        _wpath.write_text(_wtext.replace('"test_handler": "PreToolUse",',
+                                         '"test_handler": "PostToolUse",'), encoding="utf-8")
+        if run_quiet(wrongevent, check=False) != 2:
+            failures.append("a HANDLER_EVENT value disagreeing with the manifest event must fail closed "
+                            "(exit 2)")
+
+        # N4 (round 10): a dict VALUE that is a STRING LITERAL resembling a '"name": name,' entry must NOT
+        #     contribute a PHANTOM key. The round-9 regex _dispatch_keys scanned raw text and extracted
+        #     "test_handler" from inside the string value below (fail-OPEN: cross_check then accepted a
+        #     manifest handler the runtime HANDLERS lacks). ast.parse reads dict KEY NODES structurally and
+        #     does NOT execute the script, so a string-literal value contributes no key.
+        _decoy = 'HANDLERS = {\n    "decoy": ' + repr('"test_handler": test_handler,') + ',\n}\n'
+        if "test_handler" in _dispatch_keys(_decoy, "HANDLERS"):
+            failures.append("a string-literal dict VALUE must not contribute a phantom HANDLERS key")
+        if _dispatch_keys(_decoy, "HANDLERS") != {"decoy"}:
+            failures.append("ast _dispatch_keys must extract only the real string-literal key 'decoy'")
+
+        # N4b (round 10): the SAME decoy in a BUILT tree fails closed end-to-end. The fixture's real
+        #     HANDLERS entry is replaced by the decoy, so test_handler is genuinely undispatchable and
+        #     cross_check must exit 2 (the regex read the phantom key and let it pass, exit 0).
+        phantom = tmp / "phantom"
+        phantom.mkdir()
+        _build_tree(phantom)
+        _ppath = phantom / ".aiqt" / "core" / "hooks" / "scripts" / SCRIPT_NAME
+        _ptext = _ppath.read_text(encoding="utf-8")
+        _ppath.write_text(_ptext.replace(
+            '"test_handler": test_handler,',
+            '"decoy": ' + repr('"test_handler": test_handler,') + ','), encoding="utf-8")
+        if run_quiet(phantom, check=False) != 2:
+            failures.append("a string-literal decoy embedding a phantom HANDLERS key must fail closed "
+                            "(exit 2)")
+
+        # N5 (round 11, FIX 2): a LATER non-dict rebinding of the dispatcher name fails closed. The runtime
+        #     dict is the rebinding's value (empty/undispatchable), but the r10 _module_dict filtered for an
+        #     ast.Dict value BEFORE counting bindings, so it found the sole literal and read its keys as
+        #     dispatchable (fail-OPEN). Counting EVERY binding first fails closed.
+        _rebind = ('HANDLERS = {\n    "test_handler": test_handler,\n}\n'
+                   'HANDLERS = make_handlers()\n')
+        if _dispatch_keys(_rebind, "HANDLERS") != set():
+            failures.append("a later non-dict rebinding of HANDLERS must fail closed (empty key set)")
+        _rebind_ev = ('HANDLER_EVENT = {\n    "test_handler": "PreToolUse",\n}\n'
+                      'HANDLER_EVENT = build_events()\n')
+        if _dispatch_event_map(_rebind_ev) != {}:
+            failures.append("a later non-dict rebinding of HANDLER_EVENT must fail closed (empty map)")
+
+        # N6 (round 11, FIX 2): a subscript or augmented MUTATION alongside the literal is a second binding of
+        #     the name, so the dispatcher is no longer a single immutable literal and fails closed.
+        _subscript = ('HANDLERS = {\n    "test_handler": test_handler,\n}\n'
+                      'HANDLERS["late"] = late_handler\n')
+        if _dispatch_keys(_subscript, "HANDLERS") != set():
+            failures.append("a subscript mutation of HANDLERS must fail closed (empty key set)")
+        _augmented = ('HANDLERS = {\n    "test_handler": test_handler,\n}\n'
+                      'HANDLERS += extra\n')
+        if _dispatch_keys(_augmented, "HANDLERS") != set():
+            failures.append("an augmented rebinding of HANDLERS must fail closed (empty key set)")
+
+        # N7 (round 11, FIX 2): a TUPLE-UNPACK binding (HANDLERS, HANDLER_EVENT = ..) is intentionally
+        #     unsupported (a dispatcher is bound once as its own dict literal). r10 ignored a non-Name target,
+        #     so the accompanying literal still read as dispatchable (fail-OPEN); counting every binding of
+        #     the name fails it closed.
+        _unpack = ('HANDLERS = {\n    "test_handler": test_handler,\n}\n'
+                   'HANDLERS, HANDLER_EVENT = _pair()\n')
+        if _dispatch_keys(_unpack, "HANDLERS") != set():
+            failures.append("a tuple-unpack rebinding of HANDLERS (alongside its literal) must fail closed")
 
         # 3. An unknown corpus-id in the manifest fails closed.
         badid = tmp / "badid"
@@ -576,6 +822,7 @@ def self_test_main():
                 # a non-tool event must drop the now-forbidden matcher as it flips to warn
                 _mutate(warntree, tool_block,
                         'event = "{}"\nhandler = "test_handler"\ndefault = "warn"'.format(event))
+            _set_script_event(warntree, event)
             if event in WARN_EVENTS:
                 if run_quiet(warntree, check=False) != 0 or run_quiet(warntree, check=True) != 0:
                     failures.append("'warn' default on WARN event {} expected a clean generate + "
@@ -592,11 +839,13 @@ def self_test_main():
         _build_tree(stop_block)
         _mutate(stop_block, tool_block,
                 'event = "Stop"\nhandler = "test_handler"\ndefault = "block"')
+        _set_script_event(stop_block, "Stop")
         stop_warn = tmp / "stop-warn"
         stop_warn.mkdir()
         _build_tree(stop_warn)
         _mutate(stop_warn, tool_block,
                 'event = "Stop"\nhandler = "test_handler"\ndefault = "warn"')
+        _set_script_event(stop_warn, "Stop")
         if run_quiet(stop_block, check=False) != 0 or run_quiet(stop_warn, check=False) != 0:
             failures.append("byte-identity setup: both Stop trees expected a clean generate (exit 0)")
         else:
@@ -646,6 +895,7 @@ def self_test_main():
         _build_tree(ssblock)
         _mutate(ssblock, tool_block,
                 'event = "SessionStart"\nhandler = "test_handler"\ndefault = "block"')
+        _set_script_event(ssblock, "SessionStart")
         if run_quiet(ssblock, check=True) != 2:
             failures.append("default 'block' on SessionStart expected exit 2 (an overclaim)")
     finally:

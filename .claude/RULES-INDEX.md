@@ -71,6 +71,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Maintain an AI toolchain register](rules/aiqt/10-TRUST-ai-toolchain-register.md)
 - [Assess and advise are discussion only](rules/aiqt/10-TRUST-assess-advise-discussion-only.md)
 - [Claim a pooled item atomically](rules/aiqt/10-TRUST-atomic-claim-from-pool.md)
+- [Bounded waits and a liveness backstop](rules/aiqt/10-TRUST-bounded-wait-and-liveness-backstop.md)
 - [Change record](rules/aiqt/10-TRUST-change-record.md)
 - [Change record has a curated public face](rules/aiqt/10-TRUST-change-tracking-ext.md)
 - [Clarify before acting](rules/aiqt/10-TRUST-clarify-before-acting.md)

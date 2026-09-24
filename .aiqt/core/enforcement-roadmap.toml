@@ -109,7 +109,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "cntdef"
 status = "enforced"
-mechanisms = ["hook:orch-ask-unattended", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-yield-tool-guard"]
+mechanisms = ["gate:liveness-joins", "gate:orch-route-selftest", "hook:orch-ask-unattended", "hook:orch-route-guard", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-wait-guard", "hook:orch-wake-register", "hook:orch-yield-tool-guard"]
 
 [[rule]]
 corpus-id = "cntprd"
@@ -215,6 +215,11 @@ mechanisms = []
 corpus-id = "liccmp"
 status = "none"
 mechanisms = []
+
+[[rule]]
+corpus-id = "livbak"
+status = "enforced"
+mechanisms = ["gate:wait-boundary-fuzz", "gate:wait-discipline", "hook:orch-wait-guard"]
 
 [[rule]]
 corpus-id = "lvw001"
@@ -579,7 +584,7 @@ mechanisms = ["hook:orch-resume-audit", "hook:orch-resume-barrier"]
 [[rule]]
 corpus-id = "setcmp"
 status = "enforced"
-mechanisms = ["hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-yield-tool-guard"]
+mechanisms = ["gate:liveness-joins", "gate:orch-route-selftest", "hook:orch-route-guard", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-wait-guard", "hook:orch-yield-tool-guard"]
 
 [[rule]]
 corpus-id = "slfgrd"

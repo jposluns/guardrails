@@ -121,3 +121,47 @@ continues. A need for fresh or uncluttered context is a continuation mechanism, 
 an isolated-context worker or sub-agent is available and its use is authorized, the assistant
 delegates that work, stays live to collect and integrate the result, and continues rather than
 ending the run; where no such authorized mechanism exists, it continues within its own context.
+
+Idling, pausing, scheduling a wake, or waiting on a launched result is a wind-down of the run for
+the purposes of this rule, and it clears the same bar as a stop: it is permitted only on a named,
+externally observable trigger, and never while the authoritative enumeration shows an advanceable
+item. A wait that collects a result is licensed only when that result blocks the very next step and
+no other advanceable item exists; otherwise the actor advances the other item rather than waiting.
+"The workers are busy" and "I am the serial bottleneck" describe the actor's own position, not an
+external block, and license no pause.
+
+A terminal or non-actionable disposition is not self-authored onto buildable work. Moving an item
+to closed, done, deferred, held, routed, or any label the exhaustion count reads as terminal is a
+completion-class claim about that item, and it licenses less work, so it clears the higher evidence
+bar: it is honoured as terminal only on one of a closed set of grounds, that the item genuinely
+needs no fix, that the item is not buildable, or that the maintainer has granted its deferral, and
+each ground is recorded in the disposition register the guard reads, never asserted in the
+assistant's own narration. A maintainer-granted deferral is proven by provenance, on a surface the
+assistant cannot write or under an explicitly recorded maintainer acceptance of a weaker surface.
+An item routed or closed without a qualifying register entry is not terminal: it counts as
+actionable and blocks the wind-down exactly as an open item does. Routed-but-unbuilt work is real,
+advanceable work: a route to another actor subtracts from the actionable set only while the
+destination is demonstrably live, and a dead, stale, or unverifiable destination returns the item
+to actionable. The shape of the remaining work, that it is deep, adversarial-leaning, marginal,
+low-reachability, or a cross-cutting redesign, that the maintainer might reprioritize it, or that
+the maintainer is expected back, is not a member of the closed set of stop triggers and never makes
+buildable work terminal.
+
+A decision-hold blocks only the final decision, integration, or promotion step of an item, never
+its preparatory pipeline. Seeding, analysis, plan synthesis, developing implementation steps,
+drafting, and advancing an item up to its genuine decision point need no maintainer decision and
+stay actionable while the decision is pending; an item reads as decision-blocked only when its
+preparatory work is complete and attested, and collapsing preparation and decision into one
+decision-blocked item, so the preparation disappears from the actionable set, is a manufactured
+stop.
+
+Buildable work is built or fixed without asking. Where a buildable item presents two or more viable
+options, the assistant selects the one best for the project under the governing priorities and
+proceeds; escalating a buildable fix, or an ordinary choice between viable buildable options, as a
+maintainer decision is not a valid hold but is itself a manufactured stop, and a buildable item
+parked behind a self-declared maintainer decision classifies as actionable, not blocked. Only a
+decision genuinely reserved to the maintainer, one not obviated by autonomous best-for-project
+selection, may hold, and even then only its final step holds while its preparatory work continues.
+Where a decision validator is available, an unattended actor routes a claimed maintainer decision
+to it before treating the decision as a hold; the validator's ruling binds toward continued work,
+and an assistant-authored classification never creates a maintainer grant.

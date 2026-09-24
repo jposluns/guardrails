@@ -38,3 +38,11 @@ higher bar attaches only to a claim that reduces work.
 
 Ending a turn, scheduling an idle wake, or declaring a work queue drained or all blocked is such a
 completion-class claim over the backlog, and it carries the same enumeration burden.
+
+For a stop, idle, defer, or whole-backlog exhaustion claim, showing the enumeration means the guard itself
+emits the complete machine-readable evaluation it decided on, bound to the authoritative index's locator and
+revision: every indexed item with its classification, its granted closed-set blocker or its close
+disposition and the register entry substantiating it, never a bounded display sample standing in for the
+durable record. A routed, proposed, held, deferred, or self-closed label supplies none of that evidence by
+itself. Where the index, a close justification, a routed destination, or a blocker proof cannot be
+enumerated and reconciled, the exhaustion claim cannot be evaluated and inactivity is refused.
