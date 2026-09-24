@@ -9,14 +9,14 @@ the hook's own self-test, and wires it into settings.json. This gate keeps the t
 relies on true of the working tree.
 
 NOT APPLICABLE. When .preview/ is absent this gate prints NOT APPLICABLE and exits 0, so retiring the
-channel (deleting the directory) needs no gate edit. A hooks-preview path that is present but is not a
+channel (deleting the directory) needs no gate edit. A .preview path that is present but is not a
 real directory (a symbolic link, a regular file) is a cannot-evaluate, never absent.
 
 When the directory is present, the channel's declared inputs are README.md and SHA256SUMS (both required;
 an absent or unreadable one is exit 2), and every other entry must be a hook file named like
 `clock-inject.py` (lowercase letters, digits and hyphens, ending .py). Three legs:
 
-  (a) SELF-TEST. Each .preview/*.py runs as [sys.executable, "-I", "-B", <path>, "--self-test"] in a
+  (a) SELF-TEST. Each .preview/*.py runs as [sys.executable, "-I", "-S", "-B", <path>, "--self-test"] in a
       fresh temporary working directory, with stdin closed and every AIQT_, ORCH_ and CLAUDE_ variable
       removed from its environment, so an operator's live hook configuration cannot steer the verdict.
       After that scrub the one variable AIQT_HOOKS_REQUIRE_SIBLINGS=1 is set: a hook skips its
@@ -301,7 +301,7 @@ def leg_selftest(pdir, hooks, findings, unverifiable):
             continue
         try:
             try:
-                res = subprocess.run([sys.executable, "-I", "-B", path, "--self-test"], cwd=work,
+                res = subprocess.run([sys.executable, "-I", "-S", "-B", path, "--self-test"], cwd=work,
                                      capture_output=True, timeout=SELFTEST_TIMEOUT, env=_selftest_env(),
                                      stdin=subprocess.DEVNULL)
             except subprocess.TimeoutExpired:
@@ -430,10 +430,13 @@ def run(root):
 _STUB_OK = b"import sys\nsys.exit(0 if '--self-test' in sys.argv else 3)\n"
 _STUB_FAIL = b"import sys\nprint('stub self-test failure')\nsys.exit(1)\n"
 _STUB_SLOW = b"import time\ntime.sleep(30)\n"
-# Passes only when its environment carries REQUIRE_SIBLINGS_VAR=1 and no other scrubbed-family variable.
+# Passes only when its environment carries REQUIRE_SIBLINGS_VAR=1 and no other scrubbed-family variable, and it
+# was launched the way the README tells users to launch a hook (-I -S -B: isolated, no site, no bytecode).
 _STUB_ENV = (b"import os, sys\nkeys = sorted(k for k in os.environ if k.startswith(('AIQT_', 'ORCH_', 'CLAUDE_')))\n"
+             b"f = sys.flags\n"
              b"sys.exit(0 if keys == ['AIQT_HOOKS_REQUIRE_SIBLINGS'] and "
-             b"os.environ['AIQT_HOOKS_REQUIRE_SIBLINGS'] == '1' else 1)\n")
+             b"os.environ['AIQT_HOOKS_REQUIRE_SIBLINGS'] == '1' and "
+             b"f.isolated == 1 and f.no_site == 1 and f.dont_write_bytecode == 1 else 1)\n")
 # Scrubbed-family variables seeded into the gate's own environment to prove leg (a) removes or overrides them.
 _SEEDED_ENV = {"AIQT_SEEDED": "x", REQUIRE_SIBLINGS_VAR: "0", "ORCH_SEEDED": "x", "CLAUDE_SEEDED": "x"}
 

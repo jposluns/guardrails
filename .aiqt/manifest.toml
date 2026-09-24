@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d90d50bd5c105d1c40033dacfe293cef02d8f0c79794085edec2b0f6390da721"
+tree-sha256 = "bc901a9ef4dc3cd1f2de099151e72b21f1513991c31c6ec9c9c9d0fe8d3c4b55"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 142990
-sha256 = "4944f1871b237cfe3e81e25a8d2fd230fb2139adc129a08d164cfddc48ecb2df"
+bytes = 143159
+sha256 = "90d67ffbd09579116f8c6e3fb886d7fc711a009c935b91252fed2f5b8b351ff4"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3066,8 +3066,8 @@ sha256 = "b013edeeefca5054b5351bab57530a8874d6bc2aaacdc7dd598110e80f5e78eb"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
-bytes = 37732
-sha256 = "cce10b1d4058db440eeecd89de7daf9892f3529b2716b08dcb178fa5373aa9c2"
+bytes = 37972
+sha256 = "e2f2c3b6ab36591186f9f81f26a94063bb8752ef7ebf9945f088f48fe4e8e429"
 
 [[sources]]
 path = "tools/check_install_page.py"
