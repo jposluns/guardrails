@@ -39,6 +39,8 @@ from _gen_common import repo_root  # noqa: E402
 # run correctly in an isolated copy that is not itself an adopter or a git repository, while still driving
 # the lazy render / emit / import paths that a survivor would break.
 _SUBSET = [
+    ("opf-homes-selftest", "check_opf_homes.py", ["--self-test"]),
+    ("opf-homes-contract", "check_opf_homes.py", []),
     ("opf-tooling-selftest", "opf.py", ["--self-test"]),
     ("opf-drift-selftest", "check_opf_drift.py", ["--self-test"]),
     ("opf-doctor-selftest", "check_opf_doctor.py", ["--self-test"]),
