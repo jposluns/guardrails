@@ -315,9 +315,13 @@ section of its opening docstring. Read that section before relying on a hook; in
 - **`parallel-write-read.py`** sees only writes made through the file tools in the same session; a file
   written by a shell command is never tracked. It checks a small, fixed set of reading forms (an input
   redirection, a few named file options such as `--body-file`, and the first operand of `cat`, a shell,
-  or a common interpreter) and misses every other reader, such as `grep` or `sed`. A consumer ordered
-  before its write in one batch is missed, records expire after 900 seconds, and a write that leaves
-  the file untouched reads as not landed (one deny, cleared by re-issuing the command).
+  or a common interpreter when no option comes before it) and misses every other reader, such as `grep`,
+  `sed`, or `cat -e f`. Paths built from variables or substitutions, reads inside nested shell strings,
+  and every command after a directory change are not checked. It compares file metadata, not content:
+  any change to the file after the attempt counts as landed, even one the write did not make, and a
+  write that leaves the file untouched reads as not landed (one deny, cleared by re-issuing the command).
+  A consumer ordered before its write in one batch is missed. Records expire after 900 seconds, the
+  oldest are dropped past 64 entries or 64 KiB, and an entry stops denying after 32 denied commands.
 
 `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `parallel-write-read.py` also allow
 commands over 64 KiB or
