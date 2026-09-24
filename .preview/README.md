@@ -5,7 +5,7 @@ Each hook is one self-contained Python file that you can download, check, test, 
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-Six hooks are published here, each listed with its checksum and link in the integrity table below.
+Seven hooks are published here, each listed with its checksum and link in the integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 ## What these hooks are
@@ -13,7 +13,8 @@ A hook without a row in that table is not available here, and the install steps 
 The three clock hooks, `clock-inject.py`, `stamp-truth-stop.py`, and `future-stamp-write.py`, back the
 rule that a current timestamp is read from the clock, never recalled or guessed
 ([the rule text](../.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)). The other hooks guard completion
-records, background polling loops, and existing working-record files. Each one is a discipline
+records, background polling loops, existing working-record files, and files read before their write
+has landed. Each one is a discipline
 guard against accidental drift, not a security boundary, and each one fails open: if the hook hits an
 error or input it cannot evaluate, it gets out of the way rather than blocking your work. Each file states
 what it does not catch in a section headed `RESIDUAL COVERAGE` in its opening docstring; that section is
@@ -56,6 +57,13 @@ the authority, and the summary further down this page only points to it.
   removal), truncating redirections, plain two-operand `cp` and `mv` onto a file, `truncate -s 0`,
   and `tee` without options. It also checks helper-session calls.
   Event: `PreToolUse`, matcher `Bash`.
+- **`parallel-write-read.py`** denies a shell command that reads a file whose write, attempted moments
+  earlier through a file tool, never landed. When a write and a command that consumes its file (for
+  example `gh pr create --body-file body.md`) are issued together and the write is blocked or fails, the
+  command would read a missing or stale file. It records each write attempt and denies, once, a command
+  that reads that file while it is exactly as it was before the attempt; re-issuing the same command is
+  allowed. It never runs the command.
+  Events: `PreToolUse`, matcher `Write|Edit|MultiEdit|NotebookEdit` (to record) and matcher `Bash` (to check).
 
 ## Integrity
 
@@ -68,6 +76,7 @@ files are served from this repository's main branch; for a raw download, use
 |---|---|---|
 | `clock-inject.py` | `65fe1cae733f72d2f82b884b9bb710310b0b6ad0dcccd8c874c5f2bdd2e25386` | [clock-inject.py](clock-inject.py) |
 | `future-stamp-write.py` | `05ba93df003a56f22f913de84d746a58677a958eff687935e81459eb84564130` | [future-stamp-write.py](future-stamp-write.py) |
+| `parallel-write-read.py` | `000c142430abfc99f4ab96a10e121136abbfd4c4b4aeb1324bcb355ead81410b` | [parallel-write-read.py](parallel-write-read.py) |
 | `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
 | `stamp-truth-stop.py` | `05281e245fa4226949263dfdbc0532bae69efa22fe479424ce6f672ea9e2de57` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
@@ -132,7 +141,7 @@ fails and report it; do not work around a failed check.
    array; do not add a second key with the same event name. Register each hook once: if a later version
    of the pack's plugin provides the same hook, remove this entry so it does not run twice.
 
-   Use this launch line for each of the six hooks:
+   Use this launch line for each of the seven hooks:
 
    ```sh
    /bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B "/ABSOLUTE/PATH/TO/<file>"'
@@ -142,9 +151,9 @@ fails and report it; do not work around a failed check.
      loads it; `-S` skips site packages, which these hooks do not use; `-B` writes no bytecode cache.
    - The `[ -d ... ]` tests are a launch guard: if any standard stream is a directory, Python would fail
      before the hook's own code could fail open, so the guard skips the hook instead.
-   - For `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`, use this guard in place
-     of their docstrings' `REGISTRATION` line, which tests only stdin. This guard has a stricter launch
-     condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
+   - For `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `parallel-write-read.py`, use
+     this guard in place of their docstrings' `REGISTRATION` line, which tests only stdin. This guard has a
+     stricter launch condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
      runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks do not define
      a `REGISTRATION` constant; use this same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
@@ -153,10 +162,11 @@ fails and report it; do not work around a failed check.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
-   This combined example shows the six hooks. Copy only entries for hooks you have downloaded,
+   This combined example shows the seven hooks. Copy only entries for hooks you have downloaded,
    checked, and tested. `clock-inject.py` needs both `PostToolUse` and `PostToolUseFailure`, with no
    matcher (all tools); `stamp-truth-stop.py` uses `Stop`, with no matcher. On `PreToolUse`,
-   `future-stamp-write.py` matches file writes and shell commands, and the other three match `Bash`.
+   `future-stamp-write.py` matches file writes and shell commands, `parallel-write-read.py` has one
+   entry for file writes and one for `Bash`, and the other three match `Bash`.
 
    ```json
    {
@@ -174,13 +184,16 @@ fails and report it; do not work around a failed check.
          { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/future-stamp-write.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/ungated-record.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/unbounded-wait.py\"'" } ] },
-         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/record-remove-check.py\"'" } ] }
+         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/record-remove-check.py\"'" } ] },
+         { "matcher": "Write|Edit|MultiEdit|NotebookEdit", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/parallel-write-read.py\"'" } ] },
+         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/parallel-write-read.py\"'" } ] }
        ]
      }
    }
    ```
 
-   The self-tests for `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py` include
+   The self-tests for `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and
+   `parallel-write-read.py` include
    byte-identity checks against `block-bare-detach.py` and `inplace-edit-verify.py`, two reference hooks
    not yet published here. Those checks report `SKIPPED` until the reference files are available;
    skipped is not a pass. The `record-remove-check.py` differential check also reports
@@ -191,12 +204,12 @@ fails and report it; do not work around a failed check.
 
 6. Smoke-test the live hook. For `clock-inject.py`, run any command in the new session (for example
    `true`) and confirm a `CLOCK (read by hook, authoritative):` line reaches the assistant's context. For
-   the other five, a passing self-test in step 3 is the check; they stay silent until they see something
+   the other six, a passing self-test in step 3 is the check; they stay silent until they see something
    to flag.
 
 ### A note on hooks that record authority
 
-Some hooks, though none of the six above, need a line in a durable record to switch on or to grant an
+Some hooks, though none of the seven above, need a line in a durable record to switch on or to grant an
 exception, for example an entry saying that you, the maintainer, approved something. Expect your assistant
 to decline to write such a line itself, even when your permission settings would allow the write: a record
 of your own authority is not something it should author on your behalf, and permission allow rules have
@@ -230,6 +243,10 @@ both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` 
   calls. For an intended destruction, put `# record-rm-ok: <reason>` after the last command token on the
   same line, separated by a blank, with a non-empty reason and nothing but whitespace after the comment.
   The comment records an attestation; it does not prove that the file was read or can be restored.
+- **`parallel-write-read.py`** needs no store or lease setting. It keeps a small state file for each
+  session in a folder only you can read: in `XDG_RUNTIME_DIR` when that is a private folder you own,
+  else in the system temporary folder. It skips helper-session calls and the worker processes described
+  above. A denied command is allowed when issued again unchanged.
 
 The `record-ok` and `wait-ok` comments must begin a word and be the last non-blank content of the
 command. Their reasons are optional; text inside quotes does not opt out.
@@ -239,7 +256,7 @@ command. Their reasons are optional; text inside quotes does not opt out.
 | `AIQT_STORE_ROOT` | The folder or folders holding your working records, as absolute paths joined with `:`. The future-date and record-removal checks only look at files under these folders. |
 | `AIQT_LEASE_FILE` | The absolute path to a small text file that marks when the current working session started. When it is set and valid, the hooks report and check how long the session has been running. |
 | `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks out of that output. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
-| `G_REF_DIR` | Self-tests only: the folder containing reference hooks for the byte-identity checks in `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`. If unset or empty, they look beside the hook itself. Each missing reference makes its check report `SKIPPED`. |
+| `G_REF_DIR` | Self-tests only: the folder containing reference hooks for the byte-identity checks in `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `parallel-write-read.py`. If unset or empty, they look beside the hook itself. Each missing reference makes its check report `SKIPPED`. |
 
 The lease file marks the session's start on a field line of its own:
 
@@ -295,10 +312,18 @@ section of its opening docstring. Read that section before relying on a hook; in
   and files beyond its scan budgets are not fully checked. Moving a record out of the store is allowed.
   A file created or filled after the check can be lost without a warning. It can deny unreachable
   commands and files that have a good backup; it does not check for a restore path.
+- **`parallel-write-read.py`** sees only writes made through the file tools in the same session; a file
+  written by a shell command is never tracked. It checks a small, fixed set of reading forms (an input
+  redirection, a few named file options such as `--body-file`, and the first operand of `cat`, a shell,
+  or a common interpreter) and misses every other reader, such as `grep` or `sed`. A consumer ordered
+  before its write in one batch is missed, records expire after 900 seconds, and a write that leaves
+  the file untouched reads as not landed (one deny, cleared by re-issuing the command).
 
-`ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py` also allow commands over 64 KiB or
-input they cannot follow. Their docstrings describe further parsing limits and work budgets. All three skip
-verification worker processes; `ungated-record.py` and `unbounded-wait.py` also skip helper-session calls.
+`ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `parallel-write-read.py` also allow
+commands over 64 KiB or
+input they cannot follow. Their docstrings describe further parsing limits and work budgets. All four skip
+verification worker processes; `ungated-record.py`, `unbounded-wait.py`, and `parallel-write-read.py` also skip
+helper-session calls.
 
 ## Status and retirement
 
