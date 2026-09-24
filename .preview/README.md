@@ -245,9 +245,9 @@ both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` 
   The comment records an attestation; it does not prove that the file was read or can be restored.
 - **`parallel-write-read.py`** needs no store or lease setting. It keeps a small state file for each
   session in a folder `parallel-write-read-<uid>` that only you can read, inside `XDG_RUNTIME_DIR` when
-  that is a real folder you own with mode 0700, else inside the system temporary folder. It skips
-  helper-session calls and the worker processes described above. A denied command is allowed when issued
-  again unchanged.
+  that names an absolute path to a real folder you own with mode 0700, else inside the system temporary
+  folder. It skips helper-session calls and the worker processes described above. A denied command is
+  allowed when issued again unchanged.
 
 The `record-ok` and `wait-ok` comments must begin a word and be the last non-blank content of the
 command. Their reasons are optional; text inside quotes does not opt out.
