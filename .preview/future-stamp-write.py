@@ -3140,12 +3140,17 @@ def _evaluate(payload, now):
     return []
 
 
-def _emit_line(text, stream=None):
+def _emit_line(text, *stream):
     """Write one line to `stream` (default stdout) and flush it. An output error fails OPEN (round 24): it is
     swallowed, and the stream's descriptor is pointed at /dev/null so the interpreter's exit flush cannot fail
     either, so the hook still exits 0. If that rescue fails too, the process ends at once with os._exit(0)
     (no flush is retried), since any later write or exit flush could fail the hook."""
-    s = sys.stdout if stream is None else stream
+    # a line meant for another stream (stderr) is written there or dropped, NEVER sent to stdout, the hook's
+    # protocol channel: sys.stderr is None when descriptor 2 was closed at startup, and a None default once
+    # read that as stdout
+    s = stream[0] if stream else sys.stdout
+    if s is None:
+        return False
     try:
         print(text, file=s, flush=True)
         return True
@@ -3987,7 +3992,12 @@ def _self_test():
             sib = _sibling_or_skip("stamp-truth-stop.py")
             spec = importlib.util.spec_from_file_location("sts_sibling", sib)
             mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+            # the sibling is loaded with no bytecode written, so no __pycache__ is left beside the hooks
+            old_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+            try:
+                spec.loader.exec_module(mod)
+            finally:
+                sys.dont_write_bytecode = old_dwb
             self.assertEqual(mod.SCHED_KEYWORDS, SCHED_KEYWORDS)
             self.assertEqual(mod.SCHED_GAP_TOKENS, SCHED_GAP_TOKENS)
             self.assertEqual((mod.TIME_GRAMMAR, mod.ZONE_GRAMMAR), (TIME_GRAMMAR, ZONE_GRAMMAR))
@@ -4501,7 +4511,12 @@ def _self_test():
             sib = _sibling_or_skip("stamp-truth-stop.py")
             spec = importlib.util.spec_from_file_location("sts_sibling13", sib)
             mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+            # the sibling is loaded with no bytecode written, so no __pycache__ is left beside the hooks
+            old_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+            try:
+                spec.loader.exec_module(mod)
+            finally:
+                sys.dont_write_bytecode = old_dwb
             for name in ("_code_lines", "_code_spans", "_in_spans"):
                 self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
             for name in ("_BTICK_RE", "_FENCE_RE"):
@@ -5075,6 +5090,19 @@ def _self_test():
                     "m._emit_line('x', b);print('after', flush=True)" % os.path.abspath(__file__))
             r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=30)
             self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "before\n", ""))
+
+        def test_closed_stderr_line_never_reaches_stdout(self):
+            # the worker-skip line is for stderr only: with descriptor 2 closed (sys.stderr is None) it is dropped,
+            # never redirected to stdout, the hook's protocol channel; the open-stderr control shows it is emitted
+            env = {k: v for k, v in os.environ.items() if k not in ("ORCH_WORKER", "ORCH_VERIFY_OWNER")}
+            env["AIQT_HOOKS_WORKER"] = "1"
+            hook = [sys.executable, "-I", "-S", "-B", os.path.abspath(__file__)]
+            close2 = "import os, sys; os.close(2); os.execv(sys.argv[1], sys.argv[1:])"
+            for closed in (False, True):
+                argv = [sys.executable, "-I", "-S", "-B", "-c", close2] + hook if closed else hook
+                p = subprocess.run(argv, input="{}", capture_output=True, text=True, env=env, timeout=30)
+                self.assertEqual((p.returncode, p.stdout), (0, ""), (closed, p.stderr))
+                self.assertEqual("skipped, worker marker present" in p.stderr, not closed, (closed, p.stderr))
 
         def test_fail_open_before_evaluation(self):
             class Unreadable:
