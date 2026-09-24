@@ -467,6 +467,24 @@ def validate_op(row):
             continue  # an unknown key was already reported above; do not shape-check it
         if not _valid_field(field, row[field]):
             findings.append("op {!r} field {!r} has a malformed value".format(name, field))
+    # Directory identities (store_root) are not mutation operands. Pack members are relative
+    # to target, so validate their composed destinations as well as ordinary file operands.
+    from _opf_store import require_ordinary_target, store_control_roots, overlaps_home
+    operands = [row[f] for f in row if _FIELD_KINDS.get(f) == "filepath" and isinstance(row[f], str)]
+    if name == "install-pack" and isinstance(row.get("target"), str):
+        import posixpath
+        if row["target"] != ".":
+            operands.append(row["target"])
+        for member in row.get("members", []) if isinstance(row.get("members"), list) else []:
+            if isinstance(member, dict) and isinstance(member.get("path"), str):
+                operands.append(posixpath.join(row["target"], member["path"]))
+    for operand in operands:
+        try:
+            require_ordinary_target(operand)
+            if any(overlaps_home(operand, home) for home in store_control_roots()):
+                raise ValueError("adoption operand overlaps reserved store control area: {!r}".format(operand))
+        except ValueError as exc:
+            findings.append(str(exc))
     return _ok() if not findings else _invalid(findings)
 
 

@@ -3898,6 +3898,14 @@ def _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shuti
         if os.path.abspath(dirpath) == imports_root_abs \
                 and promoted_run_id is not None and promoted_run_id in names:
             drop.add(promoted_run_id)
+        working_abs = os.path.join(os.path.abspath(store_root), _opf_store.WORKING_DIRNAME)
+        if os.path.abspath(dirpath) == working_abs:
+            drop.update(n for n in names if n == _opf_store.JOURNALS_DIRNAME)
+        # Exclude exactly this preview destination. Same-named nested directories and sibling
+        # staging runs remain visible. This is inert while previews are outside the store.
+        preview_abs = os.path.abspath(preview_dir)
+        if os.path.abspath(dirpath) == os.path.dirname(preview_abs):
+            drop.update(n for n in names if n == os.path.basename(preview_abs))
         return drop
 
     shutil.copytree(store_root, preview_dir, ignore=_ignore, dirs_exist_ok=True, symlinks=True)

@@ -323,13 +323,10 @@ def _digest_of(root_fd, rel):
 # `_opf_store.STORE_ROOT_CONTROL_DIRS`, the EXACT tuple `_opf_import._assemble_preview` drops at the store
 # root (its `_ignore`, which drops these at the store root only, never a same-named dir nested deeper). Ingest
 # holds NO parallel literal of its own and derives its store-root control exclusion from that one constant, so
-# the two can never mirror-drift (the true single-authority premise shift: one source, no mirror). `.aiqt` is
-# the control UMBRELLA: the apply-promotion ops + archive trees (`_opf_import.IMPORT_OPS_REL` /
-# `IMPORT_JOURNAL_REL` / `IMPORT_ARCHIVE_REL`) and migrate's `.aiqt/migration/journal` ALL nest under it, so
-# excluding the whole `.aiqt` SUBTREE covers every control / journal / archive tree BY CONSTRUCTION rather
-# than by re-enumerating each; `.git` is the VCS dir. The self-test asserts SET EQUALITY between the exclusion
-# ingest builds and that authority, and that those import-layer constants stay under `.aiqt`, so a reintroduced
-# literal or an ops tree relocated out from under `.aiqt` is caught as drift.
+# the two cannot mirror-drift. The store-root .aiqt exclusion still covers legacy import state and
+# AIQT migration machinery until the import writers move. Store-tree homes, including the legacy
+# imports reservation, derive from the containment classifier's control_roots. The self-tests
+# compare the exact prune set with that authority; no evidence or journal subtree is adoption input.
 
 
 # The generated PUBLIC deliverables live at the PRODUCT repository root in EVERY topology (spec 5.8;
@@ -447,7 +444,7 @@ def _managed_paths(resolution, manifest_data):
     contained-only, collision-filtered, canonicalized `valid_unmanaged`.
       - prune_prefixes: store-relative directory subtrees never detected under `.working/`: the machine
         store subtree (`resolution.machine_rel`, which contains the manifest, the typed indexes, and the
-        control ledgers) and the reserved `.working/imports/` run tree (`_opf_import.IMPORTS_REL`). This is
+        control ledgers) and the classifier-registered store control roots, including legacy imports. This is
         OPF's control area, the checker's C-CONTAINMENT ground, not this adoption-source detector's, so it is
         pruned wholesale by design (F10-2 / F10-3, ratified).
       - store_leaf / declared_leaf: EXACT-LEAF managed destinations, matched by EXACT path EQUALITY, exactly
@@ -489,12 +486,12 @@ def _managed_paths(resolution, manifest_data):
         real store stray (F1). For an inline / default store re-anchoring is IDENTITY, so inline behaviour is
         unchanged. The R7-1 three-valued no-match consults ONLY the SUBTREE set, since an exact-leaf entry is
         a single file matched in results, not an unread covered subtree."""
-    prune = {resolution.machine_rel, _opf_import.IMPORTS_REL}
     # DERIVE the adoption-content managed classification from the checker's SINGLE pure authority rather than
     # re-deriving it here, so ingest and C-CONTAINMENT cannot diverge on the [unmanaged] cover or the view
     # targets (F10-1). The helper is pure (no I/O, no `rep`) and derives enabled_types / layout internally
     # from the manifest the caller already validated (D2).
     cls = _opf_check.classify_containment(manifest_data, resolution.machine_rel)
+    prune = {resolution.machine_rel} | set(cls.control_roots)
     # A malformed [unmanaged] entry is a located CANNOT-EVALUATE (a by-construction backstop: the manifest
     # validator `_opf_store._validate_unmanaged` normally rejects an escaping / non-string entry upstream, so
     # `detect` fails closed at init-first validation before reaching here; this mirrors the checker's cant).
@@ -600,7 +597,7 @@ def _detect_store_scope(store_fd, prune, leaf, subtree):
         os.close(working_fd)
     rows = []
     for rel in files:
-        if rel in leaf or _under_any(rel, subtree):
+        if rel in leaf or _under_any(rel, subtree | prune):
             continue
         digest, size = _digest_of(store_fd, rel)
         rows.append(_row(rel, "store", digest, size))
@@ -1181,9 +1178,9 @@ def admit_row_scope(scope, sp, base):
         if not sp.startswith(working + "/"):
             raise _finding("store-scope row {!r} does not lie in the mandatory store subtree {!r}/ (a store "
                            "row is store-relative and detected only under it)".format(sp, working))
-        if _under_any(sp, (_opf_import.IMPORTS_REL,)):
-            raise _finding("store-scope row {!r} lies in the reserved imports tree {!r}, which detection "
-                           "prunes wholesale".format(sp, _opf_import.IMPORTS_REL))
+        if _under_any(sp, _opf_store.store_control_roots()):
+            raise _finding("store-scope row {!r} lies in reserved store control area, which detection "
+                           "prunes wholesale".format(sp))
     elif scope == "declared":
         store_working_rel = (None if base is None
                              else posixpath.normpath(posixpath.join(base, working)))
@@ -1655,8 +1652,7 @@ def admit_move_boundary(dest, store_working_rel):
     if dest.split("/", 1)[0] == _opf_store.WORKING_DIRNAME:
         raise _finding("move destination {!r} lies inside .working/ (the store tree); a move target must "
                        "be beneath the product root but OUTSIDE .working".format(dest))
-    if store_working_rel is not None and (dest == store_working_rel
-                                          or dest.startswith(store_working_rel + "/")):
+    if store_working_rel is not None and _opf_store.overlaps_home(dest, store_working_rel):
         raise _finding("move destination {!r} lies inside the RESOLVED store working tree {!r}; a move "
                        "target must be beneath the product root but OUTSIDE the store".format(
                            dest, store_working_rel))

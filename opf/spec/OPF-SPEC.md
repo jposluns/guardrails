@@ -90,7 +90,7 @@ Two roots organize every path in this standard:
 ### 4.2 Layout overview
 
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
-The current reference tooling reserves these names and provides inert constructors only. It still
+The current reference tooling reserves these names and validates their control boundaries. It still
 supports `1.1.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
 legacy paths until homes 2 is activated, which requires the homes migration (`opf upgrade`) to be
 available. The section 9 manifest example
@@ -182,6 +182,29 @@ indexed-ignore candidate set. Gitignore is not access control: `git add -f` can 
 state. Journals are machine-local even after completion; a clone without them cannot recover those
 transactions, and requested recovery fails closed on a missing journal. Containment and doctor
 exclude journals and make no recovery claim; a rogue file there is outside their coverage.
+
+Durable evidence enumeration uses the optional machine-store ledger `evidence.toml`, with
+`format = "opf.evidence.inventory/v1"` and a `file` array. Each row has exactly `path` (a canonical
+store-relative file path), `size` (a nonnegative integer), and `sha256` (64 lowercase hex digits).
+Paths must be under `imported/<kind>/<run-id>/`, `archive/moved/`, or `archive/adoption/<run-id>/`.
+The ledger is published transactionally with the retained bytes by the owning writer or migration.
+It is not a journal projection and must remain available in a clone without journals.
+
+C-EVIDENCE-ENUM reconciles exact membership, directory structure, regular-file types, sizes and
+digests against that ledger. Unlisted members and missing listed files are findings; unreadable
+or malformed inputs cannot evaluate. The ledger may be absent only while both evidence homes
+have no members. Deleting the ledger together with its entire payload is outside this local
+snapshot check; independent history is required to detect that loss. Inventories assert
+membership, not authenticated actor history. The contained reader's size ceiling still applies.
+
+The legacy `imports/` exclusion remains registered until its writers migrate. `staging/` is
+walked and stray-graded, including empty runs; an unknown kind is always a finding. The existing
+staged-plan presence test also recognizes import and ingest runs in their typed staging homes.
+Other kinds cannot substantiate partial import status until their plan readers are registered.
+Doctor never consults a journal to decide partial status and makes no claim that a staged plan
+has a recoverable transaction. Ordinary transaction operands cannot equal, descend from, or
+contain `journals/`; capability-bound journal APIs derive their destinations from kind and run
+identity. Legacy journal transport must preserve bytes through the migration's receipt binding.
 
 
 ### 4.3 The pointer

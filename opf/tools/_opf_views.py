@@ -1643,6 +1643,10 @@ def plan_views(store_root_fd, machine_rel):
             raise ViewsError("view {!r} is declared kind {!r} but this generator renders it as {!r} "
                              "(spec 10.1)".format(name, declared_kind, kind))
         scope, dest_rel = _spec_destination(name)
+        try:
+            _opf_store.require_ordinary_target(dest_rel)
+        except ValueError as exc:
+            raise ViewsError(str(exc))
         declared_target = tbl.get("target")
         if declared_target != dest_rel:
             raise ViewsError("view {!r} declares target {!r} but its spec destination is {!r}; a manifest "

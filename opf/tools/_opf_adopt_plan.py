@@ -169,7 +169,7 @@ def _inventory(root, sources, targets):
             if target is not None and store._target_store_root(target, root) != root:
                 raise PlanError("companion/remote store requires separately scoped investigation")
         resolution = store.resolve_store(root)
-        excluded = []
+        excluded = [{"path": path, "reason": "store-control"} for path in store.store_control_roots()]
         if resolution.status == store.CANNOT_EVALUATE:
             # Prove that this is foreign content with NO candidate store manifest
             # before reading any of its files. Do not infer this from resolver prose.
@@ -185,6 +185,8 @@ def _inventory(root, sources, targets):
                         count += 1
                         if count > MAX_ENTRIES:
                             raise PlanError("store discovery exceeds entry bound")
+                        if entry.name in store.RESERVED_MACHINE_SUBDIRS:
+                            continue
                         st = os.stat(entry.name, dir_fd=wfd, follow_symlinks=False)
                         if stat.S_ISDIR(st.st_mode):
                             child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY
@@ -204,15 +206,11 @@ def _inventory(root, sources, targets):
             if checked.status != store.VALID:
                 raise PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
             excluded.append({"path": resolution.machine_rel, "reason": "machine-store"})
-            for path in manifest.get("unmanaged", {}).get("paths", []):
-                # Conservative collision check: do not let an exclusion conceal the
-                # machine subtree or a declared view. Fine-grained store membership
-                # remains the doctor's job, not an adoption-planner reimplementation.
-                path = _path(path)
-                reserved = [resolution.machine_rel, ".working/imports"]
-                reserved += [v["target"] for v in manifest.get("views", {}).values()]
-                if any(_under(path, p) or _under(p, path) for p in reserved):
-                    raise PlanError("unmanaged exclusion overlaps a reserved store path")
+            import _opf_check
+            cls = _opf_check.classify_containment(manifest, resolution.machine_rel)
+            if cls.malformed or cls.colliding:
+                raise PlanError("; ".join(cls.malformed + cls.colliding))
+            for path in cls.valid_unmanaged:
                 excluded.append({"path": path, "reason": "registered-unmanaged"})
             manifest_digest = _digest(raw)
         else:

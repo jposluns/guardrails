@@ -55,6 +55,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _opf_store     # noqa: E402  shared homes and operand boundaries
 import _journal        # noqa: E402  contained no-follow parent-open primitive (reused for listing / raw reads)
 import _opf_emit       # noqa: E402  U8 canonical emitter (the per-record digest basis)
 import _opf_import     # noqa: E402  U7 staging enumerator (imports/<run-id>/ sibling ids)
@@ -89,6 +90,8 @@ WORKLOG_NAME = "worklog.toml"
 LEASE_NAME = "lease.toml"                  # present only while the single-writer lease is held (spec 5.7)
 ARCHIVE_DIRNAME = "archive"
 ARCHIVE_MANIFEST_NAME = "archive.toml"
+EVIDENCE_MANIFEST_NAME = "evidence.toml"
+EVIDENCE_FORMAT = "opf.evidence.inventory/v1"
 INDEX_SUFFIX = ".index.toml"
 
 # The containment walk is bounded by an explicit depth ceiling so a pathologically deep directory chain
@@ -147,6 +150,7 @@ def _schema_deferred(tname):
 # the emitted set against this tuple, so a silently-skipped check becomes CANNOT-EVALUATE, never VALID.
 REQUIRED_CHECKS = (
     "C-MANIFEST", "C-PROFILES", "C-ROSTER", "C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM",
+    "C-EVIDENCE-ENUM",
     "C-VERSION-LEDGER", "C-COUNTERS", "C-ROTATION", "C-STAGING", "C-LEASE", "C-ID-SPACE", "C-RECEIPTS",
     "C-HANDOFF",
     "C-DECISION-CHAINS", "C-LINKS", "C-FROZEN-COVERAGE", "C-NO-DELETION", "C-PARTITION", "C-CONTIGUITY",
@@ -159,7 +163,7 @@ _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
 # The three DELIVERABLE_DRIFT_CHECKS grade the GENERATED public deliverables (the declared views, the root
 # VERSION deliverable, and the curated CHANGELOG.md). `opf render --write` REGENERATES the views and the
 # VERSION deliverable, so those checks are its OUTPUT, not its precondition: a mutating render gates on
-# SOURCE integrity (the other 26 required checks) and then makes the deliverables current. The source set is
+# SOURCE integrity (the remaining required checks) and then makes the deliverables current. The source set is
 # derived by SUBTRACTION, so an unclassified FUTURE required check defaults into the must-pass source set
 # (the safe direction; guard-input-soundness), and the partition is drift-gated for exactness/disjointness
 # in self_test beside the closed-roster reconciliation.
@@ -212,6 +216,9 @@ _RESIDUALS = (
     "Module-tier record schema validation (spec 8.5): the baseline record validator knows only the "
     "baseline specs, so a module-tier record is a named CANNOT-EVALUATE deferral (deferred to U2M) rather "
     "than graded here; every such record is still surfaced, so none can hide a defect.",
+    "Journal contents are not inspected by doctor. A staged plan does not prove recoverability. "
+    "Evidence inventories establish local membership, not actor authenticity; losing an inventory "
+    "and all its payload requires independent history to detect.",
     "Byte-level view drift for a per-record store that declares views (spec 5.8/10): U4's view planner "
     "does not yet support the per-record layout, so C-VIEW-DRIFT is a named CANNOT-EVALUATE there, never "
     "a silent pass.",
@@ -1221,27 +1228,25 @@ def _archived_rotatable(rec):
 
 
 def _has_active_import_run(root_fd, machine_rel, rep):
-    """True when an imports/<run-id> run directory (a valid U7 run-id shape) is actually present. A declared
-    import_status = "partial" is substantiated only by such a run (spec 11:943 requires an import or
-    migration ACTUALLY running); with none present a partial declaration cannot license the triage posture
-    that disables steady-state grading (codex-2). A listing failure is recorded CANNOT-EVALUATE by _list_dir
-    and returns False (fail-closed: the cant dominates, so the paths then grade as findings). `machine_rel`
-    is retained for call-site symmetry but is now unused: imports is store-scope (`.working/imports/`), read
-    from the shared _opf_import.IMPORTS_REL constant, not the machine subdir."""
-    imports_rel = _opf_import.IMPORTS_REL
-    subdirs, _files = _list_dir(root_fd, imports_rel, rep)
-    if not subdirs:
-        return False
-    for d in subdirs:
-        if not _opf_import._RUN_ID_RE.match(d):
-            continue
-        # round-14 C5: a partial status is substantiated only by a WELL-FORMED run, not a bare
-        # run-id-named (possibly empty) directory. Require the staged plan.toml (stage_import always writes
-        # it) to be present, so a fake or empty run dir cannot license the store-wide triage posture that
-        # suppresses stray grading.
-        _rsubs, rfiles = _list_dir(root_fd, _rel(imports_rel, d), rep)
-        if rfiles is not None and "plan.toml" in rfiles:
-            return True
+    """Substantiate partial imports by a named staged run carrying plan.toml.
+
+    Legacy imports and typed import/ingest staging share the existing plan-presence test.
+    This establishes staging presence, not journal integrity or recoverability. Other kinds
+    cannot substantiate partial imports until their plan readers are registered. Listing
+    errors are cannot-evaluate. machine_rel is retained for call-site symmetry.
+    """
+    # Keep the legacy reader while existing writers use it. The typed import and ingest homes
+    # use the same staged-plan contract. Other kinds do not yet substantiate partial imports.
+    roots = (_opf_import.IMPORTS_REL,) + tuple(
+        _opf_store.STAGING_REL + "/" + kind for kind in ("import", "ingest"))
+    for imports_rel in roots:
+        subdirs, _files = _list_dir(root_fd, imports_rel, rep)
+        for d in subdirs or ():
+            if not _opf_import._RUN_ID_RE.fullmatch(d):
+                continue
+            _rsubs, rfiles = _list_dir(root_fd, _rel(imports_rel, d), rep)
+            if rfiles is not None and "plan.toml" in rfiles:
+                return True
     return False
 
 
@@ -1700,6 +1705,111 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
                  "identifiable from the prior snapshot (spec 8.4/8.5)".format(rid, pstatus, cur_status))
 
 
+# Durable inventory is separate from machine-local journals. Writers publish this ledger in the
+# same transaction as retained bytes. It establishes membership, not authenticated actor history.
+
+def _evidence_path(path):
+    """Validate one inventory file operand against the typed durable homes."""
+    _opf_store._home_file(path)
+    imported = _opf_store.IMPORTED_REL + "/"
+    archive = _opf_store.ARCHIVE_REL + "/"
+    if path.startswith(imported):
+        parts = path[len(imported):].split("/", 2)
+        if len(parts) == 3:
+            _opf_store.evidence_run(parts[0], parts[1])
+            return
+    elif path.startswith(archive + "moved/"):
+        _opf_store.moved_dest(path[len(archive + "moved/"):])
+        return
+    elif path.startswith(archive + "adoption/"):
+        parts = path[len(archive + "adoption/"):].split("/", 1)
+        if len(parts) == 2:
+            _opf_store.retire_preimage(parts[0], parts[1])
+            return
+    raise ValueError("not a typed durable evidence file: {!r}".format(path))
+
+
+def _check_evidence(root_fd, machine_rel, rep):
+    """Exact membership, type, size and digest reconciliation; never opens journals.
+
+    A missing inventory is allowed only when neither durable home has members. Missing listed
+    files and unlisted directories fail. As with the record archive, deleting both the inventory
+    and its whole payload is outside this local snapshot check; history coverage is separate.
+    Reads use the existing contained readers and their per-file cap, with a bounded walk.
+    """
+    ledger = _rel(machine_rel, EVIDENCE_MANIFEST_NAME)
+    doc, state = _read_toml(root_fd, ledger, rep)
+    expected = {}
+    if state == "error":
+        return
+    if state == "ok":
+        if (not isinstance(doc, dict) or set(doc) != {"format", "file"}
+                or doc.get("format") != EVIDENCE_FORMAT or not isinstance(doc.get("file"), list)):
+            rep.cant("C-EVIDENCE-ENUM: malformed inventory {!r}".format(ledger))
+            return
+        for row in doc["file"]:
+            try:
+                if not isinstance(row, dict) or set(row) != {"path", "size", "sha256"}:
+                    raise ValueError("file rows require exactly path, size and sha256")
+                path = row["path"]
+                _evidence_path(path)
+                if path in expected:
+                    raise ValueError("duplicate path")
+                if type(row["size"]) is not int or row["size"] < 0:
+                    raise ValueError("size must be a nonnegative integer")
+                if not isinstance(row["sha256"], str) or not _opf_import._HEX64_RE.fullmatch(row["sha256"]):
+                    raise ValueError("sha256 must be 64 lowercase hex digits")
+                expected[path] = row
+            except (TypeError, ValueError) as exc:
+                rep.cant("C-EVIDENCE-ENUM: malformed inventory row {!r}: {}".format(row, exc))
+                return
+    roots = (_opf_store.IMPORTED_REL, _opf_store.ARCHIVE_REL)
+    directories = set(roots)
+    for path in expected:
+        parent = path.rsplit("/", 1)[0]
+        while parent not in roots:
+            directories.add(parent)
+            parent = parent.rsplit("/", 1)[0]
+    seen = set()
+    budget = [0]
+
+    def walk(rel, depth, required=False):
+        if depth > _CONTAINMENT_MAX_DEPTH:
+            rep.cant("C-EVIDENCE-ENUM: depth ceiling at {!r}".format(rel))
+            return
+        subdirs, files = _list_dir(root_fd, rel, rep)
+        if subdirs is None:
+            if required:
+                rep.cant("C-EVIDENCE-ENUM: cannot enumerate declared directory {!r}".format(rel))
+            return
+        for name in subdirs + files:
+            budget[0] += 1
+            if budget[0] > (1 << 20):
+                rep.cant("C-EVIDENCE-ENUM: entry ceiling at {!r}".format(rel))
+                return
+            full = rel + "/" + name
+            if name in subdirs:
+                if full not in directories:
+                    rep.finding("C-EVIDENCE-ENUM: off-inventory directory {!r}".format(full))
+                walk(full, depth + 1, required=True)
+            elif full not in expected:
+                rep.finding("C-EVIDENCE-ENUM: off-inventory file {!r}".format(full))
+            else:
+                seen.add(full)
+                raw, status = _read_bytes(root_fd, full, rep)
+                if status == "absent":
+                    rep.finding("C-EVIDENCE-ENUM: missing file {!r}".format(full))
+                elif status == "ok":
+                    row = expected[full]
+                    if len(raw) != row["size"] or hashlib.sha256(raw).hexdigest() != row["sha256"]:
+                        rep.finding("C-EVIDENCE-ENUM: size or digest mismatch {!r}".format(full))
+
+    for root in roots:
+        walk(root, 0)
+    for path in sorted(set(expected) - seen):
+        rep.finding("C-EVIDENCE-ENUM: missing file {!r}".format(path))
+
+
 # --- containment (C-CONTAINMENT, OPF-SPEC 14.2) ------------------------------------------------------
 
 # The pure classification `classify_containment` returns, the SINGLE authority both `_check_containment`
@@ -1714,7 +1824,7 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
 ContainmentClassification = collections.namedtuple(
     "ContainmentClassification",
     ("view_targets", "valid_unmanaged", "malformed", "colliding", "managed_file", "layout",
-     "perrecord_body_dirs", "archive_root", "imports_root"))
+     "perrecord_body_dirs", "archive_root", "imports_root", "control_roots", "evidence_roots"))
 
 
 def classify_containment(manifest_data, machine_rel):
@@ -1767,7 +1877,8 @@ def classify_containment(manifest_data, machine_rel):
                 malformed.append(
                     "C-CONTAINMENT: [unmanaged] path entry {} is not a contained store-relative string "
                     "(spec 14.2); the unmanaged declaration cannot be evaluated".format(_safe_display(p)))
-    ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, WORKLOG_NAME, LEASE_NAME})
+    ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, WORKLOG_NAME, LEASE_NAME,
+                              EVIDENCE_MANIFEST_NAME})
     # Importer namespaces (legacy_fragment) are schema-deferred and, per the decoupled D6 design, are NOT
     # declared in the manifest [types]; their type index (e.g. legacy_fragment.index.toml) is therefore a
     # managed leaf IF PRESENT even without a declaration, mirroring C-COUNTERS' optional_namespaces
@@ -1778,6 +1889,8 @@ def classify_containment(manifest_data, machine_rel):
     # from the shared _opf_import.IMPORTS_REL constant so the checker and U7 cannot drift (spec 14.1). The
     # walk starts at `.working/`, so this root is reached and graded exactly as before, one level up.
     imports_root = _opf_import.IMPORTS_REL
+    control_roots = _opf_store.store_control_roots()
+    evidence_roots = (_opf_store.IMPORTED_REL, _opf_store.ARCHIVE_REL)
 
     def managed_leaf(p):
         # A STRICT managed-leaf test: a ledger, an enabled type index, a per-record body, or a declared
@@ -1838,8 +1951,8 @@ def classify_containment(manifest_data, machine_rel):
     perrecord_body_dirs = tuple(_rel(mrel, t) for t in sorted(enabled_types) if t not in _LEDGER_TYPES)
     ledger_index_files = tuple(_rel(mrel, t + INDEX_SUFFIX) for t in sorted(enabled_types)
                                if t in _LEDGER_TYPES)
-    graded_containers = (archive_root, imports_root) + type_body_dirs
-    managed_dir_prefixes = (mrel, archive_root, imports_root) + type_body_dirs + ledger_index_files
+    graded_containers = (archive_root,) + control_roots + type_body_dirs
+    managed_dir_prefixes = (mrel, archive_root) + control_roots + type_body_dirs + ledger_index_files
     colliding = []
     valid_unmanaged = []
     for u in unmanaged:
@@ -1856,7 +1969,8 @@ def classify_containment(manifest_data, machine_rel):
     return ContainmentClassification(
         view_targets=view_targets, valid_unmanaged=valid_unmanaged, malformed=malformed,
         colliding=colliding, managed_file=managed_file, layout=layout,
-        perrecord_body_dirs=perrecord_body_dirs, archive_root=archive_root, imports_root=imports_root)
+        perrecord_body_dirs=perrecord_body_dirs, archive_root=archive_root, imports_root=imports_root,
+        control_roots=control_roots, evidence_roots=evidence_roots)
 
 
 def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
@@ -1886,6 +2000,8 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     perrecord_body_dirs = cls.perrecord_body_dirs
     archive_root = cls.archive_root
     imports_root = cls.imports_root
+    staging_root = _opf_store.STAGING_REL
+    staged_roots = (imports_root, staging_root)
 
     unmanaged_files = []
 
@@ -1896,7 +2012,7 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
         # handled by the caller's skip.) Anything else under the store is an UNREGISTERED directory, graded
         # as a stray even when empty (round-14: the walk previously graded files only, so an empty rogue
         # directory, or a tree of only empty dirs, escaped grading entirely).
-        if full == mrel or _under_any(full, (imports_root,)):
+        if full == mrel or _under_any(full, staged_roots):
             return True
         if layout == "per-record" and full in perrecord_body_dirs:
             return True
@@ -1913,7 +2029,9 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
         subdirs, files = _list_dir(root_fd, reldir, rep)
         if subdirs is None and files is None:
             return
-        if not subdirs and not files and reldir != imports_root and _under_any(reldir, (imports_root,)):
+        kind_roots = tuple(staging_root + "/" + k for k in _opf_store.STAGING_KINDS)
+        if not subdirs and not files and reldir not in staged_roots + kind_roots \
+                and _under_any(reldir, staged_roots):
             # An EMPTY directory strictly under the imports interior has no file to flag, so it would
             # escape grading entirely (round-14 graded files only; F1). Grade the directory itself as an
             # unregistered path, exactly as any other unregistered path is: a finding at steady state and
@@ -1921,12 +2039,19 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
             # ROOT itself, holding no runs, is a legitimate empty namespace and stays clean.
             unmanaged_files.append(reldir)
             return
+        if reldir == staging_root:
+            for name in sorted(set(subdirs) - set(_opf_store.STAGING_KINDS) | set(files)):
+                rep.finding("C-CONTAINMENT: invalid staging kind {!r}".format(name))
         for f in files:
             full = reldir + "/" + f
             if not managed_file(full):
                 unmanaged_files.append(full)
         for d in subdirs:
             full = reldir + "/" + d
+            # Journal contents are outside doctor coverage; only journal validation reads them.
+            # Evidence bytes have their own exact inventory check, distinct from record rotation.
+            if full == _opf_store.JOURNALS_REL or full in cls.evidence_roots:
+                continue
             if _under_any(full, valid_unmanaged) or full == archive_root:
                 continue     # a valid declared-unmanaged subtree is never read; the archive is C-ARCHIVE-ENUM's
             if not managed_dir(full):
@@ -2253,6 +2378,9 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-ARCHIVE-ENUM")
     archive_recs, archive_worklogs, rotatable = _validate_archive(root_fd, machine_rel, enabled_types,
                                                                   registered_vendors, import_status, rep)
+
+    rep.ran("C-EVIDENCE-ENUM")
+    _check_evidence(root_fd, machine_rel, rep)
 
     # --- the merged worklog (active + archive together; spec 12:982-983) and the id maps --------------
     merged = {}

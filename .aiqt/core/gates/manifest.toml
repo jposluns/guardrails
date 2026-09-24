@@ -525,7 +525,18 @@ rules = []
 platform = "ci"
 default = "block"
 class = "c"
-residue = "It runs the OPF store-homes contract gate (opf/tools/check_opf_homes.py): the default entry checks that the OPF spec carries the homes contract sections and that the rendered in-flight gitignore block matches its renderer (drift), and --self-test exercises the home constants, the path constructors and their kind, run-id and file-path guards, the reserved-name refusal in discovery, and the gitignore renderer. It checks contract text and topology only; it does not certify homes-2 runtime behaviour, which no writer uses until the layout activation slice lands, and it does not inspect an adopter's live store."
+residue = """
+The default entry checks the homes spec contract and rendered gitignore block. The self-test checks
+constructors, discovery reservations and inert writer defaults, plus in-memory boundary fixtures:
+classifier and detect set equality, unmanaged collisions, staged-run grading, evidence inventory
+membership, size and digest reconciliation, journal target refusal, capability refusal and missing
+recovery state, and anchored preview exclusions. These fixtures mock filesystem observations; they
+do not certify filesystem races, crash recovery, power-loss durability, live adopter state, or the
+whole input space. Evidence membership relies on the durable machine-store ledger; deleting that
+ledger and its complete payload requires independent history to detect. Journals are deliberately
+outside doctor coverage. Writer migration, evidence-ledger publication and legacy journal transport
+remain inactive. The existing runtime suites must still validate integration before activation.
+"""
 
 [[gate]]
 id = "opf-init-contract-check"

@@ -65,6 +65,7 @@ fail-closed way and names it so the choice is reviewable, per disclose-guard-res
 import collections.abc
 import operator
 import os
+import posixpath
 import re
 import stat
 import sys
@@ -265,6 +266,25 @@ def txn_record(kind, run_id):
     run = _home_run(kind, run_id)
     kind, run_id = run.split("/")
     return "{}/{}/runs/{}/transaction.toml".format(JOURNALS_REL, kind, run_id)
+
+
+def store_control_roots():
+    """Store-relative control roots, including the reserved legacy staging home."""
+    return tuple("{}/{}".format(WORKING_DIRNAME, n) for n in RESERVED_MACHINE_SUBDIRS)
+
+
+def overlaps_home(path, home):
+    """Whether a contained operand equals, contains, or lies within a reserved home."""
+    if not _is_contained_relpath(path):
+        raise ValueError("not a contained store-relative path: {!r}".format(path))
+    path = posixpath.normpath(path)
+    return path == "." or path == home or path.startswith(home + "/") or home.startswith(path + "/")
+
+
+def require_ordinary_target(path):
+    """Refuse journal operands, including ancestors. Internal journal writes use the held capability."""
+    if overlaps_home(path, JOURNALS_REL):
+        raise ValueError("ordinary operation target {!r} overlaps the journal home".format(path))
 
 
 def render_homes_gitignore():
@@ -566,8 +586,8 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
                  present-but-invalid store, never treated as absent, spec residual 17)
       "multiple" more than one does (ambiguous: cannot choose)
     Raises StoreError (cannot-evaluate) on any read error, a non-directory `.working/`, or a refused
-    symlink. The scan is EXHAUSTIVE and strict-unique: `toml` is the expected name (its match, when the
-    result is otherwise unique, is reported as the machine_dir), but a second stray store is NOT masked
+    symlink. Outside the pruned journal home the scan is exhaustive and strict-unique: the match, when the
+    result is otherwise unique, is reported as machine_dir; a second stray store is not masked
     (spec 4.5, residual 17).
 
     `accept_tokens` is the set of discovery tokens accepted here; None means the sole current
@@ -582,6 +602,10 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
     matches = []
     legacy = []
     for name in subdirs:
+        # No journal content is a discovery input, even a file named manifest.toml.
+        # A tree with only this reserved child stays present-but-invalid below.
+        if name == JOURNALS_DIRNAME:
+            continue
         manifest_rel = "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)
         data = _read_toml_contained(store_root_fd, manifest_rel)   # StoreError propagates (fail-closed)
         if data is None:
