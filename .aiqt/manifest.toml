@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "62d53605b33460fac90b48c78b5d58937872f77da0c0c5382f2525bc48996716"
+tree-sha256 = "d90d50bd5c105d1c40033dacfe293cef02d8f0c79794085edec2b0f6390da721"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 143325
-sha256 = "2871c064d23b8f5b6c1c3cf37b1675e04a55507e26f2c322523e945f15b17e95"
+bytes = 142990
+sha256 = "4944f1871b237cfe3e81e25a8d2fd230fb2139adc129a08d164cfddc48ecb2df"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -96,8 +96,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 14254
-sha256 = "685939071823a23c0114e1da5b2fdb510e81a13d56ec34eb91938458218479f3"
+bytes = 14249
+sha256 = "45bb0a9d5e1654fee9b222ca226b9d76a81127fe63bf260e26bc5339bdbd25d6"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2191,13 +2191,38 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 39518
-sha256 = "7c14dc4195d6a1a0418d3adbf02f757076a2ebc32bc9e88da38ce96ce48a2a34"
+bytes = 39493
+sha256 = "2663a928f67e85417062d0a2016e480628f6f6fa338691ef4b74f66dc5a787be"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
 bytes = 104427
 sha256 = "6c290908525b587a8fbce6f877f6722ef142a6e1fef559283c058ec3662aacc6"
+
+[[sources]]
+path = ".preview/README.md"
+bytes = 14291
+sha256 = "09cd1b0e3eeed38b8ac4beb254cee7148dbea2ba5f8b22b638e4b2dfc6af008e"
+
+[[sources]]
+path = ".preview/SHA256SUMS"
+bytes = 379
+sha256 = "fb809dbfb26591ba06a527de0455786a0861883da9437d33f3854dec845d0f44"
+
+[[sources]]
+path = ".preview/clock-inject.py"
+bytes = 40849
+sha256 = "e7f6a8efd76216dedad4522c7d122675db24135e0ea52e8e1f42a2082f5505b5"
+
+[[sources]]
+path = ".preview/future-stamp-write.py"
+bytes = 386941
+sha256 = "51eb6afde84a4362997db3d6ab2e8c53a7c02d556dbbf1c73940686f36296913"
+
+[[sources]]
+path = ".preview/stamp-truth-stop.py"
+bytes = 247716
+sha256 = "b73a799f81d2fd21d4f368750074f08a65dde29e031a90b60f1de569dee2de99"
 
 [[sources]]
 path = "AGENTS.md"
@@ -2328,31 +2353,6 @@ sha256 = "2107eb0ae021c8abc849693590810af430326747ee0a8d4978b8bbe92714899a"
 path = "docs/teams.md"
 bytes = 9884
 sha256 = "ac7597f96ce6a8a5445badee95573dd69d9cc6b116de610e69da522c4e32f8b8"
-
-[[sources]]
-path = "hooks-preview/README.md"
-bytes = 14705
-sha256 = "3401d4dab066e25b95d593871b27f3d5a9408a7e7f1eafcbc37720f5b4db662f"
-
-[[sources]]
-path = "hooks-preview/SHA256SUMS"
-bytes = 379
-sha256 = "fb809dbfb26591ba06a527de0455786a0861883da9437d33f3854dec845d0f44"
-
-[[sources]]
-path = "hooks-preview/clock-inject.py"
-bytes = 40849
-sha256 = "e7f6a8efd76216dedad4522c7d122675db24135e0ea52e8e1f42a2082f5505b5"
-
-[[sources]]
-path = "hooks-preview/future-stamp-write.py"
-bytes = 386941
-sha256 = "51eb6afde84a4362997db3d6ab2e8c53a7c02d556dbbf1c73940686f36296913"
-
-[[sources]]
-path = "hooks-preview/stamp-truth-stop.py"
-bytes = 247716
-sha256 = "b73a799f81d2fd21d4f368750074f08a65dde29e031a90b60f1de569dee2de99"
 
 [[sources]]
 path = "opf/site/_redirects"
@@ -3066,8 +3066,8 @@ sha256 = "b013edeeefca5054b5351bab57530a8874d6bc2aaacdc7dd598110e80f5e78eb"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
-bytes = 51438
-sha256 = "541c9af6456d52a23ad0c9839037c9d21b09045fc6f7fe683b6439f0acaa7e67"
+bytes = 37732
+sha256 = "cce10b1d4058db440eeecd89de7daf9892f3529b2716b08dcb178fa5373aa9c2"
 
 [[sources]]
 path = "tools/check_install_page.py"
@@ -3076,8 +3076,8 @@ sha256 = "6be34b5b3fe9f61750b0f006ee4dd01afeb4a45b7dc630ae6183e71d789e3e9e"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 31059
-sha256 = "c45daee297c320b16a13c7bce5611e9222e35c54ca39ab09d3525d2603c64021"
+bytes = 31054
+sha256 = "0a1d85e33e850ef7344e242f08696018f0831dc97818f371d7fdd5ab33b2f3df"
 
 [[sources]]
 path = "tools/check_leaks.py"

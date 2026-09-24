@@ -5,7 +5,7 @@ Each hook is one self-contained Python file that you can download, check, test, 
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-Three hooks are published here, each listed with its checksum and pinned link in the integrity table below.
+Three hooks are published here, each listed with its checksum and link in the integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 ## What these hooks are
@@ -38,46 +38,44 @@ the authority, and the summary further down this page only points to it.
 
 ## Integrity
 
-Every published hook file is listed below with its SHA-256 checksum and a download link pinned to a
-release tag of this repository, in the form
-`https://raw.githubusercontent.com/jposluns/guardrails/refs/tags/hooks-preview-v<N>/hooks-preview/<file>`.
-The link names the tag explicitly (`refs/tags/`), so a branch of the same name can never be served in its
-place. The same values are in [SHA256SUMS](SHA256SUMS), which lists bare file names in the format
-`sha256sum -c` reads.
+Every published hook file is listed below with its SHA-256 checksum and a link to the file itself. The
+files are served from this repository's main branch; for a raw download, use
+`https://raw.githubusercontent.com/jposluns/guardrails/main/.preview/<file>`. The same values are in
+[SHA256SUMS](SHA256SUMS), which lists bare file names in the format `sha256sum -c` reads.
 
-| File | SHA-256 | Pinned raw link |
+| File | SHA-256 | Link |
 |---|---|---|
-| `clock-inject.py` | `e7f6a8efd76216dedad4522c7d122675db24135e0ea52e8e1f42a2082f5505b5` | https://raw.githubusercontent.com/jposluns/guardrails/refs/tags/hooks-preview-v1/hooks-preview/clock-inject.py |
-| `future-stamp-write.py` | `51eb6afde84a4362997db3d6ab2e8c53a7c02d556dbbf1c73940686f36296913` | https://raw.githubusercontent.com/jposluns/guardrails/refs/tags/hooks-preview-v1/hooks-preview/future-stamp-write.py |
-| `stamp-truth-stop.py` | `b73a799f81d2fd21d4f368750074f08a65dde29e031a90b60f1de569dee2de99` | https://raw.githubusercontent.com/jposluns/guardrails/refs/tags/hooks-preview-v1/hooks-preview/stamp-truth-stop.py |
+| `clock-inject.py` | `e7f6a8efd76216dedad4522c7d122675db24135e0ea52e8e1f42a2082f5505b5` | [clock-inject.py](clock-inject.py) |
+| `future-stamp-write.py` | `51eb6afde84a4362997db3d6ab2e8c53a7c02d556dbbf1c73940686f36296913` | [future-stamp-write.py](future-stamp-write.py) |
+| `stamp-truth-stop.py` | `b73a799f81d2fd21d4f368750074f08a65dde29e031a90b60f1de569dee2de99` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 
 What the checksum does and does not prove:
 
-- The checksum, the SHA256SUMS file, and the hook itself are all served from this one repository. A
-  matching checksum proves the file arrived intact and is the file this page describes at that tag. It
-  does not prove the repository itself is uncompromised; for that, compare against a copy of this page
-  you obtained independently, such as one from an earlier visit.
-- A link must point at `jposluns/guardrails`. The repository's quality gate checks each link's shape, its
-  file name, and its tag, but not its owner and repository, so confirm those by eye.
+- The checksum is what proves the download is the file this page describes. The checksum, the
+  SHA256SUMS file, and the hook itself are all served from this one repository, so a matching checksum
+  proves the file arrived intact and matches this page. It does not prove the repository itself is
+  uncompromised; for that, compare against a copy of this page you obtained independently, such as one
+  from an earlier visit.
+- Download from `jposluns/guardrails` only. The repository's quality gate checks that each row links to
+  its own file, but not where a raw download URL points, so confirm the owner and repository by eye.
 
-How the pin works: the tag `hooks-preview-v<N>` is created on the merge commit of the change that
-publishes or changes a hook, and is pushed by the maintainer right after that change merges. Until the tag
-is pushed, the pinned links on this page do not resolve. The quality gate checks that the table,
-SHA256SUMS, and the files agree on every change, and, whenever the tag is available to it, that the file
-at the tag matches its checksum; on the change that introduces a new tag, which runs before the tag
-exists, that last check is skipped with a printed note.
+How the files are served: each file is served from the main branch as it stands, so a download always
+gets the current version, and the checksum on this page changes in the same change as the file. To
+install, download the file from its link (for a raw download, the main-branch URL above), check its
+SHA-256 against this page, and run its self-test. The quality gate checks on every change that the table,
+SHA256SUMS, and the files agree.
 
 ## Installing a hook
 
-These steps are for an AI coding assistant to carry out, one hook at a time. Replace `<file>`,
-`<checksum>`, and `<pinned raw link>` with the values from that hook's row in the integrity table. Stop at
-the first step that fails and report it; do not work around a failed check.
+These steps are for an AI coding assistant to carry out, one hook at a time. Replace `<file>` and
+`<checksum>` with the values from that hook's row in the integrity table. Stop at the first step that
+fails and report it; do not work around a failed check.
 
-1. Create the hooks directory and download the hook from its pinned link:
+1. Create the hooks directory and download the hook from the main branch:
 
    ```sh
    mkdir -p ~/.claude/hooks
-   curl -fsSL '<pinned raw link>' -o ~/.claude/hooks/<file>
+   curl -fsSL 'https://raw.githubusercontent.com/jposluns/guardrails/main/.preview/<file>' -o ~/.claude/hooks/<file>
    ```
 
 2. Check the checksum. The command prints `<file>: OK` only when the file matches the value on this page:
@@ -235,8 +233,8 @@ section of its opening docstring. Read that section before relying on a hook; in
 ## Status and retirement
 
 This is a preview channel. When a hook here becomes part of the pack's plugin, it is removed from this
-directory, its row is replaced by a pointer to where it now lives, and the pinned tag number goes up.
-When every hook has moved, this directory is removed.
+directory and its row is replaced by a pointer to where it now lives. When every hook has moved, this
+directory is removed.
 
-A change to any hook here ships with a new pinned tag, new checksums on this page, and a matching
-SHA256SUMS, all in the same change.
+A change to any hook here ships with new checksums on this page and a matching SHA256SUMS, all in the
+same change.

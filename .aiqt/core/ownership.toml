@@ -108,7 +108,7 @@ class = "pack-immutable"
 note = "The OPF specification pair (OPF-SPEC.md, OPF-QUICKSTART.md) relocated under opf/ (OPF-SELF-CONTAIN). Shipped pack content, byte-exact. H-1 ratified: no new class family."
 
 [[release-class]]
-pattern = "hooks-preview/**"
+pattern = ".preview/**"
 class = "pack-immutable"
 note = "The public hooks preview channel: standalone hook files, their README.md install page, and SHA256SUMS, byte-exact shipped content like the other top-level surfaces. Removed with the directory when the last preview hook moves into the plugin."
 
