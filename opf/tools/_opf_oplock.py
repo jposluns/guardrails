@@ -2249,8 +2249,9 @@ def _unreturned_note(what, cap, sink, rexc):
             return n + (" (not durably: the directory fsync after its unlink FAILED, so the "
                         "removal may not survive a power loss)")
         if n in scope.durability_unconfirmed:
-            return n + (" (its durability UNCONFIRMED: the directory fsync after its unlink was "
-                        "interrupted, so the removal may not survive a power loss)")
+            return n + (" (its durability UNCONFIRMED: an interruption landed after its unlink and "
+                        "before its directory fsync completed, so the removal may not survive a "
+                        "power loss)")
         return n
     shown = [_shown(n) for n in scope.removed]
     qualified = scope.undurable or scope.durability_unconfirmed
@@ -2263,8 +2264,9 @@ def _unreturned_note(what, cap, sink, rexc):
             if n in scope.removed:
                 parts.append("its {} removed".format(_shown(n)))
             elif n in scope.removal_unconfirmed:
-                parts.append("its {}'s removal UNCONFIRMED (its unlink was interrupted and its "
-                             "name could not be observed)".format(n))
+                parts.append("its {}'s removal UNCONFIRMED (its removal was interrupted between "
+                             "its unlink and the end of its directory fsync, and its name could "
+                             "not be observed)".format(n))
             else:
                 parts.append("its {} not removed (any that remains waits for a later "
                              "recover=True)".format(n))
@@ -2562,8 +2564,9 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
                                  "so its removal's durability is UNCONFIRMED")
                 elif not lease_removed and lease_outcome.get("interrupted") \
                         and lease_outcome.get("unlinked") is None:
-                    lease_why = ("whether the lease was removed is UNCONFIRMED (its unlink was "
-                                 "interrupted and its name could not be observed)")
+                    lease_why = ("whether the lease was removed is UNCONFIRMED (its removal was "
+                                 "interrupted between its unlink and the end of its directory "
+                                 "fsync, and its name could not be observed)")
         elif lease_attempted:
             try:
                 if _lstat_at(machine_fd, _opf_check.LEASE_NAME, "lease (unwind)") is not None:
