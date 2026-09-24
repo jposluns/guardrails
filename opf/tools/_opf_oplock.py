@@ -74,7 +74,9 @@ set the same way; and initialization is RESTARTABLE (fix round 6): a control dir
 new or left by a creator killed before it corrected the mode, whose owner permissions the umask
 masked is repaired on the existing-object path to its intended 0o755 or 0o644, only when it is our
 own object of the expected type whose mode lies within the intended one, bound to the stat'ed object
-and never following a symbolic link, and otherwise refused) and fsynced; only then is it published
+and never following a symbolic link, and otherwise refused; a control directory's set-group-ID bit
+is accepted and preserved only as mkdir inherits it, from a set-group-ID parent whose group it
+carries, fix round 7) and fsynced; only then is it published
 at its final name by os.link, which refuses an existing name (EEXIST) exactly as O_EXCL did; the
 staging name is then unlinked and the directory fsynced, all before the capability returns.
 GUARANTEED against process death (SIGKILL included) at any point: the final name holds either no
@@ -106,10 +108,17 @@ GUARANTEED, on the main thread of a platform with signal.pthread_sigmask, within
 below: no signal-raised exception lands inside those sections; it is delivered after them. A
 capability that was fully formed when such a signal was delivered never reaches the caller, so it is
 released (records removed, anchor unlocked, descriptors closed) before the interruption propagates
-as itself, through the scoped release directly, with no second acquirer-identity read that could
+as itself, through the scoped release directly, with no second /proc identity read that could
 refuse before the release owns the descriptors (fix round 6), and the interruption carries a note
-stating the observed outcome of that release; an acquisition that failed is fully unwound before it;
-a release has ended released, unlocked, and closed before it.
+stating the observed outcome of that release, each clause derived from the step the release recorded
+as completed (fix round 7); an acquisition that failed is fully unwound before it; a release has
+ended released, unlocked, and closed before it. A signal handler that FORKS splits this into two
+processes sharing every open file description, and a flock belongs to the open file description:
+cleanup that runs in a forked child (the unreturned release, the acquisition unwind, a
+publication's failure cleanup, the release legs and the release scope's exit) therefore acts only
+in the process that began the operation, by pid (fix round 7): a forked child closes only its own
+descriptor copies and never unlocks the anchor or removes a record or staging name, so the
+acquirer keeps its lock and its records.
 
 Beneath the deferral, as defence in depth against exceptions no mask can defer (an OSError or a
 MemoryError raised by a step, or an exception injected by a non-signal mechanism), descriptor
@@ -133,8 +142,9 @@ residuals below).
 
 Release is identity-bound. It refuses, FIRST, any caller that is not the recorded acquirer (pid plus
 the /proc start-time identity _journal._pid_start provides), touching nothing (a capability the
-acquisition itself releases because it was never returned skips this check: it was built by this
-process in that same call); it then, with the Python-handled signals deferred (above), enters an
+acquisition itself releases because it was never returned skips the /proc read, but not the pid:
+only the process that built it in that same call releases it, and a forked child closes only its
+descriptor copies); it then, with the Python-handled signals deferred (above), enters an
 enclosing cleanup (a context manager armed before any state changes) that takes sole ownership of
 the retained descriptors and marks the capability released before any step that can fail, and does
 so again on exit, so an interruption anywhere in the release, its own bookkeeping included, still
@@ -192,14 +202,19 @@ inherits the blocked mask, so it defers the same signals until it exits (bounded
 timeout). A second signal arriving in the few bytecodes between a first deferred signal's delivery
 and the start of the unreturned capability's release can skip that release (its complete,
 owner-bearing records then wait for a later recover=True, and its descriptors for process exit), and
-the note the interruption carries then says NOT released. An exception injected by a NON-signal
+the note the interruption carries then says NOT released. The forked-child guard compares pids
+only (a forked child never shares its live parent's pid): a capability object carried into a
+LATER process that inherits a recycled acquirer pid after the acquirer died is outside it, as it is
+outside the public release's /proc start-time check where start times are unavailable. An
+exception injected by a NON-signal
 mechanism (sys.settrace, as the self-tests do, or an asynchronous exception set on the thread from
 outside) or a MemoryError can land at any point, where only the structural protections stand: on
 CPython a nested try statement's own line, a with statement's exit line, and a cleanup block's first
 line lie outside every enclosing exception range, and the bodies are built so none follows a
 descriptor's adoption (each context-managed cleanup encloses a single call on its own line), but the
 smaller helpers (the machine-store walk, the anchor open, the staging-leftover listing, the record
-read and verified unlink, the recorded-store probe, the bound mode repair) are not, so such an
+read and verified unlink, the recorded-store probe, the bound mode repair, a forked child's close of
+its inherited descriptor copies) are not, so such an
 injection there can leak one descriptor, and one at the deferral's own entry or exit can leave the
 signals blocked on that thread. At the bytecode level such an injection between an open returning
 and its registration, between a helper's transfer and its caller's adoption, or between ownership
@@ -222,7 +237,8 @@ module makes no cross-lock ordering claim.
 
 Run: python3 -I -B opf/tools/_opf_oplock.py --self-test
 Exit: 0 self-test clean; 1 self-test failure; 2 refused precondition (missing containment
-primitive or git binary), never a clean skip.
+primitive or git binary), never a clean skip; 3 self-test incomplete (a restrictive-umask witness
+was SKIPPED because no fixture root honours the umask), never a pass.
 """
 import errno
 import fcntl
@@ -883,11 +899,18 @@ def _repair_restrictive_mode(parent_fd, name, label, st, is_dir):
     write for the anchor). Such an object is repaired ONLY when its mode is a subset of the intended
     one (0755 or 0644), which is all a umask can leave: a mode carrying any other bit (a group or
     other write, a special bit), or a hard-linked anchor, is not what an interrupted creation
-    leaves, and refuses unchanged. The repair sets EXACTLY the intended mode, the state an
-    uninterrupted creation ends in, so it never loosens past it, and is bound to the stat'ed object
-    and never follows a symbolic link (_chmod_bound). The name is then re-stat'ed no-follow and must
-    still bind that same (st_dev, st_ino) object, now at the intended mode, or this refuses. Returns
-    the stat to classify."""
+    leaves, and refuses unchanged. One special bit is the exception (fix round 7): a directory
+    created beneath a set-group-ID parent inherits that parent's S_ISGID bit and group from mkdir
+    itself, so a control directory carrying S_ISGID is what an interrupted creation leaves exactly
+    when the trusted parent (the parent_fd already held, fstat'ed here) is a set-group-ID directory
+    and the new directory carries the parent's group; only then is the bit accepted, and it is
+    preserved by the repair. The repair sets EXACTLY the intended mode (plus that inherited bit),
+    the state an uninterrupted creation ends in, so it never loosens past it, and is bound to the
+    stat'ed object and never follows a symbolic link (_chmod_bound). The name is then re-stat'ed
+    no-follow and must still bind that same (st_dev, st_ino) object, now at the intended mode, or
+    this refuses; where the kernel drops an inherited S_ISGID on the chmod (it clears the bit for a
+    caller outside the directory's group), the intended mode without it is accepted. Returns the
+    stat to classify."""
     if is_dir:
         needed, intended, right_type = stat.S_IRWXU, _CONTROL_DIR_MODE, stat.S_ISDIR(st.st_mode)
     else:
@@ -896,19 +919,38 @@ def _repair_restrictive_mode(parent_fd, name, label, st, is_dir):
     if not right_type or st.st_uid != os.getuid() or (st.st_mode & needed) == needed:
         return st                          # nothing to repair; the caller's checks decide the rest
     mode = stat.S_IMODE(st.st_mode)
-    if mode & ~intended or (not is_dir and st.st_nlink != 1):
-        raise OpLockError("{} lacks the owner permissions this module needs (mode {:o}, {} "
-                          "link(s)) but is not what an interrupted creation leaves (a mode within "
-                          "{:o}, one link); refusing to repair it (manual intervention "
-                          "required)".format(label, mode, st.st_nlink, intended))
-    _chmod_bound(parent_fd, name, label, st, intended)
+    inherited = 0
+    if is_dir and mode & stat.S_ISGID and _inherits_setgid(parent_fd, label, st):
+        inherited = stat.S_ISGID
+    if mode & ~(intended | inherited) or (not is_dir and st.st_nlink != 1):
+        shape = "a mode within {:o}".format(intended | inherited) if is_dir \
+            else "a mode within {:o}, one link".format(intended)
+        raise OpLockError("{} lacks the owner permissions this module needs (mode {:o}{}) but is "
+                          "not what an interrupted creation leaves ({}); refusing to repair it "
+                          "(manual intervention required)".format(
+                              label, mode, "" if is_dir else ", {} link(s)".format(st.st_nlink),
+                              shape))
+    _chmod_bound(parent_fd, name, label, st, intended | inherited)
     after = _lstat_at(parent_fd, name, label)
     if after is None or stat.S_IFMT(after.st_mode) != stat.S_IFMT(st.st_mode) \
             or (after.st_dev, after.st_ino) != (st.st_dev, st.st_ino) \
-            or stat.S_IMODE(after.st_mode) != intended:
+            or stat.S_IMODE(after.st_mode) not in (intended | inherited, intended):
         raise OpLockError("{} changed, or is not at its intended mode {:o}, after its mode repair; "
-                          "refusing".format(label, intended))
+                          "refusing".format(label, intended | inherited))
     return after
+
+
+def _inherits_setgid(parent_fd, label, st):
+    """Whether a control directory's S_ISGID bit is the one mkdir inherits (fix round 7): true only
+    when the trusted parent descriptor is a set-group-ID directory and the directory `st` describes
+    carries the parent's group, as inheritance gives it. An fstat failure refuses."""
+    try:
+        pst = os.fstat(parent_fd)
+    except OSError as exc:
+        raise OpLockError("cannot fstat the parent of {} to classify its set-group-ID bit "
+                          "({})".format(label, exc))
+    return stat.S_ISDIR(pst.st_mode) and bool(pst.st_mode & stat.S_ISGID) \
+        and st.st_gid == pst.st_gid
 
 
 def _chmod_bound(parent_fd, name, label, st, mode):
@@ -1498,9 +1540,13 @@ def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer):
     the enclosing exception ranges, so none sits between the adoption and the protection). The
     progress marker `step` is set BEFORE each syscall it names, so the cleanup's candidate names
     never lag a completed syscall. On success the descriptor is transferred out of `owner` when
-    `transfer` is set and otherwise stays owned by it; on failure only this descriptor is closed."""
+    `transfer` is set and otherwise stays owned by it; on failure only this descriptor is closed.
+    A failure raised in a FORKED CHILD of the publishing process (fix round 7: a signal handler
+    that forked where no deferral stands) removes no name, since the names and the inode are the
+    publisher's; the child closes only its own copy of the descriptor."""
     step = "create the staging file for"
     fd = None
+    publisher_pid = os.getpid()
     try:
         fd = owner.adopt(os.open(staging,
                                  os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
@@ -1524,6 +1570,22 @@ def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer):
             # The staging open itself failed or was interrupted: no descriptor was bound.
             if isinstance(exc, OSError):
                 raise OpLockError("cannot create the staging file for {} ({})".format(label, exc))
+            raise
+        if os.getpid() != publisher_pid:
+            # Fix round 7: a forked child shares the publisher's names and inode; removing them
+            # would destroy the publisher's record mid-publication. Close only the child's copy.
+            problems, interrupt = owner.close_guarded(fd) if fd in owner else ([], None)
+            if interrupt is not None:
+                closed = "the close of its descriptor copy was interrupted ({!r})".format(interrupt)
+            elif problems:
+                closed = "the close of its descriptor copy failed ({})".format("; ".join(problems))
+            else:
+                closed = "it closed only its own descriptor copy"
+            exc.add_note("opf-oplock: this failure of the {} publication was raised in a forked "
+                         "child (pid {}) of the publisher (pid {}), so it removed no name; "
+                         "{}".format(label, os.getpid(), publisher_pid, closed))
+            if interrupt is not None and isinstance(exc, Exception):
+                raise interrupt
             raise
         # ANY failure or interruption removes what this call bound and closes the descriptor HERE,
         # because the caller never received the fd and cannot unwind it. Each cleanup step is
@@ -1726,36 +1788,124 @@ def _release_unreturned(cap, exc):
     (_release_scoped, the enclosing cleanup that owns the descriptors), never through
     release_operation, whose fresh /proc identity read can refuse BEFORE that cleanup takes
     ownership (an unreadable /proc/<pid>/stat reads as a differing start time) and would leave the
-    descriptors open and the anchor locked. The note states the OBSERVED outcome: released (records
-    removed, anchor unlocked, descriptors closed); released with the failures the release collected
-    (anchor unlocked and descriptors closed, a record it could not remove kept for a later
-    recover=True); or, when an interruption landed before the release took ownership (the disclosed
-    second-signal window), NOT released."""
+    descriptors open and the anchor locked.
+
+    Fix round 7 (codex HIGH): the identity is still bound, by pid alone and with no /proc read: the
+    capability carries the pid of the process that built it (_acquirer_pid, os.getpid() at the
+    build), and only that process releases here. A signal handler that FORKS turns this path into
+    two processes: the acquirer, whose handler returned and which receives the capability, and a
+    child, whose copy of the interruption arrives here. The child shares the acquirer's open file
+    descriptions, and a flock belongs to the open file description, so an unlock in the child would
+    free the acquirer's lock and a record removal would destroy the acquirer's records. A forked
+    child (a pid that differs from the builder's; a live parent's pid is never a child's) therefore
+    closes ONLY its own inherited descriptor copies, never unlocking the anchor and never removing a
+    record.
+
+    The note states the OBSERVED outcome, each clause derived from what the release recorded as it
+    completed each step (fix round 7, codex and claude LOW), never from which exception escaped:
+    which records its verified unlinks removed, whether the anchor unlock succeeded, failed, or was
+    never confirmed, and whether the descriptor closes completed; "released" only when every step
+    completed, "released only in part" otherwise, and NOT released when an interruption landed
+    before the release took ownership (the disclosed second-signal window)."""
     what = "opf-oplock: the capability the interrupted acquisition never returned was"
+    if os.getpid() != cap._acquirer_pid:
+        _release_unreturned_forked(cap, exc, what)
+        return
+    sink = []
     try:
-        with _SignalDeferral(): _release_scoped(cap)
+        with _SignalDeferral(): _release_scoped(cap, sink)
     except BaseException as rexc:
-        if not cap._released:
-            exc.add_note("{} NOT released: {!r} interrupted its release before the release took "
-                         "ownership, so its records wait for a later recover=True and its "
-                         "descriptors and anchor lock for this process's exit".format(what, rexc))
-        elif isinstance(rexc, OpLockError):
-            exc.add_note("{} released with failures: its anchor was unlocked and its descriptors "
-                         "closed, but {} (a record the release could not remove is kept for a "
-                         "later recover=True)".format(what, rexc))
-        else:
-            exc.add_note("{} released (its anchor unlocked and its descriptors closed), and the "
-                         "release then raised {!r} (a record it could not remove is kept for a "
-                         "later recover=True)".format(what, rexc))
+        exc.add_note(_unreturned_note(what, cap, sink, rexc))
     else:
-        exc.add_note("{} released: its records removed, its anchor unlocked, and its descriptors "
-                     "closed".format(what))
+        exc.add_note(_unreturned_note(what, cap, sink, None))
+
+
+def _release_unreturned_forked(cap, exc, what):
+    """The forked child's side of _release_unreturned (fix round 7): close only this process's
+    inherited descriptor copies, under its own deferral, and note exactly that."""
+    who = "not released by this process, a forked child (pid {}) of its acquirer (pid {}): it " \
+          "removed no record and did not unlock the anchor (a flock belongs to the open file " \
+          "description the child shares with its acquirer)".format(os.getpid(), cap._acquirer_pid)
+    done = {}
+    try:
+        with _SignalDeferral(): _close_inherited(cap, done)
+    except BaseException as rexc:
+        exc.add_note("{} {}, and closing its inherited descriptor copies was interrupted by {!r}, "
+                     "so some may stay open until this process exits".format(what, who, rexc))
+    else:
+        if done["problems"]:
+            closed = "closing its {} inherited descriptor copies reported failures ({})".format(
+                done["count"], "; ".join(done["problems"]))
+        else:
+            closed = "it closed only its {} inherited descriptor copies".format(done["count"])
+        exc.add_note("{} {}; {}".format(what, who, closed))
+
+
+def _close_inherited(cap, done):
+    """Close a forked child's copies of the capability's descriptors, ownership taken first so no
+    number is closed twice; no unlock and no unlink (fix round 7). Records the count and the close
+    failures in `done`; an interruption raised by a close step is re-raised once every close ran."""
+    fds = tuple(fd for fd in (cap._machine_fd, cap._ctl_fd, cap._anchor_fd, cap._active_fd,
+                              cap._lease_fd) if fd is not None)
+    cap._released = True
+    cap._lease_fd = cap._active_fd = cap._anchor_fd = cap._ctl_fd = cap._machine_fd = None
+    owner = _FdOwner()
+    owner.adopt_all(fds)
+    problems, interrupt = owner.close_all()
+    done["count"] = len(fds)
+    done["problems"] = problems
+    if interrupt is not None:
+        raise interrupt
+
+
+def _unreturned_note(what, cap, sink, rexc):
+    """The note on an unreturned capability's release (fix round 7), derived from the state the
+    release scope recorded (sink[0], a _ReleaseScope) as each step completed."""
+    if not cap._released or not sink:
+        return ("{} NOT released: {!r} interrupted its release before the release took ownership, "
+                "so its records wait for a later recover=True and its descriptors and anchor lock "
+                "for this process's exit".format(what, rexc))
+    scope = sink[0]
+    facts = []
+    if len(scope.removed) == 2:
+        facts.append("its records removed")
+    elif scope.removed:
+        facts.append("its {} removed but not its {} (any that remains waits for a later "
+                     "recover=True)".format(scope.removed[0], ("active record" if scope.removed[0]
+                                                               == "lease" else "lease")))
+    else:
+        facts.append("neither of its records removed (any that remains waits for a later "
+                     "recover=True)")
+    if scope.unlock == "":
+        facts.append("its anchor unlocked")
+    elif scope.unlock is not None:
+        facts.append("its anchor unlock FAILED ({})".format(scope.unlock))
+    else:
+        facts.append("its anchor unlock NOT confirmed")
+    if scope.closed == []:
+        facts.append("its descriptors closed")
+    elif scope.closed:
+        facts.append("closing its descriptors reported failures ({})".format(
+            "; ".join(scope.closed)))
+    else:
+        facts.append("its descriptor closes NOT completed (its descriptors and the anchor lock may "
+                     "stay held until this process exits)")
+    complete = len(scope.removed) == 2 and scope.unlock == "" and scope.closed == []
+    text = "{} {}: {}, {}, and {}".format(what, "released" if complete else "released only in part",
+                                          facts[0], facts[1], facts[2])
+    if rexc is not None:
+        text += "; the release raised {!r}".format(rexc)
+    return text
 
 
 def _acquire_body(store_root, operation, holder, recover, nodename):
     """The body of acquire_operation, run with the Python-handled signals deferred (fix round 5):
     resolve the store, take the three legs (recovering first under recover=True), and return the
-    capability, or unwind everything and raise."""
+    capability, or unwind everything and raise. An unwind that runs in a FORKED CHILD of the
+    acquiring process (fix round 7: a signal handler that forked where no deferral stands) closes
+    only the child's descriptor copies: the records and the flock's open file description are the
+    acquirer's, so it neither removes a record nor unlocks the anchor."""
+    acquirer_pid = os.getpid()
     res = _opf_store.resolve_store(store_root)
     if res.status != _opf_store.RESOLVED:
         raise OpLockError("no RESOLVED machine store at {} ({}: {}); the operation lock requires "
@@ -1907,6 +2057,23 @@ def _acquire_body(store_root, operation, holder, recover, nodename):
             cap._released = True
             owner.adopt_all((cap._machine_fd, cap._ctl_fd, cap._anchor_fd, cap._active_fd,
                              cap._lease_fd))
+        if os.getpid() != acquirer_pid:
+            # Fix round 7: a forked child shares the acquirer's open file descriptions (the flock
+            # belongs to one) and its records; it closes only its own descriptor copies.
+            problems, interrupt = owner.close_all()
+            if interrupt is not None:
+                closed = "closing its descriptor copies was interrupted ({!r})".format(interrupt)
+            elif problems:
+                closed = "closing its descriptor copies reported failures ({})".format(
+                    "; ".join(problems))
+            else:
+                closed = "it closed only its own descriptor copies"
+            exc.add_note("opf-oplock: this acquisition unwind ran in a forked child (pid {}) of "
+                         "the acquiring process (pid {}), so it removed no record and did not "
+                         "unlock the anchor; {}".format(os.getpid(), acquirer_pid, closed))
+            if interrupt is not None and isinstance(exc, Exception):
+                raise interrupt
+            raise
         # Unwind in reverse leg order; every unwind failure is collected, never swallowed, and
         # every step (each leg, the unlock, each close) is its own guarded step, so neither a
         # failure nor an interruption in one step skips the rest. D3: the active record is removed
@@ -2036,17 +2203,24 @@ def release_operation(cap):
     with _SignalDeferral(): _release_scoped(cap)
 
 
-def _release_scoped(cap):
+def _release_scoped(cap, sink=None):
     """The deferred part of release_operation (fix round 5): the enclosing _ReleaseScope around the
-    release legs, as one call on the with statement's own line."""
-    with _ReleaseScope(cap) as scope: _release_legs(cap, scope)
+    release legs, as one call on the with statement's own line. With `sink` (a list), the scope
+    appends itself to it, so a caller can read the per-step outcome it recorded (fix round 7)."""
+    with _ReleaseScope(cap, sink) as scope: _release_legs(cap, scope)
 
 
 def _release_legs(cap, scope):
     """The body of release_operation (fix round 4, H2), run inside its enclosing _ReleaseScope:
     take ownership, re-check the retained identities, then the lease leg and (only once the lease
-    is gone) the active leg, each failure collected into scope.errors."""
+    is gone) the active leg, each failure collected into scope.errors and each removal recorded in
+    scope.removed once its verified unlink returned. In a forked child of the acquirer (fix round
+    7) no leg runs: the records are the acquirer's."""
     scope.take_ownership()
+    if os.getpid() != scope.pid:
+        scope.errors.append("forked child (pid {}) of the acquirer (pid {}): no record "
+                            "removed".format(os.getpid(), scope.pid))
+        return
     machine_fd, ctl_fd, anchor_fd = scope.retained[0], scope.retained[1], scope.retained[2]
     errors = scope.errors
     # Retained-identity re-checks. Collected rather than early-raised: the legs below still run,
@@ -2075,14 +2249,14 @@ def _release_legs(cap, scope):
     try:
         _verified_unlink(machine_fd, _opf_check.LEASE_NAME, cap._lease_ident,
                          cap._lease_bytes, "lease")
-        lease_removed = True
+        scope.removed.append("lease")
     except (OpLockError, OSError) as exc:
         errors.append("lease leg: {}".format(exc))
-        lease_removed = False
-    if lease_removed:
+    if "lease" in scope.removed:
         try:
             _verified_unlink(ctl_fd, ACTIVE_NAME, cap._active_ident, cap._active_bytes,
                              "active record")
+            scope.removed.append("active record")
         except (OpLockError, OSError) as exc:
             errors.append("active leg: {}".format(exc))
     else:
@@ -2110,15 +2284,29 @@ class _ReleaseScope:
     contract): a non-signal injection (sys.settrace, an externally set asynchronous exception) or a
     MemoryError landing inside this exit itself, outside its individually guarded unlock and close
     steps (for example at its entry, before the first guarded step), which no pure-Python handler
-    can close."""
-    __slots__ = ("_cap", "retained", "errors")
+    can close.
 
-    def __init__(self, cap):
+    Fix round 7: the scope acts only in the process that built the capability (`pid`, its
+    _acquirer_pid, no /proc read). In a FORKED CHILD, which shares the acquirer's open file
+    descriptions (a flock belongs to one), the exit closes only the child's descriptor copies and
+    never unlocks the anchor, and the legs remove no record. The scope also RECORDS each step as it
+    completes, for a truthful outcome note: `removed` (the records whose verified unlink returned),
+    `unlock` (None until the unlock is confirmed or fails: "" once it succeeded, else the failure),
+    and `closed` (None until every close step has run, then the list of close failures)."""
+    __slots__ = ("_cap", "retained", "errors", "pid", "removed", "unlock", "closed")
+
+    def __init__(self, cap, sink=None):
         self._cap = cap
         # Adopted in this order, so closed in reverse: lease, active, anchor, ctl, machine.
         self.retained = (cap._machine_fd, cap._ctl_fd, cap._anchor_fd, cap._active_fd,
                          cap._lease_fd)
         self.errors = []
+        self.pid = cap._acquirer_pid
+        self.removed = []
+        self.unlock = None
+        self.closed = None
+        if sink is not None:
+            sink.append(self)
 
     def take_ownership(self):
         """Mark the capability released and clear its descriptor fields (idempotent)."""
@@ -2135,13 +2323,23 @@ class _ReleaseScope:
         owner.adopt_all(self.retained)
         errors = self.errors
         interrupt = None
-        try:
-            fcntl.flock(self.retained[2], fcntl.LOCK_UN)
-        except OSError as uexc:
-            errors.append("unlock: {}".format(uexc))
-        except BaseException as uexc:
-            interrupt = uexc
+        if os.getpid() != self.pid:
+            # Fix round 7: a forked child's unlock would free the acquirer's flock (it belongs to
+            # the shared open file description); the child only closes its own copies below.
+            errors.append("forked child (pid {}) of the acquirer (pid {}): the anchor was not "
+                          "unlocked, only this process's descriptor copies closed".format(
+                              os.getpid(), self.pid))
+        else:
+            try:
+                fcntl.flock(self.retained[2], fcntl.LOCK_UN)
+                self.unlock = ""
+            except OSError as uexc:
+                self.unlock = str(uexc)
+                errors.append("unlock: {}".format(uexc))
+            except BaseException as uexc:
+                interrupt = uexc
         close_problems, close_interrupt = owner.close_all()
+        self.closed = close_problems
         errors.extend("close: {}".format(p) for p in close_problems)
         if interrupt is None:
             interrupt = close_interrupt
@@ -2158,8 +2356,10 @@ class _ReleaseScope:
                     "; ".join(errors)))
             return False
         if errors:
-            raise OpLockError("release completed with failures (mismatched files preserved): "
-                              + "; ".join(errors))
+            # Fix round 7: state which records were removed (observed), rather than a fixed claim
+            # that mismatched files were preserved, which was false when every record was removed.
+            raise OpLockError("release completed with failures (records removed: {}): {}".format(
+                ", ".join(self.removed) or "none", "; ".join(errors)))
         return False
 
 
@@ -4611,11 +4811,11 @@ def _st_f6_2_body(root, active, lease):
             raise OpLockError("cannot unlink lease (simulated, T-f6-2)")
         return saved_unlink(dir_fd, name, *a, **k)
 
-    def _interrupted_scope(cap):
+    def _interrupted_scope(cap, *a):
         if armed["fault"] == "before-ownership":
             held.append(cap)
             raise KeyboardInterrupt()
-        return saved_scoped(cap)
+        return saved_scoped(cap, *a)
 
     def handler(signum, frame):
         armed["fault"] = armed.get("next")
@@ -4651,7 +4851,10 @@ def _st_f6_2_body(root, active, lease):
                 assert _st_anchor_free(root), "the anchor must be unlocked ({})".format(case)
                 assert os.path.exists(active) and os.path.exists(lease), \
                     "a lease the release could not remove keeps its active record ({})".format(case)
-                assert "released with failures" in notes and "lease" in notes, notes
+                # Fix round 7: the note is derived from the recorded steps (no record removed,
+                # anchor unlocked, descriptors closed), never a fixed "with failures" text.
+                assert "released only in part: neither of its records removed" in notes \
+                    and "its anchor unlocked, and its descriptors closed" in notes, notes
                 os.unlink(lease)          # this (live) process's records: cleared by hand
                 os.unlink(active)
             else:
@@ -4665,6 +4868,369 @@ def _st_f6_2_body(root, active, lease):
         mod._verified_unlink = saved_unlink
         if saved_scoped is not None:
             mod._release_scoped = saved_scoped
+
+
+def _st_state(root):
+    """The acquirer-visible lock state a forked child must never change (fix round 7): whether the
+    anchor's flock is free, whether each control record exists, and the staging leftovers."""
+    ctl = _st_ctl_dir(root)
+    machine = os.path.join(root, ".working", "toml")
+    return (_st_anchor_free(root), os.path.exists(os.path.join(ctl, ACTIVE_NAME)),
+            os.path.exists(_st_lease_path(root)), tuple(_st_staging_leftovers(ctl, ACTIVE_NAME)),
+            tuple(_st_staging_leftovers(machine, _opf_check.LEASE_NAME)))
+
+
+def _st_forking_handler(root, record):
+    """Install a SIGINT handler that FORKS (fix round 7, the codex probe). In the child the handler
+    raises KeyboardInterrupt, so the child runs whatever cleanup the interrupted code has, and must
+    then leave through _st_forked_exit. In the parent the handler waits for the child to exit,
+    appends (the lock state before the fork, the lock state after the child exited, the child's
+    wait status, the note the child reported) to record["events"], and returns normally, so the
+    parent's own operation continues as if no signal had come."""
+    def handler(signum, frame):
+        before = _st_state(root)
+        rfd, wfd = os.pipe()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        pid = os.fork()
+        if pid == 0:
+            os.close(rfd)
+            record["wfd"] = wfd
+            raise KeyboardInterrupt()
+        os.close(wfd)
+        data = bytearray()
+        while True:
+            chunk = os.read(rfd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        os.close(rfd)
+        _, status = os.waitpid(pid, 0)
+        record["events"].append((before, _st_state(root), status,
+                                 bytes(data).decode("utf-8", "replace")))
+
+    signal.signal(signal.SIGINT, handler)
+
+
+def _st_forked_exit(top, record, fn, *args):
+    """Run fn(*args) in the process `top`; a forked child (any other pid) that the handler's
+    KeyboardInterrupt reaches here reports that interruption's notes to its parent and exits 0 (any
+    other exception in the child exits 5), so a child never runs the test's own code further."""
+    try:
+        return fn(*args)
+    except KeyboardInterrupt as exc:
+        if os.getpid() != top:
+            try:
+                _journal._write_all(record["wfd"], " ".join(getattr(exc, "__notes__", ())).encode(
+                    "utf-8", "replace"))
+            except BaseException:
+                os._exit(4)
+            os._exit(0)
+        raise
+    except BaseException:
+        if os.getpid() != top:
+            os._exit(5)
+        raise
+
+
+def _st_forked_event(record, where):
+    """The single fork event of one attempt, asserted clean: the child exited 0 and changed none of
+    the acquirer's lock state. Returns the child's note."""
+    assert len(record["events"]) == 1, "exactly one fork ({}): {}".format(where, record["events"])
+    before, after, status, note = record["events"][0]
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, \
+        "the forked child must end through its interruption ({}, status {}): {}".format(
+            where, status, note)
+    assert before == after, "the forked child changed the acquirer's lock state ({}): {} -> {}; " \
+        "its note: {}".format(where, before, after, note)
+    return note
+
+
+def _t_f7_1_forked_unreturned(d, env):
+    """T-f7-1 (fix round 7, codex HIGH, a round-6 regression: the unreturned release in a forked
+    child). In a child, a REAL SIGINT sent during the publication is deferred and delivered after
+    the capability is built; its handler FORKS. The parent's handler returns normally, so the parent
+    receives the capability; the forked child's KeyboardInterrupt reaches the unreturned-capability
+    release. The child must close ONLY its inherited descriptor copies: the parent's lock state is
+    unchanged across the child's life (anchor held, both records present), a second acquisition is
+    refused as contention, the child's note says it removed no record and did not unlock the anchor,
+    and the parent then releases cleanly with no descriptor delta. Before the fix the child deleted
+    the parent's records and unlocked the shared open file description, and a second acquisition
+    SUCCEEDED while the parent still held its capability. The public release's fork refusal is
+    T-c9."""
+    root = _st_git_store(d, "repo", env)
+    release_operation(acquire_operation(root, "op"))
+    failure = _st_in_child(lambda: _st_f7_1_body(root))
+    assert failure is None, failure
+
+
+def _st_f7_1_body(root):
+    """T-f7-1's body, run in a child (it installs its own SIGINT handler)."""
+    top = os.getpid()
+    record = {"events": []}
+    _st_forking_handler(root, record)
+    baseline = _st_open_fds()
+    state = _st_arm_signal(_st_named("_publish_staged"), 1)
+    try:
+        cap = _st_forked_exit(top, record, acquire_operation, root, "op")
+    finally:
+        sys.settrace(None)
+    assert state["fired"], "the signal must have been sent"
+    note = _st_forked_event(record, "T-f7-1")
+    assert "forked child" in note and "removed no record and did not unlock the anchor" in note \
+        and "it closed only its 5 inherited descriptor copies" in note, note
+    assert not cap._released, "the parent's capability is its own, unreleased"
+    assert not _st_anchor_free(root), "the parent's anchor lock must still be held"
+    assert os.path.exists(os.path.join(_st_ctl_dir(root), ACTIVE_NAME)) \
+        and os.path.exists(_st_lease_path(root)), "the parent's records must be intact"
+    _st_expect_refusal(acquire_operation, root, "op2", needle="held")
+    release_operation(cap)
+    assert _st_open_fds() == baseline, "no descriptor may leak"
+    assert _st_anchor_free(root), "the parent's release frees the anchor"
+    _st_no_records(root, "T-f7-1")
+
+
+def _t_f7_2_forked_cleanup_sweep(d, env):
+    """T-f7-2 (fix round 7, the class check behind codex HIGH: every release or unwind path a forked
+    child can reach). With the deferral disabled in a child (as on a thread or platform where it is
+    a no-op), a SIGINT whose handler FORKS is sent at every line event of the acquisition (the
+    public entry, its body, the publication) and of the release (the public entry, the scoped
+    release, its legs, the release scope's exit). The forked child runs whichever cleanup the
+    interruption reaches (the acquisition unwind, the publication's failure cleanup, the unreturned
+    release, the release legs and scope exit) and must change NONE of the acquirer's lock state (the
+    anchor's flock, the records, the staging names); the parent's own acquisition or release must
+    complete normally, with no descriptor delta. Before the fix the child's unwind and scope exit
+    unlocked the shared open file description and removed the parent's records."""
+    root = _st_git_store(d, "repo", env)
+    release_operation(acquire_operation(root, "op"))
+    failure = _st_in_child(lambda: _st_f7_2_body(root))
+    assert failure is None, failure
+
+
+def _st_f7_2_body(root):
+    """T-f7-2's body, run in a child (it disables the deferral and installs its own handler)."""
+    mod = sys.modules[__name__]
+    mod._deferrable_signals = lambda: ()   # this child only: no deferral stands
+    top = os.getpid()
+    record = {"events": []}
+    _st_forking_handler(root, record)
+    swept = 0
+    for release, funcs in ((False, _st_named("acquire_operation", "_acquire_body",
+                                             "_publish_staged")),
+                           (True, _st_named("release_operation", "_release_scoped",
+                                            "_release_legs", "_ReleaseScope.__exit__"))):
+        for func in funcs:
+            if release:
+                held = acquire_operation(root, "op")
+                total = _st_line_events([func], lambda: release_operation(held))
+            else:
+                caps = []
+                total = _st_line_events([func], lambda: caps.append(acquire_operation(root, "op")))
+                release_operation(caps[0])
+            assert total, "the sweep must see line events in {}".format(func.__qualname__)
+            for k in range(1, total + 1):
+                where = "{} line event {}".format(func.__qualname__, k)
+                baseline = _st_open_fds()
+                cap = acquire_operation(root, "op") if release else None
+                record["events"] = []
+                state = _st_arm_signal([func], k)
+                try:
+                    if release:
+                        _st_forked_exit(top, record, release_operation, cap)
+                    else:
+                        cap = _st_forked_exit(top, record, acquire_operation, root, "op")
+                finally:
+                    sys.settrace(None)
+                assert state["fired"], where
+                _st_forked_event(record, where)
+                if not release:
+                    assert not cap._released and not _st_anchor_free(root), \
+                        "the parent's acquisition must hold its lock ({})".format(where)
+                    release_operation(cap)
+                assert cap._released, where
+                assert _st_open_fds() == baseline, "no descriptor may leak ({})".format(where)
+                assert _st_anchor_free(root), "the anchor must end free ({})".format(where)
+                _st_no_records(root, where)
+                swept += 1
+    assert swept, "the fork sweep must have swept line events"
+
+
+def _t_f7_3_setgid_restartable(d, env):
+    """T-f7-3's fixtures live under a root that honours the umask (_st_umask_fixture_root)."""
+    return _st_umask_fixture_root(d, lambda root: _t_f7_3_body(root, env))
+
+
+def _t_f7_3_body(d, env):
+    """T-f7-3 (fix round 7, codex MEDIUM: restartable initialization beneath a set-group-ID
+    parent). With the repository's .git at mode 02755, mkdir of the control directory inherits the
+    S_ISGID bit. Under umask 0o444 and 0o777 a first acquisition is SIGKILLed at the first step
+    after creating (a) the control directory (left 02311 or 02000) and (b) the anchor; recover=True
+    under the umask in a child and then normally must SUCCEED, ending the directory at 02755 (the
+    inherited bit preserved) and the anchor at 0644. A fresh first acquisition under each umask (no
+    crash) must also succeed. Bounds: an S_ISGID control directory whose parent is NOT set-group-ID,
+    or whose group is not the parent's, is not what an interrupted creation leaves and is refused
+    unchanged. Before the fix every case (a) and every fresh acquisition refused ("mode 2311 ... is
+    not what an interrupted creation leaves")."""
+    dir_mode = _CONTROL_DIR_MODE | stat.S_ISGID
+    for mask in (0o444, 0o777):
+        for boundary in ("control directory", "anchor"):
+            label = "{} under umask {:o}, set-group-ID parent".format(boundary, mask)
+            root = _st_git_store(d, "g-{}-{:o}".format(boundary.split()[-1], mask), env)
+            git_dir = os.path.join(root, ".git")
+            os.chmod(git_dir, 0o2755)
+            if not os.lstat(git_dir).st_mode & stat.S_ISGID:
+                raise _StSkip("the fixture cannot set S_ISGID on its .git directory")
+            ctl = _st_ctl_dir(root)
+            target, needed, intended = ctl, stat.S_IRWXU, dir_mode
+            if boundary == "anchor":
+                release_operation(acquire_operation(root, "op"))
+                target = os.path.join(ctl, ANCHOR_NAME)
+                os.unlink(target)
+                needed, intended = stat.S_IRUSR | stat.S_IWUSR, _CONTROL_FILE_MODE
+            sys.stdout.flush()
+            sys.stderr.flush()
+            pid = os.fork()
+            if pid == 0:                  # the first acquirer, killed inside the creation window
+                try:
+                    os.umask(mask)
+                    _st_kill_when_present(target)
+                    acquire_operation(root, "op")
+                except BaseException:
+                    pass
+                os._exit(3)
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL, \
+                "the acquirer must die by SIGKILL ({}, status {})".format(label, status)
+            left = os.lstat(target).st_mode
+            assert (left & needed) != needed, \
+                "the kill must land before the mode is corrected ({}: mode {:o})".format(
+                    label, stat.S_IMODE(left))
+            if boundary == "control directory":
+                assert left & stat.S_ISGID, "mkdir must inherit S_ISGID ({})".format(label)
+
+            def _recover(m=mask, r=root):
+                os.umask(m)
+                release_operation(acquire_operation(r, "op", recover=True))
+
+            failure = _st_in_child(_recover)
+            assert failure is None, "{}: recovery under the umask: {}".format(label, failure)
+            release_operation(acquire_operation(root, "op", recover=True))
+            mode = stat.S_IMODE(os.lstat(target).st_mode)
+            assert mode == intended, "{} left at mode {:o}, not {:o}".format(label, mode, intended)
+    for mask in (0o444, 0o777):
+        fresh = _st_git_store(d, "gfresh-{:o}".format(mask), env)
+        os.chmod(os.path.join(fresh, ".git"), 0o2755)
+
+        def _first(m=mask, r=fresh):
+            os.umask(m)
+            release_operation(acquire_operation(r, "op"))
+
+        failure = _st_in_child(_first)
+        assert failure is None, "fresh acquisition under umask {:o}: {}".format(mask, failure)
+        mode = stat.S_IMODE(os.lstat(_st_ctl_dir(fresh)).st_mode)
+        assert mode == dir_mode, "fresh control directory at {:o}, not {:o}".format(mode, dir_mode)
+    # Bounds, on the last store: S_ISGID is accepted only as mkdir's inheritance.
+    git_dir = os.path.join(fresh, ".git")
+    ctl = _st_ctl_dir(fresh)
+    os.chmod(git_dir, 0o755)              # the parent is no longer set-group-ID
+    os.chmod(ctl, 0o2311)
+    _st_expect_refusal(acquire_operation, fresh, "op", needle="interrupted creation")
+    assert stat.S_IMODE(os.lstat(ctl).st_mode) == 0o2311, "a refused directory is left unchanged"
+    os.chmod(git_dir, 0o2755)
+    own_gid = os.lstat(ctl).st_gid
+    others = [g for g in os.getgroups() if g != os.lstat(git_dir).st_gid]
+    if others:                            # a group that is not the parent's: not inheritance
+        os.chown(ctl, -1, others[0])
+        os.chmod(ctl, 0o2311)
+        _st_expect_refusal(acquire_operation, fresh, "op", needle="interrupted creation")
+        assert stat.S_IMODE(os.lstat(ctl).st_mode) == 0o2311, "a refused directory is unchanged"
+        os.chown(ctl, -1, own_gid)
+    os.chmod(ctl, 0o2311)
+    release_operation(acquire_operation(fresh, "op"))
+    assert stat.S_IMODE(os.lstat(ctl).st_mode) == dir_mode, "repaired with the inherited bit"
+
+
+def _t_f7_4_unreturned_note_truth(d, env):
+    """T-f7-4 (fix round 7, codex and claude LOW: the unreturned release's note derives from the
+    observed state). In a child per case, a REAL SIGINT sent during the publication is deferred and
+    delivered after the capability is built; its handler arms a fault, then raises
+    KeyboardInterrupt. (A) An interruption at the release scope's exit ENTRY: the records were
+    removed but no unlock or close ran (five descriptors retained, the anchor held), so the note
+    must say the unlock is NOT confirmed and the closes NOT completed, never "descriptors closed".
+    (B) The unlock alone fails: both records are removed, so the note must say so and that the
+    unlock FAILED, never that a record is kept. (C) The lease leg fails: the note must say neither
+    record was removed, with the anchor unlocked and the descriptors closed. Before the fix (A)
+    claimed "its anchor unlocked and its descriptors closed" and (B) claimed a kept record that did
+    not exist."""
+    root = _st_git_store(d, "repo", env)
+    release_operation(acquire_operation(root, "op"))
+    for case in ("exit-entry", "unlock-fails", "lease-leg"):
+        failure = _st_in_child(lambda c=case: _st_f7_4_case(root, c))
+        assert failure is None, "{}: {}".format(case, failure)
+        for path in (os.path.join(_st_ctl_dir(root), ACTIVE_NAME), _st_lease_path(root)):
+            if case == "lease-leg" and os.path.exists(path):
+                os.unlink(path)           # the exited child's records, kept by design
+        assert _st_anchor_free(root), "the child's exit frees the anchor ({})".format(case)
+        _st_no_records(root, case)
+
+
+def _st_f7_4_case(root, case):
+    """One T-f7-4 case, run in a child (it installs its own SIGINT handler and faults)."""
+    mod = sys.modules[__name__]
+    saved_flock = fcntl.flock
+    saved_unlink = mod._verified_unlink
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+
+    def _failing_unlock(fd, op):
+        if op == fcntl.LOCK_UN:
+            raise OSError(errno.EIO, "simulated unlock failure (T-f7-4)")
+        return saved_flock(fd, op)
+
+    def _lease_leg_fails(dir_fd, name, *a, **k):
+        if name == _opf_check.LEASE_NAME:
+            raise OpLockError("cannot unlink lease (simulated, T-f7-4)")
+        return saved_unlink(dir_fd, name, *a, **k)
+
+    def handler(signum, frame):
+        if case == "exit-entry":
+            _st_arm_interrupt(_st_named("_ReleaseScope.__exit__"), 1)
+        elif case == "unlock-fails":
+            fcntl.flock = _failing_unlock
+        else:
+            mod._verified_unlink = _lease_leg_fails
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGINT, handler)
+    baseline = _st_open_fds()
+    state = _st_arm_signal(_st_named("_publish_staged"), 1)
+    try:
+        caught = _st_expect_interrupt(acquire_operation, root, "op")
+    finally:
+        sys.settrace(None)
+        fcntl.flock = saved_flock
+        mod._verified_unlink = saved_unlink
+    assert state["fired"], case
+    notes = " ".join(getattr(caught, "__notes__", ()))
+    records = (os.path.exists(active), os.path.exists(lease))
+    if case == "exit-entry":
+        assert _st_open_fds() - baseline == 5 and not _st_anchor_free(root), \
+            "the interrupted exit retains the five descriptors and the lock (observed)"
+        assert records == (False, False), records
+        assert "released only in part: its records removed, its anchor unlock NOT confirmed, " \
+            "and its descriptor closes NOT completed" in notes, notes
+        assert "descriptors closed" not in notes and "anchor unlocked" not in notes, notes
+    elif case == "unlock-fails":
+        assert _st_open_fds() == baseline and records == (False, False), records
+        assert "released only in part: its records removed, its anchor unlock FAILED" in notes \
+            and "and its descriptors closed" in notes, notes
+        assert "kept" not in notes and "could not remove" not in notes \
+            and "preserved" not in notes, notes
+    else:
+        assert _st_open_fds() == baseline and records == (True, True), records
+        assert _st_anchor_free(root), "the anchor was unlocked (observed)"
+        assert "released only in part: neither of its records removed" in notes \
+            and "its anchor unlocked, and its descriptors closed" in notes, notes
 
 
 def self_test():
@@ -4683,12 +5249,16 @@ def self_test():
     every line of the acquisition, the release, and recovery is deferred until after the section,
     and records published under a restrictive umask), and the fix-round-6 witnesses T-f6-1 and
     T-f6-2 (restartable initialization after a kill inside the creation window, and the unreturned
-    capability's release with no identity re-read), each a witness against a named defect. A
+    capability's release with no identity re-read), and the fix-round-7 witnesses T-f7-1 to T-f7-4
+    (a forked child never releases, unlocks, or removes what its acquirer holds, including at every
+    line of the acquisition and release with no deferral; restartable initialization beneath a
+    set-group-ID parent; the unreturned release's note states only the steps that completed), each
+    a witness against a named defect. A
     missing containment primitive or git binary is a REFUSAL (non-zero),
     never a clean skip. The git fixtures are pinned hermetically (LOW-5). The restrictive-umask
-    witnesses (T-f5-4, T-f6-1) run under a fixture root probed to honour the umask (a default ACL
-    on TMPDIR overrides it), falling back to /dev/shm; with no such root they print SKIP with the
-    reason, and the run ends SELF-TEST INCOMPLETE with exit 3, never a pass."""
+    witnesses (T-f5-4, T-f6-1, T-f7-3) run under a fixture root probed to honour the umask (a
+    default ACL on TMPDIR overrides it), falling back to /dev/shm; with no such root they print
+    SKIP with the reason, and the run ends SELF-TEST INCOMPLETE with exit 3, never a pass."""
     import tempfile
     import traceback
 
@@ -4782,6 +5352,14 @@ def self_test():
          _t_f6_1_restartable_init),
         ("T-f6-2 an unreturned capability is released without a /proc read, truthfully noted",
          _t_f6_2_unreturned_release),
+        ("T-f7-1 a forked child never releases the acquirer's unreturned capability",
+         _t_f7_1_forked_unreturned),
+        ("T-f7-2 a forked child's cleanup at any acquisition or release line changes no lock state",
+         _t_f7_2_forked_cleanup_sweep),
+        ("T-f7-3 a set-group-ID parent's inherited bit is repaired with, never refused",
+         _t_f7_3_setgid_restartable),
+        ("T-f7-4 the unreturned release's note states only the steps that completed",
+         _t_f7_4_unreturned_note_truth),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-oplock-selftest-"))
