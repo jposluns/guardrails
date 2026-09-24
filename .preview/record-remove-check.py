@@ -67,9 +67,12 @@ OPERANDS AND THE DIRECTORY
     NAME unknown after it); and an unquoted glob (`*`, `?`, `[...]`), matched completely against the disk as bash
     would when the hook runs. A relative operand is resolved against the working directory: the payload's cwd,
     followed only through a plain `cd DIR` with a literal DIR (no variable, `~`, or glob in it), as bash's logical
-    cd moves (`..` removed textually, every directory on the way existing; a DIR that does not exist, is empty (`cd
-    ""` fails from bash 5.2 on), or is not a directory leaves the directory where it was, and what follows it with
-    `&&` does not run). An assignment or a cd is plain when it is in the command's top-level text, outside any if,
+    cd moves (`..` removed textually, every directory on the way existing; a DIR that does not exist or is not a
+    directory leaves the directory where it was, and what follows it with `&&` does not run). An empty DIR (`cd
+    ""`) leaves the directory where it was with its outcome unknown, since that cd fails from bash 5.2 on and
+    succeeds, doing nothing, in older bash, and the hook cannot know which bash runs the command: what follows it
+    with `&&`, `||`, or `;` is judged in that directory, so a destruction on either path denies.
+    An assignment or a cd is plain when it is in the command's top-level text, outside any if,
     loop, case, `{ }` group, `( )` subshell, or function body, first in its and-or list (after `;`, a newline, `&`,
     or the start), and not a pipeline stage or an asynchronous command. Any other directory change (cd anywhere
     else, cd with an option, a non-literal or `-` target, pushd, popd, env -C, sudo -D, sudo -i) makes the directory
@@ -149,6 +152,10 @@ RESIDUAL COVERAGE.
     permuted form; POSIXLY_CORRECT and other implementations are not modelled. A target the hook cannot
     lstat or list is not judged. The vendored lexer's own disclosed limits carry over: quotes, escapes,
     comments, and here-document bodies are honoured, and a construct it cannot follow yields no verdict.
+    An empty cd (`cd ""`) is read as leaving the directory unchanged with an unknown outcome (see OPERANDS AND THE
+    DIRECTORY), so `cd "" && rm FILE` is denied although bash 5.2 and later, where that cd fails, run nothing
+    after it (a false deny there, disclosed), and `cd "" || rm FILE` is denied although older bash, where that
+    cd succeeds, does not run the rm.
 
 Self-test: python3 -I -S -B record-remove-check.py --self-test
     The reference hooks the vendored blocks were copied from are looked up in the directory named by the
@@ -1691,14 +1698,14 @@ def _plain_cd(tok, op, ctx, text, off, state):
     logical one with `..` removed textually; when every directory on that way exists, cd lands there (a relative
     operand after it is resolved through links as the kernel resolves it). When DIR does not exist, cd fails: the
     directory is unchanged, and the rest of an and-or list it heads with `&&` does not run (unknown until that list
-    ends); so too when DIR is not a directory or is empty (`cd ""` fails from bash 5.2 on). Anything else bash's cd
-    might do (its physical fallback, CDPATH) makes the directory unknown."""
+    ends); so too when DIR is not a directory. An empty DIR (`cd ""`) fails from bash 5.2 on and succeeds, doing
+    nothing, in older bash, so its outcome is unknown: the directory is unchanged, and what follows it on either
+    path is judged there. Anything else bash's cd might do (its physical fallback, CDPATH) makes the directory
+    unknown."""
     cwd = state["cwd"]
     pieces = None if tok[5] else _pieces(text[off + tok[3]:off + tok[4]], tok[1], False)
     if tok[1] == "" and pieces is not None and all(kind == "lit" for kind, _ in pieces):
-        if op == "&&":  # cd "" fails (bash 5.2 and later: "null directory"): what follows with && does not run
-            state["held"], state["cwd"] = (cwd,), None
-        return
+        return  # cd "": the directory stays; which path runs next depends on the bash version, so both are judged
     if not pieces or any(kind != "lit" for kind, _ in pieces):
         state["cwd"] = None  # not a literal target (a variable, `~`, a glob): not followed
         return
@@ -2300,8 +2307,7 @@ def _self_test():
         ("f=@S/X.md; printf -v 'f[0]' %s @O/X.md; rm \"$f\"", "O", "allow", False, ""),
         ("cd \"\"; rm X.md", "S", "deny", True, ""),
         # round 5
-        ("cd \"\" && rm X.md", "S", "allow", False, ""),
-        ("cd \"\" || rm X.md", "S", "deny", True, ""),
+        # cd "" with && or || depends on the bash version: pinned in CD_EMPTY
         ("v=aaaa; v=$v$v; rm @S/X.md", "O", "deny", True, ""),
         ("f=@S/X.md; n=f; printf -v \"$n\" %s @O/X.md; rm \"$f\"", "O", "allow", False, ""),
         ("f=@S/X.md; n=g; printf -v \"$n\" %s x; rm \"$f\"", "O", "deny", True, ""),
@@ -2336,6 +2342,18 @@ def _self_test():
         ("bash -c 'rm @S/X.md'", "O", "allow", True, "out"),
         ("eval 'rm @S/X.md'", "O", "allow", True, "out"),
         ("echo @S/X.md | xargs rm", "O", "allow", True, "out"),
+    )
+
+    # `cd ""` fails from bash 5.2 on ("null directory") and succeeds, doing nothing, in older bash, so whether what
+    # follows it runs depends on the bash version, which the hook cannot know. The rule: the directory stays, the
+    # outcome is unknown, and what follows on either path is judged there, so a destruction on either path denies
+    # (a deny where this bash destroys nothing is the disclosed false deny). Pinned rows, run from the store:
+    # (command, the hook's verdict, whether bash before 5.2 destroys a store file, whether bash 5.2 and later does).
+    CD_EMPTY = (
+        ("cd \"\" && rm X.md", "deny", True, False),
+        ("cd '' && rm X.md", "deny", True, False),
+        ("cd \"\" || rm X.md", "deny", False, True),
+        ("cd '' || rm X.md", "deny", False, True),
     )
 
     class T(unittest.TestCase):
@@ -2652,11 +2670,17 @@ def _self_test():
                            ("cd @O/nope/..; rm X.md", o), ("cd @O/nope/../../records; rm X.md", o)):
                 self.assertAllow(c, cwd=cwd)
             for c, cwd in (("cd ~ && rm X.md", o), ("d=@S; cd \"$d\" && rm X.md", o), ("cd @O/X.md && rm X.md", s),
-                           ("cd \"\" && rm X.md", s), ("cd '' && rm X.md", s),
                            ("cd $HOME && rm X.md", o)):
                 self.assertAllow(c, cwd=cwd)  # a target with an expansion is not followed; a failed cd && stops
             self.assertDeny("cd \"@S\" && rm X.md", cwd=o)  # quoting alone keeps a target literal
             self.assertDeny("cd /tmp; rm @S/X.md", cwd=s)  # an absolute path is read after a cd
+
+        # `cd ""`: the directory stays with an unknown outcome, and what follows on either path is judged there
+        def test_14_flip_cd_empty(self):
+            for c, verdict, _, _ in CD_EMPTY:
+                self.assertEqual(verdict, "deny", c)
+                self.assertDeny(c, cwd=self.x.s)
+                self.assertAllow(c, cwd=self.x.o)  # the flip: the same command where X.md is outside the store
 
         def test_14_misplaced_token_not_read(self):
             # a token whose text is not at its offsets reads as nothing, never as the text found there
@@ -2949,6 +2973,36 @@ def _self_test():
                         self.assertEqual(got, "allow", cmd)
             self.assertGreater(ran, len(CASES) * 3 // 4)
 
+        # `cd ""` against real bash: whether bash runs what follows depends on its version (see CD_EMPTY)
+        def test_22_differential_cd_empty(self):
+            bash = _trusted_bash()
+            if bash is None:
+                self.skipTest("SKIPPED, no trusted bash: the differential check did not run")
+            p = subprocess.run([bash, "--version"], stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+                               env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
+            m = re.search(rb"version (\d+)\.(\d+)", p.stdout)
+            if m is None:
+                self.skipTest("SKIPPED, bash version not read: the cd \"\" differential check did not run")
+            modern = (int(m.group(1)), int(m.group(2))) >= (5, 2)
+            for cmd, verdict, old, new in CD_EMPTY:
+                with self.subTest(cmd=cmd):
+                    fx = Fixture()
+                    try:
+                        text = fx.sub(cmd)
+                        payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                   "tool_input": {"command": text}, "cwd": fx.s}
+                        got = "deny" if _decide(payload, {"AIQT_STORE_ROOT": fx.s, "HOME": fx.s,
+                                                          "CLAUDE_PROJECT_DIR": fx.f}) else "allow"
+                        before = fx.snapshot()
+                        p = subprocess.run([bash, "--norc", "--noprofile", "-c", text], cwd=fx.s,
+                                           stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+                                           env={"LC_ALL": "C", "PATH": "/usr/bin:/bin", "HOME": fx.s})
+                        lost = destroyed(before, fx.snapshot())
+                    finally:
+                        fx.close()
+                    self.assertEqual(got, verdict, cmd)
+                    self.assertEqual(bool(lost), new if modern else old, (cmd, lost, p.stderr[-200:]))
+
         # house rules, vendoring, and cost
         def test_23_vendor_hashes(self):
             blocks = vendor_blocks()
@@ -3006,7 +3060,10 @@ def _self_test():
                          "(`truncate -s \"$n\"`)", "whose references are not correlated", "(`>& \"$fd\"`)",
                          "a word whose expansion would pass it is not read at all", "a hidden --help",
                          "(no variable, `~`, or glob in it)", "past the 262144-character expansion budget",
-                         "a word that expands nothing is still judged", "(`cd \"\"` fails from bash 5.2 on)",
+                         "a word that expands nothing is still judged",
+                         "An empty DIR (`cd \"\"`) leaves the directory where it was with its outcome unknown",
+                         "what follows it with `&&`, `||`, or `;` is judged in that directory",
+                         "run nothing after it (a false deny there, disclosed)",
                          "an assignment to one (`f[0]=...`, `read f[0]`, `declare f[0]=...`) is not followed"):
                 self.assertIn(item, " ".join(doc.split()), item)
 
