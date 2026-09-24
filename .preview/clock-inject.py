@@ -336,6 +336,9 @@ def _self_test():
     import unittest
 
     utc = datetime.timezone.utc
+    # a FIFO test's child timeout is a hang guard only (a blocking open never returns), far above the child's own
+    # run (well under a second), so the verdict never depends on the host's speed
+    HANG_TIMEOUT = 120
     line_re = re.compile(r"^CLOCK \(read by hook, authoritative\): \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \| "
                          r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z( \| session elapsed \d{2,}:\d{2})?$")
 
@@ -412,7 +415,8 @@ def _self_test():
             os.mkfifo(fifo)
             code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print(m.lease_start(%r))" % (os.path.abspath(__file__), fifo))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=5)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)
             self.assertEqual(r.stdout.strip(), "None")
 
         def test_lease_file_derivation(self):
@@ -568,7 +572,8 @@ def _self_test():
             self.write_lease("**Active-session:** sess-2026-09-23-opus55-r1\n")
             code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print(m.lease_start(%r, %r))" % (os.path.abspath(__file__), self.lease, fifo))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=5)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)
             self.assertEqual(r.stdout.strip(), "None")
 
         def test_r13_shared_lease_code_identical_to_stop_hook(self):

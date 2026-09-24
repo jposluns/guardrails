@@ -1709,13 +1709,65 @@ def _self_test():
             os.environ.clear()
             os.environ.update(old_env)
 
+    CHILD_HEAD = ("import importlib.util as u,datetime,os,time;os.environ['TZ']='EST5EDT,M3.2.0,M11.1.0';time.tzset();"
+                  "s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);s.loader.exec_module(m);"
+                  "UTC=datetime.timezone.utc\n" % os.path.abspath(__file__))
+
     def in_subprocess(expr, timeout):
         """Run `expr` (with module m loaded) in a fresh interpreter; return stdout, raising on timeout."""
-        code = ("import importlib.util as u,datetime,os,time;os.environ['TZ']='EST5EDT,M3.2.0,M11.1.0';time.tzset();"
-                "s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);s.loader.exec_module(m);"
-                "UTC=datetime.timezone.utc;print(%s)" % (os.path.abspath(__file__), expr))
-        return subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
-                              timeout=timeout).stdout.strip()
+        return subprocess.run([sys.executable, "-I", "-B", "-c", CHILD_HEAD + "print(%s)" % expr],
+                              capture_output=True, text=True, timeout=timeout).stdout.strip()
+
+    # A timing verdict compares the same code with itself on the same host, never with a wall-clock figure (a
+    # 2.0 s ceiling in a sibling hook's self-test failed at 2.53 s on a slower CI runner). A GROWTH check times,
+    # in a child, one run at GROWTH * n against GROWTH runs at n, so the two samples do the same work when the
+    # pass is linear and span about the same time, and a preemption or load spike lands on both alike (sizes
+    # interleaved, best of N); a bound on reading is checked as WORK (the bytes read and the records parsed, see
+    # work()), which takes no timing at all.
+    HANG_TIMEOUT = 120  # seconds: a child's hang guard only, far above any child's own run (about a second)
+    GROWTH = 8
+    LINEAR_LIMIT = 2.0  # GROWTH growth: about 1 when linear, about GROWTH when quadratic
+    GROWTH_SRC = ("import json, tempfile\n"
+                  "GROWTH = %d\n"
+                  "def growth(n, run, reps):\n"
+                  "    times = ([], [])\n"
+                  "    for _ in range(reps):\n"
+                  "        for size, out in zip((n, GROWTH * n), times):\n"
+                  "            t0 = time.monotonic()\n"
+                  "            for _k in range(GROWTH * n // size):\n"
+                  "                run(size)\n"
+                  "            out.append(time.monotonic() - t0)\n"
+                  "    return min(times[0]), min(times[1])\n") % GROWTH
+
+    def growth_in_child(run_src, n, reps=5):
+        """Time GROWTH runs of run(n) and one of run(GROWTH * n), where the source `run_src` defines run, in a
+        fresh interpreter under HANG_TIMEOUT (sizes interleaved, best of `reps` each); return (small, large) in
+        seconds. A child that fails (an assert in run included) raises AssertionError with its stderr."""
+        code = CHILD_HEAD + GROWTH_SRC + run_src + "print(json.dumps(growth(%d, run, %d)))\n" % (n, reps)
+        r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                           timeout=HANG_TIMEOUT)
+        if r.returncode != 0:
+            raise AssertionError(f"growth child failed ({r.returncode}): {r.stderr}")
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    def work(fn, *args):
+        """Call fn(*args) under a test-only count of its reading work; return (result, bytes os.pread returned,
+        the size of every text json.loads parsed). The hook itself is unchanged: both are restored after."""
+        read, parsed, pread, loads = [0], [], os.pread, json.loads
+
+        def counting_pread(fd, n, off):
+            data = pread(fd, n, off)
+            read[0] += len(data)
+            return data
+
+        def counting_loads(text, *a, **k):
+            parsed.append(len(text))
+            return loads(text, *a, **k)
+        os.pread, json.loads = counting_pread, counting_loads
+        try:
+            return fn(*args), read[0], parsed
+        finally:
+            os.pread, json.loads = pread, loads
 
     MIN = datetime.timedelta(minutes=1)
 
@@ -2046,8 +2098,16 @@ def _self_test():
         def test_pathological_inputs_linear(self):
             out = in_subprocess("(m.check_message('prose '+'`'*200000+'\\n'+'2026-09-23 '*100000+'\\n'+' '*200000+'x'"
                                 "+'[2099-01-01T00:00Z]',0,None,'x',0), m.check_message('Session elapsed'*20000+"
-                                "'\\n'+'Session '+'-'*200000,0,0,'x',0))", timeout=5)
+                                "'\\n'+'Session '+'-'*200000,0,0,'x',0))", timeout=HANG_TIMEOUT)
             self.assertIn("AHEAD", out)
+            # linear: the growth from n to GROWTH * n (up to the sizes above), not a 5 s child timeout as the verdict
+            small, large = growth_in_child(
+                "def run(n):\n"
+                "    m.check_message('prose ' + '`' * (2 * n) + '\\n' + '2026-09-23 ' * n + '\\n' + ' ' * (2 * n)\n"
+                "                    + 'x[2099-01-01T00:00Z]', 0, None, 'x', 0)\n"
+                "    m.check_message('Session elapsed' * (n // 5) + '\\nSession ' + '-' * (2 * n), 0, 0, 'x', 0)\n",
+                12500)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         # -- which messages --
         def test_only_after_last_genuine_user(self):
@@ -2221,13 +2281,19 @@ def _self_test():
             self.assertIn("block cap hit", err)
 
         def test_r8_block_cap_scan_bounded(self):
-            # a long run of non-marker records never makes the count scan unbounded
-            self.write(self.cycles(3)[:2] + [self.asst("filler")] * 20000 + self.cycles(3)[2:])
-            t0 = time.monotonic()
-            self.assertEqual(prior_block_cycles(self.tr), 3)
-            self.write(self.cycles(3) + [self.asst("filler")] * (CAP_SCAN_RECORDS + 10))
-            self.assertEqual(prior_block_cycles(self.tr), 0)  # the markers lie beyond the record bound
-            self.assertLess(time.monotonic() - t0, 2.0)
+            # a long run of non-marker records never makes the count scan unbounded. Checked as WORK, not as a
+            # wall-clock ceiling (which depended on the host's speed): GROWTH times the filler leaves the bytes
+            # read and the records parsed unchanged, and the records parsed stay within CAP_SCAN_RECORDS
+            for want, build in ((3, lambda k: self.cycles(3)[:2] + [self.asst("filler")] * k + self.cycles(3)[2:]),
+                                (0, lambda k: self.cycles(3) + [self.asst("filler")] * k)):
+                seen = []
+                for filler in (2500, GROWTH * 2500) if want else (CAP_SCAN_RECORDS + 10, GROWTH * CAP_SCAN_RECORDS):
+                    self.write(build(filler))
+                    got, read, parsed = work(prior_block_cycles, self.tr)
+                    self.assertEqual(got, want, filler)  # 0: the markers lie beyond the record bound
+                    self.assertLessEqual(len(parsed), CAP_SCAN_RECORDS, filler)
+                    seen.append((read, parsed))
+                self.assertEqual(seen[0], seen[1], want)
 
         def test_r9_block_cap_needs_tight_cycles(self):
             # round 9 finding 3 (MED): old blocks followed by a long successful stretch still counted, so the
@@ -2443,7 +2509,7 @@ def _self_test():
             os.mkfifo(fifo)
             out = in_subprocess("(m.lease_start(%r), m.evaluate({'transcript_path':%r,'last_assistant_message':"
                                 "'[2099-01-01T00:00Z] x'}, datetime.datetime.now(UTC), None, %r) is not None)"
-                                % (fifo, fifo, self.sdir), timeout=5)
+                                % (fifo, fifo, self.sdir), timeout=HANG_TIMEOUT)  # the hang guard
             self.assertEqual(out, "(None, True)")
 
         def test_inactive_lease_never_reads_history(self):
@@ -2458,10 +2524,14 @@ def _self_test():
                 f.write(json.dumps({"type": "user", "message": {"content": [
                     {"type": "tool_result", "content": "x" * (32 << 20)}]}}) + "\n")
                 f.write(json.dumps(self.asst("[2099-01-01T00:00Z] x")) + "\n")
-            t0 = time.monotonic()
-            r = evaluate({"transcript_path": self.tr}, self.now, self.start, self.sdir)
-            self.assertLess(time.monotonic() - t0, 2.0)
+            # fast because the 32 MiB record is never joined or parsed: checked as that WORK (every parsed text
+            # is shorter than the record and within MAX_RECORD_BYTES), not as a wall-clock ceiling, which
+            # depended on the host's speed
+            r, _read, parsed = work(evaluate, {"transcript_path": self.tr}, self.now, self.start, self.sdir)
             self.assertIsNotNone(r)
+            self.assertTrue(parsed)
+            self.assertLess(max(parsed), 32 << 20, parsed)
+            self.assertLessEqual(max(parsed), MAX_RECORD_BYTES, parsed)
 
         def test_reverse_records_exact_with_offsets(self):
             lines = [b"a" * n for n in (0, 1, CHUNK - 1, CHUNK, CHUNK + 1, 3 * CHUNK + 7, 5)]
@@ -2588,23 +2658,36 @@ def _self_test():
         def test_r4_repeated_stamps_linear(self):
             # finding (codex r3 m5): each claim sliced the growing line prefix (quadratic)
             line = "2026-09-23T17:45Z " * 100000
-            t0 = time.monotonic()
             self.assertEqual(check_message(line, to_us(self.now), None, "x", BEHIND_US), [])
-            self.assertLess(time.monotonic() - t0, 1.0)
-            t0 = time.monotonic()
             r = check_message("next " + "2099-01-01T00:00Z x " * 50000, to_us(self.now), None, "x", BEHIND_US)
-            self.assertLess(time.monotonic() - t0, 1.0)
             self.assertEqual(len(r), 1)  # deduplicated
+            # linear: the growth from n to GROWTH * n (up to the sizes above), not a 1.0 s wall-clock ceiling
+            small, large = growth_in_child(
+                "now = m.to_us(datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC))\n"
+                "def run(n):\n"
+                "    assert m.check_message('2026-09-23T17:45Z ' * n, now, None, 'x', m.BEHIND_US) == []\n"
+                "    r = m.check_message('next ' + '2099-01-01T00:00Z x ' * (n // 2), now, None, 'x', m.BEHIND_US)\n"
+                "    assert len(r) == 1, r\n", 12500, 3)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_r5_many_distinct_violations_linear_and_bounded(self):
             # finding (codex r4): add() scanned the growing violation list (quadratic in distinct violations)
             lits = [f"2099-{1 + i % 12:02d}-{1 + (i // 12) % 28:02d}T{(i // 336) % 24:02d}:{(i // 8064) % 60:02d}Z"
                     for i in range(40000)]
             self.assertEqual(len(set(lits)), 40000)
-            t0 = time.monotonic()
             r = self.final(" ".join(lits))
-            self.assertLess(time.monotonic() - t0, 1.0)
             self.assertEqual(r.count(" in your final message: "), MAX_REPORTED)
+            # linear: the growth from n to GROWTH * n distinct violations (up to 40,000), not a 1.0 s ceiling
+            small, large = growth_in_child(
+                "lits = [f'2099-{1 + i %% 12:02d}-{1 + (i // 12) %% 28:02d}T{(i // 336) %% 24:02d}:"
+                "{(i // 8064) %% 60:02d}Z' for i in range(40000)]\n"
+                "now = datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC)\n"
+                "start = datetime.datetime(2026, 9, 23, 14, 18, tzinfo=UTC)\n"
+                "def run(n):\n"
+                "    sd = tempfile.mkdtemp(dir=%r)\n"
+                "    assert m.evaluate({'last_assistant_message': ' '.join(lits[:n])}, now, start, sd)\n"
+                % self.tmp, 5000, 3)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
             self.assertIn(f"... and {40000 - MAX_REPORTED} more distinct violation(s) not listed", r)
 
         def test_r4_threat_model_stated(self):
@@ -2690,7 +2773,7 @@ def _self_test():
             os.mkfifo(fifo)
             lease = self.lease("**Active-session:** sess-2026-09-23-opus55-r1\n")
             self.assertEqual(in_subprocess("(m.transcript_start(%r), m.lease_start(%r, %r))" % (fifo, lease, fifo),
-                                           timeout=5), "(None, None)")
+                                           timeout=HANG_TIMEOUT), "(None, None)")  # the hang guard
 
         def test_r13_inactive_lease_stays_unknown(self):
             self.write([self.user("go", self.start)])
@@ -2739,8 +2822,14 @@ def _self_test():
 
         def test_r13_session_footer_scan_linear(self):
             out = in_subprocess("m.check_message('(session: '*100000+'\\n'+'(session: 1'*100000, 0, 0, 'x', 0)",
-                                timeout=5)
+                                timeout=HANG_TIMEOUT)
             self.assertEqual(out, "[]")
+            # linear: the growth from n to GROWTH * n (up to the size above), not a 5 s child timeout as the verdict
+            small, large = growth_in_child(
+                "def run(n):\n"
+                "    assert m.check_message('(session: ' * n + '\\n' + '(session: 1' * n, 0, 0, 'x', 0) == []\n",
+                12500)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_r13_shared_lease_code_identical_to_clock_inject(self):
             sib = _sibling_or_skip("clock-inject.py")

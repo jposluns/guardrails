@@ -3269,6 +3269,17 @@ def _self_test():
     PROJ = os.path.join(_BASE, "proj")
     STORE = os.path.join(PROJ, "private")
     HANG_TIMEOUT = 120  # seconds: far above the timed runs' own total (a few seconds), so only a hang reaches it
+    # A timing verdict compares the same code with itself on the same host, never with a wall-clock figure (a
+    # 2.0 s ceiling failed at 2.53 s on a slower CI runner). A GROWTH check (ratio in TIMED_PRELUDE) times one run
+    # at GROWTH * n against GROWTH runs at n, so the two samples do the same work when the pass is linear and
+    # span about the same time, and a preemption or load spike lands on both alike (a sample shorter than a
+    # scheduler slice escaped the preemption a longer one took, observed at 22 times on a pinned, loaded CPU);
+    # the sizes are interleaved, best of N. A PEER check bounds an adversarial command's time by an ORDINARY
+    # command of about the same size that the analysis judges in full (see TIMED_PRELUDE).
+    GROWTH = 8
+    LINEAR_LIMIT = 2.0  # GROWTH growth: about 1 when linear, about GROWTH when quadratic
+    FLAT_LIMIT = 3.0  # a pass independent of the varied size stays near 1; one linear in it grows by the step
+    PEER_LIMIT = 4.0  # adversarial over ordinary: about 1 to 2 on the development host
     TIMED_PRELUDE = (
         "import importlib.util as u, datetime, json, os, time\n"
         "os.environ['TZ'] = 'EST5EDT,M3.2.0,M11.1.0'\n"
@@ -3298,7 +3309,22 @@ def _self_test():
         "            out.append(time.monotonic() - t0)\n"
         "    return [min(t) for t in times]\n"
         "def ratio(n, run, reps=5):\n"
-        "    return interleaved((n, 2 * n), run, reps)\n") % (STORE, os.path.abspath(__file__))
+        "    def same_work(k):\n"
+        "        for _ in range(GROWTH * n // k):\n"
+        "            run(k)\n"
+        "    return interleaved((n, GROWTH * n), same_work, reps)\n"
+        "def versus(subject, reference, reps=5):\n"
+        "    return interleaved((0, 1), lambda k: (subject, reference)[k](), reps)\n"
+        # the PEER reference: about 64 KiB of ordinary audit-log appends and a future write into `store`, which
+        # the analysis judges in full (denied), so an adversarial command's time is compared with it
+        "def ordinary(cwd, store):\n"
+        "    c = ''.join(\"echo 'line %%d of the audit log' >> /dev/shm/x%%d\\n\" %% (i, i %% 7)\n"
+        "                for i in range(1400))\n"
+        "    c += \"printf 'hb 2099-01-01T00:00Z' > \" + store + '/state.md'\n"
+        "    def run():\n"
+        "        assert m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': cwd}, now)\n"
+        "    return run\n"
+        "GROWTH = %d\n") % (STORE, os.path.abspath(__file__), GROWTH)
 
     def run_timed(code, timeout):
         """Run `code` in a fresh isolated interpreter, killed at `timeout` seconds (raising TimeoutExpired); return
@@ -3473,7 +3499,8 @@ def _self_test():
             os.mkfifo(fifo)
             code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                     "s.loader.exec_module(m);print(repr(m.read_existing(%r, 10)))" % (os.path.abspath(__file__), fifo))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=5)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard: a blocking FIFO open never returns
             self.assertEqual(r.stdout.strip(), "('', False)")
 
         def test_store_root_env_override(self):
@@ -3609,15 +3636,16 @@ def _self_test():
             self.assertTrue(bash_writes("cat f >"))
 
         def test_r7_bash_writes_is_linear(self):
-            # round 32: best of 3 in a child under the hang ceiling (one in-process run flaked on a loaded host)
+            # round 32: best of 3 in a child under the hang ceiling (one in-process run flaked on a loaded host).
+            # The verdict is the growth from n to GROWTH * n (up to the former sizes), not a wall-clock ceiling
             code = TIMED_PRELUDE + (
-                "def run(_n):\n"
-                "    for cmd in (\"'\" + 'a' * 400000, 'x ' * 200000, '2>&1 ' * 100000, '\\\\' * 400000,\n"
-                "                \"$'\\\\'\" * 100000):\n"
+                "def run(n):\n"
+                "    for cmd in (\"'\" + 'a' * (4 * n), 'x ' * (2 * n), '2>&1 ' * n, '\\\\' * (4 * n),\n"
+                "                \"$'\\\\'\" * n):\n"
                 "        m.bash_writes(cmd)\n"
-                "print(json.dumps(interleaved((1,), run, 3)))\n")
-            (t,) = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(t, 2.0)
+                "print(json.dumps(ratio(12500, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_bash_date_substitution_passes(self):
             for cmd in ('echo "hb: $(date -u +%Y-%m-%dT%H:%M:%SZ) $(date -d \'2099-01-01 10:00\')" >> '
@@ -3652,15 +3680,24 @@ def _self_test():
         def test_bash_scan_is_linear(self):
             # finding (codex r2): unmatched $( openers rescanned the suffix quadratically
             # round 31: at this size (1.35 MB) the analysis spends BASH_WORK_BUDGET and fails OPEN (allowed), still
-            # within the timeout; a hundredth of it stays inside the budget and is still denied (unparseable)
+            # within the timeout; a hundredth of it stays inside the budget and is still denied (unparseable).
+            # The timeout is the hang guard only; linearity is the growth from n to GROWTH * n (up to that size)
             for scale, want in ((100, True), (1, False)):
                 code = ("import importlib.util as u,datetime;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
                         "s.loader.exec_module(m);n=datetime.datetime(2026,9,23,17,45,tzinfo=datetime.timezone.utc);"
                         f"c=': > {PROJ}/private/s; echo '+'$('*(500000//%d)+'`'*(100001//%d)+'$(A=B'*(50000//%d)"
                         "+' 2099-01-01T00:00Z';print(m.evaluate({'tool_name':'Bash','tool_input':{'command':c}},n))"
                         % (os.path.abspath(__file__), scale, scale, scale))
-                r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=5)
+                r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                                   timeout=HANG_TIMEOUT)
                 self.assertEqual("2099-01-01T00:00Z" in r.stdout, want, (scale, r.stdout, r.stderr))
+            code = TIMED_PRELUDE + (
+                "def run(n):\n"
+                f"    c = ': > {PROJ}/private/s; echo ' + '$(' * (5 * n) + '`' * (n + 1) + '$(A=B' * (n // 2)\n"
+                "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': c + ' 2099-01-01T00:00Z'}}, now)\n"
+                "print(json.dumps(ratio(12500, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_main_deny_shape_and_fail_open(self):
             payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": self.store,
@@ -3756,21 +3793,40 @@ def _self_test():
                 "def future(n):\n"
                 "    got = ev('Write', file_path=S, content='next ' + '2099-01-01T00:00Z x ' * n)\n"
                 "    assert got == ['2099-01-01T00:00Z'], got\n"
-                "print(json.dumps({r.__name__: ratio(n, r) for r, n in ((past, 50000), (future, 25000))}))\n")
+                "print(json.dumps({r.__name__: ratio(n, r) for r, n in ((past, 12500), (future, 6250))}))\n")
+            # the step is now GROWTH (N to 8N, up to the former sizes, equal work per sample): a 2N step bounded
+            # at 3.0 left little room between a linear pass (about 2) and a quadratic one (about 4)
             for name, (small, large) in run_timed(code, HANG_TIMEOUT).items():
-                self.assertLess(large / max(small, 1e-3), 3.0, (name, small, large))
+                self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (name, small, large))
 
         def test_r5_many_distinct_literals_linear_and_bounded(self):
             # finding (codex r4, sibling pattern): the fragment path scanned the growing list per literal
             lits = [f"2099-{1 + i % 12:02d}-{1 + (i // 12) % 28:02d}T{(i // 336) % 24:02d}:{(i // 8064) % 60:02d}Z"
                     for i in range(40000)]
             fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2 + 1))  # over the cap: the fragment path
-            t0 = time.monotonic()
             r = self.ev("MultiEdit", file_path=fp, edits=[{"old_string": "x", "new_string": "\n".join(lits[:20000])},
                                                           {"old_string": "x", "new_string": "\n".join(lits[20000:])}])
             w = self.ev("Write", file_path=os.path.join(self.tmp, "w.md"), content=" ".join(lits))
-            self.assertLess(time.monotonic() - t0, 1.0)
             self.assertEqual((len(r), len(w)), (40000, 40000))
+            # linear: the growth from n to GROWTH * n literals (up to 40,000) in a child under the hang ceiling,
+            # not a wall-clock ceiling (a 1.0 s one depended on the host's speed)
+            code = TIMED_PRELUDE + (
+                "fp = %r\n"
+                "os.environ['AIQT_STORE_ROOT'] = os.path.dirname(fp)\n"
+                "lits = [f'2099-{1 + i %% 12:02d}-{1 + (i // 12) %% 28:02d}T{(i // 336) %% 24:02d}:"
+                "{(i // 8064) %% 60:02d}Z' for i in range(40000)]\n"
+                "def ev(tool, **ti):\n"
+                "    return m.evaluate({'tool_name': tool, 'tool_input': ti, 'cwd': %r}, now)\n"
+                "def run(n):\n"
+                "    edits = [{'old_string': 'x', 'new_string': '\\n'.join(lits[:n // 2])},\n"
+                "             {'old_string': 'x', 'new_string': '\\n'.join(lits[n // 2:n])}]\n"
+                "    wp = os.path.join(os.path.dirname(fp), 'w.md')\n"
+                "    got = (len(ev('MultiEdit', file_path=fp, edits=edits)),\n"
+                "           len(ev('Write', file_path=wp, content=' '.join(lits[:n]))))\n"
+                "    assert got == (n, n), got\n"
+                "print(json.dumps(ratio(5000, run, 3)))\n") % (fp, f"{PROJ}/repo")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
             old_out = sys.stdout
             sys.stdout = io.StringIO()
             try:
@@ -3837,10 +3893,20 @@ def _self_test():
 
         def test_r6_table_scan_is_linear(self):
             rows = ["| x | 2099-01-01T00:00Z |"] * 50000
-            t0 = time.monotonic()
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", *rows), [])
             self.assertEqual(self.tw(*(["| a | b |"] * 50000)), [])
-            self.assertLess(time.monotonic() - t0, 1.0)
+            # linear: the growth from n to GROWTH * n rows (up to 50,000) in a child under the hang ceiling, not
+            # a wall-clock ceiling (a 1.0 s one depended on the host's speed)
+            code = TIMED_PRELUDE + (
+                "def tw(*lines):\n"
+                f"    ti = {{'file_path': '{PROJ}/private/state.md', 'content': '\\n'.join(lines) + '\\n'}}\n"
+                f"    return m.evaluate({{'tool_name': 'Write', 'tool_input': ti, 'cwd': '{PROJ}/repo'}}, now)\n"
+                "def run(n):\n"
+                "    assert tw('| Item | Due |', '|---|---|', *(['| x | 2099-01-01T00:00Z |'] * n)) == []\n"
+                "    assert tw(*(['| a | b |'] * n)) == []\n"
+                "print(json.dumps(ratio(6250, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         # -- round 7 (codex round-6 findings) --
         def test_r7_dq_substitution_write_seen(self):
@@ -3936,15 +4002,16 @@ def _self_test():
             self.assertIn("DELIBERATELY checked", __doc__)
 
         def test_r7_shell_tokens_linear(self):
-            # round 32: best of 3 in a child under the hang ceiling (2.08 s in-process was observed at load 30)
+            # round 32: best of 3 in a child under the hang ceiling (2.08 s in-process was observed at load 30,
+            # and a 2.0 s ceiling failed at 2.53 s on a slower CI runner). The verdict is the growth from n to
+            # GROWTH * n (up to the former sizes), not a wall-clock ceiling
             code = TIMED_PRELUDE + (
-                "def run(_n):\n"
-                "    for cmd in ('\"$(' * 100000, '\"$(x)\"' * 100000, '\"`x`\"' * 100000,\n"
-                "                '$((' * 100000 + '))' * 100000, '1>& 2 ' * 100000):\n"
+                "def run(n):\n"
+                "    for cmd in ('\"$(' * n, '\"$(x)\"' * n, '\"`x`\"' * n, '$((' * n + '))' * n, '1>& 2 ' * n):\n"
                 "        m.bash_writes(cmd)\n"
-                "print(json.dumps(interleaved((1,), run, 3)))\n")
-            (t,) = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(t, 2.0)
+                "print(json.dumps(ratio(12500, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         # -- round 8 (codex round-7 findings) --
         def test_r8_new_block_ends_table(self):
@@ -4047,8 +4114,8 @@ def _self_test():
                 "    assert m.future_in_changed_lines(old, old, 0) == []\n"
                 "print(json.dumps(interleaved((10000, 160000), run, 3)))\n")
             times = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(times[1], 3.0)
-            self.assertLess(times[1], 2.0 * times[0] + 0.2, times)  # flat in header length
+            # flat in header length (16 times longer): a ratio, with no wall-clock ceiling or absolute slack
+            self.assertLess(times[1] / max(times[0], 1e-3), FLAT_LIMIT, times)
 
         def test_r8_case_pattern_paren_in_substitution(self):
             # finding 3 (HIGH, exotic): a case pattern `)` closed the $(...) frame early, hiding the write
@@ -4929,9 +4996,10 @@ def _self_test():
                 "    got = m.evaluate({'tool_name': 'Edit', 'tool_input': {'file_path': fifo, 'old_string': old,"
                 " 'new_string': new}}, now)\n"
                 "    assert len(got) == n, len(got)\n"
-                "print(json.dumps(ratio(16000, run)))\n") % os.path.join(self.tmp, "fifo")
+                "print(json.dumps(ratio(4000, run)))\n") % os.path.join(self.tmp, "fifo")
             small, large = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(large / max(small, 1e-3), 3.0, (small, large))  # ~2 when linear; ~4 was quadratic
+            # N to GROWTH * N (up to the former 32,000): about 1 when linear, about GROWTH when quadratic
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_r26_item6_hang_guard_interrupts(self):
             # finding 6 (LOW): the growth test's ceiling was asserted only after every run returned, so it could
@@ -5421,8 +5489,10 @@ def _self_test():
             ordinary = "".join(f"echo 'line {i} of the audit log' >> /dev/shm/x{i % 7}\n" for i in range(1400)) + tail
             self.assertGreater(len(ordinary), 60000)
             self.assertEqual(self.ev("Bash", command=ordinary), [F])  # 64 KiB of ordinary lines stays inside it
-            # load-robust timing: the growth ratio from N to 2N (best of 3 each) of an in-budget command, and a
-            # subprocess ceiling (a hang or a runaway is interrupted, never waited out)
+            # load-robust timing: the growth ratio from N to GROWTH * N (interleaved, best of 5) of an in-budget
+            # command, and a subprocess ceiling (a hang or a runaway is interrupted, never waited out). The dense
+            # command's latency is bounded by an ORDINARY 64 KiB command judged in full on the same host (a PEER
+            # check), not by a wall-clock ceiling
             code = TIMED_PRELUDE + (
                 f"S = '{PROJ}/private/state.md'\n"
                 "def run(n):\n"
@@ -5430,12 +5500,12 @@ def _self_test():
                 "\"printf 'hb 2099-01-01T00:00Z' > \" + S\n"
                 "    assert m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': '/'}, now), n\n"
                 "t = ': > x;' * 10900 + \"printf 'hb 2099-01-01T00:00Z' > \" + S\n"
-                "def dense(_n):\n"
+                "def dense():\n"
                 "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': t}, 'cwd': '/'}, now)\n"
-                "print(json.dumps(ratio(1000, run) + [best(1, dense)]))\n")
-            small_t, large_t, dense_t = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(large_t / max(small_t, 1e-3), 3.0, (small_t, large_t))
-            self.assertLess(dense_t, 0.5, dense_t)  # a generous ceiling: about 20 to 40 ms on the development host
+                "print(json.dumps(ratio(250, run) + versus(dense, ordinary('/', os.path.dirname(S)))))\n")
+            small_t, large_t, dense_t, ref_t = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large_t / max(small_t, 1e-3), LINEAR_LIMIT, (small_t, large_t))
+            self.assertLess(dense_t / max(ref_t, 1e-3), PEER_LIMIT, (dense_t, ref_t))
             doc = " ".join(__doc__.split())
             for s in ("WORK BUDGET (round 31)", "is ALLOWED unchecked (fail OPEN", "an EXOTIC, disclosed miss"):
                 self.assertIn(s, doc)
@@ -5687,7 +5757,9 @@ def _self_test():
             self.assertGreater(BASH_WORK_BUDGET - b.left, 50 * cost * cap)
             self.assertEqual(self.ev("Bash", cwd=self.tmp, command=few), [F])  # still judged
             # the codex construct: 400 directories, 800 `(cd .);`, a future store write, padded to 65,536 bytes:
-            # analysed in-process well under the latency bound, or the budget is spent (best of 5 in a child)
+            # analysed in-process well under the latency bound, or the budget is spent (best of 5 in a child). The
+            # bound is a PEER check: at most PEER_LIMIT times an ordinary 64 KiB command judged in full on the same
+            # host (round 31's uncharged directory work took about 200 ms), not a wall-clock ceiling
             code = TIMED_PRELUDE + (
                 "D = %r\n"
                 "os.environ['AIQT_STORE_ROOT'] = os.path.join(D, 'store')\n"
@@ -5700,11 +5772,11 @@ def _self_test():
                 "tail = \"printf '%%s\\\\n' 'heartbeat: 2099-01-01T00:00Z' > \" + D + '/store/state.md'\n"
                 "c = body + ' ' * (65536 - len(body) - len(tail)) + tail\n"
                 "assert len(c) == 65536\n"
-                "def run(_n):\n"
+                "def run():\n"
                 "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': D}, now)\n"
-                "print(json.dumps(interleaved((1,), run, 5)))\n") % self.tmp
-            (t,) = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(t, 0.1, t)  # about 20 to 30 ms on the development host (round 31: about 200 ms)
+                "print(json.dumps(versus(run, ordinary(D, os.path.join(D, 'store')))))\n") % self.tmp
+            t, ref_t = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(t / max(ref_t, 1e-3), PEER_LIMIT, (t, ref_t))  # about 1.7 on the development host
             self.assertEqual((globals().get("CWD_COST"), globals().get("MAX_CWDS")), (6, 32))
 
         def test_r32_item3_subshell_scopes_directory_state(self):
@@ -5794,16 +5866,33 @@ def _self_test():
             # the load-sensitive growth-ratio tests (one flaked at load 34) now interleave their sizes, best of N,
             # at larger sizes, in a child under the hang ceiling
             self.assertIn("def interleaved(sizes, run, reps=5)", TIMED_PRELUDE)
+            self.assertIn("return interleaved((n, GROWTH * n), same_work, reps)", TIMED_PRELUDE)
+            self.assertIn("GROWTH = %d\n" % GROWTH, TIMED_PRELUDE)
             for test, needle in ((T.test_r4_scan_is_linear, "ratio(n, r)"),
-                                 (T.test_r26_item5_unreadable_edit_literal_index_is_linear, "ratio(16000, run)"),
-                                 (T.test_r31_work_budget_bounds_the_bash_analysis, "ratio(1000, run)"),
+                                 (T.test_r26_item5_unreadable_edit_literal_index_is_linear, "ratio(4000, run)"),
+                                 (T.test_r31_work_budget_bounds_the_bash_analysis, "ratio(250, run)"),
                                  (T.test_r8_table_context_carry_over_scales, "interleaved((10000, 160000), run, 3)"),
-                                 (T.test_r7_bash_writes_is_linear, "interleaved((1,), run, 3)"),
-                                 (T.test_r7_shell_tokens_linear, "interleaved((1,), run, 3)")):
+                                 (T.test_r7_bash_writes_is_linear, "ratio(12500, run, 3)"),
+                                 (T.test_r7_shell_tokens_linear, "ratio(12500, run, 3)"),
+                                 (T.test_bash_scan_is_linear, "ratio(12500, run, 3)"),
+                                 (T.test_r5_many_distinct_literals_linear_and_bounded, "ratio(5000, run, 3)"),
+                                 (T.test_r6_table_scan_is_linear, "ratio(6250, run, 3)"),
+                                 (T.test_r32_item2_directory_work_is_budgeted, "versus(run, ordinary("),
+                                 (T.test_r33_wrapper_check_is_constant_per_wrapper, "versus(run_codex, ordinary(")):
                 src = inspect.getsource(test)
                 self.assertIn(needle, src)
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
                 self.assertNotIn("best(2 * n, r)", src)
+            # no timing verdict is a wall-clock ceiling (a 2.0 s one failed at 2.53 s on a slower CI runner): only
+            # the hang-guard test asserts on elapsed time, a 30 s bound far above its 1 s child timeout
+            wall = [a + b for a, b in (("time.monotonic()", " - t0"), ("perf_", "counter"), ("assertLess(", "t, "),
+                                       ("assertLess(", "t_codex, "), ("assertLess(", "dense_t, "),
+                                       ("assertLess(", "times[1], 3"))]
+            for name in sorted(n for n in dir(T) if n.startswith("test_")):
+                if name != "test_r26_item6_hang_guard_interrupts":
+                    src = inspect.getsource(getattr(T, name))
+                    for needle in wall:
+                        self.assertNotIn(needle, src, name)
 
         def test_r32_disclosures(self):
             doc = " ".join(__doc__.split())
@@ -5844,8 +5933,10 @@ def _self_test():
                 c = build(w, 3 * w)
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=c), [F])
                 self.assertGreaterEqual(spend(c), 4 * 4 * w)
-            # in a child under the hang ceiling: the codex construction in-process, and the growth from 150 to 300
-            # wrappers (interleaved, best of 5; round 32's per-wrapper rescan grew it by about 3.2 times)
+            # in a child under the hang ceiling: the codex construction in-process against an ordinary 64 KiB
+            # command judged in full (a PEER check, about 1.2 on the development host; round 32 took about 107 ms),
+            # and the growth from 37 to GROWTH * 37 wrappers (interleaved, best of 5; round 32's per-wrapper
+            # rescan grew it by about 3.2 times per doubling)
             code = TIMED_PRELUDE + (
                 "D = %r\n"
                 "os.environ['AIQT_STORE_ROOT'] = os.path.join(D, 'store')\n"
@@ -5854,12 +5945,14 @@ def _self_test():
                 "    return ' |\\n'.join([\"sh -c 'echo 2099-01-01T00:00Z'\"] * w + [':'] * n) + tail\n"
                 "codex = build(450, 1050).ljust(65536)\n"
                 "def run(w):\n"
-                "    c = codex if w == 0 else build(w, 3 * w)\n"
-                "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': D}, now)\n"
-                "print(json.dumps(interleaved((0, 150, 300), run, 5)))\n") % self.tmp
-            t_codex, small, large = run_timed(code, HANG_TIMEOUT)
-            self.assertLess(t_codex, 0.05, t_codex)  # about 15 ms on the development host (round 32: about 107 ms)
-            self.assertLess(large / max(small, 1e-3), 2.6, (small, large))
+                "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': build(w, 3 * w)}, 'cwd': D}, now)\n"
+                "def run_codex():\n"
+                "    m.evaluate({'tool_name': 'Bash', 'tool_input': {'command': codex}, 'cwd': D}, now)\n"
+                "print(json.dumps(versus(run_codex, ordinary(D, os.path.join(D, 'store'))) + ratio(37, run)))\n"
+                ) % self.tmp
+            t_codex, ref_t, small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(t_codex / max(ref_t, 1e-3), PEER_LIMIT, (t_codex, ref_t))
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
             doc = " ".join(__doc__.split())
             self.assertIn("Round 33: the shell -c WRAPPER check is charged too", doc)
 
