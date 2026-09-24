@@ -70,27 +70,31 @@ file in the same directory (".<name>.opf-stage-<32 hex>", created O_CREAT|O_EXCL
 explicitly to 0o644 and verified on the open descriptor, owner read and write present and no group
 or other write, before any byte is written, so a restrictive umask such as 0o444 or 0o777 can never
 publish a record that release or crash recovery cannot reopen; a newly created anchor has its mode
-set the same way, and a newly created control directory is given its intended 0o755 when the umask
-masked any owner permission) and fsynced; only then is it published at its final name by os.link,
-which refuses an existing name (EEXIST) exactly as O_EXCL did; the staging name is then unlinked and
-the directory fsynced, all before the capability returns. GUARANTEED against process death (SIGKILL
-included) at any point: the final name holds either no record or the complete, fsynced one, never a
-torn prefix; at most a staging leftover remains, and the next acquisition removes every leftover
-matching that exact staging pattern under the held anchor flock, before stale classification, as
-garbage rather than a finding (a staging name bound to anything but a regular file refuses). The
-capability retains the open descriptors, the (st_dev, st_ino) identities, and the exact payload
-bytes of everything it created. A publication that FAILS or is INTERRUPTED before returning (an
-OSError, or any BaseException such as a KeyboardInterrupt) is treated as POTENTIALLY PUBLISHED: the
-names it bound are established by OBSERVATION (the staging name, and the final name once its os.link
-was attempted, each counted only when a no-follow stat finds it binding the created inode), never by
-bookkeeping an interruption could skip, and are removed by verified identity; its descriptor is
-closed before raising; an OSError is normalized to OpLockError, while any other BaseException is
-re-raised as itself with the cleanup outcome attached as notes; where that cleanup itself fails, the
-raise carries both the failure and a reason naming the leftover it could not remove, never a message
-that implies a clean unwind. The acquisition unwind then deletes the active record only once the
-lease name is OBSERVED absent after a failed or interrupted lease publication; a lease still present
-(or a presence check that cannot answer) KEEPS the owner-bearing active record beside it, so a later
-recover=True can clear both, never a lone owner-less lease.
+set the same way; and initialization is RESTARTABLE (fix round 6): a control directory or anchor,
+new or left by a creator killed before it corrected the mode, whose owner permissions the umask
+masked is repaired on the existing-object path to its intended 0o755 or 0o644, only when it is our
+own object of the expected type whose mode lies within the intended one, bound to the stat'ed object
+and never following a symbolic link, and otherwise refused) and fsynced; only then is it published
+at its final name by os.link, which refuses an existing name (EEXIST) exactly as O_EXCL did; the
+staging name is then unlinked and the directory fsynced, all before the capability returns.
+GUARANTEED against process death (SIGKILL included) at any point: the final name holds either no
+record or the complete, fsynced one, never a torn prefix; at most a staging leftover remains, and
+the next acquisition removes every leftover matching that exact staging pattern under the held
+anchor flock, before stale classification, as garbage rather than a finding (a staging name bound to
+anything but a regular file refuses). The capability retains the open descriptors, the (st_dev,
+st_ino) identities, and the exact payload bytes of everything it created. A publication that FAILS
+or is INTERRUPTED before returning (an OSError, or any BaseException such as a KeyboardInterrupt) is
+treated as POTENTIALLY PUBLISHED: the names it bound are established by OBSERVATION (the staging
+name, and the final name once its os.link was attempted, each counted only when a no-follow stat
+finds it binding the created inode), never by bookkeeping an interruption could skip, and are
+removed by verified identity; its descriptor is closed before raising; an OSError is normalized to
+OpLockError, while any other BaseException is re-raised as itself with the cleanup outcome attached
+as notes; where that cleanup itself fails, the raise carries both the failure and a reason naming
+the leftover it could not remove, never a message that implies a clean unwind. The acquisition
+unwind then deletes the active record only once the lease name is OBSERVED absent after a failed or
+interrupted lease publication; a lease still present (or a presence check that cannot answer) KEEPS
+the owner-bearing active record beside it, so a later recover=True can clear both, never a lone
+owner-less lease.
 
 Interruptions are DEFERRED, not chased line by line (fix round 5). In CPython an asynchronous
 exception reaches Python code only through a Python-level signal handler (KeyboardInterrupt is the
@@ -100,10 +104,12 @@ SIGSTOP, and the synchronous fault signals are never blocked): a signal arriving
 pending and is delivered when the exact previous mask is restored, after the section has ended.
 GUARANTEED, on the main thread of a platform with signal.pthread_sigmask, within the residuals
 below: no signal-raised exception lands inside those sections; it is delivered after them. A
-capability that was fully formed when such a signal was delivered never reaches the caller, so it
-is released (records removed, anchor unlocked, descriptors closed) before the interruption
-propagates as itself; an acquisition that failed is fully unwound before it; a release has ended
-released, unlocked, and closed before it.
+capability that was fully formed when such a signal was delivered never reaches the caller, so it is
+released (records removed, anchor unlocked, descriptors closed) before the interruption propagates
+as itself, through the scoped release directly, with no second acquirer-identity read that could
+refuse before the release owns the descriptors (fix round 6), and the interruption carries a note
+stating the observed outcome of that release; an acquisition that failed is fully unwound before it;
+a release has ended released, unlocked, and closed before it.
 
 Beneath the deferral, as defence in depth against exceptions no mask can defer (an OSError or a
 MemoryError raised by a step, or an exception injected by a non-signal mechanism), descriptor
@@ -125,25 +131,25 @@ cleanup; the smaller helpers they call are protected against their operations' e
 not claimed line-complete against an exception injected at an arbitrary line boundary (the
 residuals below).
 
-Release is identity-bound. It refuses, FIRST, any caller that is not the recorded acquirer (pid
-plus the /proc start-time identity _journal._pid_start provides), touching nothing; it then, with
-the Python-handled signals deferred (above), enters an enclosing cleanup (a context manager armed
-before any state changes) that takes sole ownership of the retained descriptors and marks the
-capability released before any step that can fail, and does so again on exit, so an interruption
-anywhere in the release, its own bookkeeping included, still ends released, unlocked, and closed;
-it re-checks the retained anchor and control-directory identities (collected, not
-early-raised); it then removes the LEASE and ONLY THEN the active record: when the lease cannot be
-removed, the owner-bearing active record is KEPT beside it, so a later recover=True can confirm the
-holder dead and clear both, never a lone owner-less lease no recovery can clear; each removal is a
-verified unlink (re-open no-follow, type, link count, size, device and inode against the retained
-identity, byte equality against the retained payload, and a final pre-unlink name-stat) and a
-mismatch refuses and PRESERVES the file rather than removing it; an OS error inside a leg (an EIO
-read, a failed fstat) is normalized to OpLockError and collected like any other leg failure; the
-anchor is unlocked LAST and every retained descriptor closed by that enclosing cleanup, each its
-own guarded step, so no leg failure or interruption can skip the unlock or a close; and the
-collected failures aggregate into
-one raise after the unlock. The acquisition unwind follows the same shape and the same lease-first
-order.
+Release is identity-bound. It refuses, FIRST, any caller that is not the recorded acquirer (pid plus
+the /proc start-time identity _journal._pid_start provides), touching nothing (a capability the
+acquisition itself releases because it was never returned skips this check: it was built by this
+process in that same call); it then, with the Python-handled signals deferred (above), enters an
+enclosing cleanup (a context manager armed before any state changes) that takes sole ownership of
+the retained descriptors and marks the capability released before any step that can fail, and does
+so again on exit, so an interruption anywhere in the release, its own bookkeeping included, still
+ends released, unlocked, and closed; it re-checks the retained anchor and control-directory
+identities (collected, not early-raised); it then removes the LEASE and ONLY THEN the active record:
+when the lease cannot be removed, the owner-bearing active record is KEPT beside it, so a later
+recover=True can confirm the holder dead and clear both, never a lone owner-less lease no recovery
+can clear; each removal is a verified unlink (re-open no-follow, type, link count, size, device and
+inode against the retained identity, byte equality against the retained payload, and a final
+pre-unlink name-stat) and a mismatch refuses and PRESERVES the file rather than removing it; an OS
+error inside a leg (an EIO read, a failed fstat) is normalized to OpLockError and collected like any
+other leg failure; the anchor is unlocked LAST and every retained descriptor closed by that
+enclosing cleanup, each its own guarded step, so no leg failure or interruption can skip the unlock
+or a close; and the collected failures aggregate into one raise after the unlock. The acquisition
+unwind follows the same shape and the same lease-first order.
 
 Every control path is reached only through dir_fd opens beneath no-follow walked parents
 (_opf_store._open_dir_nofollow); every control open carries O_NOFOLLOW and O_NONBLOCK, so a
@@ -153,62 +159,63 @@ under an already-open control root), and a link-count check applies to regular f
 to a directory.
 
 DISCLOSED RESIDUALS (this guard does not cover): the flock is advisory, binding only cooperating
-processes; a same-uid actor who unlinks and recreates the anchor out of band is not prevented,
-only bounded by the control-directory ownership and permission checks and surfaced by the
-stale-record refusal; the final unlink is by name, so a window remains between the pre-unlink
-name-stat and the unlink itself, narrowed by flock exclusivity, never closed; acquirer identity
-degrades to bare pid equality where /proc start times are unavailable (non-Linux), where a
-confirmed-dead recovery still rests on os.kill returning ProcessLookupError rather than on a start
-time; the machine-store directory is validated for OWNERSHIP ONLY (not group- or other-writability),
-so a group-writable machine store can weaken the lease leg where the control root and the machine
-store diverge in trust: this is ownership-only BY DESIGN, to avoid over-firing on the shared-group
-adopter stores the machine store legitimately lives in, and is disclosed here rather than
-prevented; a store or common-dir path with a symlinked ancestor is refused by the no-follow walk
-rather than served; and this is the LOCAL in-repository serialization boundary, not a
-remote-visible lease. Atomic publication needs hard-link support in the control and machine-store
-directories (a filesystem without it refuses acquisition, fail-closed), and its crash guarantee is
-against PROCESS death: durability across power loss rests on the filesystem honouring fsync and is
-not independently verified here. A newly created control directory's mode is corrected by name
-beneath its open parent, so a same-uid actor who swaps the new name for a symbolic link in the
-instant before that chmod redirects it to an object that actor already owns (nothing is gained,
-and the following identity re-check refuses). The interruption guarantee rests on the signal
-deferral and is bounded as follows. The deferral covers this module's acquisition (recovery
-included) and release; a helper another module calls directly (the resume substrate's calls to
-_create_control_file, _verified_unlink, and _open_control_dir) runs without it, under the
-structural protections only. The deferral
-is a no-op for a caller on a thread other than the main thread and on a platform without
-signal.pthread_sigmask, where only the structural protections apply. A
-process-directed signal that the kernel delivers to another thread which leaves it unblocked still
-has its Python handler run on the main thread, inside the section. A child process started inside
-the section (the git rev-parse) inherits the blocked mask, so it defers the same signals until it
-exits (bounded by the git timeout). A second signal arriving in the few bytecodes between a first
-deferred signal's delivery and the start of the unreturned capability's release can skip that
-release (its complete, owner-bearing records then wait for a later recover=True, and its
-descriptors for process exit). An exception injected by a NON-signal mechanism (sys.settrace, as
-the self-tests do, or an asynchronous exception set on the thread from outside) or a MemoryError
-can land at any point, where only the structural protections stand: on CPython a nested try
-statement's own line, a with statement's exit line, and a cleanup block's first line lie outside
-every enclosing exception range, and the bodies are built so none follows a descriptor's adoption
-(each context-managed cleanup encloses a single call on its own line), but the smaller helpers
-(the machine-store walk, the anchor open, the staging-leftover listing, the record read and
-verified unlink, the recorded-store probe) are not, so such an injection there can leak one
-descriptor, and one at the deferral's own entry or exit can leave the signals blocked on that
-thread. At the bytecode level such an injection between an open returning and its registration,
-between a helper's transfer and its caller's adoption, or between ownership being cleared and the
-os.close call, can leak that one descriptor (never double-close it); one landing between the
-active record's publication returning and the acquisition storing its identity can leave that
-complete, owner-bearing record for a later recover=True (a LEASE so left is caught by the unwind's
-absence check, which keeps the active record beside it); and one landing inside a cleanup handler
-itself, outside its individually guarded unlock and close steps, is not covered. A capability
-built and handed its descriptors but interrupted before it is returned is unwound like any other
-failure (its descriptors come back to the unwind, its records are removed, and the anchor is
-unlocked); record descriptors are adopted straight into the acquisition's owner, with no transfer
-step. Stale pairing by
-the recorded path cannot tell a DELETED machine store from a MOVED one: when a checkout that
-crashed while holding is renamed or moved (for example by git worktree move) and recovery then
-runs from ANOTHER checkout first, the recorded path is absent, recovery clears the shared active
-record, and the moved checkout's lease is left as a lone lease that needs manual removal (no
-second holder arises; recovering from the moved checkout itself first avoids it).
+processes; a same-uid actor who unlinks and recreates the anchor out of band is not prevented, only
+bounded by the control-directory ownership and permission checks and surfaced by the stale-record
+refusal; the final unlink is by name, so a window remains between the pre-unlink name-stat and the
+unlink itself, narrowed by flock exclusivity, never closed; acquirer identity degrades to bare pid
+equality where /proc start times are unavailable (non-Linux), where a confirmed-dead recovery still
+rests on os.kill returning ProcessLookupError rather than on a start time; the machine-store
+directory is validated for OWNERSHIP ONLY (not group- or other-writability), so a group-writable
+machine store can weaken the lease leg where the control root and the machine store diverge in
+trust: this is ownership-only BY DESIGN, to avoid over-firing on the shared-group adopter stores the
+machine store legitimately lives in, and is disclosed here rather than prevented; a store or
+common-dir path with a symlinked ancestor is refused by the no-follow walk rather than served; and
+this is the LOCAL in-repository serialization boundary, not a remote-visible lease. Atomic
+publication needs hard-link support in the control and machine-store directories (a filesystem
+without it refuses acquisition, fail-closed), and its crash guarantee is against PROCESS death:
+durability across power loss rests on the filesystem honouring fsync and is not independently
+verified here. The restartable mode repair treats ANY same-uid control directory or anchor of the
+expected type whose mode lies within the intended one but lacks an owner permission as an
+interrupted creation, so a mode a same-uid actor set deliberately in that range is overwritten with
+the intended one; on a platform without O_PATH the repair uses the platform's no-follow chmod by
+name, so a same-uid swap of the name for another object of ours in the instant before it can reach
+that object (the identity re-check then refuses), and where no no-follow chmod exists the repair
+refuses, leaving a manual chmod. The interruption guarantee rests on the signal deferral and is
+bounded as follows. The deferral covers this module's acquisition (recovery included) and release; a
+helper another module calls directly (the resume substrate's calls to _create_control_file,
+_verified_unlink, and _open_control_dir) runs without it, under the structural protections only. The
+deferral is a no-op for a caller on a thread other than the main thread and on a platform without
+signal.pthread_sigmask, where only the structural protections apply. A process-directed signal that
+the kernel delivers to another thread which leaves it unblocked still has its Python handler run on
+the main thread, inside the section. A child process started inside the section (the git rev-parse)
+inherits the blocked mask, so it defers the same signals until it exits (bounded by the git
+timeout). A second signal arriving in the few bytecodes between a first deferred signal's delivery
+and the start of the unreturned capability's release can skip that release (its complete,
+owner-bearing records then wait for a later recover=True, and its descriptors for process exit), and
+the note the interruption carries then says NOT released. An exception injected by a NON-signal
+mechanism (sys.settrace, as the self-tests do, or an asynchronous exception set on the thread from
+outside) or a MemoryError can land at any point, where only the structural protections stand: on
+CPython a nested try statement's own line, a with statement's exit line, and a cleanup block's first
+line lie outside every enclosing exception range, and the bodies are built so none follows a
+descriptor's adoption (each context-managed cleanup encloses a single call on its own line), but the
+smaller helpers (the machine-store walk, the anchor open, the staging-leftover listing, the record
+read and verified unlink, the recorded-store probe, the bound mode repair) are not, so such an
+injection there can leak one descriptor, and one at the deferral's own entry or exit can leave the
+signals blocked on that thread. At the bytecode level such an injection between an open returning
+and its registration, between a helper's transfer and its caller's adoption, or between ownership
+being cleared and the os.close call, can leak that one descriptor (never double-close it); one
+landing between the active record's publication returning and the acquisition storing its identity
+can leave that complete, owner-bearing record for a later recover=True (a LEASE so left is caught by
+the unwind's absence check, which keeps the active record beside it); and one landing inside a
+cleanup handler itself, outside its individually guarded unlock and close steps, is not covered. A
+capability built and handed its descriptors but interrupted before it is returned is unwound like
+any other failure (its descriptors come back to the unwind, its records are removed, and the anchor
+is unlocked); record descriptors are adopted straight into the acquisition's owner, with no transfer
+step. Stale pairing by the recorded path cannot tell a DELETED machine store from a MOVED one: when
+a checkout that crashed while holding is renamed or moved (for example by git worktree move) and
+recovery then runs from ANOTHER checkout first, the recorded path is absent, recovery clears the
+shared active record, and the moved checkout's lease is left as a lone lease that needs manual
+removal (no second holder arises; recovering from the moved checkout itself first avoids it).
 
 Nested journal/index lock composition is DELIBERATELY OUT OF SCOPE here (deferred to PR3); this
 module makes no cross-lock ordering claim.
@@ -290,7 +297,8 @@ _FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 # The modes this module creates its control objects with. The creating process's umask filters a
 # mode passed to open or mkdir, so a restrictive umask (0o444, 0o777) would leave a record, the
 # anchor, or the control directory its own later readers cannot open; each is therefore set
-# explicitly after creation and verified (fix round 5).
+# explicitly after creation and verified (fix round 5), and one a creator killed before that step
+# left is repaired on the next acquisition (fix round 6, _repair_restrictive_mode).
 _CONTROL_FILE_MODE = 0o644
 _CONTROL_DIR_MODE = 0o755
 
@@ -834,14 +842,15 @@ def _open_control_dir(control_root_fd, control_root_desc, dirname=CONTROL_DIRNAM
     parent: by default this module's own opf-oplock control directory, and by explicit `dirname` a
     SIBLING control home (the OPF-D2B resume substrate's opf-init tree composes this rather than
     reimplementing it). A pre-existing symlink or wrong type at the name refuses up front; only
-    the single component is ever created (no parents, and never a missing input root)."""
+    the single component is ever created (no parents, and never a missing input root). Creation is
+    RESTARTABLE (fix round 6): an existing directory whose owner permissions a restrictive umask
+    masked, as a creator killed before correcting its mode leaves it, is repaired to its intended
+    mode by _repair_restrictive_mode, whoever created it."""
     label = "{}/{}".format(control_root_desc, dirname)
     st = _lstat_at(control_root_fd, dirname, label)
     if st is None:
-        created = False
         try:
             os.mkdir(dirname, _CONTROL_DIR_MODE, dir_fd=control_root_fd)
-            created = True
             os.fsync(control_root_fd)
         except FileExistsError:
             pass  # a concurrent creator won the race; classify what is there now
@@ -851,44 +860,92 @@ def _open_control_dir(control_root_fd, control_root_desc, dirname=CONTROL_DIRNAM
         if st is None:
             raise OpLockError("control directory {} vanished after creation; refusing".format(
                 label))
-        if created:
-            st = _restore_created_dir_mode(control_root_fd, dirname, label, st)
     if stat.S_ISLNK(st.st_mode):
         raise OpLockError("control directory name {} is a symlink; refusing".format(label))
     if not stat.S_ISDIR(st.st_mode):
         raise OpLockError("control directory name {} is not a directory".format(label))
+    st = _repair_restrictive_mode(control_root_fd, dirname, label, st, is_dir=True)
     with _FdOwner() as owner:
         fd = owner.adopt(_open_dir_at(control_root_fd, dirname, label))
         _validate_ctl_dir_fd(fd, label)
         return owner.transfer(fd)
 
 
-def _restore_created_dir_mode(parent_fd, dirname, label, st):
-    """Give a control directory THIS call just created its intended mode when the creating umask
-    masked any of the owner's read, write, or search permissions (fix round 5); without all three the
-    directory could not be listed, written, or opened by its own later users. Only a real directory
-    owned by the current uid is changed, by name beneath the already-open parent; the name is then
-    re-stat'ed no-follow and must still bind the same (st_dev, st_ino) directory, now with every owner
-    permission present, or this refuses. Returns the stat to classify. Residual: the chmod by name
-    follows a symbolic link, so a same-uid actor who swaps the new name for a link in the instant
-    between the stat and the chmod redirects the chmod to an object that actor already owns (and could
-    chmod itself, so nothing is gained), and the re-stat then refuses."""
-    if (st.st_mode & stat.S_IRWXU) == stat.S_IRWXU:
-        return st
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
-        return st                          # the caller's type check (or the fd validation) refuses
-    try:
-        os.chmod(dirname, _CONTROL_DIR_MODE, dir_fd=parent_fd)
-    except OSError as exc:
-        raise OpLockError("cannot set the mode of the new control directory {} ({})".format(
-            label, exc))
-    after = _lstat_at(parent_fd, dirname, label)
-    if after is None or not stat.S_ISDIR(after.st_mode) \
+def _repair_restrictive_mode(parent_fd, name, label, st, is_dir):
+    """Self-heal a control object whose owner permissions a restrictive umask masked (fix round 6,
+    RESTARTABLE initialization). A creator killed between creating the control directory or the
+    anchor and correcting its mode leaves, under umask 0o444 or 0o777, a directory of mode 0311 or
+    0000 or an anchor of mode 0200 or 0000, which every later open refuses; this repairs it on the
+    next acquisition, whether this call or an earlier one created it. `st` is the no-follow stat of
+    `name` beneath the trusted parent_fd. Nothing is changed unless the object is exactly the
+    expected type (a directory, or a regular file with one link), owned by the current uid, and
+    lacks an owner permission this module needs (read, write, and search for the directory; read and
+    write for the anchor). Such an object is repaired ONLY when its mode is a subset of the intended
+    one (0755 or 0644), which is all a umask can leave: a mode carrying any other bit (a group or
+    other write, a special bit), or a hard-linked anchor, is not what an interrupted creation
+    leaves, and refuses unchanged. The repair sets EXACTLY the intended mode, the state an
+    uninterrupted creation ends in, so it never loosens past it, and is bound to the stat'ed object
+    and never follows a symbolic link (_chmod_bound). The name is then re-stat'ed no-follow and must
+    still bind that same (st_dev, st_ino) object, now at the intended mode, or this refuses. Returns
+    the stat to classify."""
+    if is_dir:
+        needed, intended, right_type = stat.S_IRWXU, _CONTROL_DIR_MODE, stat.S_ISDIR(st.st_mode)
+    else:
+        needed = stat.S_IRUSR | stat.S_IWUSR
+        intended, right_type = _CONTROL_FILE_MODE, stat.S_ISREG(st.st_mode)
+    if not right_type or st.st_uid != os.getuid() or (st.st_mode & needed) == needed:
+        return st                          # nothing to repair; the caller's checks decide the rest
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & ~intended or (not is_dir and st.st_nlink != 1):
+        raise OpLockError("{} lacks the owner permissions this module needs (mode {:o}, {} "
+                          "link(s)) but is not what an interrupted creation leaves (a mode within "
+                          "{:o}, one link); refusing to repair it (manual intervention "
+                          "required)".format(label, mode, st.st_nlink, intended))
+    _chmod_bound(parent_fd, name, label, st, intended)
+    after = _lstat_at(parent_fd, name, label)
+    if after is None or stat.S_IFMT(after.st_mode) != stat.S_IFMT(st.st_mode) \
             or (after.st_dev, after.st_ino) != (st.st_dev, st.st_ino) \
-            or (after.st_mode & stat.S_IRWXU) != stat.S_IRWXU:
-        raise OpLockError("control directory {} changed, or still lacks owner read, write, and "
-                          "search permission, after its creation; refusing".format(label))
+            or stat.S_IMODE(after.st_mode) != intended:
+        raise OpLockError("{} changed, or is not at its intended mode {:o}, after its mode repair; "
+                          "refusing".format(label, intended))
     return after
+
+
+def _chmod_bound(parent_fd, name, label, st, mode):
+    """chmod the object `name` beneath parent_fd to `mode` WITHOUT following a symbolic link and
+    bound to the object `st` describes (fix round 6). Where O_PATH exists (Linux), the name is
+    opened O_PATH|O_NOFOLLOW (which needs no permission on the object itself, so a mode-0000 object
+    opens), the OPENED object is confirmed to be that same (st_dev, st_ino), type, and owner, and
+    its mode is set through that descriptor's /proc/self/fd entry, which names the opened object
+    itself and cannot be redirected by a later swap of the name. Elsewhere the platform's no-follow
+    chmod beneath the parent descriptor is used when it is supported, and the caller's re-stat
+    confirms the identity afterwards; where neither is available this refuses rather than follow a
+    link."""
+    if hasattr(os, "O_PATH"):
+        with _FdOwner() as owner:
+            try:
+                fd = owner.adopt(os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                         dir_fd=parent_fd))
+                ost = os.fstat(fd)
+                if stat.S_IFMT(ost.st_mode) != stat.S_IFMT(st.st_mode) \
+                        or (ost.st_dev, ost.st_ino) != (st.st_dev, st.st_ino) \
+                        or ost.st_uid != os.getuid():
+                    raise OpLockError("{} changed before its mode repair; refusing".format(label))
+                os.chmod("/proc/self/fd/{}".format(fd), mode)
+            except OSError as exc:
+                raise OpLockError("cannot repair the mode of {} ({}); refusing (manual "
+                                  "intervention required)".format(label, exc))
+        return
+    if os.chmod in os.supports_follow_symlinks and os.chmod in os.supports_dir_fd:
+        try:
+            os.chmod(name, mode, dir_fd=parent_fd, follow_symlinks=False)
+        except (OSError, NotImplementedError, ValueError) as exc:
+            raise OpLockError("cannot repair the mode of {} ({}); refusing (manual intervention "
+                              "required)".format(label, exc))
+        return
+    raise OpLockError("cannot repair the mode of {} without following a symbolic link on this "
+                      "platform; refusing (manual intervention required: chmod it to {:o})".format(
+                          label, mode))
 
 
 # --- the anchor (leg 1) ---------------------------------------------------------------------------
@@ -898,8 +955,17 @@ def _open_anchor(ctl_fd):
     """Open the persistent mutex anchor, existing-first: a pre-existing regular file is opened
     O_RDWR|O_NOFOLLOW; creation (O_CREAT|O_EXCL) happens only on genuine absence; a symlink or any
     other type at the name refuses. The opened file is validated (regular, link count exactly 1,
-    owned by us, not group/other-writable) before it may carry the flock."""
+    owned by us, not group/other-writable) before it may carry the flock. Creation is RESTARTABLE
+    (fix round 6): a pre-existing anchor whose owner read or write a restrictive umask masked, as a
+    creator killed between its creation and its fchmod leaves it, is repaired to 0644 by
+    _repair_restrictive_mode before it is opened."""
     st = _lstat_at(ctl_fd, ANCHOR_NAME, ANCHOR_NAME)
+    if st is not None:
+        if stat.S_ISLNK(st.st_mode):
+            raise OpLockError("mutex anchor name is a symlink; refusing")
+        if not stat.S_ISREG(st.st_mode):
+            raise OpLockError("mutex anchor name is not a regular file; refusing")
+        _repair_restrictive_mode(ctl_fd, ANCHOR_NAME, "mutex anchor", st, is_dir=False)
     with _FdOwner() as owner:
         if st is None:
             try:
@@ -922,10 +988,6 @@ def _open_anchor(ctl_fd):
             except OSError as exc:
                 raise OpLockError("cannot {} ({})".format(step, exc))
         else:
-            if stat.S_ISLNK(st.st_mode):
-                raise OpLockError("mutex anchor name is a symlink; refusing")
-            if not stat.S_ISREG(st.st_mode):
-                raise OpLockError("mutex anchor name is not a regular file; refusing")
             try:
                 fd = owner.adopt(os.open(ANCHOR_NAME,
                                          os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
@@ -1657,12 +1719,37 @@ def _release_unreturned(cap, exc):
     """Release a fully formed capability the caller never received because `exc` (a signal deferred
     across the acquisition, delivered at its end) interrupted the return (fix round 5). The release
     runs under its own deferral; whatever it raises is attached to `exc` as a note, so the original
-    interruption is the one that propagates."""
+    interruption is the one that propagates.
+
+    Fix round 6 (codex MEDIUM 2): this process built the capability moments ago, so the acquirer
+    identity is already established. The release therefore goes straight to the scoped release
+    (_release_scoped, the enclosing cleanup that owns the descriptors), never through
+    release_operation, whose fresh /proc identity read can refuse BEFORE that cleanup takes
+    ownership (an unreadable /proc/<pid>/stat reads as a differing start time) and would leave the
+    descriptors open and the anchor locked. The note states the OBSERVED outcome: released (records
+    removed, anchor unlocked, descriptors closed); released with the failures the release collected
+    (anchor unlocked and descriptors closed, a record it could not remove kept for a later
+    recover=True); or, when an interruption landed before the release took ownership (the disclosed
+    second-signal window), NOT released."""
+    what = "opf-oplock: the capability the interrupted acquisition never returned was"
     try:
-        release_operation(cap)
+        with _SignalDeferral(): _release_scoped(cap)
     except BaseException as rexc:
-        exc.add_note("opf-oplock: the capability the interrupted acquisition never returned was "
-                     "released, reporting: {!r}".format(rexc))
+        if not cap._released:
+            exc.add_note("{} NOT released: {!r} interrupted its release before the release took "
+                         "ownership, so its records wait for a later recover=True and its "
+                         "descriptors and anchor lock for this process's exit".format(what, rexc))
+        elif isinstance(rexc, OpLockError):
+            exc.add_note("{} released with failures: its anchor was unlocked and its descriptors "
+                         "closed, but {} (a record the release could not remove is kept for a "
+                         "later recover=True)".format(what, rexc))
+        else:
+            exc.add_note("{} released (its anchor unlocked and its descriptors closed), and the "
+                         "release then raised {!r} (a record it could not remove is kept for a "
+                         "later recover=True)".format(what, rexc))
+    else:
+        exc.add_note("{} released: its records removed, its anchor unlocked, and its descriptors "
+                     "closed".format(what))
 
 
 def _acquire_body(store_root, operation, holder, recover, nodename):
@@ -4256,7 +4343,66 @@ def _t_f5_3_signal_recovery(d, env):
     assert failure is None, failure
 
 
+class _StSkip(Exception):
+    """A test that cannot establish its precondition on this host: reported as SKIP with the reason,
+    never as a PASS, and counted in the suite summary."""
+
+
+def _st_honours_umask(parent):
+    """Whether objects created in `parent` take their mode from the process umask: under umask
+    0o777 a new directory and a new file must both come out mode 0000. A default ACL on `parent`
+    overrides the umask (the ACL's mask applies instead), so it answers False there."""
+    probe = os.path.join(parent, "umask-probe-{}".format(uuid.uuid4().hex))
+    old = os.umask(0o777)
+    try:
+        os.mkdir(probe, 0o777)
+    finally:
+        os.umask(old)
+    try:
+        dir_mode = stat.S_IMODE(os.lstat(probe).st_mode)
+        os.chmod(probe, 0o700)
+        old = os.umask(0o777)
+        try:
+            fd = os.open(os.path.join(probe, "f"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        finally:
+            os.umask(old)
+        os.close(fd)
+        file_mode = stat.S_IMODE(os.lstat(os.path.join(probe, "f")).st_mode)
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+    return dir_mode == 0 and file_mode == 0
+
+
+def _st_umask_fixture_root(d, body):
+    """Run body(root) with `root` a fixture directory whose new objects honour the process umask
+    (test hermeticity: an inherited default ACL, as on a TMPDIR carrying one, overrides the umask
+    and would silently change what a restrictive-umask witness observes). `d` is tried first, then
+    a fresh directory under /dev/shm (removed afterwards); when neither honours the umask the test
+    is SKIPPED with the reason, never passed."""
+    if _st_honours_umask(d):
+        return body(d)
+    tried = [d]
+    if os.path.isdir("/dev/shm"):
+        import tempfile
+        shm = os.path.realpath(tempfile.mkdtemp(prefix="opf-oplock-umask-", dir="/dev/shm"))
+        try:
+            if _st_honours_umask(shm):
+                return body(shm)
+            tried.append(shm)
+        finally:
+            shutil.rmtree(shm, ignore_errors=True)
+    else:
+        tried.append("/dev/shm (absent)")
+    raise _StSkip("no fixture root honours the process umask (a default ACL overrides it); "
+                  "tried: {}".format(", ".join(tried)))
+
+
 def _t_f5_4_restrictive_umask(d, env):
+    """T-f5-4's fixtures live under a root that honours the umask (_st_umask_fixture_root)."""
+    return _st_umask_fixture_root(d, lambda root: _t_f5_4_body(root, env))
+
+
+def _t_f5_4_body(d, env):
     """T-f5-4 (fix round 5, codex MEDIUM 3: publication under a restrictive umask). Under umask
     0o444 and under 0o777, in a child: (a) a holder acquires and is SIGKILLed, and a recover=True
     from a normal process must then succeed; (b) a holder acquires and releases normally, which must
@@ -4307,6 +4453,220 @@ def _t_f5_4_restrictive_umask(d, env):
         release_operation(cap)
 
 
+def _st_kill_when_present(path):
+    """Arm a line trace over EVERY frame that SIGKILLs this process at the first line event at which
+    `path` exists (no-follow): the first interpreter step after the syscall that created it (fix
+    round 6). Run it only in a child."""
+    def local(frame, event, arg):
+        if event == "line" and os.path.lexists(path):
+            os.kill(os.getpid(), signal.SIGKILL)
+        return local
+
+    sys.settrace(lambda frame, event, arg: local)
+
+
+def _t_f6_1_restartable_init(d, env):
+    """T-f6-1's fixtures live under a root that honours the umask (_st_umask_fixture_root)."""
+    return _st_umask_fixture_root(d, lambda root: _t_f6_1_body(root, env))
+
+
+def _t_f6_1_body(d, env):
+    """T-f6-1 (fix round 6, codex MEDIUM 1 and claude LOW: restartable initialization). Under umask
+    0o444 and under 0o777, a first acquisition is SIGKILLed at the first interpreter step after the
+    syscall that CREATES (a) the control directory and (b) the mutex anchor, before its mode is
+    corrected, leaving an object whose owner permissions the umask masked (0311 or 0000 for the
+    directory, 0200 or 0000 for the anchor). A recover=True acquisition, under the same umask in a
+    child and then in a normal process, must SUCCEED, and the object must end at its intended mode
+    (0755, 0644). Before the fix every later acquisition refused it forever ("Permission denied").
+    The repair is bounded: a mode carrying bits beyond the intended one, or a hard-linked anchor, is
+    not what an interrupted creation leaves and is refused unchanged; a symlink is never repaired;
+    and a real signal at every line of the repair is delivered after the section."""
+    for mask in (0o444, 0o777):
+        for boundary in ("control directory", "anchor"):
+            label = "{} under umask {:o}".format(boundary, mask)
+            root = _st_git_store(d, "r-{}-{:o}".format(boundary.split()[-1], mask), env)
+            ctl = _st_ctl_dir(root)
+            target = ctl
+            needed = stat.S_IRWXU
+            intended = _CONTROL_DIR_MODE
+            if boundary == "anchor":
+                cap = acquire_operation(root, "op")    # the control directory exists, intact
+                release_operation(cap)
+                target = os.path.join(ctl, ANCHOR_NAME)
+                os.unlink(target)
+                needed = stat.S_IRUSR | stat.S_IWUSR
+                intended = _CONTROL_FILE_MODE
+            sys.stdout.flush()
+            sys.stderr.flush()
+            pid = os.fork()
+            if pid == 0:                  # the first acquirer, killed inside the creation window
+                try:
+                    os.umask(mask)
+                    _st_kill_when_present(target)
+                    acquire_operation(root, "op")
+                except BaseException:
+                    pass
+                os._exit(3)
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL, \
+                "the acquirer must die by SIGKILL ({}, status {})".format(label, status)
+            left = stat.S_IMODE(os.lstat(target).st_mode)
+            assert (left & needed) != needed, \
+                "the kill must land before the mode is corrected ({}: mode {:o})".format(
+                    label, left)
+
+            def _recover(m=mask):
+                os.umask(m)
+                release_operation(acquire_operation(root, "op", recover=True))
+
+            failure = _st_in_child(_recover)
+            assert failure is None, "{}: recovery under the umask: {}".format(label, failure)
+            cap = acquire_operation(root, "op", recover=True)
+            release_operation(cap)
+            mode = stat.S_IMODE(os.lstat(target).st_mode)
+            assert mode == intended, "{} left at mode {:o}, not {:o}".format(label, mode, intended)
+    # The repair's bounds, on the last store: never loosen past the intended mode, never a
+    # hard-linked anchor, never a symlink.
+    anchor = os.path.join(ctl, ANCHOR_NAME)
+    for bad in (0o020, 0o100):
+        os.chmod(anchor, bad)
+        _st_expect_refusal(acquire_operation, root, "op", needle="interrupted creation")
+        assert stat.S_IMODE(os.lstat(anchor).st_mode) == bad, "a refused anchor is left unchanged"
+    os.chmod(ctl, 0o070)
+    _st_expect_refusal(acquire_operation, root, "op", needle="interrupted creation")
+    assert stat.S_IMODE(os.lstat(ctl).st_mode) == 0o070, "a refused directory is left unchanged"
+    os.chmod(ctl, 0o755)
+    os.chmod(anchor, 0)
+    os.link(anchor, os.path.join(ctl, "pinning-link"))
+    _st_expect_refusal(acquire_operation, root, "op", needle="interrupted creation")
+    assert stat.S_IMODE(os.lstat(anchor).st_mode) == 0, "a hard-linked anchor is never repaired"
+    os.unlink(os.path.join(ctl, "pinning-link"))
+    victim = os.path.join(d, "symlink-victim")
+    with open(victim, "wb"):
+        pass
+    os.chmod(victim, 0)
+    os.unlink(anchor)
+    os.symlink(victim, anchor)
+    _st_expect_refusal(acquire_operation, root, "op", needle="symlink")
+    assert stat.S_IMODE(os.stat(victim).st_mode) == 0, "a symlink target is never repaired"
+    os.unlink(anchor)
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+    # A real signal at every line of the repair (anchor 0200, then the directory 0311) is delivered
+    # after the acquisition, which repaired the object and released the unreturned capability.
+    for path, bad, good in ((anchor, 0o200, _CONTROL_FILE_MODE), (ctl, 0o311, _CONTROL_DIR_MODE)):
+        prepare, invoke, settle, check = _st_acquire_scenario(root)
+
+        def _prepare(p=path, b=bad):
+            os.chmod(p, b)
+            return prepare()
+
+        def _check(ctx, where, p=path, g=good):
+            check(ctx, where)
+            assert stat.S_IMODE(os.lstat(p).st_mode) == g, "not repaired ({})".format(where)
+
+        funcs = _st_named("_repair_restrictive_mode", "_chmod_bound")
+        if funcs:
+            failure = _st_in_child(lambda: _st_signal_sweep(root, funcs, _prepare, invoke, settle,
+                                                            _check))
+            assert failure is None, failure
+
+
+def _t_f6_2_unreturned_release(d, env):
+    """T-f6-2 (fix round 6, codex MEDIUM 2: the unreturned capability's release). In a child, a REAL
+    SIGINT sent during the publication is deferred and delivered after the acquisition built its
+    capability; its handler first arms a fault, then raises KeyboardInterrupt. (A) An EIO on every
+    /proc read (the acquirer-identity read release_operation makes, which reads it as a differing
+    start time): the capability must still be released, with ZERO descriptor delta, the anchor free,
+    both records removed, and a note that says so. Before the fix the public release refused before
+    taking ownership, leaking five descriptors with the anchor held, while the note claimed the
+    capability "was released". (B) The lease leg fails: the note must say released WITH failures,
+    the anchor free and nothing leaked, the owner-bearing records kept. (C) The release is
+    interrupted before it takes ownership: the note must say NOT released."""
+    root = _st_git_store(d, "repo", env)
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+    failure = _st_in_child(lambda: _st_f6_2_body(root, active, lease))
+    assert failure is None, failure
+
+
+def _st_f6_2_body(root, active, lease):
+    """T-f6-2's body, run in a child (it installs its own SIGINT handler)."""
+    mod = sys.modules[__name__]
+    armed = {"fault": None}
+    real_open = open
+    saved_unlink = mod._verified_unlink
+    saved_scoped = getattr(mod, "_release_scoped", None)
+    held = []
+
+    def _proc_open(path, *a, **k):
+        if armed["fault"] == "proc-eio" and str(path).startswith("/proc/"):
+            raise OSError(errno.EIO, "simulated /proc read failure (T-f6-2)")
+        return real_open(path, *a, **k)
+
+    def _lease_leg_fails(dir_fd, name, *a, **k):
+        if armed["fault"] == "lease-leg" and name == _opf_check.LEASE_NAME:
+            raise OpLockError("cannot unlink lease (simulated, T-f6-2)")
+        return saved_unlink(dir_fd, name, *a, **k)
+
+    def _interrupted_scope(cap):
+        if armed["fault"] == "before-ownership":
+            held.append(cap)
+            raise KeyboardInterrupt()
+        return saved_scoped(cap)
+
+    def handler(signum, frame):
+        armed["fault"] = armed.get("next")
+        raise KeyboardInterrupt()
+
+    signal.signal(signal.SIGINT, handler)
+    _journal.open = _proc_open
+    mod._verified_unlink = _lease_leg_fails
+    if saved_scoped is not None:
+        mod._release_scoped = _interrupted_scope
+    try:
+        for case in ("proc-eio", "lease-leg", "before-ownership"):
+            armed["fault"] = None
+            armed["next"] = case
+            baseline = _st_open_fds()
+            state = _st_arm_signal(_st_named("_publish_staged"), 1)
+            try:
+                caught = _st_expect_interrupt(acquire_operation, root, "op")
+            finally:
+                sys.settrace(None)
+            armed["fault"] = None
+            assert state["fired"], case
+            notes = " ".join(getattr(caught, "__notes__", ()))
+            if case == "proc-eio":
+                assert _st_open_fds() == baseline, "no descriptor may leak ({}): {}".format(
+                    case, notes)
+                assert _st_anchor_free(root), "the anchor must be unlocked ({})".format(case)
+                assert not os.path.exists(active) and not os.path.exists(lease), case
+                assert "was released: its records removed, its anchor unlocked, and its " \
+                    "descriptors closed" in notes, notes
+            elif case == "lease-leg":
+                assert _st_open_fds() == baseline, "no descriptor may leak ({})".format(case)
+                assert _st_anchor_free(root), "the anchor must be unlocked ({})".format(case)
+                assert os.path.exists(active) and os.path.exists(lease), \
+                    "a lease the release could not remove keeps its active record ({})".format(case)
+                assert "released with failures" in notes and "lease" in notes, notes
+                os.unlink(lease)          # this (live) process's records: cleared by hand
+                os.unlink(active)
+            else:
+                assert "was NOT released" in notes, notes
+                assert held and not held[0]._released, "the capability was never released"
+                saved_scoped(held.pop())  # the test's own cleanup of the unreleased capability
+                assert _st_open_fds() == baseline, "cleanup ({})".format(case)
+                assert not os.path.exists(active) and not os.path.exists(lease), case
+    finally:
+        del _journal.open
+        mod._verified_unlink = saved_unlink
+        if saved_scoped is not None:
+            mod._release_scoped = saved_scoped
+
+
 def self_test():
     """Regression roster (plan section (e)): the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
     round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
@@ -4321,9 +4681,14 @@ def self_test():
     interruption sweeps over release and acquisition, T-f4-3 extended in round 5 to the smaller
     helpers with a real signal), and the fix-round-5 witnesses T-f5-1 to T-f5-4 (a real signal at
     every line of the acquisition, the release, and recovery is deferred until after the section,
-    and records published under a restrictive umask), each a witness against a named defect. A
+    and records published under a restrictive umask), and the fix-round-6 witnesses T-f6-1 and
+    T-f6-2 (restartable initialization after a kill inside the creation window, and the unreturned
+    capability's release with no identity re-read), each a witness against a named defect. A
     missing containment primitive or git binary is a REFUSAL (non-zero),
-    never a clean skip. The git fixtures are pinned hermetically (LOW-5)."""
+    never a clean skip. The git fixtures are pinned hermetically (LOW-5). The restrictive-umask
+    witnesses (T-f5-4, T-f6-1) run under a fixture root probed to honour the umask (a default ACL
+    on TMPDIR overrides it), falling back to /dev/shm; with no such root they print SKIP with the
+    reason, and the run ends SELF-TEST INCOMPLETE with exit 3, never a pass."""
     import tempfile
     import traceback
 
@@ -4413,6 +4778,10 @@ def self_test():
          _t_f5_3_signal_recovery),
         ("T-f5-4 records published under a restrictive umask stay releasable and recoverable",
          _t_f5_4_restrictive_umask),
+        ("T-f6-1 a first acquisition killed before its mode fix is repaired, never stuck",
+         _t_f6_1_restartable_init),
+        ("T-f6-2 an unreturned capability is released without a /proc read, truthfully noted",
+         _t_f6_2_unreturned_release),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-oplock-selftest-"))
@@ -4431,6 +4800,7 @@ def self_test():
     os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
     os.makedirs(os.path.join(base, "xdg"), exist_ok=True)
     failures = []
+    skipped = []
     try:
         env = _st_git_env(base)
         for index, (name, fn) in enumerate(tests):
@@ -4439,6 +4809,9 @@ def self_test():
             try:
                 fn(d, env)
                 print("PASS  {}".format(name))
+            except _StSkip as exc:
+                skipped.append(name)
+                print("SKIP  {}: {}".format(name, exc))
             except BaseException:
                 failures.append(name)
                 print("FAIL  {}".format(name))
@@ -4454,6 +4827,11 @@ def self_test():
         print("SELF-TEST FAIL: {} of {} tests failed: {}".format(
             len(failures), len(tests), "; ".join(failures)))
         return 1
+    if skipped:
+        # a skipped check never executed, so the run is not a pass: exit non-zero (fail closed)
+        print("SELF-TEST INCOMPLETE: {} of {} tests SKIPPED, not passed: {}".format(
+            len(skipped), len(tests), "; ".join(skipped)))
+        return 3
     print("SELF-TEST PASS")
     return 0
 
