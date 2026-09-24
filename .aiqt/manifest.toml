@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "6ffabce9afa8bd2ad1dec3027b10ced299531372cd9fb0c72db9b5b1e1dc95d6"
+tree-sha256 = "390616006db2209f79f4d2427456d880e4ec06f9084a972b36c55f66dd0a830a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2202,27 +2202,27 @@ sha256 = "6c290908525b587a8fbce6f877f6722ef142a6e1fef559283c058ec3662aacc6"
 [[sources]]
 path = ".preview/README.md"
 bytes = 14291
-sha256 = "62d31e2523d4fbd2a561f14cf9a2b2fac20c5612173e9324ce4708d57e7ef78c"
+sha256 = "fff797cd3280324ee768af7d2d5aefdf9773783c0c98616eebfb247cc33b57a7"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 379
-sha256 = "3608ed42dab6e037789432eda6ee712e5c7a5666542946878473b75bd5c97a44"
+sha256 = "c0f927db3632a988ed8bb52e9da1373910e7003613cf946908c2b360ce4a75a9"
 
 [[sources]]
 path = ".preview/clock-inject.py"
-bytes = 59304
-sha256 = "c3e55ceb81e720c7ebf5dbbe95cf49c6f5aad29c019f7fcd8abec00cee6633dc"
+bytes = 61404
+sha256 = "5f7550e8a1afa2c2db6ffe94250de0b740d9f1c92a5e2b1ce52f88b8a1e4775e"
 
 [[sources]]
 path = ".preview/future-stamp-write.py"
-bytes = 412212
-sha256 = "2ce746b0aee868af2034cbcaf96b7baefbc51f2862bf3162b67ee285a90e03d6"
+bytes = 414312
+sha256 = "356378740e7e21f531b8c1e2eb5220a2612f48c0027305e2f9d3ecf109e2933d"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 274481
-sha256 = "ea35470c7d8eae8e1bc810307d5e3380610cbfd670d80b0b49d717db4eadb176"
+bytes = 276581
+sha256 = "f6365d467b66de32bd1abc573c852f6e9da6aec19bef0284c44a08eb2c159b55"
 
 [[sources]]
 path = "AGENTS.md"

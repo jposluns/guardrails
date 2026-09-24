@@ -3230,8 +3230,11 @@ def _wall_clock_asserts(source, exempt=()):
     the host's speed. A time figure is a clock reading (time.time, perf_counter, monotonic, process_time,
     thread_time, clock_gettime, or an _ns variant; datetime.now, utcnow, or today), a result of a timing
     harness (run_timed, growth_in_child), a name assigned from one (a for target or unpacking included), or
-    arithmetic, a comparison, a subscript, an attribute, min, max, abs, sum, or a method call on one; a
-    quotient of two time figures is a dimensionless ratio and may be bounded. A clock read through an alias
+    arithmetic, a comparison, a subscript, an attribute, min, max, abs, sum, int, float, round, or a method
+    call on one; a quotient of two time figures is a dimensionless ratio and may be bounded. A tuple or list
+    literal assigned to a tuple or list target is matched element by element, so only the names that receive
+    a time figure are tainted, and a shape it cannot match (a starred element, a length mismatch) taints
+    nothing, the not-flagging direction. A clock read through an alias
     counts too: a module alias (`import time as t`, `import datetime as d`), an imported one (`from time import
     X as Y`, or `*`; `from datetime import datetime as Y`), and an assigned one (a plain `name = time.X` or
     `name = X` of a clock or alias), each bound at module level or within the function. An assertion's operands
@@ -3239,7 +3242,10 @@ def _wall_clock_asserts(source, exempt=()):
     scanned, under its enclosing test_ function (else its innermost function); `exempt` names the hang-guard
     tests, whose bound on elapsed time is their point. Residual (disclosed): the taint is by name within one
     test_ function and its nested functions, so a time figure passed through a container mutation, a global, a
-    call to another helper, or a harness this list does not name escapes the scan; a clock this list does not
+    call to another helper, or a harness this list does not name escapes the scan; so does one routed through
+    an expression form the scan does not follow: an assignment expression (walrus) in an asserted operand, a
+    dict literal, a container built by a comprehension or filled by a store into a subscript, or any other
+    routing not listed above; so does the time figure in a starred or mismatched unpacking; a clock this list does not
     name (os.times, date.today, time.localtime or gmtime, a third-party clock, a file's mtime) escapes too, as
     does an alias bound any other way (an attribute, a tuple target, getattr, a module or class assigned to a
     name); a subprocess timeout is not an assertion and is not scanned."""
@@ -3264,7 +3270,7 @@ def _wall_clock_asserts(source, exempt=()):
             if isinstance(f, ast.Name):
                 if f.id in clocks or f.id in al["clock"]:
                     return True
-                return f.id in ("min", "max", "abs", "sum", "float", "round") and any(
+                return f.id in ("min", "max", "abs", "sum", "int", "float", "round") and any(
                     timed(a, names, al) for a in node.args)
             if isinstance(f, ast.Attribute):
                 if f.attr in ("time", "time_ns"):
@@ -3300,6 +3306,15 @@ def _wall_clock_asserts(source, exempt=()):
                 yield from targets(e)
         elif isinstance(node, ast.Starred):
             yield from targets(node.value)
+
+    def split(target, value):  # an assignment's (target, value) pairs, a tuple or list literal matched in step
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+            if len(target.elts) == len(value.elts) and not any(
+                    isinstance(e, ast.Starred) for e in target.elts + value.elts):
+                for t, v in zip(target.elts, value.elts):
+                    yield from split(t, v)
+            return  # otherwise a shape it cannot match: nothing is tainted, the not-flagging direction
+        yield target, value
 
     def aliases(node, al):  # the (kind, name) aliases node binds; kind: time, datetime (modules), dtclass, clock
         if isinstance(node, ast.Import):
@@ -3362,7 +3377,7 @@ def _wall_clock_asserts(source, exempt=()):
                 changed = bind(nodes, al)
                 for node in nodes:
                     if isinstance(node, ast.Assign):
-                        pairs = [(t, node.value) for t in node.targets]
+                        pairs = [pair for t in node.targets for pair in split(t, node.value)]
                     elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)) and \
                             node.value is not None:
                         pairs = [(node.target, node.value)]
@@ -3431,9 +3446,13 @@ def _wall_clock_alias_fixtures():
            "    self.assertLess(time.clock_gettime(time.CLOCK_MONOTONIC) - t0, 1)\n"
            "def test_be(self):\n    from time import clock_gettime_ns as cg\n    t0 = cg(1)\n"
            "    assert cg(1) - t0 < 10\n"
-           "def test_bf(self):\n    from datetime import *\n    self.assertLess((datetime.today() - t0).seconds, 5)\n")
+           "def test_bf(self):\n    from datetime import *\n    self.assertLess((datetime.today() - t0).seconds, 5)\n"
+           "def test_bj(self):\n    elapsed, n = clock() - t0, 3\n    self.assertLess(elapsed, 1)\n"
+           "def test_bk(self):\n    t0 = time.monotonic()\n    e = int((time.monotonic() - t0) * 1000)\n"
+           "    self.assertLess(e, 500)\n")
     flagged = ["test_i", "test_j", "test_k", "test_l", "test_m", "test_n", "test_o", "test_p", "test_q", "test_r",
-               "test_s", "test_t", "test_ba", "test_bb", "test_bc", "test_bd", "test_be", "test_bf"]
+               "test_s", "test_t", "test_ba", "test_bb", "test_bc", "test_bd", "test_be", "test_bf", "test_bj",
+               "test_bk"]
     good = ("import time as tm\nfrom time import perf_counter as clock\ntick = tm.monotonic\n"
             "import datetime as dt\n"
             "def test_u(self):\n    deadline = clock() + HANG_TIMEOUT\n    out = run(timeout=deadline - clock())\n"
@@ -3451,7 +3470,10 @@ def _wall_clock_alias_fixtures():
             "    self.assertEqual(datetime.date(2026, 9, 24).day, 24)\n"
             "def test_bh(self):\n    t0 = time.clock_gettime(time.CLOCK_MONOTONIC)\n"
             "    lines = run(timeout=HANG_TIMEOUT - (time.clock_gettime(time.CLOCK_MONOTONIC) - t0))\n"
-            "    self.assertEqual(lines.count, 2)\n")
+            "    self.assertEqual(lines.count, 2)\n"
+            "def test_bi(self):\n    started, count = clock(), 3\n    self.assertEqual(count, 3)\n"
+            "    [(t1, n), m] = [(tick(), 4), 5]\n    self.assertEqual(n + m, 9)\n"
+            "    first, *rest = clock(), 1, 2\n    self.assertEqual(rest, [1, 2])\n")
     return bad, flagged, good
 
 
@@ -6186,7 +6208,10 @@ def _self_test():
             """Residual (disclosed): the scan covers direct calls, imported aliases, and assigned aliases within a
             function, not values passed between functions, so a time figure handed to a helper that asserts on it
             is not flagged. Nor is a reading from a clock the scan does not name (os.times, date.today,
-            time.localtime or gmtime, a third-party clock, a file's mtime); see _wall_clock_asserts."""
+            time.localtime or gmtime, a third-party clock, a file's mtime), nor a time figure routed through an
+            expression form the scan does not follow: an assignment expression (walrus), a dict literal, a
+            container built by a comprehension or filled by a store into a subscript, a starred or mismatched
+            unpacking, or any other routing; see _wall_clock_asserts."""
             # every assertion of this file is scanned (see _wall_clock_asserts): none bounds a time figure, a
             # ratio of two time figures excepted, outside the hang-guard tests named in HANG_GUARD_TESTS
             with open(os.path.abspath(__file__), encoding="utf-8") as f:
