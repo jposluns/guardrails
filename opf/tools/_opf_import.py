@@ -3856,7 +3856,7 @@ def _build_promotion_machine_files(store_root_fd, machine_rel, run_rel, candidat
     return files
 
 
-def _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shutil, promoted_run_id):
+def _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shutil, promoted_run_id, homes=1):
     """Copy the live store into a throwaway tempdir PREVIEW and overlay the merged machine files, so the
     preview models the post-promotion store. It ignores the VCS dir and the store-root `.aiqt/` ops trees (at
     the store root only), and drops ONLY the run being promoted from `.working/imports/` -- publication
@@ -3898,8 +3898,9 @@ def _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shuti
         if os.path.abspath(dirpath) == imports_root_abs \
                 and promoted_run_id is not None and promoted_run_id in names:
             drop.add(promoted_run_id)
+        # Homes 2 only: a legacy store's journals/ is an ordinary store path the preview must grade.
         working_abs = os.path.join(os.path.abspath(store_root), _opf_store.WORKING_DIRNAME)
-        if os.path.abspath(dirpath) == working_abs:
+        if homes >= 2 and os.path.abspath(dirpath) == working_abs:
             drop.update(n for n in names if n == _opf_store.JOURNALS_DIRNAME)
         # Exclude exactly this preview destination. Same-named nested directories and sibling
         # staging runs remain visible. This is inert while previews are outside the store.

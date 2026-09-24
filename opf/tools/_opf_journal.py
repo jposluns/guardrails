@@ -1,6 +1,6 @@
-"""Capability-bound store journal API. Existing writers remain on their legacy homes.
+"""Capability-bound store journal API. No store writer uses it yet; writers keep their legacy homes.
 
-Store writers use this API for journal frames and terminal projections. Paths derive from
+Homes-2 store writers must use this API for journal frames and terminal projections. Paths derive from
 kind and run identity; callers cannot choose a destination. Recovery opens existing state
 and refuses a missing journal. It never bootstraps a replacement recovery history.
 
@@ -30,27 +30,32 @@ def _opened(cap, kind, run_id, create):
         raise _journal.JournalError("operation capability is being released or used")
     root_fd = jr_fd = None
     try:
-        if cap._claimant is not None:
-            raise _journal.JournalError("operation capability is being released")
         try:
-            _opf_init_substrate._require_live_capability(cap)
-        except _opf_init_substrate.InitSubstrateError as exc:
-            raise _journal.JournalError(str(exc))
-        root_fd = _opf_store._open_root_fd(cap.store_root)
-        machine_fd = _journal._open_dir_contained(root_fd, cap.machine_rel)
+            if cap._claimant is not None:
+                raise _journal.JournalError("operation capability is being released")
+            try:
+                _opf_init_substrate._require_live_capability(cap)
+            except _opf_init_substrate.InitSubstrateError as exc:
+                raise _journal.JournalError(str(exc))
+            root_fd = _opf_store._open_root_fd(cap.store_root)
+            machine_fd = _journal._open_dir_contained(root_fd, cap.machine_rel)
+            try:
+                st = os.fstat(machine_fd)
+                if (st.st_dev, st.st_ino) != cap._machine_ident:
+                    raise _journal.JournalError("store identity differs from the held capability")
+            finally:
+                os.close(machine_fd)
+            rel = _opf_store.journal_root(kind)
+            if create:
+                _journal.ensure_journal_dirs(root_fd, rel)
+            jr_fd = _journal.open_journal_root_fd(root_fd, rel)
+        except (OSError, _opf_store.StoreError) as exc:
+            raise _journal.JournalError("cannot open store journal: {}".format(exc))
+        # A failure inside the caller's operation is attributed to the operation, not the open.
         try:
-            st = os.fstat(machine_fd)
-            if (st.st_dev, st.st_ino) != cap._machine_ident:
-                raise _journal.JournalError("store identity differs from the held capability")
-        finally:
-            os.close(machine_fd)
-        rel = _opf_store.journal_root(kind)
-        if create:
-            _journal.ensure_journal_dirs(root_fd, rel)
-        jr_fd = _journal.open_journal_root_fd(root_fd, rel)
-        yield root_fd, jr_fd, Path(cap.store_root) / rel / run_id
-    except (OSError, _opf_store.StoreError) as exc:
-        raise _journal.JournalError("cannot open store journal: {}".format(exc))
+            yield root_fd, jr_fd, Path(cap.store_root) / rel / run_id
+        except (OSError, _opf_store.StoreError) as exc:
+            raise _journal.JournalError("store journal operation failed: {}".format(exc))
     finally:
         for fd in (jr_fd, root_fd):
             if fd is not None:

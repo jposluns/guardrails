@@ -169,7 +169,7 @@ def _inventory(root, sources, targets):
             if target is not None and store._target_store_root(target, root) != root:
                 raise PlanError("companion/remote store requires separately scoped investigation")
         resolution = store.resolve_store(root)
-        excluded = [{"path": path, "reason": "store-control"} for path in store.store_control_roots()]
+        excluded = []
         if resolution.status == store.CANNOT_EVALUATE:
             # Prove that this is foreign content with NO candidate store manifest
             # before reading any of its files. Do not infer this from resolver prose.
@@ -185,8 +185,6 @@ def _inventory(root, sources, targets):
                         count += 1
                         if count > MAX_ENTRIES:
                             raise PlanError("store discovery exceeds entry bound")
-                        if entry.name in store.RESERVED_MACHINE_SUBDIRS:
-                            continue
                         st = os.stat(entry.name, dir_fd=wfd, follow_symlinks=False)
                         if stat.S_ISDIR(st.st_mode):
                             child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY
@@ -206,12 +204,22 @@ def _inventory(root, sources, targets):
             if checked.status != store.VALID:
                 raise PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
             excluded.append({"path": resolution.machine_rel, "reason": "machine-store"})
-            import _opf_check
-            cls = _opf_check.classify_containment(manifest, resolution.machine_rel)
-            if cls.malformed or cls.colliding:
-                raise PlanError("; ".join(cls.malformed + cls.colliding))
-            for path in cls.valid_unmanaged:
+            # A legacy store (homes 1) reserves only the imports tree and excludes nothing more; homes 2
+            # also reserves every store control root and excludes it from investigation (spec 14.2).
+            homes = store.homes_generation(manifest)
+            control = list(store.store_control_roots(homes))
+            for path in manifest.get("unmanaged", {}).get("paths", []):
+                # Conservative collision check: do not let an exclusion conceal the
+                # machine subtree, a store control root, or a declared view. Fine-grained store
+                # membership remains the doctor's job, not an adoption-planner reimplementation.
+                path = _path(path)
+                reserved = [resolution.machine_rel] + control
+                reserved += [v["target"] for v in manifest.get("views", {}).values()]
+                if any(_under(path, p) or _under(p, path) for p in reserved):
+                    raise PlanError("unmanaged exclusion overlaps a reserved store path")
                 excluded.append({"path": path, "reason": "registered-unmanaged"})
+            if homes >= 2:
+                excluded.extend({"path": path, "reason": "store-control"} for path in control)
             manifest_digest = _digest(raw)
         else:
             manifest_path = ""

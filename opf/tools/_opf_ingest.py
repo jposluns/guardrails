@@ -324,9 +324,10 @@ def _digest_of(root_fd, rel):
 # root (its `_ignore`, which drops these at the store root only, never a same-named dir nested deeper). Ingest
 # holds NO parallel literal of its own and derives its store-root control exclusion from that one constant, so
 # the two cannot mirror-drift. The store-root .aiqt exclusion still covers legacy import state and
-# AIQT migration machinery until the import writers move. Store-tree homes, including the legacy
-# imports reservation, derive from the containment classifier's control_roots. The self-tests
-# compare the exact prune set with that authority; no evidence or journal subtree is adoption input.
+# AIQT migration machinery until the import writers move. Store-tree control roots derive from the
+# containment classifier's control_roots for the store's homes generation: a legacy store prunes only
+# the imports tree, while homes 2 also prunes the evidence, staging and journal homes. The self-tests
+# compare the exact prune set with that authority in both generations.
 
 
 # The generated PUBLIC deliverables live at the PRODUCT repository root in EVERY topology (spec 5.8;
@@ -1158,12 +1159,13 @@ def admit_row_binding(r, opt):
                                "disabled (ruling 3a requires an explicit dest)".format(sp))
 
 
-def admit_row_scope(scope, sp, base):
+def admit_row_scope(scope, sp, base, homes=1):
     """The PURE static SCOPE admissibility of one worksheet row's (scope, source_path), raising a FINDING
     _DetectError: exactly the scope boundaries detection enforces that are decidable from the frozen path
     and the re-anchor `base` alone (no live tree, no manifest). A STORE-scope row is store-relative and
     detection emits it only from the mandatory `.working/` subtree (the store walk root), never from the
-    reserved imports tree it prunes. A DECLARED-scope row is product-relative and detection never emits one
+    store control roots it prunes for the store's homes generation `homes` (legacy 1 by default: only the
+    imports tree). A DECLARED-scope row is product-relative and detection never emits one
     from the literal product-root `.working/`, from the RESOLVED store working subtree
     (`include_scope_prefixes`), from the store-root control / VCS dirs re-anchored at `base`
     (`_opf_store.STORE_ROOT_CONTROL_DIRS`), or at a store pointer control file. `base` is the store-under-
@@ -1178,7 +1180,7 @@ def admit_row_scope(scope, sp, base):
         if not sp.startswith(working + "/"):
             raise _finding("store-scope row {!r} does not lie in the mandatory store subtree {!r}/ (a store "
                            "row is store-relative and detected only under it)".format(sp, working))
-        if _under_any(sp, _opf_store.store_control_roots()):
+        if _under_any(sp, _opf_store.store_control_roots(homes)):
             raise _finding("store-scope row {!r} lies in reserved store control area, which detection "
                            "prunes wholesale".format(sp))
     elif scope == "declared":
@@ -1652,7 +1654,8 @@ def admit_move_boundary(dest, store_working_rel):
     if dest.split("/", 1)[0] == _opf_store.WORKING_DIRNAME:
         raise _finding("move destination {!r} lies inside .working/ (the store tree); a move target must "
                        "be beneath the product root but OUTSIDE .working".format(dest))
-    if store_working_rel is not None and _opf_store.overlaps_home(dest, store_working_rel):
+    if store_working_rel is not None and (dest == store_working_rel
+                                          or dest.startswith(store_working_rel + "/")):
         raise _finding("move destination {!r} lies inside the RESOLVED store working tree {!r}; a move "
                        "target must be beneath the product root but OUTSIDE the store".format(
                            dest, store_working_rel))

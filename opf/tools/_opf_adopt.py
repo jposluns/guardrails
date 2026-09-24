@@ -444,10 +444,13 @@ def _closed_keyset(table, required, optional):
     return missing, unknown
 
 
-def validate_op(row):
+def validate_op(row, homes=1):
     """Validate ONE AdoptionPlan op row against its ADOPT_OPS definition. A non-table is CANNOT-EVALUATE; an
     op name outside ADOPT_OPS is CANNOT-EVALUATE (out-of-vocabulary refused, never a skip); a table with a
-    known op but a missing/unknown field or a malformed field shape is INVALID."""
+    known op but a missing/unknown field or a malformed field shape is INVALID. `homes` is the store's
+    active homes generation: a legacy store (1, the default) keeps its legacy disposition with no
+    control-area refusal; in homes 2 an operand that equals, contains, or lies within a store control
+    root is INVALID."""
     if not isinstance(row, dict):
         return _cannot("op row is not a table")
     name = row.get("op")
@@ -467,25 +470,34 @@ def validate_op(row):
             continue  # an unknown key was already reported above; do not shape-check it
         if not _valid_field(field, row[field]):
             findings.append("op {!r} field {!r} has a malformed value".format(name, field))
-    # Directory identities (store_root) are not mutation operands. Pack members are relative
-    # to target, so validate their composed destinations as well as ordinary file operands.
-    from _opf_store import require_ordinary_target, store_control_roots, overlaps_home
+    if homes >= 2:
+        findings.extend(_control_operand_findings(name, row, homes))
+    return _ok() if not findings else _invalid(findings)
+
+
+def _control_operand_findings(name, row, homes):
+    """Homes-2 control-area refusal for one op row. Directory identities (store_root) are not
+    mutation operands. Pack members are relative to target, so their composed destinations are
+    checked as well as ordinary file operands. Evidence receipts and retire preimages are not plan
+    operands: the apply engine derives them from the homes constructors through the
+    capability-bound journal API, so a plan row naming a control home is refused."""
+    import posixpath
+    from _opf_store import store_control_roots, overlaps_home
     operands = [row[f] for f in row if _FIELD_KINDS.get(f) == "filepath" and isinstance(row[f], str)]
     if name == "install-pack" and isinstance(row.get("target"), str):
-        import posixpath
         if row["target"] != ".":
             operands.append(row["target"])
         for member in row.get("members", []) if isinstance(row.get("members"), list) else []:
             if isinstance(member, dict) and isinstance(member.get("path"), str):
                 operands.append(posixpath.join(row["target"], member["path"]))
+    findings = []
     for operand in operands:
         try:
-            require_ordinary_target(operand)
-            if any(overlaps_home(operand, home) for home in store_control_roots()):
+            if any(overlaps_home(operand, home) for home in store_control_roots(homes)):
                 raise ValueError("adoption operand overlaps reserved store control area: {!r}".format(operand))
         except ValueError as exc:
             findings.append(str(exc))
-    return _ok() if not findings else _invalid(findings)
+    return findings
 
 
 def _valid_field(field, value):
