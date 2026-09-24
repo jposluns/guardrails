@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inert homes-2 contract and gitignore drift gate (OPF-LAYOUT-HOMES L1).
+"""Inert homes-2 contract and gitignore drift gate (homes 2 is not yet activated).
 
 Checks documented topology against the constructor authority. Text checks protect the planned
 contract, not runtime conformance to homes 2. No store is mutated or required to install a block.
@@ -15,7 +15,7 @@ import _opf_store as store  # noqa: E402
 SPEC = Path(__file__).resolve().parents[1] / "spec" / "OPF-SPEC.md"
 # Scope each wording check to its operative section, never a whole-document negative scan.
 _CONTRACT = {
-    "4.2": ('spec_version = "2.0.0"', "[opf].homes = 2", "until L4", "git common directory",
+    "4.2": ('spec_version = "2.0.0"', "[opf].homes = 2", "until homes 2 is activated", "git common directory",
             "machine-local", "git add -f", "tracked staging or journals", "layout-", "preview-"),
     "4.4": ("MUST NOT be used as a machine subdirectory", "legacy content cannot be re-absorbed"),
     "9.2": ('spec_version = "2.0.0"', "unknown future generations are refused",
@@ -175,7 +175,7 @@ def self_test():
     check("inert-root-exclusions", lambda: store.STORE_ROOT_CONTROL_DIRS == (".git", ".aiqt"))
     source = Path(store.__file__).read_text(encoding="utf-8")
     check("transitional-comment", lambda: "In homes 2, .aiqt is AIQT-only" in source
-          and "Until L4 activates homes 2, legacy import state still" in source)
+          and "Until homes 2 is activated, legacy import state still" in source)
     text = SPEC.read_text(encoding="utf-8")
     check("spec-contract", lambda: not contract_findings(text))
     # Each operative section independently discriminates: removing it must fail the drift gate.

@@ -90,9 +90,10 @@ Two roots organize every path in this standard:
 ### 4.2 Layout overview
 
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
-L1 reserves names and supplies inert constructors only. The reference tooling still supports
-`1.1.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
-legacy paths until L4, after the L3 migration is available. The section 9 manifest example
+This version reserves the names and provides inert constructors only. The reference tooling still
+supports `1.1.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
+legacy paths until homes 2 is activated, which requires the homes migration (`opf upgrade`) to be
+available. The section 9 manifest example
 continues to describe that legacy format. The homes-2 requirements in sections 4.2, 9.2, 12,
 14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.
 
@@ -165,7 +166,7 @@ validity or filesystem safety. File operands use canonical contained relative pa
 dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.
 
 Homes-2 init and upgrade render this managed block into `.working/.gitignore` from the topology
-constants; L1 supplies the renderer and drift gate but installs no block:
+constants; the reference tooling provides the renderer and drift gate but installs no block:
 
 ```gitignore
 # >>> opf-managed >>>
@@ -974,7 +975,7 @@ not yet a committed public contract for third-party authors.
 
 The homes-generation upgrade targets `spec_version = "2.0.0"` with required integer `[opf].homes = 2`.
 Absent or `1` denotes legacy homes for migration; unknown future generations are refused.
-The runtime supported version and init format remain unchanged until L4 activates homes 2.
+The runtime supported version and init format remain unchanged until homes 2 is activated.
 The migration refuses a store resolved outside the product root until a multi-root coordinator exists.
 Unproven legacy `.archive/` entries remain in place with a standing finding until dispositioned.
 

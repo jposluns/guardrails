@@ -87,7 +87,7 @@ POINTER_REL = ".opf.toml"              # committed store pointer, at the PRODUCT
 LOCAL_POINTER_REL = ".opf.local.toml"  # uncommitted machine-local override, resolved FIRST (spec 4.3)
 WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root (spec 4.4)
 # Store-root exclusions, anchored only at the STORE ROOT. In homes 2, .aiqt is AIQT-only
-# content; OPF writes no state here. Until L4 activates homes 2, legacy import state still
+# content; OPF writes no state here. Until homes 2 is activated, legacy import state still
 # lives there. Keep this exclusion for those stores and for AIQT-owned material afterwards.
 # _opf_import._assemble_preview and _opf_ingest derive their root exclusions from this tuple.
 STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
@@ -268,7 +268,7 @@ def txn_record(kind, run_id):
 
 
 def render_homes_gitignore():
-    """Pure homes-2 block renderer. L1 does not install it in any store.
+    """Pure homes-2 block renderer. This version does not install it in any store.
     This is not access control: git add -f can still stage ignored state.
     """
     ignored = (JOURNALS_DIRNAME, STAGING_DIRNAME)
