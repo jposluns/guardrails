@@ -926,7 +926,8 @@ def _require_inline_layout(store_root_fd, machine_rel):
     file this reader never confirmed (a phantom target). The store's declared layout is therefore read from
     the AUTHORITATIVE manifest [opf].layout (guard-input-soundness); any layout other than `inline`,
     or an absent/malformed opf table, is CANNOT-EVALUATE, fail-closed, never a partial inline read of
-    a non-inline store. (per-record support is a disclosed follow-on.)"""
+    a non-inline store. (per-record support is a disclosed follow-on.) Returns the manifest it read, so a
+    caller derives the store's homes generation from this same authoritative read."""
     manifest_rel = "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)
     data = _read_toml(store_root_fd, manifest_rel)
     if data is None:
@@ -939,6 +940,7 @@ def _require_inline_layout(store_root_fd, machine_rel):
                       "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
                       "partial inline read that would miss per-record ids or admit a phantom target)".format(
                           manifest_rel, layout))
+    return data
 
 
 def _active_types(store_root_fd, machine_rel):
@@ -4474,7 +4476,7 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                 active_types = _active_types(root_fd, machine_rel)
                 roster = _roster()
                 registered_vendors = _registered_vendors(root_fd, machine_rel)
-                _require_inline_layout(root_fd, machine_rel)
+                homes = _opf_store.homes_generation(_require_inline_layout(root_fd, machine_rel))
                 cand_counters = _read_toml(root_fd, run_rel + "/candidate/counters.toml")
                 if cand_counters is None:
                     raise _cannot("staged run has no candidate/counters.toml (malformed run; cannot promote)")
@@ -4521,7 +4523,8 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                 import shutil
                 preview_dir = tempfile.mkdtemp(prefix="opf-import-apply-preview-")
                 try:
-                    _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shutil, run_id)
+                    _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shutil, run_id,
+                                      homes=homes)
                     view_files = _reconcile_preview_views(
                         preview_dir, root_fd, machine_rel, product_root)
                     if set(view_files) & set(machine_files):
@@ -7232,6 +7235,48 @@ def self_test():
         check("A10-promoted-run-dropped-sibling-retained",
               not (prevA10 / ".working" / "imports" / prom_run_a10).exists()
               and (prevA10 / ".working" / "imports" / sib_run_a10 / "y.toml").is_file())
+        # A11: apply hands the preview the store's homes generation, derived from the manifest the inline-
+        # layout gate reads: a legacy store stays generation 1 and an activated homes-2 store reaches the
+        # homes-2 preview. The spy stops apply at the preview, before anything is promoted.
+        from unittest.mock import patch as _patch_a11
+
+        class _PreviewReached(BaseException):
+            pass
+
+        def _a11_generation(generation):
+            root, mdir = build_apply_store()
+            planned = plan_import(root, ["a.txt"], now=NOW, run_nonce="apply-a11-{}".format(generation))
+            review_accept_all(root, planned.run_id)
+            if generation == 2:
+                model = tomllib.loads((mdir / "manifest.toml").read_text(encoding="utf-8"))
+                model["opf"]["homes"] = 2
+                (mdir / "manifest.toml").write_text(_opf_emit.emit_checked(model), encoding="utf-8")
+            seen = []
+            real_validate = _opf_store.validate_manifest
+
+            def spy(*_args, **kwargs):
+                seen.append(kwargs.get("homes", 1))
+                raise _PreviewReached
+
+            def validate_declared(data, *args, **kwargs):
+                # The homes declaration is not yet a manifest schema key: validate the rest as shipped.
+                opf = data.get("opf") if isinstance(data, dict) else None
+                if isinstance(opf, dict) and "homes" in opf:
+                    data = dict(data, opf=dict((k, v) for k, v in opf.items() if k != "homes"))
+                return real_validate(data, *args, **kwargs)
+
+            with _patch_a11.object(_opf_store, "SUPPORTED_HOMES", generation), \
+                    _patch_a11.object(_opf_store, "HOMES2_SPEC_VERSION", _opf_store.SUPPORTED_SPEC_VERSION), \
+                    _patch_a11.object(_opf_store, "validate_manifest", validate_declared), \
+                    _patch_a11.object(sys.modules[__name__], "_assemble_preview", spy):
+                try:
+                    apply_import(root, planned.run_id, now=NOW)
+                except _PreviewReached:
+                    pass
+            return seen
+
+        check("A11-legacy-preview-generation", _a11_generation(1) == [1])
+        check("A11-homes2-preview-generation", _a11_generation(2) == [2])
 
         # ======================= round-4 fix discriminators (change-carries-check) =======================
         # The round-4 fixes (N1 TOML-aware manifest flip, F5b store-root imports anchor, N2 close-quietly

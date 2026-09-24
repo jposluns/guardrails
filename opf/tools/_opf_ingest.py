@@ -138,14 +138,15 @@ class DetectResult:
     output. On a clean detection `worksheet` is the frozen, canonical worksheet payload (carrying its own
     `worksheet_digest`), `rows` the ordered disposition rows, and `worksheet_digest` the reproducibility
     anchor. Detect writes NOTHING and allocates no run id (SECI-preview-has-no-side-effects)."""
-    __slots__ = ("verdict", "findings", "worksheet", "worksheet_digest", "rows")
+    __slots__ = ("verdict", "findings", "worksheet", "worksheet_digest", "rows", "homes")
 
-    def __init__(self, verdict, findings=None, worksheet=None, worksheet_digest=None, rows=None):
+    def __init__(self, verdict, findings=None, worksheet=None, worksheet_digest=None, rows=None, homes=1):
         self.verdict = verdict                    # CLEAN / FINDING / CANNOT_EVALUATE
         self.findings = findings or []
         self.worksheet = worksheet or {}
         self.worksheet_digest = worksheet_digest
         self.rows = rows or []
+        self.homes = homes                        # the store homes generation the detection pruned by
 
 
 class _DetectError(Exception):
@@ -823,7 +824,8 @@ def _detect_declared_scope(product_root, include, leaf, subtree, store_working_r
 def _detect_rows(product_root, resolution, include):
     """Assemble the ordered disposition rows: the mandatory store scope plus the opt-in declared scope. The
     rows are sorted by (source_path bytes, scope) so the worksheet digest is invariant to enumeration and
-    `--include` order (determinism)."""
+    `--include` order (determinism). Returns (rows, homes): the store homes generation is derived from the
+    same validated manifest re-read that fixes the exclusions."""
     store_fd = _opf_store._open_store_root_fd(resolution.store_root,
                                               resolution.pointer_source != "default")
     try:
@@ -843,8 +845,8 @@ def _detect_rows(product_root, resolution, include):
                 manifest_rel, reval.status, "; ".join(reval.findings)))
         prune, store_leaf, store_subtree, declared_leaf, declared_subtree = _managed_paths(
             resolution, manifest_data)
-        rows = _detect_store_scope(store_fd, prune, store_leaf, store_subtree,
-                                   homes=_opf_store.homes_generation(manifest_data))
+        homes = _opf_store.homes_generation(manifest_data)
+        rows = _detect_store_scope(store_fd, prune, store_leaf, store_subtree, homes=homes)
     finally:
         os.close(store_fd)
     if include:
@@ -856,7 +858,7 @@ def _detect_rows(product_root, resolution, include):
         rows += _detect_declared_scope(product_root, include, declared_leaf, declared_subtree,
                                        _store_working_under_product(resolution))
     rows.sort(key=lambda r: (r["source_path"].encode("utf-8"), r["scope"]))
-    return rows
+    return rows, homes
 
 
 def detect(product_root, include=None):
@@ -892,7 +894,7 @@ def detect(product_root, include=None):
             raise _cannot("store manifest is not VALID ({}: {}); run `opf init` first".format(
                 mv.status, "; ".join(mv.findings)))
 
-        rows = _detect_rows(product_root, resolution, include)
+        rows, homes = _detect_rows(product_root, resolution, include)
         worksheet, digest = _build_worksheet(rows)
         # Validate the assembled worksheet against its own validator BEFORE returning CLEAN: `validate_worksheet`
         # is the SINGLE authority on what is a legal worksheet, so a source_path detection accepted (the
@@ -907,7 +909,7 @@ def detect(product_root, include=None):
             raise _cannot("the assembled worksheet fails its own validator (fail-closed, never a clean "
                           "detection whose worksheet is invalid); detected source_path(s): {}; findings: "
                           "{}".format(bad, "; ".join(ws_findings)))
-        return DetectResult(CLEAN, worksheet=worksheet, worksheet_digest=digest, rows=rows)
+        return DetectResult(CLEAN, worksheet=worksheet, worksheet_digest=digest, rows=rows, homes=homes)
     except _DetectError as exc:
         return DetectResult(exc.verdict, [exc.message])
     except _journal.JournalError as exc:
@@ -1445,8 +1447,8 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                 admit_row_binding(r, opt)
                 # Static scope admissibility (the SHARED admit_row_scope authority the review gate applies to
                 # the frozen worksheet): defence in depth behind the reconcile above, which already requires
-                # every row to be one detection emitted.
-                admit_row_scope(r["scope"], sp, reanchor_base)
+                # every row to be one detection emitted, under the generation that fresh detection pruned by.
+                admit_row_scope(r["scope"], sp, reanchor_base, homes=fresh.homes)
                 resolved_sp = _resolve_by_scope(r["scope"], sp)
                 if resolved_sp in expected:
                     raise _cannot("worksheet row {!r} and another row both resolve to product path {!r}; "
@@ -3236,6 +3238,44 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                              "duplicate resolved_source_path")
                 finally:
                     _gate_ing.admit_row_scope = _real_scope
+
+                # The gate's static scope check uses the store homes generation its caller supplies: a store
+                # row in the journal home is refused as a control-area row only for a homes-2 store, an
+                # unsupplied generation cannot evaluate once homes 2 can be active, and legacy is unchanged.
+                def _journal_row(b):
+                    keep_row = first(b["worksheet"]["row"], source_path="legacy/keep.md")
+                    twin = dict(keep_row, scope="store", source_path=".working/journals/keep.md")
+                    b["worksheet"]["row"].append(twin)
+                    restamp(b)
+                    b["crosswalk"].append(derive_crosswalk_row(twin, ".working/journals/keep.md"))
+
+                def scope_detail(**gate):
+                    snap = snapshot_run()
+                    try:
+                        b = copy.deepcopy(pristine)
+                        _journal_row(b)
+                        rebind(run, b)
+                        return _chk.check_staged_run(rundir, **gate)["ingest-source-binding"]
+                    finally:
+                        restore_run(snap)
+
+                legacy_scope = scope_detail()
+                check("pr4b-homes-legacy-journal-row-admissible", legacy_scope[0] is False
+                      and "not scope-admissible" not in legacy_scope[1])
+                check("pr4b-homes-legacy-explicit-unchanged", scope_detail(homes=1) == legacy_scope)
+                _prior_homes = _opf_store.SUPPORTED_HOMES
+                _opf_store.SUPPORTED_HOMES = 2
+                try:
+                    homes2_scope = scope_detail(homes=2)
+                    check("pr4b-homes2-journal-row-refused", homes2_scope[0] is False
+                          and "reserved store control area" in homes2_scope[1])
+                    unbound_scope = scope_detail()
+                    check("pr4b-homes2-unsupplied-generation-cannot", unbound_scope[0] is False
+                          and "homes generation was not supplied" in unbound_scope[1])
+                    homes2_clean = _chk.check_staged_run(rundir, homes=2)
+                    check("pr4b-homes2-coherent-run-passes", all(homes2_clean[cid][0] for cid in _pr4b_ids))
+                finally:
+                    _opf_store.SUPPORTED_HOMES = _prior_homes
 
                 # A-m4 (PROPOSALS DOCUMENT RE-DERIVE-AND-EQUAL): the staged importer proposals REVERSED (each
                 # row still valid, confined, counted, and the report regenerated to match) no longer equal the

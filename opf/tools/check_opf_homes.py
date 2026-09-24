@@ -213,6 +213,7 @@ def boundary_self_test():
     directories = {".working"}
     listed = []
     unreadable = set()
+    vanished = set()
     inventories = {}
 
     def listing(_fd, rel):
@@ -221,7 +222,7 @@ def boundary_self_test():
             raise AssertionError("doctor read journals")
         if rel in unreadable or rel in files:
             raise store.StoreError("unreadable or wrong-type input: " + rel)
-        if rel not in directories:
+        if rel not in directories or rel in vanished:
             return None, None
         prefix = rel + "/"
         dirs = sorted(d[len(prefix):] for d in directories if d.startswith(prefix) and "/" not in d[len(prefix):])
@@ -239,6 +240,7 @@ def boundary_self_test():
         directories.add(".working")
         inventories.clear()
         unreadable.clear()
+        vanished.clear()
 
     def read_toml(_fd, rel, rep):
         if rel.startswith(".working/journals/") or not store.is_evidence_inventory_name(rel.rsplit("/", 1)[-1]):
@@ -355,6 +357,15 @@ def boundary_self_test():
                                                                  for s in evidence().findings))
             del files[orphan + "/file"]
             directories.discard(orphan)
+            # A bundle its parent listed but that is gone when it is listed itself is a race, not an
+            # empty bundle: its claims are unknown, so the walk cannot evaluate rather than pass.
+            raced = ".working/imported/import/" + run.replace("0123", "89ab")
+            directories.add(raced)
+            vanished.add(raced)
+            check("evidence-bundle-vanished-cannot", lambda: any(
+                "vanished" in s for s in evidence().cannot) and not evidence().findings)
+            vanished.clear()
+            directories.discard(raced)
             probe = adoption + "/probe.toml"
             add(probe, b"retained")
             check("evidence-unclaimed-phase-member", lambda: graded(evidence(), probe))
@@ -377,7 +388,9 @@ def boundary_self_test():
             good = copy.deepcopy(inventories)
             # A claim on another bundle's member or another run's preimage is refused on its own, so the
             # rightful owner's inventory drops that row here rather than masking it as a duplicate claim.
+            # An import bundle claiming a preimage path under its OWN run id is refused by its kind alone.
             sole = {"cross-bundle": doc(row(preimage)), "foreign-preimage": doc(row(receipt))}
+            own_preimage = ".working/archive/adoption/" + run + "/file"
             # Every malformed or unreadable inventory is cannot-evaluate and grades nothing partially.
             for label, broken in (
                     ("format", dict(doc(), format="unsupported")),
@@ -389,6 +402,7 @@ def boundary_self_test():
                     ("wrong-prefix", doc(dict(row(source), path=source[len(".working/"):]), row(moved))),
                     ("cross-bundle", doc(row(source), row(moved), row(receipt))),
                     ("foreign-preimage", doc(row(source), row(moved), row(preimage))),
+                    ("import-own-run-preimage", doc(row(source), row(moved), row(own_preimage))),
                     ("lists-inventory", doc(row(source), row(moved), row(inventory))),
                     ("boolean-size", doc(dict(row(source), size=True), row(moved))),
                     ("negative-size", doc(dict(row(source), size=-1), row(moved))),
@@ -401,11 +415,13 @@ def boundary_self_test():
             inventories[adoption + "/inventory.toml"] = doc(row(receipt), row(preimage), row(moved))
             check("evidence-cross-duplicate-refused", lambda: bool(evidence().cannot))
             inventories.update(copy.deepcopy(good))
+            # An unreadable or vanished inventory leaves its bundle's claims unknown: cannot-evaluate
+            # only, never a partial reconciliation grading the rest of the homes without those claims.
             unreadable.add(inventory)
-            check("evidence-unreadable-inventory", lambda: bool(evidence().cannot))
+            check("evidence-unreadable-inventory", lambda: bool(evidence().cannot) and not evidence().findings)
             unreadable.clear()
             del inventories[inventory]
-            check("evidence-vanished-inventory", lambda: bool(evidence().cannot))
+            check("evidence-vanished-inventory", lambda: bool(evidence().cannot) and not evidence().findings)
             inventories.update(copy.deepcopy(good))
             unreadable.add(".working/imported")
             check("evidence-unreadable-root", lambda: bool(evidence().cannot))
@@ -650,6 +666,98 @@ def boundary_self_test():
     # An unresolved store with a candidate manifest under a reserved name still requires repair.
     for name in store.RESERVED_MACHINE_SUBDIRS:
         check("investigation-unresolved-reserved-" + name, lambda n=name: unresolved_manifest(n))
+
+    # Every generation-dependent call site derives the generation from the store's own manifest read, so a
+    # homes-2 store reaches the control-area refusal there and a legacy store is graded exactly as before.
+    import datetime
+    import tomllib
+    same = SimpleNamespace(st_dev=1, st_ino=1, st_mode=stat.S_IFDIR, st_nlink=1, st_size=0,
+                           st_mtime_ns=0, st_ctime_ns=0)
+    control_op = dict(create, path=".working/journals/file")
+    utc = datetime.datetime(2026, 9, 17, 12, tzinfo=datetime.timezone.utc)
+
+    def planned(generation, op):
+        model = manifest2 if generation == 2 else manifest
+        resolved = SimpleNamespace(status=store.RESOLVED, machine_rel=machine, detail="", pointer_source="default")
+        with patch.object(store, "SUPPORTED_HOMES", generation), \
+                patch.object(store._journal, "require_containment"), \
+                patch.object(store, "_open_dir_nofollow", return_value=-1), \
+                patch.object(planning.os, "fstat", return_value=same), \
+                patch.object(planning.os, "close"), \
+                patch.object(store, "_read_pointer_target", return_value=None), \
+                patch.object(store, "resolve_store", return_value=resolved), \
+                patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
+                patch.object(planning, "_read_rel", return_value=emit.emit_checked(model).encode()), \
+                patch.object(store._journal, "_open_parent", side_effect=FileNotFoundError), \
+                patch.object(adopt, "validate_plan", wraps=adopt.validate_plan) as frozen:
+            observed = planning.investigate(Path("/store"), sources=[])
+            result = planning.plan(
+                Path("/store"), sources=[], product="opf", decisions=[], ops=[op],
+                expected_observation_digest=tomllib.loads(observed.observation.decode())["observation_digest"],
+                now=utc, run_nonce="0123456789abcdef")
+        return result, [c.kwargs.get("homes") for c in frozen.call_args_list]
+
+    homes2_plan, _ = planned(2, control_op)
+    legacy_plan, legacy_frozen = planned(1, control_op)
+    ordinary_plan, ordinary_frozen = planned(2, dict(create, path="notes.txt"))
+    # Each op loop refuses on its own (its exact findings), not only through the frozen-plan revalidation.
+    refused = tuple(adopt.validate_op(control_op, homes=2).findings)
+    check("plan-homes2-control-op-refused", lambda: homes2_plan.status == store.INVALID and homes2_plan.plan is None
+          and bool(refused) and homes2_plan.findings == refused)
+    control_retire = dict(op="retire-file", path=".working/journals/file", preimage_digest="sha256:" + "0" * 64)
+    with patch.object(planning, "_decisions", return_value=([control_retire], [])):
+        retired, _ = planned(2, dict(create, path="notes.txt"))
+        legacy_retired, _ = planned(1, dict(create, path="notes.txt"))
+    check("plan-homes2-control-disposition-refused", lambda: retired.status == store.INVALID
+          and retired.findings == tuple(adopt.validate_op(control_retire, homes=2).findings) != ())
+    check("plan-legacy-control-disposition-planned", lambda: legacy_retired.status == store.VALID)
+    check("plan-legacy-control-op-planned", lambda: legacy_plan.status == store.VALID and legacy_frozen == [1])
+    check("plan-homes2-frozen-plan-bound", lambda: ordinary_plan.status == store.VALID and ordinary_frozen == [2])
+    check("plan-validate-homes2-refused", lambda: adopt.validate_plan(
+        tomllib.loads(legacy_plan.plan.decode()), homes=2).status == store.INVALID)
+    check("plan-validate-legacy-unchanged", lambda: adopt.validate_plan(
+        tomllib.loads(legacy_plan.plan.decode())).status == store.VALID)
+
+    same_root = SimpleNamespace(status=store.RESOLVED, machine_rel=machine, store_root=Path("/store"),
+                                product_root=Path("/store"), pointer_source="default", detail="")
+
+    def detected_rows(generation):
+        with patch.object(store, "SUPPORTED_HOMES", generation), \
+                patch.object(store, "_open_store_root_fd", return_value=-1), patch.object(ingest.os, "close"), \
+                patch.object(store, "_read_toml_contained", return_value=copy.deepcopy(manifest2)), \
+                patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
+                patch.object(ingest, "_managed_paths", return_value=(set(), set(), set(), set(), set())), \
+                patch.object(ingest, "_detect_store_scope", return_value=[]) as walked:
+            return ingest._detect_rows("/store", same_root, None), walked.call_args.kwargs.get("homes")
+
+    check("detect-rows-homes2-generation", lambda: detected_rows(2) == (([], 2), 2))
+    check("detect-rows-legacy-generation", lambda: detected_rows(1) == (([], 1), 1))
+    with patch.object(journal, "require_containment"), patch.object(store, "resolve_store", return_value=same_root), \
+            patch.object(store, "load_manifest", return_value=SimpleNamespace(status=store.VALID, findings=[])), \
+            patch.object(ingest, "_detect_rows", return_value=([], 2)), \
+            patch.object(ingest, "validate_worksheet", return_value=[]):
+        check("detect-result-carries-generation", lambda: ingest.detect("/store").homes == 2)
+
+    def ingest_planned(generation):
+        journal_row = dict(scope="store", source_path=".working/journals/notes.md", disposition="keep", note="")
+        with patch.object(journal, "require_containment"), \
+                patch.object(ingest, "validate_worksheet", return_value=[]), \
+                patch.object(ingest, "validate_options", return_value=[]), \
+                patch.object(ingest, "detect", return_value=ingest.DetectResult(ingest.CLEAN, homes=generation)), \
+                patch.object(ingest, "_reconcile_worksheet_against_detect"), \
+                patch.object(store, "resolve_store", return_value=same_root), \
+                patch.object(store, "_open_root_fd", return_value=-1), patch.object(ingest.os, "close"), \
+                patch.object(ingest, "_digest_of", side_effect=_Reached):
+            try:
+                result = ingest.plan_ingest("/store", dict(row=[journal_row]), dict(option=[]), now=utc,
+                                            run_nonce="0123456789abcdef")
+            except _Reached:
+                return "admitted"
+        return result.verdict, " ".join(result.findings)
+
+    check("ingest-plan-homes2-control-row-refused", lambda: ingest_planned(2)[0] == ingest.FINDING
+          and "reserved store control area" in ingest_planned(2)[1])
+    check("ingest-plan-legacy-row-admitted", lambda: ingest_planned(1) == "admitted")
 
     check("internal-api-capability-required", lambda: refuses(
         lambda: home_journal.run_transaction(object(), "import", run, [], lambda _name: b"")))

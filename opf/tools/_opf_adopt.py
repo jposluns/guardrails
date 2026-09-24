@@ -531,9 +531,10 @@ def _valid_field(field, value):
     return False  # an unclassified field kind fails closed
 
 
-def validate_plan(plan):
+def validate_plan(plan, homes=1):
     """Validate an AdoptionPlan. A non-table is CANNOT-EVALUATE; an unknown product / a per-op
-    out-of-vocabulary name propagates CANNOT-EVALUATE; any other schema violation is INVALID."""
+    out-of-vocabulary name propagates CANNOT-EVALUATE; any other schema violation is INVALID. `homes`
+    is the store's active homes generation, applied to every op row as validate_op applies it."""
     if not isinstance(plan, dict):
         return _cannot("adoption plan is not a table")
     findings = []
@@ -563,7 +564,7 @@ def validate_plan(plan):
         if not ops:
             findings.append("plan 'ops' is empty (a plan must carry at least one op)")
         for i, row in enumerate(ops):
-            res = validate_op(row)
+            res = validate_op(row, homes=homes)
             if res.status == CANNOT_EVALUATE:
                 return _cannot("plan op[{}]: {}".format(i, "; ".join(res.findings)))
             if res.status == INVALID:
