@@ -255,26 +255,27 @@ REPORT_MD_NAME = "IMPORT-REPORT.md"
 # proposals.toml + run id and the review path reads machine data only, never the human-readable report.
 PROPOSALS_NAME = "proposals.toml"
 
-# --- OPF-MIGRATE MIG-PR4a: the FROZEN ingest review-evidence bundle -----------------------------------
-# The review/acceptance step (PR-4) validates a FROZEN staged snapshot (ratified acceptance model A5), so
-# MIG-PR4a freezes the review evidence a later acceptance-capture slice (PR-4c) reads into ONE additive,
+# --- The FROZEN ingest review-evidence bundle ------------------------------------------------------------
+# The review/acceptance step validates a FROZEN staged snapshot (the ratified acceptance model), so the
+# planner freezes the review evidence that ingest acceptance capture reads into ONE additive,
 # store-native TOML artefact staged beside the promotion candidate. It EMBEDS the review-only inputs that
 # are otherwise NOT staged (the original triaged worksheet with its recomputed digest, the ingest-options /
 # --include declaration incl. explicit-dest-vs-default, the scoped resolution crosswalk, and each migrate
 # row's importer selection + validated result count, preserving a zero-candidate / zero-proposal result),
 # and BINDS the already-staged artefacts by DIGEST rather than duplicating them (the baseline plan via the
 # report's plan_digest, the frozen inventory, ingest-actions.toml, candidates_draft.toml, proposals.toml).
-# It NEVER redefines plan_digest (A1: acceptance carries an explicit ingest/action binding, not a new
-# digest authority). Its presence is ALSO a non-promotable ingest marker (recognized at apply) and makes an
-# ingest run non-reviewable until PR-4c (recognized at both review entry points). Canonical _opf_emit TOML,
-# matching the house convention (the plan's canonical-JSON residual is reconciled to TOML here too).
+# It NEVER redefines plan_digest (acceptance carries an explicit ingest/action binding, not a new digest
+# authority). Its presence is ALSO a non-promotable ingest marker (recognized at apply) and routes an ingest
+# run to durable ingest acceptance capture (recognized at both review entry points). Canonical _opf_emit
+# TOML, matching the house convention (the plan's canonical-JSON residual is reconciled to TOML here too).
 INGEST_REVIEW_NAME = "ingest-review.toml"
 INGEST_REVIEW_FORMAT = "opf-ingest-review-bundle-v2"
-# The ingest-only artefacts whose presence makes a run a NON-PROMOTABLE, NON-REVIEWABLE root-ingest plan in
-# this build. apply_import refuses on ANY of these BEFORE any journal/lock work; the review entry points
-# refuse acceptance capture on ANY of these (PR-4c not yet implemented). ingest-actions.toml stays the
-# FIRST-staged marker (round-2 P1-1); the others are recognized for defence in depth (a partially-staged
-# leftover, or any unforeseen ordering, is still refused; marginal cost one lstat each).
+# The ingest-only artefacts whose presence makes a run a NON-PROMOTABLE root-ingest plan in this build.
+# apply_import refuses on ANY of these BEFORE any journal/lock work; the review entry points route a run
+# carrying ANY of these to ingest acceptance capture (durable evidence home only), never to ordinary
+# fragment review. ingest-actions.toml stays the FIRST-staged marker; the others are recognized for
+# defence in depth (a partially-staged leftover, or any unforeseen ordering, is still refused; marginal
+# cost one lstat each).
 _INGEST_RUN_MARKERS = (INGEST_ACTIONS_NAME, CANDIDATES_DRAFT_NAME, INGEST_REVIEW_NAME)
 
 # The attributed acceptance record (spec 14.1), captured by `--review` and bound to the exact run. It is the
@@ -3226,12 +3227,19 @@ def _require_review_gate(run_dir):
 def _validate_frozen_losses(rd, bundle, docs):
     """Validate frozen loss against staged bytes; never invoke an importer."""
     import _opf_importers as importers
+    # The bytes come from the migrate row's resolved source in run.toml (the identity the gate binds to the
+    # worksheet and to the preserved bytes), never from the loss entry's own digest, so a loss entry that
+    # describes another preserved source fails its digest binding rather than validating against it.
+    staged = {s["path"]: s["sha256"] for s in docs["run.toml"]["source"]}
     for m in bundle["migrate"]:
         loss = m["loss"]
         problems = importers._validate_source_entry(loss, "frozen loss")
         if problems:
             raise _cannot("; ".join(problems))
-        raw = rd.read_bytes("sources/" + loss["source_digest"].removeprefix("sha256:"))
+        bound = staged.get(m["resolved_source_path"])
+        if bound is None:
+            raise _cannot("frozen conversion {} resolves to no staged source".format(m["source_path"]))
+        raw = rd.read_bytes("sources/" + bound)
         source = {"path": m["resolved_source_path"], "raw": raw, "sha256": _sha256_hex(raw), "size": len(raw)}
         candidates = [{k: c[k] for k in ("draft_ref", "type", "record")}
                       for c in docs[CANDIDATES_DRAFT_NAME]["candidate"]
@@ -3441,9 +3449,14 @@ def _read_ingest_acceptance(root_fd, run_id):
             return None
         raw, _st = _journal._read_contained(fd, ACCEPTANCE_NAME)
         try:
-            return _strict_json(raw)
+            record = _strict_json(raw)
         except (ValueError, RecursionError) as exc:
             raise _cannot("durable acceptance is malformed ({}); create a fresh run".format(exc))
+        # None is reserved for observed absence: a present record that decodes to JSON null, or to any other
+        # non-object, is malformed evidence, never "not yet reviewed".
+        if not isinstance(record, dict):
+            raise _cannot("durable acceptance is not a JSON object; retain it and create a fresh run")
+        return record
     finally:
         os.close(fd)
 
@@ -3515,8 +3528,11 @@ def _capture_ingest_review(resolution, run_id, actor, decisions, ingest, clock):
             prior_binding, prior_complete, prior_rejected = validate_ingest_acceptance(current, prior)
             if prior_binding or prior_complete:
                 raise _cannot("prior acceptance changed during capture; retain it and create a fresh run")
-            if prior_rejected and not _rejected:
-                raise _cannot("a recorded rejection requires a fresh plan; it cannot be relabelled in place")
+            # A recorded rejection is attributed evidence: any capture over it (a relabel to accept, a swapped
+            # reject, or a re-reject by another actor) would replace that evidence, so capture refuses.
+            if prior_rejected:
+                raise _cannot("a recorded rejection requires a fresh plan; it is retained as evidence and "
+                              "cannot be replaced or relabelled in place")
     finally:
         os.close(fd)
     rel = _stage_acceptance(resolution, home, data)
@@ -3645,7 +3661,8 @@ def _ingest_review_changes(previous, current):
 
 def review_import(product_root, run_id, *, actor, decisions, now, ingest=None, clock=None):
     """Capture an attributed acceptance record over a staged import run (spec 14.1), writing
-    `acceptance.json` into the run dir. This is the batch (decisions-list) contract surface; the interactive
+    `acceptance.json` into the run dir for an ordinary run, or only into the durable evidence home for an
+    ingest run. This is the batch (decisions-list) contract surface; the interactive
     front-end funnels into it. It NEVER mutates the active store and NEVER re-plans: it records accept/reject
     decisions and binds them to the exact run (run id + plan digest + inventory digest), so a regenerated
     plan (a new run) invalidates a prior acceptance by construction. A recorded reject makes a later apply
@@ -5671,13 +5688,19 @@ def _self_test_ingest_acceptance(check):
         entry["sha256"] = _sha256_hex(files[entry["path"]])
     files["report.toml"] = _emit_bytes(report, "report")
     check("accept-full-model-counters", _ingest_snapshot(reader)["binding"]["review_model_digest"] != before_model)
-    for name in ("report.toml", REPORT_MD_NAME):
+    # Flip: a refusal that comes only from the TOML parser admits the parse-valid report.toml tail;
+    # IMPORT-REPORT.md is never parsed, so its tail reaches only the byte-reproducibility check.
+    for name, tail in (("report.toml", b"# parse-valid, not byte-re-derivable\n"),
+                       (REPORT_MD_NAME, b"corruption")):
         prior = files[name]
-        files[name] += b"corruption"
+        files[name] += tail
         try:
+            if name == "report.toml":
+                check("accept-report-tail-parses",
+                      tomllib.loads(files[name].decode()) == tomllib.loads(prior.decode()))
             _ingest_snapshot(reader)
             refused = False
-        except Exception:
+        except _StageError:
             refused = True
         finally:
             files[name] = prior
@@ -5738,6 +5761,8 @@ def _self_test_ingest_acceptance(check):
     check("accept-envelope-v1", cli._import_decode_decisions(
         _emit_acceptance_bytes({"schema": 1, "run_id": rid, "decisions": []}), rid) == [])
     check("accept-template-undecided", all("decision" not in u for u in envelope["ingest"]["units"]))
+    # Flip: a statement placed above the docstring leaves the import verb undocumented (__doc__ is None).
+    check("accept-cli-import-doc", cli._cmd_import.__doc__ is not None)
     # Flip: a subset pass, an extra result, a bool-like value, and a duplicate registry must each refuse.
     for results, registry in (({}, ("a",)), ({"a": (True, "")}, ("a", "b")),
                               ({"a": (1, "")}, ("a",)), ({"a": (True, 1)}, ("a",)),
@@ -5749,7 +5774,8 @@ def _self_test_ingest_acceptance(check):
             refused = True
         check("accept-gate-contract", refused)
     _require_gate_results({"a": (True, "")}, ("a",))
-    # Flip: the old shared format and count-only loss check fail the frozen-loss negatives.
+    # Flip: the old shared format and count-only loss check fail the frozen-loss negatives; selecting the
+    # validated bytes by the loss entry's own digest admits the cross-source substitution.
     raw = b"- [ ] synthetic task\n"
     source = {"path": "a", "raw": raw, "sha256": _sha256_hex(raw), "size": len(raw)}
     result = importers.run_importer("github-tasklist", source)
@@ -5757,15 +5783,23 @@ def _self_test_ingest_acceptance(check):
     row = {"scope": "declared", "source_path": "a", "resolved_source_path": "a",
            "importer_kind": "github-tasklist", "candidate_count": len(result.candidates),
            "proposal_count": len(result.proposals), "loss": result.lossy}
-    docs = {CANDIDATES_DRAFT_NAME: {"candidate": [dict(c, source_path="a") for c in result.candidates]},
+    docs = {"run.toml": {"source": [{"path": "a", "sha256": source["sha256"], "size": len(raw)}]},
+            CANDIDATES_DRAFT_NAME: {"candidate": [dict(c, source_path="a") for c in result.candidates]},
             PROPOSALS_NAME: {"proposal": [dict(p, origin=_IMPORTER_PROPOSAL_ORIGIN) for p in result.proposals]}}
+    # A second preserved source whose own importer output is self-consistent under the same path "a".
+    other_raw = b"- [ ] a different, longer synthetic task\n"
+    other = importers.run_importer("github-tasklist", dict(
+        source, raw=other_raw, sha256=_sha256_hex(other_raw), size=len(other_raw)))
+    check("accept-loss-other-fixture", other.verdict == CLEAN)
+    staged = {"sources/" + source["sha256"]: raw, "sources/" + _sha256_hex(other_raw): other_raw}
     class Reader:
         def read_bytes(self, name):
-            if name != "sources/" + source["sha256"]:
-                raise ValueError("unexpected source")
-            return raw
+            if name not in staged:
+                raise _cannot("unexpected staged read: " + name)
+            return staged[name]
     _validate_frozen_losses(Reader(), {"migrate": [row]}, docs)
-    for mutation in ("shrink-proposal", "loss-gap", "loss-overlap", "missing-loss", "extra-loss"):
+    for mutation in ("shrink-proposal", "loss-gap", "loss-overlap", "missing-loss", "extra-loss",
+                     "cross-source"):
         m, ds = copy.deepcopy(row), copy.deepcopy(docs)
         if mutation == "shrink-proposal":
             ds[PROPOSALS_NAME]["proposal"][0]["span"][1] -= 1
@@ -5775,6 +5809,10 @@ def _self_test_ingest_acceptance(check):
             m["loss"]["span"].append(copy.deepcopy(m["loss"]["span"][0]))
         elif mutation == "missing-loss":
             m.pop("loss")
+        elif mutation == "cross-source":
+            m["loss"] = copy.deepcopy(other.lossy)
+            ds[CANDIDATES_DRAFT_NAME]["candidate"] = [dict(c, source_path="a") for c in other.candidates]
+            ds[PROPOSALS_NAME]["proposal"] = [dict(p, origin=_IMPORTER_PROPOSAL_ORIGIN) for p in other.proposals]
         else:
             m["loss"]["extra"] = {}
         try:
@@ -5857,8 +5895,6 @@ def _self_test_ingest_acceptance(check):
             except _StageError:
                 refused = True
             check("accept-intake-eof-invalid", refused)
-    check("accept-intake-non-tty", review_import_interactive(
-        "/synthetic", rid, actor="reviewer", now=None, in_stream=io.StringIO()).verdict == CANNOT_EVALUATE)
 
 
     stamp = datetime.datetime(2026, 9, 9, 12, 1, tzinfo=datetime.timezone.utc)
@@ -5915,10 +5951,13 @@ def _self_test_ingest_capture_run(root, run, now, check):
 
     # Flip: creating homes inside review would turn this refusal into a write.
     check("accept-home-not-provisioned", capture().verdict == CANNOT_EVALUATE)
-    check("accept-home-not-activated", review_import(root, run.name, actor="reviewer", decisions=decisions,
-          ingest=ingest, now=now).verdict == CANNOT_EVALUATE)
     home = Path(root) / _ingest_acceptance_home(run.name)
     home.mkdir(parents=True)
+    # Flip: dropping the activation call lets capture write into this operator-created home on the legacy
+    # fixture manifest; the patched capture below, over the same home, is the positive control.
+    check("accept-home-not-activated", review_import(root, run.name, actor="reviewer", decisions=decisions,
+          ingest=ingest, now=now, clock=lambda: stamp).verdict == CANNOT_EVALUATE
+          and not (home / ACCEPTANCE_NAME).exists())
     before = {str(p.relative_to(root)): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()}
     result = capture()
     check("accept-ingest-positive", result.verdict == CLEAN)
@@ -5955,17 +5994,49 @@ def _self_test_ingest_capture_run(root, run, now, check):
         check("accept-apply-routing", applied.verdict == CANNOT_EVALUATE and applied.promoted is False
               and before_apply == {str(p): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()})
     acc_path.write_bytes(saved)
+    # Flip: without the TTY guard this piped stream carries a complete review and is captured; the TTY run
+    # over the same answers is the positive control.
+    class TTY(io.StringIO):
+        def isatty(self):
+            return True
+    answers = "accept\n\n" * (len(envelope["decisions"]) + len(envelope["ingest"]["units"]))
+    with patch.object(sys.modules[__name__], "_require_ingest_homes"):
+        piped = review_import_interactive(root, run.name, actor="second", now=now,
+                                          in_stream=io.StringIO(answers), out_stream=io.StringIO(),
+                                          clock=lambda: stamp)
+        check("accept-intake-non-tty", piped.verdict == CANNOT_EVALUATE and acc_path.read_bytes() == saved)
+        attended = review_import_interactive(root, run.name, actor="reviewer", now=now,
+                                             in_stream=TTY(answers), out_stream=io.StringIO(),
+                                             clock=lambda: stamp)
+        check("accept-intake-tty-control", attended.verdict == CLEAN)
+    acc_path.write_bytes(saved)
     reject = copy.deepcopy(ingest)
     reject["units"][0]["decision"] = "reject"
     check("accept-reject-captured", capture(reject).verdict == CLEAN)
     check("accept-reject-gate-valid", all(ok for ok, detail in gate.check_staged_run(run).values()))
     check("accept-reject-needs-fresh-plan", capture().verdict == CANNOT_EVALUATE)
+    rejected_bytes = acc_path.read_bytes()
+    # Flip: an aggregate "some reject remains" guard admits both captures and replaces the attributed reject.
+    check("accept-reject-not-replaced", capture(reject, actor="second").verdict == CANNOT_EVALUATE
+          and acc_path.read_bytes() == rejected_bytes)
+    if len(ingest["units"]) > 1:
+        swapped = copy.deepcopy(ingest)
+        swapped["units"][1]["decision"] = "reject"
+        check("accept-reject-not-swapped", capture(swapped).verdict == CANNOT_EVALUATE
+              and acc_path.read_bytes() == rejected_bytes)
     # A stale existing record is never repaired in place, even with otherwise complete new decisions.
     corrupt = _strict_json(acc_path.read_bytes())
     corrupt["ingest"]["binding"]["report_digest"] = "sha256:" + "f" * 64
     acc_path.write_bytes(_emit_acceptance_bytes(corrupt))
     prior = acc_path.read_bytes()
     check("accept-repair-fresh-run", capture().verdict == CANNOT_EVALUATE and acc_path.read_bytes() == prior)
+    # Flip: decoding JSON null to None reads this present record as "not yet reviewed", so the gate passes it
+    # and capture replaces it.
+    acc_path.write_bytes(b"null\n")
+    check("accept-null-record-gate",
+          gate.check_staged_run(run).get("ingest-acceptance-binding", (True, ""))[0] is False)
+    check("accept-null-record-kept", capture().verdict == CANNOT_EVALUATE
+          and acc_path.read_bytes() == b"null\n")
 
 
 def self_test():

@@ -2458,8 +2458,6 @@ def _cmd_import_review_aid(rest):
 
 
 def _cmd_import(rest):
-    if "--show-review" in rest or "--diff-review" in rest:
-        return _cmd_import_review_aid(rest)
     """`opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
     (--decisions FILE | --interactive) | --apply <run-id>)`: the store import verb.
 
@@ -2497,6 +2495,8 @@ def _cmd_import(rest):
     the operation layer (the deterministic run id composes them). Every residual escape (a resolver/gather/
     operation escape, an unreadable --set/--decisions file) fails closed to exit 2 (never a false 0 or an
     uncaught exit-1), the same class-width backstop render/doctor carry."""
+    if "--show-review" in rest or "--diff-review" in rest:
+        return _cmd_import_review_aid(rest)
     import datetime
 
     root = None
