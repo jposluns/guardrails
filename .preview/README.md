@@ -10,7 +10,8 @@ A hook without a row in that table is not available here, and the install steps 
 
 ## What these hooks are
 
-The three clock hooks back the rule that a current timestamp is read from the clock, never recalled or guessed
+The three clock hooks, `clock-inject.py`, `stamp-truth-stop.py`, and `future-stamp-write.py`, back the
+rule that a current timestamp is read from the clock, never recalled or guessed
 ([the rule text](../.claude/rules/aiqt/10-ACCUR-timestamp-from-clock.md)). The other hooks guard completion
 records, background polling loops, and existing working-record files. Each one is a discipline
 guard against accidental drift, not a security boundary, and each one fails open: if the hook hits an
@@ -44,9 +45,10 @@ the authority, and the summary further down this page only points to it.
   Event: `PreToolUse`, matcher `Bash`.
 - **`unbounded-wait.py`** denies a background `while` or `until` loop that sleeps between polls and
   carries no counter or deadline marker. Background means the tool's `run_in_background` is true or
-  the loop, or a command group around it, is launched with `&`. It names a bounded rewrite, and can
-  also point out a missing parent directory for a literal path being polled. A `break` alone is not
-  a bound, and a `timeout` around only the probe or sleep does not bound the loop.
+  the loop, or a compound command around it (a group, subshell, `if`, or loop), is launched with `&`.
+  It names a bounded rewrite, and can also point out a missing parent directory for a literal path
+  being polled. A `break` alone is not a bound, and a `timeout` around only the probe or sleep does
+  not bound the loop.
   Event: `PreToolUse`, matcher `Bash`.
 - **`record-remove-check.py`** denies a shell command that would remove, truncate, or replace an
   existing, non-empty working-record file under a configured store folder. It checks the filesystem
@@ -126,10 +128,11 @@ fails and report it; do not work around a failed check.
 4. Switch the hook on by adding an entry to the `hooks` section of Claude Code's `settings.json` (the
    user file `~/.claude/settings.json`, or a project's `.claude/settings.json`). If `settings.json`
    already has a `hooks` section, add to it rather than replacing it, and keep every existing entry and
-   permission. Register each hook once: if a later version of the pack's plugin provides the same hook,
-   remove this entry so it does not run twice.
+   permission. If an event such as `PreToolUse` already has an array, append the selected entries to that
+   array; do not add a second key with the same event name. Register each hook once: if a later version
+   of the pack's plugin provides the same hook, remove this entry so it does not run twice.
 
-   Every hook is launched the same way:
+   Use this launch line for each of the six hooks:
 
    ```sh
    /bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B "/ABSOLUTE/PATH/TO/<file>"'
@@ -139,13 +142,21 @@ fails and report it; do not work around a failed check.
      loads it; `-S` skips site packages, which these hooks do not use; `-B` writes no bytecode cache.
    - The `[ -d ... ]` tests are a launch guard: if any standard stream is a directory, Python would fail
      before the hook's own code could fail open, so the guard skips the hook instead.
+   - For `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py`, use this guard in place
+     of their docstrings' `REGISTRATION` line, which tests only stdin. This guard has a stricter launch
+     condition: it also skips directory stdout or stderr. When none of the streams is a directory, it
+     runs the same `python3 -I -S -B` command with stdin unchanged. The three clock hooks do not define
+     a `REGISTRATION` constant; use this same guard for them.
    - Use the absolute path to the downloaded file. It sits inside double quotes, so a path with spaces
      works; the path must not contain `"`, `'`, `$`, a backtick, or a backslash. The hooks need `python3`
      on the `PATH` that Claude Code runs hook commands with.
    - In JSON, each `"` inside the command is written `\"`, as in the entries below. The `timeout` value is
      the most seconds Claude Code lets one run of the hook take.
 
-   **`clock-inject.py`**, on two events with no matcher (all tools):
+   This combined example shows the six hooks. Copy only entries for hooks you have downloaded,
+   checked, and tested. `clock-inject.py` needs both `PostToolUse` and `PostToolUseFailure`, with no
+   matcher (all tools); `stamp-truth-stop.py` uses `Stop`, with no matcher. On `PreToolUse`,
+   `future-stamp-write.py` matches file writes and shell commands, and the other three match `Bash`.
 
    ```json
    {
@@ -155,79 +166,25 @@ fails and report it; do not work around a failed check.
        ],
        "PostToolUseFailure": [
          { "hooks": [ { "type": "command", "timeout": 10, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/clock-inject.py\"'" } ] }
-       ]
-     }
-   }
-   ```
-
-   **`stamp-truth-stop.py`**, on `Stop` (no matcher):
-
-   ```json
-   {
-     "hooks": {
+       ],
        "Stop": [
          { "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/stamp-truth-stop.py\"'" } ] }
-       ]
-     }
-   }
-   ```
-
-   **`future-stamp-write.py`**, on `PreToolUse` for file writes and shell commands:
-
-   ```json
-   {
-     "hooks": {
+       ],
        "PreToolUse": [
-         { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/future-stamp-write.py\"'" } ] }
-       ]
-     }
-   }
-   ```
-
-   **`ungated-record.py`**, on `PreToolUse` for shell commands:
-
-   ```json
-   {
-     "hooks": {
-       "PreToolUse": [
-         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/ungated-record.py\"'" } ] }
-       ]
-     }
-   }
-   ```
-
-   Its self-test includes byte-identity checks against two reference hooks not yet published here.
-   Those checks report `SKIPPED` until the reference files are available; skipped is not a pass.
-
-   **`unbounded-wait.py`**, on `PreToolUse` for shell commands:
-
-   ```json
-   {
-     "hooks": {
-       "PreToolUse": [
-         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/unbounded-wait.py\"'" } ] }
-       ]
-     }
-   }
-   ```
-
-   Its self-test includes byte-identity checks against two reference hooks not yet published here.
-   Those checks report `SKIPPED` until the reference files are available; skipped is not a pass.
-
-   **`record-remove-check.py`**, on `PreToolUse` for shell commands:
-
-   ```json
-   {
-     "hooks": {
-       "PreToolUse": [
+         { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/future-stamp-write.py\"'" } ] },
+         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/ungated-record.py\"'" } ] },
+         { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/unbounded-wait.py\"'" } ] },
          { "matcher": "Bash", "hooks": [ { "type": "command", "timeout": 30, "command": "/bin/sh -c '[ -d /dev/stdin ] || [ -d /dev/stdout ] || [ -d /dev/stderr ] || exec python3 -I -S -B \"/ABSOLUTE/PATH/TO/.claude/hooks/record-remove-check.py\"'" } ] }
        ]
      }
    }
    ```
 
-   Its self-test includes byte-identity checks against two reference hooks not yet published here.
-   Those checks report `SKIPPED` until the reference files are available; skipped is not a pass.
+   The self-tests for `ungated-record.py`, `unbounded-wait.py`, and `record-remove-check.py` include
+   byte-identity checks against `block-bare-detach.py` and `inplace-edit-verify.py`, two reference hooks
+   not yet published here. Those checks report `SKIPPED` until the reference files are available;
+   skipped is not a pass. The `record-remove-check.py` differential check also reports
+   `SKIPPED, no trusted bash` when it cannot find a trusted root-owned `/usr/bin/bash` or `/bin/bash`.
 
 5. Configure the hook with the environment variables in the next section, then start a new Claude Code
    session so the settings are read.
@@ -316,7 +273,10 @@ section of its opening docstring. Read that section before relying on a hook; in
   passes, and some table layouts give false positives or misses, which the file lists.
 - **`ungated-record.py`** checks recognized gates and literal completion claims in one straight-line
   shell command. It misses separate calls, scripts, nested shell strings, compound-command contents,
-  background gates, unrecognized runners, claims built at run time, and destinations held in variables.
+  background gates, unrecognized runners, claim words outside its fixed, case-sensitive uppercase list
+  (which includes `PASS`, `DONE`, and `VERIFIED`), claims built at run time, and destinations held in
+  variables.
+  For example, `passed` and `OK` are not recognized claim words.
   It skips commands that inspect `$?`, `${?}`, or `PIPESTATUS`, turn on errexit or pipefail, or define a
   function. A status reference even in a comment can skip the check. Its approximate reading of
   `printf` and expansions can miss claims or flag text the shell would not write.
@@ -324,8 +284,10 @@ section of its opening docstring. Read that section before relying on a hook; in
   their own input. It can still flag `while ! read` and `until read`, which can spin at end of input;
   reopening a file on every read is polling. It misses nested shell strings, scripts, function bodies,
   substitutions, watcher utilities such as `tail -f`, busy loops without sleep, and a single long sleep.
-  A counter or clock marker is enough to allow a loop even if it never limits the wait. It does not
-  verify that a foreground process ends when the tool's timeout expires.
+  Commands whose top-level stream holds `case` or `coproc` are allowed without being followed. It also
+  misses sleeps run through unlisted launchers, such as `flock`, `xargs`, or `ssh`. A counter or clock
+  marker is enough to allow a loop even if it never limits the wait. It does not verify that a
+  foreground process ends when the tool's timeout expires.
 - **`record-remove-check.py`** checks only supported shell forms and configured stores. It allows
   absent or empty files and files within a store's `.git` directory, though removing that directory
   whole is checked. It misses editor tools, scripts, nested shell strings, `find`, `rsync`, git
