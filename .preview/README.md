@@ -68,7 +68,7 @@ files are served from this repository's main branch; for a raw download, use
 |---|---|---|
 | `clock-inject.py` | `5f7550e8a1afa2c2db6ffe94250de0b740d9f1c92a5e2b1ce52f88b8a1e4775e` | [clock-inject.py](clock-inject.py) |
 | `future-stamp-write.py` | `356378740e7e21f531b8c1e2eb5220a2612f48c0027305e2f9d3ecf109e2933d` | [future-stamp-write.py](future-stamp-write.py) |
-| `record-remove-check.py` | `53d6b309f10c5ac93c69a492e1440125ce528d138fb1d966963e5bec7c948f2e` | [record-remove-check.py](record-remove-check.py) |
+| `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
 | `stamp-truth-stop.py` | `f6365d467b66de32bd1abc573c852f6e9da6aec19bef0284c44a08eb2c159b55` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |

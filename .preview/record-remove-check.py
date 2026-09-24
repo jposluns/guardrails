@@ -69,7 +69,7 @@ OPERANDS AND THE DIRECTORY
     followed only through a plain `cd DIR` with a literal DIR (no variable, `~`, or glob in it), as bash's logical
     cd moves (`..` removed textually, every directory on the way existing; a DIR that does not exist or is not a
     directory leaves the directory where it was, and what follows it with `&&` does not run). An empty DIR (`cd
-    ""`) leaves the directory where it was with its outcome unknown, since that cd fails from bash 5.2 on and
+    ""`) leaves the directory where it was with its outcome unknown, since that cd fails in newer bash (5.3) and
     succeeds, doing nothing, in older bash, and the hook cannot know which bash runs the command: what follows it
     with `&&`, `||`, or `;` is judged in that directory, so a destruction on either path denies.
     An assignment or a cd is plain when it is in the command's top-level text, outside any if,
@@ -153,7 +153,7 @@ RESIDUAL COVERAGE.
     lstat or list is not judged. The vendored lexer's own disclosed limits carry over: quotes, escapes,
     comments, and here-document bodies are honoured, and a construct it cannot follow yields no verdict.
     An empty cd (`cd ""`) is read as leaving the directory unchanged with an unknown outcome (see OPERANDS AND THE
-    DIRECTORY), so `cd "" && rm FILE` is denied although bash 5.2 and later, where that cd fails, run nothing
+    DIRECTORY), so `cd "" && rm FILE` is denied although newer bash (5.3), where that cd fails, run nothing
     after it (a false deny there, disclosed), and `cd "" || rm FILE` is denied although older bash, where that
     cd succeeds, does not run the rm.
 
@@ -1698,7 +1698,7 @@ def _plain_cd(tok, op, ctx, text, off, state):
     logical one with `..` removed textually; when every directory on that way exists, cd lands there (a relative
     operand after it is resolved through links as the kernel resolves it). When DIR does not exist, cd fails: the
     directory is unchanged, and the rest of an and-or list it heads with `&&` does not run (unknown until that list
-    ends); so too when DIR is not a directory. An empty DIR (`cd ""`) fails from bash 5.2 on and succeeds, doing
+    ends); so too when DIR is not a directory. An empty DIR (`cd ""`) fails in newer bash (5.3) and succeeds, doing
     nothing, in older bash, so its outcome is unknown: the directory is unchanged, and what follows it on either
     path is judged there. Anything else bash's cd might do (its physical fallback, CDPATH) makes the directory
     unknown."""
@@ -2344,11 +2344,11 @@ def _self_test():
         ("echo @S/X.md | xargs rm", "O", "allow", True, "out"),
     )
 
-    # `cd ""` fails from bash 5.2 on ("null directory") and succeeds, doing nothing, in older bash, so whether what
+    # `cd ""` fails in newer bash (5.3) ("null directory") and succeeds, doing nothing, in older bash, so whether what
     # follows it runs depends on the bash version, which the hook cannot know. The rule: the directory stays, the
     # outcome is unknown, and what follows on either path is judged there, so a destruction on either path denies
     # (a deny where this bash destroys nothing is the disclosed false deny). Pinned rows, run from the store:
-    # (command, the hook's verdict, whether bash before 5.2 destroys a store file, whether bash 5.2 and later does).
+    # (command, the hook's verdict, whether older bash destroys a store file, whether newer bash (5.3) does).
     CD_EMPTY = (
         ("cd \"\" && rm X.md", "deny", True, False),
         ("cd '' && rm X.md", "deny", True, False),
@@ -2978,12 +2978,10 @@ def _self_test():
             bash = _trusted_bash()
             if bash is None:
                 self.skipTest("SKIPPED, no trusted bash: the differential check did not run")
-            p = subprocess.run([bash, "--version"], stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
-                               env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
-            m = re.search(rb"version (\d+)\.(\d+)", p.stdout)
-            if m is None:
-                self.skipTest("SKIPPED, bash version not read: the cd \"\" differential check did not run")
-            modern = (int(m.group(1)), int(m.group(2))) >= (5, 2)
+            # ask this bash directly whether `cd ""` fails, rather than inferring it from a version number
+            p = subprocess.run([bash, "--norc", "--noprofile", "-c", "cd \"\""], stdin=subprocess.DEVNULL,
+                               capture_output=True, timeout=60, env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
+            modern = p.returncode != 0
             for cmd, verdict, old, new in CD_EMPTY:
                 with self.subTest(cmd=cmd):
                     fx = Fixture()
