@@ -66,10 +66,10 @@ files are served from this repository's main branch; for a raw download, use
 |---|---|---|
 | `clock-inject.py` | `5f7550e8a1afa2c2db6ffe94250de0b740d9f1c92a5e2b1ce52f88b8a1e4775e` | [clock-inject.py](clock-inject.py) |
 | `future-stamp-write.py` | `356378740e7e21f531b8c1e2eb5220a2612f48c0027305e2f9d3ecf109e2933d` | [future-stamp-write.py](future-stamp-write.py) |
-| `record-remove-check.py` | `fd8d55d50f97efe9ce9c86fca69c4bd8bb2ecd88243c6c4766bbb467ec8c9701` | [record-remove-check.py](record-remove-check.py) |
+| `record-remove-check.py` | `7b8c5afbd8ed050f443cb8a13867526bead01cc692ca40e1c0e480ae795def4a` | [record-remove-check.py](record-remove-check.py) |
 | `stamp-truth-stop.py` | `f6365d467b66de32bd1abc573c852f6e9da6aec19bef0284c44a08eb2c159b55` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `4e7f2aa4b60f09b28ba913d0489036fdba23d899074417b12abd767d7fd543e5` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `1319d7cb5af0de31f1e55499708ed58f9b16796ffcefe2a50a643de5510426b6` | [ungated-record.py](ungated-record.py) |
+| `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 

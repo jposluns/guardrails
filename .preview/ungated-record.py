@@ -2544,7 +2544,7 @@ def _self_test():
             src = open(here).read()
             pattern = re.compile(r"\bG" + r"\d+\b|" + "|".join(
                 ("cla" + "ude", "gem" + "ini", "cod" + "ex", "fab" + "le", "g" + "pt", "orches" + "trator",
-                 "fl" + "eet", "orch" + "-verify", "lab" + "_infra", "OR" + "CH_[A-Z_]+")), re.I)
+                 "fl" + "eet", "orch" + "-verify", "la" + "b_in" + "fra", "OR" + "CH_[A-Z_]+")), re.I)
             found = {m.group() for m in pattern.finditer(src)}
             self.assertEqual(found - {"OR" + "CH_WORKER", "OR" + "CH_VERIFY_OWNER"}, set())
 
