@@ -718,7 +718,9 @@ def _show_toml(git, store_root, prefix, relpath, disp, notes):
         return None
     try:
         data = tomllib.loads(out.out.decode("utf-8"))
-    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError) as exc:
+    # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
+    # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError) as exc:
         notes.append("prior: {} at HEAD is not valid TOML ({}); the prior committed snapshot is "
                      "omitted".format(disp, exc))
         return None
@@ -923,6 +925,30 @@ def self_test():
     def check(name, cond):
         if not cond:
             failures.append(name)
+
+    # F-TOML-BARE-VALUEERROR-CLASS: a committed prior TOML carrying a 1200-deep nested array (tomllib raises
+    # RecursionError, not a ValueError) or an over-long integer literal (a BARE ValueError) is OMITTED with a
+    # note, never an escape. _run_git is substituted for the one call so the case needs no repository; the
+    # digit and recursion limits are pinned to the CPython defaults (test-hermeticity); both restored.
+    _saved_run_git = globals()["_run_git"]
+    _prev_digits, _prev_reclimit = sys.get_int_max_str_digits(), sys.getrecursionlimit()
+    sys.set_int_max_str_digits(4300)
+    sys.setrecursionlimit(1000)
+    try:
+        for tc_label, tc_body in (("deep-nesting", "deep = " + "[" * 1200 + "]" * 1200 + "\n"),
+                                  ("over-long-int", "big = " + "9" * 4400 + "\n")):
+            globals()["_run_git"] = lambda *_a, _b=tc_body, **_k: _GitOutcome(True, 0, _b.encode("utf-8"), "")
+            tc_notes = []
+            try:
+                tc_got = _show_toml(git, ".", "", "x.toml", "x.toml", tc_notes)
+            except (ValueError, RecursionError) as exc:
+                tc_got = "escaped " + type(exc).__name__
+            check("toml-class/{}-omitted-with-note".format(tc_label),
+                  tc_got is None and any("not valid TOML" in n for n in tc_notes))
+    finally:
+        globals()["_run_git"] = _saved_run_git
+        sys.setrecursionlimit(_prev_reclimit)
+        sys.set_int_max_str_digits(_prev_digits)
 
     machine_rel = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
 

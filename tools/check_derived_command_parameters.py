@@ -260,7 +260,10 @@ def load_config(path):
             data = tomllib.load(handle)
     except OSError as exc:
         raise GateError("cannot read the configuration {} ({})".format(CONFIG_REL, exc))
-    except tomllib.TOMLDecodeError as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("configuration {} does not parse ({})".format(CONFIG_REL, exc))
     extra = set(data) - {"format-version", "binding"}
     if extra:
@@ -663,6 +666,29 @@ def self_test_main():  # noqa: C901  a flat sequence of independent cases
                        {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
             if _run_quiet(r) != 2:
                 failures.append("e2e: a boolean format-version expected fail-closed exit 2")
+
+            # (e2) an integer literal past CPython's 4300-digit int-string limit makes tomllib raise a BARE
+            #      ValueError (not TOMLDecodeError); it must still fail closed exit 2, never escape as a
+            #      traceback (F-TOML-BARE-VALUEERROR-CLASS). The digit limit is pinned to the default 4300
+            #      (test-hermeticity) and restored in finally.
+            #      A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must fail
+            #      closed the same way; the recursion limit is pinned to the CPython default 1000.
+            for big_tag, big_value in (("over-long-int", "9" * 4400), ("deep-nesting", "[" * 1200 + "]" * 1200)):
+                r = _fresh(big_tag, good_cfg.replace("format-version = 1", "format-version = " + big_value),
+                           {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
+                _prev_digits = sys.get_int_max_str_digits()
+                _prev_reclimit = sys.getrecursionlimit()
+                sys.set_int_max_str_digits(4300)
+                sys.setrecursionlimit(1000)
+                try:
+                    rc_big = _run_quiet(r)
+                except (ValueError, RecursionError) as exc:
+                    rc_big = "a bare {} escaped".format(type(exc).__name__)
+                finally:
+                    sys.setrecursionlimit(_prev_reclimit)
+                    sys.set_int_max_str_digits(_prev_digits)
+                if rc_big != 2:
+                    failures.append("e2e: {} expected fail-closed exit 2, got {}".format(big_tag, rc_big))
 
             # (f) a duplicate binding id fails closed exit 2.
             dup_cfg = good_cfg + ('\n[[binding]]\nid = "repository-target"\npaths = ["cmd/resume.md"]\n'

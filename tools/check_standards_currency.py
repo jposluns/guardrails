@@ -290,6 +290,30 @@ def self_test_main():
                 failures.append("run() malformed under --warn-only MUST stay exit 2 (never masked)")
             if _run_quiet(tmp / "does-not-exist") != 2:
                 failures.append("run() with an absent standards dir expected fail-closed exit 2")
+            # F-TOML-BARE-VALUEERROR-CLASS: an integer literal past CPython's 4300-digit int-string limit
+            # makes tomllib raise a BARE ValueError (not TOMLDecodeError). _standards.load_manifests must
+            # still raise ManifestError, so run() fails closed at exit 2 rather than escaping a traceback.
+            # The digit limit is pinned to the default 4300 (test-hermeticity) and restored in finally.
+            # A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must fail closed
+            # the same way; the recursion limit is pinned to the CPython default 1000 for the same reason.
+            for big_label, big_value in (("an over-long integer literal", "9" * 4400),
+                                         ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+                big = Path(tempfile.mkdtemp(prefix="standards-big-", dir=str(tmp)))
+                (big / "big.toml").write_text("over-long = " + big_value + "\n" + _manifest(
+                    "big", "stable", days_ago(10)), encoding="utf-8")
+                _prev_digits = sys.get_int_max_str_digits()
+                _prev_reclimit = sys.getrecursionlimit()
+                sys.set_int_max_str_digits(4300)
+                sys.setrecursionlimit(1000)
+                try:
+                    rc_big = _run_quiet(big)
+                except (ValueError, RecursionError) as exc:
+                    rc_big = "a bare {} escaped".format(type(exc).__name__)
+                finally:
+                    sys.setrecursionlimit(_prev_reclimit)
+                    sys.set_int_max_str_digits(_prev_digits)
+                if rc_big != 2:
+                    failures.append("run() with {} expected exit 2, got {}".format(big_label, rc_big))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

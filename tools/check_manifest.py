@@ -389,6 +389,26 @@ def self_test_main():
         print("SELF-TEST ERROR: git is unavailable; fail-closed", file=sys.stderr)
         return 2
 
+    # F-TOML-BARE-VALUEERROR-CLASS: _gen_common.load_toml's callers fail closed on the ValueError family by
+    # contract, but a 1200-deep nested array makes tomllib raise RecursionError (a RuntimeError); load_toml
+    # must map it into that family at the parse locus. The recursion limit is pinned to the CPython default
+    # 1000 (test-hermeticity) and restored in finally.
+    deep_failures = []
+    with tempfile.TemporaryDirectory(prefix="aiqt-load-toml-deep-") as deep_dir:
+        deep_path = Path(deep_dir) / "deep.toml"
+        deep_path.write_text("deep = " + "[" * 1200 + "]" * 1200 + "\n", encoding="utf-8")
+        prev_reclimit = sys.getrecursionlimit()
+        sys.setrecursionlimit(1000)
+        try:
+            load_toml(deep_path)
+            deep_failures.append("load_toml accepted a deeply nested TOML array")
+        except ValueError:
+            pass
+        except RecursionError:
+            deep_failures.append("load_toml let a bare RecursionError escape (callers catch only ValueError)")
+        finally:
+            sys.setrecursionlimit(prev_reclimit)
+
     def check_quiet(root):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             try:
@@ -411,7 +431,7 @@ def self_test_main():
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
-    failures = []
+    failures = list(deep_failures)   # the load_toml RecursionError case above (F-TOML-BARE-VALUEERROR-CLASS)
     try:
         # (a) clean fixture passes.
         clean = _fresh("clean")

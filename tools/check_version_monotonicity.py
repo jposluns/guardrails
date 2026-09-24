@@ -269,7 +269,9 @@ def _load_head_releases(root):
 def _parse_base_releases(text):
     try:
         data = tomllib.loads(text)
-    except (tomllib.TOMLDecodeError, ValueError) as exc:
+    # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
+    # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("baseline changelog.toml does not parse: {}".format(exc))
     return _releases_from_data(data, "base")
 
@@ -295,7 +297,9 @@ def _base_is_genesis(root, base_commit, base_releases):
     if present:
         try:
             base_rel = tomllib.loads(_show_file(root, base_commit, RELEASES_REL))
-        except (tomllib.TOMLDecodeError, ValueError) as exc:
+        # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
+        # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+        except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
             raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
         unknown = set(base_rel) - {"format-version", "release"}
         if unknown:
@@ -434,7 +438,9 @@ def layer_c(root, base_commit, head_data):
         return []
     try:
         base_data = tomllib.loads(_show_file(root, base_commit, RELEASES_REL))
-    except (tomllib.TOMLDecodeError, ValueError) as exc:
+    # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
+    # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("baseline {} does not parse: {}".format(RELEASES_REL, exc))
     base_rows = _rows_of(base_data, "release", "baseline " + RELEASES_REL)
     head_rows = _rows_of(head_data, "release", RELEASES_REL)
@@ -464,7 +470,9 @@ def layer_d(root, base_commit, head_data):
         return []
     try:
         base_data = tomllib.loads(_show_file(root, base_commit, IDHISTORY_REL))
-    except (tomllib.TOMLDecodeError, ValueError) as exc:
+    # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
+    # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("baseline {} does not parse: {}".format(IDHISTORY_REL, exc))
     findings = []
     for section in REGISTER_SECTIONS:
@@ -534,6 +542,21 @@ def _run_quiet(root, base):
 
 def self_test_main():
     failures = []
+
+    # F-TOML-BARE-VALUEERROR-CLASS: a 1200-deep nested array makes tomllib raise RecursionError (a
+    # RuntimeError, not a ValueError); the baseline parse must still fail closed as GateError. The recursion
+    # limit is pinned to the CPython default 1000 (test-hermeticity) and restored in finally.
+    prev_reclimit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        _parse_base_releases("deep = " + "[" * 1200 + "]" * 1200 + "\n")
+        failures.append("a deeply nested baseline changelog.toml must fail closed (GateError)")
+    except GateError:
+        pass
+    except RecursionError:
+        failures.append("a deeply nested baseline changelog.toml let a bare RecursionError escape")
+    finally:
+        sys.setrecursionlimit(prev_reclimit)
 
     # M1 (prefix identity): (base, head, expect_a_finding).
     prefix_cases = [

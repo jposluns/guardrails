@@ -198,7 +198,10 @@ def _read_contained_toml(root_fd, relpath):
         raise PinError("cannot read {} ({})".format(relpath, exc))
     try:
         return tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise PinError("cannot parse {} ({})".format(relpath, exc))
 
 
@@ -517,7 +520,12 @@ def _read_release(staged):
     every identity field must be a non-empty string and quorum a positive int, with NO coercion. A
     malformed or empty release record is a fail-closed PinError (exit 2), never a pin published over empty
     identity."""
-    data = tomllib.loads((staged / "release.toml").read_text(encoding="utf-8"))
+    try:
+        data = tomllib.loads((staged / "release.toml").read_text(encoding="utf-8"))
+    except RecursionError as exc:
+        # tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply nested array or inline
+        # table, which do_pin's ValueError-family handler would not catch (F-TOML-BARE-VALUEERROR-CLASS).
+        raise PinError("cannot parse release.toml ({})".format(exc)) from exc
     rel = data.get("release", {})
     if not isinstance(rel, dict):
         raise PinError("release.toml [release] must be a table")
@@ -1189,6 +1197,45 @@ def self_test():
                 "corruption-finding": "", "chain": chain}
 
     try:
+        # ---- TBIG (F-TOML-BARE-VALUEERROR-CLASS): an integer literal past CPython's 4300-digit int-string
+        # limit makes tomllib raise a BARE ValueError (not TOMLDecodeError); the contained TOML reader must
+        # still refuse with PinError (exit 2), never let the ValueError escape (do_un_adopt catches only
+        # PinError/OSError). The digit limit is pinned to the default 4300 (test-hermeticity). ----
+        # A 1200-deep nested array (RecursionError, not a ValueError) is refused the same way, both by the
+        # contained reader and by do_pin's staged release.toml reader (_read_release); the recursion limit
+        # is pinned to the CPython default 1000 for the same reason. ----
+        for bi_label, bi_value in (("an over-long integer literal", "9" * 4400),
+                                   ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+            bi = Path(tempfile.mkdtemp(prefix="bigint-", dir=str(tmp))) / "root"
+            (bi / PIN_REL).parent.mkdir(parents=True)
+            (bi / PIN_REL).write_text("over-long = " + bi_value + "\n", encoding="utf-8")
+            (bi / "release.toml").write_text("over-long = " + bi_value + "\n", encoding="utf-8")
+            bi_fd = _open_root_fd(bi)
+            prev_digits = sys.get_int_max_str_digits()
+            prev_reclimit = sys.getrecursionlimit()
+            sys.set_int_max_str_digits(4300)
+            sys.setrecursionlimit(1000)
+            try:
+                bi_readers = [("pin record", lambda: read_pin(bi_fd))]
+                if bi_value.startswith("["):
+                    # _read_release leaves the ValueError family to do_pin's handler by design, so only the
+                    # RecursionError member is asserted at that locus.
+                    bi_readers.append(("staged release.toml", lambda: _read_release(bi)))
+                for bi_reader, bi_call in bi_readers:
+                    try:
+                        bi_call()
+                        bi_outcome = "parsed"
+                    except PinError:
+                        bi_outcome = "refused"
+                    except (ValueError, RecursionError):
+                        bi_outcome = "escaped"
+                    check("TBIG: {} in the {} is a PinError, never an escaped ValueError or "
+                          "RecursionError".format(bi_label, bi_reader), bi_outcome == "refused")
+            finally:
+                sys.setrecursionlimit(prev_reclimit)
+                sys.set_int_max_str_digits(prev_digits)
+                os.close(bi_fd)
+
         # ---- T1/T2/T14: initial pin real; doctor catches a byte-mutation and a mode-change ----
         a = tmp / "A" / "root"; a.mkdir(parents=True)
         s = _write_staged(tmp / "A" / "s", onop, onpay, rel1, [])

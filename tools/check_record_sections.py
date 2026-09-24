@@ -284,7 +284,10 @@ def load_config(path, allow_absent=False):
         raise GateError("cannot read config {} ({})".format(path, exc))
     try:
         data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("cannot parse config {} ({})".format(path, exc))
     if not isinstance(data, dict) or set(data) != TOP_KEYS:
         raise GateError("{}: top-level keys must be exactly {}".format(path, sorted(TOP_KEYS)))
@@ -615,6 +618,39 @@ def self_test():
     def expect(name, got, want):
         if got != want:
             failures.append("{}: got {}, want {}".format(name, got, want))
+
+    # F-TOML-BARE-VALUEERROR-CLASS: an integer literal past CPython's
+    # 4300-digit int-string limit makes tomllib raise a BARE ValueError
+    # (not TOMLDecodeError); load_config must still refuse with GateError.
+    # The digit limit is pinned to the default 4300 (test-hermeticity).
+    # A 1200-deep nested array (RecursionError, not a ValueError) must be
+    # refused the same way; the recursion limit is pinned to 1000 too.
+    prev_digits = sys.get_int_max_str_digits()
+    prev_reclimit = sys.getrecursionlimit()
+    sys.set_int_max_str_digits(4300)
+    sys.setrecursionlimit(1000)
+    try:
+        for big_label, big_value in (
+                ("an over-long integer literal", "9" * 4400),
+                ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+            with tempfile.TemporaryDirectory(
+                    prefix="aiqt-record-sections-bigint-") as big_dir:
+                big_cfg = Path(big_dir) / "record-sections.toml"
+                big_cfg.write_text(
+                    "schema-version = " + big_value + "\n", encoding="utf-8")
+                try:
+                    load_config(big_cfg)
+                    big_outcome = "accepted"
+                except GateError:
+                    big_outcome = "refused"
+                except (ValueError, RecursionError) as exc:
+                    big_outcome = "a bare {} escaped".format(
+                        type(exc).__name__)
+                expect(big_label + " in the config fails closed",
+                       big_outcome, "refused")
+    finally:
+        sys.setrecursionlimit(prev_reclimit)
+        sys.set_int_max_str_digits(prev_digits)
 
     try:
         with tempfile.TemporaryDirectory(

@@ -126,7 +126,11 @@ def _show(root, commit, path):
 def _show_toml(root, commit, path):
     try:
         return tomllib.loads(_show(root, commit, path).decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS). run()'s ValueError
+    # backstop covered only the first; both now fail closed here, at the parse locus.
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("predecessor {} at {} does not parse: {}".format(path, commit, exc))
 
 
@@ -1935,6 +1939,32 @@ def _real_pack_e2e(tmp, failures):
 
 def self_test_main():  # noqa: C901  a flat sequence of independent classification cases
     failures = []
+
+    # F-TOML-BARE-VALUEERROR-CLASS: a predecessor TOML carrying an over-long integer literal (a BARE
+    # ValueError) or a 1200-deep nested array (a RecursionError) must fail closed as GateError at the
+    # _show_toml parse locus; run()'s ValueError backstop never covered the RecursionError member. The digit
+    # and recursion limits are pinned to the CPython defaults (test-hermeticity) and restored in finally.
+    import tempfile as _tempfile
+    with _tempfile.TemporaryDirectory(prefix="aiqt-delta-toml-class-") as tc_dir:
+        tc_repo = Path(tc_dir)
+        (tc_repo / "bigint.toml").write_text("big = " + "9" * 4400 + "\n", encoding="utf-8")
+        (tc_repo / "deep.toml").write_text("deep = " + "[" * 1200 + "]" * 1200 + "\n", encoding="utf-8")
+        _git_init_commit(tc_repo, "toml class fixtures")
+        prev_digits, prev_reclimit = sys.get_int_max_str_digits(), sys.getrecursionlimit()
+        sys.set_int_max_str_digits(4300)
+        sys.setrecursionlimit(1000)
+        try:
+            for tc_name in ("bigint.toml", "deep.toml"):
+                try:
+                    _show_toml(tc_repo, "HEAD", tc_name)
+                    failures.append("_show_toml accepted {}".format(tc_name))
+                except GateError:
+                    pass
+                except (ValueError, RecursionError) as exc:
+                    failures.append("_show_toml let a bare {} escape on {}".format(type(exc).__name__, tc_name))
+        finally:
+            sys.setrecursionlimit(prev_reclimit)
+            sys.set_int_max_str_digits(prev_digits)
 
     def _rows(*specs):
         # specs: (kind, target, release[, impact-or-old-class][, new-class]). The row's `id` IS the target

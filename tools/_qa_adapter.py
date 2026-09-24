@@ -326,7 +326,10 @@ def load_config(path):
         raise ConfigError("cannot read assurance config {}: {}".format(path, exc))
     try:
         cfg = tomllib.loads(raw.decode("utf-8"))
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise ConfigError("malformed assurance config {}: {}".format(path, exc))
     # SCHEMA validation, past mere parseability: the config must be a table with a [surfaces] table, and
     # each declared surface must be a table whose `adapter` is a string and whose `required`/`enabled`
@@ -1068,6 +1071,32 @@ def _self_test():
             failures.append("load_config accepted a string-valued schema-version")
         except ConfigError:
             pass
+        # 21b. DISCRIMINATING (F-TOML-BARE-VALUEERROR-CLASS): an integer literal past CPython's 4300-digit
+        #      int-string limit makes tomllib raise a BARE ValueError (not TOMLDecodeError); load_config must
+        #      still refuse with a ConfigError. Narrowing the parse handler back to (TOMLDecodeError,
+        #      UnicodeDecodeError) lets the ValueError escape. The digit limit is pinned to the default 4300
+        #      (test-hermeticity) and restored in finally.
+        #      A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must be refused the
+        #      same way; the recursion limit is pinned to the CPython default 1000 for the same reason.
+        _prev_digits = sys.get_int_max_str_digits()
+        _prev_reclimit = sys.getrecursionlimit()
+        sys.set_int_max_str_digits(4300)
+        sys.setrecursionlimit(1000)
+        try:
+            for big_label, big_value in (("an over-long integer literal", "9" * 4400),
+                                         ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+                big_cfg = tmp / "bad-literal.toml"
+                big_cfg.write_text("schema-version = " + big_value + "\n", encoding="utf-8")
+                try:
+                    load_config(big_cfg)
+                    failures.append("load_config accepted {}".format(big_label))
+                except ConfigError:
+                    pass
+                except (ValueError, RecursionError) as exc:
+                    failures.append("load_config let a bare {} escape on {}".format(type(exc).__name__, big_label))
+        finally:
+            sys.setrecursionlimit(_prev_reclimit)
+            sys.set_int_max_str_digits(_prev_digits)
 
         # 22. DISCRIMINATING (--config operand parsing): an empty operand, the =-joined empty form, a
         #     next-flag operand, and a duplicate --config are each loud errors, never a silent accept or a

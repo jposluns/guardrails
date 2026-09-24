@@ -251,7 +251,10 @@ def parse_frontmatter(fm_text, source_rel):
     """
     try:
         data = tomllib.loads(fm_text)
-    except tomllib.TOMLDecodeError as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise SchemaError("{}: frontmatter is not valid TOML: {}".format(source_rel, exc))
     known = set(REQUIRED_FIELDS) | set(OPTIONAL_FIELDS)
     unknown = sorted(k for k in data if k not in known)
@@ -923,6 +926,24 @@ def _self_test():
     _expect_error("no frontmatter close", "+++\ntitle = \"T\"\nhello\n", "never closed")
     # 3. Malformed TOML fails closed.
     _expect_error("bad toml", "+++\ntitle = not valid\n+++\n", "not valid TOML")
+    # 3b. An integer literal past CPython's 4300-digit int-string limit makes tomllib raise a BARE ValueError
+    #     (not TOMLDecodeError); it must still fail closed as SchemaError (F-TOML-BARE-VALUEERROR-CLASS). The
+    #     digit limit is pinned to the default 4300 (test-hermeticity) and restored in finally. A 1200-deep
+    #     nested array (tomllib raises RecursionError, not a ValueError) must fail closed the same way; the
+    #     recursion limit is pinned to the CPython default 1000 for the same reason.
+    _prev_digits = sys.get_int_max_str_digits()
+    _prev_reclimit = sys.getrecursionlimit()
+    sys.set_int_max_str_digits(4300)
+    sys.setrecursionlimit(1000)
+    try:
+        for label, value in (("over-long integer", "9" * 4400), ("deep nesting", "[" * 1200 + "]" * 1200)):
+            try:
+                _expect_error(label, "+++\nx = " + value + "\n+++\n", "not valid TOML")
+            except (ValueError, RecursionError) as exc:
+                failures.append("{}: a bare {} escaped the frontmatter parse".format(label, type(exc).__name__))
+    finally:
+        sys.setrecursionlimit(_prev_reclimit)
+        sys.set_int_max_str_digits(_prev_digits)
     # 4. Missing required key fails closed.
     _expect_error("missing key", '+++\ntitle = "T"\n+++\n', "missing required key")
     # 5. Unknown key fails closed.

@@ -194,7 +194,10 @@ def load_manifests(std_dir):
         with open(path, "rb") as handle:
             try:
                 data = tomllib.load(handle)
-            except tomllib.TOMLDecodeError as exc:
+            # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+            # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+            # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+            except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
                 raise ManifestError("{}: invalid TOML: {}".format(path.name, exc))
         manifest = Manifest(path, data)
         if manifest.map_key in out:

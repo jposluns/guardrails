@@ -912,7 +912,9 @@ def _control_payload(document, closed_keys, label):
         raise OpLockError("cannot emit {} ({})".format(label, exc))
     try:
         reparsed = tomllib.loads(text)
-    except (tomllib.TOMLDecodeError, ValueError) as exc:  # defensive: emit_checked already reparsed
+    # Defensive: emit_checked already reparsed. RecursionError too: tomllib raises it (not a
+    # ValueError) on deep nesting (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise OpLockError("emitted {} did not reparse ({})".format(label, exc))
     if set(reparsed) != set(closed_keys):
         raise OpLockError("{} top-level keys {} do not equal the closed set {}".format(
@@ -955,7 +957,9 @@ def _read_control_record(dir_fd, name, label):
                 label, _MAX_RECORD_BYTES))
     try:
         doc = tomllib.loads(bytes(data).decode("utf-8", errors="strict"))
-    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError) as exc:
+    # RecursionError too: tomllib raises it (not a ValueError) on deep nesting
+    # (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError, RecursionError) as exc:
         raise OpLockError("{} is not decodable UTF-8 TOML; refusing recovery ({})".format(label, exc))
     if not isinstance(doc, dict):
         raise OpLockError("{} is not a TOML table; refusing recovery".format(label))
@@ -3424,6 +3428,35 @@ def _t_c6_diffinode(d, env):
     os.unlink(active)
     cap = acquire_operation(root, "op")
     release_operation(cap)
+
+
+def _t_toml_class_read_control(d, env):
+    """T-toml-class (F-TOML-BARE-VALUEERROR-CLASS): a control record carrying a 1200-deep nested
+    array makes tomllib raise RecursionError (a RuntimeError, not a ValueError), and one carrying
+    an over-long integer literal a bare ValueError; _read_control_record must refuse both with
+    OpLockError, never let either escape. The recursion and digit limits are pinned to the
+    CPython defaults (test-hermeticity) and restored in finally."""
+    dirp = os.path.join(d, "ctl-toml-class")
+    os.mkdir(dirp)
+    dfd = os.open(dirp, os.O_RDONLY | os.O_DIRECTORY)
+    prev_rec, prev_dig = sys.getrecursionlimit(), sys.get_int_max_str_digits()
+    sys.setrecursionlimit(1000)
+    sys.set_int_max_str_digits(4300)
+    try:
+        for name, body in (("deep.toml", "deep = " + "[" * 1200 + "]" * 1200 + "\n"),
+                           ("bigint.toml", "big = " + "9" * 4400 + "\n")):
+            with open(os.path.join(dirp, name), "w", encoding="utf-8") as fh:
+                fh.write(body)
+            try:
+                _read_control_record(dfd, name, name)
+            except OpLockError as exc:
+                assert "not decodable UTF-8 TOML" in str(exc), str(exc)
+                continue
+            raise AssertionError("{} was not refused".format(name))
+    finally:
+        sys.set_int_max_str_digits(prev_dig)
+        sys.setrecursionlimit(prev_rec)
+        os.close(dfd)
 
 
 def _t_h4_quote(d, env):
@@ -7481,6 +7514,7 @@ def self_test():
          _t_c6_c7_med6_verified_release),
         ("T-c6-diffinode same-bytes inode swap is preserved", _t_c6_diffinode),
         ("T-h4-quote a double-quoted holder round-trips intact", _t_h4_quote),
+        ("T-toml-class a deep or over-long control record is refused", _t_toml_class_read_control),
         ("T-c9 release is bound to the acquirer identity", _t_c9_acquirer_identity),
         ("T-c10 three-way .git classification, no fallback", _t_c10_git_classification),
         ("T-c12 contention and double release refuse", _t_c12_contention_and_double_release),

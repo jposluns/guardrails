@@ -487,7 +487,10 @@ def _load_successor_inventory(path):
             doc = tomllib.load(fh)
     except OSError as exc:
         raise AdoptError("cannot read successor inventory {} ({}); fail-closed".format(path, exc))
-    except tomllib.TOMLDecodeError as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise AdoptError("successor inventory {} is not valid TOML ({}); fail-closed".format(path, exc))
     rows = doc.get("clause", [])
     if not isinstance(rows, list):
@@ -634,6 +637,33 @@ def self_test():
         except AdoptError:
             pass
         os.close(afd)
+
+        # (d2) F-TOML-BARE-VALUEERROR-CLASS: an integer literal past CPython's 4300-digit int-string limit
+        # makes tomllib raise a BARE ValueError (not TOMLDecodeError); the successor-inventory loader must
+        # still refuse with AdoptError (exit 2), never let the ValueError escape. The digit limit is pinned to
+        # the default 4300 (test-hermeticity) and restored in finally.
+        # A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must be refused the same
+        # way; the recursion limit is pinned to the CPython default 1000 for the same reason.
+        prev_digits = sys.get_int_max_str_digits()
+        prev_reclimit = sys.getrecursionlimit()
+        sys.set_int_max_str_digits(4300)
+        sys.setrecursionlimit(1000)
+        try:
+            for big_label, big_value in (("an over-long integer literal", "9" * 4400),
+                                         ("a deeply nested array", "[" * 1200 + "]" * 1200)):
+                big_inv = tmp / "bigint-inventory.toml"
+                big_inv.write_text("over-long = " + big_value + "\n", encoding="utf-8")
+                try:
+                    _load_successor_inventory(big_inv)
+                    failures.append("{} in the successor inventory must be refused (exit 2)".format(big_label))
+                except AdoptError:
+                    pass
+                except (ValueError, RecursionError) as exc:
+                    failures.append("{} let a bare {} escape the successor-inventory loader (exit 2 "
+                                    "expected)".format(big_label, type(exc).__name__))
+        finally:
+            sys.setrecursionlimit(prev_reclimit)
+            sys.set_int_max_str_digits(prev_digits)
 
         # (fix #7) unique-per-call temp + no-overwrite publish: a fresh archive leaves NO leftover temp in
         # its entry dir, publishes the exact bytes, and a same-bytes re-archive is idempotent.
