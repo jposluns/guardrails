@@ -2254,7 +2254,22 @@ def _unreturned_note(what, cap, sink, rexc):
         return n
     shown = [_shown(n) for n in scope.removed]
     qualified = scope.undurable or scope.durability_unconfirmed
-    if len(scope.removed) == 2:
+    if scope.removal_unconfirmed:
+        # Fix round 11 (codex and claude LOW): with an UNCONFIRMED removal, each record's own
+        # outcome is rendered separately (removed, removal UNCONFIRMED, or not removed), so a record
+        # whose removal is unconfirmed is never also reported as not removed.
+        parts = []
+        for n in ("lease", "active record"):
+            if n in scope.removed:
+                parts.append("its {} removed".format(_shown(n)))
+            elif n in scope.removal_unconfirmed:
+                parts.append("its {}'s removal UNCONFIRMED (its unlink was interrupted and its "
+                             "name could not be observed)".format(n))
+            else:
+                parts.append("its {} not removed (any that remains waits for a later "
+                             "recover=True)".format(n))
+        records = "; ".join(parts)
+    elif len(scope.removed) == 2:
         records = "its {} and its {} removed".format(*shown) if qualified \
             else "its records removed"
     elif scope.removed:
@@ -2264,11 +2279,6 @@ def _unreturned_note(what, cap, sink, rexc):
     else:
         records = "neither of its records removed (any that remains waits for a later " \
             "recover=True)"
-    if scope.removal_unconfirmed:
-        records += " (whether its {} was removed is UNCONFIRMED: its unlink was interrupted and " \
-            "its name could not be observed)".format(" and its ".join(scope.removal_unconfirmed))
-        if not scope.removed:
-            records = records.replace("neither of its records removed", "no removal confirmed", 1)
     facts.append(records)
     # Fix round 9 (codex MED 2): the lock is given up only by closing the anchor descriptor, so
     # that close's recorded outcome is the lock clause; (codex LOW) a close an interruption cut
@@ -7239,12 +7249,21 @@ def _st_interrupt_dir_fsync(path, armed):
     return saved
 
 
-def _st_f10_2_unreturned(root, which):
-    """T-f10-2 (A), one record, run in a child."""
+def _st_f10_2_unreturned(root, which, stat_fails=False):
+    """T-f10-2 (A), one record, run in a child. With `stat_fails` (T-f11-1), the no-follow stat
+    that observes the record's name after the interrupted fsync fails with EIO, once."""
     active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
     lease = _st_lease_path(root)
     where = os.path.join(root, ".working", "toml") if which == "lease" else _st_ctl_dir(root)
+    name = _opf_check.LEASE_NAME if which == "lease" else ACTIVE_NAME
     armed = {}
+    saved_stat = os.stat
+
+    def _stat(path, *a, **k):
+        if armed.get("stat") and path == name and k.get("dir_fd") is not None:
+            armed["stat"] = False
+            raise OSError(errno.EIO, "simulated no-follow stat failure (T-f11-1)")
+        return saved_stat(path, *a, **k)
 
     def handler(signum, frame):
         armed["on"] = True
@@ -7252,6 +7271,20 @@ def _st_f10_2_unreturned(root, which):
 
     signal.signal(signal.SIGINT, handler)
     saved = _st_interrupt_dir_fsync(where, armed)
+    if stat_fails:
+        fsync = os.fsync
+
+        def _fsync_then_stat(fd):
+            try:
+                return fsync(fd)
+            except KeyboardInterrupt:
+                # The observation that follows the interruption fails. Installed only now:
+                # replacing os.stat before acquire_operation would fail its containment probe.
+                armed["stat"] = True
+                os.stat = _stat
+                raise
+
+        os.fsync = _fsync_then_stat
     baseline = _st_open_fds()
     state = _st_arm_signal(_st_named("_publish_staged"), 1)
     try:
@@ -7259,6 +7292,7 @@ def _st_f10_2_unreturned(root, which):
     finally:
         sys.settrace(None)
         os.fsync = saved
+        os.stat = saved_stat
     assert state["fired"], which
     notes = " ".join(getattr(caught, "__notes__", ()))
     assert caught.args == ("the deferred signal (T-f10-2)",), \
@@ -7266,7 +7300,17 @@ def _st_f10_2_unreturned(root, which):
     assert _st_open_fds() == baseline and _st_anchor_free(root), notes
     assert "neither of its records removed" not in notes, notes
     assert "UNCONFIRMED" in notes and "released only in part" in notes, notes
-    if which == "lease":
+    if stat_fails:
+        assert not armed.get("stat"), "the failing observation must have been reached"
+        if which == "lease":
+            assert not os.path.exists(lease) and os.path.exists(active), "the lease went"
+            assert "its lease's removal UNCONFIRMED" in notes \
+                and "its active record not removed" in notes, notes
+        else:
+            assert not os.path.exists(lease) and not os.path.exists(active), "both records went"
+            assert "its lease removed; its active record's removal UNCONFIRMED" in notes, notes
+            assert "but not its active record" not in notes, notes
+    elif which == "lease":
         assert not os.path.exists(lease) and os.path.exists(active), "the lease went; kept active"
         assert "its lease (" in notes and "removed but not its active record" in notes, notes
     else:
@@ -7343,6 +7387,25 @@ def _st_f10_3_body(root):
     _st_no_records(root, "T-f10-3")
 
 
+def _t_f11_1_unobservable_removal(d, env):
+    """T-f11-1 (fix round 11, codex and claude LOW: each record's outcome rendered on its own). As
+    T-f10-2 (A), but the interrupted directory fsync is followed by a FAILING no-follow stat of the
+    record's name (EIO), so the release cannot observe whether the unlink removed it (the
+    `unlinked is None` path): for the lease, and separately for the active record. The note must
+    name each record's own outcome (removed, removal UNCONFIRMED, or not removed) and never assert
+    that a record whose removal is UNCONFIRMED was not removed. Before the fix the active-record
+    case read "its lease removed but not its active record ... (whether its active record was
+    removed is UNCONFIRMED ...)", with both records in fact gone."""
+    root = _st_git_store(d, "repo", env)
+    release_operation(acquire_operation(root, "op"))
+    for which in ("lease", "active record"):
+        failure = _st_in_child(lambda w=which: _st_f10_2_unreturned(root, w, stat_fails=True))
+        assert failure is None, "{}: {}".format(which, failure)
+        for path in (os.path.join(_st_ctl_dir(root), ACTIVE_NAME), _st_lease_path(root)):
+            if os.path.exists(path):
+                os.unlink(path)           # the exited child's kept record, cleared by hand
+
+
 def self_test():
     """Regression roster (plan section (e)): the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
     round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
@@ -7374,7 +7437,8 @@ def self_test():
     its own acts; a fork inside the write loop never publishes a doubled record; and, fix round 10,
     T-f10-1 to T-f10-3: a fork anywhere in the acquisition entry after its identity capture gets no
     capability, an interrupted post-unlink fsync is noted as an unconfirmed removal, and an
-    interrupted anchor close is retried and attributed; T-f7-4 and T-f8-4
+    interrupted anchor close is retried and attributed; T-f11-1, fix round 11: an unobservable
+    interrupted removal is noted per record, never as not removed; T-f7-4 and T-f8-4
     extended to interrupted closes), each a witness against a named defect. A
     missing containment primitive or git binary is a REFUSAL (non-zero),
     never a clean skip. The git fixtures are pinned hermetically (LOW-5). The restrictive-umask
@@ -7508,6 +7572,8 @@ def self_test():
          _t_f10_2_interrupted_fsync),
         ("T-f10-3 an interrupted anchor close is retried while still owned, and attributed",
          _t_f10_3_anchor_close_attributed),
+        ("T-f11-1 an unobservable interrupted removal is noted per record, never as not removed",
+         _t_f11_1_unobservable_removal),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-oplock-selftest-"))
