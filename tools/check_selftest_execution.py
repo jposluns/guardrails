@@ -151,7 +151,10 @@ def _manifest_suites(manifest_path):
     except OSError as exc:
         _cannot("expectation manifest {} unreadable: {}".format(manifest_path, exc))
         return None
-    except tomllib.TOMLDecodeError as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         _cannot("expectation manifest {} is not valid TOML: {}".format(manifest_path, exc))
         return None
     if set(data) != MANIFEST_TOP_KEYS:
@@ -655,6 +658,29 @@ def self_test():
                 ("bool-format-version", _manifest_text(header="format-version = true"))):
             root = build(text, _report_body(GOOD_IDS, 0))
             code, _out, _err = run(root)
+            expect("st/manifest-{}-2".format(label), code, 2)
+            expect("st/manifest-{}-no-launch".format(label), launched(root), False)
+
+        # 7b: an integer literal past CPython's 4300-digit int-string limit makes tomllib raise a BARE
+        #     ValueError (not TOMLDecodeError); the manifest is still refused 2 BEFORE any launch
+        #     (F-TOML-BARE-VALUEERROR-CLASS). The digit limit is pinned to the default 4300
+        #     (test-hermeticity) and restored in finally.
+        #     A 1200-deep nested array (RecursionError, not a ValueError) is refused the same way; the
+        #     recursion limit is pinned to the CPython default 1000 too.
+        for label, value in (("over-long-int", "9" * 4400), ("deep-nesting", "[" * 1200 + "]" * 1200)):
+            prev_digits = sys.get_int_max_str_digits()
+            prev_reclimit = sys.getrecursionlimit()
+            sys.set_int_max_str_digits(4300)
+            sys.setrecursionlimit(1000)
+            try:
+                root = build(_manifest_text(header="format-version = " + value), _report_body(GOOD_IDS, 0))
+                try:
+                    code, _out, _err = run(root)
+                except (ValueError, RecursionError) as exc:
+                    code = "a bare {} escaped".format(type(exc).__name__)
+            finally:
+                sys.setrecursionlimit(prev_reclimit)
+                sys.set_int_max_str_digits(prev_digits)
             expect("st/manifest-{}-2".format(label), code, 2)
             expect("st/manifest-{}-no-launch".format(label), launched(root), False)
 

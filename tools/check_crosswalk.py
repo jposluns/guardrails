@@ -70,7 +70,9 @@ def _load_toml(path):
             return tomllib.load(fh)
     except FileNotFoundError:
         raise GateError("required input {} is absent".format(path))
-    except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+    # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
+    # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (OSError, ValueError, RecursionError, tomllib.TOMLDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(path, exc))
 
 
@@ -826,6 +828,23 @@ def self_test():
         return 2
     failures = []
     n = 0
+    # F-TOML-BARE-VALUEERROR-CLASS: a 1200-deep nested array makes tomllib raise RecursionError (a
+    # RuntimeError, not a ValueError); _load_toml must still refuse with GateError (exit 2). The recursion
+    # limit is pinned to the CPython default 1000 (test-hermeticity) and restored in finally.
+    deep = tmp / "deep-nesting.toml"
+    deep.write_text("deep = " + "[" * 1200 + "]" * 1200 + "\n", encoding="utf-8")
+    prev_reclimit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        _load_toml(deep)
+        failures.append("a deeply nested TOML array must be refused (exit 2)")
+    except GateError:
+        pass
+    except RecursionError:
+        failures.append("a deeply nested TOML array let a bare RecursionError escape _load_toml (exit 2 "
+                        "expected)")
+    finally:
+        sys.setrecursionlimit(prev_reclimit)
     try:
         # Clean one-to-one, fold, split all PASS.
         for label, kw in (("one-to-one", {}), ("fold", {"fold": True}), ("split", {"split": True})):

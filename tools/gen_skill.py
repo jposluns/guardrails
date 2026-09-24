@@ -463,7 +463,13 @@ def plugin_identity(root):
     name-less, or homepage-less manifest is fail-closed (OSError/ValueError, which build_outputs surfaces
     as exit 2)."""
     path = root.joinpath(*IDENTITY_MANIFEST_PARTS)
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except RecursionError as exc:
+        # tomllib raises RecursionError (a RuntimeError, not a ValueError) on a deeply nested array or inline
+        # table; map it into the ValueError family build_outputs surfaces as exit 2
+        # (F-TOML-BARE-VALUEERROR-CLASS).
+        raise ValueError("{}: TOML nesting is too deep to parse ({})".format(path, exc)) from exc
     plugin = data.get("plugin") if isinstance(data, dict) else None
     name = plugin.get("author-name") if isinstance(plugin, dict) else None
     homepage = plugin.get("homepage") if isinstance(plugin, dict) else None
@@ -791,6 +797,26 @@ def self_test_main():
         return 2
     try:
         # 1. Well-formed source renders and round-trips clean.
+        # 0. F-TOML-BARE-VALUEERROR-CLASS: a 1200-deep nested array in the identity manifest makes tomllib
+        #    raise RecursionError (a RuntimeError, not a ValueError); plugin_identity must map it into the
+        #    ValueError family run_gen surfaces as exit 2. The recursion limit is pinned to the CPython
+        #    default 1000 (test-hermeticity) and restored in finally.
+        deep = tmp / "deep-identity"
+        deep.joinpath(*IDENTITY_MANIFEST_PARTS[:-1]).mkdir(parents=True)
+        deep.joinpath(*IDENTITY_MANIFEST_PARTS).write_text("[plugin]\ndeep = " + "[" * 1200 + "]" * 1200 + "\n",
+                                                           encoding="utf-8")
+        prev_reclimit = sys.getrecursionlimit()
+        sys.setrecursionlimit(1000)
+        try:
+            plugin_identity(deep)
+            failures.append("a deeply nested identity manifest must fail closed (ValueError -> exit 2)")
+        except ValueError:
+            pass
+        except RecursionError:
+            failures.append("a deeply nested identity manifest let a bare RecursionError escape plugin_identity")
+        finally:
+            sys.setrecursionlimit(prev_reclimit)
+
         good = tmp / "good"
         good.mkdir()
         _write_fixture(good, good_src)

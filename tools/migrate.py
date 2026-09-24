@@ -95,7 +95,9 @@ def load_crosswalk(root):
             return tomllib.load(fh)
     except FileNotFoundError:
         raise RefuseError("no crosswalk at {} (nothing to plan)".format(CROSSWALK_REL))
-    except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+    # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply nested
+    # array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (OSError, ValueError, RecursionError, tomllib.TOMLDecodeError) as exc:
         raise RefuseError("cannot read {} ({})".format(CROSSWALK_REL, exc))
 
 
@@ -749,6 +751,24 @@ def self_test():
 
     failures = []
     checked = 0
+    # F-TOML-BARE-VALUEERROR-CLASS: a 1200-deep nested array makes tomllib raise RecursionError (a
+    # RuntimeError, not a ValueError); load_crosswalk must still refuse with RefuseError. The recursion
+    # limit is pinned to the CPython default 1000 (test-hermeticity) and restored in finally.
+    deep_root = tmp / "deep-crosswalk"
+    (deep_root / CROSSWALK_REL).parent.mkdir(parents=True)
+    (deep_root / CROSSWALK_REL).write_text("deep = " + "[" * 1200 + "]" * 1200 + "\n", encoding="utf-8")
+    prev_reclimit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        load_crosswalk(deep_root)
+        failures.append("a deeply nested TOML crosswalk must be refused")
+    except RefuseError:
+        pass
+    except RecursionError:
+        failures.append("a deeply nested TOML crosswalk let a bare RecursionError escape load_crosswalk")
+    finally:
+        sys.setrecursionlimit(prev_reclimit)
+    checked += 1
     try:
         # Per-case pre/post baselines, derived from a real clean cutover (never hand-written).
         baselines = {}

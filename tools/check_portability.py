@@ -302,7 +302,10 @@ def _mask_manifest_identity(text):
     [[hook]] table or any other section is not an attribution location. Malformed TOML is fail-closed."""
     try:
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("attribution source {} does not parse ({})".format(IDENTITY_MANIFEST, exc))
     plugin = data.get("plugin") if isinstance(data, dict) else None
     values = {}
@@ -485,7 +488,10 @@ def load_identity(root):
             data = tomllib.load(handle)
     except OSError as exc:
         raise GateError("cannot read the identity source {} ({})".format(IDENTITY_MANIFEST, exc))
-    except tomllib.TOMLDecodeError as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("identity source {} does not parse ({})".format(IDENTITY_MANIFEST, exc))
     plugin = data.get("plugin")
     if not isinstance(plugin, dict):
@@ -1043,6 +1049,32 @@ def self_test_main():
     _expect_gate_error("finding 4: duplicate git path",
                        lambda: _list_tracked(iw_root, runner=_fake_runner(
                            top_ok, _FakeProc(stdout=good_record + good_record))))
+
+    # F-TOML-BARE-VALUEERROR-CLASS: an integer literal past CPython's 4300-digit int-string limit makes
+    # tomllib raise a BARE ValueError (not TOMLDecodeError). Both identity-manifest parse sites (the
+    # attribution mask and load_identity) must still fail closed as GateError. The digit limit is pinned to
+    # the default 4300 (test-hermeticity) and restored in finally; the fixture lives in its own tempdir.
+    # A 1200-deep nested array (tomllib raises RecursionError, not a ValueError) must fail closed the same
+    # way at both sites; the recursion limit is pinned to the CPython default 1000 for the same reason.
+    import tempfile as _tempfile
+    _prev_digits = sys.get_int_max_str_digits()
+    _prev_reclimit = sys.getrecursionlimit()
+    sys.set_int_max_str_digits(4300)
+    sys.setrecursionlimit(1000)
+    try:
+        for big_label, big_value in (("over-long integer", "9" * 4400), ("deep nesting", "[" * 1200 + "]" * 1200)):
+            big_toml = "[plugin]\nover-long = " + big_value + "\n"
+            _expect_gate_error(big_label + " attribution source",
+                               lambda: _mask_manifest_identity(big_toml), "does not parse")
+            with _tempfile.TemporaryDirectory(prefix="aiqt-portability-bigint-") as big_root:
+                big_path = Path(big_root) / IDENTITY_MANIFEST
+                big_path.parent.mkdir(parents=True)
+                big_path.write_text(big_toml, encoding="utf-8")
+                _expect_gate_error(big_label + " identity source",
+                                   lambda: load_identity(Path(big_root)), "does not parse")
+    finally:
+        sys.setrecursionlimit(_prev_reclimit)
+        sys.set_int_max_str_digits(_prev_digits)
 
     # Coverage and working-tree kind checks remain fail-closed or C3 exactly as the tracked-surface roster
     # specifies, including the identity manifest as a shipped deny input.

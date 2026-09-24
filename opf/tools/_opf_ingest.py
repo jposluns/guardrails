@@ -2627,6 +2627,42 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                     raised_bare = True  # the pre-fix regression: the bare ValueError escaped the writer
                 check("bundle-inventory-hugeint-fail-closed", verdict == CANNOT_EVALUATE and not raised_bare)
 
+        # (h0b) F-TOML-BARE-VALUEERROR-CLASS: the same step-3 parse must also convert the class's
+        # RecursionError member (a 1200-deep nested array; a RuntimeError, not a ValueError) to
+        # CANNOT-EVALUATE. The recursion limit is pinned to the CPython default 1000 (test-hermeticity).
+        _h0b_prev_reclimit = sys.getrecursionlimit()
+        sys.setrecursionlimit(1000)
+        try:
+            with fixture({"legacy/a.md": "source\n"}) as (root, machine):
+                ws = triage(root, ["legacy/a.md"], "keep")
+                run = staged(root, machine, ws, empty, ["legacy/a.md"])
+                if run is not None:
+                    run_rel = "{}/{}".format(_opf_import.IMPORTS_REL, run.name)
+                    bundle = load_bundle(root, run)
+                    run_src = read(run, "run.toml")["source"]
+                    expected = {s["path"]: ("sha256:" + s["sha256"], s["size"]) for s in run_src}
+                    review_inputs = {
+                        "include": bundle["include"] if bundle["include_declared"] else None,
+                        "worksheet": bundle["worksheet"], "options": bundle["options"],
+                        "crosswalk": bundle["crosswalk"], "migrate": bundle["migrate"],
+                        "expected": expected}
+                    # Append the over-long integer as RAW bytes: the canonical emitter would itself hit the
+                    # int->str ceiling, so it is written straight into the staged bytes step 2 binds and step 3
+                    # parses. tomllib then raises a bare ValueError on the 5000-digit literal (> the 4300 ceiling).
+                    raw = (run / "inventory.toml").read_bytes()
+                    (run / "inventory.toml").write_bytes(raw + b"\ndeep = " + b"[" * 1200 + b"]" * 1200 + b"\n")
+                    verdict = None
+                    raised_bare = False
+                    try:
+                        _opf_import._write_ingest_review_bundle(root, run_rel, run.name, review_inputs)
+                    except _opf_import._StageError as exc:
+                        verdict = exc.verdict
+                    except RecursionError:
+                        raised_bare = True  # the RecursionError escaped the writer
+                    check("bundle-inventory-deep-nesting-fail-closed", verdict == CANNOT_EVALUATE and not raised_bare)
+        finally:
+            sys.setrecursionlimit(_h0b_prev_reclimit)
+
         # (h) MIG-PR4b: the read-only SEMANTIC gate over the frozen bundle. Over a COHERENT mixed
         # keep+move+migrate ingest run all five ingest checks PASS; each new check then FINDINGs on its own
         # targeted mutation (change-carries-check). The bundle is NOT digest-bound by any artefact (acyclic

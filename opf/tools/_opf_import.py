@@ -2376,7 +2376,9 @@ def _write_ingest_review_bundle(product_root, run_rel, run_id, review_inputs):
         expected = review_inputs["expected"]
         try:
             _inventory_doc = tomllib.loads(_inventory_bytes.decode("utf-8"))
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
+            # RecursionError too (F-TOML-BARE-VALUEERROR-CLASS): tomllib raises it, a RuntimeError and not a
+            # ValueError, on a deeply nested array or inline table; _read_toml's contained reader maps it too.
             # ValueError family, at the PARSE locus (decode + tomllib.loads over the in-memory staged bytes):
             # UnicodeDecodeError and tomllib.TOMLDecodeError are ValueError subclasses, and tomllib ALSO
             # raises a BARE ValueError on an integer literal over CPython's 4300-digit string-conversion
@@ -3538,7 +3540,10 @@ def _flip_import_status_bytes(store_root_fd, manifest_rel):
     import tomllib   # lazy: stdlib TOML reader; the writer is _opf_emit's canonical emitter
     try:
         model = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise _cannot("cannot parse the live manifest {} ({}); cannot promote".format(manifest_rel, exc))
     opf_tbl = model.get("opf")
     if not (isinstance(opf_tbl, dict) and isinstance(opf_tbl.get("import_status"), str)):
@@ -7243,6 +7248,42 @@ def self_test():
             os.close(fdN1)
         check("N1flip-differently-formatted-flips-to-complete",
               tomllib.loads(flippedN1.decode("utf-8"))["opf"]["import_status"] == "complete")
+
+        # N1bigint (F-TOML-BARE-VALUEERROR-CLASS): a live manifest carrying an integer literal past CPython's
+        # 4300-digit string-conversion ceiling makes tomllib raise a BARE ValueError (not TOMLDecodeError),
+        # so the flip's parse must convert the whole ValueError family to CANNOT-EVALUATE, never raise.
+        # The store fd is opened BEFORE the over-long line is appended (resolve_store reads the manifest
+        # too). Reverting the parse locus to (UnicodeDecodeError, TOMLDecodeError) lets the ValueError
+        # escape (vN1big == "escaped"). The digit limit is PINNED to the default 4300 (test-hermeticity)
+        # so an ambient unlimited setting cannot parse the literal cleanly; restored in finally.
+        # N1deep: the same class's RecursionError member. A 1200-deep nested array makes tomllib raise
+        # RecursionError (a RuntimeError, not a ValueError); it too must be CANNOT-EVALUATE. The recursion
+        # limit is pinned to the CPython default 1000 alongside the digit limit (test-hermeticity).
+        for n1_label, n1_line in (("N1bigint-over-long-integer", "over_long = " + "9" * 4400 + "\n"),
+                                  ("N1deep-nested-array", "deep = " + "[" * 1200 + "]" * 1200 + "\n")):
+            rootN1big, mN1big = build_apply_store()
+            manifest_relN1big = "{}/manifest.toml".format(mN1big.relative_to(rootN1big))
+            resN1big = _opf_store.resolve_store(rootN1big)
+            fdN1big = _opf_store._open_store_root_fd(resN1big.store_root, resN1big.pointer_source != "default")
+            _n1big_prev_idlimit = sys.get_int_max_str_digits()
+            _n1big_prev_reclimit = sys.getrecursionlimit()
+            sys.set_int_max_str_digits(4300)
+            sys.setrecursionlimit(1000)
+            try:
+                with open(mN1big / "manifest.toml", "a", encoding="utf-8") as fh:
+                    fh.write(n1_line)
+                try:
+                    _flip_import_status_bytes(fdN1big, manifest_relN1big)
+                    vN1big = "flipped"
+                except _StageError as exc:
+                    vN1big = exc.verdict
+                except (ValueError, RecursionError):
+                    vN1big = "escaped"
+            finally:
+                sys.setrecursionlimit(_n1big_prev_reclimit)
+                sys.set_int_max_str_digits(_n1big_prev_idlimit)
+                os.close(fdN1big)
+            check(n1_label + "-manifest-cannot-eval", vN1big == CANNOT_EVALUATE)
 
         # N2a (PRC-N2 round-4, unit): _journal._close_fd_quietly swallows a close-time OSError rather than
         # propagating it. A double close (the second os.close raises EBADF and fstat confirms the fd gone)

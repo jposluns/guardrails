@@ -66,7 +66,13 @@ def repo_root(start=None):
 
 def load_toml(path):
     with open(path, "rb") as handle:
-        return tomllib.load(handle)
+        try:
+            return tomllib.load(handle)
+        except RecursionError as exc:
+            # Callers fail closed on the ValueError family by contract, but tomllib raises RecursionError (a
+            # RuntimeError) on a deeply nested array or inline table; map it into that family here, at the
+            # parse locus, so no caller's ValueError handler is bypassed (F-TOML-BARE-VALUEERROR-CLASS).
+            raise ValueError("{}: TOML nesting is too deep to parse ({})".format(path, exc)) from exc
 
 
 def _markers(name):

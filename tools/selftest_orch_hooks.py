@@ -78,7 +78,10 @@ def _expected_check_ids():
     try:
         with open(CHECKS_MANIFEST, "rb") as handle:
             data = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc),
               file=sys.stderr)
         return None

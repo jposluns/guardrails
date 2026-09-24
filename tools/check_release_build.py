@@ -154,7 +154,10 @@ def _show_toml(root, ref, path):
         raise GateError("git show {}:{} failed".format(ref, path))
     try:
         return tomllib.loads(proc.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("{} at {} does not parse: {}".format(path, ref, exc))
 
 
@@ -356,7 +359,10 @@ def qa_layers(qa_path, qa_sha256, expect_candidate_sha):
         return ["QA attestation bytes do not match the recorded digest"], []
     try:
         obj = tomllib.loads(blob.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("QA attestation does not parse: {}".format(exc))
     return validate_qa_obj(obj, expect_candidate_sha)
 
@@ -930,7 +936,10 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
             evidence, exc))
     try:
         data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+    # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise GateError("first-pin: evidence artifact {} does not parse ({}); fail-closed".format(
             evidence, exc))
     agents = _show_bytes(root, candidate_sha, "AGENTS.md")
@@ -978,7 +987,10 @@ def _first_pin_evidence_findings(root, candidate_sha, evidence):
         else:
             try:
                 demo = tomllib.loads(demo_bytes.decode("utf-8"))
-            except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
+            # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
+            # on a deeply nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
+            except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError):
                 raise GateError("first-pin: the demonstration {} resolves but is not offline-evaluable "
                                 "(does not parse); adopter-owned evidence that cannot be evaluated is "
                                 "exit 2".format(demo_ref))
@@ -1668,6 +1680,12 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             (fp / "qa" / "badsuperset.toml").write_text(
                 'agents-sha256 = "{}"\ndelivered-prefix-obligations = ["ob1", "ob2", "obX"]\n'
                 'floor-profile-obligations = ["ob1", "ob2"]\n'.format(a_sha), encoding="utf-8")
+            # An integer literal past CPython's 4300-digit int-string limit (F-TOML-BARE-VALUEERROR-CLASS).
+            big_text = "over-long = " + "9" * 4400 + "\n"
+            (fp / "qa" / "bigint.toml").write_text(big_text, encoding="utf-8")
+            # A 1200-deep nested array: tomllib raises RecursionError (a RuntimeError, not a ValueError).
+            deep_text = "deep = " + "[" * 1200 + "]" * 1200 + "\n"
+            (fp / "qa" / "deep.toml").write_text(deep_text, encoding="utf-8")
             _write_records(fp, "format-version = 1\n")
             _commit(fp, "candidate with AGENTS.md + demonstration")
             fp_commit = subprocess.run(["git", "-C", str(fp), "rev-parse", "HEAD"],
@@ -1715,6 +1733,46 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 failures.append("first-pin evidence: a candidate without AGENTS.md must raise (exit 2)")
             except GateError:
                 pass
+
+            # (F-TOML-BARE-VALUEERROR-CLASS) an integer literal past CPython's 4300-digit int-string limit
+            # makes tomllib raise a BARE ValueError (not TOMLDecodeError). Each of the four gate parse sites
+            # (the first-pin evidence artifact, its demonstration, the QA attestation, and a git-shown TOML)
+            # must still fail closed as GateError (exit 2); narrowing any one back to (UnicodeDecodeError,
+            # TOMLDecodeError) lets the ValueError escape. The digit limit is pinned to the default 4300
+            # (test-hermeticity) and restored in finally.
+            # The same four sites must fail closed on the class's RecursionError member (a 1200-deep nested
+            # array); the recursion limit is pinned to the CPython default 1000 for the same reason.
+            big_cases = []
+            for kind, text, rel in (("over-long integer", big_text, "qa/bigint.toml"),
+                                    ("deep nesting", deep_text, "qa/deep.toml")):
+                ev_path = fp / "{}-evidence.toml".format(rel[3:-5])
+                ev_path.write_text(text, encoding="utf-8")
+                ev_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                big_cases += [
+                    (kind + " evidence artifact",
+                     lambda ev_path=ev_path: _first_pin_evidence_findings(fp, fp_commit, str(ev_path))),
+                    (kind + " demonstration", lambda rel=rel: _first_pin_evidence_findings(
+                        fp, fp_commit, _ev(**{"demonstration": '"{}"'.format(rel)}))),
+                    (kind + " QA attestation",
+                     lambda ev_path=ev_path, ev_sha=ev_sha: qa_layers(str(ev_path), ev_sha, fp_commit)),
+                    (kind + " git-shown TOML", lambda rel=rel: _show_toml(fp, fp_commit, rel))]
+            prev_digits = sys.get_int_max_str_digits()
+            prev_reclimit = sys.getrecursionlimit()
+            sys.set_int_max_str_digits(4300)
+            sys.setrecursionlimit(1000)
+            try:
+                for big_label, big_call in big_cases:
+                    try:
+                        big_call()
+                        failures.append("{}: expected GateError (exit 2), got a result".format(big_label))
+                    except GateError:
+                        pass
+                    except (ValueError, RecursionError) as exc:
+                        failures.append("{}: a bare {} escaped the parse (exit 2 expected)".format(
+                            big_label, type(exc).__name__))
+            finally:
+                sys.setrecursionlimit(prev_reclimit)
+                sys.set_int_max_str_digits(prev_digits)
 
             # (round-4 finding 7) _show_bytes distinguishes a genuinely ABSENT path (None) from a git
             # resolution/infrastructure failure (GateError), so a git error is never downgraded to a finding.
