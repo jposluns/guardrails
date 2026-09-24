@@ -75,6 +75,10 @@ bullet, a numbered list) is not a field, so a later line in a recognized form is
 covered are exactly those listed under Coverage.
 
 Self-test: python3 -I -S -B clock-inject.py --self-test
+Run beside its sibling hooks, the self-test also checks that the code shared verbatim with them is identical.
+Run alone (a single-hook install), those sibling-parity checks are SKIPPED, not passed, each naming the absent
+sibling; with env AIQT_HOOKS_REQUIRE_SIBLINGS=1 an absent sibling FAILS them instead (for a repository gate). A
+sibling that is present but unreadable fails them either way.
 """
 
 import datetime
@@ -103,6 +107,26 @@ def _is_worker(env=None):
     if env.get("AIQT_HOOKS_WORKER") == "1":
         return True
     return env.get("ORCH_WORKER") == "1" or "ORCH_VERIFY_OWNER" in env  # legacy spellings
+
+def _sibling_or_skip(name, env=None):
+    """Self-test helper, kept identical across the three hooks: the path of sibling hook `name` beside this file.
+    A genuinely absent sibling (os.lstat raises FileNotFoundError, nothing broader) SKIPS the calling test with a
+    message naming it, so a single-hook install self-tests clean; with env AIQT_HOOKS_REQUIRE_SIBLINGS=1 the
+    absence FAILS the test instead, so a repository gate never skips parity silently. Any other error (an
+    unreadable directory, say) propagates, and a sibling that exists but cannot be loaded fails when it is read,
+    so only a genuine absence ever skips."""
+    import unittest
+    env = os.environ if env is None else env
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        if env.get("AIQT_HOOKS_REQUIRE_SIBLINGS") == "1":
+            raise AssertionError(f"sibling hook {name} is absent ({path}) and AIQT_HOOKS_REQUIRE_SIBLINGS=1 "
+                                 "requires it") from None
+        raise unittest.SkipTest(f"sibling hook {name} is absent (a standalone install); set "
+                                "AIQT_HOOKS_REQUIRE_SIBLINGS=1 to require it") from None
+    return path
 
 
 # ---- lease / elapsed (kept identical to stamp-truth-stop.py; python3 -I forbids a sibling import) ----
@@ -550,12 +574,12 @@ def _self_test():
         def test_r13_shared_lease_code_identical_to_stop_hook(self):
             import importlib.util
             import inspect
-            sib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stamp-truth-stop.py")
+            sib = _sibling_or_skip("stamp-truth-stop.py")
             spec = importlib.util.spec_from_file_location("sts_sibling", sib)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             for name in ("read_regular", "lease_file", "_utc_field", "transcript_start", "lease_start", "_is_worker",
-                     "_cfg"):
+                     "_cfg", "_sibling_or_skip"):
                 self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
             for name in ("_SESS_RE", "_LEASE_FIELD_RE", "_START_VALUE_RE", "_HEADING_RE"):
                 self.assertEqual((getattr(mod, name).pattern, getattr(mod, name).flags),
@@ -619,6 +643,72 @@ def _self_test():
                 self.assertRegex(obj["additionalContext"], line_re)
             for argv in (None, 7):  # argv that cannot be inspected fails open: exit 0, silent, nothing evaluated
                 self.assertEqual(run_main("{}", argv=argv), (0, ""), argv)
+
+        # -- sibling parity on a single-hook install --
+        PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",)
+        PARITY_SIBLINGS = ("stamp-truth-stop.py",)
+
+        def _parity_in_copy(self, siblings, value, dangling=False):
+            """Copy this file (and `siblings`, found beside it) into a fresh directory, run ONLY the copy's
+            sibling-parity tests in a child interpreter with AIQT_HOOKS_REQUIRE_SIBLINGS set to `value` (None:
+            unset, whatever the caller has), and return ([rc, run, skipped, failures, errors], child stderr).
+            With `dangling`, each sibling is a symlink to a missing target: it EXISTS but cannot be read."""
+            base = "/dev/shm" if os.path.isdir("/dev/shm") else None
+            d = tempfile.mkdtemp(prefix="sib.", dir=base)
+            try:
+                me = os.path.join(d, os.path.basename(os.path.abspath(__file__)))
+                shutil.copyfile(os.path.abspath(__file__), me)
+                for sib in siblings:
+                    shutil.copyfile(_sibling_or_skip(sib), os.path.join(d, sib))
+                if dangling:
+                    for sib in self.PARITY_SIBLINGS:
+                        os.symlink(os.path.join(d, "no-such-target"), os.path.join(d, sib))
+                env = {k: v for k, v in os.environ.items() if k != "AIQT_HOOKS_REQUIRE_SIBLINGS"}
+                if value is not None:
+                    env["AIQT_HOOKS_REQUIRE_SIBLINGS"] = value
+                code = ("import importlib.util as u, json, unittest\n"
+                        "s = u.spec_from_file_location('m', %r)\n"
+                        "m = u.module_from_spec(s)\n"
+                        "s.loader.exec_module(m)\n"
+                        "names = %r\n"
+                        "unittest.TestLoader.loadTestsFromTestCase = lambda self, tc: unittest.TestSuite("
+                        "tc(n) for n in names)\n"
+                        "box, run = [], unittest.TextTestRunner.run\n"
+                        "unittest.TextTestRunner.run = lambda self, t: box.append(run(self, t)) or box[-1]\n"
+                        "rc = m._self_test()\n"
+                        "r = box[0]\n"
+                        "print(json.dumps([rc, r.testsRun, len(r.skipped), len(r.failures), len(r.errors)]))\n"
+                        ) % (me, self.PARITY_TESTS)
+                p = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code], env=env, capture_output=True,
+                                   text=True, timeout=120)
+                self.assertTrue(p.stdout.strip(), p.stderr)
+                return json.loads(p.stdout.strip().splitlines()[-1]), p.stderr
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
+
+        def test_sibling_parity_skips_alone_and_fails_when_required(self):
+            # a single-hook install: each sibling-parity test is SKIPPED (not passed) with a message naming the
+            # absent sibling, unless AIQT_HOOKS_REQUIRE_SIBLINGS=1, when the same absence FAILS it
+            n = len(self.PARITY_TESTS)
+            for value in (None, "0", ""):
+                got, err = self._parity_in_copy((), value)
+                self.assertEqual(got, [0, n, n, 0, 0], (value, err))
+                for sib in self.PARITY_SIBLINGS:
+                    self.assertIn(f"sibling hook {sib} is absent (a standalone install)", err)
+            got, err = self._parity_in_copy((), "1")
+            self.assertEqual(got, [1, n, 0, n, 0], err)
+            self.assertIn("AIQT_HOOKS_REQUIRE_SIBLINGS=1 requires it", err)
+            # a sibling that EXISTS but cannot be read fails (never skips), with or without the variable
+            for value in (None, "1"):
+                got, err = self._parity_in_copy((), value, dangling=True)
+                self.assertEqual((got[0], got[1], got[2], got[3] + got[4]), (1, n, 0, n), (value, err))
+
+        def test_sibling_parity_runs_and_passes_with_siblings_present(self):
+            # with every sibling beside the copy the parity tests RUN and pass, whatever the variable says
+            n = len(self.PARITY_TESTS)
+            for value in (None, "1"):
+                got, err = self._parity_in_copy(self.PARITY_SIBLINGS, value)
+                self.assertEqual(got, [0, n, 0, 0, 0], (value, err))
 
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestLoader().loadTestsFromTestCase(T))
     return 0 if result.wasSuccessful() else 1

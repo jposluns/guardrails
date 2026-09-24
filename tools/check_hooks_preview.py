@@ -18,38 +18,52 @@ an absent or unreadable one is exit 2), and every other entry must be a hook fil
   (a) SELF-TEST. Each hooks-preview/*.py runs as [sys.executable, "-I", "-B", <path>, "--self-test"] in a
       fresh temporary working directory, with stdin closed and every AIQT_, ORCH_ and CLAUDE_ variable
       removed from its environment, so an operator's live hook configuration cannot steer the verdict.
+      After that scrub the one variable AIQT_HOOKS_REQUIRE_SIBLINGS=1 is set: a hook skips its
+      sibling-parity tests when a sibling file is absent unless that variable is "1", and here the
+      siblings are present, so a parity test can never skip silently under this gate.
       A nonzero exit is a finding. A run that outlives SELFTEST_TIMEOUT seconds delivered no verdict and
       is a cannot-evaluate (exit 2), attributed to this gate's deadline, not reported as a hook failure.
   (b) INTEGRITY. The README.md integrity table (the one table whose header row is exactly
-      `| File | SHA-256 | Pinned raw link |`) and SHA256SUMS (`sha256sum` text format, `<64 hex>  <name>`,
-      with `#` comment lines allowed) are parsed. The two must list the same files with the same hashes;
+      `| File | SHA-256 | Pinned raw link |`; every line from its separator row to the first blank line
+      or the end of the file must be a `| a | b | c |` row, since GitHub renders a row written without a
+      leading pipe too) and SHA256SUMS (`sha256sum` text format, `<64 hex>  <name>`, with `#` comment
+      lines allowed, lines ended by LF only) are parsed. README.md lines are split where GitHub splits
+      them (LF, CR, CRLF). A line separator Python would honour but the consumer does not (VT, FF, FS,
+      GS, RS, NEL, U+2028, U+2029, and in SHA256SUMS also CR) is a cannot-evaluate anywhere in either
+      file, so the gate never parses a line its reader does not see. The two must list the same files
+      with the same hashes;
       each listed hash must equal the SHA-256 of that file's working-tree bytes; a hook file present but
       unlisted, or listed but absent, is a finding. A SHA256SUMS name containing `/` (an absolute or
       relative path, not a bare file name) is a finding, because `sha256sum -c` would then check the file
       at that path rather than the downloaded one. A table or SHA256SUMS line that cannot be parsed is a
       cannot-evaluate (exit 2). An empty listing is valid only when no hook file is present.
   (c) PIN. Each table row's raw link must have the shape
-      https://raw.githubusercontent.com/<owner>/<repo>/<tag>/hooks-preview/<file>, where <file> names the
-      same file as the row and <tag> matches hooks-preview-v<N>. When that tag resolves in the local
-      repository (refs/tags/<tag>), the blob at <tag>:hooks-preview/<file> must exist and hash to the
-      README value. When the tag does not resolve (the normal state on the pull request that introduces
-      or bumps it, before the maintainer pushes the tag after merge), a note is printed and the leg is
-      skipped for that row. A git failure other than an unresolved tag or a path genuinely absent at the
-      tag (git missing, not a repository, an unreadable object) is a cannot-evaluate.
+      https://raw.githubusercontent.com/<owner>/<repo>/refs/tags/<tag>/hooks-preview/<file>, where <file>
+      names the same file as the row and <tag> matches hooks-preview-v<N>. The explicit refs/tags/ form is
+      required because a bare <tag> segment is ambiguous (a branch of the same name could be served
+      instead of the tag this leg verifies); a bare tag, refs/heads/, or any other ref form is a finding.
+      When refs/tags/<tag> exists in the local repository, it must resolve to a readable commit and the
+      blob at <tag>:hooks-preview/<file> must exist and hash to the README value. When the ref does not
+      exist (the normal state on the pull request that introduces or bumps it, before the maintainer
+      pushes the tag after merge), a note is printed and the leg is skipped for that row. A git failure
+      other than an absent tag ref or a path genuinely absent at the tag (git missing, not a repository,
+      a tag ref that exists but does not resolve to a readable commit, an unreadable object) is a
+      cannot-evaluate.
   A scratch directory that cannot be created for a hook self-test is a cannot-evaluate for that hook.
 
 DISCLOSED RESIDUALS (what this gate does not catch):
   - Leg (a) trusts each hook's own self-test: a hook whose self-test is weak, or that exits 0 without
     testing, passes. The gate judges the exit status only, never the self-test's content.
-  - Leg (c) is skipped, with a printed note, whenever the tag does not resolve locally, including a CI
+  - Leg (c) is skipped, with a printed note, whenever the tag ref is absent locally, including a CI
     checkout that fetched no tags; the pin is then enforced only for shape. The <owner>/<repo> part of a
     link is not validated against any canonical origin, so a link to a different repository with the
     right shape passes; the SHA-256 in the README is the trust anchor, and it is checked in leg (b).
   - README hash, SHA256SUMS, and hook bytes share one origin (this repository), so this gate proves the
     three agree with each other and with the tag, not that the repository itself is uncompromised.
   - Only the one integrity table is parsed; hashes or links written elsewhere in README.md prose are not.
-  - The environment scrub removes three variable families and nothing else; a hook self-test that reads
-    another ambient input (the clock, the time zone, the locale) is responsible for pinning it itself.
+  - The environment scrub removes three variable families and sets AIQT_HOOKS_REQUIRE_SIBLINGS=1, and
+    changes nothing else; a hook self-test that reads another ambient input (the clock, the time zone,
+    the locale) is responsible for pinning it itself.
 
   check_hooks_preview.py              run the gate over hooks-preview/
   check_hooks_preview.py --self-test  synthetic temp-tree fixtures proving each leg fails on a seeded fault
@@ -58,7 +72,7 @@ Exit convention (matches the repo's gates):
   0  clean, or a printed NOT APPLICABLE
   1  a real finding (a failing hook self-test, a hash or listing disagreement, a bad or stale pin)
   2  cannot-evaluate: a missing or unreadable required input, an unparseable table or SHA256SUMS line, a
-     self-test that timed out or had no scratch directory, a git failure other than an unresolved tag or
+     self-test that timed out or had no scratch directory, a git failure other than an absent tag ref or
      an absent path, an unrecognized argument, or (under --self-test) a mandatory case that was skipped
 """
 import hashlib
@@ -85,11 +99,21 @@ SUMS_LINE_RE = re.compile(r"^([0-9a-f]{64})  (\S+)$")
 TABLE_HEADER = "| File | SHA-256 | Pinned raw link |"
 TABLE_SEPARATOR_RE = re.compile(r"^\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|$")
 TAG_RE = re.compile(r"^hooks-preview-v\d+$")
+# A raw link to a channel file; group 3 is the ref part, which leg (c) requires to be refs/tags/<tag>.
 RAW_LINK_RE = re.compile(
-    r"^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/([^/\s]+)/"
+    r"^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(\S+?)/"
     + re.escape(PREVIEW_DIR) + r"/([^/\s]+)$")
+PINNED_REF_RE = re.compile(r"^refs/tags/([^/\s]+)$")
 # Environment families removed from a hook self-test (live hook configuration must not steer the verdict).
 SCRUB_PREFIXES = ("AIQT_", "ORCH_", "CLAUDE_")
+# Set after the scrub: a hook's sibling-parity tests must run, never skip, under this gate.
+REQUIRE_SIBLINGS_VAR = "AIQT_HOOKS_REQUIRE_SIBLINGS"
+# Characters str.splitlines() treats as line breaks that the channel's readers do not. `sha256sum -c` ends
+# a line at LF only; GitHub (CommonMark) ends a README line at LF, CR or CRLF, so CR is allowed there.
+SUMS_BREAK_CHARS = "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+README_BREAK_CHARS = SUMS_BREAK_CHARS.replace("\r", "")
+# The whitespace GitHub trims around a table row or cell and treats as blank (space and tab only).
+GFM_SPACE = " \t"
 # Seconds one hook self-test may run. Set well above the slowest shipped self-test (a few seconds today),
 # so a correctly running self-test is never cut short; exceeding it is reported as this gate's deadline.
 SELFTEST_TIMEOUT = 600
@@ -164,11 +188,24 @@ def _decode(name, data):
         raise GateError("{}/{} is not valid UTF-8: {}".format(PREVIEW_DIR, name, exc))
 
 
+def _reject_breaks(name, lines, chars, reader, endings):
+    """Raise GateError at the first line holding one of `chars`, a line break Python would honour but the
+    file's reader does not, so the gate never parses a line that reader does not see."""
+    for number, line in enumerate(lines, 1):
+        for ch in line:
+            if ch in chars:
+                raise GateError("{}:{}: U+{:04X} is not a line break for {}; lines end with {} only".format(
+                    name, number, ord(ch), reader, endings))
+
+
 def parse_sums(text):
-    """Parse SHA256SUMS. Returns {name: hex}. `#` comment lines and blank lines are skipped; any other line
-    must be `<64 lowercase hex>  <name>`. A malformed line or a duplicate name raises GateError."""
+    """Parse SHA256SUMS. Returns {name: hex}. Lines end with LF only (one trailing LF allowed); `#` comment
+    lines and blank lines are skipped; any other line must be `<64 lowercase hex>  <name>`. Another line
+    separator anywhere, a malformed line, or a duplicate name raises GateError."""
     listed = {}
-    for number, line in enumerate(text.splitlines(), 1):
+    lines = (text[:-1] if text.endswith("\n") else text).split("\n")
+    _reject_breaks(SUMS_NAME, lines, SUMS_BREAK_CHARS, "`sha256sum -c`", "LF")
+    for number, line in enumerate(lines, 1):
         if not line.strip() or line.startswith("#"):
             continue
         m = SUMS_LINE_RE.match(line)
@@ -183,32 +220,40 @@ def parse_sums(text):
 
 def _cell_code(cell):
     """Unwrap a single backtick code span, or return None."""
-    cell = cell.strip()
+    cell = cell.strip(GFM_SPACE)
     if len(cell) >= 2 and cell.startswith("`") and cell.endswith("`") and "`" not in cell[1:-1]:
         return cell[1:-1]
     return None
 
 
 def parse_readme_table(text):
-    """Parse the one integrity table. Returns a list of (line_number, name, hex, link). The header row must
-    appear exactly once and be followed by a separator row; the rows are the consecutive `|` lines after
-    it. A missing or duplicated header, a missing separator, or a malformed row raises GateError."""
-    lines = text.splitlines()
-    headers = [i for i, line in enumerate(lines) if line.strip() == TABLE_HEADER]
+    """Parse the one integrity table. Returns a list of (line_number, name, hex, link). Lines split where
+    GitHub splits them (LF, CR, CRLF); any other line break Python would honour raises GateError. The
+    header row must appear exactly once and be followed by a separator row; every line from there to the
+    first blank line (or the end of the file) is a row, because GitHub renders a line without a leading
+    `|` as a row too, so each must be a well-formed `| a | b | c |` row. A missing or duplicated header, a
+    missing separator, or a malformed row raises GateError."""
+    lines = re.split(r"\r\n|\r|\n", text)
+    _reject_breaks(README_NAME, lines, README_BREAK_CHARS, "GitHub", "LF, CR or CRLF")
+    headers = [i for i, line in enumerate(lines) if line.strip(GFM_SPACE) == TABLE_HEADER]
     if len(headers) != 1:
         raise GateError("{}: expected exactly one integrity table header row `{}`, found {}".format(
             README_NAME, TABLE_HEADER, len(headers)))
     h = headers[0]
-    if h + 1 >= len(lines) or TABLE_SEPARATOR_RE.match(lines[h + 1].strip()) is None:
+    if h + 1 >= len(lines) or TABLE_SEPARATOR_RE.match(lines[h + 1].strip(GFM_SPACE)) is None:
         raise GateError("{}:{}: the integrity table header is not followed by a separator row".format(
             README_NAME, h + 2))
     rows = []
     seen = set()
     for i in range(h + 2, len(lines)):
-        line = lines[i].strip()
-        if not line.startswith("|"):
+        line = lines[i].strip(GFM_SPACE)
+        if not line:
             break
         number = i + 1
+        if not line.startswith("|"):
+            raise GateError("{}:{}: a line inside the integrity table does not start with `|`; GitHub renders "
+                            "it as a row, so write it as `| a | b | c |` or end the table with a blank line "
+                            "first".format(README_NAME, number))
         if not line.endswith("|"):
             raise GateError("{}:{}: integrity table row does not end with `|`".format(README_NAME, number))
         cells = line[1:-1].split("|")
@@ -217,7 +262,7 @@ def parse_readme_table(text):
                 README_NAME, number, len(cells)))
         name = _cell_code(cells[0])
         hexd = _cell_code(cells[1])
-        link = cells[2].strip()
+        link = cells[2].strip(GFM_SPACE)
         if link.startswith("<") and link.endswith(">"):
             link = link[1:-1]
         if name is None or hexd is None or not link:
@@ -258,22 +303,29 @@ def _git(root, *args):
 
 
 def resolve_tag(root, tag):
-    """Return the commit id the tag names, or None when refs/tags/<tag> does not exist. Any other git
-    outcome (not a repository, git missing) raises GateError."""
+    """Return the commit id the tag names, or None when refs/tags/<tag> does not exist. Existence is read
+    from the ref store itself (`git for-each-ref`, which lists a ref whatever its object's state), so a
+    tag ref that exists but does not resolve to a readable commit raises GateError instead of reading as
+    absent. Any other git outcome (not a repository, git missing) raises GateError."""
     probe = _git(root, "rev-parse", "--is-inside-work-tree")
     if probe.returncode != 0:
         raise GateError("the pin leg cannot evaluate: {} is not a readable git repository ({})".format(
             root, probe.stderr.decode("utf-8", "replace").strip() or "git rev-parse failed"))
-    res = _git(root, "rev-parse", "--verify", "--quiet", "refs/tags/{}^{{commit}}".format(tag))
+    ref = "refs/tags/{}".format(tag)
+    listed = _git(root, "for-each-ref", "--format=%(refname)", ref)
+    if listed.returncode != 0 or listed.stderr.strip():
+        raise GateError("cannot list {}: {}".format(ref, _bounded(
+            listed.stderr or "git for-each-ref exit {}".format(listed.returncode))))
+    if ref.encode("utf-8") not in listed.stdout.split(b"\n"):
+        return None
+    res = _git(root, "rev-parse", "--verify", "--quiet", "{}^{{commit}}".format(ref))
     if res.returncode == 0:
         sha = res.stdout.decode("ascii", "replace").strip()
         if re.match(r"^[0-9a-f]{40}([0-9a-f]{24})?$", sha) is None:
             raise GateError("git returned an unrecognized commit id for tag {}: {!r}".format(tag, sha))
         return sha
-    if res.returncode == 1 and not res.stderr.strip():
-        return None
-    raise GateError("cannot resolve tag {}: {}".format(
-        tag, res.stderr.decode("utf-8", "replace").strip() or "git rev-parse exit {}".format(res.returncode)))
+    raise GateError("tag {} exists but does not resolve to a readable commit: {}".format(tag, _bounded(
+        res.stderr or "git rev-parse exit {}".format(res.returncode))))
 
 
 def _bounded(data, limit=DIAG_LIMIT):
@@ -314,7 +366,10 @@ def blob_at(root, commit, name):
 # --- the three legs -------------------------------------------------------------------------------
 
 def _selftest_env():
-    return {k: v for k, v in os.environ.items() if not k.startswith(SCRUB_PREFIXES)}
+    """The hook self-test environment: the three families scrubbed, then only REQUIRE_SIBLINGS_VAR=1 set."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(SCRUB_PREFIXES)}
+    env[REQUIRE_SIBLINGS_VAR] = "1"
+    return env
 
 
 def _tail(data, n=15):
@@ -323,7 +378,9 @@ def _tail(data, n=15):
 
 
 def leg_selftest(pdir, hooks, findings, unverifiable):
-    """(a) Run each hook's own --self-test isolated; nonzero is a finding, a timeout is unverifiable."""
+    """(a) Run each hook's own --self-test isolated; nonzero is a finding, a timeout is unverifiable. The
+    environment is scrubbed of AIQT_, ORCH_ and CLAUDE_ variables and then carries AIQT_HOOKS_REQUIRE_SIBLINGS=1
+    (set after the scrub), so a hook's sibling-parity tests run rather than skip silently in CI."""
     for name in hooks:
         path = str((pdir / name).resolve())
         try:
@@ -393,18 +450,24 @@ def leg_integrity(pdir, hooks, rows, sums, findings):
 
 
 def leg_pin(root, rows, findings):
-    """(c) Each raw link names its own file under a hooks-preview-v<N> tag; when the tag resolves locally
-    the blob at the tag must hash to the README value."""
+    """(c) Each raw link names its own file under refs/tags/hooks-preview-v<N>; when that tag ref exists
+    locally the blob at the tag must hash to the README value."""
     commits = {}
     for number, name, hexd, link in rows:
         m = RAW_LINK_RE.match(link)
         if m is None:
-            findings.append("{}:{}: {} link is not a raw.githubusercontent.com/<owner>/<repo>/<tag>/{}/<file> "
-                            "link (c)".format(README_NAME, number, name, PREVIEW_DIR))
+            findings.append("{}:{}: {} link is not a raw.githubusercontent.com/<owner>/<repo>/refs/tags/<tag>/"
+                            "{}/<file> link (c)".format(README_NAME, number, name, PREVIEW_DIR))
             continue
-        tag, link_file = m.group(3), m.group(4)
+        ref, link_file = m.group(3), m.group(4)
         if link_file != name:
             findings.append("{}:{}: the {} row links to {} (c)".format(README_NAME, number, name, link_file))
+        pinned = PINNED_REF_RE.match(ref)
+        if pinned is None:
+            findings.append("{}:{}: the {} link names ref {!r}; use refs/tags/<tag>, so the tag and never a "
+                            "same-named branch is served (c)".format(README_NAME, number, name, ref))
+            continue
+        tag = pinned.group(1)
         if TAG_RE.match(tag) is None:
             findings.append("{}:{}: the {} link is pinned to {!r}, not a hooks-preview-v<N> tag (c)".format(
                 README_NAME, number, name, tag))
@@ -415,7 +478,7 @@ def leg_pin(root, rows, findings):
             commits[tag] = resolve_tag(root, tag)
         commit = commits[tag]
         if commit is None:
-            print("  note: tag {} does not resolve locally; the at-tag hash check for {} is skipped (the tag "
+            print("  note: tag {} does not exist locally; the at-tag hash check for {} is skipped (the tag "
                   "is pushed after merge)".format(tag, name))
             continue
         blob = blob_at(root, commit, name)
@@ -486,7 +549,14 @@ def run(root):
 _STUB_OK = b"import sys\nsys.exit(0 if '--self-test' in sys.argv else 3)\n"
 _STUB_FAIL = b"import sys\nprint('stub self-test failure')\nsys.exit(1)\n"
 _STUB_SLOW = b"import time\ntime.sleep(30)\n"
-_LINK = "https://raw.githubusercontent.com/example/pack/{tag}/hooks-preview/{name}"
+# Passes only when its environment carries REQUIRE_SIBLINGS_VAR=1 and no other scrubbed-family variable.
+_STUB_ENV = (b"import os, sys\nkeys = sorted(k for k in os.environ if k.startswith(('AIQT_', 'ORCH_', 'CLAUDE_')))\n"
+             b"sys.exit(0 if keys == ['AIQT_HOOKS_REQUIRE_SIBLINGS'] and "
+             b"os.environ['AIQT_HOOKS_REQUIRE_SIBLINGS'] == '1' else 1)\n")
+_LINK = "https://raw.githubusercontent.com/example/pack/refs/tags/{tag}/hooks-preview/{name}"
+_BARE_LINK = "https://raw.githubusercontent.com/example/pack/{ref}/hooks-preview/{name}"
+# Scrubbed-family variables seeded into the gate's own environment to prove leg (a) removes or overrides them.
+_SEEDED_ENV = {"AIQT_SEEDED": "x", REQUIRE_SIBLINGS_VAR: "0", "ORCH_SEEDED": "x", "CLAUDE_SEEDED": "x"}
 
 
 def _readme(rows, header=TABLE_HEADER):
@@ -556,6 +626,21 @@ def _no_scratch(*args, **kwargs):
     raise OSError(28, "No space left on device (seeded by the self-test)")
 
 
+def _seed_env():
+    """Seed _SEEDED_ENV into os.environ; returns the prior values for _restore_env."""
+    saved = {k: os.environ.get(k) for k in _SEEDED_ENV}
+    os.environ.update(_SEEDED_ENV)
+    return saved
+
+
+def _restore_env(saved):
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
 def self_test_main():
     global SELFTEST_TIMEOUT
     failures = []
@@ -604,6 +689,16 @@ def self_test_main():
             pass
         if parse_sums("# only a comment\n") != {}:
             failures.append("parse_sums did not accept a comment-only listing as empty")
+        if parse_sums("{}  x.py".format("0" * 64)) != {"x.py": "0" * 64}:
+            failures.append("parse_sums did not accept a listing without a trailing LF")
+        saved_env = _seed_env()
+        try:
+            got_env = {k: v for k, v in _selftest_env().items() if k.startswith(SCRUB_PREFIXES)}
+        finally:
+            _restore_env(saved_env)
+        if got_env != {REQUIRE_SIBLINGS_VAR: "1"}:
+            failures.append("the hook self-test environment carries {!r}, expected only {}=1 of the scrubbed "
+                            "families".format(sorted(got_env.items()), REQUIRE_SIBLINGS_VAR))
 
         # Cases that never reach git (always run).
         # 1. absent directory -> NOT APPLICABLE, exit 0.
@@ -736,6 +831,60 @@ def self_test_main():
             (r / ".git" / "objects" / oid[:2] / oid[2:]).unlink()
             case("tag resolves but its tree is unreadable", 2, r, needle="cannot list")
 
+            # 23b. (c) the tag ref exists but its commit object is gone -> exit 2, never read as an absent
+            #      tag (which would skip the leg with a note).
+            r = _build(repo("tag-commit-missing"), ok)
+            _commit_and_tag(r, "hooks-preview-v1")
+            oid = _fixture_git(r, "rev-parse", "hooks-preview-v1^{commit}").stdout.decode("ascii").strip()
+            (r / ".git" / "objects" / oid[:2] / oid[2:]).unlink()
+            case("tag ref exists but its commit is unreadable", 2, r, needle="does not resolve to a readable commit")
+
+            # 23c. (a) the hook self-test sees REQUIRE_SIBLINGS_VAR=1 and no other scrubbed-family variable,
+            #      even when the gate's own environment carries them -> exit 0.
+            r = _build(repo("selftest-env"), {"clock-inject.py": _STUB_ENV})
+            saved_env = _seed_env()
+            try:
+                case("hook self-test environment", 0, r)
+            finally:
+                _restore_env(saved_env)
+
+            # 23d. a README with CRLF line endings (GitHub splits there too) parses as the LF form -> exit 0.
+            r = _build(repo("readme-crlf"), ok)
+            text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
+            (r / PREVIEW_DIR / README_NAME).write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+            case("README with CRLF line endings", 0, r)
+
+            # 23e. (b) a table line written without a leading `|` (GitHub still renders it as a row) -> exit 2.
+            r = _build(repo("pipeless-row"), ok)
+            text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
+            phantom = "`missing.py` | `{}` | {}".format(
+                "a" * 64, _LINK.format(tag="hooks-preview-v1", name="missing.py"))
+            row_end = text.index("\n", text.index("| `clock-inject.py` |"))
+            (r / PREVIEW_DIR / README_NAME).write_text(
+                text[:row_end + 1] + phantom + " |\n" + text[row_end + 1:], encoding="utf-8")
+            case("table row without a leading pipe", 2, r, needle="does not start with `|`")
+
+            # 23f. a line separator the reader does not honour -> exit 2: each one in SHA256SUMS, and U+2028
+            #      joining a phantom row onto a README table row (one line to GitHub, two to str.splitlines()).
+            for ch in SUMS_BREAK_CHARS:
+                r = _build(repo("sums-break-{:04x}".format(ord(ch))), ok)
+                sums_text = _sums([("clock-inject.py", ok_hex)])
+                (r / PREVIEW_DIR / SUMS_NAME).write_bytes(sums_text.replace("\n", ch, 1).encode("utf-8"))
+                case("SHA256SUMS line separator U+{:04X}".format(ord(ch)), 2, r, needle="is not a line break")
+            r = _build(repo("readme-break"), ok)
+            text = (r / PREVIEW_DIR / README_NAME).read_text(encoding="utf-8")
+            row_end = text.index("\n", text.index("| `clock-inject.py` |"))
+            (r / PREVIEW_DIR / README_NAME).write_text(
+                text[:row_end] + "\u2028| " + phantom + " |" + text[row_end:], encoding="utf-8")
+            case("README line separator U+2028", 2, r, needle="is not a line break")
+
+            # 23g. (c) a link whose ref is a bare tag or a branch, not refs/tags/<tag> -> exit 1.
+            for label, ref in (("bare tag", "hooks-preview-v1"), ("refs/heads", "refs/heads/hooks-preview-v1")):
+                case("link pinned by {}".format(label), 1, _build(
+                    repo("link-{}".format(label.replace(" ", "-").replace("/", "-"))), ok,
+                    rows=[("clock-inject.py", ok_hex, _BARE_LINK.format(ref=ref, name="clock-inject.py"))]),
+                    needle="use refs/tags/<tag>")
+
             # 24. the self-test itself: with no git binary on PATH the git-backed cases are skipped, so the
             #     self-test must exit 2 and name what it skipped, never report a pass.
             ran.append("self-test without git")
@@ -755,7 +904,11 @@ def self_test_main():
                        "listed but absent", "alien file name in the table", "tag resolves and matches",
                        "tag resolves to a different blob", "tag lacks the file",
                        "pin leg outside a readable repository", "tag resolves but its tree is unreadable",
-                       "self-test without git"]
+                       "tag ref exists but its commit is unreadable", "hook self-test environment",
+                       "README with CRLF line endings", "table row without a leading pipe"]
+            skipped += ["SHA256SUMS line separator U+{:04X}".format(ord(ch)) for ch in SUMS_BREAK_CHARS]
+            skipped += ["README line separator U+2028", "link pinned by bare tag", "link pinned by refs/heads",
+                        "self-test without git"]
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("fixture construction failed: {}".format(exc))
     finally:
@@ -772,11 +925,13 @@ def self_test_main():
                   len(ran), len(skipped), "; ".join(skipped)))
         return 2
     print("SELF-TEST PASS: {} case(s): the NOT APPLICABLE path, the zero-hook channel, and each leg's seeded "
-          "fault (a: failing and timed-out self-tests, no scratch directory; b: corrupted hash, disagreement, "
-          "empty listing, unlisted, absent, alien and extra entries, path entries in SHA256SUMS, malformed "
-          "inputs; c: wrong file, non-tag ref, non-raw link, matching, stale and missing blob at a resolving "
-          "tag, unreadable tree at a resolving tag, unreadable repository; the self-test refusing to pass "
-          "without git) all hold".format(len(ran)))
+          "fault (a: failing and timed-out self-tests, no scratch directory, the scrubbed environment with "
+          "{}=1; b: corrupted hash, disagreement, empty listing, unlisted, absent, alien and extra entries, "
+          "path entries in SHA256SUMS, malformed inputs, a table row without a leading pipe, line separators "
+          "the reader does not honour, a CRLF README; c: wrong file, non-tag ref, bare-tag and refs/heads "
+          "links, non-raw link, matching, stale and missing blob at a resolving tag, unreadable tree at a "
+          "resolving tag, an existing tag ref with an unreadable commit, unreadable repository; the "
+          "self-test refusing to pass without git) all hold".format(len(ran), REQUIRE_SIBLINGS_VAR))
     return 0
 
 

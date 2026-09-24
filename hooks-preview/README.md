@@ -40,14 +40,16 @@ the authority, and the summary further down this page only points to it.
 
 Every published hook file is listed below with its SHA-256 checksum and a download link pinned to a
 release tag of this repository, in the form
-`https://raw.githubusercontent.com/jposluns/guardrails/hooks-preview-v<N>/hooks-preview/<file>`. The same
-values are in [SHA256SUMS](SHA256SUMS), which lists bare file names in the format `sha256sum -c` reads.
+`https://raw.githubusercontent.com/jposluns/guardrails/refs/tags/hooks-preview-v<N>/hooks-preview/<file>`.
+The link names the tag explicitly (`refs/tags/`), so a branch of the same name can never be served in its
+place. The same values are in [SHA256SUMS](SHA256SUMS), which lists bare file names in the format
+`sha256sum -c` reads.
 
 | File | SHA-256 | Pinned raw link |
 |---|---|---|
-| `clock-inject.py` | `b7f25e057de40c0959b447197702857c7332c65f6f80c45ae121a065ce2cbbe7` | https://raw.githubusercontent.com/jposluns/guardrails/hooks-preview-v1/hooks-preview/clock-inject.py |
-| `future-stamp-write.py` | `4c0c67e6d879d5667950ef29882a32a028ae2614952e88274b5cd684ed2c4455` | https://raw.githubusercontent.com/jposluns/guardrails/hooks-preview-v1/hooks-preview/future-stamp-write.py |
-| `stamp-truth-stop.py` | `fdfb1c674e19a26c1e4c41a18d4ff0f6d31826cc3ffe96290a16d4bdc2e2d4bf` | https://raw.githubusercontent.com/jposluns/guardrails/hooks-preview-v1/hooks-preview/stamp-truth-stop.py |
+| `clock-inject.py` | `e7f6a8efd76216dedad4522c7d122675db24135e0ea52e8e1f42a2082f5505b5` | https://raw.githubusercontent.com/jposluns/guardrails/refs/tags/hooks-preview-v1/hooks-preview/clock-inject.py |
+| `future-stamp-write.py` | `51eb6afde84a4362997db3d6ab2e8c53a7c02d556dbbf1c73940686f36296913` | https://raw.githubusercontent.com/jposluns/guardrails/refs/tags/hooks-preview-v1/hooks-preview/future-stamp-write.py |
+| `stamp-truth-stop.py` | `b73a799f81d2fd21d4f368750074f08a65dde29e031a90b60f1de569dee2de99` | https://raw.githubusercontent.com/jposluns/guardrails/refs/tags/hooks-preview-v1/hooks-preview/stamp-truth-stop.py |
 
 What the checksum does and does not prove:
 
@@ -84,6 +86,9 @@ the first step that fails and report it; do not work around a failed check.
    (cd ~/.claude/hooks && echo '<checksum>  <file>' | sha256sum -c -)
    ```
 
+   On macOS, which has no `sha256sum` by default, use `shasum -a 256 -c -` in its place; it prints the
+   same `<file>: OK`.
+
    If it prints anything other than `<file>: OK`, delete the downloaded file and stop. A mismatch means
    the file is not the one this page describes.
 
@@ -93,7 +98,9 @@ the first step that fails and report it; do not work around a failed check.
    python3 -I -S -B ~/.claude/hooks/<file> --self-test
    ```
 
-   A nonzero exit or a reported failure means stop; do not switch the hook on.
+   A nonzero exit or a reported failure means stop; do not switch the hook on. A hook installed on its own
+   reports a few tests as skipped: those compare it with the other two hooks' files, which are not there.
+   Skipped is expected; failed is not.
 
 4. Switch the hook on by adding an entry to the `hooks` section of Claude Code's `settings.json` (the
    user file `~/.claude/settings.json`, or a project's `.claude/settings.json`). If `settings.json`
