@@ -16,7 +16,7 @@ are reused, so the two gates agree and no plaintext internal name is re-typed he
 
 SCOPE, deliberately narrow and explicit. This gate scans ONLY the QA-suite shipped surfaces plus the shipped
 gate-runner and CI-workflow files this PR modifies (tools/run_all_checks.sh and .github/workflows/quality.yml,
-both verified clean of provenance shapes), NOT the whole tree: the existing pack legitimately carries
+both verified clean of provenance shapes), plus the public .preview/ channel, NOT the whole tree: the existing pack legitimately carries
 guardrail-decision ids in its hooks and a dogfood-adopter name in its site and docs, so a whole-tree
 provenance-id scan would be a wall of false positives. The scope is the surfaces listed in SCOPE_RELPATHS
 (files scanned directly, directories walked fail-closed);
@@ -72,6 +72,7 @@ SCOPE_RELPATHS = (
     ".aiqt/core/qa-skills",      # future QA skill sources (multi-skill generator input)
     "site/downloads/qa-skills",  # future generated QA skill outputs
     "docs/qa-suite.md",          # future QA-suite adopter docs
+    ".preview",                  # the public hooks preview channel (skipped once retired)
 )
 
 # Internal provenance-id SHAPE patterns (generic; carry no codename). A guardrail-decision or finding id
