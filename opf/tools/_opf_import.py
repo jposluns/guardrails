@@ -4618,7 +4618,8 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
             os.close(_ingest_root_fd)
         if marker_name is not None:
             detail = _ingest_acceptance_explanation(resolution, run_id)
-            raise _cannot("ingest disposition execution is unavailable; nothing promoted. " + detail)
+            raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest disposition "
+                          "execution is unavailable; nothing promoted. {}".format(run_id, marker_name, detail))
         journal_root = Path(resolution.store_root) / IMPORT_JOURNAL_REL
 
         try:
