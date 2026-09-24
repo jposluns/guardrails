@@ -45,9 +45,9 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `clock-inject.py` | `b0905c5e3efbfbf8d4a314da2b536e38c29ce67987e952c88612983f281b5098` | [clock-inject.py](clock-inject.py) |
-| `future-stamp-write.py` | `eeec504bc9f7e37acef3078fefb5ceb7927d97eae750967146cf1ef8c835cbd7` | [future-stamp-write.py](future-stamp-write.py) |
-| `stamp-truth-stop.py` | `ce2c6d7c2d9b958edd347174654619c73fd086d1cf21ae01163f17621fab5a9b` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `clock-inject.py` | `a364816aa5bfddbe33df69167ee968bbba11c61b0cbf3056d8905373655cf1c4` | [clock-inject.py](clock-inject.py) |
+| `future-stamp-write.py` | `660f9688e59b874830527b93c481a68e0b9d6ff3c8a2236fe1858564a1818e8f` | [future-stamp-write.py](future-stamp-write.py) |
+| `stamp-truth-stop.py` | `202f33e7434ddeb340e6f1d83bc638468448abf2d5ee96c2f6fd972d1fce2eb1` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 
 What the checksum does and does not prove:
 

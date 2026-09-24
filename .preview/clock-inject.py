@@ -129,6 +129,121 @@ def _sibling_or_skip(name, env=None):
     return path
 
 
+def _wall_clock_asserts(source, exempt=()):
+    """Self-test helper, kept identical across the three hooks: [(function, line)] of every assertion in
+    `source` whose operand is a TIME figure, so no test's verdict rests on a wall-clock bound, which depends on
+    the host's speed. A time figure is a clock reading (time.time, perf_counter, monotonic, process_time,
+    thread_time, or an _ns variant), a result of a timing harness (run_timed, growth_in_child), a name assigned
+    from one (a for target or unpacking included), or arithmetic, a comparison, a subscript, min, max, abs,
+    sum, or a method call on one; a quotient of two time figures is a dimensionless ratio and may be bounded.
+    Every assertion in the source is scanned, under its enclosing test_ function (else its innermost
+    function); `exempt` names the hang-guard tests, whose bound on elapsed time is their point. Residual
+    (disclosed): the taint is by name within one test_ function and its nested functions, so a time figure
+    passed through an attribute, a container mutation, a global, a call to another helper, or a harness this
+    list does not name escapes the scan; a subprocess timeout is not an assertion and is not scanned."""
+    import ast
+    clocks = {"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns", "process_time", "process_time_ns",
+              "thread_time", "thread_time_ns", "run_timed", "growth_in_child"}
+    single = {"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"}
+
+    def timed(node, names):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name):
+                if f.id in clocks:
+                    return True
+                return f.id in ("min", "max", "abs", "sum", "float", "round") and any(
+                    timed(a, names) for a in node.args)
+            if isinstance(f, ast.Attribute):
+                if f.attr in ("time", "time_ns"):
+                    return isinstance(f.value, ast.Name) and f.value.id == "time"
+                return f.attr in clocks or timed(f.value, names)
+            return False
+        if isinstance(node, ast.Name):
+            return node.id in names
+        if isinstance(node, ast.BinOp):
+            left, right = timed(node.left, names), timed(node.right, names)
+            return left != right if isinstance(node.op, ast.Div) else left or right
+        if isinstance(node, ast.Compare):
+            return any(timed(x, names) for x in [node.left] + node.comparators)
+        if isinstance(node, ast.BoolOp):
+            return any(timed(x, names) for x in node.values)
+        if isinstance(node, ast.UnaryOp):
+            return timed(node.operand, names)
+        if isinstance(node, (ast.Subscript, ast.Starred)):
+            return timed(node.value, names)
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return any(timed(e, names) for e in node.elts)
+        if isinstance(node, ast.IfExp):
+            return timed(node.body, names) or timed(node.orelse, names)
+        return False
+
+    def targets(node):
+        if isinstance(node, ast.Name):
+            yield node.id
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            for e in node.elts:
+                yield from targets(e)
+        elif isinstance(node, ast.Starred):
+            yield from targets(node.value)
+
+    tree, parent, cache = ast.parse(source), {}, {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    def scope(node):  # the enclosing test_ function, else the innermost function (None at module level)
+        inner, up = None, parent.get(node)
+        while up is not None:
+            if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if up.name.startswith("test_"):
+                    return up
+                inner = inner or up
+            up = parent.get(up)
+        return inner
+
+    def tainted(fn):  # the names fn (its nested functions included) assigns a time figure, to a fixed point
+        if fn not in cache:
+            names, changed = set(), True
+            while changed:
+                changed = False
+                for node in ast.walk(fn):
+                    if isinstance(node, ast.Assign):
+                        pairs = [(t, node.value) for t in node.targets]
+                    elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)) and \
+                            node.value is not None:
+                        pairs = [(node.target, node.value)]
+                    elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                        pairs = [(node.target, node.iter)]
+                    elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                        pairs = [(node.optional_vars, node.context_expr)]
+                    else:
+                        continue
+                    for target, value in pairs:
+                        new = set(targets(target)) - names if timed(value, names) else set()
+                        if new:
+                            names |= new
+                            changed = True
+            cache[fn] = names
+        return cache[fn]
+
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            operands = [node.test]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+                node.func.attr.startswith("assert"):
+            operands = node.args[:1] if node.func.attr in single else node.args[:2]
+        else:
+            continue
+        fn = scope(node)
+        name = fn.name if fn is not None else "<module>"
+        names = tainted(fn) if fn is not None else set()
+        if name not in exempt and any(timed(x, names) for x in operands):
+            found.append((name, node.lineno))
+    return sorted(found, key=lambda item: item[1])
+
+
 # ---- lease / elapsed (kept identical to stamp-truth-stop.py; python3 -I forbids a sibling import) ----
 
 def read_regular(path, limit):
@@ -584,7 +699,7 @@ def _self_test():
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             for name in ("read_regular", "lease_file", "_utc_field", "transcript_start", "lease_start", "_is_worker",
-                     "_cfg", "_sibling_or_skip"):
+                     "_cfg", "_sibling_or_skip", "_wall_clock_asserts"):
                 self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
             for name in ("_SESS_RE", "_LEASE_FIELD_RE", "_START_VALUE_RE", "_HEADING_RE"):
                 self.assertEqual((getattr(mod, name).pattern, getattr(mod, name).flags),
@@ -648,6 +763,39 @@ def _self_test():
                 self.assertRegex(obj["additionalContext"], line_re)
             for argv in (None, 7):  # argv that cannot be inspected fails open: exit 0, silent, nothing evaluated
                 self.assertEqual(run_main("{}", argv=argv), (0, ""), argv)
+
+        # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
+        HANG_GUARD_TESTS = ()
+
+        def test_no_wall_clock_verdict(self):
+            # every assertion of this file is scanned (see _wall_clock_asserts): none bounds a time figure, a
+            # ratio of two time figures excepted, outside the hang-guard tests named in HANG_GUARD_TESTS
+            with open(os.path.abspath(__file__), encoding="utf-8") as f:
+                src = f.read()
+            self.assertEqual(_wall_clock_asserts(src, self.HANG_GUARD_TESTS), [])
+            flagged = [name for name, _line in _wall_clock_asserts(src)]
+            for name in self.HANG_GUARD_TESTS:  # an exemption names a real hang guard the scan would flag
+                self.assertIn(name, flagged)
+            # the forms a substring check missed are caught: a harness result, an elapsed name, a bare assert, a
+            # for target, a time.time difference, and a comparison inside assertTrue
+            bad = ("def test_a(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
+                   "    self.assertLess(large, 2.0)\n"
+                   "def test_b(self):\n    started = time.monotonic()\n    run()\n"
+                   "    elapsed = time.monotonic() - started\n    self.assertLess(elapsed, 0.5)\n"
+                   "def test_c(self):\n    t0 = time.perf_counter()\n    assert time.perf_counter() - t0 < 1\n"
+                   "def test_d(self):\n    for name, (s, big) in run_timed(c, 9).items():\n"
+                   "        self.assertTrue(big < 3, name)\n"
+                   "def test_e(self):\n    t = time.time()\n    self.assertLessEqual(time.time() - t, 1)\n"
+                   "def test_f(self):\n    def inner():\n        self.assertLess(growth_in_child(src, 9)[1], 1)\n")
+            self.assertEqual([name for name, _line in _wall_clock_asserts(bad)],
+                             ["test_a", "test_b", "test_c", "test_d", "test_e", "test_f"])
+            # a ratio of two time figures, a time figure in the message only, and an exempt hang guard pass
+            good = ("def test_g(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
+                    "    self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))\n"
+                    "    self.assertTrue(large / small < 2, (small, large))\n"
+                    "def test_h(self):\n    t0 = time.monotonic()\n    self.assertLess(time.monotonic() - t0, 30.0)\n")
+            self.assertEqual(_wall_clock_asserts(good, ("test_h",)), [])
+            self.assertEqual(_wall_clock_asserts(good), [("test_h", 7)])
 
         # -- sibling parity on a single-hook install --
         PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",)
