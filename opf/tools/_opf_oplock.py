@@ -133,8 +133,9 @@ syscall of both publications run only in the acquiring process (fix round 9, _ga
 check and the step one expression), and the publication reads its staged bytes back before
 publishing them.
 
-RELEASE BY CLOSE (fix round 9). No lock path of this module calls flock(LOCK_UN) (only the self-test's own
-probes of a fresh descriptor do, to test whether the anchor is free). A flock belongs to the
+RELEASE BY CLOSE (fix round 9). No lock path of this module calls flock(LOCK_UN) (only the
+self-test's own probes of a fresh descriptor do, to test whether the anchor is free). A flock
+belongs to the
 open file description, which the anchor descriptor shares with every dup and every forked copy of
 it, and it is freed only when the LAST descriptor referring to that description is closed (verified
 in this environment, and witnessed by T-f9-2: a dup, or a forked child's inherited copy, keeps the
@@ -212,14 +213,19 @@ Nothing here creates a missing input root (only the single opf-oplock component 
 under an already-open control root), and a link-count check applies to regular files ONLY, never
 to a directory.
 
-CALLER CONTRACT (fix rounds 8 and 9). An OpCapability is owned by the one thread that acquired it,
+CALLER CONTRACT (fix rounds 8 to 10). An OpCapability is owned by the one thread that acquired it,
 and that thread releases it, once. A concurrent release of the same capability (a second thread
 calling release_operation while the first is in progress, or after it) is REFUSED safely: exactly
 one release claims the capability, and every other refuses with OpLockError holding none of its
 descriptors, removing nothing, and closing nothing, so it can never close a descriptor number the
 process has reused; no release ever waits on the claim without bound (it retries without blocking
-for at most _CLAIM_WAIT_SECONDS, then refuses). Forking while an acquisition or a release is in
-progress (a signal handler that forks, inside the section where the deferral does not stand)
+for at most _CLAIM_WAIT_SECONDS, then refuses). An acquisition is in progress from its entry
+identity capture, the FIRST statement of acquire_operation (fix round 10), and this contract is
+bounded there: a fork that lands before that capture (before or at the entry call, or at the
+capture's own line boundary) is a separate caller, not a continuation, which captures its own
+identity and acquires, or is refused, on its own account, contending for the one lock like any
+other caller. Forking after that capture while an acquisition, or while a release, is in progress
+(a signal handler that forks, where the deferral does not stand, or outside the deferred section)
 yields NO usable capability in the child: a child that continues the acquisition forward is
 refused at the flock, at its first pid-gated step under it, or at the hand-off, a child that
 continues a
@@ -1924,14 +1930,22 @@ def _set_record_mode(fd, label):
                               label, stat.S_IMODE(mode), _CONTROL_FILE_MODE))
 
 
-def _verified_unlink(dir_fd, name, ident, expected_bytes, label):
+def _verified_unlink(dir_fd, name, ident, expected_bytes, label, outcome=None):
     """Remove a control record ONLY when it is verifiably the one this capability created: re-open
     no-follow, require a plain regular file with link count exactly 1, the retained (st_dev,
     st_ino) identity, the exact retained size, and byte equality with the retained payload; then a
     final pre-unlink name-stat re-check; then unlink by dir_fd and fsync the parent. ANY mismatch
     refuses and PRESERVES the file (never-seize: a replaced or modified record is somebody's
     evidence, not ours to delete). An unlink whose directory fsync then fails raises
-    _UnlinkNotDurable (fix round 8): the name WAS removed, only its durability failed."""
+    _UnlinkNotDurable (fix round 8): the name WAS removed, only its durability failed.
+
+    Fix round 10 (codex LOW): with `outcome` (a dict), the caller learns what happened even when an
+    interruption (any BaseException that is not an OSError) lands anywhere from the unlink through
+    the fsync: "done" is set once both completed; on an interruption "interrupted" is set and
+    "unlinked" records, by OBSERVATION (a no-follow stat of the name, never bookkeeping the
+    interruption could have skipped), whether the name no longer binds the verified record (True),
+    still does (False), or could not be observed (None). The interruption itself propagates
+    unchanged."""
     with _FdOwner() as owner:
         try:
             fd = owner.adopt(os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd))
@@ -1945,16 +1959,37 @@ def _verified_unlink(dir_fd, name, ident, expected_bytes, label):
     if name_st is None or not stat.S_ISREG(name_st.st_mode) \
             or (name_st.st_dev, name_st.st_ino) != ident:
         raise OpLockError("{} identity changed before the unlink; preserved".format(label))
+    step = "unlink"
     try:
         os.unlink(name, dir_fd=dir_fd)
-    except OSError as exc:
-        raise OpLockError("cannot unlink {} ({})".format(label, exc))
-    try:
+        step = "fsync"
         os.fsync(dir_fd)
+        if outcome is not None:
+            outcome["done"] = True
     except OSError as exc:
+        if step == "unlink":
+            raise OpLockError("cannot unlink {} ({})".format(label, exc))
         raise _UnlinkNotDurable("{} was unlinked, but the directory fsync after the unlink FAILED "
                                 "({}), so the removal may not survive a power loss".format(
                                     label, exc))
+    except BaseException:
+        if outcome is not None:
+            outcome["interrupted"] = True
+            outcome["unlinked"] = _unlinked_by_observation(dir_fd, name, ident)
+        raise
+
+
+def _unlinked_by_observation(dir_fd, name, ident):
+    """Whether `name` beneath dir_fd no longer binds the record `ident` (fix round 10): True when
+    it is absent or binds another object, False when it still binds that record, None when the
+    no-follow stat cannot answer (an OSError), which the caller reports as UNCONFIRMED."""
+    try:
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino) != ident
 
 
 def _verified_unlink_verify(fd, ident, expected_bytes, label):
@@ -2014,7 +2049,20 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     round 5): a signal arriving meanwhile is delivered only once the acquisition has either failed
     and unwound or fully formed its capability, which is then released before the interruption
     propagates, because the caller never receives it.
+
+    Fix round 10 (codex MED): the acquirer identity is captured by this function's FIRST
+    statement, before any preliminary call, and the fork contract is bounded there: a fork that
+    lands before that capture (before or at the entry call, or at the capture's own line boundary)
+    is a separate caller, which captures its own identity and acquires, or is refused, on its own
+    account, contending for the one lock like any other caller; every fork after it is a
+    continuation, which receives no capability.
     """
+    # Fix round 8 (codex HIGH 1), moved first in fix round 10 (codex MED): the acquirer identity is
+    # captured ONCE, here, before any other statement, and everything the acquisition binds to an
+    # identity (the default holder, the active record's owner, the capability, and every fork
+    # guard) uses this same value, never a later os.getpid(), which a forked continuation would
+    # answer with its own pid.
+    acquirer_pid = os.getpid()
     if not _containment.probe():
         raise OpLockError("race-free containment primitive absent; fail-closed")
     if type(recover) is not bool:
@@ -2027,11 +2075,6 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
         raise OpLockError("this host reports an empty nodename (os.uname().nodename); refusing to "
                           "acquire, because the active record's owner identity would carry no host "
                           "and a later recovery could never confirm its holder dead")
-    # Fix round 8 (codex HIGH 1): the acquirer identity is captured ONCE, here, and everything the
-    # acquisition binds to an identity (the default holder, the active record's owner, the
-    # capability, and every fork guard) uses this same value, never a later os.getpid(), which a
-    # forked continuation would answer with its own pid.
-    acquirer_pid = os.getpid()
     if holder is None:
         holder = "opf:{}:{}".format(nodename, acquirer_pid)
     _validate_field("holder", holder)
@@ -2199,11 +2242,20 @@ def _unreturned_note(what, cap, sink, rexc):
     facts = []
     # Fix round 8 (codex LOW): an unlink that ran is a removal; only its durability can fail, and a
     # removal whose directory fsync failed is named as not durable, never as not performed.
-    shown = [n + (" (not durably: the directory fsync after its unlink FAILED, so the removal "
-                  "may not survive a power loss)" if n in scope.undurable else "")
-             for n in scope.removed]
+    # Fix round 10 (codex LOW): a removal whose directory fsync was interrupted is named with its
+    # durability UNCONFIRMED, and a removal that could not be observed is named as UNCONFIRMED.
+    def _shown(n):
+        if n in scope.undurable:
+            return n + (" (not durably: the directory fsync after its unlink FAILED, so the "
+                        "removal may not survive a power loss)")
+        if n in scope.durability_unconfirmed:
+            return n + (" (its durability UNCONFIRMED: the directory fsync after its unlink was "
+                        "interrupted, so the removal may not survive a power loss)")
+        return n
+    shown = [_shown(n) for n in scope.removed]
+    qualified = scope.undurable or scope.durability_unconfirmed
     if len(scope.removed) == 2:
-        records = "its {} and its {} removed".format(*shown) if scope.undurable \
+        records = "its {} and its {} removed".format(*shown) if qualified \
             else "its records removed"
     elif scope.removed:
         records = "its {} removed but not its {} (any that remains waits for a later " \
@@ -2212,6 +2264,11 @@ def _unreturned_note(what, cap, sink, rexc):
     else:
         records = "neither of its records removed (any that remains waits for a later " \
             "recover=True)"
+    if scope.removal_unconfirmed:
+        records += " (whether its {} was removed is UNCONFIRMED: its unlink was interrupted and " \
+            "its name could not be observed)".format(" and its ".join(scope.removal_unconfirmed))
+        if not scope.removed:
+            records = records.replace("neither of its records removed", "no removal confirmed", 1)
     facts.append(records)
     # Fix round 9 (codex MED 2): the lock is given up only by closing the anchor descriptor, so
     # that close's recorded outcome is the lock clause; (codex LOW) a close an interruption cut
@@ -2226,8 +2283,10 @@ def _unreturned_note(what, cap, sink, rexc):
         facts.append("its anchor descriptor's close reported a failure ({}), so the release of its "
                      "hold on the lock is NOT confirmed".format(scope.anchor_close))
     else:
-        facts.append("the release of its hold on the lock NOT confirmed (no close of its anchor "
-                     "descriptor completed here)")
+        # Fix round 10 (claude LOW): only what was recorded; a close of the anchor descriptor may
+        # still have run, unattributed, among the general closes.
+        facts.append("the release of its hold on the lock NOT confirmed (no anchor-close step "
+                     "was recorded)")
     if scope.closed is None:
         facts.append("its descriptor closes NOT completed (its descriptors and the anchor lock may "
                      "stay held until this process exits)")
@@ -2244,8 +2303,8 @@ def _unreturned_note(what, cap, sink, rexc):
                          "is UNCONFIRMED ({})".format(count, "it" if count == 1 else "they",
                                                       _NEVER_RETRIED))
         facts.append(" and ".join(parts))
-    complete = len(scope.removed) == 2 and not scope.undurable and scope.anchor_close == "" \
-        and scope.closed == [] and not scope.unconfirmed
+    complete = len(scope.removed) == 2 and not qualified and not scope.removal_unconfirmed \
+        and scope.anchor_close == "" and scope.closed == [] and not scope.unconfirmed
     text = "{} {}: {}, {}, and {}".format(what, "released" if complete else "released only in part",
                                           facts[0], facts[1], facts[2])
     if rexc is not None:
@@ -2467,9 +2526,10 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
         lease_removed = True
         lease_why = "the lease was not removed"
         if lease_ident is not None:
+            lease_outcome = {}
             try:
                 _verified_unlink(machine_fd, _opf_check.LEASE_NAME, lease_ident, lease_payload,
-                                 "lease (unwind)")
+                                 "lease (unwind)", lease_outcome)
             except _UnlinkNotDurable as uexc:
                 # Fix round 8: the lease name WAS removed but not durably; the conservative order
                 # still keeps the active record, and the message says which step failed.
@@ -2480,8 +2540,20 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
                 unwind.append(str(uexc))
                 lease_removed = False
             except BaseException as uexc:
+                # Fix round 10 (codex LOW): the interruption is held (re-raised after the full
+                # unwind) and the lease leg's outcome is taken from what _verified_unlink observed:
+                # a leg that completed is a durable removal; a lease observed gone after an
+                # interrupted fsync has its durability UNCONFIRMED (the active record is then kept,
+                # the conservative order); an unobservable one is UNCONFIRMED.
                 interrupt = uexc
-                lease_removed = False
+                lease_removed = bool(lease_outcome.get("done"))
+                if not lease_removed and lease_outcome.get("unlinked"):
+                    lease_why = ("the lease was unlinked, but its directory fsync was interrupted, "
+                                 "so its removal's durability is UNCONFIRMED")
+                elif not lease_removed and lease_outcome.get("interrupted") \
+                        and lease_outcome.get("unlinked") is None:
+                    lease_why = ("whether the lease was removed is UNCONFIRMED (its unlink was "
+                                 "interrupted and its name could not be observed)")
         elif lease_attempted:
             try:
                 if _lstat_at(machine_fd, _opf_check.LEASE_NAME, "lease (unwind)") is not None:
@@ -2642,9 +2714,13 @@ def _release_legs(cap, scope):
     # later recover=True once this holder is dead); the reverse would strand a lone owner-less
     # lease that no recovery can confirm dead. A leg's raw OSError is collected like an
     # OpLockError (DEF-3, defence in depth over _verified_unlink's own normalization).
+    # Fix round 10 (codex LOW): an interruption from a leg's unlink through its fsync is recorded
+    # from the leg's observed outcome (_record_interrupted_removal) before it propagates unchanged,
+    # so a completed unlink is never reported as a record that was not removed.
+    outcome = {}
     try:
         _verified_unlink(machine_fd, _opf_check.LEASE_NAME, cap._lease_ident,
-                         cap._lease_bytes, "lease")
+                         cap._lease_bytes, "lease", outcome)
         scope.removed.append("lease")
     except _UnlinkNotDurable as exc:
         scope.removed.append("lease")
@@ -2652,10 +2728,14 @@ def _release_legs(cap, scope):
         errors.append("lease leg: {}".format(exc))
     except (OpLockError, OSError) as exc:
         errors.append("lease leg: {}".format(exc))
+    except BaseException:
+        _record_interrupted_removal(scope, "lease", outcome)
+        raise
     if "lease" in scope.removed and "lease" not in scope.undurable:
+        outcome = {}
         try:
             _verified_unlink(ctl_fd, ACTIVE_NAME, cap._active_ident, cap._active_bytes,
-                             "active record")
+                             "active record", outcome)
             scope.removed.append("active record")
         except _UnlinkNotDurable as exc:
             scope.removed.append("active record")
@@ -2663,11 +2743,31 @@ def _release_legs(cap, scope):
             errors.append("active leg: {}".format(exc))
         except (OpLockError, OSError) as exc:
             errors.append("active leg: {}".format(exc))
+        except BaseException:
+            _record_interrupted_removal(scope, "active record", outcome)
+            raise
     else:
         errors.append("active leg: KEPT, because the lease {} (the owner-bearing active record "
                       "is retained so a later recover=True can confirm the holder dead and clear "
                       "both)".format("removal was not made durable" if "lease" in scope.removed
                                      else "was not removed"))
+
+
+def _record_interrupted_removal(scope, name, outcome):
+    """Record in `scope` what an interrupted release leg's verified unlink did (fix round 10, codex
+    LOW), from the outcome _verified_unlink observed: a leg that completed (the interruption landed
+    after it) is a removal; a name observed gone after an interruption between the unlink and the
+    end of its fsync is a removal whose durability is UNCONFIRMED; a name whose state could not be
+    observed is a removal that is itself UNCONFIRMED; a name observed still bound is no removal."""
+    if name in scope.removed:
+        return
+    if outcome.get("done"):
+        scope.removed.append(name)
+    elif outcome.get("unlinked"):
+        scope.removed.append(name)
+        scope.durability_unconfirmed.append(name)
+    elif outcome.get("interrupted") and outcome.get("unlinked") is None:
+        scope.removal_unconfirmed.append(name)
 
 
 _LOST_CLAIM = ("capability already released: a concurrent release of the same capability claimed "
@@ -2718,9 +2818,13 @@ class _ReleaseScope:
     close failures), and `unconfirmed` (the descriptors whose close an interruption cut short
     after ownership cleared, fix round 9: never reported closed, never closed again); `claimed` is
     True once this scope holds the claim, `in_child` once it claimed in a forked child, and
-    `refused` (None, "lost", or "timeout") once a claim attempt has concluded that it cannot win."""
+    `refused` (None, "lost", or "timeout") once a claim attempt has concluded that it cannot win.
+    Fix round 10 (codex LOW): `durability_unconfirmed` (removals whose directory fsync an
+    interruption cut short) and `removal_unconfirmed` (records whose interrupted unlink could not
+    be observed), both recorded by _record_interrupted_removal."""
     __slots__ = ("_cap", "retained", "claimed", "in_child", "refused", "errors", "pid", "removed",
-                 "undurable", "anchor_close", "closed", "unconfirmed")
+                 "undurable", "durability_unconfirmed", "removal_unconfirmed", "anchor_close",
+                 "closed", "unconfirmed")
 
     def __init__(self, cap, sink=None):
         self._cap = cap
@@ -2732,6 +2836,8 @@ class _ReleaseScope:
         self.pid = cap._acquirer_pid
         self.removed = []
         self.undurable = []
+        self.durability_unconfirmed = []
+        self.removal_unconfirmed = []
         self.anchor_close = None
         self.closed = None
         self.unconfirmed = []
@@ -2818,6 +2924,14 @@ class _ReleaseScope:
         # so this exit runs the same code in both processes and a child can never free the lock.
         anchor = self.retained[2]
         anchor_problems, anchor_unconfirmed, interrupt = owner.close_guarded(anchor)
+        if anchor in owner:
+            # Fix round 10 (claude LOW): the close step was interrupted BEFORE its ownership was
+            # cleared, so os.close never ran on it and the number is still ours: its one close is
+            # made here, attributed, rather than left to the general closes below, whose outcome
+            # the anchor clause could not name. The first interruption is kept.
+            anchor_problems, anchor_unconfirmed, retried = owner.close_guarded(anchor)
+            if interrupt is None:
+                interrupt = retried
         if anchor_problems:
             self.anchor_close = anchor_problems[0]
             errors.append("anchor close: {}; the release of the lock is not confirmed".format(
@@ -6969,6 +7083,266 @@ def _st_f9_5_body(root):
         _st_settle(root, baseline, where)
 
 
+def _t_f10_1_entry_continuation(d, env):
+    """T-f10-1 (fix round 10, codex MED: a returning fork anywhere in the outer acquisition entry).
+    In a bounded child, first with the production deferral and then with it disabled, a SIGINT
+    whose handler FORKS and RETURNS is sent at every line event of acquire_operation's own frame,
+    the public entry the earlier sweeps (T-f8-1, T-f9-3) started after; the parent's handler waits,
+    so the child runs forward first. The entry identity is captured by the entry's FIRST statement,
+    and the contract is bounded there: a fork at that statement's own line event precedes the
+    capture, so that child is a separate caller, not a continuation (it may acquire and release on
+    its own account, contending like any caller). At every LATER event the continuation must
+    receive no capability and change none of the lock state across its life, and the acquirer then
+    acquires and releases cleanly. Before the fix a fork at the containment probe or the nodename
+    check, before a capture placed after them, gave the child a capability bound to its own pid,
+    whose release returned normally."""
+    root = _st_git_store(d, "repo", env)
+    release_operation(acquire_operation(root, "op"))
+    for deferral in (True, False):
+        failure = _st_in_child_bounded(lambda x=deferral: _st_f10_1_body(root, x), 600)
+        assert failure is None, "deferral {}: {}".format("on" if deferral else "off", failure)
+
+
+def _st_f10_1_entry(top, record, root):
+    """T-f10-1's call of acquire_operation(root, "op"): returned or raised as usual in `top`. A
+    forked child reports how it ended through record["wfd"] and exits 0: "RAISED: ..." when
+    refused, "SEPARATE CALLER released" when it received a capability bound to its OWN pid (a
+    separate caller, which then releases it itself), and "GOT A CAPABILITY bound to pid N" when it
+    received one bound to any other pid."""
+    try:
+        result = acquire_operation(root, "op")
+    except BaseException as exc:
+        if os.getpid() == top:
+            raise
+        report = "RAISED: {!r} {}".format(exc, " ".join(getattr(exc, "__notes__", ())))
+    else:
+        if os.getpid() == top:
+            return result
+        if result._acquirer_pid == os.getpid():
+            try:
+                release_operation(result)
+                report = "SEPARATE CALLER released"
+            except BaseException as exc:
+                report = "SEPARATE CALLER release failed: {!r}".format(exc)
+        else:
+            report = "GOT A CAPABILITY bound to pid {}".format(result._acquirer_pid)
+    try:
+        _journal._write_all(record["wfd"], report.encode("utf-8", "replace"))
+    except BaseException:
+        os._exit(4)
+    os._exit(0)
+
+
+def _st_f10_1_body(root, deferral):
+    """T-f10-1's body, run in a bounded child."""
+    import inspect
+    if not deferral:
+        sys.modules[__name__]._deferrable_signals = lambda: ()   # this child only
+    lines, first = inspect.getsourcelines(acquire_operation)
+    capture = [first + i for i, text in enumerate(lines)
+               if text.strip() == "acquirer_pid = os.getpid()"]
+    assert len(capture) == 1, capture
+    code = acquire_operation.__code__
+    top = os.getpid()
+    record = {"events": []}
+    _st_bounded_fork_handler(record, lambda: _st_state(root), 60)
+
+    def arm(k):
+        """A REAL SIGINT at the k-th line event of acquire_operation's own frame (k 0: count)."""
+        state = {"seen": 0, "fired": False, "line": None}
+
+        def local(frame, event, arg):
+            if event == "line" and not state["fired"]:
+                state["seen"] += 1
+                if state["seen"] == k:
+                    state["fired"] = True
+                    state["line"] = frame.f_lineno
+                    sys.settrace(None)
+                    os.kill(os.getpid(), signal.SIGINT)
+            return local
+
+        sys.settrace(lambda frame, event, arg: local if frame.f_code is code else None)
+        return state
+
+    state = arm(0)
+    try:
+        cap = acquire_operation(root, "op")
+    finally:
+        sys.settrace(None)
+    release_operation(cap)
+    total = state["seen"]
+    assert total, "the sweep must see line events in acquire_operation"
+    for k in range(1, total + 1):
+        baseline = _st_open_fds()
+        record["events"] = []
+        state = arm(k)
+        try:
+            cap = _st_f10_1_entry(top, record, root)
+        finally:
+            sys.settrace(None)
+        where = "T-f10-1 deferral {} line event {} (line {})".format(
+            "on" if deferral else "off", k, state["line"])
+        assert state["fired"], where
+        before, after, report = _st_fork_event(record, where)
+        if state["line"] == capture[0]:
+            assert report.startswith("RAISED:") or report == "SEPARATE CALLER released", \
+                "a fork before the identity capture is a separate caller ({}): {}".format(
+                    where, report)
+        else:
+            assert report.startswith("RAISED:"), "a forked continuation of the entry never " \
+                "receives a capability ({}): {}".format(where, report)
+            assert before == after, "the continuation changed the lock state ({}): {} -> {}; " \
+                "its report: {}".format(where, before, after, report)
+        assert cap is not None and cap._acquirer_pid == top, where
+        release_operation(cap)
+        _st_settle(root, baseline, where)
+
+
+def _t_f10_2_interrupted_fsync(d, env):
+    """T-f10-2 (fix round 10, codex LOW: an interrupted post-unlink fsync). A KeyboardInterrupt is
+    raised by the directory fsync right after a SUCCESSFUL verified unlink (the fsync never ran):
+    (A) in the unreturned capability's release (a real SIGINT during the publication, deferred,
+    whose handler arms the fault), after the lease's unlink and, separately, after the active
+    record's; (B) in the acquisition unwind after the lease's unlink. The completed unlink must be
+    recorded as a removal whose durability is UNCONFIRMED, never as a record that was not removed;
+    the ORIGINAL interruption (the handler's) must be the one that propagates from (A); and the
+    conservative order holds (a lease whose removal is not confirmed durable keeps the active
+    record). Before the fix the interruption escaped before the removal was recorded: (A) noted
+    "neither of its records removed" with the lease gone and "its lease removed but not its active
+    record" with both gone, and (B) noted "the lease was not removed" with the lease gone."""
+    root = _st_git_store(d, "repo", env)
+    release_operation(acquire_operation(root, "op"))
+    for which in ("lease", "active record"):
+        failure = _st_in_child(lambda w=which: _st_f10_2_unreturned(root, w))
+        assert failure is None, "{}: {}".format(which, failure)
+        for path in (os.path.join(_st_ctl_dir(root), ACTIVE_NAME), _st_lease_path(root)):
+            if os.path.exists(path):
+                os.unlink(path)           # the exited child's kept record, cleared by hand
+    failure = _st_in_child(lambda: _st_f10_2_unwind(root))
+    assert failure is None, failure
+
+
+def _st_interrupt_dir_fsync(path, armed):
+    """Replace os.fsync so that, while armed["on"] is set, the next fsync of the directory at `path`
+    raises KeyboardInterrupt WITHOUT running (once). Returns the original os.fsync."""
+    target = os.stat(path)
+    saved = os.fsync
+
+    def _fsync(fd):
+        st = os.fstat(fd)
+        if armed.get("on") and (st.st_dev, st.st_ino) == (target.st_dev, target.st_ino):
+            armed["on"] = False
+            raise KeyboardInterrupt("interrupted directory fsync (T-f10-2)")
+        return saved(fd)
+
+    os.fsync = _fsync
+    return saved
+
+
+def _st_f10_2_unreturned(root, which):
+    """T-f10-2 (A), one record, run in a child."""
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+    where = os.path.join(root, ".working", "toml") if which == "lease" else _st_ctl_dir(root)
+    armed = {}
+
+    def handler(signum, frame):
+        armed["on"] = True
+        raise KeyboardInterrupt("the deferred signal (T-f10-2)")
+
+    signal.signal(signal.SIGINT, handler)
+    saved = _st_interrupt_dir_fsync(where, armed)
+    baseline = _st_open_fds()
+    state = _st_arm_signal(_st_named("_publish_staged"), 1)
+    try:
+        caught = _st_expect_interrupt(acquire_operation, root, "op")
+    finally:
+        sys.settrace(None)
+        os.fsync = saved
+    assert state["fired"], which
+    notes = " ".join(getattr(caught, "__notes__", ()))
+    assert caught.args == ("the deferred signal (T-f10-2)",), \
+        "the original interruption propagates: {!r}".format(caught)
+    assert _st_open_fds() == baseline and _st_anchor_free(root), notes
+    assert "neither of its records removed" not in notes, notes
+    assert "UNCONFIRMED" in notes and "released only in part" in notes, notes
+    if which == "lease":
+        assert not os.path.exists(lease) and os.path.exists(active), "the lease went; kept active"
+        assert "its lease (" in notes and "removed but not its active record" in notes, notes
+    else:
+        assert not os.path.exists(lease) and not os.path.exists(active), "both records went"
+        assert "its lease and its active record (" in notes, notes
+        assert "but not its active record" not in notes, notes
+
+
+def _st_f10_2_unwind(root):
+    """T-f10-2 (B), run in a child."""
+    mod = sys.modules[__name__]
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+    armed = {}
+    saved_cap = mod.OpCapability
+
+    class _BoomCap:
+        def __init__(self, *a, **k):
+            armed["on"] = True
+            raise OSError(errno.EIO, "simulated post-creation failure (T-f10-2 unwind)")
+
+    saved = _st_interrupt_dir_fsync(os.path.join(root, ".working", "toml"), armed)
+    mod.OpCapability = _BoomCap
+    try:
+        caught = _st_expect_interrupt(acquire_operation, root, "op")
+    finally:
+        mod.OpCapability = saved_cap
+        os.fsync = saved
+    notes = " ".join(getattr(caught, "__notes__", ()))
+    assert not os.path.exists(lease) and os.path.exists(active), "(B) conservative order"
+    assert "the lease was not removed" not in notes and "UNCONFIRMED" in notes, notes
+    os.unlink(active)
+    assert _st_anchor_free(root), "(B) the unwind still gives up the lock"
+
+
+def _t_f10_3_anchor_close_attributed(d, env):
+    """T-f10-3 (fix round 10, claude LOW: the anchor clause states only a recorded outcome). In a
+    child, a REAL SIGINT sent during the publication is deferred and delivered after the capability
+    is built; its handler arms a non-signal injection (a line trace, the self-tests' own
+    mechanism) at the first line of _FdOwner.close, then raises KeyboardInterrupt. The injection
+    lands in the release scope exit's close of the anchor descriptor BEFORE its ownership is
+    cleared, so os.close never ran on it. The anchor's close must still be made and attributed:
+    the anchor ends free, no descriptor leaks, and the note says the anchor descriptor closed,
+    never that no close of it completed. Before the fix the anchor was closed, unattributed, by
+    the general closes, while the note read "(no close of its anchor descriptor completed here)"."""
+    root = _st_git_store(d, "repo", env)
+    release_operation(acquire_operation(root, "op"))
+    failure = _st_in_child(lambda: _st_f10_3_body(root))
+    assert failure is None, failure
+
+
+def _st_f10_3_body(root):
+    """T-f10-3's body, run in a child (it installs its own SIGINT handler)."""
+    armed = {}
+
+    def handler(signum, frame):
+        armed["state"] = _st_arm_interrupt(_st_named("_FdOwner.close"), 1)
+        raise KeyboardInterrupt("the deferred signal (T-f10-3)")
+
+    signal.signal(signal.SIGINT, handler)
+    baseline = _st_open_fds()
+    state = _st_arm_signal(_st_named("_publish_staged"), 1)
+    try:
+        caught = _st_expect_interrupt(acquire_operation, root, "op")
+    finally:
+        sys.settrace(None)
+    assert state["fired"] and armed["state"]["fired"], "both the signal and the injection fired"
+    notes = " ".join(getattr(caught, "__notes__", ()))
+    assert caught.args == ("the deferred signal (T-f10-3)",), repr(caught)
+    assert _st_open_fds() == baseline, "no descriptor may leak: {}".format(notes)
+    assert _st_anchor_free(root), "the anchor's close ran (observed free)"
+    assert "no close of its anchor descriptor completed" not in notes, notes
+    assert "its anchor descriptor closed (releasing its hold on the lock)" in notes, notes
+    _st_no_records(root, "T-f10-3")
+
+
 def self_test():
     """Regression roster (plan section (e)): the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
     round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
@@ -6997,7 +7371,10 @@ def self_test():
     inherited lock; a forked continuation of a release or unwind never frees the acquirer's lock,
     which is released only by closing; a forked publication continuation never strands a lone
     owner-less lease; a forked recovery continuation deletes nothing and its refusal claims only
-    its own acts; a fork inside the write loop never publishes a doubled record; T-f7-4 and T-f8-4
+    its own acts; a fork inside the write loop never publishes a doubled record; and, fix round 10,
+    T-f10-1 to T-f10-3: a fork anywhere in the acquisition entry after its identity capture gets no
+    capability, an interrupted post-unlink fsync is noted as an unconfirmed removal, and an
+    interrupted anchor close is retried and attributed; T-f7-4 and T-f8-4
     extended to interrupted closes), each a witness against a named defect. A
     missing containment primitive or git binary is a REFUSAL (non-zero),
     never a clean skip. The git fixtures are pinned hermetically (LOW-5). The restrictive-umask
@@ -7125,6 +7502,12 @@ def self_test():
          _t_f9_4_recovery_continuation),
         ("T-f9-5 a fork inside the write loop never publishes a record holding its payload twice",
          _t_f9_5_write_loop_continuation),
+        ("T-f10-1 a fork anywhere in the acquisition entry after its identity capture gets nothing",
+         _t_f10_1_entry_continuation),
+        ("T-f10-2 an interrupted post-unlink fsync is noted as unconfirmed, never as no removal",
+         _t_f10_2_interrupted_fsync),
+        ("T-f10-3 an interrupted anchor close is retried while still owned, and attributed",
+         _t_f10_3_anchor_close_attributed),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-oplock-selftest-"))
