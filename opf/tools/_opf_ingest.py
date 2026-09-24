@@ -2646,9 +2646,9 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                         "worksheet": bundle["worksheet"], "options": bundle["options"],
                         "crosswalk": bundle["crosswalk"], "migrate": bundle["migrate"],
                         "expected": expected}
-                    # Append the over-long integer as RAW bytes: the canonical emitter would itself hit the
-                    # int->str ceiling, so it is written straight into the staged bytes step 2 binds and step 3
-                    # parses. tomllib then raises a bare ValueError on the 5000-digit literal (> the 4300 ceiling).
+                    # Append a 1200-deep nested array as RAW bytes, written straight into the staged bytes step 2
+                    # binds and step 3 parses. tomllib then raises a RecursionError (not a TOMLDecodeError and not
+                    # a ValueError) on the nesting, which the parse site must still refuse fail-closed.
                     raw = (run / "inventory.toml").read_bytes()
                     (run / "inventory.toml").write_bytes(raw + b"\ndeep = " + b"[" * 1200 + b"]" * 1200 + b"\n")
                     verdict = None
