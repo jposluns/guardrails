@@ -244,9 +244,10 @@ both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` 
   same line, separated by a blank, with a non-empty reason and nothing but whitespace after the comment.
   The comment records an attestation; it does not prove that the file was read or can be restored.
 - **`parallel-write-read.py`** needs no store or lease setting. It keeps a small state file for each
-  session in a folder only you can read: in `XDG_RUNTIME_DIR` when that is a private folder you own,
-  else in the system temporary folder. It skips helper-session calls and the worker processes described
-  above. A denied command is allowed when issued again unchanged.
+  session in a folder `parallel-write-read-<uid>` that only you can read, inside `XDG_RUNTIME_DIR` when
+  that is a real folder you own with mode 0700, else inside the system temporary folder. It skips
+  helper-session calls and the worker processes described above. A denied command is allowed when issued
+  again unchanged.
 
 The `record-ok` and `wait-ok` comments must begin a word and be the last non-blank content of the
 command. Their reasons are optional; text inside quotes does not opt out.
@@ -313,15 +314,20 @@ section of its opening docstring. Read that section before relying on a hook; in
   A file created or filled after the check can be lost without a warning. It can deny unreachable
   commands and files that have a good backup; it does not check for a restore path.
 - **`parallel-write-read.py`** sees only writes made through the file tools in the same session; a file
-  written by a shell command is never tracked. It checks a small, fixed set of reading forms (an input
-  redirection, a few named file options such as `--body-file`, and the first operand of `cat`, a shell,
-  or a common interpreter when no option comes before it) and misses every other reader, such as `grep`,
-  `sed`, or `cat -e f`. Paths built from variables or substitutions, reads inside nested shell strings,
-  and every command after a directory change are not checked. It compares file metadata, not content:
-  any change to the file after the attempt counts as landed, even one the write did not make, and a
-  write that leaves the file untouched reads as not landed (one deny, cleared by re-issuing the command).
-  A consumer ordered before its write in one batch is missed. Records expire after 900 seconds, the
-  oldest are dropped past 64 entries or 64 KiB, and an entry stops denying after 32 denied commands.
+  written by a shell command is never tracked. It relies on a write's hook running before the hook of a
+  command issued with it; that ordering within one parallel batch has not been measured, and a batch seen
+  in the other order is allowed. It checks a small, fixed set of reading forms (an input redirection, a
+  few named file options such as `--body-file`, and the first operand of `cat`, a shell, or a common
+  interpreter when no option comes before it) and misses every other reader, such as `grep`, `sed`, or
+  `cat -e f`. Paths built from variables, substitutions, globs, or brace ranges, a symbolic-link alias of
+  the file, and reads inside nested shell strings, `eval`, scripts, or here-document bodies are not
+  checked, nor is any command after a directory change. It compares file metadata, not content: a change
+  to the file after the attempt counts as landed even when the write did not make it, while a write that
+  leaves the file untouched, or a change within one tick of a coarse file-system clock that keeps the
+  inode and size, reads as not landed. Such a false deny, and those from a few parsing edge cases the
+  docstring lists, happens once and is cleared by re-issuing the command. Records expire after 900
+  seconds, the oldest are dropped past 64 entries or 64 KiB, and an entry stops denying after 32 denied
+  commands. The hook's `RESIDUAL COVERAGE` section is the full list.
 
 `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `parallel-write-read.py` also allow
 commands over 64 KiB or
