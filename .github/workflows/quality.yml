@@ -358,6 +358,14 @@ jobs:
       - name: Hooks behaviour self-test
         run: python3 -I -B tools/selftest_aiqt_hooks.py
 
+      # The hooks-preview/ channel: each preview hook's own self-test passes, README.md and SHA256SUMS
+      # agree with the files, and each pinned raw link names its file under a hooks-preview-v<N> tag.
+      # NOT APPLICABLE when the directory is absent.
+      - name: Hooks preview self-test
+        run: python3 -I -B tools/check_hooks_preview.py --self-test
+      - name: Hooks preview
+        run: python3 -I -B tools/check_hooks_preview.py
+
       - name: Selftest-execution gate self-test
         run: python3 -I -B tools/check_selftest_execution.py --self-test
 
