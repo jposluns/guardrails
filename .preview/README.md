@@ -315,19 +315,20 @@ section of its opening docstring. Read that section before relying on a hook; in
   commands and files that have a good backup; it does not check for a restore path.
 - **`parallel-write-read.py`** sees only writes made through the file tools in the same session; a file
   written by a shell command is never tracked. It relies on a write's hook running before the hook of a
-  command issued with it; that ordering within one parallel batch has not been measured, and a batch seen
-  in the other order is allowed. It checks a small, fixed set of reading forms (an input redirection, a
-  few named file options such as `--body-file`, and the first operand of `cat`, a shell, or a common
-  interpreter when no option comes before it) and misses every other reader, such as `grep`, `sed`, or
-  `cat -e f`. Paths built from variables, substitutions, globs, or brace ranges, a symbolic-link alias of
-  the file, and reads inside nested shell strings, `eval`, scripts, or here-document bodies are not
-  checked, nor is any command after a directory change. It compares file metadata, not content: a change
-  to the file after the attempt counts as landed even when the write did not make it, while a write that
-  leaves the file untouched, or a change within one tick of a coarse file-system clock that keeps the
-  inode and size, reads as not landed. Such a false deny, and those from a few parsing edge cases the
-  docstring lists, happens once and is cleared by re-issuing the command. Records expire after 900
-  seconds, the oldest are dropped past 64 entries or 64 KiB, and an entry stops denying after 32 denied
-  commands. The hook's `RESIDUAL COVERAGE` section is the full list.
+  command issued with it; that ordering within one parallel batch has not been measured, and a batch
+  seen in the other order is allowed. It checks a small, fixed set of reading forms (an input
+  redirection, a few named file options such as `--body-file`, and the first operand of `cat`, a shell,
+  or a common interpreter when no option comes before it) and misses every other reader, such as `grep`,
+  `sed`, or `cat -e f`. Paths built from variables, substitutions, globs, or brace ranges, a symbolic
+  link whose name matches neither the file's nor the one the write used, and reads inside nested shell
+  strings, `eval`, scripts, or here-document bodies are not checked, nor is any command after a
+  directory change. It compares file metadata, not content: a change to the file after the attempt
+  counts as landed even when the write did not make it, while a write that leaves the file untouched
+  reads as not landed, and a change within one tick of a coarse file-system clock that keeps the inode
+  and size can too. Such a false deny, and those from a few parsing edge cases the docstring lists,
+  happens once and is cleared by re-issuing the command. Records expire after 900 seconds, the oldest
+  are dropped past 64 entries or 64 KiB, and an entry stops denying after 32 denied commands. The hook's
+  opening docstring, above all its `RESIDUAL COVERAGE` section, is the authority.
 
 `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `parallel-write-read.py` also allow
 commands over 64 KiB or
