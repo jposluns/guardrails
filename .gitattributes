@@ -445,6 +445,7 @@
 .preview/SHA256SUMS text eol=lf
 .preview/clock-inject.py text eol=lf
 .preview/future-stamp-write.py text eol=lf
+.preview/parallel-write-read.py text eol=lf
 .preview/record-remove-check.py text eol=lf
 .preview/stamp-truth-stop.py text eol=lf
 .preview/unbounded-wait.py text eol=lf
