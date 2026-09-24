@@ -8,16 +8,17 @@ stdlib-only, Linux/macOS.
 
 The substrate home is <control-root>/opf-init/, a SIBLING of the operation lock's opf-oplock/
 control directory under the SAME authoritative control root (the common git directory the lock
-module resolves through git itself, or the store root when .git is genuinely absent). It COMPOSES
-the merged lock facility (_opf_oplock) rather than reinventing it: the control-root resolution
-(_classify_git_entry plus _git_common_dir), the single-component control-home open
-(_open_control_dir, parameterized for this second home), the no-follow dir_fd primitives, and the
-exclusive fsynced control-file creation (_create_control_file, whose atomic staging-then-link
-publication and failure cleanup this module inherits) are the lock module's own. So a substrate
-writer killed mid-record leaves no torn record at the final name, only a staging leftover
-(".<name>.opf-stage-<32 hex>"); the lock module sweeps such leftovers only from its own control
-directory and machine store, so in an operation directory the classifier reads one as a foreign
-entry (CANNOT-EVALUATE, preserved), never as a record.
+module resolves through git itself, the ENCLOSING repository's for a store nested inside one, or
+the store root when neither it nor any ancestor carries a .git entry). It COMPOSES the merged lock
+facility (_opf_oplock) rather than reinventing it: the control-root resolution (the shared
+_control_root_dir, over _classify_git_entry and _git_common_dir), the single-component
+control-home open (_open_control_dir, parameterized for this second home), the no-follow dir_fd
+primitives, and the exclusive fsynced control-file creation (_create_control_file, whose atomic
+staging-then-link publication and failure cleanup this module inherits) are the lock module's
+own. So a substrate writer killed mid-record leaves no torn record at the final name, only a
+staging leftover (".<name>.opf-stage-<32 hex>"); the lock module sweeps such leftovers only from
+its own control directory and machine store, so in an operation directory the classifier reads
+one as a foreign entry (CANNOT-EVALUATE, preserved), never as a record.
 
 Per held operation (an _opf_oplock.OpCapability) the substrate records, under ops/<op_id>/:
 
@@ -82,7 +83,7 @@ SYSTEM-HARDENING.md), which this layer does not provide.
 
 Run: python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 Exit: 0 self-test clean; 1 self-test failure; 2 refused precondition (missing containment
-primitive or git binary), never a clean skip.
+primitive or git binary, or a fixture base inside a git repository), never a clean skip.
 """
 import datetime
 import hashlib
@@ -383,10 +384,11 @@ def _bad_phase_record(doc, raw, op_id, seq, pname):
 
 
 def _open_control_root(store_root):
-    """Resolve the RESOLVED store and open the AUTHORITATIVE control root exactly as the lock
-    module does (three-way no-follow .git classification; git itself answers for a git store;
-    never a fallback). Returns (control_root_fd, control_root_desc); the caller owns and closes
-    the fd. Every failure refuses."""
+    """Resolve the RESOLVED store and open the AUTHORITATIVE control root through the lock
+    module's own shared resolution (_opf_oplock._control_root_dir: the three-way no-follow .git
+    classification at the store root and, when it has none, at every ancestor; git itself answers
+    for a git store or an enclosing repository; never a fallback). Returns (control_root_fd,
+    control_root_desc); the caller owns and closes the fd. Every failure refuses."""
     res = _opf_store.resolve_store(store_root)
     if res.status != _opf_store.RESOLVED:
         raise InitSubstrateError("no RESOLVED machine store at {} ({}: {}); the resume substrate "
@@ -400,11 +402,11 @@ def _open_control_root(store_root):
             store_root_abs, exc))
     try:
         try:
-            if _opf_oplock._classify_git_entry(store_fd, store_root_abs) == "absent":
-                return os.dup(store_fd), store_root_abs
-            desc = _opf_oplock._git_common_dir(store_root_abs)
+            desc = _opf_oplock._control_root_dir(store_fd, store_root_abs)
         except _opf_oplock.OpLockError as exc:
             raise InitSubstrateError(str(exc))
+        if desc is None:
+            return os.dup(store_fd), store_root_abs
         try:
             fd = _opf_store._open_dir_nofollow(desc)
         except OSError as exc:
@@ -1419,6 +1421,46 @@ def _t_s13_midread_containment(d, env):
     _opf_oplock.release_operation(cap)
 
 
+def _t_s14_nested_store_home(d, env):
+    """T-s14 (F-OPLOCK-NESTED-NOT-E, layout decision E): a store NESTED inside a git repository
+    (no .git of its own) roots the substrate home under the ENCLOSING repository's common git dir,
+    beside the lock's control directory, so the same nested store in a sibling worktree classifies
+    the same recorded operation; nothing is created at either nested store root; and a bogus
+    enclosing gitdir pointer refuses the classifier with nothing created (never a store-root
+    fallback). Before the fix the home was created at the nested store root, so the sibling
+    worktree read NO-SUBSTRATE."""
+    main, nested = _opf_oplock._st_nested_git_store(d, "main", env)
+    wt = os.path.join(d, "wt")
+    _opf_oplock._st_git(["worktree", "add", "--detach", "-q", wt], main, env)
+    wt_nested = os.path.join(wt, "nested")
+    cap = _opf_oplock.acquire_operation(nested, "opf-init")
+    sub = begin_operation(cap, _st_plan_bytes(cap.op_id))
+    plan = os.path.join(_st_sub_ops(main), cap.op_id, PLAN_NAME)
+    assert os.path.isfile(plan), \
+        "a nested store's substrate home must live under the ENCLOSING common git dir"
+    record_phase(sub, cap, "plan-recorded")
+    close_operation(sub)
+    _opf_oplock.release_operation(cap)
+    survey = classify_operations(wt_nested)
+    assert survey.status == OPERATIONS, survey.status
+    assert [(r.op_id, r.status) for r in survey.operations] == [(cap.op_id, INTACT)], \
+        [(r.op_id, r.status, r.detail) for r in survey.operations]
+    for store in (nested, wt_nested):
+        for name in (SUBSTRATE_DIRNAME, _opf_oplock.CONTROL_DIRNAME):
+            assert not os.path.exists(os.path.join(store, name)), \
+                "no control home may be created at a nested store root ({})".format(store)
+    bogus = os.path.join(d, "bogus")
+    os.mkdir(bogus)
+    with open(os.path.join(bogus, ".git"), "w", encoding="utf-8") as fh:
+        fh.write("gitdir: /nonexistent-opf-init-decoy\n")
+    store = os.path.join(bogus, "nested")
+    os.mkdir(store)
+    _opf_oplock._st_store_tree(store)
+    _st_expect_refusal(classify_operations, store, needle="rev-parse")
+    assert not os.path.exists(os.path.join(store, SUBSTRATE_DIRNAME)), \
+        "a refused enclosing state must never fall back to the store root"
+
+
 def self_test():
     """Regression roster (the PR2 resume-substrate T-s witnesses), each a fail-to-pass
     discriminator against a named behaviour: the sibling-home placement under the composed
@@ -1429,8 +1471,10 @@ def self_test():
     plan write stranding nothing (T-s7), the fail-closed classifier roots (T-s8), the read-side
     classifier bounds and utc validity (T-s9), the lseek-free fresh-descriptor listings (T-s10),
     the plan-membership re-check in the same fresh listing (T-s11), the early entry-count bound
-    refusing before any phase record read (T-s12), and mid-read OSError containment (T-s13). A missing
-    containment primitive or git binary is a REFUSAL (non-zero), never a clean skip. The git
+    refusing before any phase record read (T-s12), mid-read OSError containment (T-s13), and the
+    nested store's substrate home shared under its enclosing repository's common git dir (T-s14,
+    F-OPLOCK-NESTED-NOT-E). A missing containment primitive or git binary, or a fixture base inside
+    a git repository, is a REFUSAL (non-zero), never a clean skip. The git
     fixtures are pinned hermetically exactly as the lock module's self-test pins them."""
     import tempfile
     import traceback
@@ -1462,9 +1506,17 @@ def self_test():
          _t_s12_early_count_guard),
         ("T-s13 a mid-read OSError contains to one CANNOT-EVALUATE entry",
          _t_s13_midread_containment),
+        ("T-s14 a nested store's substrate home is shared under the enclosing common git dir",
+         _t_s14_nested_store_home),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-substrate-selftest-"))
+    enclosed = _opf_oplock._st_enclosing_repo(base)
+    if enclosed is not None:
+        shutil.rmtree(base, ignore_errors=True)
+        print("REFUSED: {}; the non-git fixtures cannot run hermetically there (fail-closed, "
+              "non-zero)".format(enclosed))
+        return 2
     # Pin the git fixtures AND the composed rev-parse hermetically, exactly as the lock module's
     # self-test does: bind HOME and XDG_CONFIG_HOME (which the production _git_common_dir keeps,
     # scrubbing only GIT_*) plus GIT_CONFIG_GLOBAL/SYSTEM into the per-run temp dir, and restore
