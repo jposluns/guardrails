@@ -149,7 +149,6 @@ def _schema_deferred(tname):
 # the emitted set against this tuple, so a silently-skipped check becomes CANNOT-EVALUATE, never VALID.
 REQUIRED_CHECKS = (
     "C-MANIFEST", "C-PROFILES", "C-ROSTER", "C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM",
-    "C-EVIDENCE-ENUM",
     "C-VERSION-LEDGER", "C-COUNTERS", "C-ROTATION", "C-STAGING", "C-LEASE", "C-ID-SPACE", "C-RECEIPTS",
     "C-HANDOFF",
     "C-DECISION-CHAINS", "C-LINKS", "C-FROZEN-COVERAGE", "C-NO-DELETION", "C-PARTITION", "C-CONTIGUITY",
@@ -157,6 +156,17 @@ REQUIRED_CHECKS = (
     "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS", "C-HISTORY-RESURRECTION",
 )
 _REQUIRED_SET = frozenset(REQUIRED_CHECKS)
+# Checks a homes-2 store also requires (spec 4.2), inserted after C-ARCHIVE-ENUM. A legacy (homes 1) store's
+# roster, and so its report, is exactly REQUIRED_CHECKS.
+HOMES2_CHECKS = ("C-EVIDENCE-ENUM",)
+
+
+def required_checks(homes):
+    """The closed required-check roster for a store's active homes generation."""
+    if homes < 2:
+        return REQUIRED_CHECKS
+    at = REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
+    return REQUIRED_CHECKS[:at] + HOMES2_CHECKS + REQUIRED_CHECKS[at:]
 
 # --- source-integrity vs deliverable-drift partition (PR-C, the render --write source gate) ---------
 # The three DELIVERABLE_DRIFT_CHECKS grade the GENERATED public deliverables (the declared views, the root
@@ -188,7 +198,16 @@ def source_integrity_ok(result):
     if getattr(result, "unattributed", None):
         return False
     checks = getattr(result, "checks", None) or {}
-    return all(checks.get(cid) == "PASS" for cid in SOURCE_INTEGRITY_CHECKS)
+    return all(checks.get(cid) == "PASS" for cid in source_checks(result))
+
+
+def source_checks(result):
+    """The SOURCE_INTEGRITY checks a result is gated on, in roster order: SOURCE_INTEGRITY_CHECKS, plus the
+    homes-2 checks when the report carries one. result() grades every check its homes roster requires, so a
+    homes-2 report always carries them, and a legacy report never does."""
+    checks = getattr(result, "checks", None) or {}
+    homes = 2 if any(cid in checks for cid in HOMES2_CHECKS) else 1
+    return tuple(cid for cid in required_checks(homes) if cid not in DELIVERABLE_DRIFT_CHECKS)
 
 
 # Disclosed by-design residuals (OPF-SPEC 17): the sub-checks a parse-only, read-only whole-store engine
@@ -215,9 +234,6 @@ _RESIDUALS = (
     "Module-tier record schema validation (spec 8.5): the baseline record validator knows only the "
     "baseline specs, so a module-tier record is a named CANNOT-EVALUATE deferral (deferred to U2M) rather "
     "than graded here; every such record is still surfaced, so none can hide a defect.",
-    "Journal contents are not inspected by doctor. A staged plan does not prove recoverability. "
-    "Homes-2 evidence inventories establish local membership, not actor authenticity; losing a whole "
-    "bundle, inventory and payload together, requires independent history to detect.",
     "Byte-level view drift for a per-record store that declares views (spec 5.8/10): U4's view planner "
     "does not yet support the per-record layout, so C-VIEW-DRIFT is a named CANNOT-EVALUATE there, never "
     "a silent pass.",
@@ -233,6 +249,12 @@ _RESIDUALS = (
     "Immutable-record body preservation across time (spec 8.5) when the prior committed snapshot carries "
     "no body digest for a created-terminal record: it is a named CANNOT-EVALUATE (never a silent VALID on "
     "a rewritten immutable body), verified only when the prior supplies the digest (codex-3).",
+)
+# Disclosed only on a homes-2 report, so a legacy report's residuals are unchanged.
+_HOMES2_RESIDUALS = (
+    "Journal contents are not inspected by doctor. A staged plan does not prove recoverability. "
+    "Homes-2 evidence inventories establish local membership, not actor authenticity; losing a whole "
+    "bundle, inventory and payload together, requires independent history to detect.",
 )
 
 
@@ -284,7 +306,7 @@ class _Report:
     check that never registered `ran` is routed to CANNOT-EVALUATE naming it, so a silently-skipped check is
     never a pass."""
     __slots__ = ("findings", "cannot", "residuals", "checks", "triage", "_current", "by_check",
-                 "unattributed")
+                 "unattributed", "required")
 
     def __init__(self):
         self.findings = []
@@ -295,6 +317,14 @@ class _Report:
         self._current = None
         self.by_check = {}                # check-id -> list of the source-attributed message strings it emitted
         self.unattributed = []            # no-current findings/cants + duplicate-ran / unknown-id internal faults
+        self.required = REQUIRED_CHECKS   # the closed roster; a homes-2 store widens it via require_homes
+
+    def require_homes(self, homes):
+        # Bind the roster to the store's homes generation once the manifest names it. A homes-2 check that
+        # then never runs is CANNOT-EVALUATE, and a legacy report keeps exactly REQUIRED_CHECKS.
+        self.required = required_checks(homes)
+        if homes >= 2:
+            self.residuals.extend(_HOMES2_RESIDUALS)
 
     def ran(self, check_id):
         # Register a required check as executed and make it the attribution target. A second ran() for the
@@ -340,20 +370,21 @@ class _Report:
         # Reconcile the emitted check ids against the closed REQUIRED_CHECKS roster. A required check that
         # never registered ran() is routed to CANNOT-EVALUATE naming it; an unknown id that somehow ran is a
         # fail-closed internal fault. Neither can read as a pass.
-        for cid in REQUIRED_CHECKS:
+        for cid in self.required:
             if cid not in self.checks:
                 msg = ("internal: required check {!r} did not run; routed to CANNOT-EVALUATE "
                        "(a skipped check is never a pass)".format(cid))
                 self.cannot.append(msg)
                 self.by_check.setdefault(cid, []).append(msg)   # so the source gate can print the reason
                 self.checks[cid] = "CANNOT-EVALUATE"
+        required = frozenset(self.required)
         for cid in list(self.checks):
-            if cid not in _REQUIRED_SET:
+            if cid not in required:
                 msg = ("internal: an unknown check id {!r} was run (not in REQUIRED_CHECKS; "
                        "fail-closed)".format(cid))
                 self.cannot.append(msg)
                 self.unattributed.append(msg)                   # an unknown id has no roster verdict to carry it
-        ordered = {cid: self.checks[cid] for cid in REQUIRED_CHECKS}
+        ordered = {cid: self.checks[cid] for cid in self.required}
         for cid in self.checks:
             if cid not in ordered:
                 ordered[cid] = self.checks[cid]
@@ -1730,12 +1761,14 @@ def _check_evidence(root_fd, homes, rep):
     """C-EVIDENCE-ENUM: reconcile the homes-2 evidence homes against their per-bundle inventories.
 
     A legacy (homes 1) store has no evidence homes: nothing is read, and C-CONTAINMENT grades those
-    paths as before. In homes 2 every file under imported/ and archive/ must be claimed by exactly one
-    inventory row and match its recorded size and digest. Unlisted or unclaimed entries, a bundle with
-    no inventory, and missing listed files are findings. An unreadable or malformed input cannot
-    evaluate; a malformed inventory stops the reconciliation, since its claims are unknown. Deleting a
-    whole bundle, inventory and payload together, is outside this local snapshot check; history
-    coverage is separate. Reads use the contained readers and their per-file cap, with a bounded walk.
+    paths as before. In homes 2 every payload file under imported/ and archive/ (every file other than a
+    bundle-root inventory) must be claimed by exactly one inventory row and match its recorded size and
+    digest; each inventory is itself schema-checked. Unlisted or unclaimed entries, a bundle with no
+    inventory, and missing listed files are findings. An unreadable or malformed input, and a bundle with
+    a phase inventory but no inventory.toml, cannot evaluate; a malformed inventory stops the
+    reconciliation, since its claims are unknown. Deleting a whole bundle, inventory and payload
+    together, is outside this local snapshot check; history coverage is separate. Reads use the contained
+    readers and their per-file cap, with a bounded walk.
     """
     if homes < 2:
         return
@@ -1818,6 +1851,12 @@ def _check_evidence(root_fd, homes, rep):
             inventories = [name for name in files if _opf_store.is_evidence_inventory_name(name)]
             if not inventories:
                 rep.finding("C-EVIDENCE-ENUM: evidence bundle {!r} has no inventory".format(bundle))
+            elif "inventory.toml" not in inventories:
+                # A later phase's inventory never stands in for the first: the bundle's founding claims
+                # are unknown, so the reconciliation cannot evaluate rather than grade the phase alone.
+                rep.cant("C-EVIDENCE-ENUM: evidence bundle {!r} has a phase inventory but no "
+                         "inventory.toml".format(bundle))
+                failed[0] = True
             for name in inventories:
                 read_inventory(bundle, kind, run_id, _rel(bundle, name))
             bundles.append((bundle, subdirs, [name for name in files if name not in inventories]))
@@ -2409,6 +2448,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     registered_vendors = frozenset(reg) if isinstance(reg, list) and all(isinstance(x, str) for x in reg) \
         else frozenset()
     enabled_modules = _enabled_modules(manifest_data)
+    homes = _opf_store.homes_generation(manifest_data)
+    rep.require_homes(homes)
 
     # --- C-PROFILES: name the evaluated / unevaluated profile scope (spec 16) -------------------------
     rep.ran("C-PROFILES")
@@ -2447,13 +2488,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-ARCHIVE-ENUM: walk + reconcile the archive; collect rotation-eligibility for C-ROTATION -----
     rep.ran("C-ARCHIVE-ENUM")
-    homes = _opf_store.homes_generation(manifest_data)
     archive_recs, archive_worklogs, rotatable = _validate_archive(root_fd, machine_rel, enabled_types,
                                                                   registered_vendors, import_status, rep,
                                                                   homes=homes)
 
-    rep.ran("C-EVIDENCE-ENUM")
-    _check_evidence(root_fd, homes, rep)
+    # --- C-EVIDENCE-ENUM (homes 2 only): reconcile the evidence homes against their inventories -------
+    if homes >= 2:
+        rep.ran("C-EVIDENCE-ENUM")
+        _check_evidence(root_fd, homes, rep)
 
     # --- the merged worklog (active + archive together; spec 12:982-983) and the id maps --------------
     merged = {}

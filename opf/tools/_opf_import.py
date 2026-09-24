@@ -3902,10 +3902,10 @@ def _assemble_preview(resolution, machine_rel, machine_files, preview_dir, shuti
         working_abs = os.path.join(os.path.abspath(store_root), _opf_store.WORKING_DIRNAME)
         if homes >= 2 and os.path.abspath(dirpath) == working_abs:
             drop.update(n for n in names if n == _opf_store.JOURNALS_DIRNAME)
-        # Exclude exactly this preview destination. Same-named nested directories and sibling
-        # staging runs remain visible. This is inert while previews are outside the store.
+        # Homes 2 only: exclude exactly this preview destination. Same-named nested directories and
+        # sibling staging runs remain visible. This is inert while previews are outside the store.
         preview_abs = os.path.abspath(preview_dir)
-        if os.path.abspath(dirpath) == os.path.dirname(preview_abs):
+        if homes >= 2 and os.path.abspath(dirpath) == os.path.dirname(preview_abs):
             drop.update(n for n in names if n == os.path.basename(preview_abs))
         return drop
 

@@ -1440,19 +1440,19 @@ def render(argv, observations=None):
     import _opf_check
 
     # Phase A -- SOURCE gate (nothing touched). validate_store grades the whole store; render gates ONLY on
-    # SOURCE integrity (the 26 non-deliverable checks) via the engine predicate, so an out-of-date deliverable
-    # (a drifted view or VERSION) is render's OUTPUT to fix, not a refusal. A source violation (a duplicate
-    # id, untracked, no/malformed observations, an unreadable required input, any internal fault) refuses with
+    # SOURCE integrity (every non-deliverable check the report's homes roster requires) via the engine
+    # predicate, so an out-of-date deliverable (a drifted view or VERSION) is render's OUTPUT to fix, not a
+    # refusal. A source violation (a duplicate id, untracked, no/malformed observations, an unreadable required
+    # input, any internal fault) refuses with
     # exit 2 and nothing written, printing ONLY the source-attributed messages so the false "regenerate"
     # remedy is never advertised over a store render will not touch (guard-input-soundness; never-advertise).
     pre = _opf_check.validate_store(res, observations=observations)
     if not _opf_check.source_integrity_ok(pre):
         print("opf render: cannot evaluate: refusing to write; store SOURCE integrity is not sound "
               "(U6 validate_store); nothing written", file=sys.stderr)
-        for cid in _opf_check.REQUIRED_CHECKS:
-            if cid in _opf_check.SOURCE_INTEGRITY_CHECKS:
-                for m in pre.by_check.get(cid, []):
-                    print("  {}: {}".format(pre.checks.get(cid, "?"), m), file=sys.stderr)
+        for cid in _opf_check.source_checks(pre):
+            for m in pre.by_check.get(cid, []):
+                print("  {}: {}".format(pre.checks.get(cid, "?"), m), file=sys.stderr)
         for m in pre.unattributed:
             print("  UNATTRIBUTED: {}".format(m), file=sys.stderr)
         return EXIT_CANNOT_EVALUATE
@@ -1499,10 +1499,9 @@ def render(argv, observations=None):
         if not _opf_check.source_integrity_ok(post):
             print("opf render: cannot evaluate: post-write validation found a SOURCE-INTEGRITY regression "
                   "after the regenerate; {}".format(rollback), file=sys.stderr)
-            for cid in _opf_check.REQUIRED_CHECKS:
-                if cid in _opf_check.SOURCE_INTEGRITY_CHECKS:
-                    for m in post.by_check.get(cid, []):
-                        print("  {}: {}".format(post.checks.get(cid, "?"), m), file=sys.stderr)
+            for cid in _opf_check.source_checks(post):
+                for m in post.by_check.get(cid, []):
+                    print("  {}: {}".format(post.checks.get(cid, "?"), m), file=sys.stderr)
         else:
             print("opf render: cannot evaluate: post-write validation disagreed with the regenerate over an "
                   "OWNED deliverable; {}".format(rollback), file=sys.stderr)
@@ -1643,10 +1642,11 @@ def plan_views(store_root_fd, machine_rel):
             raise ViewsError("view {!r} is declared kind {!r} but this generator renders it as {!r} "
                              "(spec 10.1)".format(name, declared_kind, kind))
         scope, dest_rel = _spec_destination(name)
-        try:
-            _opf_store.require_ordinary_target(dest_rel)
-        except ValueError as exc:
-            raise ViewsError(str(exc))
+        if _opf_store.homes_generation(manifest) >= 2:
+            try:
+                _opf_store.require_ordinary_target(dest_rel)
+            except ValueError as exc:
+                raise ViewsError(str(exc))
         declared_target = tbl.get("target")
         if declared_target != dest_rel:
             raise ViewsError("view {!r} declares target {!r} but its spec destination is {!r}; a manifest "

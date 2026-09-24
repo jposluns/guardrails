@@ -287,13 +287,20 @@ def is_evidence_inventory_name(name):
     return isinstance(name, str) and _EVIDENCE_INVENTORY_RE.fullmatch(name) is not None
 
 
+HOMES2_SPEC_VERSION = "2.0.0"           # the only spec_version the homes-2 contract applies to (spec 4.2)
+
+
 def homes_generation(manifest_data):
     """The store's active homes generation: 2 only when this tooling activates homes 2 and the
-    manifest declares exactly the integer 2, otherwise the legacy generation 1. Manifest
-    validation, not this helper, reports a malformed or unknown declaration."""
+    manifest declares both exactly the integer 2 and spec_version 2.0.0, otherwise the legacy
+    generation 1. Raising SUPPORTED_HOMES alone therefore activates nothing for a store at the
+    current spec_version. Manifest validation, not this helper, reports a malformed or unknown
+    declaration."""
     opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     declared = opf.get("homes") if isinstance(opf, dict) else None
-    return 2 if SUPPORTED_HOMES >= 2 and type(declared) is int and declared == 2 else 1
+    version = opf.get("spec_version") if isinstance(opf, dict) else None
+    return 2 if (SUPPORTED_HOMES >= 2 and type(declared) is int and declared == 2
+                 and version == HOMES2_SPEC_VERSION) else 1
 
 
 def store_control_roots(homes):
@@ -316,8 +323,9 @@ def overlaps_home(path, home):
 
 
 def require_ordinary_target(path):
-    """Refuse journal operands, including ancestors. Internal journal writes use the held capability.
-    This applies in every generation; no shipped writer targets the journal home."""
+    """Homes-2 boundary: refuse journal operands, including ancestors. Internal journal writes use
+    the held capability. Only homes-2 entry points call this (the capability-bound journal API and
+    homes-2 view planning); legacy transactions keep their legacy operand handling."""
     if overlaps_home(path, JOURNALS_REL):
         raise ValueError("ordinary operation target {!r} overlaps the journal home".format(path))
 

@@ -18,7 +18,11 @@ _CONTRACT = {
     "4.2": ('spec_version = "2.0.0"', "[opf].homes = 2", "until homes 2 is activated", "git common directory",
             "machine-local", "git add -f", "tracked staging or journals", "layout-", "preview-",
             "keeps its legacy grading", "inventory-<phase>.toml", "an evidence commit changes only its bundle folder",
-            "claimed by exactly one row", "byte-exact", "fails closed on a reserved-name match or ambiguity"),
+            "claimed by exactly one row", "every payload file", "is itself schema-checked",
+            "A phase inventory never substitutes for a missing inventory.toml",
+            "In homes 2, ordinary transaction operands", "keep their legacy operand handling",
+            "check roster and residuals are unchanged", "byte-exact",
+            "fails closed on a reserved-name match or ambiguity"),
     "4.4": ("MUST NOT be used as a machine subdirectory", "legacy content cannot be re-absorbed"),
     "9.2": ('spec_version = "2.0.0"', "unknown future generations are refused",
             "idempotent and journaled", "Every destination is digest-verified before its source is removed",
@@ -106,11 +110,22 @@ def boundary_self_test():
             return True
         return False
 
+    def refusal(thunk):
+        # The refusal message, or None when the thunk completed; any other exception propagates.
+        try:
+            thunk()
+        except (ValueError, journal.JournalError, ingest._DetectError, views.ViewsError) as exc:
+            return str(exc)
+        return None
+
+    class _Reached(Exception):
+        """A mocked first I/O was reached: nothing refused the operation before it."""
+
     run = "imp-20260917T120000Z-0123456789abcdef"
     adopt_run = "adopt-20260917T120000Z-0123456789abcdef"
     machine = ".working/toml"
     manifest = {"opf": {"layout": "inline"}, "types": {}, "views": {}}
-    manifest2 = {"opf": {"layout": "inline", "homes": 2}, "types": {}, "views": {}}
+    manifest2 = {"opf": {"layout": "inline", "homes": 2, "spec_version": "2.0.0"}, "types": {}, "views": {}}
     homes = tuple(".working/" + name for name in ("imports", "imported", "archive", "staging", "journals"))
     legacy_root = homes[0]
 
@@ -127,6 +142,14 @@ def boundary_self_test():
     check("classifier-legacy-roster", lambda: cls.homes == 1 and cls.control_roots == (legacy_root,)
           and cls.evidence_roots == ())
     check("classifier-declaration-inert", lambda: doctor.classify_containment(manifest2, machine).homes == 1)
+    # Latent activation is gated: raising SUPPORTED_HOMES activates only a store declaring both homes 2
+    # and spec_version 2.0.0, never a current-version store or a non-integer declaration.
+    with active():
+        check("activation-homes2-declared", lambda: store.homes_generation(manifest2) == 2)
+        for label, opf in (("current-version", {"homes": 2, "spec_version": "1.1.0"}),
+                           ("no-version", {"homes": 2}), ("boolean", {"homes": True, "spec_version": "2.0.0"}),
+                           ("string", {"homes": "2", "spec_version": "2.0.0"})):
+            check("activation-gated-" + label, lambda o=opf: store.homes_generation({"opf": o}) == 1)
     with active():
         cls2 = doctor.classify_containment(manifest2, machine)
         check("classifier-roster", lambda: cls2.homes == 2 and cls2.control_roots == homes)
@@ -167,11 +190,20 @@ def boundary_self_test():
                 patch.object(ingest.os, "stat", return_value=SimpleNamespace(st_mode=mode)), \
                 patch.object(ingest, "_digest_of", side_effect=AssertionError("read control bytes")):
             check("detect-never-reads-controls-" + str(mode), lambda: ingest._detect_store_scope(
-                -1, ingest._managed_paths(resolution, manifest2)[0], set(), set()) == [])
+                -1, ingest._managed_paths(resolution, manifest2)[0], set(), set(), homes=2) == [])
+    with patch.object(ingest.os, "open", side_effect=detect_open), patch.object(ingest.os, "close"), \
+            patch.object(ingest.os, "listdir", return_value=[h.split("/")[-1] for h in homes]), \
+            patch.object(ingest.os, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFREG)), \
+            patch.object(ingest, "_digest_of", return_value=("sha256:" + "0" * 64, 0)):
+        # Main's legacy walk prunes directories only, so a regular FILE named like a home is a row.
+        check("detect-legacy-control-file-rows", lambda: len(ingest._detect_store_scope(
+            -1, ingest._managed_paths(resolution, manifest)[0], set(), set())) == len(homes))
     for home in homes:
         check("frozen-row-refusal-" + home,
               lambda h=home: refuses(lambda: ingest.admit_row_scope("store", h, "", homes=2)))
-    check("frozen-row-legacy-imports", lambda: refuses(lambda: ingest.admit_row_scope("store", legacy_root, "")))
+    check("frozen-row-legacy-imports", lambda: refusal(lambda: ingest.admit_row_scope("store", legacy_root, ""))
+          == "store-scope row {0!r} lies in the reserved imports tree {0!r}, which detection prunes "
+          "wholesale".format(legacy_root))
     for home in homes[1:]:
         check("frozen-row-legacy-" + home, lambda h=home: ingest.admit_row_scope("store", h + "/file", "") is None)
     check("move-outside-preserved", lambda: ingest.admit_move_boundary("outside/file", "ops/.working") is None)
@@ -329,6 +361,18 @@ def boundary_self_test():
             add(adoption + "/inventory-evidence.toml", b"")
             inventories[adoption + "/inventory-evidence.toml"] = doc(row(probe))
             check("evidence-phase-inventory", lambda: not evidence().findings and not evidence().cannot)
+            # A phase inventory never substitutes for a missing inventory.toml: the founding claims are
+            # unknown, so the bundle cannot evaluate, even when the phase inventory lists every member.
+            first = adoption + "/inventory.toml"
+            founding = inventories.pop(first)
+            del files[first]
+            inventories[adoption + "/inventory-evidence.toml"] = doc(row(probe), *founding["file"])
+            check("evidence-phase-without-first-cannot", lambda: any(
+                "no inventory.toml" in s for s in evidence().cannot) and not evidence().findings)
+            add(first, b"")
+            inventories[first] = founding
+            inventories[adoption + "/inventory-evidence.toml"] = doc(row(probe))
+            check("evidence-phase-restored", lambda: not evidence().findings and not evidence().cannot)
             inventory = bundle + "/inventory.toml"
             good = copy.deepcopy(inventories)
             # A claim on another bundle's member or another run's preimage is refused on its own, so the
@@ -372,8 +416,11 @@ def boundary_self_test():
     full_manifest["views"] = {}
     full_manifest2 = copy.deepcopy(full_manifest)
     full_manifest2["opf"]["homes"] = 2
+    full_manifest2["opf"]["spec_version"] = "2.0.0"
     reset()
     add(".working/imported/import/" + run + "/sources/notes.txt")
+    # A journal on disk: legacy grades it as an ordinary path, homes 2 must skip it unread.
+    add(".working/journals/import/journal/" + run + "/frames.log", b"torn")
 
     def dispatch(model):
         def doctor_toml(_fd, rel, _rep):
@@ -389,56 +436,129 @@ def boundary_self_test():
                 patch.object(importer, "_sibling_ids", return_value=[]):
             report = doctor._Report()
             doctor._validate_opened_store(0, None, machine, None, {}, None, "default", True, report)
-        return report
+        return report.result(), list(listed)
 
-    legacy_report = dispatch(full_manifest)
-    check("doctor-legacy-evidence-inert", lambda: legacy_report.checks.get("C-EVIDENCE-ENUM") == "PASS"
-          and not any(path.startswith(".working/imported") for path in listed))
-    check("doctor-legacy-contains-homes", lambda: any(
-        "'.working/imported'" in message for message in legacy_report.by_check.get("C-CONTAINMENT", [])))
-    check("doctor-check-roster", lambda: set(legacy_report.checks) == set(doctor.REQUIRED_CHECKS))
+    def contained(result, path):
+        return any(repr(path) in message for message in result.by_check.get("C-CONTAINMENT", []))
+
+    # A legacy report is exactly main's: its roster, order, count and residuals, with the homes-2
+    # names graded as ordinary paths and no evidence read.
+    legacy_report, legacy_listed = dispatch(full_manifest)
+    check("doctor-legacy-roster-exact", lambda: tuple(legacy_report.checks) == doctor.REQUIRED_CHECKS
+          and "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS and len(legacy_report.checks) == 29)
+    check("doctor-legacy-residuals-unchanged", lambda: legacy_report.residuals == list(doctor._RESIDUALS)
+          and not any(r in legacy_report.residuals for r in doctor._HOMES2_RESIDUALS))
+    check("doctor-legacy-evidence-inert", lambda: not any(
+        path.startswith(".working/imported/") for path in legacy_listed))
+    check("doctor-legacy-contains-homes", lambda: contained(legacy_report, ".working/imported")
+          and contained(legacy_report, ".working/journals"))
     with active():
-        report = dispatch(full_manifest2)
+        report, homes2_listed = dispatch(full_manifest2)
+    check("doctor-homes2-roster", lambda: tuple(report.checks) == doctor.required_checks(2)
+          and len(report.checks) == 30)
     check("doctor-dispatches-evidence", lambda: report.checks.get("C-EVIDENCE-ENUM") == "FINDING")
-    check("doctor-never-lists-journals", lambda: not any(
-        path == ".working/journals" or path.startswith(".working/journals/") for path in listed))
+    check("doctor-homes2-residual", lambda: all(r in report.residuals for r in doctor._HOMES2_RESIDUALS))
+    check("doctor-skips-journals", lambda: not contained(report, ".working/journals")
+          and not any(p == ".working/journals" or p.startswith(".working/journals/") for p in homes2_listed))
+    # The render source gate follows the report's roster: a homes-2 evidence finding refuses it, and a
+    # legacy report is gated on exactly SOURCE_INTEGRITY_CHECKS.
+    flagged = dict.fromkeys(doctor.required_checks(2), "PASS")
+    flagged["C-EVIDENCE-ENUM"] = "FINDING"
+    check("source-gate-homes2-evidence", lambda: not doctor.source_integrity_ok(
+        doctor.StoreValidation(doctor.INVALID, checks=flagged)))
+    check("source-gate-legacy-roster", lambda: set(doctor.source_checks(doctor.StoreValidation(
+        doctor.VALID, checks=dict.fromkeys(doctor.REQUIRED_CHECKS, "PASS")))) == doctor.SOURCE_INTEGRITY_CHECKS)
 
-    # Every ordinary operation kind is checked before any I/O, including direct apply and recovery.
-    with patch.object(journal, "_open_parent", side_effect=AssertionError("opened ordinary target")), \
-            patch.object(journal, "_open_txn_beneath", side_effect=AssertionError("opened journal")), \
-            patch.object(journal.os, "mkdir", side_effect=AssertionError("created journal")):
-        for kind in journal.OP_KINDS:
-            for target in (".working", ".working/journals", ".working/journals/import/journal/frame"):
-                ops = [{"op": kind, "path": target}]
-                check("ordinary-{}-{}".format(kind, target), lambda o=ops: refuses(
+    def roster(generation, ran):
+        rep = doctor._Report()
+        rep.require_homes(generation)
+        for cid in ran:
+            rep.ran(cid)
+        return rep.result()
+
+    check("roster-homes2-skipped-evidence", lambda: roster(2, doctor.REQUIRED_CHECKS).checks.get(
+        "C-EVIDENCE-ENUM") == "CANNOT-EVALUATE")
+    check("roster-legacy-evidence-unknown", lambda: any("C-EVIDENCE-ENUM" in m for m in roster(
+        1, doctor.required_checks(2)).unattributed))
+
+    # Homes 1 behaves exactly as main: the legacy engine applies no journal-operand refusal, so each
+    # legacy entry point reaches its first I/O whatever the operand.
+    targets = (".working", ".working/journals", ".working/journals/import/journal/frame")
+
+    def reached(thunk):
+        try:
+            thunk()
+        except _Reached:
+            return True
+        return False
+
+    for kind in journal.OP_KINDS:
+        for target in targets:
+            ops = [dict(op=kind, path=target)]
+            with patch.object(journal, "_open_parent", side_effect=_Reached):
+                check("legacy-apply-{}-{}".format(kind, target), lambda o=ops: reached(
                     lambda: journal.apply_ops(-1, o, lambda _name: b"")))
-                check("preimage-{}-{}".format(kind, target), lambda o=ops: refuses(
+            with patch.object(journal, "_open_txn_beneath", side_effect=_Reached):
+                check("legacy-preimage-{}-{}".format(kind, target), lambda o=ops: reached(
                     lambda: journal.capture_preimages(-1, Path("/unused"), -1, o)))
-                check("transaction-{}-{}".format(kind, target), lambda o=ops: refuses(
-                    lambda: journal.run_transaction(-1, -1, "/unused", run, {}, o, lambda _name: b"", "test")))
-    check("ordinary-sibling-allowed",
-          lambda: journal._check_ordinary_ops([{"op": "create", "path": ".working/journals-old/file"}]) is None)
-    def recovery(frame_types):
-        truncated = []
-        intent = {"txn": run, "ops": [{"op": "remove", "path": ".working/journals"}]}
-        frames = [(t, intent if t == journal.F_INTENT else {"txn": run}) for t in frame_types]
-        with patch.object(journal, "read_frames", return_value=(frames, True, 1)), \
-                patch.object(journal, "_truncate_log", side_effect=lambda *_args: truncated.append(True)):
-            try:
-                outcome = journal.recover(-1, run, -1)
-            except journal.JournalError:
-                outcome = "refused"
-        return outcome, len(truncated)
+            with patch.object(journal.os, "mkdir", side_effect=_Reached):
+                check("legacy-transaction-{}-{}".format(kind, target), lambda o=ops: reached(
+                    lambda: journal.run_transaction(-1, -1, "/unused", run, dict(), o, lambda _name: b"",
+                                                    "test")))
 
-    # Only an open transaction is acted on, so it is refused before any mutation, including the
-    # torn-tail truncate. A terminal journal is inert history: it is not refused and still truncated.
-    check("recovery-open-refused-before-truncate", lambda: recovery([journal.F_INTENT]) == ("refused", 0))
-    check("recovery-rollback-open-refused-before-truncate",
-          lambda: recovery([journal.F_INTENT, journal.F_RIP]) == ("refused", 0))
-    check("recovery-complete-terminal-truncated",
-          lambda: recovery([journal.F_INTENT, journal.F_COMPLETE]) == ("terminal", 1))
-    check("recovery-rolled-back-terminal-truncated",
-          lambda: recovery([journal.F_INTENT, journal.F_RIP, journal.F_RC]) == ("terminal", 1))
+    # Homes 2: the capability-bound API refuses every kind before it opens anything.
+    with patch.object(home_journal, "_opened", side_effect=AssertionError("opened the store journal")):
+        for kind in journal.OP_KINDS:
+            for target in targets:
+                ops = [dict(op=kind, path=target)]
+                check("homes2-transaction-{}-{}".format(kind, target), lambda o=ops: "journal home" in (
+                    refusal(lambda: home_journal.run_transaction(object(), "import", run, o,
+                                                                 lambda _name: b"")) or ""))
+    check("ordinary-sibling-allowed", lambda: home_journal._check_ordinary_ops(
+        [dict(op="create", path=".working/journals-old/file")]) is None)
+
+    def legacy_recovery(frame_types):
+        truncated = []
+        intent = dict(txn=run, ops=[dict(op="remove", path=".working/journals")])
+        frames = [(t, intent if t == journal.F_INTENT else dict(txn=run)) for t in frame_types]
+        with patch.object(journal, "read_frames", return_value=(frames, True, 1)), \
+                patch.object(journal, "_truncate_log", side_effect=lambda *_args: truncated.append(True)), \
+                patch.object(journal, "_poststate_verifies", return_value=True), \
+                patch.object(journal, "_restore_preimage"), patch.object(journal, "publish"):
+            return journal.recover(-1, run, -1), len(truncated)
+
+    # Main's legacy recovery truncates the torn tail and acts on an open transaction's operands.
+    check("legacy-recovery-open-rolls-forward", lambda: legacy_recovery([journal.F_INTENT]) == ("rolled-forward", 1))
+    check("legacy-recovery-rollback-open-rolls-back",
+          lambda: legacy_recovery([journal.F_INTENT, journal.F_RIP]) == ("rolled-back", 1))
+    check("legacy-recovery-terminal-truncated",
+          lambda: legacy_recovery([journal.F_INTENT, journal.F_COMPLETE]) == ("terminal", 1))
+
+    @contextlib.contextmanager
+    def opened(*_args, **_kwargs):
+        yield -1, -1, Path("/unused") / run
+
+    def homes2_recovery(frame_types):
+        intent = dict(txn=run, ops=[dict(op="remove", path=".working/journals")])
+        frames = [(t, intent if t == journal.F_INTENT else dict(txn=run)) for t in frame_types]
+        with patch.object(home_journal, "_opened", opened), \
+                patch.object(home_journal, "_existing_frames", return_value=frames), \
+                patch.object(home_journal, "_project"), \
+                patch.object(journal, "recover", return_value="terminal") as recovered:
+            outcome = refusal(lambda: home_journal.recover_transaction(object(), "import", run))
+            if outcome is not None:
+                outcome = "refused" if "journal home" in outcome else outcome
+            return outcome or "recovered", recovered.call_count
+
+    # Only an open homes-2 transaction is acted on, so it is refused before recover can truncate or
+    # mutate anything. A terminal journal is inert history and reaches recover unchanged.
+    check("homes2-recovery-open-refused", lambda: homes2_recovery([journal.F_INTENT]) == ("refused", 0))
+    check("homes2-recovery-rollback-open-refused",
+          lambda: homes2_recovery([journal.F_INTENT, journal.F_RIP]) == ("refused", 0))
+    check("homes2-recovery-complete-terminal",
+          lambda: homes2_recovery([journal.F_INTENT, journal.F_COMPLETE]) == ("recovered", 1))
+    check("homes2-recovery-rolled-back-terminal",
+          lambda: homes2_recovery([journal.F_INTENT, journal.F_RIP, journal.F_RC]) == ("recovered", 1))
     create = {"op": "create-file", "content_digest": "sha256:" + "0" * 64}
     for home in homes:
         check("adoption-target-" + home, lambda h=home: adopt.validate_op(
@@ -455,13 +575,18 @@ def boundary_self_test():
     check("adoption-root-pack-journal-refused", lambda: adopt.validate_op(
         {"op": "install-pack", "target": ".", "members": [
             {"path": ".working/journals/file", "digest": "sha256:" + "0" * 64}]}, homes=2).status != store.VALID)
-    view_manifest = {"opf": {"layout": "inline"}, "views": {
-        "VERSION": {"kind": "projection", "sources": [], "target": ".working/journals/file"}}}
-    with patch.object(views, "_read_raw_and_parsed", return_value=(b"", view_manifest)), \
-            patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
-            patch.object(views, "_resolve_view", return_value=("projection", [], lambda _src: "1.0.0\n")), \
-            patch.object(views, "_spec_destination", return_value=("store", ".working/journals/file")):
-        check("view-journal-destination-refused", lambda: refuses(lambda: views.plan_views(-1, machine)))
+    def view_plan(model):
+        view_manifest = dict(model, views=dict(VERSION=dict(kind="projection", sources=[],
+                                                            target=".working/journals/file")))
+        with patch.object(views, "_read_raw_and_parsed", return_value=(b"", view_manifest)), \
+                patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
+                patch.object(views, "_resolve_view", return_value=("projection", [], lambda _src: "1.0.0\n")), \
+                patch.object(views, "_spec_destination", return_value=("store", ".working/journals/file")):
+            return refusal(lambda: views.plan_views(-1, machine)) or ""
+
+    with active():
+        check("view-journal-destination-refused", lambda: "journal home" in view_plan(manifest2))
+        check("view-legacy-journal-destination-planned", lambda: "journal home" not in view_plan(manifest))
 
     import _opf_adopt_plan as planning
     import _opf_emit as emit
@@ -528,8 +653,9 @@ def boundary_self_test():
 
     check("internal-api-capability-required", lambda: refuses(
         lambda: home_journal.run_transaction(object(), "import", run, [], lambda _name: b"")))
-    check("internal-api-identity-required", lambda: refuses(
-        lambda: home_journal.recover_transaction(object(), "import", "../elsewhere")))
+    with patch.object(home_journal._opf_oplock, "OpCapability", object):
+        check("internal-api-identity-required", lambda: refuses(
+            lambda: home_journal.recover_transaction(object(), "import", "../elsewhere")))
     with patch.object(journal, "_lstat_contained", return_value=None), \
             patch.object(journal, "read_frames", side_effect=AssertionError("missing journal was read as empty")):
         check("internal-recovery-missing-refused",
@@ -672,13 +798,16 @@ def boundary_self_test():
     legacy_ignored = preview_ignored(1)
     ignored = preview_ignored(2)
     check("preview-legacy-journals-retained", lambda: legacy_ignored["/store/.working"] == set())
+    check("preview-legacy-self-retained", lambda: legacy_ignored["/store/.working/staging/preview"] == set())
     check("preview-journals-only", lambda: ignored["/store/.working"] == {"journals"})
     check("preview-self-only", lambda: ignored["/store/.working/staging/preview"] == {"preview-run"})
     check("preview-nested-retained", lambda: ignored["/store/nested/.working"] == set()
           and ignored["/store/nested/.working/staging/preview"] == set())
     check("preview-promoted-only", lambda: ignored["/store/.working/imports"] == {run})
-    check("evidence-required-roster", lambda: "C-EVIDENCE-ENUM" in doctor.REQUIRED_CHECKS
-          and "C-EVIDENCE-ENUM" in doctor.SOURCE_INTEGRITY_CHECKS)
+    check("evidence-homes2-roster", lambda: "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS
+          and doctor.required_checks(2).index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
+          and "C-EVIDENCE-ENUM" in doctor.source_checks(
+              SimpleNamespace(checks=dict.fromkeys(doctor.required_checks(2)))))
 
     for failure in failures:
         print("FAIL: " + failure)

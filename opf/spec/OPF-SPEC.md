@@ -185,8 +185,9 @@ exclude journals and make no recovery claim; a rogue file there is outside their
 
 Until homes 2 is activated, every store, whatever it declares, keeps its legacy grading: the
 homes-2 names are ordinary store paths there, graded, detected, and dispositioned exactly as
-before, and C-EVIDENCE-ENUM reads nothing. The boundary below applies only to a store that
-declares `homes = 2` once the tooling activates that generation.
+before, C-EVIDENCE-ENUM neither runs nor reads anything, and the doctor report's check roster and
+residuals are unchanged. The boundary below applies only to a store that declares both
+`homes = 2` and `spec_version = "2.0.0"` once the tooling activates that generation.
 
 Each evidence bundle `.working/imported/<kind>/<run-id>/` carries its own inventories at its
 root: `inventory.toml`, plus a new `inventory-<phase>.toml` for each later phase, where `<phase>`
@@ -202,26 +203,31 @@ a bundle stays immutable and an evidence commit changes only its bundle folder. 
 not a journal projection and remains available in a clone without journals.
 
 C-EVIDENCE-ENUM reconciles exact membership, directory structure, regular-file types, sizes and
-digests: every file under `.working/imported/` and `.working/archive/` is claimed by exactly one
-row. Unlisted or unclaimed entries, a bundle without an inventory, and missing listed files are
-findings; unreadable or malformed inputs, including a path claimed twice, cannot evaluate.
-Deleting a whole bundle, inventory and payload together, is outside this local snapshot check;
-independent history is required to detect that loss. Inventories assert membership, not
-authenticated actor history. The contained reader's size ceiling still applies.
+digests: every payload file under `.working/imported/` and `.working/archive/`, meaning every file
+other than a bundle-root inventory, is claimed by exactly one row, and every inventory is itself
+schema-checked against the shape above rather than claimed. Unlisted or unclaimed entries, a bundle
+without an inventory, and missing listed files are findings; unreadable or malformed inputs,
+including a path claimed twice, cannot evaluate. A phase inventory never substitutes for a missing
+`inventory.toml`: such a bundle cannot evaluate. Deleting a whole bundle, inventory and payload
+together, is outside this local snapshot check; independent history is required to detect that
+loss. Inventories assert membership, not authenticated actor history. The contained reader's size
+ceiling still applies.
 
 The legacy `imports/` exclusion remains registered until its writers migrate. In homes 2,
 `staging/` is walked and stray-graded, including empty runs; an unknown kind is always a finding.
 The existing staged-plan presence test also recognizes import and ingest runs in their typed
 staging homes. Other kinds cannot substantiate partial import status until their plan readers
 are registered. Doctor never consults a journal to decide partial status and makes no claim that
-a staged plan has a recoverable transaction. In every generation, ordinary transaction operands
-cannot equal, descend from, or contain `journals/`; no shipped writer targets it. Capability-bound
-journal APIs derive their destinations from kind and run identity. Legacy journal transport must
-preserve bytes through the migration's receipt binding. These comparisons are byte-exact: on a
-case-insensitive or normalizing filesystem, a differently cased or composed spelling can alias a
-reserved home and is not caught. Discovery precedes the manifest, so it cannot know the
-generation: it examines `manifest.toml` in every immediate subdirectory, including `journals/`,
-and fails closed on a reserved-name match or ambiguity; it reads nothing deeper there.
+a staged plan has a recoverable transaction. In homes 2, ordinary transaction operands, including
+those of an open transaction being recovered, cannot equal, descend from, or contain `journals/`; a
+legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer
+targets that home. Capability-bound journal APIs derive their destinations from kind and run
+identity. Legacy journal transport must preserve bytes through the migration's receipt binding.
+These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently
+cased or composed spelling can alias a reserved home and is not caught. Discovery precedes the
+manifest, so it cannot know the generation: it examines `manifest.toml` in every immediate
+subdirectory, including `journals/`, and fails closed on a reserved-name match or ambiguity; it
+reads nothing deeper there.
 
 
 ### 4.3 The pointer

@@ -145,21 +145,6 @@ def _check_rel(relpath):
     return parts
 
 
-def _check_ordinary_ops(ops):
-    """Validate the whole batch before any mutation, including a recover or direct apply."""
-    from _opf_store import require_ordinary_target
-    if not isinstance(ops, (list, tuple)):
-        raise JournalError("ordinary operations must be a list or tuple")
-    for op in ops:
-        if not isinstance(op, dict) or op.get("op") not in OP_KINDS:
-            raise JournalError("malformed ordinary operation")
-        _check_rel(op.get("path"))
-        try:
-            require_ordinary_target(op["path"])
-        except ValueError as exc:
-            raise JournalError(str(exc))
-
-
 def _close_fd_quietly(fd):
     """Close a descriptor on a cleanup / teardown path, swallowing an OSError so a close that raises
     (EINTR / EIO / EBADF) mid-teardown cannot ABORT the remaining cleanup and leak the sibling fds after
@@ -1077,7 +1062,6 @@ def capture_preimages(parent_fd, txn_dir, root_fd, ops):
     # check but before capture is caught (fail closed) rather than captured-and-clobbered (spec 1319/1323:
     # quiescence excludes the post-check/pre-replay race; this makes the drift check contiguous with the
     # capture under the held lock). Cutover ops carry no pin, so this is inert for them.
-    _check_ordinary_ops(ops)
     for op in ops:
         exp = op.get("source-poststate")
         if exp is not None:
@@ -1297,7 +1281,6 @@ def apply_ops(root_fd, ops, staged_reader):
     reversed(ops) is the normative reverse-dependency rollback order. Every write is fsync'd and every
     touched entry's parent directory is fsync'd (step 6). Any prestate mismatch raises JournalError and
     the caller rolls back from the preimages."""
-    _check_ordinary_ops(ops)
     for i, op in enumerate(ops):
         try:
             pfd, name = _open_parent(root_fd, op["path"])
@@ -1574,17 +1557,13 @@ def recover(jr_fd, txn_dir, root_fd):
     parseable and a second recover is a no-op. The txn journal is read and its terminal frames published
     beneath the trusted journal-root fd (jr_fd); preimage restore uses the contained root_fd as before."""
     frames, torn, good_len = read_frames(jr_fd, txn_dir)
-    _validate_terminal_agreement(frames)
-    types = [t for t, _ in frames]
-    intent = _first(frames, F_INTENT)
-    # Only an open transaction is acted on, so only its operands are checked, before the truncate.
-    # A terminal journal is history: recover leaves it inert and its caller binds it.
-    if intent is not None and F_COMPLETE not in types and F_RC not in types:
-        _check_ordinary_ops(intent.get("ops"))
     if torn:
         _truncate_log(jr_fd, txn_dir, good_len)
+    _validate_terminal_agreement(frames)
+    types = [t for t, _ in frames]
     if F_INTENT not in types:
         return "nothing-opened"
+    intent = _first(frames, F_INTENT)
     if F_COMPLETE in types or F_RC in types:
         return "terminal"
     ops = intent["ops"]
@@ -1610,7 +1589,6 @@ def run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops, staged_re
     released by the caller's higher-level flow via release_lock after a terminal outcome. Every framed
     record is published beneath the trusted journal-root fd (jr_fd), reached by a contained walk, so no
     txn-dir absolute path is re-resolved for the frame writes (F1 / SECI-symlink-resolution)."""
-    _check_ordinary_ops(ops)
     txn_dir = Path(journal_root) / txn_id
     # A2: enforce a transaction-wide serialized journal BUDGET before any product mutation and before the
     # txn dir is even created. The recovery reader caps frames.log at _MAX_JOURNAL_READ_BYTES; the largest

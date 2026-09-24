@@ -21,6 +21,21 @@ import _opf_oplock
 import _opf_store
 
 
+def _check_ordinary_ops(ops):
+    """Validate a whole homes-2 batch before any mutation or torn-tail truncate. This boundary is
+    this API's alone: the legacy journal engine keeps its legacy operand handling unchanged."""
+    if not isinstance(ops, (list, tuple)):
+        raise _journal.JournalError("ordinary operations must be a list or tuple")
+    for op in ops:
+        if not isinstance(op, dict) or op.get("op") not in _journal.OP_KINDS:
+            raise _journal.JournalError("malformed ordinary operation")
+        _journal._check_rel(op.get("path"))
+        try:
+            _opf_store.require_ordinary_target(op["path"])
+        except ValueError as exc:
+            raise _journal.JournalError(str(exc))
+
+
 @contextlib.contextmanager
 def _opened(cap, kind, run_id, create):
     _opf_store.txn_record(kind, run_id)  # validate both identity components before any I/O
@@ -116,7 +131,7 @@ def _project(root_fd, jr_fd, txn_dir, kind, run_id):
 
 def run_transaction(cap, kind, run_id, ops, staged_reader):
     """Run ordinary ops under the held capability, then derive the terminal projection."""
-    _journal._check_ordinary_ops(ops)
+    _check_ordinary_ops(ops)
     with _opened(cap, kind, run_id, create=True) as (root_fd, jr_fd, txn_dir):
         header = dict(kind=kind, run_id=run_id, operation_id=cap.op_id)
         result = _journal.run_transaction(root_fd, jr_fd, txn_dir.parent, run_id, header,
@@ -128,7 +143,13 @@ def run_transaction(cap, kind, run_id, ops, staged_reader):
 def recover_transaction(cap, kind, run_id):
     """Recover a named existing transaction; missing machine-local evidence refuses."""
     with _opened(cap, kind, run_id, create=False) as (root_fd, jr_fd, txn_dir):
-        _existing_frames(jr_fd, txn_dir, kind, run_id)
+        frames = _existing_frames(jr_fd, txn_dir, kind, run_id)
+        # Only an open transaction is acted on, so only its operands are checked, before recover can
+        # truncate a torn tail. A terminal journal is history: it stays inert and its projection binds it.
+        types = [t for t, _ in frames]
+        intent = _journal._first(frames, _journal.F_INTENT)
+        if intent is not None and _journal.F_COMPLETE not in types and _journal.F_RC not in types:
+            _check_ordinary_ops(intent.get("ops"))
         result = _journal.recover(jr_fd, txn_dir, root_fd)
         _project(root_fd, jr_fd, txn_dir, kind, run_id)
         return result

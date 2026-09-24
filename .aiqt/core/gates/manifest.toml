@@ -528,16 +528,19 @@ class = "c"
 residue = """
 The default entry checks the homes spec contract and rendered gitignore block. The self-test checks
 constructors, discovery reservations and inert writer defaults, plus in-memory boundary fixtures:
-legacy (homes 1) grading kept for every store until activation and, with homes 2 activated only for
-the fixture, classifier and detect set equality, unmanaged collisions, staged-run grading, per-bundle
-evidence inventory membership, size and digest reconciliation, journal target refusal, open and
-terminal recovery ordering, capability refusal and missing recovery state, and anchored preview
-exclusions. These fixtures mock filesystem observations; they do not certify filesystem races, crash
-recovery, power-loss durability, live adopter state, or the whole input space. Evidence membership
-relies on immutable per-bundle inventories; deleting a whole bundle, inventory and payload together,
-requires independent history to detect. Journals are deliberately outside doctor coverage. Writer
-migration, inventory publication and legacy journal transport remain inactive. The existing runtime
-suites must still validate integration before activation.
+legacy (homes 1) behaviour kept for every store until activation (grading, detect rows, messages,
+report roster and residuals, and the legacy journal engine's apply and recovery), activation gated
+on both homes 2 and spec_version 2.0.0 and, with homes 2 activated only for the fixture, classifier
+and detect set equality, unmanaged collisions, staged-run grading, per-bundle evidence inventory
+membership (no phase inventory substituting for inventory.toml), size and digest reconciliation,
+capability-API journal target refusal, open and terminal recovery ordering, capability refusal and
+missing recovery state, and anchored preview exclusions. These fixtures mock filesystem
+observations; they do not certify filesystem races, crash recovery, power-loss durability, live
+adopter state, or the whole input space. Evidence membership relies on immutable per-bundle
+inventories; deleting a whole bundle, inventory and payload together, requires independent
+history to detect. Journals are deliberately outside doctor coverage. Writer migration, inventory
+publication and legacy journal transport remain inactive. The existing runtime suites must still
+validate integration before activation.
 """
 
 [[gate]]

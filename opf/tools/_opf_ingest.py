@@ -565,7 +565,7 @@ def _managed_paths(resolution, manifest_data):
 
 # --- detection ---------------------------------------------------------------------------------------
 
-def _detect_store_scope(store_fd, prune, leaf, subtree):
+def _detect_store_scope(store_fd, prune, leaf, subtree, homes=1):
     """Enumerate every non-OPF-managed regular file under `.working/` (the mandatory store scope). Opens
     the `.working/` directory no-follow beneath the resolved store-root fd, walks it pruning the managed
     SUBTREE covers, and drops any file a covered entry manages, matched the SAME two ways the checker does:
@@ -574,7 +574,8 @@ def _detect_store_scope(store_fd, prune, leaf, subtree):
     while a `subtree` cover (a declared-unmanaged path) is dropped by SUBTREE containment (`_under_any`): a
     path that equals it OR lies under a declared-unmanaged directory is skipped BEFORE it is read, so an
     unmanaged subtree's contents are never digested (spec 14.2). Each survivor is a `store`-scope row
-    defaulting to `unresolved` / `baseline`."""
+    defaulting to `unresolved` / `baseline`. In homes 2 (`homes`) a regular FILE at a pruned control root
+    is dropped too, never read; a legacy store keeps its legacy row for such a file."""
     try:
         working_fd = os.open(_opf_store.WORKING_DIRNAME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                              dir_fd=store_fd)
@@ -597,8 +598,9 @@ def _detect_store_scope(store_fd, prune, leaf, subtree):
     finally:
         os.close(working_fd)
     rows = []
+    dropped = subtree | prune if homes >= 2 else subtree
     for rel in files:
-        if rel in leaf or _under_any(rel, subtree | prune):
+        if rel in leaf or _under_any(rel, dropped):
             continue
         digest, size = _digest_of(store_fd, rel)
         rows.append(_row(rel, "store", digest, size))
@@ -841,7 +843,8 @@ def _detect_rows(product_root, resolution, include):
                 manifest_rel, reval.status, "; ".join(reval.findings)))
         prune, store_leaf, store_subtree, declared_leaf, declared_subtree = _managed_paths(
             resolution, manifest_data)
-        rows = _detect_store_scope(store_fd, prune, store_leaf, store_subtree)
+        rows = _detect_store_scope(store_fd, prune, store_leaf, store_subtree,
+                                   homes=_opf_store.homes_generation(manifest_data))
     finally:
         os.close(store_fd)
     if include:
@@ -1180,7 +1183,10 @@ def admit_row_scope(scope, sp, base, homes=1):
         if not sp.startswith(working + "/"):
             raise _finding("store-scope row {!r} does not lie in the mandatory store subtree {!r}/ (a store "
                            "row is store-relative and detected only under it)".format(sp, working))
-        if _under_any(sp, _opf_store.store_control_roots(homes)):
+        if homes < 2 and _under_any(sp, (_opf_import.IMPORTS_REL,)):
+            raise _finding("store-scope row {!r} lies in the reserved imports tree {!r}, which detection "
+                           "prunes wholesale".format(sp, _opf_import.IMPORTS_REL))
+        if homes >= 2 and _under_any(sp, _opf_store.store_control_roots(homes)):
             raise _finding("store-scope row {!r} lies in reserved store control area, which detection "
                            "prunes wholesale".format(sp))
     elif scope == "declared":
