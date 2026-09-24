@@ -425,49 +425,68 @@ def _wall_clock_asserts(source, exempt=()):
     """Self-test helper, kept identical across the three hooks: [(function, line)] of every assertion in
     `source` whose operand is a TIME figure, so no test's verdict rests on a wall-clock bound, which depends on
     the host's speed. A time figure is a clock reading (time.time, perf_counter, monotonic, process_time,
-    thread_time, or an _ns variant), a result of a timing harness (run_timed, growth_in_child), a name assigned
-    from one (a for target or unpacking included), or arithmetic, a comparison, a subscript, min, max, abs,
-    sum, or a method call on one; a quotient of two time figures is a dimensionless ratio and may be bounded.
-    Every assertion in the source is scanned, under its enclosing test_ function (else its innermost
-    function); `exempt` names the hang-guard tests, whose bound on elapsed time is their point. Residual
-    (disclosed): the taint is by name within one test_ function and its nested functions, so a time figure
-    passed through an attribute, a container mutation, a global, a call to another helper, or a harness this
-    list does not name escapes the scan; a subprocess timeout is not an assertion and is not scanned."""
+    thread_time, clock_gettime, or an _ns variant; datetime.now, utcnow, or today), a result of a timing
+    harness (run_timed, growth_in_child), a name assigned from one (a for target or unpacking included), or
+    arithmetic, a comparison, a subscript, an attribute, min, max, abs, sum, or a method call on one; a
+    quotient of two time figures is a dimensionless ratio and may be bounded. A clock read through an alias
+    counts too: a module alias (`import time as t`, `import datetime as d`), an imported one (`from time import
+    X as Y`, or `*`; `from datetime import datetime as Y`), and an assigned one (a plain `name = time.X` or
+    `name = X` of a clock or alias), each bound at module level or within the function. An assertion's operands
+    are its leading positional arguments and every keyword argument but msg. Every assertion in the source is
+    scanned, under its enclosing test_ function (else its innermost function); `exempt` names the hang-guard
+    tests, whose bound on elapsed time is their point. Residual (disclosed): the taint is by name within one
+    test_ function and its nested functions, so a time figure passed through a container mutation, a global, a
+    call to another helper, or a harness this list does not name escapes the scan; a clock this list does not
+    name (os.times, date.today, time.localtime or gmtime, a third-party clock, a file's mtime) escapes too, as
+    does an alias bound any other way (an attribute, a tuple target, getattr, a module or class assigned to a
+    name); a subprocess timeout is not an assertion and is not scanned."""
     import ast
     clocks = {"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns", "process_time", "process_time_ns",
-              "thread_time", "thread_time_ns", "run_timed", "growth_in_child"}
+              "thread_time", "thread_time_ns", "clock_gettime", "clock_gettime_ns", "run_timed", "growth_in_child"}
+    stdclocks = {"time", "time_ns", "perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns",
+                 "process_time", "process_time_ns", "thread_time", "thread_time_ns", "clock_gettime",
+                 "clock_gettime_ns"}
+    dtclocks = ("now", "utcnow", "today")
     single = {"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"}
 
-    def timed(node, names):
+    def dtclass(node, al):  # a reference to the datetime class: a class alias, or <datetime module>.datetime
+        if isinstance(node, ast.Name):
+            return node.id in al["dtclass"]
+        return isinstance(node, ast.Attribute) and node.attr == "datetime" and \
+            isinstance(node.value, ast.Name) and node.value.id in al["datetime"]
+
+    def timed(node, names, al):
         if isinstance(node, ast.Call):
             f = node.func
             if isinstance(f, ast.Name):
-                if f.id in clocks:
+                if f.id in clocks or f.id in al["clock"]:
                     return True
                 return f.id in ("min", "max", "abs", "sum", "float", "round") and any(
-                    timed(a, names) for a in node.args)
+                    timed(a, names, al) for a in node.args)
             if isinstance(f, ast.Attribute):
                 if f.attr in ("time", "time_ns"):
-                    return isinstance(f.value, ast.Name) and f.value.id == "time"
-                return f.attr in clocks or timed(f.value, names)
+                    return isinstance(f.value, ast.Name) and f.value.id in al["time"]
+                if f.attr in dtclocks and dtclass(f.value, al):
+                    return True
+                return f.attr in clocks or timed(f.value, names, al)
             return False
         if isinstance(node, ast.Name):
             return node.id in names
         if isinstance(node, ast.BinOp):
-            left, right = timed(node.left, names), timed(node.right, names)
+            left, right = timed(node.left, names, al), timed(node.right, names, al)
             return left != right if isinstance(node.op, ast.Div) else left or right
         if isinstance(node, ast.Compare):
-            return any(timed(x, names) for x in [node.left] + node.comparators)
+            return any(timed(x, names, al) for x in [node.left] + node.comparators)
         if isinstance(node, ast.BoolOp):
-            return any(timed(x, names) for x in node.values)
+            return any(timed(x, names, al) for x in node.values)
         if isinstance(node, ast.UnaryOp):
-            return timed(node.operand, names)
-        if isinstance(node, (ast.Subscript, ast.Starred)):
-            return timed(node.value, names)
+            return timed(node.operand, names, al)
+        if isinstance(node, (ast.Subscript, ast.Starred, ast.Attribute)):
+            return timed(node.value, names, al)
         if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-            return any(timed(e, names) for e in node.elts)
+            return any(timed(e, names, al) for e in node.elts)
         if isinstance(node, ast.IfExp):
-            return timed(node.body, names) or timed(node.orelse, names)
+            return timed(node.body, names, al) or timed(node.orelse, names, al)
         return False
 
     def targets(node):
@@ -478,6 +497,28 @@ def _wall_clock_asserts(source, exempt=()):
                 yield from targets(e)
         elif isinstance(node, ast.Starred):
             yield from targets(node.value)
+
+    def aliases(node, al):  # the (kind, name) aliases node binds; kind: time, datetime (modules), dtclass, clock
+        if isinstance(node, ast.Import):
+            return [(a.name, a.asname or a.name) for a in node.names if a.name in ("time", "datetime")]
+        if isinstance(node, ast.ImportFrom) and node.module == "time" and not node.level:
+            bound = []
+            for a in node.names:
+                if a.name == "*":
+                    bound += [("clock", c) for c in stdclocks]
+                elif a.name in stdclocks:
+                    bound.append(("clock", a.asname or a.name))
+            return bound
+        if isinstance(node, ast.ImportFrom) and node.module == "datetime" and not node.level:
+            return [("dtclass", a.asname or "datetime") for a in node.names if a.name in ("datetime", "*")]
+        if isinstance(node, ast.Assign) and (
+                isinstance(node.value, ast.Name) and (node.value.id in clocks or node.value.id in al["clock"]) or
+                isinstance(node.value, ast.Attribute) and node.value.attr in stdclocks and
+                isinstance(node.value.value, ast.Name) and node.value.value.id in al["time"] or
+                isinstance(node.value, ast.Attribute) and node.value.attr in dtclocks and
+                dtclass(node.value.value, al)):
+            return [("clock", t.id) for t in node.targets if isinstance(t, ast.Name)]
+        return []
 
     tree, parent, cache = ast.parse(source), {}, {}
     for node in ast.walk(tree):
@@ -494,12 +535,29 @@ def _wall_clock_asserts(source, exempt=()):
             up = parent.get(up)
         return inner
 
-    def tainted(fn):  # the names fn (its nested functions included) assigns a time figure, to a fixed point
+    def bind(nodes, al):  # add the aliases nodes bind to al, to a fixed point; True if any was new
+        grew, changed = False, True
+        while changed:
+            changed = False
+            for node in nodes:
+                for kind, name in aliases(node, al):
+                    if name not in al[kind]:
+                        al[kind].add(name)
+                        grew = changed = True
+        return grew
+
+    binders = [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign))]
+    top = {"time": {"time"}, "datetime": {"datetime"}, "dtclass": {"datetime"}, "clock": set()}
+    bind([node for node in binders if scope(node) is None], top)
+
+    def tainted(fn):  # (names, al): the time figures and aliases fn (nested functions included) binds
         if fn not in cache:
-            names, changed = set(), True
+            names, al = set(), {kind: set(bound) for kind, bound in top.items()}
+            nodes = list(ast.walk(fn))
+            changed = True
             while changed:
-                changed = False
-                for node in ast.walk(fn):
+                changed = bind(nodes, al)
+                for node in nodes:
                     if isinstance(node, ast.Assign):
                         pairs = [(t, node.value) for t in node.targets]
                     elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)) and \
@@ -512,11 +570,11 @@ def _wall_clock_asserts(source, exempt=()):
                     else:
                         continue
                     for target, value in pairs:
-                        new = set(targets(target)) - names if timed(value, names) else set()
+                        new = set(targets(target)) - names if timed(value, names, al) else set()
                         if new:
                             names |= new
                             changed = True
-            cache[fn] = names
+            cache[fn] = names, al
         return cache[fn]
 
     found = []
@@ -526,14 +584,72 @@ def _wall_clock_asserts(source, exempt=()):
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
                 node.func.attr.startswith("assert"):
             operands = node.args[:1] if node.func.attr in single else node.args[:2]
+            operands = operands + [k.value for k in node.keywords if k.arg != "msg"]
         else:
             continue
         fn = scope(node)
         name = fn.name if fn is not None else "<module>"
-        names = tainted(fn) if fn is not None else set()
-        if name not in exempt and any(timed(x, names) for x in operands):
+        names, al = tainted(fn) if fn is not None else (set(), top)
+        if name not in exempt and any(timed(x, names, al) for x in operands):
             found.append((name, node.lineno))
     return sorted(found, key=lambda item: item[1])
+
+
+def _wall_clock_alias_fixtures():
+    """Self-test data, kept identical across the three hooks: (bad, flagged, good) for _wall_clock_asserts.
+    `bad` bounds a time figure read through each alias form, through keyword operands, and from each added
+    clock (datetime.now, utcnow, today; clock_gettime), and every function it names in `flagged` must be
+    flagged; `good` uses the same alias forms and clocks only for a hang-guard timeout, an assertion on a count,
+    a msg keyword, a ratio, a datetime constructor, or a name that is an alias only in another function, and
+    nothing in it may be flagged."""
+    bad = ("import time as tm\nfrom time import perf_counter as clock\ntick = tm.monotonic_ns\n"
+           "import datetime as dt\n"
+           "def test_i(self):\n    t = clock()\n    self.assertLess(clock() - t, 0.5)\n"
+           "def test_j(self):\n    my_time = time.time\n    t0 = my_time()\n    self.assertLess(my_time() - t0, 1)\n"
+           "def test_k(self):\n    t0 = tm.time()\n    self.assertLessEqual(tm.time() - t0, 1)\n"
+           "def test_l(self):\n    self.assertLess(tick() - start, 10)\n"
+           "def test_m(self):\n    from time import process_time as cpu\n    c0 = cpu()\n"
+           "    assert cpu() - c0 < 2\n"
+           "def test_n(self):\n    c1 = clock\n    c2 = c1\n    self.assertGreater(1.0, c2() - base)\n"
+           "def test_o(self):\n    from time import time\n    self.assertTrue(time() - t0 < 1)\n"
+           "def test_p(self):\n    from time import *\n    self.assertLess(time_ns() - t0, 5)\n"
+           "def test_q(self):\n    t = time.monotonic()\n    self.assertLess(a=time.monotonic()-t, b=0.5)\n"
+           "def test_r(self):\n    self.assertTrue(expr=time.perf_counter() - t0 < 1, msg='slow')\n"
+           "def test_s(self):\n    now = tm.perf_counter\n    elapsed = now() - t0\n"
+           "    self.assertLessEqual(first=elapsed, second=2)\n"
+           "def test_t(self):\n    pc = perf_counter\n    self.assertLess(pc() - t, 1)\n"
+           "def test_ba(self):\n    t0 = datetime.datetime.now()\n"
+           "    self.assertLess((datetime.datetime.now() - t0).total_seconds(), 2.0)\n"
+           "def test_bb(self):\n    from datetime import datetime as DT\n    t0 = DT.utcnow()\n"
+           "    self.assertLess((DT.utcnow() - t0).total_seconds(), 2)\n"
+           "def test_bc(self):\n    stamp = dt.datetime.now\n    t0 = stamp()\n"
+           "    self.assertLess((stamp() - t0).seconds, 2)\n"
+           "def test_bd(self):\n    t0 = time.clock_gettime(time.CLOCK_MONOTONIC)\n"
+           "    self.assertLess(time.clock_gettime(time.CLOCK_MONOTONIC) - t0, 1)\n"
+           "def test_be(self):\n    from time import clock_gettime_ns as cg\n    t0 = cg(1)\n"
+           "    assert cg(1) - t0 < 10\n"
+           "def test_bf(self):\n    from datetime import *\n    self.assertLess((datetime.today() - t0).seconds, 5)\n")
+    flagged = ["test_i", "test_j", "test_k", "test_l", "test_m", "test_n", "test_o", "test_p", "test_q", "test_r",
+               "test_s", "test_t", "test_ba", "test_bb", "test_bc", "test_bd", "test_be", "test_bf"]
+    good = ("import time as tm\nfrom time import perf_counter as clock\ntick = tm.monotonic\n"
+            "import datetime as dt\n"
+            "def test_u(self):\n    deadline = clock() + HANG_TIMEOUT\n    out = run(timeout=deadline - clock())\n"
+            "    proc.wait(timeout=tick() + 1)\n    self.assertEqual(len(out), 3)\n"
+            "def test_v(self):\n    my_time = tm.time\n    proc.wait(timeout=my_time() + 30)\n"
+            "    self.assertEqual(proc.returncode, 0, msg=my_time())\n"
+            "def test_w(self):\n    from time import process_time as cpu\n    limit = cpu() + 5\n"
+            "    calls = count_calls(limit)\n    self.assertEqual(first=calls, second=2, msg=cpu() - limit)\n"
+            "def test_x(self):\n    from time import time\n    subprocess.run(cmd, timeout=time() + 5)\n"
+            "    self.assertEqual(n_lines, 4)\n"
+            "def test_y(self):\n    my_time = len\n    self.assertEqual(my_time([1, 2]), 2)\n"
+            "def test_z(self):\n    a, b = clock(), clock()\n    self.assertLess(b / max(a, 1e-3), LIMIT)\n"
+            "def test_bg(self):\n    stamp = dt.datetime.now(dt.timezone.utc)\n"
+            "    self.assertEqual(len(render(stamp)), 17)\n    self.assertEqual(dt.time(12, 0).hour, 12)\n"
+            "    self.assertEqual(datetime.date(2026, 9, 24).day, 24)\n"
+            "def test_bh(self):\n    t0 = time.clock_gettime(time.CLOCK_MONOTONIC)\n"
+            "    lines = run(timeout=HANG_TIMEOUT - (time.clock_gettime(time.CLOCK_MONOTONIC) - t0))\n"
+            "    self.assertEqual(lines.count, 2)\n")
+    return bad, flagged, good
 
 
 # ---- lease / elapsed (kept identical to clock-inject.py; python3 -I forbids a sibling import) ----
@@ -2398,17 +2514,26 @@ def _self_test():
         def test_r8_block_cap_scan_bounded(self):
             # a long run of non-marker records never makes the count scan unbounded. Checked as WORK, not as a
             # wall-clock ceiling (which depended on the host's speed): GROWTH times the filler leaves the bytes
-            # read and the records parsed unchanged, and the records parsed stay within CAP_SCAN_RECORDS
-            for want, build in ((3, lambda k: self.cycles(3)[:2] + [self.asst("filler")] * k + self.cycles(3)[2:]),
-                                (0, lambda k: self.cycles(3) + [self.asst("filler")] * k)):
+            # read and the records parsed unchanged. An assistant filler ends the walk at the counting gap
+            # (CAP_GAP_ASSISTANT), long before the record bound; a tool-result filler neither widens the gap nor
+            # ends the run, so only the record bound stops that walk, and its records parsed are EXACTLY
+            # CAP_SCAN_RECORDS (a widened or removed bound parses more and fails here)
+            result = self.user([{"type": "tool_result", "tool_use_id": "t", "content": "ok"}])
+            for want, at_cap, build in (
+                    (3, False, lambda k: self.cycles(3)[:2] + [self.asst("filler")] * k + self.cycles(3)[2:]),
+                    (0, False, lambda k: self.cycles(3) + [self.asst("filler")] * k),
+                    (0, True, lambda k: self.cycles(3) + [result] * k)):
                 seen = []
-                for filler in (2500, GROWTH * 2500) if want else (CAP_SCAN_RECORDS + 10, GROWTH * CAP_SCAN_RECORDS):
+                for filler in (2500, GROWTH * 2500) if want else (2 * CAP_SCAN_RECORDS, GROWTH * 2 * CAP_SCAN_RECORDS):
                     self.write(build(filler))
                     got, read, parsed = work(prior_block_cycles, self.tr)
-                    self.assertEqual(got, want, filler)  # 0: the markers lie beyond the record bound
-                    self.assertLessEqual(len(parsed), CAP_SCAN_RECORDS, filler)
+                    self.assertEqual(got, want, filler)  # 0: the markers lie beyond the gap or the record bound
+                    if at_cap:
+                        self.assertEqual(len(parsed), CAP_SCAN_RECORDS, filler)
+                    else:
+                        self.assertLess(len(parsed), CAP_SCAN_RECORDS, filler)
                     seen.append((read, parsed))
-                self.assertEqual(seen[0], seen[1], want)
+                self.assertEqual(seen[0], seen[1], (want, at_cap))
 
         def test_r9_block_cap_needs_tight_cycles(self):
             # round 9 finding 3 (MED): old blocks followed by a long successful stretch still counted, so the
@@ -2976,7 +3101,7 @@ def _self_test():
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             for name in ("read_regular", "lease_file", "_utc_field", "transcript_start", "lease_start", "_is_worker",
-                     "_cfg", "_sibling_or_skip", "_wall_clock_asserts"):
+                     "_cfg", "_sibling_or_skip", "_wall_clock_asserts", "_wall_clock_alias_fixtures"):
                 self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
             for name in ("_SESS_RE", "_LEASE_FIELD_RE", "_START_VALUE_RE", "_HEADING_RE"):
                 self.assertEqual((getattr(mod, name).pattern, getattr(mod, name).flags),
@@ -3003,7 +3128,8 @@ def _self_test():
                 self.assertEqual((getattr(mod, name).pattern, getattr(mod, name).flags),
                                  (globals()[name].pattern, globals()[name].flags), name)
             # the configuration and kill-switch helpers are shared verbatim across the three hooks
-            for name in ("_cfg", "_is_worker", "_sibling_or_skip", "_wall_clock_asserts"):
+            for name in ("_cfg", "_is_worker", "_sibling_or_skip", "_wall_clock_asserts",
+                         "_wall_clock_alias_fixtures"):
                 self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
 
 
@@ -4086,6 +4212,10 @@ def _self_test():
         HANG_GUARD_TESTS = ()
 
         def test_no_wall_clock_verdict(self):
+            """Residual (disclosed): the scan covers direct calls, imported aliases, and assigned aliases within a
+            function, not values passed between functions, so a time figure handed to a helper that asserts on it
+            is not flagged. Nor is a reading from a clock the scan does not name (os.times, date.today,
+            time.localtime or gmtime, a third-party clock, a file's mtime); see _wall_clock_asserts."""
             # every assertion of this file is scanned (see _wall_clock_asserts): none bounds a time figure, a
             # ratio of two time figures excepted, outside the hang-guard tests named in HANG_GUARD_TESTS
             with open(os.path.abspath(__file__), encoding="utf-8") as f:
@@ -4114,6 +4244,11 @@ def _self_test():
                     "def test_h(self):\n    t0 = time.monotonic()\n    self.assertLess(time.monotonic() - t0, 30.0)\n")
             self.assertEqual(_wall_clock_asserts(good, ("test_h",)), [])
             self.assertEqual(_wall_clock_asserts(good), [("test_h", 7)])
+            # a clock read through an alias (import-as, from-import, an assigned name) or a keyword operand is
+            # caught; the same aliases used for a hang-guard timeout, a count, or a msg keyword are not
+            bad, want, good = _wall_clock_alias_fixtures()
+            self.assertEqual([name for name, _line in _wall_clock_asserts(bad)], want)
+            self.assertEqual(_wall_clock_asserts(good), [])
 
         # -- sibling parity on a single-hook install --
         PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_clock_inject",
