@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5d0e53927268e2e46301c9acbfd9bfa4b2147d76c1997a7fc5d80644f69882d0"
+tree-sha256 = "e5df738cdfdf097e52a87a3a08f8c92f2f8236f7ae0a2e7e302736d89b91b538"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3391,8 +3391,8 @@ sha256 = "49960dad994a6cda99e4a3c0c5dad5306eb329ea718c7e52a169feb53a1e2cdc"
 
 [[sources]]
 path = "tools/leak-hashes.txt"
-bytes = 767
-sha256 = "a310ed893f6cabccb186613b5acd626a95ec02aed01f117eeb2b049a6f44efb5"
+bytes = 442
+sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/migrate.py"
