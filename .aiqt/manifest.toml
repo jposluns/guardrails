@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "def92ae24584c55466c53c47dc0a32b82074d530e5efd0a88a929a5e5a368ce1"
+tree-sha256 = "610754ef9db2cc430e54fbfe90325e3f7affa54b1674cca6bbec75c8033d4b7f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2191,8 +2191,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 39382
-sha256 = "7b4ddd7404901aea96430caecc5e1260c763d831784cd37ed8f42bd4151cdbc7"
+bytes = 39518
+sha256 = "7c14dc4195d6a1a0418d3adbf02f757076a2ebc32bc9e88da38ce96ce48a2a34"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2331,13 +2331,28 @@ sha256 = "ac7597f96ce6a8a5445badee95573dd69d9cc6b116de610e69da522c4e32f8b8"
 
 [[sources]]
 path = "hooks-preview/README.md"
-bytes = 13388
-sha256 = "94458e929e1e22e382089e542a41a3688a98ff7c5fa61744f91dce2c40c36901"
+bytes = 14253
+sha256 = "8f7fc77082cfbf85101aeb1d53a774369b64e6dd7442578ecd6535165d5a7032"
 
 [[sources]]
 path = "hooks-preview/SHA256SUMS"
-bytes = 123
-sha256 = "3a2c20559aa27daae08e3c27cb1861f6761d16241a357eb2f54944af681ba786"
+bytes = 379
+sha256 = "6811b1ea33ad462d325395054967704e796b3356cb8ed5b8c7d11710fae329a7"
+
+[[sources]]
+path = "hooks-preview/clock-inject.py"
+bytes = 34924
+sha256 = "b7f25e057de40c0959b447197702857c7332c65f6f80c45ae121a065ce2cbbe7"
+
+[[sources]]
+path = "hooks-preview/future-stamp-write.py"
+bytes = 380990
+sha256 = "4c0c67e6d879d5667950ef29882a32a028ae2614952e88274b5cd684ed2c4455"
+
+[[sources]]
+path = "hooks-preview/stamp-truth-stop.py"
+bytes = 241721
+sha256 = "fdfb1c674e19a26c1e4c41a18d4ff0f6d31826cc3ffe96290a16d4bdc2e2d4bf"
 
 [[sources]]
 path = "opf/site/_redirects"

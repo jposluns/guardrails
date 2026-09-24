@@ -1,1 +1,4 @@
 # SHA-256 checksums for the hooks-preview files, in sha256sum format. The README.md integrity table lists the same values.
+b7f25e057de40c0959b447197702857c7332c65f6f80c45ae121a065ce2cbbe7  clock-inject.py
+4c0c67e6d879d5667950ef29882a32a028ae2614952e88274b5cd684ed2c4455  future-stamp-write.py
+fdfb1c674e19a26c1e4c41a18d4ff0f6d31826cc3ffe96290a16d4bdc2e2d4bf  stamp-truth-stop.py

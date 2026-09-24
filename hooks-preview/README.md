@@ -5,10 +5,8 @@ Each hook is one self-contained Python file that you can download, check, test, 
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
 
-**No hook is published in this channel yet.** The three hooks described below are being prepared for it.
-Each one's file, checksum, and pinned link are added to the integrity table in the change that publishes
-it. Until a hook has a row in that table, it is not available here and the install steps do not apply to
-it.
+Three hooks are published here, each listed with its checksum and pinned link in the integrity table below.
+A hook without a row in that table is not available here, and the install steps do not apply to it.
 
 ## What these hooks are
 
@@ -47,6 +45,9 @@ values are in [SHA256SUMS](SHA256SUMS), which lists bare file names in the forma
 
 | File | SHA-256 | Pinned raw link |
 |---|---|---|
+| `clock-inject.py` | `b7f25e057de40c0959b447197702857c7332c65f6f80c45ae121a065ce2cbbe7` | https://raw.githubusercontent.com/jposluns/guardrails/hooks-preview-v1/hooks-preview/clock-inject.py |
+| `future-stamp-write.py` | `4c0c67e6d879d5667950ef29882a32a028ae2614952e88274b5cd684ed2c4455` | https://raw.githubusercontent.com/jposluns/guardrails/hooks-preview-v1/hooks-preview/future-stamp-write.py |
+| `stamp-truth-stop.py` | `fdfb1c674e19a26c1e4c41a18d4ff0f6d31826cc3ffe96290a16d4bdc2e2d4bf` | https://raw.githubusercontent.com/jposluns/guardrails/hooks-preview-v1/hooks-preview/stamp-truth-stop.py |
 
 What the checksum does and does not prove:
 
@@ -175,7 +176,10 @@ you type directly (in Claude Code, a line starting with `!`).
 ## Configuration
 
 The hooks read their settings from environment variables. Each feature has its own off state, and nothing
-beyond these variables is assumed:
+beyond these variables is assumed. Each `AIQT_` variable also accepts an older spelling with the prefix
+`ORCH_` (for example `ORCH_STORE_ROOT`), read only when the `AIQT_` one is unset, so "unset" below means
+both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` and any value of
+`ORCH_VERIFY_OWNER`; if your environment sets either for another purpose, the hooks stay silent there.
 
 - The current time needs no setting. `clock-inject.py` always reads it from the clock and injects it, and
   `stamp-truth-stop.py` always compares zoned timestamps against it.
