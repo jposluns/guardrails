@@ -90,7 +90,7 @@ Two roots organize every path in this standard:
 ### 4.2 Layout overview
 
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
-This version reserves the names and provides inert constructors only. The reference tooling still
+The current reference tooling reserves these names and provides inert constructors only. It still
 supports `1.1.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
 legacy paths until homes 2 is activated, which requires the homes migration (`opf upgrade`) to be
 available. The section 9 manifest example
