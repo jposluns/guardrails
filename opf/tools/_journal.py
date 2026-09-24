@@ -1575,15 +1575,16 @@ def recover(jr_fd, txn_dir, root_fd):
     beneath the trusted journal-root fd (jr_fd); preimage restore uses the contained root_fd as before."""
     frames, torn, good_len = read_frames(jr_fd, txn_dir)
     _validate_terminal_agreement(frames)
+    types = [t for t, _ in frames]
     intent = _first(frames, F_INTENT)
-    if intent is not None:
+    # Only an open transaction is acted on, so only its operands are checked, before the truncate.
+    # A terminal journal is history: recover leaves it inert and its caller binds it.
+    if intent is not None and F_COMPLETE not in types and F_RC not in types:
         _check_ordinary_ops(intent.get("ops"))
     if torn:
         _truncate_log(jr_fd, txn_dir, good_len)
-    types = [t for t, _ in frames]
     if F_INTENT not in types:
         return "nothing-opened"
-    intent = _first(frames, F_INTENT)
     if F_COMPLETE in types or F_RC in types:
         return "terminal"
     ops = intent["ops"]
