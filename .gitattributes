@@ -445,7 +445,10 @@
 .preview/SHA256SUMS text eol=lf
 .preview/clock-inject.py text eol=lf
 .preview/future-stamp-write.py text eol=lf
+.preview/record-remove-check.py text eol=lf
 .preview/stamp-truth-stop.py text eol=lf
+.preview/unbounded-wait.py text eol=lf
+.preview/ungated-record.py text eol=lf
 AGENTS.md text eol=lf
 CHANGELOG.md text eol=lf
 CLAUDE.md text eol=lf

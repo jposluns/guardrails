@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "7ae10ee94361c2971e9ab76c56d741147758c1deb373c3d863f82400dc88d478"
+tree-sha256 = "9d080e4c81a6669555788e6e40ef0c5f77a716f8c77f37a92ba694e06fa3ad3f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2191,8 +2191,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 39534
-sha256 = "fea7a3a0fa8b0afca31d20a343fc8fb106590fdfa5c09a407ba9d09f49a43953"
+bytes = 39656
+sha256 = "7eaf1bd9b2e6397cf531c189cd03f532e5d9b76f100de978159e98c1411f96db"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2201,13 +2201,13 @@ sha256 = "6c290908525b587a8fbce6f877f6722ef142a6e1fef559283c058ec3662aacc6"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 14291
-sha256 = "fff797cd3280324ee768af7d2d5aefdf9773783c0c98616eebfb247cc33b57a7"
+bytes = 22152
+sha256 = "5e7d37a2a21e221f7369ac293d7c4916bb736badb4fae4c325e9396e02ff5b54"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
-bytes = 379
-sha256 = "c0f927db3632a988ed8bb52e9da1373910e7003613cf946908c2b360ce4a75a9"
+bytes = 636
+sha256 = "e5eb1ecc72b9b904a92224e792f0183082e4b4fd80f905a88d75e6ee80a649f2"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2220,9 +2220,24 @@ bytes = 414312
 sha256 = "356378740e7e21f531b8c1e2eb5220a2612f48c0027305e2f9d3ecf109e2933d"
 
 [[sources]]
+path = ".preview/record-remove-check.py"
+bytes = 170806
+sha256 = "fd8d55d50f97efe9ce9c86fca69c4bd8bb2ecd88243c6c4766bbb467ec8c9701"
+
+[[sources]]
 path = ".preview/stamp-truth-stop.py"
 bytes = 276581
 sha256 = "f6365d467b66de32bd1abc573c852f6e9da6aec19bef0284c44a08eb2c159b55"
+
+[[sources]]
+path = ".preview/unbounded-wait.py"
+bytes = 112418
+sha256 = "4e7f2aa4b60f09b28ba913d0489036fdba23d899074417b12abd767d7fd543e5"
+
+[[sources]]
+path = ".preview/ungated-record.py"
+bytes = 127836
+sha256 = "1319d7cb5af0de31f1e55499708ed58f9b16796ffcefe2a50a643de5510426b6"
 
 [[sources]]
 path = "AGENTS.md"
