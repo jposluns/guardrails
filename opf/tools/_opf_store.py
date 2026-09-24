@@ -307,14 +307,30 @@ def _open_dir_nofollow(abspath):
     # '//'-anchored path with a message claiming it is not absolute (over-fire; class 2).
     if not parts or parts[0] not in (os.sep, os.sep + os.sep):
         raise OSError("store root {!r} is not an absolute POSIX path".format(str(abspath)))
-    fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)   # the filesystem root itself is never a symlink
-    for comp in parts[1:]:
-        try:
-            nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        finally:
-            os.close(fd)                                    # close the parent whether or not the open raised
-        fd = nfd
-    return fd
+    # Descriptor ownership: `held` lists every descriptor this walk still owns, from the moment each open
+    # returns until the return hands the last one to the caller. The protected region spans the root
+    # open through the return itself. During a hand-off BOTH descriptors are held: the child is appended
+    # BEFORE the parent leaves `held`, and the parent's ownership is cleared (popped) immediately before
+    # its close, so a failing parent close (on Linux the number is released even when close reports an
+    # error) can neither leak the child nor double-close the parent. Any failure or interruption closes
+    # every descriptor still held and re-raises. Residual (sub-line, disclosed): an interruption between
+    # an open returning and its append, or between a pop and its close, leaks that one descriptor.
+    held = []
+    try:
+        # The filesystem root itself is never a symlink.
+        held.append(os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY))
+        for comp in parts[1:]:
+            held.append(os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1]))
+            os.close(held.pop(-2))
+        return held.pop()
+    except BaseException as exc:
+        while held:
+            try:
+                os.close(held.pop())
+            except OSError as cexc:
+                exc.add_note("additionally the no-follow walk descriptor could not be closed ({})".format(
+                    cexc))
+        raise
 
 
 def _open_store_root_fd(store_root, pointer):
