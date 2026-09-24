@@ -22,6 +22,8 @@ run_gate() {
   echo
 }
 
+run_gate "opf-homes-selftest"          python3 -I -B "$here/check_opf_homes.py" --self-test
+run_gate "opf-homes-contract"          python3 -I -B "$here/check_opf_homes.py"
 run_gate "opf-tooling-selftest"        python3 -I -B "$here/opf.py" --self-test
 run_gate "opf-drift-selftest"          python3 -I -B "$here/check_opf_drift.py" --self-test
 run_gate "opf-doctor-selftest"         python3 -I -B "$here/check_opf_doctor.py" --self-test

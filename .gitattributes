@@ -550,6 +550,7 @@ opf/tools/_vendor/marko/renderer.py text eol=lf
 opf/tools/_vendor/marko/source.py text eol=lf
 opf/tools/check_opf_doctor.py text eol=lf
 opf/tools/check_opf_drift.py text eol=lf
+opf/tools/check_opf_homes.py text eol=lf
 opf/tools/check_opf_import.py text eol=lf
 opf/tools/check_opf_ingest.py text eol=lf
 opf/tools/check_opf_init.py text eol=lf

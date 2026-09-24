@@ -519,6 +519,15 @@ class = "c"
 residue = "It runs the OPF init Keep-acceptance CONTRACT validator (opf/tools/_opf_init_contract.py) via its --self-test: the module is the pure, closed-schema validator for the D2b --decisions Keep-only adoption model, performing no filesystem, subprocess, clock, random, or network access and taking no filename, path-to-inspect, already-locked, or approved input, so a parser result is never a capability. The self-test drives validate_keep over in-memory acceptance bytes and synthetic observation contexts and asserts an enumerated matrix: three positive cases (an empty-decision store, a single foreign-file Keep, and a directory-group covering a tree) return VALID, and twenty-four negative or fail-closed cases each return the expected INVALID or CANNOT-EVALUATE (duplicate keys, extra or missing root keys, a bad schema or operation, a boolean-as-integer, a float, a nesting-limit evasion, invalid UTF-8, a backslash or absolute or dot-dot or not-below-.working path, a decision-order violation, a reserved view or machine-store path, a ghost decision, an uncovered foreign file, binding and inventory-digest and head mismatches as CANNOT-EVALUATE, and a duplicate observed-inventory path as CANNOT-EVALUATE). Its frozen constants (ACTOR_KINDS, the reserved managed set, the canonical-JSON and digest rules, the v1 limits) mirror _opf_schema.py, _opf_store.py, _opf_check.py, and _opf_init.py at authoring time; the sibling check_opf_init_contract gate re-verifies that alignment against source. It arguably serves the change-carries-a-check and check-fails-closed-on-unreadable disciplines, but the linkage to a single corpus rule is not undeniable, so none is claimed here. Class c: coverage is representative, so it asserts these enumerated cases rather than the acceptance grammar's whole input space; it validates a supplied observation context by equality and does not itself perform the observation (PR3 establishes it), it does not exercise the operation-layer application (PR4 through PR7) or physical filesystem behaviour, and any harness failure fails closed to a non-zero exit rather than a clean skip."
 
 [[gate]]
+id = "opf-homes"
+script = "opf/tools/check_opf_homes.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It runs the OPF store-homes contract gate (opf/tools/check_opf_homes.py): the default entry checks that the OPF spec carries the homes contract sections and that the rendered in-flight gitignore block matches its renderer (drift), and --self-test exercises the home constants, the path constructors and their kind, run-id and file-path guards, the reserved-name refusal in discovery, and the gitignore renderer. It checks contract text and topology only; it does not certify homes-2 runtime behaviour, which no writer uses until the layout activation slice lands, and it does not inspect an adopter's live store."
+
+[[gate]]
 id = "opf-init-contract-check"
 script = "opf/tools/check_opf_init_contract.py"
 rules = []

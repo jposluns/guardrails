@@ -89,6 +89,13 @@ Two roots organize every path in this standard:
 
 ### 4.2 Layout overview
 
+The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
+L1 reserves names and supplies inert constructors only. The reference tooling still supports
+`1.1.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
+legacy paths until L4, after the L3 migration is available. The section 9 manifest example
+continues to describe that legacy format. The homes-2 requirements in sections 4.2, 9.2, 12,
+14.1, 14.2, and 15 describe the target contract, not an activated runtime guarantee.
+
 ```
 <product repository root>/
   .opf.toml                        # committed store pointer (section 4.3)
@@ -129,13 +136,52 @@ Two roots organize every path in this standard:
           archive.toml             # enumerates rotated IDs and spans (section 12)
           done.index.toml
           worklog.toml
-    imports/<import-run-id>/       # staged import plans, mappings, fragments (section 14; store scope)
+    archive/
+      moved/<source-path>          # default Move destinations (section 14.2)
+      adoption/<run-id>/           # adoption retire preimages (section 14.2)
+    imported/<kind>/<run-id>/      # durable originals, digest evidence, acceptance (section 14)
+    staging/<kind>/<run-id>/       # short-lived staging, evidence-gated reclamation (section 14.1)
+    journals/<kind>/               # reserved recovery state, never a view or ordinary op target
+      journal/                    # crash-durable frames
+      runs/<run-id>/transaction.toml # gate-readable projections
 ```
 
 When the store has been relocated, the `.working/` tree lives at the store repository root exactly
 as drawn, and the product repository keeps only the pointer and the public deliverables. The
 per-record layout (section 9) additionally places one file per record under
 `.working/toml/<type>/`, with each `<type>.index.toml` acting as the registry.
+
+The reserved children `archive/`, `imported/`, `staging/`, and `journals/` are store-tree control
+area, neither machine-store records nor adopter content; they relocate with the machine store.
+In homes 2, OPF writes no state outside `.working/` except the operation-lock and coupled-init
+substrate in the git common directory, and none under `.aiqt/`. The record archive remains
+inside the discovered machine store; the example name `toml` is not hardcoded.
+
+The closed kind vocabulary is `import`, `ingest`, `adoption`, `layout`, `preview`. Import and
+ingest run IDs use `imp-<YYYYMMDD>T<HHMMSS>Z-<hash16>`; adoption uses `adopt-` with that
+suffix. Layout and preview reserve `layout-` and `preview-` with the same suffix. Here
+`hash16` is 16 lowercase hexadecimal characters; constructors check lexical shape, not calendar
+validity or filesystem safety. File operands use canonical contained relative paths: no empty,
+dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.
+
+Homes-2 init and upgrade render this managed block into `.working/.gitignore` from the topology
+constants; L1 supplies the renderer and drift gate but installs no block:
+
+```gitignore
+# >>> opf-managed >>>
+/journals/
+/staging/
+# <<< opf-managed <<<
+```
+
+Durable `imported/` and `archive/` evidence stays tracked. Installation must inspect effective
+ignore rules and the index first; tracked staging or journals require an explicit reviewed
+untracking change, never silent index mutation. The block travels with the store and joins the
+indexed-ignore candidate set. Gitignore is not access control: `git add -f` can stage ignored
+state. Journals are machine-local even after completion; a clone without them cannot recover those
+transactions, and requested recovery fails closed on a missing journal. Containment and doctor
+exclude journals and make no recovery claim; a rogue file there is outside their coverage.
+
 
 ### 4.3 The pointer
 
@@ -179,11 +225,12 @@ the named fixed root for this file; any other path in a pointer MUST be absolute
 
 ### 4.4 The machine store
 
-All machine-readable TOML lives in `.working/toml/`. The directory name `.working` at the store
+Machine-store TOML records live in `.working/toml/`. The directory name `.working` at the store
 repository root is fixed by this standard. The machine subdirectory's standard name is `toml`;
-tooling MUST NOT hardcode it, and MUST locate it by discovery. The name `imports` is reserved at
-the store level for the import-run staging tree (`.working/imports/`, section 14.1) and MUST NOT be
-used as a machine subdirectory name; discovery fails closed on a machine store so named.
+tooling MUST NOT hardcode it, and MUST locate it by discovery. The names `imports`, `imported`,
+`archive`, `staging`, and `journals` are reserved at the store level for OPF control area and
+MUST NOT be used as a machine subdirectory name; discovery fails closed on a machine store so named.
+The legacy staging name `imports` remains reserved so legacy content cannot be re-absorbed.
 
 ### 4.5 Manifest discovery
 
@@ -925,9 +972,18 @@ not yet a committed public contract for third-party authors.
 
 ### 9.2 Store schema upgrades
 
+The homes-generation upgrade targets `spec_version = "2.0.0"` with required integer `[opf].homes = 2`.
+Absent or `1` denotes legacy homes for migration; unknown future generations are refused.
+The runtime supported version and init format remain unchanged until L4 activates homes 2.
+The migration refuses a store resolved outside the product root until a multi-root coordinator exists.
+Unproven legacy `.archive/` entries remain in place with a standing finding until dispositioned.
+
 A base-schema version bump ships a tested, in-place store-schema upgrade (`opf upgrade`). The upgrade
-is additive, idempotent, and runs under the store consistency contract and the single-writer lease
-(section 5.7). It fails closed on an unresolvable store, a declared `spec_version` ABOVE the tooling,
+is idempotent and journaled. A purely schema-level bump is additive; a homes-generation bump
+additionally relocates OPF control areas as a versioned, journaled, fail-closed relocation.
+Every destination is digest-verified before its source is removed. Both kinds of upgrade run under
+the store consistency contract and the single-writer lease (section 5.7).
+It fails closed on an unresolvable store, a declared `spec_version` ABOVE the tooling,
 a divergence, a held lease, or any populated state that contradicts its preconditions; it never
 lowers the fail-closed floor. Before any write it enforces two fail-closed preconditions: it claims
 the single-writer lease (section 5.7) and holds it across the whole mutation, and it verifies the
@@ -1084,6 +1140,13 @@ because it is pre-terminal and mutable-until-release (sections 6.2 and 8.4). Ope
 blocks, unresolved decisions, unresolved fragments, unexpired waivers, the current handoff, and the
 unreleased worklog tail never rotate.
 
+The record-rotation archive under the discovered machine store is distinct from the store-tree
+`archive/` in section 4.2, which retains relocated adopter files and adoption preimages, never
+rotated records. Neither is scanned as the other. Imported originals, acceptance evidence, and
+retire preimages are retained indefinitely by default. Automatic reclamation applies only to staging
+runs, after independent re-read and digest verification of their required evidence in its durable
+home; age alone never authorizes deletion.
+
 Each rotation writes the year's `archive.toml`, enumerating every moved ID (and, for the worklog,
 every moved span) and its destination. Validation confirms that every ID exists in exactly one
 active or archived location, and coverage gates read active and archive together, so rotation never
@@ -1130,10 +1193,19 @@ section fixes the posture the tooling must honour.
   `incomplete`, `unmapped`, `ignored`, or `cannot_evaluate`. Everything not confidently mapped
   becomes quarantined `legacy_fragment` data with source path, digest, span, and run ID; nothing is
   dropped.
-- Import runs stage under `.working/imports/<run-id>/` and promote only a fully validated
-  candidate, leaving originals in place. The staging tree is a store-level area beside the machine
-  store, not inside it: the machine store carries TOML records only, so an import run's non-TOML
-  content (the preserved source bodies) never lands under the machine subdirectory.
+- Import runs stage under `.working/staging/import/<run-id>/`; ingest disposition runs use
+  `.working/staging/ingest/<run-id>/`. Only a fully validated candidate is promoted. Scan, planning,
+  and review remove nothing. Accepted publication relocates each declared original into the durable
+  evidence bundle at `.working/imported/import/<run-id>/`, preserving full bytes, identity, and digests.
+  Destination durability and digest verification precede source removal; removal participates in the
+  same recoverable transaction as record and view publication. Acceptance binds the removal action,
+  resolved roots, homes generation, plan digest, and inventory digest. A copy-preserving legacy
+  acceptance never authorizes removal. A source outside the participating roots is a plan-time
+  cannot-evaluate naming that source. Both staging and evidence are store-level areas beside the
+  machine store, which carries TOML records only.
+- Reclamation requires every required artefact to be re-read and digest-matched in its durable home.
+  Reclamation is journaled and idempotent; an unreadable tree holds the run. Pending review never
+  reclaims into implicit acceptance or cancellation. Read-only commands never clean staging.
 - Review and acceptance are explicit and attributed. A staged plan is promoted only after a human, or
   the assistant acting on the adopter's behalf, reviews it and records a decision on every fragment
   through a review step, never by editing the human-readable report. The review step captures a decision
@@ -1173,13 +1245,18 @@ assistant driving the adoption on the adopter's behalf) three options:
   confirms no unmanaged path collides with the name of any OPF-managed file or declared view
   target.
 - **Migrate.** Import the file's content into the appropriate OPF type through the same import
-  machinery as any other source (staged under `.working/imports/<run-id>/`, validated, promoted only on a
+  machinery as any other source (staged under `.working/staging/import/<run-id>/`, validated, promoted only on a
   full pass) and generate its view. Where the generated view lands at the same path as the
   original file, the replacement happens only as part of the promoted, validated, reviewed import,
   with the original's full content preserved in the import run (digest and fragments), never as a
   silent overwrite.
-- **Move.** Relocate the file out of the managed store to a destination the adopter names, with
-  the move recorded.
+- **Move.** Relocate the file to a destination the adopter names outside the managed store, with
+  the move recorded; or, when no destination is named, retire it into
+  `.working/archive/moved/<source-path>`, preserving substructure. An occupied destination is a
+  collision finding, never an overwrite. This retention area stays under integrity coverage and is
+  never absorbed as a record. An explicit destination inside the store tree is valid only beneath
+  `.working/archive/moved/`. The default Move refuses a store resolved outside the product root until
+  a multi-root coordinator exists.
 
 Detection is fail-safe: the tooling surfaces what it found and asks; it never silently absorbs,
 deletes, or overwrites a pre-existing file, and it takes no default action on one. A detected file
@@ -1188,6 +1265,13 @@ the adopter has not yet decided on is recorded as unresolved, and posture report
 fragments. The flow is assistant-drivable by construction: the options are presented as inert plan
 data, the assistant or adopter picks per file, and each pick is recorded with its actor
 attribution like any other decision.
+
+The reserved children `archive/`, `imported/`, `staging/`, and `journals/` are OPF control area.
+Detection never surfaces them as adopter content, no adoption option selects them, and no
+`[unmanaged]` declaration may name or contain them. Adoption retire preserves the exact preimage
+under `.working/archive/adoption/<run-id>/` before removal or replacement. Adoption evidence is
+committed and immutable under `.working/imported/adoption/<run-id>/`; events are transaction
+records under `.working/journals/adoption/`.
 
 After adoption, the same detection keeps running, scoped by phase. `import_status = "partial"`
 denotes an in-progress import or migration only: it is set only while an import or migration is
@@ -1220,8 +1304,12 @@ vocabulary, not profile schemas or store data. `actor.kind` carries only the
 portable categories; identity detail lives in `actor.id` or extensions. `mode`,
 `tier_assessment`, and `waiver` ship structure only (evidence, assessor, outcome, validity, scope,
 expiry) with adopter-supplied vocabularies. The location patterns of section 5.3 are described
-generically; no pattern names a real repository, host account, or internal system. Import
-provenance stays inside the adopter's own repositories. Experimental fields ride registered
+generically; no pattern names a real repository, host account, or internal system. Import and
+adoption provenance, including originals under `imported/` and retired files under `archive/`,
+stays inside the adopter's own repositories. In homes 2, `.aiqt/` is AIQT-owned material, not an OPF
+state home; OPF operates without it. Only homes migration may read explicitly inventoried OPF
+artefacts from former `.aiqt/` locations, without touching unrelated AIQT material.
+Experimental fields ride registered
 `x-<vendor>` tables only, within the limits of section 8.7.
 
 The base standard's required schema vocabulary names no adopter, operator, or profile by

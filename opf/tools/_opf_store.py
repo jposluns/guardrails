@@ -65,6 +65,7 @@ fail-closed way and names it so the choice is reviewable, per disclose-guard-res
 import collections.abc
 import operator
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -85,13 +86,31 @@ except ModuleNotFoundError:  # Python < 3.11
 POINTER_REL = ".opf.toml"              # committed store pointer, at the PRODUCT root (spec 4.3)
 LOCAL_POINTER_REL = ".opf.local.toml"  # uncommitted machine-local override, resolved FIRST (spec 4.3)
 WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root (spec 4.4)
-# The store-root control / VCS directory names, dropped or excluded at the STORE ROOT only (never a
-# same-named dir nested deeper): `.git` is the VCS dir; `.aiqt` is the control UMBRELLA under which every
-# apply / import / migration ops, journal, and archive tree nests, so excluding the `.aiqt` subtree covers
-# them all by construction. This tuple is the SINGLE store-topology authority both
-# `_opf_import._assemble_preview` (its store-root drop set) and `_opf_ingest` (its store-root control
-# exclusion) derive from, so the two can never mirror-drift (spec 4.4 / 14.2).
+# Store-root exclusions, anchored only at the STORE ROOT. In homes 2, .aiqt is AIQT-only
+# content; OPF writes no state here. Until L4 activates homes 2, legacy import state still
+# lives there. Keep this exclusion for those stores and for AIQT-owned material afterwards.
+# _opf_import._assemble_preview and _opf_ingest derive their root exclusions from this tuple.
 STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
+# Homes-2 topology is inert until migration and writer activation (spec 4.2 / 9.2).
+IMPORTED_DIRNAME = "imported"
+ARCHIVE_DIRNAME_STORE = "archive"       # distinct from the machine-store record archive
+STAGING_DIRNAME = "staging"
+JOURNALS_DIRNAME = "journals"
+IMPORTED_REL = "{}/{}".format(WORKING_DIRNAME, IMPORTED_DIRNAME)
+ARCHIVE_REL = "{}/{}".format(WORKING_DIRNAME, ARCHIVE_DIRNAME_STORE)
+STAGING_REL = "{}/{}".format(WORKING_DIRNAME, STAGING_DIRNAME)
+JOURNALS_REL = "{}/{}".format(WORKING_DIRNAME, JOURNALS_DIRNAME)
+STORE_TREE_CONTROL_DIRS = (IMPORTED_DIRNAME, ARCHIVE_DIRNAME_STORE, STAGING_DIRNAME, JOURNALS_DIRNAME)
+RESERVED_MACHINE_SUBDIRS = ("imports",) + STORE_TREE_CONTROL_DIRS
+STAGING_KINDS = ("import", "ingest", "adoption", "layout", "preview")
+# Import and ingest share the import engine's grammar; adoption has its own existing grammar.
+# Layout and preview reserve new prefixes with the same timestamp/hash shape. This checks shape,
+# not calendar validity, ownership, existence, symlinks, or permission to mutate a constructed path.
+_HOME_RUN_PREFIXES = {"import": "imp", "ingest": "imp", "adoption": "adopt",
+                      "layout": "layout", "preview": "preview"}
+_HOME_RUN_SUFFIX = r"-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
+GITIGNORE_BEGIN = "# >>> opf-managed >>>"
+GITIGNORE_END = "# <<< opf-managed <<<"
 DEFAULT_MACHINE_SUBDIR = "toml"        # standard machine-store subdir name, tried first (spec 4.4)
 MANIFEST_NAME = "manifest.toml"        # discovery marker filename (spec 4.5)
 STANDARD_TOKEN = "opf"          # exact discovery token in [opf].standard (spec 4.5)
@@ -189,6 +208,88 @@ TOP_LEVEL_TABLES = frozenset({"opf", "store", "modules", "profiles", "types", "p
 
 _NAMESPACE_OK = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _EXTENSION_VENDOR_OK = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")   # ASCII x-<vendor> slug alphabet
+
+
+def _home_kind(kind):
+    if not isinstance(kind, str) or kind not in STAGING_KINDS:
+        raise ValueError("unknown homes kind: {!r}".format(kind))
+    return kind
+
+
+def _home_run(kind, run_id):
+    kind = _home_kind(kind)
+    pattern = _HOME_RUN_PREFIXES[kind] + _HOME_RUN_SUFFIX
+    if not isinstance(run_id, str) or re.fullmatch(pattern, run_id) is None:
+        raise ValueError("invalid {} run-id: {!r}".format(kind, run_id))
+    return "{}/{}".format(kind, run_id)
+
+
+def _home_file(path):
+    # Canonical file-operand grammar, matching _opf_adopt._is_contained_filepath.
+    # Do not normalize: an aliased spelling is a refused input, never a different destination.
+    if (not isinstance(path, str) or not path or path.startswith("/") or "\\" in path
+            or re.match(r"^[A-Za-z]:", path)
+            or any(c in ("", ".", "..") for c in path.split("/"))
+            or any(ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f or c in ("\u2028", "\u2029") for c in path)):
+        raise ValueError("invalid homes file path: {!r}".format(path))
+    return path
+
+
+def stage_run(kind, run_id):
+    """Store-root-relative staging path; no I/O or ownership claim."""
+    return "{}/{}".format(STAGING_REL, _home_run(kind, run_id))
+
+
+def evidence_run(kind, run_id):
+    """Store-root-relative durable evidence path."""
+    return "{}/{}".format(IMPORTED_REL, _home_run(kind, run_id))
+
+
+def moved_dest(source_path):
+    """Store-root-relative default Move destination, preserving source substructure."""
+    return "{}/moved/{}".format(ARCHIVE_REL, _home_file(source_path))
+
+
+def retire_preimage(run_id, path):
+    """Store-root-relative adoption preimage path."""
+    return "{}/{}/{}".format(ARCHIVE_REL, _home_run("adoption", run_id), _home_file(path))
+
+
+def journal_root(kind):
+    """Store-root-relative journal frames, disjoint from run projections."""
+    return "{}/{}/journal".format(JOURNALS_REL, _home_kind(kind))
+
+
+def txn_record(kind, run_id):
+    """Store-root-relative transaction projection."""
+    run = _home_run(kind, run_id)
+    kind, run_id = run.split("/")
+    return "{}/{}/runs/{}/transaction.toml".format(JOURNALS_REL, kind, run_id)
+
+
+def render_homes_gitignore():
+    """Pure homes-2 block renderer. L1 does not install it in any store.
+    This is not access control: git add -f can still stage ignored state.
+    """
+    ignored = (JOURNALS_DIRNAME, STAGING_DIRNAME)
+    if not set(ignored) <= set(STORE_TREE_CONTROL_DIRS):
+        raise ValueError("ignored homes are not registered store-tree control directories")
+    return "\n".join((GITIGNORE_BEGIN,) + tuple("/{}/".format(n) for n in ignored) + (GITIGNORE_END, ""))
+
+
+def homes_gitignore_matches(text):
+    """Exact managed-block drift check; adopter text outside the block is preserved.
+    Only block bytes are checked, not effective git rules or index state. Activation must
+    inspect both before installation; a tracked control path requires reviewed untracking.
+    """
+    if not isinstance(text, str):
+        return False
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == GITIGNORE_BEGIN]
+    ends = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == GITIGNORE_END]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return False
+    return "".join(lines[starts[0]:ends[0] + 1]) == render_homes_gitignore()
 
 
 def snapshot_caller_alarm():
@@ -511,16 +612,11 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
     if len(matches) > 1:
         return "multiple", None, "{} machine stores declare the opf token: {}".format(
             len(matches), ", ".join(sorted(matches)))
-    # OPF-IMPORTS-RELOCATE: `imports` is reserved at the store level for the fixed import-run staging root
-    # `.working/imports/` (spec 4.4/14.1). Since the relocation, a machine store so named would EQUAL that
-    # staging root (staging would write into the machine store and containment would grade the machine store
-    # as the imports interior), so the sole-match `imports` name is refused fail-closed (StoreError ->
-    # CANNOT-EVALUATE at _resolve_at), matching this function's fail-closed convention. The literal is bound
-    # to _opf_import.IMPORTS_DIRNAME by contract; it is compared literally here to avoid inverting the module
-    # layering (_opf_import imports _opf_store, never the reverse).
-    if matches[0] == "imports":   # == _opf_import.IMPORTS_DIRNAME (spec 4.4 reserved store-level name)
-        raise StoreError("the machine subdirectory name {!r} is reserved for the store-level import-run "
-                         "staging root {}/{} (spec 4.4); it cannot name the machine store".format(
+    # Retain the legacy staging reservation as well as the inert homes-2 names.
+    # A reserved sole match is never a machine store, including during legacy-token discovery.
+    if matches[0] in RESERVED_MACHINE_SUBDIRS:
+        raise StoreError("the machine subdirectory name {!r} is reserved for store-level control "
+                         "area {}/{} (spec 4.4); it cannot name the machine store".format(
                              matches[0], WORKING_DIRNAME, matches[0]))
     return "one", matches[0], "machine store at {}/{}".format(WORKING_DIRNAME, matches[0])
 
