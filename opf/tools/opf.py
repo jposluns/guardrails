@@ -1156,7 +1156,7 @@ def _cmd_init(rest):
             _opf_store._journal._close_fd_quietly(root_fd)
 
 
-# --- opf upgrade: the 1.0.0 -> 1.1.0 store-schema upgrade (spec 9.2) ---------------------------------
+# --- opf upgrade: the store-schema upgrade to the tooling spec_version (spec 9.2) ---------------------
 
 # The single 1.0.0 -> 1.1.0 upgrade this build implements. maintainer_decision and preference_pattern
 # baseline (they were module-tier in 1.0.0); contribution is net-new; the decision_support module is
@@ -1166,7 +1166,12 @@ def _cmd_init(rest):
 # _opf_store.SUPPORTED_SPEC_VERSION (bound only after _bootstrap), so a future spec bump cannot let this
 # constant silently drift from the roster.
 _UPGRADE_FROM = "1.0.0"
-_UPGRADE_TO = "1.1.0"
+# OPF-D2B PR3a (PD-D2B-PR3-SCHEMA decision 5): base spec 1.2.0 admits the managed bootstrap provenance
+# `.working/toml/init.toml` a coupled init writes. The 1.1.0 -> 1.2.0 allowed delta is the spec_version
+# bump ALONE: a 1.1.0 (D2a) store gains no init.toml (no provenance is ever fabricated for it), and a 1.0.0
+# store takes the full 1.0.0 delta straight to 1.2.0 (the later hop adds nothing else).
+_UPGRADE_MID = "1.1.0"
+_UPGRADE_TO = "1.2.0"
 _UPGRADE_NEW_TYPES = ("contribution", "maintainer_decision", "preference_pattern")
 _UPGRADE_RETIRED_MODULE = "decision_support"
 _UPGRADE_NEW_VIEWS = ("CONTRIBUTIONS.md", "DECISIONS.toml")
@@ -1537,9 +1542,45 @@ def _upgrade_postcondition(old_manifest, new_manifest, old_counters, new_counter
                             "with the missing CN/MD/PP namespaces added as zeros")
 
 
+def _upgrade_plan_minor(manifest_model, counters_model):
+    """The 1.1.0 -> 1.2.0 allowed delta (spec 9.2, OPF-D2B PR3a): the [opf].spec_version bump ALONE.
+    Preconditions (fail-closed): the current [opf] base table (never the retired [devprocess]) declaring
+    standard "opf" and spec_version 1.1.0, and a [counters] table. No init.toml provenance is created
+    (none is ever fabricated for an existing store), no type, view, module, index, or counter changes,
+    and the postcondition asserts the manifest diff is EXACTLY the version field and the counters model
+    is unchanged. Returns (new_manifest, new_counters, added_namespaces, origin) like _upgrade_plan."""
+    import copy
+    base = manifest_model.get(_opf_store.STANDARD_TOKEN)
+    if not isinstance(base, dict) or _opf_store.PRIOR_STANDARD_TOKEN in manifest_model:
+        raise _UpgradeError("manifest carries no [{}] base table (or still carries the retired [{}]); "
+                            "not a {} store this upgrade migrates (fail-closed)".format(
+                                _opf_store.STANDARD_TOKEN, _opf_store.PRIOR_STANDARD_TOKEN,
+                                _UPGRADE_MID))
+    if base.get("standard") != _opf_store.STANDARD_TOKEN or base.get("spec_version") != _UPGRADE_MID:
+        raise _UpgradeError("manifest [{}] is not a {} base; no known upgrade path (fail-closed)".format(
+            _opf_store.STANDARD_TOKEN, _UPGRADE_MID))
+    if not isinstance(counters_model.get("counters"), dict):
+        raise _UpgradeError("counters.toml [counters] table is missing or malformed (fail-closed)")
+    new_manifest = copy.deepcopy(manifest_model)
+    new_manifest[_opf_store.STANDARD_TOKEN]["spec_version"] = _UPGRADE_TO
+    new_counters = copy.deepcopy(counters_model)
+    expected = copy.deepcopy(manifest_model)
+    expected[_opf_store.STANDARD_TOKEN] = dict(expected[_opf_store.STANDARD_TOKEN],
+                                               spec_version=_UPGRADE_TO)
+    if new_manifest != expected or new_counters != counters_model:
+        raise _UpgradeError("upgrade postcondition failed: the {} -> {} delta is the spec_version bump "
+                            "alone".format(_UPGRADE_MID, _UPGRADE_TO))
+    origin = {"pre_declared": frozenset(), "ds_key_present": False, "decisions_declared": None,
+              "from": _UPGRADE_MID}
+    return new_manifest, new_counters, [], origin
+
+
 def _cmd_upgrade(rest):
-    """`opf upgrade [--root DIR]`: the in-place, additive, idempotent 1.0.0 -> 1.1.0 store-schema upgrade
-    (spec 9.2). It RESOLVES the store at --root, refuses fail-closed on a store above the tooling spec or on
+    """`opf upgrade [--root DIR]`: the in-place, additive, idempotent store-schema upgrade to the tooling
+    spec_version {to} (spec 9.2). Two origins are supported: a 1.1.0 store takes the 1.1.0 -> {to} delta,
+    the spec_version bump alone (no init.toml provenance is fabricated, nothing else changes); a 1.0.0
+    store takes the full delta below, straight to {to}.
+    It RESOLVES the store at --root, refuses fail-closed on a store above the tooling spec or on
     a non-canonical (hand-edited/comment-bearing) manifest or counters, applies EXACTLY the allowed delta as
     a model regeneration through the canonical new-document emitter (bump spec_version; drop the retired
     decision_support module WHERE PRESENT; add each contribution/maintainer_decision/preference_pattern type
@@ -2164,6 +2205,7 @@ def _upgrade_run(root):
         if sv_tuple is not None and sv_tuple > tuple(int(p) for p in _UPGRADE_TO.split(".")):
             raise _UpgradeError("store declares spec_version {!r} ABOVE the {} this tooling implements; "
                                 "a newer store is never downgraded (fail-closed)".format(sv, _UPGRADE_TO))
+        minor = sv == _UPGRADE_MID
 
         # PRECONDITION (spec 9.2): re-emitting the UNCHANGED parsed model reproduces the on-disk bytes
         # exactly, proving the file is canonical and comment-free so the bounded rewrite loses nothing.
@@ -2173,7 +2215,9 @@ def _upgrade_run(root):
         if _opf_emit.emit_checked(counters_model).encode("utf-8") != counters_bytes:
             raise _UpgradeError("counters.toml is not in canonical new-document form; refusing (fail-closed)")
 
-        new_manifest, new_counters, added_ns, origin = _upgrade_plan(manifest_model, counters_model)
+        new_manifest, new_counters, added_ns, origin = (
+            _upgrade_plan_minor if minor else _upgrade_plan)(manifest_model, counters_model)
+        origin_version = _UPGRADE_MID if minor else _UPGRADE_FROM
         new_manifest_bytes = _opf_emit.emit_checked(new_manifest).encode("utf-8")
         new_counters_bytes = _opf_emit.emit_checked(new_counters).encode("utf-8")
 
@@ -2194,14 +2238,16 @@ def _upgrade_run(root):
         lease_payload = _upgrade_acquire_lease(root_fd, machine_rel)
         released = False
         try:
-            # Apply: rewrite manifest + counters (canonical bytes), create the missing empty indexes.
+            # Apply: rewrite manifest + counters (canonical bytes), create the missing empty indexes. The
+            # 1.1.0 origin rewrites the manifest alone (its delta is the spec_version bump).
             _upgrade_replace(root_fd, manifest_rel, new_manifest_bytes)
-            _upgrade_replace(root_fd, counters_rel, new_counters_bytes)
+            if new_counters_bytes != counters_bytes:
+                _upgrade_replace(root_fd, counters_rel, new_counters_bytes)
             empty_index = _opf_emit.emit_checked(
                 {"schema": _opf_schema.SUPPORTED_SCHEMA, "record": []}).encode("utf-8")
             created_indexes = []
             created_relpaths = []
-            for tname in _UPGRADE_NEW_TYPES:
+            for tname in (() if minor else _UPGRADE_NEW_TYPES):
                 idx_rel = "{}/{}{}".format(machine_rel, tname, _opf_check.INDEX_SUFFIX)
                 if _upgrade_create_index(root_fd, idx_rel, empty_index):
                     created_indexes.append(tname)
@@ -2209,7 +2255,7 @@ def _upgrade_run(root):
             # The two NET-NEW view targets are created-untracked this run (their store-relative destinations,
             # for the enumerated recovery); the re-rendered pre-existing views live under the same `.working`
             # subtree the scoped restore covers.
-            for vname in _UPGRADE_NEW_VIEWS:
+            for vname in (() if minor else _UPGRADE_NEW_VIEWS):
                 _scope, _relpath = _opf_views._spec_destination(vname)
                 if _scope == "store":
                     created_relpaths.append(_relpath)
@@ -2249,12 +2295,13 @@ def _upgrade_run(root):
             released = True
             _upgrade_release_lease(root_fd, machine_rel, lease_payload)
             print("opf upgrade: store schema upgraded {} -> {} and doctor-VALID (staged, NOT committed)."
-                  .format(_UPGRADE_FROM, _UPGRADE_TO))
+                  .format(origin_version, _UPGRADE_TO))
             print(json.dumps({
-                "event": "upgraded", "root": str(root), "from": _UPGRADE_FROM, "to": _UPGRADE_TO,
+                "event": "upgraded", "root": str(root), "from": origin_version, "to": _UPGRADE_TO,
                 "created_indexes": sorted(created_indexes), "added_counters": sorted(added_ns),
                 "pre_declared_types": sorted(origin["pre_declared"]),
-                "decisions_view": "widened" if origin["decisions_declared"] else "not-declared"},
+                "decisions_view": "unchanged" if minor else (
+                    "widened" if origin["decisions_declared"] else "not-declared")},
                 sort_keys=True))
             print("opf upgrade: review the staged changes, then stage and commit them (scope the add to the "
                   "store subtree, never `add -A`, which would sweep in unrelated product work):")

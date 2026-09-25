@@ -121,6 +121,7 @@ continues to describe that legacy format. The homes-2 requirements in sections 4
       version.toml                 # version and release ledger (section 6.1)
       worklog.toml                 # durable operational record (section 6.2)
       lease.toml                   # single-writer lease, present only while held (section 5.7)
+      init.toml                    # bootstrap provenance of a coupled init (section 9.2), if present
       backlog_item.index.toml      # typed record files (section 8)
       done.index.toml
       finding.index.toml
@@ -299,8 +300,8 @@ is ignored for enforcement and recorded as unevaluated, never treated as a base-
 Source files are lowercase; deliverables are uppercase.
 
 - Every file inside `.working/toml/` is lowercase: `manifest.toml`, `counters.toml`,
-  `version.toml`, `worklog.toml`, `lease.toml`, `<type>.index.toml`, `archive.toml`. The pointer
-  `.opf.toml` and its local override are lowercase machine source on the same terms.
+  `version.toml`, `worklog.toml`, `lease.toml`, `init.toml`, `<type>.index.toml`, `archive.toml`. The
+  pointer `.opf.toml` and its local override are lowercase machine source on the same terms.
 - Every generated deliverable at `.working/` top level, and the public deliverables at the
   product repository root (`CHANGELOG.md`, `VERSION`), is uppercase.
 
@@ -879,7 +880,7 @@ shape (the schema release that follows this specification is normative):
 
 [opf]
 standard = "opf"               # discovery token; exact value required
-spec_version = "1.1.0"         # OPFiles base spec version this store conforms to
+spec_version = "1.2.0"         # OPFiles base spec version this store conforms to
 layout = "inline"              # storage layout: "inline" or "per-record" (was layout_profile)
 posture = "required"           # "off", "warn", or "required" (section 11)
 import_status = "none"         # "none", "partial", or "complete"
@@ -1062,6 +1063,13 @@ high-water; and create each missing empty `*.index.toml` file for the three base
 that already exist (such as a `maintainer_decision.index.toml` where governance was enabled, whose
 records are preserved byte-for-byte). The upgrade weakens nothing: `preference_pattern` simply moves to
 always-on, so a populated decision-support index is kept as is.
+
+Base spec 1.2.0 admits one new managed machine-store file, `.working/toml/init.toml`: the bootstrap
+provenance a coupled `opf init` records (its format is frozen in OPF-INIT-D2B). It is a managed leaf
+when present and is never required, so a store without it stays valid. For the 1.1.0 to 1.2.0 upgrade
+the allowed delta is the `spec_version` bump alone: no provenance is created for an existing store
+(none is ever fabricated), and no other field, file, or counter changes. A 1.0.0 store takes the
+1.0.0 delta above directly to 1.2.0.
 
 ## 10. Views and deliverables
 

@@ -514,6 +514,7 @@ opf/tools/_opf_importers.py text eol=lf
 opf/tools/_opf_ingest.py text eol=lf
 opf/tools/_opf_init.py text eol=lf
 opf/tools/_opf_init_contract.py text eol=lf
+opf/tools/_opf_init_operation.py text eol=lf
 opf/tools/_opf_init_substrate.py text eol=lf
 opf/tools/_opf_journal.py text eol=lf
 opf/tools/_opf_observe.py text eol=lf

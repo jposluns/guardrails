@@ -128,7 +128,7 @@ PRIOR_STANDARD_TOKEN = "devprocess"    # the RETIRED 1.0.0 discovery token (base
                                        # token the base declares, so acceptance is expressed as a token set.
 MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (manifest/pointer); a larger
                                        # store input is refused rather than read unboundedly (SECA)
-SUPPORTED_SPEC_VERSION = "1.1.0"       # the OPFiles base spec_version this tooling implements; a store
+SUPPORTED_SPEC_VERSION = "1.2.0"       # the OPFiles base spec_version this tooling implements; a store
                                        # declaring an OLDER spec_version is fail-closed with a distinct
                                        # migration-needed finding naming the `opf upgrade` remedy (spec 9.x)
 

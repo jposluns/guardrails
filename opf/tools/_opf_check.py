@@ -88,6 +88,10 @@ COUNTERS_NAME = "counters.toml"
 VERSION_NAME = "version.toml"
 WORKLOG_NAME = "worklog.toml"
 LEASE_NAME = "lease.toml"                  # present only while the single-writer lease is held (spec 5.7)
+# The managed bootstrap provenance a coupled D2b `opf init` writes (OPF-INIT-D2B "Bootstrap Provenance",
+# base spec 1.2.0): a managed machine-store leaf when present, never required (an upgraded D2a store has
+# none, and none is ever fabricated for it).
+INIT_PROVENANCE_NAME = "init.toml"
 ARCHIVE_DIRNAME = "archive"
 ARCHIVE_MANIFEST_NAME = "archive.toml"
 EVIDENCE_FORMAT = "opf.evidence.inventory/v1"   # homes-2 per-bundle inventory format (spec 4.2)
@@ -1981,7 +1985,8 @@ def classify_containment(manifest_data, machine_rel):
                 malformed.append(
                     "C-CONTAINMENT: [unmanaged] path entry {} is not a contained store-relative string "
                     "(spec 14.2); the unmanaged declaration cannot be evaluated".format(_safe_display(p)))
-    ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, WORKLOG_NAME, LEASE_NAME})
+    ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, WORKLOG_NAME, LEASE_NAME,
+                              INIT_PROVENANCE_NAME})
     # Importer namespaces (legacy_fragment) are schema-deferred and, per the decoupled D6 design, are NOT
     # declared in the manifest [types]; their type index (e.g. legacy_fragment.index.toml) is therefore a
     # managed leaf IF PRESENT even without a declaration, mirroring C-COUNTERS' optional_namespaces

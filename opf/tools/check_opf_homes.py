@@ -826,6 +826,10 @@ def boundary_self_test():
         lambda: home_journal.recover_transaction(cap, "import", run)))
     cap._released = False
     cap._acquirer_pid = -1
+    # OPF-D2B PR3a: the acquirer identity now spans (pid, pid-start), so this foreign-acquirer
+    # capability must carry a pid-start too; -1 keeps the identity foreign, yielding a clean refusal
+    # rather than an unset-slot AttributeError.
+    cap._acquirer_pid_start = -1
     check("internal-api-foreign-acquirer-refused", lambda: refuses(
         lambda: home_journal.recover_transaction(cap, "import", run)))
     cap._claim.acquire()
@@ -1077,10 +1081,12 @@ def self_test():
                 block.replace("# <<< opf-managed <<<", "# >>> opf-managed >>>")):
         check("gitignore-drift-{!r}".format(bad), lambda: not store.homes_gitignore_matches(bad))
 
-    check("inert-version", lambda: store.SUPPORTED_SPEC_VERSION == "1.1.0")
+    # OPF-D2B PR3a (decision 5): the base spec_version bump 1.1.0 -> 1.2.0 is an intended change
+    # (init.toml provenance, with a tested opf upgrade route), no longer inert.
+    check("inert-version", lambda: store.SUPPORTED_SPEC_VERSION == "1.2.0")
     check("inert-homes", lambda: store.SUPPORTED_HOMES == 1
           and store.homes_generation({"opf": {"homes": 2}}) == 1)
-    check("inert-init", lambda: init._manifest_model()["opf"]["spec_version"] == "1.1.0"
+    check("inert-init", lambda: init._manifest_model()["opf"]["spec_version"] == "1.2.0"
           and "homes" not in init._manifest_model()["opf"])
     check("inert-import", lambda: (importer.IMPORTS_REL, importer.IMPORT_OPS_REL, importer.IMPORT_ARCHIVE_REL) ==
           (".working/imports", ".aiqt/import", ".aiqt/import-archive"))
