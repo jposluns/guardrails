@@ -8,8 +8,10 @@ stdlib-only, Linux/macOS.
 
 The substrate home is <control-root>/opf-init/, a SIBLING of the operation lock's opf-oplock/
 control directory under the SAME authoritative control root (the common git directory the lock
-module resolves through git itself, the ENCLOSING repository's for a store nested inside one, or
-the store root when neither it nor any ancestor carries a .git entry). It COMPOSES the merged lock
+module resolves through git itself, or, for a store nested inside a repository, that store's own
+home keyed by its path relative to the ENCLOSING repository's toplevel beneath that repository's
+common git dir, so distinct nested stores never see each other's operations, or the store root
+when neither it nor any ancestor carries a .git entry). It COMPOSES the merged lock
 facility (_opf_oplock) rather than reinventing it: the control-root resolution (the shared
 _control_root_dir, over _classify_git_entry and _git_common_dir), the single-component
 control-home open (_open_control_dir, parameterized for this second home), the no-follow dir_fd
@@ -388,7 +390,10 @@ def _open_control_root(store_root):
     module's own shared resolution (_opf_oplock._control_root_dir: the three-way no-follow .git
     classification at the store root and, when it has none, at every ancestor; git itself answers
     for a git store or an enclosing repository; never a fallback). Returns (control_root_fd,
-    control_root_desc); the caller owns and closes the fd. Every failure refuses."""
+    control_root_desc); the caller owns and closes the fd. For a store NESTED in a repository the
+    control root is that store's own keyed home (_opf_oplock._open_store_home), opened and never
+    created here: when it is genuinely absent the fd is None (no operation was ever acquired for
+    that store). Every other failure refuses."""
     res = _opf_store.resolve_store(store_root)
     if res.status != _opf_store.RESOLVED:
         raise InitSubstrateError("no RESOLVED machine store at {} ({}: {}); the resume substrate "
@@ -402,17 +407,27 @@ def _open_control_root(store_root):
             store_root_abs, exc))
     try:
         try:
-            desc = _opf_oplock._control_root_dir(store_fd, store_root_abs)
+            resolved = _opf_oplock._control_root_dir(store_fd, store_root_abs)
         except _opf_oplock.OpLockError as exc:
             raise InitSubstrateError(str(exc))
-        if desc is None:
+        if resolved is None:
             return os.dup(store_fd), store_root_abs
+        desc, key = resolved
         try:
             fd = _opf_store._open_dir_nofollow(desc)
         except OSError as exc:
             raise InitSubstrateError("cannot open common git dir {} no-follow ({})".format(
                 desc, exc))
-        return fd, desc
+        if key is None:
+            return fd, desc
+        try:
+            try:
+                home_fd = _opf_oplock._open_store_home(fd, desc, key, False)
+            except _opf_oplock.OpLockError as exc:
+                raise InitSubstrateError(str(exc))
+        finally:
+            os.close(fd)
+        return home_fd, os.path.join(desc, _opf_oplock.CONTROL_DIRNAME, key)
     finally:
         os.close(store_fd)
 
@@ -448,6 +463,10 @@ def _open_ops_for_write(cap):
     the SAME control tree the held flock excludes for; a mismatch refuses. Returns the ops/ dir
     fd; the caller owns and closes it."""
     control_root_fd, desc = _open_control_root(cap.store_root)
+    if control_root_fd is None:
+        raise InitSubstrateError("the resolved control root {} is absent, so it does not carry "
+                                 "the held capability's control directory; refusing to write the "
+                                 "substrate under a different control tree".format(desc))
     home_fd = None
     try:
         try:
@@ -739,6 +758,8 @@ def classify_operations(store_root):
     resume dispatch runs it only after the lock module's explicit recovery has succeeded.
     """
     control_root_fd, desc = _open_control_root(store_root)
+    if control_root_fd is None:
+        return ResumeSurvey(NO_SUBSTRATE, ())
     home_fd = None
     ops_fd = None
     try:
@@ -1435,7 +1456,8 @@ def _t_s14_nested_store_home(d, env):
     wt_nested = os.path.join(wt, "nested")
     cap = _opf_oplock.acquire_operation(nested, "opf-init")
     sub = begin_operation(cap, _st_plan_bytes(cap.op_id))
-    plan = os.path.join(_st_sub_ops(main), cap.op_id, PLAN_NAME)
+    plan = os.path.join(_opf_oplock._st_nested_home(main, "nested"), SUBSTRATE_DIRNAME,
+                        OPS_DIRNAME, cap.op_id, PLAN_NAME)
     assert os.path.isfile(plan), \
         "a nested store's substrate home must live under the ENCLOSING common git dir"
     record_phase(sub, cap, "plan-recorded")
@@ -1459,6 +1481,35 @@ def _t_s14_nested_store_home(d, env):
     _st_expect_refusal(classify_operations, store, needle="rev-parse")
     assert not os.path.exists(os.path.join(store, SUBSTRATE_DIRNAME)), \
         "a refused enclosing state must never fall back to the store root"
+
+
+def _t_s15_distinct_nested_homes(d, env):
+    """T-s15 (claude MED2, gemini MED): DISTINCT stores nested in ONE repository keep DISTINCT
+    substrate homes, so the classifier sees only its OWN store's operations: an operation
+    recorded for pkg-a is INTACT for pkg-a in a sibling worktree and invisible to pkg-b, which
+    reads NO-SUBSTRATE. Before the fix pkg-b's survey reported pkg-a's operation as INTACT."""
+    mono = _opf_oplock._st_git_store(d, "mono", env)
+    for rel in ("pkg-a", "pkg-b"):
+        _opf_oplock._st_store_tree(os.path.join(mono, rel))
+    _opf_oplock._st_git(["add", "-A"], mono, env)
+    _opf_oplock._st_git(["-c", "user.name=opf-selftest", "-c",
+                         "user.email=selftest@example.invalid", "commit", "-q", "-m", "stores"],
+                        mono, env)
+    wt = os.path.join(d, "wt")
+    _opf_oplock._st_git(["worktree", "add", "--detach", "-q", wt], mono, env)
+    cap = _opf_oplock.acquire_operation(os.path.join(mono, "pkg-a"), "opf-init")
+    sub = begin_operation(cap, _st_plan_bytes(cap.op_id))
+    record_phase(sub, cap, "plan-recorded")
+    close_operation(sub)
+    _opf_oplock.release_operation(cap)
+    survey = classify_operations(os.path.join(wt, "pkg-a"))
+    assert survey.status == OPERATIONS, survey.status
+    assert [(r.op_id, r.status) for r in survey.operations] == [(cap.op_id, INTACT)], \
+        [(r.op_id, r.status, r.detail) for r in survey.operations]
+    for store in (os.path.join(mono, "pkg-b"), os.path.join(wt, "pkg-b"), mono):
+        survey = classify_operations(store)
+        assert survey.status == NO_SUBSTRATE, (store, survey.status, [
+            (r.op_id, r.status) for r in survey.operations])
 
 
 def self_test():
@@ -1508,6 +1559,8 @@ def self_test():
          _t_s13_midread_containment),
         ("T-s14 a nested store's substrate home is shared under the enclosing common git dir",
          _t_s14_nested_store_home),
+        ("T-s15 distinct nested stores keep distinct substrate homes",
+         _t_s15_distinct_nested_homes),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-substrate-selftest-"))

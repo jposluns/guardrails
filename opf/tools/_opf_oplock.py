@@ -15,8 +15,12 @@ The lock identity is THREE LEGS, held together or the acquisition fails and unwi
      absent there, at each ancestor nearest first (layout decision E, F-OPLOCK-NESTED-NOT-E: a
      store NESTED inside a repository anchors at that ENCLOSING repository's common git dir,
      asked of git at the enclosing toplevel once git's own --show-toplevel at the store root
-     names that same directory, by path and identity, with the store inside it, so the same
-     nested store in two worktrees shares one lock): genuine absence everywhere roots the control
+     names that same directory, by path and identity, with the store inside it, in a home KEYED
+     by the store's path relative to that toplevel, <common-dir>/opf-oplock/store-<sha256 hex>,
+     that path validated against git's own --show-prefix, so the same nested store in two
+     worktrees shares one lock while distinct stores nested in one repository share nothing; a
+     store nested inside a git SUBMODULE refuses, because a submodule's common git dir is per
+     superproject worktree): genuine absence everywhere roots the control
      tree at the store root; a real directory or a regular gitdir-pointer file asks git; ANYTHING
      else (a symlink, live or dangling, a FIFO, an unreadable entry, a failed or missing git on a
      git store, or a toplevel git names differently) refuses, never falls back to the repository
@@ -263,10 +267,16 @@ machine store legitimately lives in, and is disclosed here rather than prevented
 common-dir path with a symlinked ancestor is refused by the no-follow walk rather than served; the
 enclosing-repository walk recognizes a repository only by a .git entry at an ancestor, so an
 ancestor that is itself a bare repository or a git directory carrying no .git entry is not
-recognized and the store roots at its own root, as before; git's own discovery stops at a
-filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM is scrubbed with every GIT_ variable), so a
-store nested on a different filesystem from its enclosing repository, like one whose toplevel git
-spells differently (a case-insensitive filesystem), refuses rather than resolving; an ancestor
+recognized and the store roots at its own root, as before; a store root that is ITSELF a
+submodule checkout (its own .git entry) anchors at its own common git dir, as before, which is
+per superproject worktree, so that store checked out in two superproject worktrees takes two
+independent locks (only a store NESTED inside a submodule is refused); a nested store's home is
+keyed by its path relative to the toplevel, so a store moved or renamed inside its repository
+takes a new, empty home and its earlier records stay under the old key; git's own discovery stops
+at a filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM is scrubbed with every GIT_ variable),
+so a store nested on a different filesystem from its enclosing repository, like one whose toplevel
+or whose path inside it (--show-prefix) git spells differently (a case-insensitive filesystem),
+refuses rather than resolving; an ancestor
 .git created or removed after the walk and git's answer is not observed by that acquisition (the
 point-in-time bound the store-root classification already carries); and
 this is the LOCAL in-repository serialization boundary, not a remote-visible lease. Atomic
@@ -371,6 +381,7 @@ SKIPPED because its precondition cannot be built on this host), never a pass.
 """
 import errno
 import fcntl
+import hashlib
 import os
 import shutil
 import signal
@@ -395,6 +406,9 @@ import _opf_store          # noqa: E402
 # active, the active record; nothing else is created there (the earlier draft's ops/<uuid>/phases
 # tree is retired with the nested-lock scope-out).
 CONTROL_DIRNAME = "opf-oplock"
+# A store NESTED in a repository keys its control root <common-dir>/opf-oplock/<prefix><sha256 hex
+# of its path relative to the toplevel> (_nested_store_key); no other opf-oplock entry uses it.
+NESTED_HOME_PREFIX = "store-"
 ANCHOR_NAME = "mutex.lock"
 ACTIVE_NAME = "active.toml"
 
@@ -1023,10 +1037,10 @@ def _git_common_dir(store_root):
     return _git_rev_parse_path(store_root, "--git-common-dir")
 
 
-def _git_rev_parse_path(store_root, option):
-    """The one path git rev-parse prints for `option` (--git-common-dir or --show-toplevel) at
-    `store_root`, under the explicit -C binding, the scrubbed environment, and the fail-closed
-    output discipline _git_common_dir documents; a relative answer is joined to `store_root`."""
+def _git_rev_parse_output(store_root, option):
+    """The whole decoded output of git rev-parse `option` at `store_root`, under the explicit -C
+    binding and the scrubbed environment _git_common_dir documents; a missing git, a launch
+    failure, a timeout, a nonzero exit, or undecodable output refuses."""
     git = shutil.which("git")
     if git is None:
         raise OpLockError("git binary not found on PATH while the store or an enclosing directory "
@@ -1044,10 +1058,17 @@ def _git_rev_parse_path(store_root, option):
         raise OpLockError("git rev-parse {} failed at {} (exit {}); refusing, never a "
                           "repository-root fallback".format(option, store_root, proc.returncode))
     try:
-        out = proc.stdout.decode("utf-8", errors="strict")
+        return proc.stdout.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         raise OpLockError("git rev-parse {} output at {} is not decodable; "
                           "refusing".format(option, store_root))
+
+
+def _git_rev_parse_path(store_root, option):
+    """The one path git rev-parse prints for `option` (--git-common-dir or --show-toplevel) at
+    `store_root`, under the explicit -C binding, the scrubbed environment, and the fail-closed
+    output discipline _git_common_dir documents; a relative answer is joined to `store_root`."""
+    out = _git_rev_parse_output(store_root, option)
     # git prints the path followed by EXACTLY one newline record terminator. Strip ONLY that one
     # terminator, never arbitrary trailing whitespace: a directory path may legitimately end in a
     # space or a tab, and a blanket .strip() would silently redirect the control root to a
@@ -1108,28 +1129,97 @@ def _require_git_toplevel(store_root, toplevel, ident):
                           "classified; refusing, never a store-root fallback".format(answer))
 
 
+def _refuse_submodule(toplevel):
+    """Refuse a store nested inside a git SUBMODULE: a submodule's common git dir is per
+    superproject worktree (<super>/.git/worktrees/<wt>/modules/<sm> in a linked worktree), so the
+    same nested store in two superproject worktrees would anchor at two different common dirs and
+    take two independent locks. git's own rev-parse --show-superproject-working-tree at the
+    toplevel prints nothing for a repository that is no submodule; any output refuses."""
+    out = _git_rev_parse_output(toplevel, "--show-superproject-working-tree")
+    if out:
+        raise OpLockError("the repository at {} enclosing the store is a git submodule of {}; "
+                          "refusing: a submodule's common git dir is per superproject worktree, so "
+                          "one lock could not be shared across those worktrees".format(
+                              toplevel, out[:-1] if out.endswith("\n") else out))
+
+
+def _nested_store_key(store_root, toplevel):
+    """The control-home key of a store NESTED in the repository at `toplevel`: NESTED_HOME_PREFIX
+    followed by the sha256 hex digest of the store's path relative to the toplevel ("/"
+    separated). The relative path is VALIDATED before it is encoded: every component is a proper
+    name (never empty, "." or ".."), and it must equal, byte for byte, the prefix git's own
+    rev-parse --show-prefix prints at the store root (a disagreement is ambiguous git state and
+    refuses). So the same store in any worktree of one repository keys the same home, and two
+    distinct stores never do."""
+    rel = store_root[len(toplevel.rstrip(os.sep)) + len(os.sep):]
+    parts = rel.split(os.sep)
+    if not rel or any(part in ("", ".", "..") for part in parts):
+        raise OpLockError("store root {} has no valid path relative to the git toplevel {}; "
+                          "refusing".format(store_root, toplevel))
+    rel = "/".join(parts)
+    prefix = _git_rev_parse_output(store_root, "--show-prefix")
+    if prefix != rel + "/\n":
+        raise OpLockError("git rev-parse --show-prefix at {} answered {!r}, not the store's path "
+                          "{!r} inside {}; refusing (ambiguous git state)".format(
+                              store_root, prefix, rel, toplevel))
+    return NESTED_HOME_PREFIX + hashlib.sha256(os.fsencode(rel)).hexdigest()
+
+
 def _control_root_dir(store_fd, store_root):
     """The ONE control-root resolution every consumer shares (the acquisition, and the resume
-    substrate's reads and writes), per layout decision E: the lock and the init resume substrate
-    live in the git COMMON dir, because a lock must be shared across worktrees. Returns the
-    authoritative common git directory's absolute path, or None when the store root itself is the
-    control root. A store root carrying its own .git asks git at the store root (unchanged). A
-    store root with GENUINELY no .git is examined for an ENCLOSING repository: the nearest ancestor
-    carrying a .git entry (_enclosing_git_toplevel), cross-checked against git's own toplevel and
-    prefix-validated (_require_git_toplevel), roots the control tree at THAT repository's common
-    git dir, so the same nested store in two worktrees of one repository contends on ONE anchor;
-    only when no ancestor carries a .git entry is the store root the control root. Unreadable,
-    malformed, or ambiguous git state at the store root or at any ancestor refuses (a
-    cannot-evaluate), never a fallback to the store root."""
+    substrate's reads and writes): the lock and the init resume substrate live in the git COMMON
+    dir, because a lock must be shared across the worktrees of ONE store. Returns None when the
+    store root itself is the control root, else (the authoritative common git directory's absolute
+    path, a key or None). A store root carrying its own .git asks git at the store root
+    (unchanged; key None: the common git dir is the control root). A store root with GENUINELY no
+    .git is examined for an ENCLOSING repository: the nearest ancestor carrying a .git entry
+    (_enclosing_git_toplevel), cross-checked against git's own toplevel and prefix-validated
+    (_require_git_toplevel), refused when that repository is a submodule (_refuse_submodule), and
+    keyed by the store's validated path relative to the toplevel (_nested_store_key): its control
+    root is <that repository's common git dir>/opf-oplock/<key> (_open_store_home), so the same
+    nested store in two worktrees contends on ONE anchor while distinct stores nested in one
+    repository never share an anchor, an active record, or a resume substrate. Only when no
+    ancestor carries a .git entry is the store root the control root. Unreadable, malformed, or
+    ambiguous git state at the store root or at any ancestor refuses (a cannot-evaluate), never a
+    fallback to the store root."""
     store_root = os.path.abspath(store_root)
     if _classify_git_entry(store_fd, store_root) == "present":
-        return _git_common_dir(store_root)
+        return _git_common_dir(store_root), None
     enclosing = _enclosing_git_toplevel(store_root)
     if enclosing is None:
         return None
     toplevel, ident = enclosing
     _require_git_toplevel(store_root, toplevel, ident)
-    return _git_common_dir(toplevel)
+    _refuse_submodule(toplevel)
+    key = _nested_store_key(store_root, toplevel)
+    return _git_common_dir(toplevel), key
+
+
+def _open_store_home(common_fd, common_desc, key, create):
+    """Open the keyed control root <common-dir>/opf-oplock/<key> of a store NESTED in a repository
+    (_control_root_dir); that store's own opf-oplock/ and opf-init/ homes live beneath it exactly
+    as they do under any other control root. With create=True (the acquisition) each single
+    component is opened, or created on genuine absence, restartably, by _open_control_dir. With
+    create=False (the resume substrate, which never creates the lock's tree) a genuinely absent
+    component returns None, and anything but a plain control directory of ours refuses. Returns
+    the keyed directory's descriptor, which the caller owns, or None."""
+    with _FdOwner() as owner:
+        parent, desc = common_fd, common_desc
+        for name in (CONTROL_DIRNAME, key):
+            label = "{}/{}".format(desc, name)
+            if create:
+                fd = owner.adopt(_open_control_dir(parent, desc, dirname=name))
+            else:
+                st = _lstat_at(parent, name, label)
+                if st is None:
+                    return None
+                if not stat.S_ISDIR(st.st_mode):
+                    raise OpLockError("control directory name {} is not a plain directory; "
+                                      "refusing".format(label))
+                fd = owner.adopt(_open_dir_at(parent, name, label))
+                _validate_ctl_dir_fd(fd, label)
+            parent, desc = fd, label
+        return owner.transfer(parent)
 
 
 def _open_control_dir(control_root_fd, control_root_desc, dirname=CONTROL_DIRNAME):
@@ -2463,13 +2553,21 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             store_root_abs, res.machine_rel))
         machine_path = os.path.join(store_root_abs, res.machine_rel)
 
-        control_root_desc = _control_root_dir(store_fd, store_root_abs)
-        if control_root_desc is None:
+        resolved = _control_root_dir(store_fd, store_root_abs)
+        if resolved is None:
             control_root_fd = owner.adopt(_dup_store_root(store_fd))
             control_root_desc = store_root_abs
         else:
+            control_root_desc, store_key = resolved
             control_root_fd = owner.adopt(_open_path_dir_nofollow(control_root_desc,
                                                                   "common git dir"))
+            if store_key is not None:
+                # A NESTED store: its control root is its keyed home beneath the common git dir.
+                common_fd = control_root_fd
+                control_root_fd = owner.adopt(_open_store_home(common_fd, control_root_desc,
+                                                               store_key, True))
+                owner.close(common_fd, "cannot close the common-git-dir descriptor ({})")
+                control_root_desc = os.path.join(control_root_desc, CONTROL_DIRNAME, store_key)
         ctl_fd = owner.adopt(_open_control_dir(control_root_fd, control_root_desc))
         # Ownership of the control-root descriptor is cleared BEFORE its close, so a failing close
         # (Linux has released the number even then) can never lead the unwind to close whatever
@@ -3174,6 +3272,13 @@ def _st_ctl_dir(root):
     return os.path.join(root, ".git", CONTROL_DIRNAME)
 
 
+def _st_nested_home(root, rel):
+    """The keyed control root of the store nested at `rel` ("/" separated) inside the repository
+    at `root`, computed independently of _nested_store_key."""
+    return os.path.join(root, ".git", CONTROL_DIRNAME,
+                        NESTED_HOME_PREFIX + hashlib.sha256(rel.encode("utf-8")).hexdigest())
+
+
 def _st_lease_path(root):
     return os.path.join(root, ".working", "toml", _opf_check.LEASE_NAME)
 
@@ -3662,7 +3767,8 @@ def _t_c10_git_classification(d, env):
 
 def _t_e1_nested_store_shared_anchor(d, env):
     """T-e1 (F-OPLOCK-NESTED-NOT-E, layout decision E): a store NESTED inside a git repository (no
-    .git of its own) anchors at the ENCLOSING repository's common git dir, so the same nested store
+    .git of its own) anchors at the ENCLOSING repository's common git dir, in its home keyed by
+    its path relative to the toplevel (<common>/opf-oplock/store-<key>), so the same nested store
     in two worktrees of one repository contends on ONE anchor while each keeps its own lease, and
     nothing is created at either nested store root. Before the fix each nested store rooted its
     own control tree at the store root, so the sibling worktree took a second, independent lock.
@@ -3674,8 +3780,8 @@ def _t_e1_nested_store_shared_anchor(d, env):
     wt = os.path.join(d, "wt")
     _st_git(["worktree", "add", "--detach", "-q", wt], main, env)
     wt_nested = os.path.join(wt, "nested")
-    anchor = os.path.join(_st_ctl_dir(main), ANCHOR_NAME)
-    active = os.path.join(_st_ctl_dir(main), ACTIVE_NAME)
+    anchor = os.path.join(_st_nested_home(main, "nested"), CONTROL_DIRNAME, ANCHOR_NAME)
+    active = os.path.join(_st_nested_home(main, "nested"), CONTROL_DIRNAME, ACTIVE_NAME)
     cap = acquire_operation(nested, "op-main-nested")
     assert os.path.isfile(anchor), \
         "a nested store's anchor must live under the ENCLOSING common git dir"
@@ -3707,7 +3813,8 @@ def _t_e1_nested_store_shared_anchor(d, env):
     assert os.path.isfile(os.path.join(plain, CONTROL_DIRNAME, ANCHOR_NAME))
     release_operation(cap)
     funcs = _st_named("_control_root_dir", "_enclosing_git_toplevel", "_require_git_toplevel",
-                      "_git_rev_parse_path")
+                      "_git_rev_parse_path", "_git_rev_parse_output", "_refuse_submodule",
+                      "_nested_store_key", "_open_store_home")
     assert funcs, "the enclosing-repository resolution must exist to be swept"
 
     def prepare():
@@ -3725,7 +3832,8 @@ def _t_e1_nested_store_shared_anchor(d, env):
             os.unlink(path)
         assert not left, "nothing may be left behind ({}): {}".format(where, left)
 
-    failure = _st_in_child(lambda: _st_signal_sweep(main, funcs, prepare, invoke, settle, check))
+    failure = _st_in_child(lambda: _st_signal_sweep(main, funcs, prepare, invoke, settle, check,
+                                                    ctl=os.path.dirname(anchor)))
     assert failure is None, failure
 
 
@@ -3785,6 +3893,70 @@ def _t_e3_enclosing_git_unreadable(d, env):
         os.chmod(pointer, 0o600)
     assert not os.path.exists(os.path.join(store, CONTROL_DIRNAME)), \
         "an unreadable enclosing .git must never fall back to the store root"
+
+
+def _t_e4_distinct_nested_stores(d, env):
+    """T-e4 (claude MED2, gemini MED): DISTINCT stores nested in ONE repository never share an
+    anchor or an active record: each is keyed by its path relative to the enclosing toplevel, so
+    while one is held the other, and the repository's own top-level store, still acquire; the
+    SAME nested store in a sibling worktree still contends (the same relative path, the same
+    key). Before the fix every store nested in one repository contended on the one
+    <common-dir>/opf-oplock anchor."""
+    mono = _st_git_store(d, "mono", env)
+    for rel in ("pkg-a", os.path.join("libs", "pkg-b")):
+        _st_store_tree(os.path.join(mono, rel))
+    _st_git(["add", "-A"], mono, env)
+    _st_git(["-c", "user.name=opf-selftest", "-c", "user.email=selftest@example.invalid",
+             "commit", "-q", "-m", "stores"], mono, env)
+    wt = os.path.join(d, "wt")
+    _st_git(["worktree", "add", "--detach", "-q", wt], mono, env)
+    pkg_a, pkg_b = os.path.join(mono, "pkg-a"), os.path.join(mono, "libs", "pkg-b")
+    cap_a = acquire_operation(pkg_a, "op-a")
+    cap_b = acquire_operation(pkg_b, "op-b")     # a DISTINCT nested store: no contention
+    cap_top = acquire_operation(mono, "op-top")  # the repository's own store: no contention
+    _st_expect_refusal(acquire_operation, os.path.join(wt, "pkg-a"), "op-a-wt", needle="held")
+    homes = set()
+    for cap in (cap_a, cap_b, cap_top):
+        st = os.fstat(cap._anchor_fd)
+        homes.add((st.st_dev, st.st_ino))
+    assert len(homes) == 3, "distinct stores must hold distinct anchors"
+    for cap in (cap_top, cap_b, cap_a):
+        release_operation(cap)
+    cap = acquire_operation(os.path.join(wt, "libs", "pkg-b"), "op-b-wt")
+    _st_expect_refusal(acquire_operation, pkg_b, "op-b", needle="held")
+    release_operation(cap)
+    for store in (pkg_a, pkg_b):
+        assert not os.path.exists(os.path.join(store, CONTROL_DIRNAME)), \
+            "no control tree may be created at a nested store root ({})".format(store)
+    real_output = _git_rev_parse_output
+
+    def other_prefix(store_root, option):   # git spelling the store's path differently
+        out = real_output(store_root, option)
+        return out.upper() if option == "--show-prefix" else out
+
+    globals()["_git_rev_parse_output"] = other_prefix
+    try:
+        _st_expect_refusal(acquire_operation, pkg_a, "op-a", needle="--show-prefix")
+    finally:
+        globals()["_git_rev_parse_output"] = real_output
+
+
+def _t_e5_submodule_nested_store(d, env):
+    """T-e5 (claude MED1): a store nested inside a git SUBMODULE refuses with a reason naming the
+    submodule: its common git dir is per superproject worktree (.git/worktrees/<wt>/modules/<sm>),
+    so the same store in two superproject worktrees would take two independent locks. Nothing is
+    created at the store root or in the submodule's git dir. Before the fix it acquired."""
+    sub, _nested = _st_nested_git_store(d, "sub", env)
+    sup = _st_git_store(d, "super", env)
+    _st_git(["-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sm"], sup, env)
+    _st_git(["-c", "user.name=opf-selftest", "-c", "user.email=selftest@example.invalid",
+             "commit", "-q", "-m", "submodule"], sup, env)
+    store = os.path.join(sup, "sm", "nested")
+    _st_expect_refusal(acquire_operation, store, "op", needle="submodule")
+    assert not os.path.exists(os.path.join(store, CONTROL_DIRNAME)), \
+        "a refused submodule store must never fall back to the store root"
+    assert not os.path.exists(os.path.join(sup, ".git", "modules", "sm", CONTROL_DIRNAME)), \
+        "a refused submodule store must create nothing in the submodule's git dir"
 
 
 def _t_c3_companion(d, env):
@@ -4579,9 +4751,10 @@ def _t_f3_3_control_root_close_fd_reuse(d, env):
     release_operation(cap)
 
 
-def _st_anchor_free(root):
-    """True when the mutex anchor's flock is FREE (a fresh open file description can take it)."""
-    fd = os.open(os.path.join(_st_ctl_dir(root), ANCHOR_NAME), os.O_RDWR | os.O_CLOEXEC)
+def _st_anchor_free(root, ctl=None):
+    """True when the mutex anchor's flock is FREE (a fresh open file description can take it);
+    the anchor is root's own unless `ctl` names another control directory."""
+    fd = os.open(os.path.join(ctl or _st_ctl_dir(root), ANCHOR_NAME), os.O_RDWR | os.O_CLOEXEC)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -5222,7 +5395,7 @@ def _st_section_codes():
     return set(f.__code__ for f in held)
 
 
-def _st_signal_sweep(root, funcs, prepare, invoke, settle, check):
+def _st_signal_sweep(root, funcs, prepare, invoke, settle, check, ctl=None):
     """The real-signal sweep engine (fix round 5); run it INSIDE a child (_st_in_child). A SIGINT
     handler is installed that raises KeyboardInterrupt and records whether it ran inside a critical
     section (_st_section_codes). For each function in `funcs`, its own line events are counted on
@@ -5230,7 +5403,9 @@ def _st_signal_sweep(root, funcs, prepare, invoke, settle, check):
     event k in turn: prepare() sets the scenario up, a REAL SIGINT is sent at event k
     (_st_arm_signal), and invoke() must raise the KeyboardInterrupt, delivered exactly once and
     OUTSIDE every critical section, with no descriptor-count delta and the anchor free; check()
-    verifies the scenario's own end state. Returns the number of events swept."""
+    verifies the scenario's own end state. `ctl` names the control directory whose anchor is
+    probed when it is not root's own (a nested store's keyed home). Returns the number of events
+    swept."""
     section = _st_section_codes()
     witness = {"delivered": 0, "inside": 0}
 
@@ -5270,7 +5445,7 @@ def _st_signal_sweep(root, funcs, prepare, invoke, settle, check):
                 "the signal was delivered INSIDE a critical section ({})".format(where)
             check(ctx, where)
             assert _st_open_fds() == baseline, "no descriptor may leak ({})".format(where)
-            assert _st_anchor_free(root), "the anchor must be unlocked ({})".format(where)
+            assert _st_anchor_free(root, ctl), "the anchor must be unlocked ({})".format(where)
             swept += 1
     return swept
 
@@ -7772,6 +7947,10 @@ def self_test():
          _t_e2_enclosing_git_refusals),
         ("T-e3 an unreadable enclosing .git refuses, no store-root fallback",
          _t_e3_enclosing_git_unreadable),
+        ("T-e4 distinct stores nested in one repository hold distinct anchors",
+         _t_e4_distinct_nested_stores),
+        ("T-e5 a store nested in a submodule refuses, naming the submodule",
+         _t_e5_submodule_nested_store),
         ("T-c12 contention and double release refuse", _t_c12_contention_and_double_release),
         ("T-c13 FIFO control names cannot block or pass", _t_c13_fifo_control_names),
         ("T-c8/T-c14 nested-lock scope-out (PR3)", _t_c8_c14_scope_out),
