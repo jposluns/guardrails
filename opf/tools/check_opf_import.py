@@ -3982,8 +3982,8 @@ def _self_test():
         # missing span then raises TypeError instead of the located row FINDING) each leaves the self-test at
         # exit 0. Each fixture starts from a single otherwise-valid row and fires the row-check BEFORE the
         # byte-repro block, so no report regen is needed; grade with the row-malformed credit (so the detached
-        # twin is graded too) and assert proposals-artifact fires ALONE with the row-malformed detail. F-A's
-        # dynamic proposals-row assertion below auto-covers these labels, so they are NOT hand-listed anywhere.
+        # twin is graded too) and assert proposals-artifact fires ALONE with the row-malformed detail. Each label
+        # self-asserts fires-alone here and is twin-graded via graded()'s `-detached` equality expect.
         for span_suffix, span_mutate in (
                 ("nonint", lambda row: row.update(span=[1.5, 2.5])),
                 ("bool", lambda row: row.update(span=[True, False])),
