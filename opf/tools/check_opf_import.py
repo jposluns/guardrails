@@ -2313,17 +2313,28 @@ def _check_staged_run(rd, homes=None):
 
 def _self_test_gate_generation_sites(expect):
     """Every read of the generation, or of a value derived from it (by assignment or under a generation-dependent
-    branch), in the staged-run gate is one of these statements. A new alias must itself read a name listed here, so
-    any new generation dependence in ordinary grading fails this pin until it is deliberately added."""
+    branch), in the staged-run gate is one of these statements. The pin guards ordinary edits: a new read of a listed
+    name, or a new statement assigning one, fails it until the statement is deliberately added, and a dynamic scope
+    or code lookup (locals(), vars(), globals(), eval, exec, compile, __import__) is refused outright. It does not
+    see a name first assigned inside a generation-dependent branch that is not listed here; the behavioural variants
+    (_self_test_gate_generation and _self_test_gate_generation_applied) cover those on their fixtures, by requiring
+    every generation-independent result to keep its generation-1 value under generation 2 and every invalid
+    generation."""
     import ast
     import inspect
     src = inspect.getsource(_check_staged_run)
     lines = src.split("\n")
+    tree = ast.parse(src)
     names = ("gen", "homes", "gen_error", "legacy_generation", "fd", "ing_results", "marker", "ingest_is_run",
-             "durable_unavailable", "ingest_bundle", "ingest_load_failed", "ingest_load_detail")
-    found = sorted((n.id, lines[n.lineno - 1].strip()) for n in ast.walk(ast.parse(src))
+             "durable_unavailable", "ingest_bundle", "ingest_load_failed", "ingest_load_detail", "acc_raw",
+             "results")
+    found = sorted((n.id, lines[n.lineno - 1].strip()) for n in ast.walk(tree)
                    if isinstance(n, ast.Name) and n.id in names)
     expected = sorted((
+        ('acc_raw', 'acc_raw = None'),
+        ('acc_raw', 'acc_raw = rd.read_bytes(imp.ACCEPTANCE_NAME)'),
+        ('acc_raw', 'if acc_raw is not None and imp._acceptance_marks_ingest(acc_raw):'),
+        ('acc_raw', 'if acc_raw is not None and imp._acceptance_marks_ingest(acc_raw):'),
         ('durable_unavailable', 'durable_unavailable = ""'),
         ('durable_unavailable', 'durable_unavailable = "durable acceptance cannot be located ({})".format(exc)'),
         ('durable_unavailable', 'record(cid, not durable_unavailable, durable_unavailable or "not an ingest run")'),
@@ -2391,11 +2402,76 @@ def _self_test_gate_generation_sites(expect):
         ('marker', 'marker = "durable import evidence"'),
         ('marker', 'marker = imp.ACCEPTANCE_NAME'),
         ('marker', 'marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)'),
+        ('results', 'if cid not in results:'),
+        ('results', 'results = {}'),
+        ('results', 'results[cid] = (bool(ok), detail)'),
+        ('results', 'return results'),
+        ('results', 'return results'),
     ))
     expect("gate-generation-read-sites", found == expected)
+    # A dynamic lookup reads the generation without naming it; the gate makes none.
+    dynamic = ("locals", "vars", "globals", "eval", "exec", "compile", "__import__")
+    expect("gate-generation-no-dynamic-access", not any(
+        (isinstance(n, ast.Name) and n.id in dynamic) or (isinstance(n, ast.Attribute) and n.attr in dynamic)
+        for n in ast.walk(tree)))
+
+
+def _self_test_gate_generation_cases():
+    """The invalid generations every generation test sweeps, as (label, supplied value); None is unsupplied."""
+    return (("bool", True), ("false", False), ("string", "2"), ("one-string", "1"), ("future", 3), ("zero", 0),
+            ("negative", -1), ("float", 2.0), ("one-float", 1.0), ("nan", float("nan")), ("unsupplied", None))
+
+
+def _self_test_gate_generation_accept(rd, files, fixture):
+    """Stage a valid acceptance on the synthetic ordinary run `rd`, then apply the fixture's one corruption."""
+    import _opf_import as imp
+    import _opf_emit
+    rep = rd.load_toml("report.toml")
+    rows = {(r["source_path"], tuple(r["span"])): r for r in rd.load_toml("mappings.toml")["mapping"]}
+    decisions = []
+    for fr in rd.load_toml("inventory.toml")["fragment"]:
+        row = rows[(fr["source_path"], tuple(fr["span"]))]
+        decisions.append({"fragment_id": fr["fragment_id"], "decision": "accept", "origin": row["origin"],
+                          "proposed_state": row["state"]})
+    rid = rd.path.name
+    acc = {"format": imp.ACCEPTANCE_FORMAT, "run_id": rid, "plan_digest": rep["plan_digest"],
+           "inventory_digest": rep["inventory_digest"], "reviewed_at": "2026-09-09T12:00:00Z",
+           "actor": {"declared": "Gate Reviewer", "context": {"os_user": "", "git_identity": "", "hostname": ""}},
+           "decisions": decisions}
+    if fixture == "accepted-run-id":
+        acc["run_id"] = rid[:-1] + ("1" if rid[-1] != "1" else "2")
+    files[imp.ACCEPTANCE_NAME] = imp._emit_acceptance_bytes(acc)
+    rd.tree[imp.ACCEPTANCE_NAME] = "file"
+    field = {"accepted-verdict-1": ("verdict", 1), "accepted-verdict-false": ("verdict", False),
+             "accepted-not-ready": ("promotion_ready", False)}.get(fixture)
+    if field is not None:
+        rep[field[0]] = field[1]
+        files["report.toml"] = _opf_emit.emit(rep).encode("utf-8")
+
+
+def _self_test_gate_generation_applied(expect, label, run_dir):
+    """A genuinely applied run graded on disk, with transaction grading live (no store failure is injected): every
+    generation-independent id keeps its generation-1 result under generation 2 and under every invalid generation,
+    and every invalid generation fails each dependent id. Returns the generation-1 results."""
+    from unittest.mock import patch
+    import _opf_store
+    dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
+    with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+        baseline = check_staged_run(run_dir, homes=1)
+        for case, homes in (("generation-2", 2),) + _self_test_gate_generation_cases():
+            result = check_staged_run(run_dir) if homes is None else check_staged_run(run_dir, homes=homes)
+            expect("gate-generation-applied-{}-{}".format(label, case),
+                   set(result) == set(EXPECTED_CHECKS)
+                   and all(result[cid] == value for cid, value in baseline.items() if cid not in dependent)
+                   and (case == "generation-2" or not any(result[cid][0] for cid in dependent)))
+    return baseline
+
 
 def _self_test_gate_generation(expect):
-    """Invalid generations fail every dependent id without suppressing ordinary grading."""
+    """Invalid generations fail every dependent id without suppressing ordinary grading, and generation 2 changes no
+    generation-independent id of an ordinary run. The ordinary fixtures include a valid staged acceptance and
+    single-field corruptions of it (another run's id, verdict 1, verdict false, promotion_ready false), so a
+    generation-dependent bypass of one of those fields fails the comparison, whatever name carries it."""
     import sys
     from unittest.mock import patch
     import _opf_import as imp
@@ -2406,12 +2482,15 @@ def _self_test_gate_generation(expect):
     dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
     staged_acceptance = ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
                          "acceptance-completeness")
-    cases = (("bool", True), ("string", "2"), ("future", 3), ("float", 2.0),
-             ("nan", float("nan")), ("unsupplied", None))
-    for fixture in ("ordinary", "ordinary-marked-acceptance", "ingest", "malformed-core"):
+    cases = _self_test_gate_generation_cases()
+    # A valid staged acceptance, and single-field corruptions of it, each mapped to the one check it fails.
+    accepted = {"accepted": None, "accepted-run-id": "acceptance-binding", "accepted-verdict-1": "report-schema",
+                "accepted-verdict-false": "report-schema", "accepted-not-ready": "report-schema"}
+    ordinary = ("ordinary", "ordinary-marked-acceptance") + tuple(accepted)
+    for fixture in ordinary + ("ingest", "malformed-core"):
         rd, files = imp._memory_ingest_run()
         rd.fd = -1
-        if fixture in ("ordinary", "ordinary-marked-acceptance"):
+        if fixture in ordinary:
             for name in imp._INGEST_RUN_MARKERS:
                 files.pop(name, None)
                 rd.tree.pop(name, None)
@@ -2429,6 +2508,8 @@ def _self_test_gate_generation(expect):
                 rep["verdict"] = False
                 files["report.toml"] = _opf_emit.emit(rep).encode("utf-8")
                 files[imp.REPORT_MD_NAME] += b"x"
+            elif fixture in accepted:
+                _self_test_gate_generation_accept(rd, files, fixture)
         elif fixture == "malformed-core":
             real_load = rd.load_toml
 
@@ -2443,6 +2524,18 @@ def _self_test_gate_generation(expect):
         with patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
                 patch.object(os, "open", side_effect=OSError("synthetic store unavailable")):
             baseline = _check_staged_run(rd, homes=1)
+            if fixture in accepted:
+                # The valid acceptance grades clean; each corruption is a finding on its own check only.
+                expect("gate-generation-{}-baseline".format(fixture), all(
+                    ok is (cid != accepted[fixture]) for cid, (ok, _detail) in baseline.items()
+                    if cid not in ("transaction-schema", "transaction-consistency")))
+            if fixture == "ordinary" or fixture in accepted:
+                # Generation 2 probes the durable home (unavailable here) and reads the staged acceptance bytes;
+                # an ordinary run keeps every generation-independent result.
+                current = _check_staged_run(rd, homes=2)
+                expect("gate-generation-{}-generation-2".format(fixture),
+                       set(current) == set(EXPECTED_CHECKS) and all(
+                           current[cid] == value for cid, value in baseline.items() if cid not in dependent))
             if fixture == "ordinary-marked-acceptance":
                 # The fixture really carries the findings the invalid cases must preserve.
                 expect("gate-generation-ordinary-marked-acceptance-baseline-findings", all(
@@ -2464,8 +2557,7 @@ def _self_test_gate_generation(expect):
                 # acceptance ids route by generation, so only an ordinary run compares them too.
                 ordinary_unchanged = all(
                     result.get(cid) == value for cid, value in baseline.items()
-                    if cid not in dependent and (fixture in ("ordinary", "ordinary-marked-acceptance")
-                                                 or cid not in staged_acceptance))
+                    if cid not in dependent and (fixture in ordinary or cid not in staged_acceptance))
                 ordinary_clean = (fixture != "ordinary" or all(
                     ok for cid, (ok, _detail) in baseline.items()
                     if cid not in ("transaction-schema", "transaction-consistency")))
@@ -2973,6 +3065,14 @@ def _self_test():
         (g3s / imp.IMPORT_ARCHIVE_REL / g3.name / imp.ACCEPTANCE_NAME).unlink()
         _ts, tc = txc(g3)
         expect("disc-txn-consistency", tc[0] is False and "archived acceptance.json is absent" in tc[1])
+        # Both applied runs under every generation, with transaction grading live on the real store: the
+        # archive-absent run keeps its transaction finding, so a generation-dependent value (an ingest result, a
+        # durable-home probe) reaching that grading flips it.
+        g_gen1 = _self_test_gate_generation_applied(expect, "complete", g_run)
+        g3_gen1 = _self_test_gate_generation_applied(expect, "archive-absent", g3)
+        expect("gate-generation-applied-baselines", all(ok for ok, _d in g_gen1.values())
+               and not g3_gen1["transaction-consistency"][0]
+               and "archived acceptance.json is absent" in g3_gen1["transaction-consistency"][1])
         # F1 on the genuine store: the producer's complete record downgraded (published / prepared, allocation
         # LF-999), the genuine terminal journal unchanged.
         for st in ("published", "prepared"):
