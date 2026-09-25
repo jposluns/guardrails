@@ -1371,22 +1371,61 @@ def _apply_dirs(root_fd, plan, resuming):
     return out
 
 
-def _read_exact(pfd, name, label, size):
-    """Read a destination for an exact-match decision: no-follow, non-blocking, regular, bounded
-    at size + 1. Returns (bytes, fstat)."""
+def _open_dest(pfd, name, label):
+    """Open a destination ONCE, no-follow and non-blocking (a FIFO never blocks the open), with no
+    prior stat for the open to race: returns the held fd, or None when the name is absent. A name
+    the open itself refuses (a symbolic link, a socket) is lstat'ed only to choose the refusal: a
+    non-regular object is REFUSED, anything else CANNOT-EVALUATE; neither is ever trusted."""
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=pfd)
+        return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=pfd)
+    except FileNotFoundError:
+        return None
     except OSError as exc:
-        raise InitOperationError("cannot open {} ({})".format(label, exc), CANNOT_EVALUATE)
+        err = exc
+    st = _lstat(pfd, name, label)
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        raise InitOperationError("{} exists and is not a regular file; preserved and "
+                                 "refused".format(label))
+    raise InitOperationError("cannot open {} ({})".format(label, err), CANNOT_EVALUATE)
+
+
+def _read_held(fd, pfd, name, label, size):
+    """Read an OPENED destination for an exact-match decision, every fact from the held fd: its
+    type (a non-regular object refuses before any read), its bytes (bounded at size + 1), then its
+    fstat, and only then re-bind the name to that fstat's identity. The held fd pins its inode, so
+    a replacement made during classification can never reuse that inode number and pass as the
+    original: a name no longer bound to the held object (unlinked, renamed over, or recreated, same
+    bytes included) is CANNOT-EVALUATE. Returns (bytes, fstat), the fstat taken after the read."""
     try:
-        try:
-            st = os.fstat(fd)
-        except OSError as exc:
-            raise InitOperationError("cannot fstat {} ({})".format(label, exc), CANNOT_EVALUATE)
-        if not stat.S_ISREG(st.st_mode):
-            return None, st
-        data = _read_bounded_fd(fd, size)
-        return data, st
+        st = os.fstat(fd)
+    except OSError as exc:
+        raise InitOperationError("cannot fstat {} ({})".format(label, exc), CANNOT_EVALUATE)
+    if not stat.S_ISREG(st.st_mode):
+        raise InitOperationError("{} exists and is not a regular file; preserved and "
+                                 "refused".format(label))
+    data = _read_bounded_fd(fd, size)
+    try:
+        fst = os.fstat(fd)
+    except OSError as exc:
+        raise InitOperationError("cannot fstat {} ({})".format(label, exc), CANNOT_EVALUATE)
+    now = _lstat(pfd, name, label)
+    if fst.st_nlink < 1 or now is None or (now.st_dev, now.st_ino) != (fst.st_dev, fst.st_ino):
+        raise InitOperationError("{} was replaced while it was classified; preserved and "
+                                 "refused".format(label), CANNOT_EVALUATE)
+    if len(data) <= size and len(data) != fst.st_size:
+        raise InitOperationError("{} changed size while it was read".format(label),
+                                 CANNOT_EVALUATE)
+    return data, fst
+
+
+def _read_exact(pfd, name, label, size):
+    """Read a destination for an exact-match decision: opened once (_open_dest) and read from the
+    held fd (_read_held). Returns (bytes, fstat); an absent destination is CANNOT-EVALUATE."""
+    fd = _open_dest(pfd, name, label)
+    if fd is None:
+        raise InitOperationError("cannot open {} (it is absent)".format(label), CANNOT_EVALUATE)
+    try:
+        return _read_held(fd, pfd, name, label, size)
     finally:
         os.close(fd)
 
@@ -1394,23 +1433,18 @@ def _read_exact(pfd, name, label, size):
 def _classify_dest(pfd, name, entry, data):
     """Three-way (plus refusal) classification of a planned file's destination: "absent"; "exact"
     (an opened, no-follow, singly-linked regular file whose bytes, size, and mode EXACTLY equal the
-    plan, established by reading, never inferred from a name, header, or inode); anything else
-    raises a REFUSED conflict (different bytes, a strict prefix included, a wrong mode, type, or
-    link count), and an unreadable destination raises CANNOT-EVALUATE, never absence."""
+    plan, established by reading ONE held fd whose name still binds it, never inferred from a
+    name, header, or inode); anything else raises a REFUSED conflict (different bytes, a strict
+    prefix included, a wrong mode, type, or link count), and an unreadable or replaced destination
+    raises CANNOT-EVALUATE, never absence."""
     path = entry["path"]
-    st = _lstat(pfd, name, path)
-    if st is None:
+    fd = _open_dest(pfd, name, path)
+    if fd is None:
         return "absent", None
-    if not stat.S_ISREG(st.st_mode):
-        raise InitOperationError("{} exists and is not a regular file; preserved and "
-                                 "refused".format(path))
-    got, fst = _read_exact(pfd, name, path, len(data))
-    if got is None:
-        raise InitOperationError("{} changed type while it was read; preserved and refused".format(
-            path))
-    if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
-        raise InitOperationError("{} was replaced while it was classified; preserved and "
-                                 "refused".format(path), CANNOT_EVALUATE)
+    try:
+        got, fst = _read_held(fd, pfd, name, path, len(data))
+    finally:
+        os.close(fd)
     if fst.st_nlink != 1:
         raise InitOperationError("{} has {} links; preserved and refused".format(
             path, fst.st_nlink))
@@ -3110,8 +3144,9 @@ def _physical_tests(base, env, ok, signal):
         ok("R12-{}-retry-completes".format(which), res2 and res2["status"] == SOURCES_READY
            and res2["operation_id"] == ops[0], "{} {}".format(res2, err[-400:]))
 
-    # R13 a destination REPLACED between its classification stat and its open is never trusted: the
-    # identity check refuses it CANNOT-EVALUATE (a same-bytes replacement included).
+    # R13 a destination REPLACED while it is classified (after its open, before its name is re-bound
+    # to the held fd) is never trusted: the identity check refuses it CANNOT-EVALUATE (a same-bytes
+    # replacement included), and the held fd pins its inode so the replacement cannot reuse it.
     root = _plain_repo(os.path.join(base, "swap"), env)
     rc, _res, _err = _child(root, env, kill="source:2")
     ops, raw = _read_plan(root)
@@ -3119,16 +3154,16 @@ def _physical_tests(base, env, ok, signal):
     entry = plan["sets"]["S"][0]
     data = plan_payloads(plan)[entry["path"]]
     this = sys.modules[__name__]
-    real_read = this._read_exact
+    real_read = this._read_held
 
-    def swapping_read(pfd, name, label, size):
+    def swapping_read(held, pfd, name, label, size):
         os.unlink(name, dir_fd=pfd)
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=pfd)
         os.write(fd, data)
         os.fchmod(fd, 0o644)
         os.close(fd)
-        return real_read(pfd, name, label, size)
-    this._read_exact = swapping_read
+        return real_read(held, pfd, name, label, size)
+    this._read_held = swapping_read
     try:
         rfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         pfd, name = _journal._open_parent(rfd, entry["path"])
@@ -3142,7 +3177,7 @@ def _physical_tests(base, env, ok, signal):
             os.close(pfd)
             os.close(rfd)
     finally:
-        this._read_exact = real_read
+        this._read_held = real_read
 
     # R15 publication never replaces and never publishes unverified bytes: _stage_and_publish over an
     # existing destination refuses and preserves it (link, never rename or overwrite), and a staged
