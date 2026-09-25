@@ -2315,8 +2315,10 @@ def _self_test_gate_generation_sites(expect):
     """Every read of the generation, or of a value derived from it (by assignment or under a generation-dependent
     branch), in the staged-run gate is one of these statements. The pin guards ordinary edits: a new read of a listed
     name, or a new statement assigning one, fails it until the statement is deliberately added, and a dynamic scope
-    or code lookup (locals(), vars(), globals(), eval, exec, compile, __import__) is refused outright. It does not
-    see a name first assigned inside a generation-dependent branch that is not listed here; the behavioural variants
+    or code lookup (locals(), vars(), globals(), eval, exec, compile, __import__) is refused outright. Every name bound
+    in the body of a branch whose condition reads the generation must be listed, so a new generation-derived name
+    fails here too (the loop-local exc, cid, ok and detail excepted). Names bound elsewhere under a derived condition
+    are left to the behavioural variants
     (_self_test_gate_generation and _self_test_gate_generation_applied) cover those on their fixtures, by requiring
     every generation-independent result to keep its generation-1 value under generation 2 and every invalid
     generation."""
@@ -2409,6 +2411,22 @@ def _self_test_gate_generation_sites(expect):
         ('results', 'return results'),
     ))
     expect("gate-generation-read-sites", found == expected)
+    # A name bound in the body of a branch that tests the generation itself is generation-derived: it must be listed.
+    direct = {"gen", "homes", "gen_error", "legacy_generation"}
+    bound = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.If, ast.While)):
+            continue
+        tested = {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
+        if direct & tested:
+            for stmt in node.body:
+                for n in ast.walk(stmt):
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                        bound.add(n.id)
+                    elif isinstance(n, ast.ExceptHandler) and n.name:
+                        bound.add(n.name)
+    # Loop targets and the handler name there are local to their own statement; they are pinned so a new one fails.
+    expect("gate-generation-branch-bindings", bound <= set(names) | {"exc", "cid", "ok", "detail"})
     # A dynamic lookup reads the generation without naming it; the gate makes none.
     dynamic = ("locals", "vars", "globals", "eval", "exec", "compile", "__import__")
     expect("gate-generation-no-dynamic-access", not any(
