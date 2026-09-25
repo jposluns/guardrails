@@ -43,6 +43,18 @@ still hold, and the freshly resolved control root must carry the opf-oplock dire
 capability's retained identity, so a write can never land under a different control tree than the
 one the held flock excludes for.
 
+OPF-D2B PR3a (PD-D2B-PR3-SCHEMA decisions 1 to 4) extends the substrate, never its ops/<op_id>/
+record shape: the init PRE-STORE holder (_opf_oplock.InitHolder, the shared flock with no record and
+no lease) is also a live writer, bound to its explicit product root rather than to the resolver (an
+init store does not resolve until its manifest is published), so the plan and the first milestones
+are persisted before the machine store exists; an operation handle is bound to the holder that began
+or resumed it (by token), and only that holder or the capability attach_init_lease minted from it
+extends it. resume_operation reopens an existing operation under its ORIGINAL id, never rewriting
+plan.json; under the held lock the exact staging leftovers a killed publication leaves are swept
+first, and an operation directory the sweep leaves empty (its plan was never published) is settled by
+removal, reported. Two separately classified SIBLING homes, journals/ (the init effect journal) and
+outcomes/<op_id>/ (bounded, create-only attempt outcomes), sit beside ops/ under opf-init/.
+
 The RESUME CLASSIFIER (classify_operations) is READ-ONLY and PLAN-AWARE: it enumerates ops/ and
 classifies each operation directory against its own plan.json into INTACT (a valid canonical plan
 plus a contiguous, bounded, well-formed phase sequence; the resume input a later dispatch
@@ -107,6 +119,15 @@ import _opf_store          # noqa: E402
 SUBSTRATE_DIRNAME = "opf-init"
 OPS_DIRNAME = "ops"
 PLAN_NAME = "plan.json"
+# OPF-D2B PR3a (PD-D2B-PR3-SCHEMA decision 4): separately classified SIBLING homes beneath opf-init/ for
+# the init operation's effect journals and its attempt outcomes, so the ops/<op_id>/ record shape (exactly
+# plan.json plus the create-only phase records) is kept unchanged. journals/ holds one framed journal
+# transaction directory per effect group (the shared _journal framing, INTENT and COMPLETE only);
+# outcomes/<op_id>/ holds create-only, contiguous NNNN-attempt.json records, one per attempt.
+JOURNALS_DIRNAME = "journals"
+OUTCOMES_DIRNAME = "outcomes"
+HOME_KINDS = (OPS_DIRNAME, JOURNALS_DIRNAME, OUTCOMES_DIRNAME)
+OUTCOME_FORMAT = "opf.init.outcome/v1"
 
 # The frozen D2b plan identity (OPF-INIT-D2B.md): the closed top-level key set is the spec's Plan
 # Format member list, frozen verbatim, and the PLAN schema is NOT this module's to extend. The
@@ -128,6 +149,10 @@ _SCHEMA = 1
 MAX_PLAN_BYTES = _opf_init_contract.MAX_RAW_BYTES
 MAX_PHASE_BYTES = _opf_oplock._MAX_RECORD_BYTES
 MAX_PHASES = 128
+# Attempt outcomes are diagnostics, bounded separately from the monotonic milestone phases so repeated
+# retries never consume the phase bound (the plan's separate-bounded-semantics requirement).
+MAX_OUTCOMES = 64
+MAX_OUTCOME_BYTES = _opf_init_contract.MAX_RAW_BYTES
 
 # An operation id is the capability's uuid4 string; a phase name is filename-safe by construction
 # (lowercase alphanumerics with interior hyphens, bounded), so a record name never needs escaping
@@ -136,6 +161,7 @@ _OP_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 _PHASE_NAME_PATTERN = r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
 _PHASE_NAME_RE = re.compile(_PHASE_NAME_PATTERN + r"\Z")
 _PHASE_FILE_RE = re.compile(r"([0-9]{4})-(" + _PHASE_NAME_PATTERN + r")\.json\Z")
+_OUTCOME_FILE_RE = re.compile(r"([0-9]{4})-attempt\.json\Z")
 
 # A phase record's utc field carries the oplock's _utc_now shape exactly (RFC 3339 UTC, second
 # precision, Z suffix): the grammar is pinned here and the field ranges and calendar validity (no
@@ -165,11 +191,18 @@ class OpSubstrate:
     durable record and is never removed by this handle.
     """
     __slots__ = ("op_id", "store_root", "_ops_fd", "_op_fd", "_op_ident", "_plan_ident",
-                 "_plan_digest", "_plan_bytes", "_phases", "_next_seq", "_closed")
+                 "_plan_digest", "_plan_bytes", "_phases", "_next_seq", "_closed", "_token",
+                 "swept")
 
-    def __init__(self, op_id, store_root, ops_fd, op_fd, op_ident, plan_ident, plan_bytes):
+    def __init__(self, op_id, store_root, ops_fd, op_fd, op_ident, plan_ident, plan_bytes,
+                 token=None):
         self.op_id = op_id
         self.store_root = store_root
+        # OPF-D2B PR3a: the init holder token this handle is bound to (None for a handle begun under
+        # an ordinary capability). A write through this handle requires the same holder or the
+        # capability attach_init_lease minted from it, so no other holder can extend it.
+        self._token = token
+        self.swept = ()
         self._ops_fd = ops_fd
         self._op_fd = op_fd
         self._op_ident = op_ident
@@ -415,37 +448,98 @@ def _open_control_root(store_root):
         os.close(store_fd)
 
 
-def _require_live_capability(cap):
-    """A substrate WRITE runs only under the LIVE held operation lock: the exact OpCapability
-    type, unreleased, called by the recorded acquirer (pid plus /proc start time), with the
-    retained anchor identity still holding (a regular, singly-linked file with the acquire-time
-    device and inode). Anything else refuses before any write."""
-    if not isinstance(cap, _opf_oplock.OpCapability):
-        raise InitSubstrateError("a substrate write requires a held OpCapability")
-    if cap._released:
-        raise InitSubstrateError("capability already released; a substrate write requires the "
-                                 "held operation lock")
-    pid = os.getpid()
-    if pid != cap._acquirer_pid or _journal._pid_start(pid) != cap._acquirer_pid_start:
-        raise InitSubstrateError("substrate write refused: caller (pid {}) is not the recorded "
-                                 "acquirer (pid {})".format(pid, cap._acquirer_pid))
+def _open_init_control_root(product_root):
+    """The AUTHORITATIVE control root of an init operation's explicit product root (OPF-D2B PR3a):
+    the common git directory git itself reports, opened no-follow, WITHOUT requiring a RESOLVED
+    store (the store resolves only once init has published its manifest). The product root must be
+    absolute and carry a .git entry; everything else refuses, never a fallback. Returns
+    (control_root_fd, control_root_desc); the caller owns and closes the fd."""
+    if type(product_root) is not str or not os.path.isabs(product_root):
+        raise InitSubstrateError("init product root must be an absolute path")
     try:
-        st = os.fstat(cap._anchor_fd)
+        product_fd = _opf_store._open_dir_nofollow(product_root)
     except OSError as exc:
-        raise InitSubstrateError("cannot fstat the held anchor ({})".format(exc))
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 \
-            or (st.st_dev, st.st_ino) != cap._anchor_ident:
-        raise InitSubstrateError("the held anchor identity no longer holds; the flock no longer "
-                                 "excludes anyone, so no substrate write may land")
+        raise InitSubstrateError("cannot open init product root {} no-follow ({})".format(
+            product_root, exc))
+    try:
+        try:
+            if _opf_oplock._classify_git_entry(product_fd, product_root) == "absent":
+                raise InitSubstrateError("init product root {} carries no .git entry; refusing "
+                                         "(the init binding is a git binding)".format(product_root))
+            desc = _opf_oplock._git_common_dir(product_root)
+        except _opf_oplock.OpLockError as exc:
+            raise InitSubstrateError(str(exc))
+        try:
+            return _opf_store._open_dir_nofollow(desc), desc
+        except OSError as exc:
+            raise InitSubstrateError("cannot open common git dir {} no-follow ({})".format(
+                desc, exc))
+    finally:
+        os.close(product_fd)
+
+
+def _writer_root(writer):
+    """(root, is_init) for a substrate writer: an InitHolder, or an init capability, binds to its
+    explicit product root; an ordinary capability to its resolved store root."""
+    if isinstance(writer, _opf_oplock.InitHolder):
+        return writer.product_root, True
+    if writer.init_root is not None:
+        return writer.init_root, True
+    return writer.store_root, False
+
+
+def _open_writer_control_root(writer):
+    root, is_init = _writer_root(writer)
+    return _open_init_control_root(root) if is_init else _open_control_root(root)
+
+
+def _require_live_capability(cap):
+    """A substrate WRITE runs only under the LIVE held operation lock: an OpCapability or (OPF-D2B
+    PR3a) an init pre-store InitHolder, unreleased and unspent, called by the recorded acquirer
+    (pid plus /proc start time), with the retained anchor identity still holding (a regular,
+    singly-linked file with the acquire-time device and inode). The gate is the lock module's own
+    (_opf_oplock.require_live_holder), single-sourced. Anything else refuses before any write."""
+    try:
+        _opf_oplock.require_live_holder(cap)
+    except _opf_oplock.OpLockError as exc:
+        raise InitSubstrateError("substrate write refused: {}".format(exc))
+
+
+def _require_bound_writer(sub, writer):
+    """A write through `sub` requires a writer bound to the same operation: an ordinary
+    capability whose op_id is the handle's; or, for a handle begun or resumed under an init holder,
+    that same holder (by token) or the capability attach_init_lease minted from it (same token AND
+    op_id). Never a different holder, and never an op-id comparison alone for an init handle."""
+    if sub._token is None:
+        if isinstance(writer, _opf_oplock.InitHolder) or sub.op_id != writer.op_id:
+            raise InitSubstrateError("substrate handle op_id {!r} does not match the held "
+                                     "capability's {!r}".format(sub.op_id,
+                                                                getattr(writer, "op_id", None)))
+        return
+    if isinstance(writer, _opf_oplock.InitHolder):
+        if writer.token is not sub._token:
+            raise InitSubstrateError("substrate handle op_id {!r} is bound to a different init "
+                                     "holder".format(sub.op_id))
+        return
+    if writer.init_token is not sub._token or writer.op_id != sub.op_id:
+        raise InitSubstrateError("substrate handle op_id {!r} does not match the held "
+                                 "capability's {!r}".format(sub.op_id, writer.op_id))
 
 
 def _open_ops_for_write(cap):
-    """Open (creating each single component on genuine absence) the substrate ops/ home for a
-    WRITE under the held capability. The freshly resolved control root must still carry the
-    lock's opf-oplock directory with the capability's retained identity, so the write lands under
-    the SAME control tree the held flock excludes for; a mismatch refuses. Returns the ops/ dir
-    fd; the caller owns and closes it."""
-    control_root_fd, desc = _open_control_root(cap.store_root)
+    """The ops/ home for a WRITE (see _open_home_for_write)."""
+    return _open_home_for_write(cap, OPS_DIRNAME)
+
+
+def _open_home_for_write(cap, kind):
+    """Open (creating each single component on genuine absence) the substrate home `kind` (ops/,
+    journals/, or outcomes/) for a WRITE under the held capability or init holder. The freshly
+    resolved control root must still carry the lock's opf-oplock directory with the writer's
+    retained identity, so the write lands under the SAME control tree the held flock excludes for;
+    a mismatch refuses. Returns the home dir fd; the caller owns and closes it."""
+    if kind not in HOME_KINDS:
+        raise InitSubstrateError("unknown substrate home {!r}".format(kind))
+    control_root_fd, desc = _open_writer_control_root(cap)
     home_fd = None
     try:
         try:
@@ -463,7 +557,7 @@ def _open_ops_for_write(cap):
                                                     dirname=SUBSTRATE_DIRNAME)
             return _opf_oplock._open_control_dir(home_fd,
                                                  "{}/{}".format(desc, SUBSTRATE_DIRNAME),
-                                                 dirname=OPS_DIRNAME)
+                                                 dirname=kind)
         except _opf_oplock.OpLockError as exc:
             raise InitSubstrateError(str(exc))
     finally:
@@ -486,7 +580,20 @@ def begin_operation(cap, plan_bytes):
     pre-existing record.
     """
     _require_live_capability(cap)
-    _validate_plan(plan_bytes, cap.op_id)
+    if isinstance(cap, _opf_oplock.InitHolder):
+        # OPF-D2B PR3a: an init holder is not yet bound to an operation; the operation is the one
+        # the plan names (its id is the plan producer's fresh uuid4), and the handle is bound to
+        # this holder's token so only this holder, or the capability minted from it, extends it.
+        try:
+            op_id = _strict_json_loads(plan_bytes, "plan record")["operation_id"] \
+                if type(plan_bytes) is bytes else None
+        except (InitSubstrateError, KeyError):
+            op_id = None
+        token = cap.token
+    else:
+        op_id = cap.op_id
+        token = cap.init_token
+    _validate_plan(plan_bytes, op_id)
     ops_fd = _open_ops_for_write(cap)
     op_fd = None
     plan_fd = None
@@ -495,14 +602,14 @@ def begin_operation(cap, plan_bytes):
     plan_ident = None
     try:
         try:
-            os.mkdir(cap.op_id, 0o755, dir_fd=ops_fd)
+            os.mkdir(op_id, 0o755, dir_fd=ops_fd)
         except FileExistsError:
             raise InitSubstrateError("operation directory {} already exists; operation ids are "
                                      "never reused and a pre-existing tree is never adopted "
-                                     "silently".format(cap.op_id))
+                                     "silently".format(op_id))
         except OSError as exc:
             raise InitSubstrateError("cannot create operation directory {} ({})".format(
-                cap.op_id, exc))
+                op_id, exc))
         created_dir = True
         try:
             os.fsync(ops_fd)
@@ -510,8 +617,8 @@ def begin_operation(cap, plan_bytes):
             raise InitSubstrateError("cannot fsync the ops directory after creation "
                                      "({})".format(exc))
         try:
-            op_fd = _opf_oplock._open_dir_at(ops_fd, cap.op_id, "ops/{}".format(cap.op_id))
-            _opf_oplock._validate_ctl_dir_fd(op_fd, "ops/{}".format(cap.op_id))
+            op_fd = _opf_oplock._open_dir_at(ops_fd, op_id, "ops/{}".format(op_id))
+            _opf_oplock._validate_ctl_dir_fd(op_fd, "ops/{}".format(op_id))
             plan_fd, plan_ident = _opf_oplock._create_control_file(op_fd, PLAN_NAME, plan_bytes,
                                                                    "plan record")
         except _opf_oplock.OpLockError as exc:
@@ -520,9 +627,9 @@ def begin_operation(cap, plan_bytes):
         os.close(plan_fd)
         plan_fd = None
         op_st = os.fstat(op_fd)
-        return OpSubstrate(op_id=cap.op_id, store_root=cap.store_root, ops_fd=ops_fd,
+        return OpSubstrate(op_id=op_id, store_root=_writer_root(cap)[0], ops_fd=ops_fd,
                            op_fd=op_fd, op_ident=(op_st.st_dev, op_st.st_ino),
-                           plan_ident=plan_ident, plan_bytes=plan_bytes)
+                           plan_ident=plan_ident, plan_bytes=plan_bytes, token=token)
     except BaseException as exc:
         # Unwind ONLY this facility's own just-created artefacts; every unwind failure is
         # collected, never swallowed. The composed _create_control_file unlinks its own torn file
@@ -537,7 +644,7 @@ def begin_operation(cap, plan_bytes):
                 unwind.append(str(uexc))
         if created_dir:
             try:
-                os.rmdir(cap.op_id, dir_fd=ops_fd)
+                os.rmdir(op_id, dir_fd=ops_fd)
                 os.fsync(ops_fd)
             except OSError as uexc:
                 unwind.append("cannot remove the just-created operation directory "
@@ -603,9 +710,7 @@ def record_phase(sub, cap, phase):
     if sub._closed:
         raise InitSubstrateError("substrate handle already closed")
     _require_live_capability(cap)
-    if sub.op_id != cap.op_id:
-        raise InitSubstrateError("substrate handle op_id {!r} does not match the held "
-                                 "capability's {!r}".format(sub.op_id, cap.op_id))
+    _require_bound_writer(sub, cap)
     if type(phase) is not str or not _PHASE_NAME_RE.match(phase):
         raise InitSubstrateError("phase name must be a bounded lowercase alphanumeric-and-hyphen "
                                  "token")
@@ -649,6 +754,343 @@ def close_operation(sub):
     if errors:
         raise InitSubstrateError("close completed with failures: " + "; ".join(errors))
 
+
+# --- OPF-D2B PR3a: operation-bound resume, the interrupted-publication sweep, the sibling homes ------
+#
+# PD-D2B-PR3-SCHEMA decision 2: a retry resumes its ORIGINAL operation through resume_operation, an
+# explicit operation-bound handle over the existing ops/<op_id>/ tree, re-read through contained
+# descriptors; plan.json is never overwritten and no op id is mutated or fabricated. Decision 3: a
+# publication (plan, phase, or outcome record) killed mid-way leaves at most the lock module's exact
+# staging leftover, which the holder of the lock sweeps before it reads the tree, so a record killed
+# between its link and its staging unlink is back to one link; an operation directory the sweep leaves
+# EMPTY (its plan was never published) authorized nothing and is discarded explicitly, and reported.
+
+
+def _split_staging_name(entry):
+    """The record name a substrate staging leftover was staging (a plan, phase, or outcome record),
+    or None when `entry` is not EXACTLY a staging name the lock module's publication could have
+    produced for such a record."""
+    marker = _opf_oplock._STAGING_MARKER
+    if type(entry) is not str or not entry.startswith(".") or marker not in entry:
+        return None
+    inner = entry[1:entry.rindex(marker)]
+    if inner != PLAN_NAME and not _PHASE_FILE_RE.match(inner) \
+            and not _OUTCOME_FILE_RE.match(inner):
+        return None
+    return inner if _opf_oplock._is_staging_name(entry, inner) else None
+
+
+def _sweep_record_staging(parent_fd, name, dir_fd, dir_ident, label):
+    """Remove the staging leftovers a publication killed mid-way left in the record directory
+    `name` (dir_fd) beneath parent_fd. Called ONLY under the held lock, so no cooperating publisher
+    is mid-publication: the lock module's own sweep discipline. Only a plain regular file whose name
+    is EXACTLY a plan, phase, or outcome staging name is removed; a staging name bound to anything
+    else refuses (manual intervention). Returns the sorted names removed."""
+    removed = []
+    for entry in sorted(_list_dir_fresh(parent_fd, name, dir_ident, label)):
+        if _split_staging_name(entry) is None:
+            continue
+        try:
+            st = os.stat(entry, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise InitSubstrateError("cannot stat staging leftover {} in {} ({})".format(
+                entry, label, exc))
+        if not stat.S_ISREG(st.st_mode):
+            raise InitSubstrateError("staging leftover {} in {} is not a regular file; refusing "
+                                     "(manual intervention required)".format(entry, label))
+        try:
+            os.unlink(entry, dir_fd=dir_fd)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise InitSubstrateError("cannot remove staging leftover {} in {} ({})".format(
+                entry, label, exc))
+        removed.append(entry)
+    if removed:
+        try:
+            os.fsync(dir_fd)
+        except OSError as exc:
+            raise InitSubstrateError("cannot fsync {} after removing staging leftovers "
+                                     "({})".format(label, exc))
+    return removed
+
+
+def _open_existing_op_dir(ops_fd, operation_id):
+    """Open the existing operation directory no-follow beneath ops_fd, validated as a control
+    directory; returns (op_fd, op_ident). Absence, a symlink, or a wrong type refuses."""
+    try:
+        st = os.stat(operation_id, dir_fd=ops_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        raise InitSubstrateError("no recorded operation {}".format(operation_id))
+    except OSError as exc:
+        raise InitSubstrateError("cannot stat operation directory {} ({})".format(
+            operation_id, exc))
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise InitSubstrateError("operation directory {} is not a plain directory".format(
+            operation_id))
+    label = "ops/{}".format(operation_id)
+    try:
+        op_fd = _opf_oplock._open_dir_at(ops_fd, operation_id, label)
+    except _opf_oplock.OpLockError as exc:
+        raise InitSubstrateError(str(exc))
+    try:
+        op_st = _opf_oplock._validate_ctl_dir_fd(op_fd, label)
+    except _opf_oplock.OpLockError as exc:
+        os.close(op_fd)
+        raise InitSubstrateError(str(exc))
+    if (op_st.st_dev, op_st.st_ino) != (st.st_dev, st.st_ino):
+        os.close(op_fd)
+        raise InitSubstrateError("operation directory {} changed between its stat and its "
+                                 "open".format(operation_id))
+    return op_fd, (op_st.st_dev, op_st.st_ino)
+
+
+def resume_operation(writer, operation_id, expected_plan_digest):
+    """Reopen the EXISTING operation `operation_id` under the live writer (an InitHolder, or the
+    capability bound to that operation), returning an operation-bound OpSubstrate whose later
+    record_phase appends continue the recorded sequence (decision 2). Under the held lock the
+    operation directory's staging leftovers are swept first (decision 3); then the plan is re-read
+    no-follow and validated, its plan_digest must EQUAL `expected_plan_digest` (the caller's
+    re-derived basis: changed evidence refuses), and every phase record is re-read, shape-checked,
+    and bound into the handle's roster by its sha256 content digest, exactly as begin_operation and
+    record_phase would have recorded them. plan.json is NEVER overwritten; a foreign entry, a gap, a
+    malformed record, or an over-bound tree refuses (the tree is preserved). The names the sweep
+    removed are in the handle's `swept` attribute."""
+    _require_live_capability(writer)
+    if type(operation_id) is not str or not _OP_ID_RE.match(operation_id):
+        raise InitSubstrateError("operation id {!r} is not well-formed".format(operation_id))
+    if type(expected_plan_digest) is not str \
+            or not _opf_init_contract._DIGEST_RE.match(expected_plan_digest):
+        raise InitSubstrateError("expected plan digest must be sha256:<64 hex>")
+    if isinstance(writer, _opf_oplock.InitHolder):
+        token = writer.token
+    else:
+        if writer.op_id != operation_id:
+            raise InitSubstrateError("the held capability is bound to operation {!r}, not "
+                                     "{!r}".format(writer.op_id, operation_id))
+        token = writer.init_token
+    ops_fd = _open_ops_for_write(writer)
+    op_fd = None
+    try:
+        op_fd, op_ident = _open_existing_op_dir(ops_fd, operation_id)
+        label = "ops/{}".format(operation_id)
+        swept = _sweep_record_staging(ops_fd, operation_id, op_fd, op_ident, label)
+        plan_raw, plan_st = _read_record_bytes(op_fd, PLAN_NAME, "plan record", MAX_PLAN_BYTES)
+        plan = _validate_plan(plan_raw, operation_id)
+        if plan["plan_digest"] != expected_plan_digest:
+            raise InitSubstrateError("operation {} plan_digest {} does not equal the expected {}; "
+                                     "changed evidence is never resumed".format(
+                                         operation_id, plan["plan_digest"], expected_plan_digest))
+        entries = sorted(_list_dir_fresh(ops_fd, operation_id, op_ident, label))
+        if len(entries) > MAX_PHASES + 1:
+            raise InitSubstrateError("{} entries exceed the plan plus {}-phase-record bound".format(
+                len(entries), MAX_PHASES))
+        if PLAN_NAME not in entries:
+            raise InitSubstrateError("plan record is absent from the fresh listing; refusing")
+        roster = []
+        for entry in entries:
+            if entry == PLAN_NAME:
+                continue
+            m = _PHASE_FILE_RE.match(entry)
+            if m is None:
+                raise InitSubstrateError("foreign entry {!r} in operation directory {}".format(
+                    entry, operation_id))
+            seq, pname = int(m.group(1)), m.group(2)
+            raw, st = _read_record_bytes(op_fd, entry, "phase record {}".format(entry),
+                                         MAX_PHASE_BYTES)
+            reason = _bad_phase_record(_strict_json_loads(raw, "phase record {}".format(entry)),
+                                       raw, operation_id, seq, pname)
+            if reason is not None:
+                raise InitSubstrateError("phase record {}: {}".format(entry, reason))
+            roster.append((seq, entry, (st.st_dev, st.st_ino), hashlib.sha256(raw).hexdigest()))
+        roster.sort()
+        if [r[0] for r in roster] != list(range(1, len(roster) + 1)):
+            raise InitSubstrateError("phase sequence is not contiguous from 0001")
+        sub = OpSubstrate(op_id=operation_id, store_root=_writer_root(writer)[0], ops_fd=ops_fd,
+                          op_fd=op_fd, op_ident=op_ident,
+                          plan_ident=(plan_st.st_dev, plan_st.st_ino), plan_bytes=plan_raw,
+                          token=token)
+        sub._phases = roster
+        sub._next_seq = len(roster) + 1
+        sub.swept = tuple(swept)
+        return sub
+    except BaseException:
+        for open_fd in (op_fd, ops_fd):
+            if open_fd is not None:
+                try:
+                    os.close(open_fd)
+                except OSError:
+                    pass
+        raise
+
+
+def recorded_phases(sub):
+    """The handle's recorded (seq, phase-name) roster, in order (read from the handle, which was
+    bound to the on-disk records at begin, resume, or append)."""
+    if not isinstance(sub, OpSubstrate):
+        raise InitSubstrateError("recorded_phases requires an OpSubstrate handle")
+    return tuple((seq, _PHASE_FILE_RE.match(name).group(2)) for seq, name, _i, _d in sub._phases)
+
+
+def settle_operation(writer, operation_id):
+    """Under the live writer, sweep the operation directory's staging leftovers (decision 3) and,
+    when that leaves it EMPTY, remove it: an operation whose plan was never published authorized no
+    worktree write, so it carries no evidence to preserve. Returns (swept names, discarded). A
+    directory with anything else left is untouched beyond the exact staging sweep (discarded False);
+    the caller's classification then grades it."""
+    _require_live_capability(writer)
+    if type(operation_id) is not str or not _OP_ID_RE.match(operation_id):
+        raise InitSubstrateError("operation id {!r} is not well-formed".format(operation_id))
+    ops_fd = _open_ops_for_write(writer)
+    try:
+        op_fd, op_ident = _open_existing_op_dir(ops_fd, operation_id)
+        label = "ops/{}".format(operation_id)
+        try:
+            swept = _sweep_record_staging(ops_fd, operation_id, op_fd, op_ident, label)
+            remaining = _list_dir_fresh(ops_fd, operation_id, op_ident, label)
+        finally:
+            os.close(op_fd)
+        if remaining:
+            return tuple(swept), False
+        try:
+            os.rmdir(operation_id, dir_fd=ops_fd)
+            os.fsync(ops_fd)
+        except OSError as exc:
+            raise InitSubstrateError("cannot remove the empty operation directory {} ({})".format(
+                operation_id, exc))
+        return tuple(swept), True
+    finally:
+        os.close(ops_fd)
+
+
+def discard_empty_operation(writer, operation_id):
+    """settle_operation that REFUSES unless the directory was discarded: the swept names on
+    success; a directory with anything else left is preserved evidence, never discarded."""
+    swept, discarded = settle_operation(writer, operation_id)
+    if not discarded:
+        raise InitSubstrateError("operation directory {} is not empty; it is preserved evidence, "
+                                 "never discarded".format(operation_id))
+    return swept
+
+
+def open_journal_home(writer):
+    """The opf-init/journals/ home descriptor for the init effect journal (decision 4), opened (and
+    created on genuine absence) under the live writer; the caller owns and closes it."""
+    _require_live_capability(writer)
+    return _open_home_for_write(writer, JOURNALS_DIRNAME)
+
+
+def _validate_outcome(raw, op_id):
+    """Outcome record bytes: canonical, bounded, strict JSON carrying the frozen outcome format for
+    this operation (the outcome envelope's own fields are the producer's, the init operation
+    layer's, to validate deeply)."""
+    if type(raw) is not bytes or not raw or len(raw) > MAX_OUTCOME_BYTES:
+        raise InitSubstrateError("outcome payload must be non-empty bytes within {} bytes".format(
+            MAX_OUTCOME_BYTES))
+    doc = _strict_json_loads(raw, "outcome record")
+    if _canonical_or_refuse(doc, "outcome record") != raw:
+        raise InitSubstrateError("outcome record is not the exact canonical serialization")
+    if doc.get("format") != OUTCOME_FORMAT or doc.get("operation_id") != op_id \
+            or type(doc.get("schema")) is not int or doc.get("schema") != _SCHEMA:
+        raise InitSubstrateError("outcome record must carry schema {}, format {!r}, and the "
+                                 "operation id {}".format(_SCHEMA, OUTCOME_FORMAT, op_id))
+    return doc
+
+
+def record_outcome(sub, writer, payload):
+    """Append one create-only attempt outcome, NNNN-attempt.json, under outcomes/<op_id>/ for the
+    operation `sub` is bound to, through the live writer bound to it (an InitHolder, including the
+    one detach_init_lease hands back, or the capability minted from it). The sequence is contiguous
+    from 0001 and bounded by MAX_OUTCOMES, separately from the milestone phases; staging leftovers
+    are swept first, and a foreign entry or a gap refuses. Returns the record name."""
+    if not isinstance(sub, OpSubstrate):
+        raise InitSubstrateError("record_outcome requires an OpSubstrate handle")
+    _require_live_capability(writer)
+    _require_bound_writer(sub, writer)
+    _validate_outcome(payload, sub.op_id)
+    home_fd = _open_home_for_write(writer, OUTCOMES_DIRNAME)
+    op_fd = None
+    try:
+        control_home = "{}/{}".format(SUBSTRATE_DIRNAME, OUTCOMES_DIRNAME)
+        try:
+            op_fd = _opf_oplock._open_control_dir(home_fd, control_home, dirname=sub.op_id)
+        except _opf_oplock.OpLockError as exc:
+            raise InitSubstrateError(str(exc))
+        st = os.fstat(op_fd)
+        label = "outcomes/{}".format(sub.op_id)
+        _sweep_record_staging(home_fd, sub.op_id, op_fd, (st.st_dev, st.st_ino), label)
+        entries = sorted(_list_dir_fresh(home_fd, sub.op_id, (st.st_dev, st.st_ino), label))
+        seqs = []
+        for entry in entries:
+            m = _OUTCOME_FILE_RE.match(entry)
+            if m is None:
+                raise InitSubstrateError("foreign entry {!r} in {}".format(entry, label))
+            seqs.append(int(m.group(1)))
+        if seqs != list(range(1, len(seqs) + 1)):
+            raise InitSubstrateError("{} is not a contiguous outcome sequence".format(label))
+        seq = len(seqs) + 1
+        if seq > MAX_OUTCOMES:
+            raise InitSubstrateError("outcome count would exceed the {}-record bound".format(
+                MAX_OUTCOMES))
+        name = "{:04d}-attempt.json".format(seq)
+        try:
+            fd, _ident = _opf_oplock._create_control_file(op_fd, name, payload,
+                                                          "outcome record {}".format(name))
+        except _opf_oplock.OpLockError as exc:
+            raise InitSubstrateError(str(exc))
+        os.close(fd)
+        return name
+    finally:
+        for open_fd in (op_fd, home_fd):
+            if open_fd is not None:
+                os.close(open_fd)
+
+
+def read_outcomes(product_root, operation_id):
+    """READ-ONLY: the parsed attempt outcomes recorded for an init operation, in order (an empty
+    tuple when none was ever recorded). A malformed, foreign, gapped, or unreadable entry refuses."""
+    if type(operation_id) is not str or not _OP_ID_RE.match(operation_id):
+        raise InitSubstrateError("operation id {!r} is not well-formed".format(operation_id))
+    control_root_fd, desc = _open_init_control_root(product_root)
+    fds = [control_root_fd]
+    try:
+        cur = control_root_fd
+        for comp in (SUBSTRATE_DIRNAME, OUTCOMES_DIRNAME, operation_id):
+            try:
+                st = _opf_oplock._lstat_at(cur, comp, comp)
+            except _opf_oplock.OpLockError as exc:
+                raise InitSubstrateError(str(exc))
+            if st is None:
+                return ()
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                raise InitSubstrateError("{} is not a plain directory".format(comp))
+            try:
+                nfd = _opf_oplock._open_dir_at(cur, comp, comp)
+            except _opf_oplock.OpLockError as exc:
+                raise InitSubstrateError(str(exc))
+            fds.append(nfd)
+            parent, cur = cur, nfd
+        nst = os.fstat(cur)
+        entries = sorted(_list_dir_fresh(parent, operation_id, (nst.st_dev, nst.st_ino),
+                                         "outcomes/{}".format(operation_id)))
+        out = []
+        for i, entry in enumerate(entries, 1):
+            m = _OUTCOME_FILE_RE.match(entry)
+            if m is None or int(m.group(1)) != i:
+                raise InitSubstrateError("outcomes/{} holds a foreign or out-of-sequence entry "
+                                         "{!r}".format(operation_id, entry))
+            doc, raw = _read_json_record(cur, entry, "outcome record " + entry, MAX_OUTCOME_BYTES)
+            _validate_outcome(raw, operation_id)
+            out.append(doc)
+        return tuple(out)
+    finally:
+        for open_fd in reversed(fds):
+            try:
+                os.close(open_fd)
+            except OSError:
+                pass
 
 # --- the plan-aware resume classifier (read-only) --------------------------------------------------
 
@@ -737,6 +1179,19 @@ def classify_operations(store_root):
     resume dispatch runs it only after the lock module's explicit recovery has succeeded.
     """
     control_root_fd, desc = _open_control_root(store_root)
+    return _classify_at(control_root_fd, desc)
+
+
+def classify_init_operations(product_root):
+    """READ-ONLY classify_operations for an init operation's explicit product root (OPF-D2B PR3a):
+    the same plan-aware classification over the authoritative control root, WITHOUT requiring a
+    RESOLVED store (an interrupted init has no resolvable store yet). Deletes and repairs nothing."""
+    control_root_fd, desc = _open_init_control_root(product_root)
+    return _classify_at(control_root_fd, desc)
+
+
+def _classify_at(control_root_fd, desc):
+    """The body of the read-only classifiers over an opened control root; closes it."""
     home_fd = None
     ops_fd = None
     try:
@@ -1419,6 +1874,214 @@ def _t_s13_midread_containment(d, env):
     _opf_oplock.release_operation(cap)
 
 
+_ST_INIT_OP = "abcdef01-2345-4678-9abc-def012345678"
+
+
+def _st_init_home(root):
+    return os.path.join(root, ".git", SUBSTRATE_DIRNAME)
+
+
+def _st_child(fn):
+    """Run fn() in a forked child; return its exit status (fn's return code, 99 on an exception)."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os._exit(fn() or 0)
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+            os._exit(99)
+    _, status = os.waitpid(pid, 0)
+    return status
+
+
+def _t_s14_holder_writes_and_binding(d, env):
+    """T-s14 (decisions 1 and 2): an init pre-store holder writes the plan and phases BEFORE any
+    store exists (no RESOLVED store; the init control root is the explicit product root's common git
+    dir); the handle is bound to that holder's token, so the capability attach_init_lease mints from
+    it continues the same sequence, while a different holder, or an ordinary capability naming the
+    same op id, is refused."""
+    root = _opf_oplock._st_unadopted_repo(d, "repo", env)
+    other = _opf_oplock._st_unadopted_repo(d, "other", env)
+    holder = _opf_oplock.acquire_init_operation(root, "opf-init")
+    sub = begin_operation(holder, _st_plan_bytes(_ST_INIT_OP))
+    assert os.path.isfile(os.path.join(_st_init_home(root), OPS_DIRNAME, _ST_INIT_OP, PLAN_NAME))
+    assert record_phase(sub, holder, "plan-recorded") == "0001-plan-recorded.json"
+    foreign = _opf_oplock.acquire_init_operation(other, "opf-init")
+    _st_expect_refusal(record_phase, sub, foreign, "x", needle="different init holder")
+    _opf_oplock.release_init_holder(foreign)
+    _opf_oplock._st_make_machine_dir(root)
+    cap = _opf_oplock.attach_init_lease(holder, _ST_INIT_OP)
+    assert record_phase(sub, cap, "dirs-verified") == "0002-dirs-verified.json"
+    _st_expect_refusal(record_phase, sub, holder, "x", needle="spent")
+    back = _opf_oplock.detach_init_lease(cap)
+    assert record_phase(sub, back, "after-detach") == "0003-after-detach.json"
+    close_operation(sub)
+    _opf_oplock.release_init_holder(back)
+    store = _opf_oplock._st_git_store(d, "store", env)
+    plain = _opf_oplock.acquire_operation(store, "op")
+    psub = begin_operation(plain, _st_plan_bytes(plain.op_id))
+    close_operation(psub)
+    _opf_oplock.release_operation(plain)
+    survey = classify_init_operations(root)
+    assert survey.status == OPERATIONS and survey.operations[0].status == INTACT
+    assert survey.operations[0].phases == ((1, "plan-recorded"), (2, "dirs-verified"),
+                                           (3, "after-detach"))
+
+
+def _t_s15_resume_operation(d, env):
+    """T-s15 (decision 2): a crashed operation is RESUMED under a fresh holder through
+    resume_operation: the original op id, the plan bytes untouched, the phase roster re-bound, and
+    the next append continues the sequence; a wrong plan digest, an unknown op id, or a gapped tree
+    refuses and the tree is preserved."""
+    root = _opf_oplock._st_unadopted_repo(d, "repo", env)
+    plan = _st_plan_bytes(_ST_INIT_OP)
+
+    def crash():
+        h = _opf_oplock.acquire_init_operation(root, "opf-init")
+        s = begin_operation(h, plan)
+        record_phase(s, h, "plan-recorded")
+        record_phase(s, h, "dirs-intent")
+        return 0                          # exit without release or close: a crash
+    status = _st_child(crash)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, status
+    op_dir = os.path.join(_st_init_home(root), OPS_DIRNAME, _ST_INIT_OP)
+    holder = _opf_oplock.acquire_init_operation(root, "opf-init")
+    _st_expect_refusal(resume_operation, holder, _ST_INIT_OP, "sha256:" + "1" * 64,
+                       needle="changed evidence")
+    _st_expect_refusal(resume_operation, holder, "11111111-1111-1111-1111-111111111111",
+                       "sha256:" + "0" * 64, needle="no recorded operation")
+    sub = resume_operation(holder, _ST_INIT_OP, "sha256:" + "0" * 64)
+    assert recorded_phases(sub) == ((1, "plan-recorded"), (2, "dirs-intent"))
+    assert record_phase(sub, holder, "dirs-verified") == "0003-dirs-verified.json"
+    with open(os.path.join(op_dir, PLAN_NAME), "rb") as fh:
+        assert fh.read() == plan, "resume never rewrites the plan"
+    close_operation(sub)
+    os.unlink(os.path.join(op_dir, "0002-dirs-intent.json"))
+    _st_expect_refusal(resume_operation, holder, _ST_INIT_OP, "sha256:" + "0" * 64,
+                       needle="contiguous")
+    assert os.path.isfile(os.path.join(op_dir, "0003-dirs-verified.json")), "preserved"
+    _opf_oplock.release_init_holder(holder)
+
+
+def _t_s16_staging_sweep(d, env):
+    """T-s16 (decision 3): resume sweeps EXACTLY the lock module's staging leftovers of a plan or
+    phase record (a lone staging file, and one killed after its link, sharing the record's inode),
+    restoring the record's single link, and refuses a staging name bound to a non-regular entry and
+    any other foreign entry, preserving them."""
+    root = _opf_oplock._st_unadopted_repo(d, "repo", env)
+    holder = _opf_oplock.acquire_init_operation(root, "opf-init")
+    sub = begin_operation(holder, _st_plan_bytes(_ST_INIT_OP))
+    record_phase(sub, holder, "plan-recorded")
+    close_operation(sub)
+    op_dir = os.path.join(_st_init_home(root), OPS_DIRNAME, _ST_INIT_OP)
+    lone = "." + "0002-dirs-intent.json" + _opf_oplock._STAGING_MARKER + "a" * 32
+    with open(os.path.join(op_dir, lone), "wb") as fh:
+        fh.write(b"{")
+    linked = "." + "0001-plan-recorded.json" + _opf_oplock._STAGING_MARKER + "b" * 32
+    os.link(os.path.join(op_dir, "0001-plan-recorded.json"), os.path.join(op_dir, linked))
+    assert classify_init_operations(root).operations[0].status == CANNOT_EVALUATE
+    sub = resume_operation(holder, _ST_INIT_OP, "sha256:" + "0" * 64)
+    assert sorted(sub.swept) == sorted([lone, linked]), sub.swept
+    assert sorted(os.listdir(op_dir)) == ["0001-plan-recorded.json", PLAN_NAME]
+    assert os.stat(os.path.join(op_dir, "0001-plan-recorded.json")).st_nlink == 1
+    close_operation(sub)
+    bad = "." + PLAN_NAME + _opf_oplock._STAGING_MARKER + "c" * 32
+    os.mkdir(os.path.join(op_dir, bad))
+    _st_expect_refusal(resume_operation, holder, _ST_INIT_OP, "sha256:" + "0" * 64,
+                       needle="not a regular file")
+    os.rmdir(os.path.join(op_dir, bad))
+    with open(os.path.join(op_dir, ".plan.json.opf-stage-short"), "wb") as fh:
+        fh.write(b"x")
+    _st_expect_refusal(resume_operation, holder, _ST_INIT_OP, "sha256:" + "0" * 64,
+                       needle="foreign entry")
+    assert os.path.exists(os.path.join(op_dir, ".plan.json.opf-stage-short")), "preserved"
+    _opf_oplock.release_init_holder(holder)
+
+
+def _t_s17_kill_during_plan_publication(d, env):
+    """T-s17 (decision 3): a REAL SIGKILL during the plan's atomic publication, (a) before its link
+    (a staging leftover only) and (b) after its link but before the staging unlink (the plan with
+    link count 2 beside its staging name), is handled on retry: (a) the operation directory is
+    swept EMPTY and discarded explicitly (the plan never authorized anything); (b) the classifier
+    reads the doubly-linked plan as CANNOT-EVALUATE and resume sweeps it back to one link and
+    resumes the SAME operation. A non-empty directory is never discarded."""
+    import signal as _signal
+    for when in ("before-link", "after-link"):
+        root = _opf_oplock._st_unadopted_repo(d, "repo-" + when, env)
+
+        def crash():
+            h = _opf_oplock.acquire_init_operation(root, "opf-init")
+            real_link = os.link
+
+            def killing_link(*args, **kwargs):
+                if when == "after-link":
+                    real_link(*args, **kwargs)
+                os.kill(os.getpid(), _signal.SIGKILL)
+            os.link = killing_link
+            begin_operation(h, _st_plan_bytes(_ST_INIT_OP))
+            return 5                      # unreachable: the kill lands inside the publication
+        status = _st_child(crash)
+        assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == _signal.SIGKILL, status
+        op_dir = os.path.join(_st_init_home(root), OPS_DIRNAME, _ST_INIT_OP)
+        entries = sorted(os.listdir(op_dir))
+        holder = _opf_oplock.acquire_init_operation(root, "opf-init")
+        if when == "before-link":
+            assert len(entries) == 1 and entries[0].startswith(".plan.json.opf-stage-"), entries
+            swept = discard_empty_operation(holder, _ST_INIT_OP)
+            assert len(swept) == 1 and not os.path.exists(op_dir), swept
+            _st_expect_refusal(resume_operation, holder, _ST_INIT_OP, "sha256:" + "0" * 64,
+                               needle="no recorded operation")
+        else:
+            assert PLAN_NAME in entries and len(entries) == 2, entries
+            assert classify_init_operations(root).operations[0].status == CANNOT_EVALUATE
+            _st_expect_refusal(discard_empty_operation, holder, _ST_INIT_OP,
+                               needle="preserved evidence")
+            assert settle_operation(holder, _ST_INIT_OP) == ((), False), "never discarded"
+            sub = resume_operation(holder, _ST_INIT_OP, "sha256:" + "0" * 64)
+            assert sorted(os.listdir(op_dir)) == [PLAN_NAME]
+            record_phase(sub, holder, "plan-recorded")
+            close_operation(sub)
+            assert classify_init_operations(root).operations[0].status == INTACT
+        _opf_oplock.release_init_holder(holder)
+
+
+def _t_s18_outcomes_home(d, env):
+    """T-s18 (decision 4): attempt outcomes live in the SIBLING outcomes/<op_id>/ home (the
+    ops/<op_id>/ shape is unchanged), create-only, contiguous, canonical, and bound to the
+    operation; a foreign entry or a malformed payload refuses; the holder detach_init_lease hands
+    back may still record the outcome; read_outcomes returns them in order."""
+    root = _opf_oplock._st_unadopted_repo(d, "repo", env)
+    holder = _opf_oplock.acquire_init_operation(root, "opf-init")
+    sub = begin_operation(holder, _st_plan_bytes(_ST_INIT_OP))
+
+    def outcome(n):
+        return _opf_init_contract.canonical_json_bytes(dict(
+            schema=1, format=OUTCOME_FORMAT, operation_id=_ST_INIT_OP, attempt=n))
+    assert record_outcome(sub, holder, outcome(1)) == "0001-attempt.json"
+    _st_expect_refusal(record_outcome, sub, holder, outcome(2) + b"\n", needle="canonical")
+    _st_expect_refusal(record_outcome, sub, holder, _opf_init_contract.canonical_json_bytes(
+        dict(schema=1, format=OUTCOME_FORMAT, operation_id="x")), needle="operation id")
+    _opf_oplock._st_make_machine_dir(root)
+    cap = _opf_oplock.attach_init_lease(holder, _ST_INIT_OP)
+    assert record_outcome(sub, cap, outcome(2)) == "0002-attempt.json"
+    back = _opf_oplock.detach_init_lease(cap)
+    assert record_outcome(sub, back, outcome(3)) == "0003-attempt.json"
+    home = os.path.join(_st_init_home(root), OUTCOMES_DIRNAME, _ST_INIT_OP)
+    assert sorted(os.listdir(os.path.join(_st_init_home(root), OPS_DIRNAME, _ST_INIT_OP))) \
+        == [PLAN_NAME], "the ops/<op_id>/ record shape is unchanged"
+    got = read_outcomes(root, _ST_INIT_OP)
+    assert [o["attempt"] for o in got] == [1, 2, 3]
+    with open(os.path.join(home, "notes"), "w", encoding="utf-8") as fh:
+        fh.write("x\n")
+    _st_expect_refusal(record_outcome, sub, back, outcome(4), needle="foreign entry")
+    _st_expect_refusal(read_outcomes, root, _ST_INIT_OP, needle="foreign")
+    close_operation(sub)
+    _opf_oplock.release_init_holder(back)
+
+
 def self_test():
     """Regression roster (the PR2 resume-substrate T-s witnesses), each a fail-to-pass
     discriminator against a named behaviour: the sibling-home placement under the composed
@@ -1462,6 +2125,16 @@ def self_test():
          _t_s12_early_count_guard),
         ("T-s13 a mid-read OSError contains to one CANNOT-EVALUATE entry",
          _t_s13_midread_containment),
+        ("T-s14 an init holder writes before the store exists; handles bind to the holder",
+         _t_s14_holder_writes_and_binding),
+        ("T-s15 a crashed operation resumes under its original id through resume_operation",
+         _t_s15_resume_operation),
+        ("T-s16 resume sweeps exact staging leftovers and refuses anything else",
+         _t_s16_staging_sweep),
+        ("T-s17 a SIGKILL during plan publication is discarded or resumed, never replaced",
+         _t_s17_kill_during_plan_publication),
+        ("T-s18 attempt outcomes live in the sibling outcomes home, bound and contiguous",
+         _t_s18_outcomes_home),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-substrate-selftest-"))

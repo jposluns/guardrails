@@ -585,7 +585,8 @@ def _suite():
             man1 = man_of(mach1)
             check("U1 base table renamed to [opf]", "opf" in man1 and "devprocess" not in man1)
             check("U1 discovery token renamed to opf", man1["opf"].get("standard") == "opf")
-            check("U1 spec_version bumped to 1.1.0", man1["opf"]["spec_version"] == "1.1.0")
+            check("U1 spec_version bumped to the tooling spec_version",
+                  man1["opf"]["spec_version"] == _opf_store.SUPPORTED_SPEC_VERSION)
             check("U1 base table body otherwise carried over", all(
                 man1["opf"].get(k) == v for k, v in (
                     ("layout", "inline"), ("posture", "required"), ("import_status", "none"))))
@@ -613,8 +614,48 @@ def _suite():
             before = _snapshot(s1)
             rc2, out2 = upgrade(s1)
             check("U2 idempotent second run exits 0", rc2 == EXIT_OK)
-            check("U2 idempotent second run reports no-op", "already at spec_version 1.1.0" in out2)
+            check("U2 idempotent second run reports no-op", "already at spec_version {}".format(
+                _opf_store.SUPPORTED_SPEC_VERSION) in out2)
             check("U2 idempotent second run is a byte no-op", _snapshot(s1) == before)
+
+            # U28) OPF-D2B PR3a: a 1.1.0 (D2a) store upgrades to 1.2.0 by the spec_version bump ALONE:
+            # every other manifest field, the counters, every index, version, and worklog stay byte-
+            # identical, no init.toml provenance is fabricated, the store is doctor-VALID, and a second
+            # run is a byte no-op. Fails without the 1.1.0 origin (the 1.0.0 planner refuses [opf]).
+            s28 = base / "u28-d2a"
+            s28.mkdir()
+            mach28 = build_store(s28)
+            rc28a, _out28a = upgrade(s28)
+            man28 = man_of(mach28)
+            man28["opf"]["spec_version"] = "1.1.0"
+            (mach28 / _opf_store.MANIFEST_NAME).write_text(_opf_emit.emit_checked(man28),
+                                                            encoding="utf-8")
+            git_call(s28, ["--literal-pathspecs", "add", "-A"])
+            git_call(s28, ["commit", "-m", "a 1.1.0 store"])
+            before28 = _snapshot(s28)
+            rc28, out28 = upgrade(s28)
+            check("U28 1.1.0 store upgrades (exit 0)", rc28a == EXIT_OK and rc28 == EXIT_OK)
+            check("U28 reports the 1.1.0 origin", '"from": "1.1.0"' in out28
+                  and '"decisions_view": "unchanged"' in out28)
+            man28b = man_of(mach28)
+            check("U28 spec_version bumped", man28b["opf"]["spec_version"]
+                  == _opf_store.SUPPORTED_SPEC_VERSION)
+            man28b["opf"]["spec_version"] = "1.1.0"
+            check("U28 manifest otherwise unchanged", man28b == man28)
+            after28 = _snapshot(s28)
+            mrel = "{}/{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR,
+                                     _opf_store.MANIFEST_NAME)
+            check("U28 nothing else changed (counters, indexes, version, worklog byte-identical)",
+                  {k: v for k, v in after28.items() if k != mrel}
+                  == {k: v for k, v in before28.items() if k != mrel})
+            check("U28 no provenance fabricated", not (mach28 / _opf_check.INIT_PROVENANCE_NAME).exists())
+            drc28, dout28 = doctor(s28)
+            check("U28 upgraded 1.1.0 store is doctor-VALID", drc28 == EXIT_OK and "integrity: VALID"
+                  in dout28)
+            again28 = _snapshot(s28)
+            rc28c, out28c = upgrade(s28)
+            check("U28 second run is a byte no-op", rc28c == EXIT_OK and _snapshot(s28) == again28
+                  and "nothing to upgrade" in out28c)
 
             # U3) governance=true, MA+MD rows, empty MA/MD indexes, MA/MD counters.
             s3 = base / "u3-gov"
@@ -835,7 +876,8 @@ def _suite():
             build_store(s17a, manifest=above_manifest)
             rc17a, out17a = upgrade(s17a)
             check("U17 above-tooling store refused (exit 2)", rc17a == EXIT_ERROR)
-            check("U17 above-tooling refusal names the reason", "ABOVE the 1.1.0" in out17a)
+            check("U17 above-tooling refusal names the reason", "ABOVE the {}".format(
+                _opf_store.SUPPORTED_SPEC_VERSION) in out17a)
 
             s17b = base / "u17-noncanonical"
             s17b.mkdir()

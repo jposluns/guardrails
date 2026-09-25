@@ -59,7 +59,10 @@ The lock identity is THREE LEGS, held together or the acquisition fails and unwi
   3. The spec 5.7 LEASE at <machine-store>/lease.toml (published exclusively, as the active
      record is), mandatory: acquisition
      requires a RESOLVED machine store and every capability carries a lease. A capability without
-     a lease cannot exist. The lease schema is single-sourced from the store validator and is not
+     a lease cannot exist. (OPF-D2B PR3a: `opf init`, which creates the store, first takes the SAME
+     anchor through acquire_init_operation, a pre-store holder that publishes no record and is not a
+     capability, and mints its capability only by attaching the mandatory lease once the machine
+     store exists; see the init section below.) The lease schema is single-sourced from the store validator and is not
      extended here; lease-holder liveness is derived from the paired active record's owner (same
      holder).
 
@@ -749,12 +752,14 @@ class OpCapability:
                  "_ctl_fd", "_machine_fd", "_anchor_fd", "_active_fd", "_lease_fd",
                  "_anchor_ident", "_ctl_ident", "_machine_ident", "_active_ident", "_lease_ident",
                  "_active_bytes", "_lease_bytes",
-                 "_acquirer_pid", "_acquirer_pid_start", "_released", "_claim", "_claimant")
+                 "_acquirer_pid", "_acquirer_pid_start", "_released", "_claim", "_claimant",
+                 "init_root", "init_token")
 
     def __init__(self, op_id, holder, operation, store_root, machine_rel,
                  ctl_fd, machine_fd, anchor_fd, active_fd, lease_fd,
                  anchor_ident, ctl_ident, machine_ident, active_ident, lease_ident,
-                 active_bytes, lease_bytes, acquirer_pid, acquirer_pid_start):
+                 active_bytes, lease_bytes, acquirer_pid, acquirer_pid_start,
+                 init_root=None, init_token=None):
         self.op_id = op_id
         self.holder = holder
         self.operation = operation
@@ -777,6 +782,13 @@ class OpCapability:
         self._released = False
         self._claim = threading.Lock()
         self._claimant = None
+        # OPF-D2B PR3a: set only on a capability minted by attach_init_lease from an InitHolder. The
+        # explicit product root the init operation is bound to (its store does not RESOLVE until the
+        # manifest is published, so the resume substrate binds to this root instead of the resolver),
+        # and the holder's token, which binds the capability to the operation handle begun or resumed
+        # under that holder. None on every capability acquire_operation returns.
+        self.init_root = init_root
+        self.init_token = init_token
 
 
 # --- small fail-closed primitives ---------------------------------------------------------------
@@ -1528,7 +1540,12 @@ def _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease
                           "recovery (manual intervention required)")
     doc, active_ident, active_bytes = _read_control_record(ctl_fd, ACTIVE_NAME, "active record")
     owner, machine = _validate_recovery_active(doc)
-    if (machine["dev"], machine["ino"]) != (str(machine_st.st_dev), str(machine_st.st_ino)) \
+    # OPF-D2B PR3a: `machine_st` is None when the recovering acquirer is the init PRE-STORE holder of a
+    # checkout whose machine store does not exist yet; the recorded machine store is then never this
+    # checkout's, so the pairing is decided by whether the recorded one still exists, exactly as for a
+    # differing identity.
+    if (machine_st is None
+            or (machine["dev"], machine["ino"]) != (str(machine_st.st_dev), str(machine_st.st_ino))) \
             and _recorded_machine_store_present(machine):
         raise OpLockError("the stale active record is paired with a different machine store: the one "
                           "recorded at {!r} (device/inode {}/{}), which still exists with that "
@@ -1537,7 +1554,8 @@ def _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease
                           "strand it; refusing recovery (run recovery from the checkout that owns "
                           "that machine store)".format(
                               machine["path"], machine["dev"], machine["ino"], machine_path,
-                              machine_st.st_dev, machine_st.st_ino))
+                              "absent" if machine_st is None else machine_st.st_dev,
+                              "absent" if machine_st is None else machine_st.st_ino))
     node = owner.get("nodename")
     if not isinstance(node, str) or not node:
         raise OpLockError("the stale active record owner has no usable nodename; its holder may be "
@@ -2992,6 +3010,570 @@ class _ReleaseScope:
         return False
 
 
+# --- OPF-D2B PR3a: the init-specific PRE-STORE holder (PD-D2B-PR3-SCHEMA decisions 1, 2, and 4) ------
+#
+# `opf init` cannot use acquire_operation as it stands: acquisition requires a RESOLVED machine store
+# and writes the mandatory lease into it, while init is the operation that creates that store. The
+# ratified lifecycle (decision 1) is therefore: take the SHARED mutex first, through the same control
+# root, anchor, flock, owner checks, and recovery machinery as acquire_operation (never a second mutex,
+# never an already_locked assertion); let the init operation layer persist its plan and create the
+# machine directory through its own journal while ONLY the flock is held; and only then ATTACH the
+# mandatory lease, which mints an ordinary OpCapability. A lease-less OpCapability never exists.
+#
+# The pre-store holder (InitHolder) publishes NO control record and carries NO lease. A holder killed
+# before attaching leaves nothing in the control directory: the kernel frees its flock with its last
+# descriptor, and whatever it created in the worktree is the init operation layer's journaled, resumable
+# evidence. It is NOT an OpCapability, so no path that requires a capability (release_operation, a
+# nested writer) accepts it; the resume substrate accepts it explicitly for the records it writes before
+# the lease exists (the plan, the milestone phases, the directory-effect journal).
+#
+# Completion versus release (decision 4): detach_init_lease is the lease-release step. It removes the
+# lease and then the active record (the D3 order) while KEEPING the flock, and hands back an InitHolder,
+# so the caller's final validation runs after the last store write (the lease removal) while the outer
+# mutex still excludes every cooperating writer; release_init_holder then closes the anchor, which gives
+# up the lock (release by close). A detach that fails partway closes everything (a full release by close,
+# the records it could not remove left for a later recover=True), so no failure path leaves a holder
+# whose state the caller cannot name.
+#
+# DISCLOSED RESIDUALS (beyond the module contract, which applies unchanged): these entry points reuse the
+# module's primitives, its signal deferral, its pid-gated mutating steps, and its single descriptor
+# owner, but they are NOT swept by the line-level interruption and fork suites (T-f4 to T-f11) that
+# cover acquire_operation and release_operation; their coverage is the T-i witnesses below. The init
+# holder requires a git worktree (the D2b binding is a git binding), so a product root with no .git
+# refuses rather than rooting the control tree at the product root.
+
+_INIT_MACHINE_REL = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+_OP_ID_GRAMMAR = frozenset("0123456789abcdef-")
+
+
+class InitHolder:
+    """The init PRE-STORE holder: the shared anchor flock and nothing else (no control record, no
+    lease). Carries the explicit product root it is bound to, the retained control-directory and
+    anchor descriptors and identities, and the acquirer identity (pid plus /proc start time). Its
+    `token` is a fresh object the resume substrate binds an operation handle to, and that
+    attach_init_lease copies into the minted OpCapability, so a handle begun under one holder can
+    never be written through another. `spent` is set when attach_init_lease transfers the
+    descriptors into a capability; `_released` when release_init_holder has closed them."""
+    __slots__ = ("product_root", "machine_rel", "control_root", "token", "_ctl_fd", "_anchor_fd",
+                 "_anchor_ident", "_ctl_ident", "_product_ident", "_acquirer_pid",
+                 "_acquirer_pid_start", "_released", "_spent", "_claim", "_operation", "_holder")
+
+    def __init__(self, product_root, control_root, ctl_fd, anchor_fd, anchor_ident, ctl_ident,
+                 product_ident, acquirer_pid, acquirer_pid_start, operation, holder):
+        self.product_root = product_root
+        self.machine_rel = _INIT_MACHINE_REL
+        self.control_root = control_root
+        self.token = object()
+        self._ctl_fd = ctl_fd
+        self._anchor_fd = anchor_fd
+        self._anchor_ident = anchor_ident
+        self._ctl_ident = ctl_ident
+        self._product_ident = product_ident
+        self._acquirer_pid = acquirer_pid
+        self._acquirer_pid_start = acquirer_pid_start
+        self._released = False
+        self._spent = False
+        self._claim = threading.Lock()
+        self._operation = operation
+        self._holder = holder
+
+
+def _require_acquirer(obj, what):
+    """Refuse any caller that is not the recorded acquirer of `obj` (pid plus /proc start time),
+    touching nothing; the same identity rule release_operation applies."""
+    pid = os.getpid()
+    recorded = obj._acquirer_pid_start
+    if recorded != "" and not _journal._is_canonical_pid_start(recorded):
+        raise OpLockError("recorded acquirer start time is malformed; refusing {} (a malformed "
+                          "control input is a failure, never trusted)".format(what))
+    if pid != obj._acquirer_pid or _journal._pid_start(pid) != recorded:
+        raise OpLockError("{} refused: caller (pid {}) is not the recorded acquirer (pid "
+                          "{})".format(what, pid, obj._acquirer_pid))
+
+
+def require_live_holder(obj):
+    """The shared liveness gate the resume substrate and the init operation layer apply before a
+    write: `obj` is an InitHolder or an OpCapability, not released (nor, for a holder, spent into a
+    capability), called by its recorded acquirer, with the retained anchor identity still holding (a
+    regular, singly-linked file with the acquire-time device and inode). Raises OpLockError; returns
+    nothing."""
+    if isinstance(obj, InitHolder):
+        if obj._spent:
+            raise OpLockError("the init holder was spent into a capability; write through the "
+                              "capability")
+    elif not isinstance(obj, OpCapability):
+        raise OpLockError("a write requires a held InitHolder or OpCapability")
+    if obj._released:
+        raise OpLockError("the operation lock is already released; a write requires it held")
+    _require_acquirer(obj, "write")
+    try:
+        st = os.fstat(obj._anchor_fd)
+    except (OSError, TypeError) as exc:
+        raise OpLockError("cannot fstat the held anchor ({})".format(exc))
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 \
+            or (st.st_dev, st.st_ino) != obj._anchor_ident:
+        raise OpLockError("the held anchor identity no longer holds; the flock no longer excludes "
+                          "anyone, so no write may land")
+
+
+def _init_product_root(product_root):
+    """The explicit, absolute, NUL-free product root string an init holder binds to (a control
+    parameter validated, never coerced or resolved through symlinks)."""
+    if not isinstance(product_root, (str, os.PathLike)):
+        raise OpLockError("init product root must be a path")
+    root = os.fspath(product_root)
+    if type(root) is not str or not root or "\x00" in root or not os.path.isabs(root):
+        raise OpLockError("init product root must be an absolute, NUL-free path (the explicit "
+                          "binding), not {!r}".format(root))
+    return os.path.abspath(root)
+
+
+def _probe_init_machine_dir(product_fd, product_root):
+    """Open the init machine store (.working/toml) beneath the product root no-follow when it
+    exists, returning its descriptor, or None on GENUINE absence of either component. A symlink, a
+    non-directory, an unreadable component, or a machine store owned by another uid refuses."""
+    fd = None
+    with _FdOwner() as owner:
+        for comp in _INIT_MACHINE_REL.split("/"):
+            parent = product_fd if fd is None else fd
+            st = _lstat_at(parent, comp, "{}/{}".format(product_root, comp))
+            if st is None:
+                return None
+            if not stat.S_ISDIR(st.st_mode):
+                raise OpLockError("{}/{} is not a plain directory; refusing (manual intervention "
+                                  "required)".format(product_root, comp))
+            nfd = owner.adopt(_open_dir_at(parent, comp, "{}/{}".format(product_root, comp)))
+            if fd is not None:
+                owner.close(fd, "cannot close a machine-store probe descriptor ({})")
+            fd = nfd
+        st = _fstat_or_refuse(fd, "init machine store")
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise OpLockError("init machine store {}/{} is not a directory owned by the current uid; "
+                              "refusing".format(product_root, _INIT_MACHINE_REL))
+        return owner.transfer(fd)
+
+
+def acquire_init_operation(product_root, operation, holder=None, recover=False):
+    """Take the SHARED operation mutex for an `opf init` of the product root `product_root` BEFORE
+    its store exists, returning an InitHolder (decision 1): no control record, no lease.
+
+    The control root is the authoritative common git directory of the product root (git itself,
+    scrubbed environment, never a fallback); the anchor, flock, post-lock check, and staging-garbage
+    sweep are acquire_operation's own. A stale active record (and, when the machine store already
+    exists from an interrupted bootstrap, a stale lease) refuses without recover=True; with it, the
+    confirmed-dead liveness gate and the lease-first delete order are reused verbatim. `product_root`
+    must be absolute: it is the explicit binding, never an ambient working directory."""
+    acquirer_pid = os.getpid()
+    if not _containment.probe():
+        raise OpLockError("race-free containment primitive absent; fail-closed")
+    if type(recover) is not bool:
+        raise OpLockError("recover must be a bool (a control parameter is validated, never "
+                          "coerced)")
+    root = _init_product_root(product_root)
+    nodename = os.uname().nodename
+    if type(nodename) is not str or not nodename:
+        raise OpLockError("this host reports an empty nodename; refusing to acquire, because a "
+                          "later recovery could never confirm this holder dead")
+    if holder is None:
+        holder = "opf:{}:{}".format(nodename, acquirer_pid)
+    _validate_field("holder", holder)
+    _validate_field("operation", operation)
+    result = None
+    try:
+        with _SignalDeferral(): result = _acquire_init_body(root, operation, holder, recover,
+                                                              acquirer_pid)
+        return result if os.getpid() == acquirer_pid else _refuse_init_continuation(result)
+    except BaseException:
+        if result is not None and not result._released and os.getpid() == acquirer_pid:
+            _close_holder_fds(result)
+        raise
+
+
+def _refuse_init_continuation(holder):
+    """A forked continuation of an init acquisition receives no holder: it closes only its inherited
+    descriptor copies (which cannot free the acquirer's flock) and refuses."""
+    _close_holder_fds(holder)
+    raise OpLockError("init acquisition refused in a forked continuation (pid {}) of the acquiring "
+                      "process (pid {}); it receives no holder and closed only its inherited "
+                      "descriptor copies".format(os.getpid(), holder._acquirer_pid))
+
+
+def _close_holder_fds(holder):
+    """Close a holder's retained descriptors, the anchor's FIRST (its close gives up this process's
+    hold on the lock), each its own guarded step; returns the collected problems. Marks it released."""
+    fds = tuple(fd for fd in (holder._ctl_fd, holder._anchor_fd) if fd is not None)
+    holder._released = True
+    holder._ctl_fd = holder._anchor_fd = None
+    owner = _FdOwner()
+    owner.adopt_all(fds)                  # closed most recently adopted first: the anchor, then ctl
+    problems, unconfirmed, interrupt = owner.close_all()
+    if unconfirmed:
+        problems.append(_unconfirmed_closes(len(unconfirmed), "holder descriptor"))
+    if interrupt is not None:
+        interrupt.add_note("opf-oplock: raised while closing the init holder's descriptors")
+        raise interrupt
+    return problems
+
+
+def _acquire_init_body(root, operation, holder, recover, acquirer_pid):
+    """The body of acquire_init_operation, run with the Python-handled signals deferred."""
+    owner = _FdOwner()
+    anchor_fd = None
+    try:
+        product_fd = owner.adopt(_open_path_dir_nofollow(root, "init product root"))
+        product_st = _fstat_or_refuse(product_fd, "init product root")
+        if _classify_git_entry(product_fd, root) == "absent":
+            raise OpLockError("init product root {} carries no .git entry; the D2b init binding is a "
+                              "git binding, so the control root is never the product root".format(
+                                  root))
+        control_root_desc = _git_common_dir(root)
+        control_root_fd = owner.adopt(_open_path_dir_nofollow(control_root_desc, "common git dir"))
+        ctl_fd = owner.adopt(_open_control_dir(control_root_fd, control_root_desc))
+        owner.close(control_root_fd, "cannot close the control-root descriptor ({})")
+        anchor_fd = owner.adopt(_open_anchor(ctl_fd))
+        _gated_step(acquirer_pid, "take the anchor lock", _flock_exclusive, anchor_fd)
+        anchor_ident = _post_lock_anchor_check(ctl_fd, anchor_fd)
+        _gated_step(acquirer_pid, "remove the active record's staging leftovers",
+                    _remove_staging_garbage, ctl_fd, ACTIVE_NAME, "active record")
+        machine_fd = _probe_init_machine_dir(product_fd, root)
+        if machine_fd is not None:
+            owner.adopt(machine_fd)
+            _gated_step(acquirer_pid, "remove the lease's staging leftovers",
+                        _remove_staging_garbage, machine_fd, _opf_check.LEASE_NAME, "lease")
+        machine_st = None if machine_fd is None else _fstat_or_refuse(machine_fd, "machine store")
+        machine_path = os.path.join(root, _INIT_MACHINE_REL)
+        stale_active = _classify_stale(ctl_fd, ACTIVE_NAME, "active record")
+        stale_lease = machine_fd is not None and _classify_stale(machine_fd, _opf_check.LEASE_NAME,
+                                                                 "lease")
+        if stale_active or stale_lease:
+            if not recover:
+                stale = ", ".join(n for n, s in ((ACTIVE_NAME, stale_active),
+                                                 (_opf_check.LEASE_NAME, stale_lease)) if s)
+                raise OpLockError(
+                    "stale operation record(s) under a free anchor ({}); refusing without EXPLICIT "
+                    "recovery (recover=True), which itself proceeds only when the recorded holder "
+                    "is confirmed dead".format(stale))
+            rec_active_ident, rec_active_bytes, rec_lease_ident, rec_lease_bytes = \
+                _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease,
+                                               machine_st, machine_path)
+            if stale_lease:
+                _gated_step(acquirer_pid, "remove the stale lease", _recover_stale, machine_fd,
+                            _opf_check.LEASE_NAME, rec_lease_ident, rec_lease_bytes, "lease")
+            if stale_active:
+                _gated_step(acquirer_pid, "remove the stale active record", _recover_stale, ctl_fd,
+                            ACTIVE_NAME, rec_active_ident, rec_active_bytes, "active record")
+        if machine_fd is not None:
+            owner.close(machine_fd, "cannot close the machine-store descriptor ({})")
+        owner.close(product_fd, "cannot close the product-root descriptor ({})")
+        ctl_st = _fstat_or_refuse(ctl_fd, "control directory")
+        result = InitHolder(
+            product_root=root, control_root=control_root_desc, ctl_fd=ctl_fd, anchor_fd=anchor_fd,
+            anchor_ident=anchor_ident, ctl_ident=(ctl_st.st_dev, ctl_st.st_ino),
+            product_ident=(product_st.st_dev, product_st.st_ino), acquirer_pid=acquirer_pid,
+            acquirer_pid_start=_journal._pid_start(acquirer_pid), operation=operation,
+            holder=holder)
+        owner.transfer_all()
+        return result
+    except BaseException as exc:
+        # No record was published, so the unwind only closes: the anchor FIRST (its close gives up
+        # the lock; release by close, never flock(LOCK_UN)), then the rest.
+        problems = []
+        interrupt = None
+        if anchor_fd is not None and anchor_fd in owner:
+            aprob, _aunc, interrupt = owner.close_guarded(anchor_fd)
+            problems.extend(aprob)
+        cprob, cunc, cint = owner.close_all()
+        problems.extend(cprob)
+        if cunc:
+            problems.append(_unconfirmed_closes(len(cunc), "init descriptor"))
+        interrupt = interrupt or cint
+        if interrupt is not None and isinstance(exc, Exception):
+            interrupt.add_note("opf-oplock: raised while unwinding a failed init acquisition "
+                               "({})".format(exc))
+            raise interrupt
+        if problems and isinstance(exc, Exception):
+            raise OpLockError("{}; additionally the unwind failed: {}".format(
+                exc, "; ".join(problems))) from exc
+        raise
+
+
+def _valid_operation_id(operation_id):
+    """A well-formed uuid4 operation id string (the substrate's grammar), else refuse."""
+    if type(operation_id) is not str or len(operation_id) != 36 \
+            or any(ch not in _OP_ID_GRAMMAR for ch in operation_id) \
+            or [len(p) for p in operation_id.split("-")] != [8, 4, 4, 4, 12]:
+        raise OpLockError("operation id {!r} is not a well-formed operation id".format(
+            operation_id))
+
+
+def attach_init_lease(holder, operation_id):
+    """Attach the MANDATORY lease to a live InitHolder whose machine store now exists, minting the
+    ordinary OpCapability for the init operation `operation_id` (decisions 1 and 2): the active
+    record (owner identity, [machine_store] pairing) and the lease are published atomically exactly
+    as acquire_operation publishes them, and the capability takes over the holder's anchor and
+    control-directory descriptors, so the flock is never released between the two. The capability's
+    op_id IS the operation id (minted bound to the operation, never mutated afterwards), and it
+    carries the holder's token and product root. The holder is SPENT on success. On failure the
+    records this call published are removed in the D3 order (a lease that cannot be removed keeps the
+    owner-bearing active record beside it for a later recover=True) and the holder stays live, still
+    holding the flock, for the caller to release."""
+    if not isinstance(holder, InitHolder):
+        raise OpLockError("attach_init_lease requires an InitHolder")
+    _valid_operation_id(operation_id)
+    require_live_holder(holder)
+    if holder._product_ident is None:
+        raise OpLockError("a holder returned by detach_init_lease cannot re-attach a lease; acquire "
+                          "a fresh init holder")
+    if not holder._claim.acquire(False):
+        raise OpLockError("the init holder is being released or attached concurrently; refusing")
+    try:
+        with _SignalDeferral(): cap = _attach_init_body(holder, operation_id)
+        return cap
+    finally:
+        holder._claim.release()
+
+
+def _attach_init_body(holder, operation_id):
+    """The body of attach_init_lease, run with the Python-handled signals deferred."""
+    pid = holder._acquirer_pid
+    owner = _FdOwner()
+    active_ident = lease_ident = None
+    active_payload = lease_payload = None
+    lease_attempted = False
+    machine_fd = None
+    try:
+        product_fd = owner.adopt(_open_path_dir_nofollow(holder.product_root, "init product root"))
+        pst = _fstat_or_refuse(product_fd, "init product root")
+        if (pst.st_dev, pst.st_ino) != holder._product_ident:
+            raise OpLockError("the init product root {} no longer names the directory the holder "
+                              "was acquired for; refusing".format(holder.product_root))
+        machine_fd = owner.adopt(_open_machine_dir(product_fd, _INIT_MACHINE_REL,
+                                                   holder.product_root))
+        machine_st = _fstat_or_refuse(machine_fd, "init machine store")
+        machine_path = os.path.join(holder.product_root, _INIT_MACHINE_REL)
+        _gated_step(pid, "remove the lease's staging leftovers", _remove_staging_garbage,
+                    machine_fd, _opf_check.LEASE_NAME, "lease")
+        if _classify_stale(holder._ctl_fd, ACTIVE_NAME, "active record") \
+                or _classify_stale(machine_fd, _opf_check.LEASE_NAME, "lease"):
+            raise OpLockError("an active record or lease appeared while the init holder held the "
+                              "anchor; refusing to attach (a record this holder did not publish is "
+                              "never adopted or overwritten)")
+        acquired_at = _utc_now()
+        owner_identity = dict(pid=pid, uid=os.getuid(), nodename=os.uname().nodename,
+                              session=operation_id, utc=acquired_at)
+        owner_identity["pid-start"] = holder._acquirer_pid_start
+        active_payload = _control_payload(
+            dict(schema=_ACTIVE_SCHEMA, op_id=operation_id, holder=holder._holder,
+                 operation=holder._operation, acquired_at=acquired_at, owner=owner_identity,
+                 machine_store=_machine_store_table(machine_path, machine_st)),
+            ACTIVE_TOP_KEYS, "active record")
+        lease_payload = _control_payload(
+            dict(schema=_SCHEMA, holder=holder._holder, operation=holder._operation,
+                 acquired_at=acquired_at),
+            _opf_check.LEASE_TOP_KEYS, "lease")
+        active_fd, active_ident = _create_control_file(holder._ctl_fd, ACTIVE_NAME, active_payload,
+                                                       "active record", owner=owner,
+                                                       publisher_pid=pid)
+        lease_attempted = True
+        lease_fd, lease_ident = _create_control_file(machine_fd, _opf_check.LEASE_NAME,
+                                                     lease_payload, "lease", owner=owner,
+                                                     publisher_pid=pid)
+        owner.close(product_fd, "cannot close the product-root descriptor ({})")
+        cap = OpCapability(
+            op_id=operation_id, holder=holder._holder, operation=holder._operation,
+            store_root=holder.product_root, machine_rel=_INIT_MACHINE_REL,
+            ctl_fd=holder._ctl_fd, machine_fd=machine_fd, anchor_fd=holder._anchor_fd,
+            active_fd=active_fd, lease_fd=lease_fd, anchor_ident=holder._anchor_ident,
+            ctl_ident=holder._ctl_ident, machine_ident=(machine_st.st_dev, machine_st.st_ino),
+            active_ident=active_ident, lease_ident=lease_ident, active_bytes=active_payload,
+            lease_bytes=lease_payload, acquirer_pid=pid,
+            acquirer_pid_start=holder._acquirer_pid_start, init_root=holder.product_root,
+            init_token=holder.token)
+        # ONE step hands the holder's descriptors to the capability: the holder is spent and its
+        # fields cleared together, so no later call can close a number the capability now owns.
+        holder._spent, holder._ctl_fd, holder._anchor_fd = True, None, None
+        owner.transfer_all()
+        return cap
+    except BaseException as exc:
+        if os.getpid() != pid:
+            owner.close_all()
+            raise
+        unwind = []
+        lease_removed = True
+        if lease_ident is not None:
+            try:
+                _verified_unlink(machine_fd, _opf_check.LEASE_NAME, lease_ident, lease_payload,
+                                 "lease (unwind)")
+            except (OpLockError, OSError) as uexc:
+                unwind.append(str(uexc))
+                lease_removed = False
+        elif lease_attempted:
+            try:
+                if _lstat_at(machine_fd, _opf_check.LEASE_NAME, "lease (unwind)") is not None:
+                    unwind.append("lease (unwind): the failed publication left the lease in place")
+                    lease_removed = False
+            except OpLockError as uexc:
+                unwind.append(str(uexc))
+                lease_removed = False
+        if active_ident is not None:
+            if not lease_removed:
+                unwind.append("active record (unwind) KEPT beside the lease for a later "
+                              "recover=True")
+            else:
+                try:
+                    _verified_unlink(holder._ctl_fd, ACTIVE_NAME, active_ident, active_payload,
+                                     "active record (unwind)")
+                except (OpLockError, OSError) as uexc:
+                    unwind.append(str(uexc))
+        cprob, cunc, cint = owner.close_all()
+        unwind.extend(cprob)
+        if cunc:
+            unwind.append(_unconfirmed_closes(len(cunc), "attach descriptor"))
+        if cint is not None and isinstance(exc, Exception):
+            cint.add_note("opf-oplock: raised while unwinding a failed lease attach ({})".format(exc))
+            raise cint
+        if unwind and isinstance(exc, Exception):
+            raise OpLockError("{}; additionally the attach unwind reported: {}".format(
+                exc, "; ".join(unwind))) from exc
+        raise
+
+
+def detach_init_lease(cap):
+    """The lease-release step of an init capability (decision 4): remove the lease, then (only once
+    the lease is durably gone) the active record, KEEPING the flock, and return an InitHolder bound
+    to the same product root and token so the caller's final validation runs after the last store
+    write while the mutex still excludes cooperating writers. Refuses, touching nothing, any caller
+    that is not the acquirer, a capability not minted by attach_init_lease, or one already released.
+    Any failure after the claim ends in a FULL release by close (every descriptor closed, the anchor
+    first; the records that could not be removed left for a later recover=True) and raises, naming
+    what was removed, so a failure never leaves a half-detached capability."""
+    if not isinstance(cap, OpCapability) or cap.init_root is None:
+        raise OpLockError("detach_init_lease requires an init capability (minted by "
+                          "attach_init_lease)")
+    if cap._released:
+        raise OpLockError("capability already released")
+    _require_acquirer(cap, "lease detach")
+    with _SignalDeferral(): return _detach_init_body(cap)
+
+
+def _detach_init_body(cap):
+    """The body of detach_init_lease, run with the Python-handled signals deferred."""
+    if not cap._claim.acquire(False):
+        raise OpLockError(_LOST_CLAIM)
+    try:
+        if cap._released or cap._claimant is not None:
+            raise OpLockError(_LOST_CLAIM)
+        fds = (cap._machine_fd, cap._ctl_fd, cap._anchor_fd, cap._active_fd, cap._lease_fd)
+        cap._released = True
+        cap._lease_fd = cap._active_fd = cap._anchor_fd = cap._ctl_fd = cap._machine_fd = None
+    finally:
+        cap._claim.release()
+    machine_fd, ctl_fd, anchor_fd, active_fd, lease_fd = fds
+    owner = _FdOwner()
+    owner.adopt_all((machine_fd, active_fd, lease_fd))
+    errors = []
+    removed = []
+    # The retained-identity re-check is collected, not early-raised, exactly as release_operation's:
+    # the legs still run, so the records this capability verifiably owns are removed either way, and
+    # the anomaly then forces the full release below (a broken anchor excludes no one, so no final
+    # check may run under it).
+    try:
+        st = os.fstat(anchor_fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 \
+                or (st.st_dev, st.st_ino) != cap._anchor_ident:
+            errors.append("anchor: the mutex anchor identity or link count changed while held")
+    except OSError as exc:
+        errors.append("anchor: cannot fstat ({})".format(exc))
+    lease_gone = False
+    try:
+        _verified_unlink(machine_fd, _opf_check.LEASE_NAME, cap._lease_ident, cap._lease_bytes,
+                         "lease")
+        removed.append("lease")
+        lease_gone = True
+    except _UnlinkNotDurable as exc:
+        removed.append("lease (not durably)")
+        errors.append("lease leg: {}".format(exc))
+    except (OpLockError, OSError) as exc:
+        errors.append("lease leg: {}".format(exc))
+    if not lease_gone:
+        errors.append("active leg: KEPT, because the lease was not durably removed (the "
+                      "owner-bearing active record is retained for a later recover=True)")
+    else:
+        try:
+            _verified_unlink(ctl_fd, ACTIVE_NAME, cap._active_ident, cap._active_bytes,
+                             "active record")
+            removed.append("active record")
+        except _UnlinkNotDurable as exc:
+            removed.append("active record (not durably)")
+            errors.append("active leg: {}".format(exc))
+        except (OpLockError, OSError) as exc:
+            errors.append("active leg: {}".format(exc))
+    cprob, cunc, cint = owner.close_all()
+    errors.extend("close: {}".format(p) for p in cprob)
+    if cunc:
+        errors.append(_unconfirmed_closes(len(cunc), "record descriptor"))
+    if errors or cint is not None:
+        # A full release by close: the anchor first (it gives up the lock), then the control dir.
+        final = _FdOwner()
+        final.adopt_all((ctl_fd, anchor_fd))
+        fprob, func, fint = final.close_all()
+        errors.extend("close: {}".format(p) for p in fprob)
+        if func:
+            errors.append(_unconfirmed_closes(len(func), "holder descriptor"))
+        interrupt = cint or fint
+        text = ("lease detach failed and ended in a full release by close (records removed: {}): "
+                "{}".format(", ".join(removed) or "none", "; ".join(errors)))
+        if interrupt is not None:
+            interrupt.add_note("opf-oplock: " + text)
+            raise interrupt
+        raise OpLockError(text)
+    try:
+        ctl_st = os.fstat(ctl_fd)
+    except OSError as exc:
+        final = _FdOwner()
+        final.adopt_all((ctl_fd, anchor_fd))
+        fprob, _func, fint = final.close_all()
+        if fint is not None:
+            raise fint
+        raise OpLockError("lease detach removed {} but could not fstat the control directory "
+                          "({}); ended in a full release by close{}".format(
+                              ", ".join(removed), exc,
+                              "; " + "; ".join(fprob) if fprob else ""))
+    holder = InitHolder(
+        product_root=cap.init_root, control_root=None, ctl_fd=ctl_fd, anchor_fd=anchor_fd,
+        anchor_ident=cap._anchor_ident, ctl_ident=(ctl_st.st_dev, ctl_st.st_ino),
+        product_ident=None, acquirer_pid=cap._acquirer_pid,
+        acquirer_pid_start=cap._acquirer_pid_start, operation=cap.operation, holder=cap.holder)
+    holder.token = cap.init_token
+    return holder
+
+
+def release_init_holder(holder):
+    """Release an InitHolder (the mutex-release step, decision 4): refuses, touching nothing, any
+    caller that is not the acquirer, a spent holder (its descriptors belong to a capability), or one
+    already released; otherwise closes the anchor descriptor FIRST (which gives up the lock; release
+    by close) and then the control-directory descriptor. Nothing is unlinked: the holder published no
+    record. A failed close raises OpLockError naming it."""
+    if not isinstance(holder, InitHolder):
+        raise OpLockError("release_init_holder requires an InitHolder")
+    if holder._spent:
+        raise OpLockError("the init holder was spent into a capability; release the capability")
+    if holder._released:
+        raise OpLockError("init holder already released")
+    _require_acquirer(holder, "init holder release")
+    if not holder._claim.acquire(False):
+        raise OpLockError("the init holder is being released or attached concurrently; refusing")
+    try:
+        if holder._released or holder._spent:
+            raise OpLockError("init holder already released")
+        with _SignalDeferral(): problems = _close_holder_fds(holder)
+    finally:
+        holder._claim.release()
+    if problems:
+        raise OpLockError("init holder release completed with failures: {}".format(
+            "; ".join(problems)))
+
+
 # --- self-test --------------------------------------------------------------------------------------
 
 
@@ -3022,7 +3604,7 @@ def _st_store_tree(root):
     location)."""
     md = os.path.join(root, ".working", "toml")
     os.makedirs(md)
-    manifest = ('[opf]\nstandard = "opf"\nspec_version = "1.1.0"\nlayout = "inline"\n'
+    manifest = ('[opf]\nstandard = "opf"\nspec_version = "1.2.0"\nlayout = "inline"\n'
                 'posture = "required"\nimport_status = "none"\n\n'
                 '[modules]\nconcurrent_operation = true\n')
     with open(os.path.join(md, "manifest.toml"), "w", encoding="utf-8") as fh:
@@ -7442,6 +8024,208 @@ def _t_f11_1_unobservable_removal(d, env):
                 os.unlink(path)           # the exited child's kept record, cleared by hand
 
 
+def _st_unadopted_repo(parent, name, env):
+    """A REAL git repository with one commit and NO store (the init fixture)."""
+    root = os.path.join(parent, name)
+    os.mkdir(root)
+    _st_git(["init", "-q"], root, env)
+    with open(os.path.join(root, "README"), "w", encoding="utf-8") as fh:
+        fh.write("fixture\n")
+    _st_git(["add", "-A"], root, env)
+    _st_git(["-c", "user.name=opf-selftest", "-c", "user.email=selftest@example.invalid",
+             "commit", "-q", "-m", "fixture"], root, env)
+    return root
+
+
+def _st_make_machine_dir(root):
+    os.makedirs(os.path.join(root, ".working", "toml"))
+    os.chmod(os.path.join(root, ".working"), 0o755)
+    os.chmod(os.path.join(root, ".working", "toml"), 0o755)
+
+
+_ST_OP_ID = "12345678-1234-4234-8234-1234567890ab"
+
+
+def _t_i1_prestore_holder(d, env):
+    """T-i1 (decision 1): the init PRE-STORE holder takes the SHARED anchor of an unadopted
+    repository (no RESOLVED store; acquire_operation refuses the same root), publishes NO control
+    record and writes nothing in the worktree, excludes a second init holder and a resolved-store
+    acquirer on a linked worktree (one anchor), and frees the lock on release; a relative root and a
+    root with no .git refuse."""
+    root = _st_unadopted_repo(d, "repo", env)
+    _st_expect_refusal(acquire_operation, root, "opf-init", needle="RESOLVED")
+    before = sorted(os.listdir(root))
+    holder = acquire_init_operation(root, "opf-init")
+    assert isinstance(holder, InitHolder) and not isinstance(holder, OpCapability)
+    assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME], \
+        "the pre-store holder must publish no control record"
+    assert sorted(os.listdir(root)) == before, "the pre-store holder must write nothing in the worktree"
+    assert not _st_anchor_free(root), "the holder must hold the shared anchor flock"
+    _st_expect_refusal(acquire_init_operation, root, "opf-init", needle="contention")
+    wt = os.path.join(d, "wt")
+    _st_git(["worktree", "add", "--detach", "-q", wt], root, env)
+    _st_store_tree(wt)
+    _st_expect_refusal(acquire_operation, wt, "op", needle="contention")
+    _st_expect_refusal(release_operation, holder, needle="OpCapability")
+    release_init_holder(holder)
+    assert _st_anchor_free(root), "release_init_holder must give the lock up"
+    _st_expect_refusal(release_init_holder, holder, needle="already released")
+    _st_expect_refusal(require_live_holder, holder, needle="released")
+    _st_expect_refusal(acquire_init_operation, "relative/root", "opf-init", needle="absolute")
+    nogit = os.path.join(d, "nogit")
+    os.mkdir(nogit)
+    _st_expect_refusal(acquire_init_operation, nogit, "opf-init", needle="no .git")
+    assert not os.path.exists(os.path.join(nogit, CONTROL_DIRNAME)), \
+        "a refused non-git root must not gain a control directory"
+
+
+def _t_i2_attach_mints_bound_capability(d, env):
+    """T-i2 (decisions 1 and 2): attach_init_lease requires the machine store to exist, then mints
+    an ordinary OpCapability whose op_id IS the operation id (the active record and the lease both
+    name it), carrying the holder's product root and token, taking over the holder's descriptors
+    (the flock is never released between the two); the holder is spent. A malformed operation id
+    refuses before anything; release_operation releases the minted capability normally."""
+    root = _st_unadopted_repo(d, "repo", env)
+    holder = acquire_init_operation(root, "opf-init")
+    _st_expect_refusal(attach_init_lease, holder, "not-an-id", needle="operation id")
+    _st_expect_refusal(attach_init_lease, holder, _ST_OP_ID, needle="cannot open")
+    assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME], \
+        "a refused attach must publish nothing"
+    assert not _st_anchor_free(root), "a refused attach must leave the holder holding the lock"
+    _st_make_machine_dir(root)
+    cap = attach_init_lease(holder, _ST_OP_ID)
+    assert isinstance(cap, OpCapability) and cap.op_id == _ST_OP_ID
+    assert cap.init_root == root and cap.init_token is holder.token
+    with open(os.path.join(_st_ctl_dir(root), ACTIVE_NAME), "rb") as fh:
+        active = tomllib.loads(fh.read().decode("utf-8"))
+    assert active["op_id"] == _ST_OP_ID and active["owner"]["session"] == _ST_OP_ID
+    assert os.path.isfile(_st_lease_path(root)), "the mandatory lease is attached"
+    assert not _st_anchor_free(root)
+    _st_expect_refusal(release_init_holder, holder, needle="spent")
+    _st_expect_refusal(require_live_holder, holder, needle="spent")
+    _st_expect_refusal(attach_init_lease, holder, _ST_OP_ID, needle="spent")
+    require_live_holder(cap)
+    release_operation(cap)
+    assert _st_anchor_free(root)
+    assert not os.path.exists(_st_lease_path(root))
+    assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME]
+
+
+def _t_i3_detach_keeps_mutex(d, env):
+    """T-i3 (decision 4): detach_init_lease removes the lease and then the active record but KEEPS
+    the flock, returning an InitHolder with the same token (the final check runs under the mutex);
+    release_init_holder then frees it. A detached holder cannot re-attach; detaching an ordinary
+    capability, or twice, refuses."""
+    root = _st_unadopted_repo(d, "repo", env)
+    holder = acquire_init_operation(root, "opf-init")
+    _st_make_machine_dir(root)
+    cap = attach_init_lease(holder, _ST_OP_ID)
+    back = detach_init_lease(cap)
+    assert isinstance(back, InitHolder) and back.token is holder.token
+    assert not os.path.exists(_st_lease_path(root)), "detach removes the lease"
+    assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME], "detach removes the active record"
+    assert not _st_anchor_free(root), "detach must KEEP the mutex for the final check"
+    require_live_holder(back)
+    _st_expect_refusal(detach_init_lease, cap, needle="released")
+    _st_expect_refusal(attach_init_lease, back, _ST_OP_ID, needle="re-attach")
+    release_init_holder(back)
+    assert _st_anchor_free(root), "the mutex is released only by release_init_holder"
+    store = _st_git_store(d, "store", env)
+    plain = acquire_operation(store, "op")
+    _st_expect_refusal(detach_init_lease, plain, needle="init capability")
+    release_operation(plain)
+
+
+def _t_i4_crash_and_recovery(d, env):
+    """T-i4: a holder that dies BEFORE attaching leaves no control record, so the next init
+    acquisition proceeds at once (the kernel freed its flock); one that dies AFTER attaching leaves
+    the owner-bearing active record and the lease, which refuse without recover=True and are cleared
+    by the confirmed-dead gate with it, reused verbatim."""
+    root = _st_unadopted_repo(d, "repo", env)
+    for attach in (False, True):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                h = acquire_init_operation(root, "opf-init")
+                if attach:
+                    if not os.path.isdir(os.path.join(root, ".working", "toml")):
+                        _st_make_machine_dir(root)
+                    attach_init_lease(h, _ST_OP_ID)
+                os._exit(0)                   # crash: no release
+            except BaseException:
+                os._exit(3)
+        _, status = os.waitpid(pid, 0)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, status
+        if not attach:
+            assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME]
+            h = acquire_init_operation(root, "opf-init")
+            release_init_holder(h)
+            continue
+        assert os.path.exists(os.path.join(_st_ctl_dir(root), ACTIVE_NAME))
+        assert os.path.exists(_st_lease_path(root))
+        _st_expect_refusal(acquire_init_operation, root, "opf-init", needle="stale")
+        h = acquire_init_operation(root, "opf-init", recover=True)
+        assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME]
+        assert not os.path.exists(_st_lease_path(root))
+        release_init_holder(h)
+    # A holder that died after attaching, whose machine store was then removed: the stale active
+    # record's recorded machine store is gone, so recovery reaches the liveness gate with NO machine
+    # store of its own (the pre-store holder's absent-machine-store branch) and clears the record.
+    pid = os.fork()
+    if pid == 0:
+        try:
+            h = acquire_init_operation(root, "opf-init")
+            attach_init_lease(h, _ST_OP_ID)
+            os._exit(0)
+        except BaseException:
+            os._exit(3)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, status
+    shutil.rmtree(os.path.join(root, ".working"))
+    _st_expect_refusal(acquire_init_operation, root, "opf-init", needle="stale")
+    h = acquire_init_operation(root, "opf-init", recover=True)
+    assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME], "the stale active record is cleared"
+    release_init_holder(h)
+
+
+def _t_i5_holder_identity_bound(d, env):
+    """T-i5: the holder is bound to its acquirer: a forked child can neither write through it
+    (require_live_holder), attach through it, nor release it; a foreign lease that appears while the
+    holder holds the anchor is never adopted by attach (refused, preserved, holder still live)."""
+    root = _st_unadopted_repo(d, "repo", env)
+    holder = acquire_init_operation(root, "opf-init")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            refused = 0
+            for fn, args in ((require_live_holder, (holder,)),
+                             (attach_init_lease, (holder, _ST_OP_ID)),
+                             (release_init_holder, (holder,))):
+                try:
+                    fn(*args)
+                except OpLockError:
+                    refused += 1
+            os._exit(0 if refused == 3 else 1)
+        except BaseException:
+            os._exit(2)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, status
+    assert not _st_anchor_free(root), "a forked child must never free the acquirer's lock"
+    _st_make_machine_dir(root)
+    with open(_st_lease_path(root), "w", encoding="utf-8") as fh:
+        fh.write("foreign\n")
+    _st_expect_refusal(attach_init_lease, holder, _ST_OP_ID, needle="appeared")
+    with open(_st_lease_path(root), "r", encoding="utf-8") as fh:
+        assert fh.read() == "foreign\n", "a foreign lease is preserved"
+    assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME]
+    require_live_holder(holder)
+    release_init_holder(holder)
+
+
 def self_test():
     """Regression roster (plan section (e)): the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
     round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
@@ -7611,6 +8395,16 @@ def self_test():
          _t_f10_3_anchor_close_attributed),
         ("T-f11-1 an unobservable interrupted removal is noted per record, never as not removed",
          _t_f11_1_unobservable_removal),
+        ("T-i1 the init pre-store holder shares the anchor and publishes nothing",
+         _t_i1_prestore_holder),
+        ("T-i2 attach mints an operation-bound capability over the holder's flock",
+         _t_i2_attach_mints_bound_capability),
+        ("T-i3 detach removes lease and active record but keeps the mutex",
+         _t_i3_detach_keeps_mutex),
+        ("T-i4 a crashed init holder recovers through the confirmed-dead gate",
+         _t_i4_crash_and_recovery),
+        ("T-i5 the init holder is bound to its acquirer; a foreign lease is never adopted",
+         _t_i5_holder_identity_bound),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-oplock-selftest-"))

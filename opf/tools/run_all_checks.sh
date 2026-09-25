@@ -36,6 +36,8 @@ run_gate "opf-ingest-selftest"         python3 -I -B "$here/check_opf_ingest.py"
 run_gate "opf-adopt-selftest"          python3 -I -B "$here/_opf_adopt.py" --self-test
 run_gate "opf-oplock-selftest"         python3 -I -B "$here/_opf_oplock.py" --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B "$here/_opf_init_substrate.py" --self-test
+run_gate "opf-init-builders-selftest"  python3 -I -B "$here/_opf_init.py" --self-test
+run_gate "opf-init-operation-selftest" python3 -I -B "$here/_opf_init_operation.py" --self-test
 run_gate "commonmark-headings-selftest" python3 -I -B "$here/selftest_commonmark_headings.py"
 run_gate "commonmark-conformance"      python3 -I -B "$here/selftest_commonmark_conformance.py"
 
