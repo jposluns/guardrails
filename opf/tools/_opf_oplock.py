@@ -282,9 +282,15 @@ whose git dir lies in a <.git>/modules/ or <.git>/worktrees/<wt>/modules/ direct
 whose superproject keeps its git dir under another name (--separate-git-dir) passes both, and a
 store nested in an independent clone lying inside another repository's work tree, with no gitlink,
 anchors at that clone's own common git dir, so either, reached through two superproject worktrees,
-takes two independent locks); a nested store's home is keyed by its path relative to the toplevel,
-so a store moved or renamed inside its repository takes a new, empty home and its earlier records
-stay under the old key; git's own discovery stops at a filesystem boundary
+takes two independent locks); git's submodule probe starts a git ls-files child in the parent
+directory of the enclosing repository's toplevel, so for every nested store, acquired or refused,
+that child reads the configuration and the index of whatever repository encloses that directory
+(the superproject, or any repository whose work tree holds the enclosing one, gitlink or not), and
+runs any command that repository configures for reading its index (core.fsmonitor), inside the
+signal-deferred section: a repository the store's owner may not control, whose configuration this
+module neither validates nor overrides; a nested store's home is keyed by its path relative to the
+toplevel, so a store moved or renamed inside its repository takes a new, empty home and its
+earlier records stay under the old key; git's own discovery stops at a filesystem boundary
 (GIT_DISCOVERY_ACROSS_FILESYSTEM is scrubbed with every GIT_ variable), so a store nested on a
 different filesystem from its enclosing repository refuses rather than resolving, as does a store
 (nested, or its own repository) whose toplevel git spells differently from the walk, except that
@@ -346,7 +352,8 @@ inherits the blocked mask, so it defers the same signals until it exits: each co
 resolution runs exactly ONE git rev-parse, killed at the git timeout (_GIT_TIMEOUT_SECONDS, 30 s),
 and the acquisition and each resume-substrate call run one resolution, so the git child adds at
 most one git timeout to the time a section holds the signals; a grandchild git starts (the
-submodule probe's ls-files) inherits the mask too and runs inside that same timeout, which bounds
+submodule probe's ls-files, in the superproject, disclosed above) inherits the mask too and runs
+inside that same timeout, which bounds
 the section's wait on the git child, not the grandchild's own lifetime. A
 second signal arriving in the few bytecodes between a first deferred signal's delivery
 and the start of the unreturned capability's release can skip that release (its complete,
@@ -3916,10 +3923,9 @@ def _t_e1_nested_store_shared_anchor(d, env):
     store root (unchanged); and a REAL signal at every line event of the enclosing-repository
     resolution is deferred past the acquisition, leaking nothing and leaving no record behind.
     Each holder's lease is witnessed WHILE it holds, at its own checkout's machine store and not
-    at the sibling's. That no control tree is created at the old store-root location
-    (<nested>/opf-oplock) is witnessed by the checks after the two clean acquisitions; the sweep
-    does not repeat it, since a deferred signal never lands inside the resolution and so cannot
-    divert it there."""
+    at the sibling's. Nothing is created at the old store-root location (<nested>/opf-oplock),
+    after the two clean acquisitions and after every event of the sweep, so a deferred signal that
+    diverted any part of the acquisition there fails the sweep."""
     main, nested = _st_nested_git_store(d, "main", env)
     wt = os.path.join(d, "wt")
     _st_git(["worktree", "add", "--detach", "-q", wt], main, env)
@@ -3974,11 +3980,15 @@ def _t_e1_nested_store_shared_anchor(d, env):
     def settle(ctx, cap):
         release_operation(cap)
 
+    old_ctl = os.path.join(nested, CONTROL_DIRNAME)
+
     def check(ctx, where):
         left = [p for p in (active, _st_lease_path(nested)) if os.path.exists(p)]
         for path in left:
             os.unlink(path)
         assert not left, "no record may be left behind ({}): {}".format(where, left)
+        assert not os.path.lexists(old_ctl), \
+            "nothing may be left at the old store-root location ({}): {}".format(where, old_ctl)
 
     failure = _st_in_child(lambda: _st_signal_sweep(main, funcs, prepare, invoke, settle, check,
                                                     ctl=os.path.dirname(anchor)))
@@ -4139,12 +4149,15 @@ def _t_e6_toplevel_identity(d, env):
     ENCLOSING repository) refuses rather than taking that repository's own lock; and a directory
     swapped for another repository at the SAME path between the classification and git's answer
     (so only the identity differs) refuses on both paths, as does one swapped AFTER git's last
-    answer (the identity checks follow git's one rev-parse invocation). Nothing is created in any
+    answer (the identity checks follow git's one rev-parse invocation), and so does a NESTED STORE
+    ROOT swapped for another directory after git's last answer (its path inside the toplevel must
+    lead, opened no-follow, to the store root's own identity). Nothing is created in any
     repository. Before the fix the store root's own .git was taken on git's --git-common-dir
     alone, so the empty .git took the enclosing repository's lock and the swapped store root
     acquired; with the identity comparison removed, the swapped nested toplevel acquired; and
     with the identity checked before git's last answer, a swap after it acquired in the other
-    repository."""
+    repository; and with the store-root comparison removed, the swapped nested store root
+    acquired."""
     main = _st_git_store(d, "main", env)
     decoy = os.path.join(main, "decoy")
     os.makedirs(os.path.join(decoy, ".git"))
@@ -4192,33 +4205,42 @@ def _t_e6_toplevel_identity(d, env):
             "a swapped toplevel must create nothing in either repository ({})".format(repo)
     real_output = _git_rev_parse_output
     late = []
-    for kind in ("own", "nested"):
+    for kind in ("own", "nested", "store"):   # "store": the nested store root itself is swapped
         base = os.path.join(d, "late-" + kind)
         os.mkdir(base)
         if kind == "own":
             root = store = _st_git_store(base, "repo", env)
         else:
             root, store = _st_nested_git_store(base, "repo", env)
+        target = store if kind == "store" else root
 
-        def output_then_swap(where, *options, _root=root, _base=base, _kind=kind):
+        def output_then_swap(where, *options, _target=target, _base=base, _kind=kind):
             out = real_output(where, *options)
-            if "--git-common-dir" in options and _root not in late:
-                other = _st_git_store(_base, "other", env) if _kind == "own" else \
-                    _st_nested_git_store(_base, "other", env)[0]
-                os.rename(_root, _root + "-moved")
-                os.rename(other, _root)
-                late.append(_root)
+            if "--git-common-dir" in options and _target not in late:
+                if _kind == "store":
+                    other = os.path.join(_base, "other")
+                    os.mkdir(other)
+                else:
+                    other = _st_git_store(_base, "other", env) if _kind == "own" else \
+                        _st_nested_git_store(_base, "other", env)[0]
+                os.rename(_target, _target + "-moved")
+                os.rename(other, _target)
+                late.append(_target)
             return out
 
+        needle = "does not lead to the store root" if kind == "store" else "identity differs"
         globals()["_git_rev_parse_output"] = output_then_swap
         try:
-            _st_expect_refusal(acquire_operation, store, "op", needle="identity differs")
+            _st_expect_refusal(acquire_operation, store, "op", needle=needle)
         finally:
             globals()["_git_rev_parse_output"] = real_output
         for repo in (root, root + "-moved"):
             assert not os.path.exists(os.path.join(repo, ".git", CONTROL_DIRNAME)), \
-                "a toplevel swapped after git's last answer must create nothing ({})".format(repo)
-    assert len(late) == 2, "both late swaps must have happened: {}".format(late)
+                "a directory swapped after git's last answer must create nothing ({})".format(repo)
+        for moved in (store, store + "-moved"):
+            assert not os.path.exists(_st_lease_path(moved)), \
+                "a directory swapped after git's last answer must hold no lease ({})".format(moved)
+    assert len(late) == 3, "all three late swaps must have happened: {}".format(late)
 
 
 def _t_e7_path_spellings(d, env):
@@ -8247,7 +8269,8 @@ def self_test():
     repository's common git dir, shared across worktrees; malformed, ambiguous, or unreadable
     enclosing git state refuses; distinct nested stores hold distinct anchors; a store nested in a
     submodule refuses; git's toplevel is cross-checked by path and identity for a store that
-    is its own repository and for a nested store; a "//" root spelling shares the lock while a
+    is its own repository and for a nested store, and a nested store's own root by identity; a
+    "//" root spelling shares the lock while a
     path spelled unlike its directory listing refuses; and a failing close anywhere in a nested
     store's acquisition leaks nothing), each a witness against a named defect. A
     missing containment primitive or git binary, or a fixture base inside a git repository, is a
