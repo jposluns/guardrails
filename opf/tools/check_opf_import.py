@@ -3918,6 +3918,39 @@ def _self_test():
                and pres["proposals-artifact"][1] == ("a proposals.toml row is malformed or carries an origin "
                                                      "outside the proposal-provenance vocabulary"))
 
+        # proposals-artifact (per-row shape, non-dict row): a proposal row that is not a dict is a located row
+        # FINDING (the isinstance(pr, dict) clause), and graded's twin re-grades it as a detached copy
+        # (proposals-artifact is in detached_ids), so the shape guard fires at BOTH generations. Only
+        # proposals-artifact fires (proposals.toml is not in report's artefact list). Without the
+        # isinstance(pr, dict) clause `pr.get("origin")` would raise AttributeError out of check_staged_run
+        # rather than returning the located False result.
+        m = copy_run(clean)
+        props = _load_toml(m / "proposals.toml")
+        props["proposal"] = ["not-a-dict"]
+        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        pres = graded(m, "disc-proposals-artifact-row-nondict", credit=(
+            ("proposals-artifact", "a proposals.toml row is malformed"),))
+        expect("disc-proposals-artifact-row-nondict",
+               [cid for cid, (ok, _d) in pres.items() if not ok] == ["proposals-artifact"]
+               and pres["proposals-artifact"][1] == ("a proposals.toml row is malformed or carries an origin "
+                                                     "outside the proposal-provenance vocabulary"))
+
+        # proposals-artifact (per-row shape, non-string source_path): a full valid model_proposal row whose
+        # source_path is not a string is a located row FINDING (the isinstance(pr.get("source_path"), str)
+        # clause), re-graded detached by graded's twin. Only proposals-artifact fires. Without the
+        # source_path isinstance clause the non-string source_path would slip the row conjunction.
+        m = copy_run(clean)
+        props = _load_toml(m / "proposals.toml")
+        props["proposal"] = [{"origin": imp._MODEL_PROPOSAL_ORIGIN, "source_path": 123,
+                              "span": [0, 2], "suggested_state": "unmapped", "note": ""}]
+        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        pres = graded(m, "disc-proposals-artifact-row-nonstr-source", credit=(
+            ("proposals-artifact", "a proposals.toml row is malformed"),))
+        expect("disc-proposals-artifact-row-nonstr-source",
+               [cid for cid, (ok, _d) in pres.items() if not ok] == ["proposals-artifact"]
+               and pres["proposals-artifact"][1] == ("a proposals.toml row is malformed or carries an origin "
+                                                     "outside the proposal-provenance vocabulary"))
+
         # proposals-artifact (R6-F1, proposal span shape): a proposal span that is a list but NOT a 2-element
         # int pair ([] or [5]) must be a located row FINDING, never an uncaught IndexError when
         # _render_report_md indexes span[0]/span[1]. proposals.toml is not in report's artefact list, so only
@@ -3933,7 +3966,8 @@ def _self_test():
             props["proposal"] = [{"origin": imp._MODEL_PROPOSAL_ORIGIN, "source_path": "a.txt",
                                   "span": bad_span, "suggested_state": "unmapped", "note": ""}]
             (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
-            pa = graded(m)["proposals-artifact"]
+            pa = graded(m, "disc-proposals-artifact-span-{}".format(len(bad_span)), credit=(
+                ("proposals-artifact", "row is malformed"),))["proposals-artifact"]
             expect("disc-proposals-artifact-span-{}".format(len(bad_span)),
                    pa[0] is False and "row is malformed" in pa[1])
 
@@ -3992,7 +4026,8 @@ def _self_test():
             imp._render_report_md(m_inv.get("inventory_digest"), m_inv.get("fragment"),
                                   m_norm, m.name).encode("utf-8"))
         rewrite_report_digest(m, "IMPORT-REPORT.md")
-        expect("disc-proposals-origin-unknown", graded(m)["proposals-artifact"][0] is False)
+        expect("disc-proposals-origin-unknown", graded(m, "disc-proposals-origin-unknown", credit=(
+            ("proposals-artifact", "a proposals.toml row is malformed"),))["proposals-artifact"][0] is False)
 
         # --- acceptance.json (conditionally present): absent PASSes, present-and-valid PASSes, and each
         #     new acceptance check FINDINGs on its single mutation (acceptance.json is not in report's
@@ -4488,6 +4523,15 @@ def _self_test():
                not credited(claimed, {"artifact-digest-integrity": (False, "control-text at generation 2")}))
         expect("gate-generation-sweep-coverage-control-own-detail",
                not credited({"artifact-digest-integrity": (False, "unrelated failure")}))
+        # own-detail, text-elsewhere sibling: the target fails with an unrelated detail while the claimed
+        # needle text sits on a DIFFERENT, PASSING id. The correct rule reads the needle from the target's
+        # OWN detail (needle in results[cid][1]), so it is NOT credited; a `needle in repr(results)` mutant
+        # (M5, text found anywhere in the results dict) WOULD credit it, since the passing id's detail carries
+        # the text and the text-elsewhere guard only inspects FAILING ids. So this control has teeth against M5
+        # where the own-detail control above (text nowhere in the dict) does not.
+        expect("gate-generation-sweep-coverage-control-own-detail-elsewhere",
+               not credited({"artifact-digest-integrity": (False, "unrelated failure"),
+                             "mapping-totality": (True, "control-text")}))
         # Per store state: the detached copies alone credit every id a detached ordinary run grades.
         detached_coverage = _self_test_gate_generation_coverage(
             [entry for entry in swept if entry[0] in detached_labels], detached_ids)
@@ -4500,6 +4544,15 @@ def _self_test():
                 label == clabel + suffix and [cid for cid, (ok, _d) in first.items() if not ok] == [cond_id]
                 for label, first, _second, _credit in swept) for clabel, _edit in conditions
                 for suffix in ("", "-detached")))
+        # Every proposals ROW condition (per-row vocab, shape, and span) fired proposals-artifact alone at base
+        # AND detached, mirroring the header proposals_conditions coverage above (gemini/F3-uniformity).
+        proposals_row_labels = ("disc-proposals-artifact-suggested-state", "disc-proposals-origin-unknown",
+                                "disc-proposals-artifact-row-nondict", "disc-proposals-artifact-row-nonstr-source",
+                                "disc-proposals-artifact-span-0", "disc-proposals-artifact-span-1")
+        expect("gate-generation-proposals-row-conditions", all(any(
+            label == clabel + suffix and [cid for cid, (ok, _d) in first.items() if not ok] == ["proposals-artifact"]
+            for label, first, _second, _credit in swept) for clabel in proposals_row_labels
+            for suffix in ("", "-detached")))
 
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
