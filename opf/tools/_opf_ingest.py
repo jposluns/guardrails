@@ -2301,13 +2301,22 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
 
         def swept_gate(run_dir, label):
             """The gate's generation-1 result for `run_dir`, after grading it at generation 2 as well (the tooling
-            supporting it): every ingest-check result must be identical, so a generation-2-only bypass of an ingest
-            check fails the flip that grades it. The generation-dependent scope rows are graded apart below."""
+            supporting it): every generation-independent result must be identical, ordinary and ingest alike, so a
+            generation-2-only bypass of any check the fixture fails fails the flip that grades it. On an ingest run
+            the two ingest-acceptance ids grade the durable home at generation 2 and the staged acceptance ids then
+            report that grading (a completeness id the completeness result, every other the binding result); every
+            other id, and every id of an ordinary run, is compared. The generation-dependent scope rows are graded
+            apart below."""
             first = _chk.check_staged_run(run_dir)
             with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
                 second = _chk.check_staged_run(run_dir, homes=2)
-            check(label + "-generation-2", all(second[cid] == first[cid] for cid in
-                                               ("ingest-run-structure",) + _chk._INGEST_CHECK_IDS))
+            staged = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
+            ingest = first["ingest-run-structure"] != (True, "not an ingest run")
+            varies = _chk._INGEST_ACCEPTANCE_CHECKS + staged if ingest else ()
+            check(label + "-generation-2", set(second) == set(first) == set(_chk.EXPECTED_CHECKS)
+                  and all(second[cid] == first[cid] for cid in first if cid not in varies)
+                  and (not ingest or all(second[cid] == second[_chk._INGEST_ACCEPTANCE_CHECKS[
+                      cid.endswith("completeness")]] for cid in staged)))
             return first
 
         def open_fd(root):
@@ -2774,6 +2783,17 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 check("pr4b-disc-report-repro",
                       swept_gate(rundir, "pr4b-disc-report-repro")["ingest-report-reproducibility"][0] is False)
                 (run / "IMPORT-REPORT.md").write_bytes(orig_report)
+
+                # (h4b) an ordinary check on the ingest run: report.toml schema 2 fails report-schema with its own
+                # located detail, and swept_gate requires the same result at generation 2 (the ingest checks, which
+                # validate the same envelope, fail too).
+                orig_rep = (run / "report.toml").read_bytes()
+                bad_rep = dict(read(run, "report.toml"), schema=2)
+                (run / "report.toml").write_bytes(_opf_import._emit_bytes(bad_rep, "report.toml"))
+                rep_res = swept_gate(rundir, "pr4b-disc-ingest-report-schema")
+                check("pr4b-disc-ingest-report-schema", rep_res["report-schema"] == (
+                    False, "report.toml schema/run_id/verdict/promotion_ready/artifact malformed"))
+                (run / "report.toml").write_bytes(orig_rep)
 
                 # (h5) ingest-run-structure: a present-but-malformed bundle, and an ingest-marked run whose
                 # review bundle is absent (partial run), both a located FINDING at the gate (never a raise).

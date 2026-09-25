@@ -2331,9 +2331,17 @@ def _self_test_gate_generation_sites(expect):
     _self_test_gate_generation_coverage: the fixture passes staged-run-structure and the id's other prerequisites and
     fails that id with its own located detail, so a blanket failure (an empty run, an unreadable core) credits
     nothing. Its controls show that an always-passing id registered beside the others is reported uncovered, and
-    that the blanket fixtures alone credit no id. Coverage is per id; the report-schema conditions each carry their
-    own swept fixture (gate-generation-report-schema-conditions). A bypass of a condition that no fixture fails, or
-    one that needs a store state no fixture builds, is not detected."""
+    that the blanket fixtures alone credit no id, and synthetic rows pin each clause of the rule
+    (gate-generation-sweep-coverage-control-*). Coverage is per id and per store state: every credited ordinary and
+    staged-acceptance discriminator is also graded as a detached copy, whose generation 2 takes the no-store branch,
+    and must credit those ids there (gate-generation-detached-coverage); every ordinary id is failed on an ingest run
+    beside a durable home (gate-generation-ingest-ordinary-coverage). Per condition, the report-schema conjunction and
+    the proposals.toml header conjunction of proposals-artifact (schema type, schema value, run_id, proposal array)
+    each carry their own swept fixture (gate-generation-report-schema-conditions,
+    gate-generation-proposals-artifact-conditions). Residual: every other check's conditions are covered only by the
+    discriminators _self_test lists, so a generation-2-only bypass of a condition that no fixture fails (for example
+    one proposals.toml row condition, or one acceptance-schema finding in a detached copy whose fixture is a FIFO or
+    unreadable and so is not copied), or one that needs a store state no fixture builds, is not detected."""
     import ast
     import inspect
     src = inspect.getsource(_check_staged_run)
@@ -3038,10 +3046,35 @@ def _self_test():
     # Every on-disk fixture below is graded through the generation sweep (_self_test_gate_generation_applied): its
     # generation-independent results must not change under generation 2 or any invalid generation.
     swept = []
+    # The ids a detached ordinary run grades from its own bytes: at generation 2 _ingest_store_fd finds no store and
+    # the gate takes the detached branch, so each credited discriminator for these ids is graded again as a detached
+    # copy (the store-relative transaction ids and the ingest ids are graded apart).
+    detached_ids = EXPECTED_CHECKS[:EXPECTED_CHECKS.index("acceptance-completeness") + 1]
+    detached_labels = []
+
+    def detach(run_dir):
+        """A copy of `run_dir`, under the same basename, where no store-relative home matches; None when an entry is
+        not a readable regular file or directory (a FIFO or mode-000 fixture is not copied)."""
+        import stat
+        for top, dirs, files in os.walk(str(run_dir)):
+            for name in dirs + files:
+                st = os.lstat(os.path.join(top, name))
+                if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)) \
+                        or not os.access(os.path.join(top, name), os.R_OK):
+                    return None
+        dest = base / "detached-{:03d}".format(len(detached_labels)) / run_dir.name
+        shutil.copytree(str(run_dir), str(dest))
+        return dest
 
     def graded(run_dir, label=None, ingest=False, credit=()):
-        return _self_test_gate_generation_applied(
-            expect, label or "sweep-{:03d}".format(len(swept)), run_dir, swept, ingest, credit)
+        label = label or "sweep-{:03d}".format(len(swept))
+        first = _self_test_gate_generation_applied(expect, label, run_dir, swept, ingest, credit)
+        twin = None if ingest or not any(cid in detached_ids for cid, _n in credit) else detach(run_dir)
+        if twin is not None:
+            detached_labels.append(label + "-detached")
+            _self_test_gate_generation_applied(expect, label + "-detached", twin, swept, False, credit)
+            expect("gate-generation-detached-{}".format(label), swept[-1][1] == first)
+        return first
 
     NOW = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
@@ -3838,24 +3871,25 @@ def _self_test():
         expect("disc-report-binding-digests", graded(m, credit=(
             ("report-binding-digests", "plan_digest does not recompute"),))["report-binding-digests"][0] is False)
 
-        # proposals-artifact: tamper proposals.toml (proposals.toml is not in report's artefact list, so
-        # only the proposals-artifact check fires).
-        m = copy_run(clean)
-        props = _load_toml(m / "proposals.toml")
-        props["run_id"] = "imp-20260101T000000Z-0000000000000000"
-        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
-        expect("disc-proposals-artifact", graded(m, credit=(
-            ("proposals-artifact", "schema/run_id/proposal array malformed"),))["proposals-artifact"][0] is False)
-
-        # proposals-artifact (strict-int schema, R5-F2): a proposals.toml schema of `true` (a bool) must NOT
-        # pass via Python's `True == 1`. The `type(...) is int` guard (bool excluded) makes it a FINDING, the
-        # class sibling of the report-schema bool-schema discriminator. proposals.toml is not in report's
-        # artefact list, so only the proposals-artifact check fires.
-        m = copy_run(clean)
-        props = _load_toml(m / "proposals.toml")
-        props["schema"] = True
-        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
-        expect("disc-proposals-artifact-bool-schema", graded(m)["proposals-artifact"][0] is False)
+        # proposals-artifact: one swept fixture per condition of its proposals.toml header conjunction
+        # (proposals.toml is not in report's artefact list, so only the proposals-artifact check fires): a run_id
+        # naming another run, a schema of `true` (a bool must NOT pass via Python's `True == 1`: the strict-int
+        # guard, R5-F2, the class sibling of the report-schema bool-schema discriminator), a schema integer other
+        # than 1, and a missing proposal array. Each must fail proposals-artifact alone, with the header detail.
+        proposals_conditions = (
+            ("disc-proposals-artifact", lambda props: props.update(run_id="imp-20260101T000000Z-0000000000000000")),
+            ("disc-proposals-artifact-bool-schema", lambda props: props.update(schema=True)),
+            ("disc-proposals-artifact-schema-value", lambda props: props.update(schema=2)),
+            ("disc-proposals-artifact-no-array", lambda props: props.pop("proposal")),
+        )
+        for plabel, pedit in proposals_conditions:
+            m = copy_run(clean)
+            props = _load_toml(m / "proposals.toml")
+            pedit(props)
+            (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+            pres = graded(m, plabel, credit=(("proposals-artifact", "schema/run_id/proposal array malformed"),))
+            expect(plabel, [cid for cid, (ok, _d) in pres.items() if not ok] == ["proposals-artifact"]
+                   and pres["proposals-artifact"][1] == "proposals.toml schema/run_id/proposal array malformed")
 
         # proposals-artifact (byte reproducibility): rewrite IMPORT-REPORT.md line endings LF->CRLF. The
         # rendered surface is LF, so a byte compare (not a universal-newline read) must FINDING; refresh the
@@ -4259,6 +4293,23 @@ def _self_test():
         def append(name, data):
             return lambda run_dir: (run_dir / name).write_bytes((run_dir / name).read_bytes() + data)
 
+        def toml_edit(name, change, refresh=False):
+            def mutate(run_dir):
+                data = _load_toml(run_dir / name)
+                change(data)
+                (run_dir / name).write_text(_opf_emit.emit(data), encoding="utf-8")
+                if refresh:
+                    rewrite_report_digest(run_dir, name)
+            return mutate
+
+        def source_tamper(run_dir):
+            victim = "sources/" + _load_toml(run_dir / "run.toml")["source"][0]["sha256"]
+            (run_dir / victim).write_bytes(b"tampered-bytes")
+            rewrite_report_digest(run_dir, victim)
+
+        lf_index = "fragments/legacy_fragment.index.toml"
+        zero = "sha256:" + "0" * 64
+
         ingest_cases = (
             ("ingest-durable-home", None, (), None),
             ("ingest-bundle-malformed", lambda run_dir: (run_dir / imp.INGEST_REVIEW_NAME).write_bytes(b"format = 1\n"),
@@ -4277,6 +4328,41 @@ def _self_test():
             ("ingest-artifact-digest", append("run.toml", b"\n# tampered\n"),
              ("artifact-digest-integrity", "ingest-artefact-completeness"),
              ("artifact-digest-integrity", "do not match recorded digest")),
+            # Every other ordinary check, each failed on the ingest run by its ordinary discriminator (the ingest
+            # re-derivation fails as well): generation 2 must keep that failure, so a bypass of an ordinary check on
+            # the ingest branch alone fails the sweep.
+            ("ingest-ordinary-staged-run-structure", lambda run_dir: (run_dir / imp.REPORT_MD_NAME).unlink(),
+             ("staged-run-structure", "ingest-report-reproducibility", "ingest-artefact-completeness"),
+             ("staged-run-structure", "missing ['IMPORT-REPORT.md']")),
+            ("ingest-ordinary-report-schema", toml_edit("report.toml", lambda rep: rep.update(schema=2)),
+             ("report-schema",) + _INGEST_CHECK_IDS,
+             ("report-schema", "report.toml schema/run_id/verdict/promotion_ready/artifact malformed")),
+            ("ingest-ordinary-mapping-totality", toml_edit("mappings.toml", lambda mp: mp["mapping"][0].update(
+                span=[0, mp["mapping"][0]["span"][1] - 1]), True),
+             ("mapping-totality", "lf-bijection", "ingest-artefact-completeness"), ("mapping-totality", "spans")),
+            ("ingest-ordinary-mapping-state-vocab", toml_edit("mappings.toml", lambda mp: mp["mapping"][0].update(
+                state="renamed"), True), ("mapping-state-vocab", "lf-bijection", "ingest-artefact-completeness"),
+             ("mapping-state-vocab", "outside the 8-state vocabulary")),
+            ("ingest-ordinary-mapping-origin-vocab", toml_edit("mappings.toml", lambda mp: mp["mapping"][0].update(
+                origin="guessed"), True), ("mapping-origin-vocab", "ingest-artefact-completeness"),
+             ("mapping-origin-vocab", "outside the provenance vocabulary")),
+            ("ingest-ordinary-lf-bijection", toml_edit(lf_index, lambda lf: lf.update(record=lf["record"][:-1]), True),
+             ("lf-bijection", "ingest-artefact-completeness"), ("lf-bijection", "do not correspond one-to-one")),
+            ("ingest-ordinary-lf-quad-completeness", toml_edit(lf_index, lambda lf: lf["record"][0].pop("span"), True),
+             ("lf-bijection", "lf-quad-completeness", "ingest-artefact-completeness"),
+             ("lf-quad-completeness", "omits a provenance-quad field")),
+            ("ingest-ordinary-source-preservation", source_tamper,
+             ("source-preservation", "ingest-source-binding", "ingest-draft-loss-binding",
+              "ingest-artefact-completeness"), ("source-preservation", "do not hash to the recorded digest")),
+            ("ingest-ordinary-inventory-digest", toml_edit("inventory.toml", lambda inv: inv.update(
+                inventory_digest=zero)), ("inventory-digest", "report-binding-digests", "ingest-source-binding",
+                                          "ingest-report-reproducibility"), ("inventory-digest", "does not recompute")),
+            ("ingest-ordinary-report-binding-digests", toml_edit("report.toml", lambda rep: rep.update(
+                plan_digest=zero)), ("report-binding-digests", "ingest-source-binding", "ingest-artefact-completeness"),
+             ("report-binding-digests", "plan_digest does not recompute")),
+            ("ingest-ordinary-proposals-artifact", toml_edit(imp.PROPOSALS_NAME, lambda props: props.update(schema=2)),
+             ("proposals-artifact",) + _INGEST_CHECK_IDS,
+             ("proposals-artifact", "schema/run_id/proposal array malformed")),
         )
         for label, corrupt, fails, claim in ingest_cases:
             counter[0] += 1
@@ -4289,8 +4375,14 @@ def _self_test():
             second = swept[-1][2]
             expect("gate-generation-disk-{}-generation-2".format(label),
                    {cid for cid, (ok, _d) in first.items() if not ok} == set(fails)
-                   and (claim is None or claim[1] in first[claim[0]][1])
+                   and (claim is None or (claim[1] in first[claim[0]][1] and second[claim[0]] == first[claim[0]]))
                    and all(second[cid] == (True, "not yet reviewed") for cid in _INGEST_ACCEPTANCE_CHECKS))
+        # Every ordinary id is failed on a generation-2 ingest run, with the same result at both generations.
+        ingest_labels = {label for label, _corrupt, _fails, _claim in ingest_cases}
+        expect("gate-generation-ingest-ordinary-coverage", all(any(
+            label in ingest_labels and not first[cid][0] and second[cid] == first[cid]
+            for label, first, second, _credit in swept) for cid in EXPECTED_CHECKS[:EXPECTED_CHECKS.index(
+                "proposals-artifact") + 1]))
         # A durable home holding an actual review, graded at generation 2: a valid review over the model the gate
         # itself validates, then that review with a stale plan_digest (binding), a typed unit left undecided
         # (completeness), a recorded rejection, and a record that is not an object (every acceptance id fails).
@@ -4356,10 +4448,39 @@ def _self_test():
                set(_self_test_gate_generation_coverage(padded, EXPECTED_CHECKS + (extra,))) == set(EXPECTED_CHECKS))
         expect("gate-generation-sweep-coverage-control-blanket",
                len(blanket) >= 2 and not _self_test_gate_generation_coverage(blanket, EXPECTED_CHECKS))
-        # Condition coverage for report-schema: each condition's own swept fixture failed report-schema alone.
-        expect("gate-generation-report-schema-conditions", all(any(
-            label == rlabel and [cid for cid, (ok, _d) in first.items() if not ok] == ["report-schema"]
-            for label, first, _second, _credit in swept) for rlabel, _redit in report_conditions))
+
+        # Controls on each clause of the rule: a synthetic row failing only the claimed id with the claimed text earns
+        # credit, and so does one whose text is also carried by an id that depends on the claim; the row with a failing
+        # prerequisite, with the text on a failing id that does not depend on the claim, or with a different
+        # generation-2 result earns none.
+        def credited(first, second_changes=(), cid="artifact-digest-integrity"):
+            row = dict({c: (True, "") for c in EXPECTED_CHECKS}, **first)
+            return cid in _self_test_gate_generation_coverage(
+                [("control", row, dict(row, **dict(second_changes)), ((cid, "control-text"),))], (cid,))
+
+        claimed = {"artifact-digest-integrity": (False, "control-text")}
+        expect("gate-generation-sweep-coverage-control-credited", credited(claimed))
+        expect("gate-generation-sweep-coverage-control-dependent-text", credited(
+            {"report-schema": (False, "control-text"), "artifact-digest-integrity": (False, "control-text")},
+            cid="report-schema"))
+        expect("gate-generation-sweep-coverage-control-prerequisite",
+               not credited(dict(claimed, **{"report-schema": (False, "another reason")})))
+        expect("gate-generation-sweep-coverage-control-text-elsewhere",
+               not credited(dict(claimed, **{"mapping-totality": (False, "control-text")})))
+        expect("gate-generation-sweep-coverage-control-generation-2",
+               not credited(claimed, {"artifact-digest-integrity": (False, "control-text at generation 2")}))
+        # Per store state: the detached copies alone credit every id a detached ordinary run grades.
+        detached_coverage = _self_test_gate_generation_coverage(
+            [entry for entry in swept if entry[0] in detached_labels], detached_ids)
+        expect("gate-generation-detached-coverage (no crediting detached copy: {})".format(", ".join(
+            cid for cid in detached_ids if cid not in detached_coverage)), set(detached_coverage) == set(detached_ids))
+        # Condition coverage for report-schema and the proposals.toml header: each condition's own swept fixture, and
+        # its detached copy, failed that id alone.
+        for cond_id, conditions in (("report-schema", report_conditions), ("proposals-artifact", proposals_conditions)):
+            expect("gate-generation-{}-conditions".format(cond_id), all(any(
+                label == clabel + suffix and [cid for cid, (ok, _d) in first.items() if not ok] == [cond_id]
+                for label, first, _second, _credit in swept) for clabel, _edit in conditions
+                for suffix in ("", "-detached")))
 
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
