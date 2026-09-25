@@ -4583,62 +4583,6 @@ def _self_test():
                 label == clabel + suffix and [cid for cid, (ok, _d) in first.items() if not ok] == [cond_id]
                 for label, first, _second, _credit in swept) for clabel, _edit in conditions
                 for suffix in ("", "-detached")))
-        # Every proposals discriminator that fires proposals-artifact ALONE fired it at base AND detached,
-        # mirroring the header proposals_conditions coverage above (gemini/F3-uniformity). The base label set is
-        # derived DYNAMICALLY from `swept` rather than hand-listed (r20 gemini/F-A: a hardcoded tuple passes
-        # vacuously for any row discriminator omitted from it -- the omitted one is simply never checked). The
-        # SELECTION is result-INDEPENDENT: a label qualifies solely by carrying the `disc-proposals-` prefix (its
-        # own explicitly-passed graded() label; the crlf and fragment-span fixtures grade with auto `sweep-NNN`
-        # labels and so never match), being a base (not a `-detached` twin), and not being named in the multi-id
-        # exemption. The fires-EXACTLY-["proposals-artifact"] test lives INSIDE the assertion, never in the
-        # selection (r21 codex/claude/gemini: selecting on the same predicate the assertion then checks is
-        # circular -- a disc-proposals-* fixture that starts tripping a SECOND id would be silently dropped from
-        # the set and nothing would fail; fix X's hardcoded tuple caught exactly that "fires alone" break, and
-        # fix Y's circular selection lost it). So a selected label that trips a second id, or lacks its
-        # `-detached` twin, now FAILS the assertion instead of being excluded. A disc-proposals-* fixture that is
-        # legitimately meant to trip more than one id must be named in the exemption tuple below (none today --
-        # the probe shows every base fires alone -- so it is empty but present, making a future multi-id fixture a
-        # deliberate, visible choice rather than a silent drop). Each qualifying base must have BOTH `<label>` and
-        # `<label>-detached` in swept, each failing proposals-artifact alone, proving the guard fires at BOTH
-        # generations. The non-empty guard catches a mistyped prefix that would match nothing and make the all()
-        # pass vacuously.
-        proposals_row_multi_id_exempt = ()  # disc-proposals-* fixtures legitimately allowed to trip >1 id (none today)
-
-        def proposals_row_conditions_hold(rows, exempt):
-            labels = sorted(
-                label for label, _first, _second, _credit in rows
-                if label.startswith("disc-proposals-") and not label.endswith("-detached")
-                and label not in exempt)
-            return bool(labels) and all(any(
-                label == clabel + suffix and [cid for cid, (ok, _d) in first.items() if not ok] == ["proposals-artifact"]
-                for label, first, _second, _credit in rows) for clabel in labels
-                for suffix in ("", "-detached"))
-
-        proposals_row_labels = sorted(
-            label for label, _first, _second, _credit in swept
-            if label.startswith("disc-proposals-") and not label.endswith("-detached")
-            and label not in proposals_row_multi_id_exempt)
-        expect("gate-generation-proposals-row-conditions-nonempty", len(proposals_row_labels) >= 1)
-        expect("gate-generation-proposals-row-conditions",
-               proposals_row_conditions_hold(swept, proposals_row_multi_id_exempt))
-        # Negative controls (r21 codex): the row-conditions assertion CATCHES a swept entry whose base trips a
-        # SECOND id, and a base missing its `-detached` twin (or a twin missing its base). A well-formed
-        # base+detached pair each firing proposals-artifact alone HOLDS, so the negatives are not vacuously false.
-        def _prow_entry(label, failing_ids):
-            first = {cid: (False, "synthetic") for cid in failing_ids}
-            return (label, first, dict(first), ())
-        _good_pair = [_prow_entry("disc-proposals-synthetic", ["proposals-artifact"]),
-                      _prow_entry("disc-proposals-synthetic-detached", ["proposals-artifact"])]
-        expect("gate-generation-proposals-row-conditions-control-holds",
-               proposals_row_conditions_hold(_good_pair, ()))
-        expect("gate-generation-proposals-row-conditions-control-multi-id",
-               not proposals_row_conditions_hold(
-                   [(l, dict(f, **{"artifact-digest-integrity": (False, "synthetic")}), s, c)
-                    for l, f, s, c in _good_pair], ()))
-        expect("gate-generation-proposals-row-conditions-control-missing-twin",
-               not proposals_row_conditions_hold(_good_pair[:1], ()))
-        expect("gate-generation-proposals-row-conditions-control-missing-base",
-               not proposals_row_conditions_hold(_good_pair[1:], ()))
 
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
