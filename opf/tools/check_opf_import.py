@@ -2359,8 +2359,11 @@ def _self_test_gate_generation(expect):
                         patch.object(imp, "_validate_staged_ingest_bundle") as bundle:
                     result = (_check_staged_run(rd) if bad is None
                               else _check_staged_run(rd, homes=bad))
-                ordinary_unchanged = (fixture != "ordinary" or all(
-                    result.get(cid) == value for cid, value in baseline.items() if cid not in dependent))
+                # Every generation-independent id keeps its generation-1 result; on an ingest run the staged
+                # acceptance ids route by generation, so only an ordinary run compares them too.
+                ordinary_unchanged = all(
+                    result.get(cid) == value for cid, value in baseline.items()
+                    if cid not in dependent and (fixture == "ordinary" or not cid.startswith("acceptance-")))
                 ordinary_clean = (fixture != "ordinary" or all(
                     ok for cid, (ok, _detail) in baseline.items()
                     if cid not in ("transaction-schema", "transaction-consistency")))
