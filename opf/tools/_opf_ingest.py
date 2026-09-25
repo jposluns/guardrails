@@ -2297,6 +2297,18 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
         migrate run now passes the staged-run gate (the repaired importer-proposal provenance gate). Each check
         FAILS without its production change (change-carries-check)."""
         import check_opf_import as _chk
+        from unittest.mock import patch
+
+        def swept_gate(run_dir, label):
+            """The gate's generation-1 result for `run_dir`, after grading it at generation 2 as well (the tooling
+            supporting it): every ingest-check result must be identical, so a generation-2-only bypass of an ingest
+            check fails the flip that grades it. The generation-dependent scope rows are graded apart below."""
+            first = _chk.check_staged_run(run_dir)
+            with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+                second = _chk.check_staged_run(run_dir, homes=2)
+            check(label + "-generation-2", all(second[cid] == first[cid] for cid in
+                                               ("ingest-run-structure",) + _chk._INGEST_CHECK_IDS))
+            return first
 
         def open_fd(root):
             resolution = _opf_store.resolve_store(root)
@@ -2398,7 +2410,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                           set(mig) == set(files) and all(mig[f]["importer_kind"] == kind for f in files))
                     # a real staged migrate run passes the repaired staged-run gate (item 7)
                     check("migrate-gate-proposals-clean-" + tag,
-                          _chk.check_staged_run(str(run))["proposals-artifact"][0] is True)
+                          swept_gate(str(run), "pr4b-sweep-01")["proposals-artifact"][0] is True)
                     if tag == "zero":
                         check("bundle-zero-result-preserved",
                               all((mig.get(f) or {}).get("candidate_count") == 0
@@ -2715,13 +2727,13 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                     mutate(b)
                     write_bundle(b)
                     try:
-                        res = _chk.check_staged_run(rundir)
+                        res = swept_gate(rundir, name)
                         check(name, res[check_id][0] is False)
                     finally:
                         restore_bundle()
 
                 # (h0) all five PASS on the coherent run.
-                clean_res = _chk.check_staged_run(rundir)
+                clean_res = swept_gate(rundir, "pr4b-clean")
                 for cid in _pr4b_ids:
                     check("pr4b-clean-" + cid, clean_res[cid][0] is True)
 
@@ -2760,18 +2772,18 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 orig_report = (run / "IMPORT-REPORT.md").read_bytes()
                 (run / "IMPORT-REPORT.md").write_bytes(orig_report + b"\n<!-- tampered -->\n")
                 check("pr4b-disc-report-repro",
-                      _chk.check_staged_run(rundir)["ingest-report-reproducibility"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-report-repro")["ingest-report-reproducibility"][0] is False)
                 (run / "IMPORT-REPORT.md").write_bytes(orig_report)
 
                 # (h5) ingest-run-structure: a present-but-malformed bundle, and an ingest-marked run whose
                 # review bundle is absent (partial run), both a located FINDING at the gate (never a raise).
                 (run / NAME).write_text('format = "wrong"\nschema = 1\n', encoding="utf-8")
                 check("pr4b-disc-structure-malformed",
-                      _chk.check_staged_run(rundir)["ingest-run-structure"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-structure-malformed")["ingest-run-structure"][0] is False)
                 restore_bundle()
                 (run / NAME).unlink()
                 check("pr4b-disc-structure-partial",
-                      _chk.check_staged_run(rundir)["ingest-run-structure"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-structure-partial")["ingest-run-structure"][0] is False)
                 restore_bundle()
 
                 # (h6) MIG-PR4b round-2 semantic-correspondence discriminators. Each new gate guard PASSES on
@@ -2826,7 +2838,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["ingest_actions_digest"] = dig(run, "ingest-actions.toml")
                 write_bundle(b)
                 check("bundle-action-kind-vs-disposition",
-                      _chk.check_staged_run(rundir)["ingest-disposition-totality"][0] is False)
+                      swept_gate(rundir, "bundle-action-kind-vs-disposition")["ingest-disposition-totality"][0] is False)
                 (run / "ingest-actions.toml").write_bytes(orig_acts)
                 restore_bundle()
 
@@ -2842,7 +2854,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
                 write_bundle(b)
                 check("bundle-candidate-envelope-valid",
-                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                      swept_gate(rundir, "bundle-candidate-envelope-valid")["ingest-draft-loss-binding"][0] is False)
                 (run / "candidates_draft.toml").write_bytes(orig_cds)
                 restore_bundle()
 
@@ -2860,7 +2872,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
                 write_bundle(b)
                 check("bundle-candidate-no-extra-source",
-                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                      swept_gate(rundir, "bundle-candidate-no-extra-source")["ingest-draft-loss-binding"][0] is False)
                 (run / "candidates_draft.toml").write_bytes(orig_cds)
                 restore_bundle()
 
@@ -2899,7 +2911,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
                 write_bundle(b)
                 check("pr4b-disc-e1-candidate-kind-stamp",
-                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-e1-candidate-kind-stamp")["ingest-draft-loss-binding"][0] is False)
                 (run / "candidates_draft.toml").write_bytes(orig_cds)
                 restore_bundle()
 
@@ -2920,7 +2932,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
                 write_bundle(b)
                 check("pr4b-disc-e8-candidate-noskip-malformed",
-                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-e8-candidate-noskip-malformed")["ingest-draft-loss-binding"][0] is False)
                 (run / "candidates_draft.toml").write_bytes(orig_cds)
                 restore_bundle()
 
@@ -2934,7 +2946,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
                 write_bundle(b)
                 check("pr4b-disc-e2-candidate-extra-key",
-                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-e2-candidate-extra-key")["ingest-draft-loss-binding"][0] is False)
                 (run / "candidates_draft.toml").write_bytes(orig_cds)
                 restore_bundle()
 
@@ -2960,7 +2972,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["inventory_toml_digest"] = dig(run, "inventory.toml")
                 write_bundle(b)
                 check("pr4b-disc-e4-inventory-vs-preserved-bytes",
-                      _chk.check_staged_run(rundir)["ingest-source-binding"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-e4-inventory-vs-preserved-bytes")["ingest-source-binding"][0] is False)
                 (run / "inventory.toml").write_bytes(orig_inv)
                 (run / "report.toml").write_bytes(orig_report)
                 restore_bundle()
@@ -2979,7 +2991,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["ingest_actions_digest"] = dig(run, "ingest-actions.toml")
                 write_bundle(b)
                 check("pr4b-disc-e5-keep-unmanaged-path",
-                      _chk.check_staged_run(rundir)["ingest-disposition-totality"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-e5-keep-unmanaged-path")["ingest-disposition-totality"][0] is False)
                 (run / "ingest-actions.toml").write_bytes(orig_acts)
                 restore_bundle()
 
@@ -2998,7 +3010,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["ingest_actions_digest"] = dig(run, "ingest-actions.toml")
                 write_bundle(b)
                 check("pr4b-disc-e5-move-action-identity",
-                      _chk.check_staged_run(rundir)["ingest-disposition-totality"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-e5-move-action-identity")["ingest-disposition-totality"][0] is False)
                 (run / "ingest-actions.toml").write_bytes(orig_acts)
                 restore_bundle()
 
@@ -3018,7 +3030,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["ingest_actions_digest"] = dig(run, "ingest-actions.toml")
                 write_bundle(b)
                 check("pr4b-disc-e7-actions-envelope-run-id",
-                      _chk.check_staged_run(rundir)["ingest-disposition-totality"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-e7-actions-envelope-run-id")["ingest-disposition-totality"][0] is False)
                 (run / "ingest-actions.toml").write_bytes(orig_acts)
                 restore_bundle()
 
@@ -3033,7 +3045,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 b["binding"]["candidates_draft_digest"] = dig(run, "candidates_draft.toml")
                 write_bundle(b)
                 check("pr4b-disc-e7-candidates-envelope-run-id",
-                      _chk.check_staged_run(rundir)["ingest-draft-loss-binding"][0] is False)
+                      swept_gate(rundir, "pr4b-disc-e7-candidates-envelope-run-id")["ingest-draft-loss-binding"][0] is False)
                 (run / "candidates_draft.toml").write_bytes(orig_cds)
                 restore_bundle()
 
@@ -3069,7 +3081,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                         b = copy.deepcopy(pristine)
                         edit(b)
                         rebind(run, b)
-                        res = _chk.check_staged_run(rundir)[check_id]
+                        res = swept_gate(rundir, name)[check_id]
                         check(name, res[0] is False and (detail is None or detail in res[1]))
                     finally:
                         restore_run(snap)
@@ -3094,7 +3106,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                     snap = snapshot_run()
                     try:
                         rebinder(run, copy.deepcopy(pristine))
-                        res = _chk.check_staged_run(rundir)
+                        res = swept_gate(rundir, "pr4b-harness-noop")
                         return all(res[cid][0] for cid in _pr4b_ids) and all(ok for ok, _d in res.values())
                     finally:
                         restore_run(snap)
@@ -3352,10 +3364,10 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 detached = root / "pr4b-detached" / "elsewhere" / "review" / run.name
                 shutil.copytree(str(run), str(detached))
                 try:
-                    _det_clean = _chk.check_staged_run(str(detached))
+                    _det_clean = swept_gate(str(detached), "pr4b-sweep-02")
                     (detached / "candidates_draft.toml").unlink()
                     (detached / "rogue.txt").write_text("x\n", encoding="utf-8")
-                    _det_bad = _chk.check_staged_run(str(detached))
+                    _det_bad = swept_gate(str(detached), "pr4b-sweep-03")
                     check("pr4b-disc-am1-detached-run",
                           all(_det_clean[cid][0] for cid in _pr4b_ids)
                           and _det_bad["ingest-run-structure"][1] != "not an ingest run"
@@ -3404,14 +3416,14 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                          ["legacy/m1.md", "legacy/m2.md"])
             if run is not None:
                 import check_opf_import as _chk6
-                _f6_clean = _chk6.check_staged_run(str(run))["ingest-draft-loss-binding"]
+                _f6_clean = swept_gate(str(run), "pr4b-sweep-04")["ingest-draft-loss-binding"]
                 d = read(run, "candidates_draft.toml")
                 order = [(c["source_path"], c["draft_ref"]) for c in d["candidate"]]
                 d["candidate"] = [c for c in d["candidate"] if c["source_path"] == "legacy/m2.md"] + [
                     c for c in d["candidate"] if c["source_path"] == "legacy/m1.md"]
                 (run / "candidates_draft.toml").write_bytes(_opf_import._emit_bytes(d, "candidates_draft.toml"))
                 rebind(run, load_bundle(root, run))
-                _f6 = _chk6.check_staged_run(str(run))["ingest-draft-loss-binding"]
+                _f6 = swept_gate(str(run), "pr4b-sweep-05")["ingest-draft-loss-binding"]
                 check("pr4b-disc-r4f6-candidates-group-order",
                       _f6_clean[0] is True
                       and order == [("legacy/m1.md", "draft-0001"), ("legacy/m1.md", "draft-0002"),
@@ -3450,7 +3462,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 acts = read(run, "ingest-actions.toml")["action"]
                 check("pr4b-r7-fixture-store-relative",
                       sorted(a["unmanaged_path"] for a in acts) == ["legacy/a.md", "legacy/b.md"])
-                r7_res = _chk.check_staged_run(str(run))
+                r7_res = swept_gate(str(run), "pr4b-sweep-06")
                 check("pr4b-disc-r7-relocated-declared-keep-passes",
                       all(r7_res[cid][0] for cid in _pr4b_ids))
                 r7_acts = read(run, "ingest-actions.toml")
@@ -3461,7 +3473,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 r7_bundle = load_bundle(root, run)
                 r7_bundle["binding"]["ingest_actions_digest"] = dig(run, "ingest-actions.toml")
                 (run / NAME).write_bytes(_opf_import._emit_bytes(r7_bundle, NAME))
-                r7_bad = _chk.check_staged_run(str(run))["ingest-disposition-totality"]
+                r7_bad = swept_gate(str(run), "pr4b-sweep-07")["ingest-disposition-totality"]
                 check("pr4b-disc-r7-contradictory-base",
                       r7_bad[0] is False and "more than one re-anchor base" in r7_bad[1])
         finally:
@@ -3508,7 +3520,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 restamp(b)
                 (run / "ingest-actions.toml").write_bytes(_opf_import._emit_bytes(acts, "ingest-actions.toml"))
                 rebind(run, b)
-                res = _chk.check_staged_run(str(run))["ingest-source-binding"]
+                res = swept_gate(str(run), "pr4b-sweep-08")["ingest-source-binding"]
                 replan = plan_ingest(root, b["worksheet"], b["options"],
                                      include=b["include"] if b["include_declared"] else None,
                                      now=now, run_nonce="mig-pr4b-am3")
@@ -3544,12 +3556,12 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             ws = triage(root, [".working/legacy/skeep.md"], "keep")
             run = staged(root, machine, ws, empty, [".working/legacy/skeep.md"])
             if run is not None:
-                _bm_clean = _chk.check_staged_run(str(run))
+                _bm_clean = swept_gate(str(run), "pr4b-sweep-09")
                 acts = read(run, "ingest-actions.toml")
                 acts["action"][0]["unmanaged_path"] = ".working/legacy/forged-exemption.md"
                 (run / "ingest-actions.toml").write_bytes(_opf_import._emit_bytes(acts, "ingest-actions.toml"))
                 rebind(run, load_bundle(root, run))
-                _bm = _chk.check_staged_run(str(run))["ingest-disposition-totality"]
+                _bm = swept_gate(str(run), "pr4b-sweep-10")["ingest-disposition-totality"]
                 check("pr4b-disc-bm-store-keep-unmanaged-path",
                       all(_bm_clean[cid][0] for cid in _pr4b_ids) and _bm[0] is False
                       and "does not equal the action re-derived" in _bm[1])

@@ -2327,8 +2327,13 @@ def _self_test_gate_generation_sites(expect):
     acceptance table, the transaction table (_self_test_gate_generation_transaction_cases) on a genuinely applied run,
     and ingest runs beside a provisioned durable home. Each requires every generation-independent result to be
     identical under generation 2 and every invalid generation. The coverage assertion (gate-generation-sweep-coverage)
-    requires each generation-independent id to fail in at least one swept fixture at generation 1. A bypass of a
-    condition that no fixture fails, or one that needs a store state no fixture builds, is not detected."""
+    requires every registered id to be credited by a swept fixture under the rule of
+    _self_test_gate_generation_coverage: the fixture passes staged-run-structure and the id's other prerequisites and
+    fails that id with its own located detail, so a blanket failure (an empty run, an unreadable core) credits
+    nothing. Its controls show that an always-passing id registered beside the others is reported uncovered, and
+    that the blanket fixtures alone credit no id. Coverage is per id; the report-schema conditions each carry their
+    own swept fixture (gate-generation-report-schema-conditions). A bypass of a condition that no fixture fails, or
+    one that needs a store state no fixture builds, is not detected."""
     import ast
     import inspect
     src = inspect.getsource(_check_staged_run)
@@ -2782,18 +2787,21 @@ def _self_test_gate_generation_transaction_cases():
     )
 
 
-def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, ingest=False):
+def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, ingest=False, credit=()):
     """One fixture graded on disk beneath its store, with the located-store branch and transaction grading live (no
     store failure is injected): every generation-independent id keeps its generation-1 result under generation 2 and
     under every invalid generation, and every invalid generation fails each dependent id. On an ingest run (`ingest`)
     the staged acceptance ids route by generation, so every invalid generation fails them too, and generation 2 keeps
-    every result except the two ingest-acceptance ids, which grade the durable home. Appends (label, generation-1
-    results, generation-2 results) to `swept` and returns the generation-1 results."""
+    every result except the two ingest-acceptance ids, which grade the durable home, and the staged acceptance ids,
+    which must then report that grading (a completeness id the completeness result, every other the binding
+    result). Appends (label, generation-1
+    results, generation-2 results, credit) to `swept` and returns the generation-1 results; `credit` is the (id,
+    located detail) pairs the fixture claims, which count only as _self_test_gate_generation_coverage allows."""
     from unittest.mock import patch
     import _opf_store
     dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
-    routed = dependent + (("acceptance-schema", "acceptance-binding", "acceptance-attribution",
-                           "acceptance-completeness") if ingest else ())
+    staged = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
+    routed = dependent + (staged if ingest else ())
     second = None
     with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
         baseline = check_staged_run(run_dir, homes=1)
@@ -2801,15 +2809,62 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
             result = check_staged_run(run_dir) if homes is None else check_staged_run(run_dir, homes=homes)
             if case == "generation-2":
                 second = result
-                varies = _INGEST_ACCEPTANCE_CHECKS if ingest else dependent
-                ok = all(result[cid] == value for cid, value in baseline.items() if cid not in varies)
+                varies = _INGEST_ACCEPTANCE_CHECKS + staged if ingest else dependent
+                ok = all(result[cid] == value for cid, value in baseline.items() if cid not in varies) and (
+                    not ingest or all(result[cid] == result[_INGEST_ACCEPTANCE_CHECKS[cid.endswith("completeness")]]
+                                      for cid in staged))
             else:
                 ok = (all(result[cid] == value for cid, value in baseline.items() if cid not in routed)
                       and not any(result[cid][0] for cid in routed))
             expect("gate-generation-applied-{}-{}".format(label, case), set(result) == set(EXPECTED_CHECKS) and ok)
     if swept is not None:
-        swept.append((label, baseline, second))
+        swept.append((label, baseline, second, tuple(credit)))
     return baseline
+
+
+def _self_test_gate_generation_prerequisites(cid):
+    """The ids that must pass in a fixture before its failure of `cid` earns coverage credit: staged-run-structure for
+    every other id; ingest-run-structure for each ingest check, and every ingest check as well for the two durable
+    ingest-acceptance ids (a review is graded only over a validated model); report-schema for the checks that read
+    report fields; acceptance-schema for acceptance binding and completeness; transaction-schema for
+    transaction-consistency."""
+    if cid == "staged-run-structure":
+        return ()
+    if cid in _INGEST_CHECK_IDS:
+        return ("staged-run-structure", "ingest-run-structure")
+    if cid in _INGEST_ACCEPTANCE_CHECKS:
+        return ("staged-run-structure", "ingest-run-structure") + _INGEST_CHECK_IDS
+    return ("staged-run-structure",) + {"artifact-digest-integrity": ("report-schema",),
+                                        "report-binding-digests": ("report-schema",),
+                                        "acceptance-binding": ("acceptance-schema",),
+                                        "acceptance-completeness": ("acceptance-schema",),
+                                        "transaction-consistency": ("transaction-schema",)}.get(cid, ())
+
+
+def _self_test_gate_generation_coverage(swept, ids):
+    """Map each id of `ids` that a swept fixture covers to the first such fixture's label; an id missing from the
+    result is uncovered. A fixture's claimed (id, located detail) covers the id only when some check passes (a
+    blanket failure credits nothing), every prerequisite (_self_test_gate_generation_prerequisites) passes, the id
+    fails with a detail containing the located text, no other failing id carries that text unless it depends on the
+    id, and generation 2 gives the same result. The two ingest-acceptance ids are judged on the generation-2 result,
+    the only generation that grades the durable home; there the staged acceptance ids report the same durable
+    grading, so they may carry the text. Every other id is judged on the generation-1 result."""
+    staged_acceptance = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
+    covered = {}
+    for label, first, second, credit in swept:
+        for cid, needle in credit:
+            results = second if cid in _INGEST_ACCEPTANCE_CHECKS else first
+            shared = {c for c in results if cid in _self_test_gate_generation_prerequisites(c)}
+            if cid in _INGEST_ACCEPTANCE_CHECKS:
+                shared.update(staged_acceptance)
+            if (cid in ids and cid not in covered and any(ok for ok, _d in results.values())
+                    and all(results[p][0] for p in _self_test_gate_generation_prerequisites(cid))
+                    and not results[cid][0] and needle in results[cid][1]
+                    and not any(not ok and needle in detail for c, (ok, detail) in results.items()
+                                if c != cid and c not in shared)
+                    and second[cid] == results[cid]):
+                covered[cid] = label
+    return covered
 
 
 def _self_test_gate_generation_disk(store, fixture=None):
@@ -2984,9 +3039,9 @@ def _self_test():
     # generation-independent results must not change under generation 2 or any invalid generation.
     swept = []
 
-    def graded(run_dir, label=None, ingest=False):
+    def graded(run_dir, label=None, ingest=False, credit=()):
         return _self_test_gate_generation_applied(
-            expect, label or "sweep-{:03d}".format(len(swept)), run_dir, swept, ingest)
+            expect, label or "sweep-{:03d}".format(len(swept)), run_dir, swept, ingest, credit)
 
     NOW = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
@@ -3469,7 +3524,7 @@ def _self_test():
             gt, gts = genuine_clone()
             context = mutate(gt, gts)
             with context if hasattr(context, "__enter__") else contextlib.nullcontext():
-                gt_gen1 = graded(gt, label)
+                gt_gen1 = graded(gt, label, credit=((cid, needle),))
             expect("gate-generation-applied-{}-baseline".format(label),
                    gt_gen1["transaction-schema"][0] is schema_ok
                    and gt_gen1["transaction-consistency"][0] is consistency_ok and needle in gt_gen1[cid][1]
@@ -3620,42 +3675,39 @@ def _self_test():
         nl_dir = m.parent / (m.name + "\n")
         m.rename(nl_dir)
         expect("disc-structure-trailing-newline",
-               graded(nl_dir)["staged-run-structure"][0] is False)
+               graded(nl_dir, credit=(("staged-run-structure", "is not a run id"),))["staged-run-structure"][0] is False)
 
-        # report-schema: flip verdict to 1 (report.toml is not in its own artefact list, so the digest
-        # check stays green).
-        m = copy_run(clean)
-        rep = _load_toml(m / "report.toml")
-        rep["verdict"] = 1
-        (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
-        expect("disc-report-schema", graded(m)["report-schema"][0] is False)
-
-        # report-schema (strict-int verdict): a report.toml verdict of `false` (a bool) must NOT pass via
-        # Python's `False == 0`. The `type(...) is int` guard (bool excluded) makes it a FINDING, so a
-        # not-promotion-ready run cannot clear all 16 checks. report.toml is not in its own artefact list, so
-        # the digest check stays green and only report-schema fires.
-        m = copy_run(clean)
-        rep = _load_toml(m / "report.toml")
-        rep["verdict"] = False
-        (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
-        expect("disc-report-schema-bool-verdict", graded(m)["report-schema"][0] is False)
-
-        # report-schema (strict-int schema, R5-F2): a report.toml schema of `true` (a bool) must NOT pass via
-        # Python's `True == 1`. The `type(...) is int` guard (bool excluded) makes it a FINDING, the class
-        # sibling of the bool-verdict discriminator above. report.toml is not in its own artefact list, so the
-        # digest check stays green and only report-schema fires.
-        m = copy_run(clean)
-        rep = _load_toml(m / "report.toml")
-        rep["schema"] = True
-        (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
-        expect("disc-report-schema-bool-schema", graded(m)["report-schema"][0] is False)
+        # report-schema: one swept fixture per condition of its conjunction (report.toml is not in its own artefact
+        # list, so the digest check stays green). Each must fail report-schema and nothing else at generation 1:
+        # verdict 1, and verdict / schema a bool (the strict-int guards: Python's `False == 0` and `True == 1` would
+        # slip a bare comparison, R5-F2), schema an integer other than 1, a report.run_id naming another run, and
+        # promotion_ready false. The non-list artifact condition is swept below (it also fails
+        # artifact-digest-integrity, which reads the same field).
+        report_conditions = (
+            ("disc-report-schema", lambda rep: rep.update(verdict=1)),
+            ("disc-report-schema-bool-verdict", lambda rep: rep.update(verdict=False)),
+            ("disc-report-schema-bool-schema", lambda rep: rep.update(schema=True)),
+            ("disc-report-schema-schema-value", lambda rep: rep.update(schema=2)),
+            ("disc-report-schema-run-id", lambda rep: rep.update(
+                run_id=rep["run_id"][:-1] + ("1" if rep["run_id"][-1] != "1" else "2"))),
+            ("disc-report-schema-not-ready", lambda rep: rep.update(promotion_ready=False)),
+        )
+        for rlabel, redit in report_conditions:
+            m = copy_run(clean)
+            rep = _load_toml(m / "report.toml")
+            redit(rep)
+            (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
+            rres = graded(m, rlabel, credit=(("report-schema", "report.toml schema/run_id/verdict/promotion_ready/artifact malformed"),))
+            expect(rlabel, [cid for cid, (ok, _d) in rres.items() if not ok] == ["report-schema"]
+                   and rres["report-schema"][1] == "report.toml schema/run_id/verdict/promotion_ready/artifact malformed")
 
         # artifact-digest-integrity: append an inert TOML comment to run.toml WITHOUT refreshing its
         # recorded digest (run.toml still parses identically, so only the digest check fires).
         m = copy_run(clean)
         with open(m / "run.toml", "ab") as fh:
             fh.write(b"\n# tampered\n")
-        expect("disc-artifact-digest", graded(m)["artifact-digest-integrity"][0] is False)
+        expect("disc-artifact-digest", graded(m, credit=(
+            ("artifact-digest-integrity", "do not match recorded digest"),))["artifact-digest-integrity"][0] is False)
 
         # artifact-digest-integrity (non-list shape, R5-F1): a report.toml `artifact` of a NON-LIST type
         # (int or bool) must be a located FINDING, never an uncaught TypeError from iterating a
@@ -3683,7 +3735,7 @@ def _self_test():
         mp["mapping"][0]["span"] = [0, mp["mapping"][0]["span"][1] - 1]
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
-        expect("disc-mapping-totality", graded(m)["mapping-totality"][0] is False)
+        expect("disc-mapping-totality", graded(m, credit=(("mapping-totality", "spans"),))["mapping-totality"][0] is False)
 
         # mapping-state-vocab: set a row state outside the vocabulary; refresh the digest.
         m = copy_run(clean)
@@ -3691,7 +3743,8 @@ def _self_test():
         mp["mapping"][0]["state"] = "renamed"
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
-        expect("disc-state-vocab", graded(m)["mapping-state-vocab"][0] is False)
+        expect("disc-state-vocab", graded(m, credit=(
+            ("mapping-state-vocab", "outside the 8-state vocabulary"),))["mapping-state-vocab"][0] is False)
 
         # mapping-origin-vocab: delete one row's origin (state/spans unchanged, so state-vocab, totality and
         # bijection stay coherent); refresh the digest so only the origin-vocab check fires.
@@ -3708,7 +3761,8 @@ def _self_test():
         mp["mapping"][0]["origin"] = "guessed"
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
-        expect("disc-origin-vocab-bad", graded(m)["mapping-origin-vocab"][0] is False)
+        expect("disc-origin-vocab-bad", graded(m, credit=(
+            ("mapping-origin-vocab", "outside the provenance vocabulary"),))["mapping-origin-vocab"][0] is False)
 
         # N4: an UNHASHABLE mapping origin/state ([]) is a located FINDING, never a TypeError at the
         # membership test. origin=[] is the real crash flip (imp._ORIGIN_SET is a frozenset); state=[] is
@@ -3733,7 +3787,8 @@ def _self_test():
         lf["record"] = lf["record"][:-1]
         (m / "fragments" / "legacy_fragment.index.toml").write_text(_opf_emit.emit(lf), encoding="utf-8")
         rewrite_report_digest(m, "fragments/legacy_fragment.index.toml")
-        expect("disc-lf-bijection", graded(m)["lf-bijection"][0] is False)
+        expect("disc-lf-bijection", graded(m, credit=(
+            ("lf-bijection", "do not correspond one-to-one"),))["lf-bijection"][0] is False)
 
         # lf-bijection (count-preserving): duplicate one record over another so the COUNT is unchanged but
         # a quarantined source loses its correspondence; the keyed check must still FINDING.
@@ -3752,7 +3807,8 @@ def _self_test():
         del lf["record"][0]["span"]
         (m / "fragments" / "legacy_fragment.index.toml").write_text(_opf_emit.emit(lf), encoding="utf-8")
         rewrite_report_digest(m, "fragments/legacy_fragment.index.toml")
-        expect("disc-lf-quad", graded(m)["lf-quad-completeness"][0] is False)
+        expect("disc-lf-quad", graded(m, credit=(
+            ("lf-quad-completeness", "omits a provenance-quad field"),))["lf-quad-completeness"][0] is False)
 
         # source-preservation: tamper preserved source bytes; refresh the report digest for that file so
         # only the preservation check (bytes no longer hash to the recorded/named digest) fires.
@@ -3761,7 +3817,8 @@ def _self_test():
         victim = run["source"][0]["sha256"]
         (m / "sources" / victim).write_bytes(b"tampered-bytes")
         rewrite_report_digest(m, "sources/" + victim)
-        expect("disc-source-preservation", graded(m)["source-preservation"][0] is False)
+        expect("disc-source-preservation", graded(m, credit=(
+            ("source-preservation", "do not hash to the recorded digest"),))["source-preservation"][0] is False)
 
         # inventory-digest: corrupt the recorded inventory_digest (inventory.toml is not in report's
         # artefact list, so only the inventory-digest check fires).
@@ -3769,7 +3826,8 @@ def _self_test():
         inv = _load_toml(m / "inventory.toml")
         inv["inventory_digest"] = "sha256:" + ("0" * 64)
         (m / "inventory.toml").write_text(_opf_emit.emit(inv), encoding="utf-8")
-        expect("disc-inventory-digest", graded(m)["inventory-digest"][0] is False)
+        expect("disc-inventory-digest", graded(m, credit=(
+            ("inventory-digest", "does not recompute"),))["inventory-digest"][0] is False)
 
         # report-binding-digests: corrupt report.toml's plan_digest (report.toml is not in its own artefact
         # list, so the digest-integrity check stays green and only the binding-digest check fires).
@@ -3777,7 +3835,8 @@ def _self_test():
         rep = _load_toml(m / "report.toml")
         rep["plan_digest"] = "sha256:" + ("0" * 64)
         (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
-        expect("disc-report-binding-digests", graded(m)["report-binding-digests"][0] is False)
+        expect("disc-report-binding-digests", graded(m, credit=(
+            ("report-binding-digests", "plan_digest does not recompute"),))["report-binding-digests"][0] is False)
 
         # proposals-artifact: tamper proposals.toml (proposals.toml is not in report's artefact list, so
         # only the proposals-artifact check fires).
@@ -3785,7 +3844,8 @@ def _self_test():
         props = _load_toml(m / "proposals.toml")
         props["run_id"] = "imp-20260101T000000Z-0000000000000000"
         (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
-        expect("disc-proposals-artifact", graded(m)["proposals-artifact"][0] is False)
+        expect("disc-proposals-artifact", graded(m, credit=(
+            ("proposals-artifact", "schema/run_id/proposal array malformed"),))["proposals-artifact"][0] is False)
 
         # proposals-artifact (strict-int schema, R5-F2): a proposals.toml schema of `true` (a bool) must NOT
         # pass via Python's `True == 1`. The `type(...) is int` guard (bool excluded) makes it a FINDING, the
@@ -3804,7 +3864,8 @@ def _self_test():
         crlf = (m / "IMPORT-REPORT.md").read_bytes().replace(b"\n", b"\r\n")
         (m / "IMPORT-REPORT.md").write_bytes(crlf)
         rewrite_report_digest(m, "IMPORT-REPORT.md")
-        expect("disc-proposals-artifact-crlf", graded(m)["proposals-artifact"][0] is False)
+        expect("disc-proposals-artifact-crlf", graded(m, credit=(
+            ("proposals-artifact", "not byte-reproducible"),))["proposals-artifact"][0] is False)
 
         # proposals-artifact (R6-F1, proposal span shape): a proposal span that is a list but NOT a 2-element
         # int pair ([] or [5]) must be a located row FINDING, never an uncaught IndexError when
@@ -4176,34 +4237,129 @@ def _self_test():
         for fixture, fails, located in _self_test_gate_generation_acceptance_cases():
             counter[0] += 1
             disk_run = _self_test_gate_generation_disk(base / "accept-disk-{:03d}".format(counter[0]), fixture)
-            disk = graded(disk_run, "disk-" + fixture)
+            disk = graded(disk_run, "disk-" + fixture, credit=located)
             expect("gate-generation-disk-{}-baseline".format(fixture),
                    (fixture == "accepted-unreadable" and os.geteuid() == 0)
                    or (set(cid for cid, (ok, _d) in disk.items() if not ok) == set(fails)
                        and all(needle in disk[cid][1] for cid, needle in located)))
-        # Ingest runs at generation 2 on a real store whose durable home is provisioned, with no review recorded:
-        # generation 2 grades each as the ingest run it is and reads the durable home.
-        for label, bundle in (("ingest-durable-home", None), ("ingest-bundle-malformed", b"format = 1\n")):
+        # Ingest runs on a real store whose durable home is provisioned, graded through the sweep: generation 2 must
+        # keep every result but the two ingest-acceptance ids, which grade the durable home. Each corruption fails at
+        # generation 1 exactly the listed ids, the last one for its own located reason; the ordinary tamper of
+        # run.toml also fails ingest-artefact-completeness, which re-derives that record.
+        def bundle_edit(change):
+            def mutate(run_dir):
+                model = _load_toml(run_dir / imp.INGEST_REVIEW_NAME)
+                change(model)
+                (run_dir / imp.INGEST_REVIEW_NAME).write_bytes(imp._emit_bytes(model, imp.INGEST_REVIEW_NAME))
+            return mutate
+
+        def stale_binding(field):
+            return bundle_edit(lambda model: model["binding"].update({field: "sha256:" + "0" * 64}))
+
+        def append(name, data):
+            return lambda run_dir: (run_dir / name).write_bytes((run_dir / name).read_bytes() + data)
+
+        ingest_cases = (
+            ("ingest-durable-home", None, (), None),
+            ("ingest-bundle-malformed", lambda run_dir: (run_dir / imp.INGEST_REVIEW_NAME).write_bytes(b"format = 1\n"),
+             ("ingest-run-structure",) + _INGEST_CHECK_IDS, ("ingest-run-structure", "present but malformed")),
+            ("ingest-source-binding", stale_binding("inventory_toml_digest"), ("ingest-source-binding",),
+             ("ingest-source-binding", "binding.inventory_toml_digest does not recompute")),
+            ("ingest-disposition-totality", bundle_edit(lambda model: model.update(migrate=[])),
+             ("ingest-disposition-totality", "ingest-draft-loss-binding", "ingest-report-reproducibility"),
+             ("ingest-disposition-totality", "do not correspond one-to-one to the migrate worksheet rows")),
+            ("ingest-draft-loss-binding", stale_binding("candidates_draft_digest"), ("ingest-draft-loss-binding",),
+             ("ingest-draft-loss-binding", "binding.candidates_draft_digest does not recompute")),
+            ("ingest-report-reproducibility", append(imp.REPORT_MD_NAME, b"x"), ("ingest-report-reproducibility",),
+             ("ingest-report-reproducibility", "is not byte-reproducible from the validated model")),
+            ("ingest-artefact-completeness", lambda run_dir: (run_dir / "stray.txt").write_bytes(b"x"),
+             ("ingest-artefact-completeness",), ("ingest-artefact-completeness", "outside the ingest artefact registry")),
+            ("ingest-artifact-digest", append("run.toml", b"\n# tampered\n"),
+             ("artifact-digest-integrity", "ingest-artefact-completeness"),
+             ("artifact-digest-integrity", "do not match recorded digest")),
+        )
+        for label, corrupt, fails, claim in ingest_cases:
             counter[0] += 1
             ingest_store = base / "ingest-disk-{:03d}".format(counter[0])
             ingest_run = _self_test_gate_generation_disk(ingest_store)
             (ingest_store / imp._ingest_acceptance_home(ingest_run.name)).mkdir(parents=True)
-            if bundle is not None:
-                (ingest_run / imp.INGEST_REVIEW_NAME).write_bytes(bundle)
-            first = graded(ingest_run, label, ingest=True)
+            if corrupt is not None:
+                corrupt(ingest_run)
+            first = graded(ingest_run, label, ingest=True, credit=(claim,) if claim else ())
             second = swept[-1][2]
-            clean_ingest = bundle is None
             expect("gate-generation-disk-{}-generation-2".format(label),
-                   first["ingest-run-structure"][0] is clean_ingest
-                   and second["ingest-run-structure"] == ((True, "") if clean_ingest else first["ingest-run-structure"])
-                   and all(second[cid] == (True, "not yet reviewed") for cid in _INGEST_ACCEPTANCE_CHECKS)
-                   and (not clean_ingest or all(ok for ok, _d in second.values())))
-        # Coverage: every generation-independent id fails in at least one swept fixture at generation 1, so a check
-        # added without a failing on-disk fixture fails here.
-        dependent_ids = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
-        uncovered = [cid for cid in EXPECTED_CHECKS if cid not in dependent_ids
-                     and not any(not first_results[cid][0] for _label, first_results, _second in swept)]
-        expect("gate-generation-sweep-coverage (no failing fixture: {})".format(", ".join(uncovered)), not uncovered)
+                   {cid for cid, (ok, _d) in first.items() if not ok} == set(fails)
+                   and (claim is None or claim[1] in first[claim[0]][1])
+                   and all(second[cid] == (True, "not yet reviewed") for cid in _INGEST_ACCEPTANCE_CHECKS))
+        # A durable home holding an actual review, graded at generation 2: a valid review over the model the gate
+        # itself validates, then that review with a stale plan_digest (binding), a typed unit left undecided
+        # (completeness), a recorded rejection, and a record that is not an object (every acceptance id fails).
+        from unittest.mock import patch as _patch
+        counter[0] += 1
+        review_store = base / "ingest-review-{:03d}".format(counter[0])
+        review_run = _self_test_gate_generation_disk(review_store)
+        review_home = review_store / imp._ingest_acceptance_home(review_run.name)
+        review_home.mkdir(parents=True)
+        with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            review_rd = _RunDir(review_run)
+            try:
+                snapshot = imp._ingest_snapshot(review_rd, 2)
+            finally:
+                review_rd.close()
+        review = dict(format=imp.INGEST_ACCEPTANCE_FORMAT, run_id=review_run.name,
+                      plan_digest=snapshot["binding"]["plan_digest"],
+                      inventory_digest=snapshot["binding"]["inventory_digest"], reviewed_at="2026-09-09T12:00:00Z",
+                      actor=dict(declared="Gate Reviewer", context=dict(os_user="", git_identity="", hostname="")),
+                      decisions=[dict(f, decision="accept") for f in snapshot["fragments"].values()],
+                      ingest=dict(format=imp.INGEST_ACCEPTANCE_BLOCK, binding=snapshot["binding"],
+                                  units=[dict(u, decision="accept", note="") for u in snapshot["units"]]))
+        binding_id, complete_id = _INGEST_ACCEPTANCE_CHECKS
+        recorded, rejected = "review recorded; execution unavailable", "recorded rejection; not promotable"
+        staged_ids = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
+        for label, change, raw, expected in (
+                ("ingest-review-valid", None, None, {binding_id: (True, recorded), complete_id: (True, recorded)}),
+                ("ingest-review-stale-binding", lambda r: r.update(plan_digest="sha256:" + "0" * 64), None,
+                 {binding_id: (False, "plan_digest is stale"), complete_id: (True, recorded)}),
+                ("ingest-review-unit-undecided", lambda r: r["ingest"]["units"].pop(), None,
+                 {binding_id: (True, recorded),
+                  complete_id: (False, "every typed ingest unit needs an explicit decision")}),
+                ("ingest-review-rejected", lambda r: r["ingest"]["units"][0].update(decision="reject"), None,
+                 {binding_id: (True, rejected), complete_id: (True, rejected)}),
+                ("ingest-review-not-object", None, b"[]\n", None)):
+            record = json.loads(json.dumps(review))
+            if change is not None:
+                change(record)
+            (review_home / imp.ACCEPTANCE_NAME).write_bytes(raw or imp._emit_acceptance_bytes(record))
+            claims = tuple((cid, detail) for cid, (ok, detail) in (expected or {}).items() if not ok)
+            first = graded(review_run, label, ingest=True, credit=claims)
+            second = swept[-1][2]
+            expect("gate-generation-disk-{}-generation-2".format(label),
+                   all(ok for ok, _d in first.values())
+                   and (all(second[cid] == value for cid, value in expected.items()) if expected else
+                        all(not second[cid][0] and "not a JSON object" in second[cid][1]
+                            for cid in _INGEST_ACCEPTANCE_CHECKS))
+                   and all(second[cid] == first[cid] for cid in first
+                           if cid not in _INGEST_ACCEPTANCE_CHECKS + staged_ids))
+        # Coverage: every registered id is credited by a swept fixture under _self_test_gate_generation_coverage (it
+        # passes staged-run-structure and the id's prerequisites, and fails the id with its own located detail).
+        coverage = _self_test_gate_generation_coverage(swept, EXPECTED_CHECKS)
+        uncovered = [cid for cid in EXPECTED_CHECKS if cid not in coverage]
+        expect("gate-generation-sweep-coverage (no crediting fixture: {})".format(", ".join(uncovered)), not uncovered)
+        # Controls: an always-passing id registered beside the others is reported uncovered, and the blanket fixtures
+        # (every check failing, as for the empty run) credit no id even when they claim every id.
+        extra = "untested-always-pass"
+        padded = [(label, dict(first, **{extra: (True, "")}), dict(second, **{extra: (True, "")}),
+                   credit + ((extra, ""),)) for label, first, second, credit in swept]
+        blanket = [(label, first, second, tuple((cid, "") for cid in EXPECTED_CHECKS))
+                   for label, first, second, _credit in swept if not any(ok for ok, _d in first.values())]
+        expect("gate-generation-sweep-coverage-control-always-pass",
+               set(_self_test_gate_generation_coverage(padded, EXPECTED_CHECKS + (extra,))) == set(EXPECTED_CHECKS))
+        expect("gate-generation-sweep-coverage-control-blanket",
+               len(blanket) >= 2 and not _self_test_gate_generation_coverage(blanket, EXPECTED_CHECKS))
+        # Condition coverage for report-schema: each condition's own swept fixture failed report-schema alone.
+        expect("gate-generation-report-schema-conditions", all(any(
+            label == rlabel and [cid for cid, (ok, _d) in first.items() if not ok] == ["report-schema"]
+            for label, first, _second, _credit in swept) for rlabel, _redit in report_conditions))
 
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
