@@ -581,6 +581,9 @@ residue = "It runs the OPF store-schema upgrade gate (opf/tools/check_opf_upgrad
 
 [[gate]]
 id = "opf-import"
+# This entry also owns ingest-acceptance-binding and ingest-acceptance-completeness in EXPECTED_CHECKS.
+# Its module self-test registers the pure acceptance discriminators; the ingest suite adds capture fixtures.
+# Coverage remains synthetic. Durable capture requires homes activation; identity and semantics are unauthenticated.
 script = "opf/tools/check_opf_import.py"
 rules = []
 platform = "ci"

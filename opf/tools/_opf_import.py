@@ -255,26 +255,27 @@ REPORT_MD_NAME = "IMPORT-REPORT.md"
 # proposals.toml + run id and the review path reads machine data only, never the human-readable report.
 PROPOSALS_NAME = "proposals.toml"
 
-# --- OPF-MIGRATE MIG-PR4a: the FROZEN ingest review-evidence bundle -----------------------------------
-# The review/acceptance step (PR-4) validates a FROZEN staged snapshot (ratified acceptance model A5), so
-# MIG-PR4a freezes the review evidence a later acceptance-capture slice (PR-4c) reads into ONE additive,
+# --- The FROZEN ingest review-evidence bundle ------------------------------------------------------------
+# The review/acceptance step validates a FROZEN staged snapshot (the ratified acceptance model), so the
+# planner freezes the review evidence that ingest acceptance capture reads into ONE additive,
 # store-native TOML artefact staged beside the promotion candidate. It EMBEDS the review-only inputs that
 # are otherwise NOT staged (the original triaged worksheet with its recomputed digest, the ingest-options /
 # --include declaration incl. explicit-dest-vs-default, the scoped resolution crosswalk, and each migrate
 # row's importer selection + validated result count, preserving a zero-candidate / zero-proposal result),
 # and BINDS the already-staged artefacts by DIGEST rather than duplicating them (the baseline plan via the
 # report's plan_digest, the frozen inventory, ingest-actions.toml, candidates_draft.toml, proposals.toml).
-# It NEVER redefines plan_digest (A1: acceptance carries an explicit ingest/action binding, not a new
-# digest authority). Its presence is ALSO a non-promotable ingest marker (recognized at apply) and makes an
-# ingest run non-reviewable until PR-4c (recognized at both review entry points). Canonical _opf_emit TOML,
-# matching the house convention (the plan's canonical-JSON residual is reconciled to TOML here too).
+# It NEVER redefines plan_digest (acceptance carries an explicit ingest/action binding, not a new digest
+# authority). Its presence is ALSO a non-promotable ingest marker (recognized at apply) and routes an ingest
+# run to durable ingest acceptance capture (recognized at both review entry points). Canonical _opf_emit
+# TOML, matching the house convention (the plan's canonical-JSON residual is reconciled to TOML here too).
 INGEST_REVIEW_NAME = "ingest-review.toml"
-INGEST_REVIEW_FORMAT = "opf-ingest-review-bundle-v1"
-# The ingest-only artefacts whose presence makes a run a NON-PROMOTABLE, NON-REVIEWABLE root-ingest plan in
-# this build. apply_import refuses on ANY of these BEFORE any journal/lock work; the review entry points
-# refuse acceptance capture on ANY of these (PR-4c not yet implemented). ingest-actions.toml stays the
-# FIRST-staged marker (round-2 P1-1); the others are recognized for defence in depth (a partially-staged
-# leftover, or any unforeseen ordering, is still refused; marginal cost one lstat each).
+INGEST_REVIEW_FORMAT = "opf-ingest-review-bundle-v2"
+# The ingest-only artefacts whose presence makes a run a NON-PROMOTABLE root-ingest plan in this build.
+# apply_import refuses on ANY of these BEFORE any journal/lock work; the review entry points route a run
+# carrying ANY of these to ingest acceptance capture (durable evidence home only), never to ordinary
+# fragment review. ingest-actions.toml stays the FIRST-staged marker; the others are recognized for
+# defence in depth (a partially-staged leftover, or any unforeseen ordering, is still refused; marginal
+# cost one lstat each).
 _INGEST_RUN_MARKERS = (INGEST_ACTIONS_NAME, CANDIDATES_DRAFT_NAME, INGEST_REVIEW_NAME)
 
 # The attributed acceptance record (spec 14.1), captured by `--review` and bound to the exact run. It is the
@@ -2083,16 +2084,10 @@ def _ingest_md_escape(s):
     return "".join(out)
 
 
-def _ingest_render_model(run_id, crosswalk, migrate):
-    """OPF-MIGRATE MIG-PR4b: build the DETERMINISTIC render model for the ingest review section from the two
-    frozen bundle fields the render displays (the scoped disposition crosswalk and the per-migrate-row
-    importer selection). Called with IDENTICAL inputs at plan time (from `ingest_review_inputs`) and at gate
-    time (from the loaded `ingest-review.toml` bundle, which froze exactly those inputs), so the section
-    byte-reproduces. Rows are re-sorted here so list order never leaks into the render. The A2 decision-unit
-    inventory (what a later attributed review must decide over) is DERIVED from the frozen scoped identities
-    and DISPLAYED only: a per-file disposition unit for every crosswalk row, plus a conversion/loss unit for
-    each migrate row that carries drafts or proposals. It is content-bound and reproducible; 4b persists NO
-    decision schema (the persisted A2/A1 representation is 4c)."""
+def _ingest_render_model(run_id, crosswalk, migrate, actions=None, candidates=None):
+    """Build the deterministic ingest presentation from frozen authority.
+    Every file has a disposition unit. Every migrate file has a conversion unit, including zero-result
+    conversions. Display labels are derived; persisted decisions join on (kind, scope, source_path)."""
     cw = sorted(
         ({"scope": r["scope"], "source_path": r["source_path"],
           "resolved_source_path": r["resolved_source_path"], "disposition": r["disposition"]}
@@ -2101,7 +2096,7 @@ def _ingest_render_model(run_id, crosswalk, migrate):
     mig = sorted(
         ({"scope": m["scope"], "source_path": m["source_path"],
           "resolved_source_path": m["resolved_source_path"], "importer_kind": m["importer_kind"],
-          "candidate_count": m["candidate_count"], "proposal_count": m["proposal_count"]}
+          "candidate_count": m["candidate_count"], "proposal_count": m["proposal_count"], "loss": m["loss"]}
          for m in migrate),
         key=lambda m: (m["source_path"].encode("utf-8"), m["scope"]))
     # Each displayed unit id is KIND-PREFIXED (`<kind>:<scope>:<source_path>`), so a conversion unit and a
@@ -2116,18 +2111,18 @@ def _ingest_render_model(run_id, crosswalk, migrate):
                       "kind": "disposition", "scope": r["scope"], "source_path": r["source_path"],
                       "disposition": r["disposition"]})
     for m in mig:
-        if m["candidate_count"] > 0 or m["proposal_count"] > 0:
-            units.append({"unit_id": "conversion:{}:{}".format(m["scope"], m["source_path"]),
-                          "kind": "conversion", "scope": m["scope"], "source_path": m["source_path"],
-                          "importer_kind": m["importer_kind"], "candidate_count": m["candidate_count"],
-                          "proposal_count": m["proposal_count"]})
+        units.append({"unit_id": "conversion:{}:{}".format(m["scope"], m["source_path"]),
+                      "kind": "conversion", "scope": m["scope"], "source_path": m["source_path"],
+                      "importer_kind": m["importer_kind"], "candidate_count": m["candidate_count"],
+                      "proposal_count": m["proposal_count"]})
     unit_ids = [u["unit_id"] for u in units]
     if len(set(unit_ids)) != len(unit_ids):
         raise _cannot("ingest review decision-unit ids are not unique ({}); a duplicated frozen (scope, "
                       "source_path) row cannot be rendered as distinct decisions (fail-closed)".format(
                           sorted({i for i in unit_ids if unit_ids.count(i) > 1})))
     units.sort(key=lambda u: (u["unit_id"].encode("utf-8"), u["kind"]))
-    return {"run_id": run_id, "crosswalk": cw, "migrate": mig, "decision_units": units}
+    return {"run_id": run_id, "crosswalk": cw, "migrate": mig, "decision_units": units,
+            "actions": actions or [], "candidates": candidates or []}
 
 
 def _render_ingest_review_md(review_model):
@@ -2157,10 +2152,10 @@ def _render_ingest_review_md(review_model):
         "section byte-reproduces it). REVIEWABILITY is displayed SEPARATELY from PROMOTION status. This",
         "section is rendered at plan time and asserts NO validation: the snapshot's coherence and its",
         "bindings over the staged bytes are established only by running the staged-run import gate, and",
-        "it is never promotable here (ingest acceptance capture and promotion are a later, attributed step).",
+        "a recorded review does not authorize disposition execution in this build.",
         "",
         "reviewability: staged; semantic validation required (run the staged-run import gate)",
-        "promotion status: refused (ingest acceptance capture is not available in this build)",
+        "promotion status: refused (disposition execution is not available in this build)",
         "",
         "### Dispositions ({} rows: {})".format(len(cw), disp_summary),
         "",
@@ -2189,6 +2184,9 @@ def _render_ingest_review_md(review_model):
                     e(u["importer_kind"]), u["candidate_count"], u["proposal_count"])
             lines.append("- unit=`{}` kind={} scope={} source=`{}` {}".format(
                 e(u["unit_id"]), e(u["kind"]), e(u["scope"]), e(u["source_path"]), detail))
+    lines += ["", "### Frozen action, conversion, and loss authority", ""]
+    payload = {k: review_model[k] for k in ("actions", "candidates", "migrate")}
+    lines.append(e(_emit_acceptance_bytes(payload).decode("ascii").rstrip()))
     lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -2304,9 +2302,11 @@ def _write_ingest_artifacts(product_root, run_rel, run_id, candidates_draft, ing
         os.close(store_root_fd)
 
 
-def _ingest_run_marker(store_root_fd, run_rel):
+def _ingest_run_marker(store_root_fd, run_rel, homes):
     """MIG-PR4a: return the name of the FIRST ingest-only marker present in the run dir (a no-follow
-    `_lstat_contained` over `_INGEST_RUN_MARKERS`), or None when none is present. Fail-closed: a
+    `_lstat_contained` over `_INGEST_RUN_MARKERS`), or None when none is present. The durable home is
+    consulted only in generation 2 (`homes`, the store's derived generation): in generation 1
+    `.working/imported` is ordinary content, never probed. Fail-closed: a
     JournalError from the contained lstat (EACCES/ELOOP/a wrong-type control path) PROPAGATES so the
     caller routes it to CANNOT-EVALUATE, never a silent "no marker" that reads a run as promotable/
     reviewable. Recognizing the run as ingest is a no-follow inspection bound to the trusted store-root
@@ -2314,7 +2314,33 @@ def _ingest_run_marker(store_root_fd, run_rel):
     for name in _INGEST_RUN_MARKERS:
         if _journal._lstat_contained(store_root_fd, run_rel + "/" + name) is not None:
             return name
-    return None
+    run_id = run_rel.rsplit("/", 1)[-1]
+    if (homes == INGEST_HOMES_GENERATION
+            and _journal._lstat_contained(store_root_fd, _ingest_acceptance_home(run_id)) is not None):
+        return "durable import evidence"
+    if homes != INGEST_HOMES_GENERATION:
+        return None
+    # A staged acceptance that is not a readable regular file, or does not decode, is no marker: the ordinary
+    # gate diagnoses it (acceptance-*) through the ordinary review/apply verdict routing.
+    st = _journal._lstat_contained(store_root_fd, run_rel + "/" + ACCEPTANCE_NAME)
+    if st is None or not stat.S_ISREG(st.st_mode):
+        return None
+    try:
+        raw, _st = _journal._read_contained(store_root_fd, run_rel + "/" + ACCEPTANCE_NAME)
+    except _journal.JournalError:
+        return None
+    return ACCEPTANCE_NAME if _acceptance_marks_ingest(raw) else None
+
+
+def _acceptance_marks_ingest(raw):
+    """Whether staged acceptance bytes carry an ingest acceptance, decoded exactly as the ordinary
+    acceptance reader decodes them (json.loads over UTF-8). Undecodable bytes are no marker; the ordinary
+    grading reports them. Strict decoding (_strict_json) is for ingest evidence only."""
+    try:
+        acc = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return False
+    return isinstance(acc, dict) and ("ingest" in acc or acc.get("format") == INGEST_ACCEPTANCE_FORMAT)
 
 
 def _write_ingest_review_bundle(product_root, run_rel, run_id, review_inputs):
@@ -2462,17 +2488,9 @@ def _write_ingest_review_bundle(product_root, run_rel, run_id, review_inputs):
 
 
 def _load_staged_ingest_for_review(store_root_fd, run_rel):
-    """OPF-MIGRATE MIG-PR4a: a BOUNDED, contained, no-follow STRUCTURAL reader of the frozen
-    `ingest-review.toml` review bundle. Returns the validated bundle dict when it is present and structurally
-    well-formed; returns None when the bundle is genuinely ABSENT (the _read_toml None-on-absent idiom, so a
-    non-ingest / non-4a run is distinguishable from a malformed one); raises CANNOT-EVALUATE when the bundle
-    is present but malformed (fail-closed). Structural validity does NOT imply the run is SEMANTICALLY
-    reviewable: this reader proves SHAPE and the presence of the bound identities only, never that the bound
-    digests match the staged artefacts. That binding recompute (recomputing binding.* over the staged bytes)
-    is performed by the MIG-PR4b read-only SEMANTIC gate (the ingest-* checks in
-    check_opf_import.check_staged_run), which closes it upstream of any acceptance; ACCEPTANCE CAPTURE remains
-    PR-4c. It reads the bundle through the same contained TOML reader (bounded by the store-read cap,
-    no-follow) the rest of the review path uses."""
+    """Read the bounded frozen bundle without following links.
+    A missing bundle returns None. An unsupported version or malformed bundle refuses with fresh-run
+    advice. Structural validity is not semantic validity; the staged-run gate recomputes its bindings."""
     bundle = _read_toml(store_root_fd, run_rel + "/" + INGEST_REVIEW_NAME)
     if bundle is None:
         return None
@@ -2501,7 +2519,8 @@ def _validate_staged_ingest_bundle(bundle, run_id):
         raise _cannot("ingest review bundle: carries field(s) outside the producer's closed shape: {} "
                       "(malformed)".format(", ".join(_opf_store._sorted_key_names(unknown))))
     if bundle.get("format") != INGEST_REVIEW_FORMAT:
-        raise _cannot("ingest review bundle: format is not {!r} (malformed)".format(INGEST_REVIEW_FORMAT))
+        raise _cannot("ingest review bundle: unsupported format; re-plan from original inputs and retain "
+                      "the old run as evidence (required {!r})".format(INGEST_REVIEW_FORMAT))
     if not (type(bundle.get("schema")) is int and bundle.get("schema") == SCHEMA):
         raise _cannot("ingest review bundle: schema is not {!r} (malformed)".format(SCHEMA))
     if bundle.get("run_id") != run_id:
@@ -2552,6 +2571,10 @@ def _validate_staged_ingest_bundle(bundle, run_id):
                 and all(type(row.get(k)) is int and row.get(k) >= 0
                         for k in ("candidate_count", "proposal_count"))):
             raise _cannot("ingest review bundle: migrate[{}] is malformed".format(i))
+        import _opf_importers
+        loss_findings = _opf_importers._validate_source_entry(row.get("loss"), "migrate[{}].loss".format(i))
+        if loss_findings:
+            raise _cannot("; ".join(loss_findings))
     return bundle
 
 
@@ -2623,7 +2646,8 @@ def plan_import(product_root, import_set, *, proposals=None, importer_proposals=
         # staging order below is unchanged (the section is only appended to the report bytes here).
         if ingest_review_inputs is not None:
             report_md = report_md + _render_ingest_review_md(_ingest_render_model(
-                result.run_id, ingest_review_inputs["crosswalk"], ingest_review_inputs["migrate"]))
+                result.run_id, ingest_review_inputs["crosswalk"], ingest_review_inputs["migrate"],
+                ingest_actions, candidates_draft))
         # P1-1: for an ingest run the identity/refusal marker (ingest-actions.toml, staged as the FIRST
         # ingest artefact inside _write_ingest_artifacts) becomes durable BEFORE the review artefacts
         # (inventory.toml / proposals.toml) exist, so at every point where a partial staging failure can
@@ -3165,9 +3189,540 @@ def _stage_acceptance(resolution, run_rel, acceptance_bytes):
     return acc_rel
 
 
-def review_import(product_root, run_id, *, actor, decisions, now):
+
+INGEST_ACCEPTANCE_FORMAT = "opf.import.acceptance/v2"
+INGEST_ACCEPTANCE_BLOCK = "opf.ingest.acceptance/v1"
+INGEST_HOMES_GENERATION = 2
+
+
+def _strict_json(raw):
+    """Bounded JSON with unique object keys and no non-finite numbers."""
+    if len(raw) > _opf_store.MAX_STORE_READ_BYTES:
+        raise ValueError("JSON exceeds the contained read cap")
+
+    def pairs(items):
+        out = {}
+        for key, value in items:
+            if key in out:
+                raise ValueError("duplicate JSON key: " + key)
+            out[key] = value
+        return out
+
+    def constant(value):
+        raise ValueError("non-finite JSON number: " + value)
+
+    return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+
+
+def _require_gate_results(results, expected, require_pass=True):
+    """A gate must return its exact registry, with strictly typed results. A caller with its own located
+    failing-check message checks the shape only (require_pass=False)."""
+    if (len(expected) != len(set(expected)) or not isinstance(results, dict)
+            or set(results) != set(expected)):
+        raise _cannot("import gate returned an incomplete or inconsistent check registry")
+    for cid in expected:
+        value = results[cid]
+        if not (type(value) is tuple and len(value) == 2
+                and type(value[0]) is bool and type(value[1]) is str):
+            raise _cannot("import gate returned a malformed result for " + cid)
+    failed = [cid for cid in expected if not results[cid][0]]
+    if failed and require_pass:
+        raise _cannot("import gate failed: " + ", ".join(failed))
+
+
+def _store_homes(resolution):
+    """The store's homes generation, derived ONCE per entry point from the authoritative manifest through
+    _opf_store.homes_generation (never a constant); every gate call and snapshot that entry point makes
+    receives this value."""
+    manifest = _opf_store.load_manifest(resolution)
+    if manifest.status != _opf_store.VALID or not isinstance(manifest.base, dict):
+        raise _cannot("the store manifest is not VALID; its homes generation cannot be derived")
+    return _opf_store.homes_generation({"opf": manifest.base})
+
+
+def _import_run_locations(run_id, homes):
+    """Store-relative locations of a staged import run, shared by the gate (_ingest_store_fd) and every
+    ingest-acceptance entry point. Generation 1 has only the legacy location: the homes-2 staging names are ordinary
+    store paths there. The first location is where staging writes a run."""
+    legacy = "{}/{}".format(IMPORTS_REL, run_id)
+    if type(homes) is int and homes == 1:
+        return (legacy,)
+    if type(homes) is int and homes == 2:
+        return (legacy, _opf_store.stage_run("ingest", run_id), _opf_store.stage_run("import", run_id))
+    raise ValueError("unknown homes generation: {!r}".format(homes))
+
+
+def _import_run_dir(resolution, run_id, homes):
+    return os.path.join(resolution.store_root, _import_run_locations(run_id, homes)[0])
+
+
+def _require_review_gate(run_dir, homes):
+    try:
+        import check_opf_import as gate
+        _require_gate_results(gate.check_staged_run(run_dir, homes=homes), gate.EXPECTED_CHECKS)
+    except _StageError:
+        raise
+    except Exception as exc:
+        raise _cannot("import gate unavailable or malformed ({!r})".format(exc))
+
+
+def _validate_frozen_losses(rd, bundle, docs):
+    """Validate frozen loss against staged bytes; never invoke an importer."""
+    import _opf_importers as importers
+    # The bytes come from the migrate row's resolved source in run.toml (the identity the gate binds to the
+    # worksheet and to the preserved bytes), never from the loss entry's own digest, so a loss entry that
+    # describes another preserved source fails its digest binding rather than validating against it.
+    staged = {s["path"]: s["sha256"] for s in docs["run.toml"]["source"]}
+    for m in bundle["migrate"]:
+        loss = m["loss"]
+        problems = importers._validate_source_entry(loss, "frozen loss")
+        if problems:
+            raise _cannot("; ".join(problems))
+        bound = staged.get(m["resolved_source_path"])
+        if bound is None:
+            raise _cannot("frozen conversion {} resolves to no staged source".format(m["source_path"]))
+        raw = rd.read_bytes("sources/" + bound)
+        source = {"path": m["resolved_source_path"], "raw": raw, "sha256": _sha256_hex(raw), "size": len(raw)}
+        candidates = [{k: c[k] for k in ("draft_ref", "type", "record")}
+                      for c in docs[CANDIDATES_DRAFT_NAME]["candidate"]
+                      if c["source_path"] == m["source_path"]]
+        proposals = [{k: v for k, v in p.items() if k != "origin"}
+                     for p in docs[PROPOSALS_NAME]["proposal"]
+                     if p["source_path"] == m["resolved_source_path"]]
+        result = importers.ImporterResult(
+            CLEAN, kind=m["importer_kind"], source_path=source["path"], lossy=loss,
+            candidates=candidates, proposals=proposals,
+            clean=not any(s["class"] in importers._UNCLEAN_CLASSES for s in loss["span"]))
+        verdict, findings = importers.validate_importer_output(result, source)
+        if verdict != CLEAN:
+            raise _cannot("frozen conversion {}: {}".format(m["source_path"], "; ".join(findings)))
+
+
+def _ingest_acceptance_home(run_id):
+    """The durable home is provisioned by layout activation, never by review."""
+    return _opf_store.evidence_run("import", run_id)
+
+
+def _ingest_authority(bundle, docs):
+    """Derive typed decisions and removal intent from validated frozen evidence."""
+    import _opf_importers as importers
+    key = lambda r: (r["scope"], r["source_path"])
+    actions = {key(a): a for a in docs[INGEST_ACTIONS_NAME]["action"]}
+    migrations = {key(m): m for m in bundle["migrate"]}
+    rows = {key(r): r for r in bundle["worksheet"]["row"]}
+    units, removals = [], []
+    for c in bundle["crosswalk"]:
+        identity = {"scope": c["scope"], "source_path": c["source_path"]}
+        row = rows[key(c)]
+        action = actions.get(key(c))
+        removal = None
+        if c["disposition"] != "keep":
+            removal = dict(identity, resolved_source_path=c["resolved_source_path"],
+                           disposition=c["disposition"], sha256=row["sha256"], size=row["size"])
+            if action is not None:
+                removal["destination"] = action["dest_path"]
+            else:
+                removal["destination"] = (_ingest_acceptance_home(bundle["run_id"]) + "/originals/"
+                                          + c["resolved_source_path"])
+            removals.append(removal)
+        authority = {"source": row, "resolved_source_path": c["resolved_source_path"],
+                     "action": action, "source_removal": removal}
+        units.append(dict(identity, kind="disposition", authority=authority))
+        if c["disposition"] == "migrate":
+            m = migrations[key(c)]
+            candidates = [d for d in docs[CANDIDATES_DRAFT_NAME]["candidate"]
+                          if d["source_path"] == c["source_path"]]
+            proposals = [p for p in docs[PROPOSALS_NAME]["proposal"]
+                         if p["source_path"] == c["resolved_source_path"]]
+            unresolved = any(s["class"] in importers._UNCLEAN_CLASSES for s in m["loss"]["span"])
+            outcome = "retained-quarantine" if unresolved or not candidates else "conversion-reviewed"
+            units.append(dict(identity, kind="conversion", authority={
+                "importer_kind": m["importer_kind"], "candidates": candidates, "proposals": proposals,
+                "loss": m["loss"], "outcome": outcome}))
+    units.sort(key=lambda u: (u["kind"], u["scope"], u["source_path"]))
+    return units, removals
+
+
+def _freeze_ingest_bytes(rd):
+    """Use one bounded byte snapshot for validation, presentation, and digest construction."""
+    raw, total = {}, 0
+    for name, kind in sorted(rd.tree.items()):
+        if kind == "file":
+            data = rd.read_bytes(name)
+            total += len(data)
+            if total > _opf_store.MAX_STORE_READ_BYTES:
+                raise _cannot("combined ingest review payload exceeds the contained read cap")
+            raw[name] = data
+
+    class Frozen:
+        path = rd.path
+        tree = dict(rd.tree)
+        def read_bytes(self, name):
+            if name not in raw:
+                raise _cannot("frozen review artefact is missing or non-regular: " + name)
+            return raw[name]
+        def load_toml(self, name):
+            try:
+                return tomllib.loads(self.read_bytes(name).decode("utf-8"))
+            except (ValueError, RecursionError) as exc:
+                raise _cannot("frozen review artefact is malformed: {} ({})".format(name, exc))
+    return Frozen()
+
+
+def _ingest_snapshot(rd, homes):
+    """Revalidate and hash the full frozen payload, not the narrower render projection. `homes` is the
+    store's derived generation; the binding records the generation the model was validated under."""
+    rd = _freeze_ingest_bytes(rd)
+    import check_opf_import as gate
+    bundle = _validate_staged_ingest_bundle(rd.load_toml(INGEST_REVIEW_NAME), rd.path.name)
+    docs = {name: rd.load_toml(name) for name in
+            ("run.toml", "report.toml", INVENTORY_NAME, INGEST_ACTIONS_NAME, CANDIDATES_DRAFT_NAME,
+             PROPOSALS_NAME, "mappings.toml")}
+    result = gate._verify_ingest_review_model(rd, bundle, docs["run.toml"],
+                                             docs["report.toml"], docs[INVENTORY_NAME], homes)
+    _require_gate_results(result, gate._INGEST_CHECK_IDS)
+    # An unsupplied generation passes the scope check above only as the legacy generation 1.
+    homes = 1 if homes is None else homes
+    payload = {name: "sha256:" + _sha256_hex(rd.read_bytes(name))
+               for name, kind in sorted(rd.tree.items()) if kind == "file"}
+    units, removals = _ingest_authority(bundle, docs)
+    sources = {s["path"]: rd.read_bytes("sources/" + s["sha256"]).decode("utf-8")
+               for s in docs["run.toml"]["source"]}
+    model = {"bundle": bundle, "payload": payload, "sources": sources,
+             "units": units, "source_removals": removals}
+    binding = dict(bundle["binding"], bundle_format=bundle["format"],
+                   bundle_digest=payload[INGEST_REVIEW_NAME],
+                   review_model_digest="sha256:" + _sha256_hex(_emit_acceptance_bytes(model)),
+                   report_digest=payload["report.toml"], presentation_digest=payload[REPORT_MD_NAME],
+                   homes_generation=homes,
+                   evidence_home=_ingest_acceptance_home(rd.path.name), source_removals=removals)
+    fragments = {}
+    mappings = {(m["source_path"], tuple(m["span"])): m for m in docs["mappings.toml"]["mapping"]}
+    for f in docs[INVENTORY_NAME]["fragment"]:
+        m = mappings[(f["source_path"], tuple(f["span"]))]
+        fragments[f["fragment_id"]] = {"fragment_id": f["fragment_id"], "origin": m["origin"],
+                                       "proposed_state": m["state"]}
+    return {"run_id": rd.path.name, "binding": binding, "units": units,
+            "fragments": fragments, "model": model}
+
+
+def _validate_ingest_review_decisions(decisions, snapshot):
+    """Join on typed identity; require exact echoes and one explicit verb per unit."""
+    import check_opf_import as gate
+    if not isinstance(decisions, list):
+        return ["ingest units must be an array"], []
+    expected = {(u["kind"], u["scope"], u["source_path"]): u for u in snapshot["units"]}
+    if len(expected) != len(snapshot["units"]):
+        return ["review model contains duplicate typed units"], []
+    seen, findings, normalized = set(), [], []
+    for d in decisions:
+        if not (isinstance(d, dict) and set(d) == {"kind", "scope", "source_path", "authority",
+                                                  "decision", "note"}
+                and all(isinstance(d[k], str) for k in ("kind", "scope", "source_path", "decision", "note"))):
+            findings.append("malformed ingest decision")
+            continue
+        key = (d["kind"], d["scope"], d["source_path"])
+        if key not in expected or key in seen:
+            findings.append("unknown or duplicate typed unit: {!r}".format(key))
+            continue
+        seen.add(key)
+        echo = {k: d[k] for k in ("kind", "scope", "source_path", "authority")}
+        if not gate._strict_eq(echo, expected[key]) or d["decision"] not in _DECISION_VERBS:
+            findings.append("wrong authority echo or decision for {!r}".format(key))
+            continue
+        normalized.append(dict(expected[key], decision=d["decision"], note=d["note"]))
+    if seen != set(expected):
+        findings.append("every typed ingest unit needs an explicit decision")
+    normalized.sort(key=lambda d: (d["kind"], d["scope"], d["source_path"]))
+    return findings, normalized
+
+
+def _ingest_fragment_decisions(decisions, snapshot):
+    fragments = snapshot["fragments"]
+    identities = {fid: fid for fid in fragments}
+    metadata = {fid: {"origin": d["origin"], "state": d["proposed_state"]} for fid, d in fragments.items()}
+    return _validate_review_decisions(decisions, identities, metadata)
+
+
+def validate_ingest_acceptance(snapshot, acceptance):
+    """Return binding findings, completeness findings, and rejection separately."""
+    import check_opf_import as gate
+    if not isinstance(acceptance, dict):
+        return ["acceptance must be an object"], ["no decisions"], False
+    base = dict(acceptance)
+    ingest = base.pop("ingest", None)
+    base["format"] = ACCEPTANCE_FORMAT
+    binding = _validate_acceptance(base)
+    if acceptance.get("format") != INGEST_ACCEPTANCE_FORMAT:
+        binding.append("ingest requires acceptance v2")
+    if acceptance.get("run_id") != snapshot["run_id"]:
+        binding.append("acceptance belongs to another run")
+    for name in ("plan_digest", "inventory_digest"):
+        if acceptance.get(name) != snapshot["binding"][name]:
+            binding.append(name + " is stale")
+    if not (isinstance(ingest, dict) and set(ingest) == {"format", "binding", "units"}
+            and ingest.get("format") == INGEST_ACCEPTANCE_BLOCK):
+        return binding + ["malformed ingest acceptance block"], ["no valid unit decisions"], False
+    if not gate._strict_eq(ingest["binding"], snapshot["binding"]):
+        binding.append("ingest binding is stale; re-plan and retain this run as evidence")
+    complete, _normalized = _validate_ingest_review_decisions(ingest["units"], snapshot)
+    submitted = acceptance.get("decisions")
+    if not isinstance(submitted, list):
+        complete.append("fragment decisions must be an array")
+    else:
+        fragment_findings, _normalized = _ingest_fragment_decisions(submitted, snapshot)
+        complete.extend(fragment_findings)
+    all_decisions = list(submitted) if isinstance(submitted, list) else []
+    all_decisions += ingest["units"] if isinstance(ingest["units"], list) else []
+    rejected = any(isinstance(d, dict) and d.get("decision") == "reject" for d in all_decisions)
+    return binding, complete, rejected
+
+
+def _read_ingest_acceptance(root_fd, run_id):
+    """Read the durable acceptance only; absence is distinct from an unreadable home."""
+    home = _ingest_acceptance_home(run_id)
+    st = _journal._lstat_contained(root_fd, home)
+    if st is None:
+        return None
+    fd = _journal._open_dir_contained(root_fd, home)
+    try:
+        names = os.listdir(fd)
+        if any(n.startswith(ACCEPTANCE_NAME + ".tmp-") for n in names):
+            raise _cannot("interrupted acceptance write in " + home + "; retain evidence and create a fresh run")
+        st = _journal._lstat_contained(fd, ACCEPTANCE_NAME)
+        if st is None:
+            return None
+        raw, _st = _journal._read_contained(fd, ACCEPTANCE_NAME)
+        try:
+            record = _strict_json(raw)
+        except (ValueError, RecursionError) as exc:
+            raise _cannot("durable acceptance is malformed ({}); create a fresh run".format(exc))
+        # None is reserved for observed absence: a present record that decodes to JSON null, or to any other
+        # non-object, is malformed evidence, never "not yet reviewed".
+        if not isinstance(record, dict):
+            raise _cannot("durable acceptance is not a JSON object; retain it and create a fresh run")
+        return record
+    finally:
+        os.close(fd)
+
+
+def _require_ingest_homes(homes):
+    """Require layout activation, not just the existence of an operator-created directory. `homes` is the
+    generation _store_homes derived from the authoritative manifest (so SUPPORTED_HOMES gates it); the
+    value returned is the one the capture's binding carries."""
+    if type(homes) is not int or homes != INGEST_HOMES_GENERATION:
+        raise _cannot("durable acceptance writing requires activated homes 2; the legacy layout is read-only here")
+    return homes
+
+
+def _capture_ingest_review(resolution, run_id, actor, decisions, ingest, clock):
+    """Capture only to a provisioned durable home after the final binding comparison."""
+    import check_opf_import as gate
+    homes = _store_homes(resolution)
+    _require_ingest_homes(homes)
+    run_dir = _import_run_dir(resolution, run_id, homes)
+    _require_review_gate(run_dir, homes)
+    rd = gate._RunDir(run_dir)
+    try:
+        snapshot = _ingest_snapshot(rd, homes)
+    finally:
+        rd.close()
+    if not isinstance(ingest, dict) or set(ingest) != {"format", "binding", "units"}:
+        raise _cannot("ingest review requires a schema-2 envelope carrying the displayed binding and units")
+    if not gate._strict_eq(ingest["binding"], snapshot["binding"]):
+        raise _finding("submitted review is stale; no decisions were rebound")
+    errors, units = _validate_ingest_review_decisions(ingest["units"], snapshot)
+    fragment_errors, decisions = _ingest_fragment_decisions(decisions, snapshot)
+    errors.extend(fragment_errors)
+    if errors:
+        raise _finding("; ".join(errors))
+    try:
+        stamp = clock() if clock is not None else datetime.datetime.now(datetime.timezone.utc)
+        _require_utc(stamp)
+    except Exception as exc:
+        raise _cannot("capture clock unavailable ({})".format(exc))
+    model = {"format": INGEST_ACCEPTANCE_FORMAT, "run_id": run_id,
+             "plan_digest": snapshot["binding"]["plan_digest"],
+             "inventory_digest": snapshot["binding"]["inventory_digest"],
+             "actor": {"declared": actor, "context": _gather_review_context(resolution)},
+             "reviewed_at": _rfc3339(stamp), "signature": None, "decisions": decisions,
+             "ingest": dict(ingest, units=units)}
+    binding, complete, _rejected = validate_ingest_acceptance(snapshot, model)
+    if binding or complete:
+        raise _finding("; ".join(binding + complete))
+    data = _emit_acceptance_bytes(model)
+    # A final full gate includes any prior durable acceptance. Repair never bypasses its failure.
+    _require_review_gate(run_dir, homes)
+    rd = gate._RunDir(run_dir)
+    try:
+        current = _ingest_snapshot(rd, homes)
+    finally:
+        rd.close()
+    if not gate._strict_eq(snapshot["binding"], current["binding"]):
+        raise _finding("review changed during capture; no decisions were rebound")
+    # Re-derive just before the write, as apply does: a manifest changed during capture writes nothing.
+    if _store_homes(resolution) != homes:
+        raise _cannot("the store manifest's homes generation changed during capture; nothing captured")
+    _require_ingest_homes(homes)
+    home = _ingest_acceptance_home(run_id)
+    fd = _opf_store._open_store_root_fd(resolution.store_root, resolution.pointer_source != "default")
+    try:
+        try:
+            hfd = _journal._open_dir_contained(fd, home)
+        except (OSError, _journal.JournalError) as exc:
+            raise _cannot("durable evidence home is not provisioned by layout activation ({}): {}".format(home, exc))
+        os.close(hfd)
+        prior = _read_ingest_acceptance(fd, run_id)
+        if prior is not None:
+            prior_binding, prior_complete, prior_rejected = validate_ingest_acceptance(current, prior)
+            if prior_binding or prior_complete:
+                raise _cannot("prior acceptance changed during capture; retain it and create a fresh run")
+            # A recorded rejection is attributed evidence: any capture over it (a relabel to accept, a swapped
+            # reject, or a re-reject by another actor) would replace that evidence, so capture refuses.
+            if prior_rejected:
+                raise _cannot("a recorded rejection requires a fresh plan; it is retained as evidence and "
+                              "cannot be replaced or relabelled in place")
+    finally:
+        os.close(fd)
+    rel = _stage_acceptance(resolution, home, data)
+    return ReviewResult(CLEAN, run_id=run_id, acceptance_rel=rel, reviewed_at=model["reviewed_at"],
+                        decisions_count=len(decisions) + len(units))
+
+
+def _ingest_review_envelope(snapshot):
+    """Export undecided typed units. A template never supplies an acceptance verb."""
+    return {"schema": 2, "run_id": snapshot["run_id"],
+            "decisions": list(snapshot["fragments"].values()),
+            "ingest": {"format": INGEST_ACCEPTANCE_BLOCK, "binding": snapshot["binding"],
+                       "units": [dict(u, note="") for u in snapshot["units"]]}}
+
+
+def _interactive_ingest_review(resolution, run_id, actor, now, stdin, stdout, clock):
+    import check_opf_import as gate
+    homes = _store_homes(resolution)
+    _require_ingest_homes(homes)
+    run_dir = _import_run_dir(resolution, run_id, homes)
+    _require_review_gate(run_dir, homes)
+    rd = gate._RunDir(run_dir)
+    try:
+        snapshot = _ingest_snapshot(rd, homes)
+    finally:
+        rd.close()
+    envelope = _ingest_review_envelope(snapshot)
+    stdout.write(_ingest_md_escape(_emit_acceptance_bytes(snapshot["model"]).decode("ascii")) + "\n")
+    try:
+        for d in envelope["decisions"] + envelope["ingest"]["units"]:
+            stdout.write(_ingest_md_escape(_emit_acceptance_bytes(d).decode("ascii")) + " accept/reject? ")
+            stdout.flush()
+            line = stdin.readline()
+            verb = line.strip().lower()
+            if verb not in ("a", "accept", "r", "reject"):
+                raise _cannot("interactive input ended or was invalid; nothing captured")
+            d["decision"] = "accept" if verb in ("a", "accept") else "reject"
+            stdout.write("note (blank to skip): ")
+            stdout.flush()
+            note = stdin.readline()
+            if not note:
+                raise _cannot("interactive input ended before the note; nothing captured")
+            d["note"] = note.strip()
+    except (KeyboardInterrupt, EOFError):
+        raise _cannot("interactive review interrupted; nothing captured")
+    return review_import(resolution.product_root, run_id, actor=actor, now=now,
+                         decisions=envelope["decisions"], ingest=envelope["ingest"], clock=clock)
+
+
+def _ingest_acceptance_explanation(resolution, run_id):
+    """Only a freshly validated durable record may supply attribution in the refusal."""
+    import check_opf_import as gate
+    try:
+        homes = _store_homes(resolution)
+        run_dir = _import_run_dir(resolution, run_id, homes)
+        _require_review_gate(run_dir, homes)
+        rd = gate._RunDir(run_dir)
+        try:
+            snapshot = _ingest_snapshot(rd, homes)
+            acceptance = None   # generation 1 has no durable home to consult
+            if homes == INGEST_HOMES_GENERATION:
+                fd = gate._ingest_store_fd(rd, homes)
+                if fd is None:
+                    raise _cannot("durable acceptance cannot be located for this run")
+                try:
+                    acceptance = _read_ingest_acceptance(fd, run_id)
+                finally:
+                    os.close(fd)
+        finally:
+            rd.close()
+        if acceptance is None:
+            return "No review has been recorded."
+        binding, complete, rejected = validate_ingest_acceptance(snapshot, acceptance)
+        if binding or complete:
+            return "Recorded review is invalid; retain it and create a fresh run."
+        return "Recorded by {} at {}; model {}; rejection={}.".format(
+            _ingest_md_escape(acceptance["actor"]["declared"]), acceptance["reviewed_at"],
+            snapshot["binding"]["review_model_digest"], rejected)
+    except Exception as exc:
+        return "Review could not be validated ({}).".format(_ingest_md_escape(str(exc)))
+
+
+def ingest_review_aid(product_root, run_id, previous_run=None):
+    """Export a template and a read-only comparison with prior durable acceptance.
+
+    Comparison tolerates stale bindings, never repairs them or copies decisions. An unreadable old
+    record is reported as such; its old content cannot be reconstructed from a digest.
+    """
+    import check_opf_import as gate
+    for rid in (run_id,) + ((previous_run,) if previous_run is not None else ()):
+        if not isinstance(rid, str) or not _RUN_ID_RE.fullmatch(rid):
+            raise _cannot("review aid requires valid run identifiers")
+    resolution = _resolve_store_for_review(product_root)
+    homes = _store_homes(resolution)
+    run_dir = _import_run_dir(resolution, run_id, homes)
+    _require_review_gate(run_dir, homes)
+    rd = gate._RunDir(run_dir)
+    try:
+        snapshot = _ingest_snapshot(rd, homes)
+    finally:
+        rd.close()
+    output = {"template": _ingest_review_envelope(snapshot), "model": snapshot["model"]}
+    if previous_run is not None and homes != INGEST_HOMES_GENERATION:
+        output["comparison"] = {"status": "cannot-evaluate",
+                                "detail": "homes generation 1 has no durable acceptance home"}
+    elif previous_run is not None:
+        fd = _opf_store._open_store_root_fd(resolution.store_root, resolution.pointer_source != "default")
+        try:
+            try:
+                previous = _read_ingest_acceptance(fd, previous_run)
+            except (_StageError, _journal.JournalError, OSError) as exc:
+                output["comparison"] = {"status": "cannot-evaluate", "detail": str(exc)}
+            else:
+                if not isinstance(previous, dict) or not isinstance(previous.get("ingest"), dict):
+                    output["comparison"] = {"status": "cannot-evaluate", "detail": "old ingest acceptance unavailable"}
+                else:
+                    output["comparison"] = _ingest_review_changes(previous["ingest"], output["template"]["ingest"])
+        finally:
+            os.close(fd)
+    return output
+
+
+def _ingest_review_changes(previous, current):
+    """Compare recorded authority, including typed echoes; never transfer review verbs."""
+    old = {k: previous.get(k) for k in ("format", "binding", "units")}
+    new = {k: current.get(k) for k in ("format", "binding", "units")}
+    for obj in (old, new):
+        if isinstance(obj["units"], list):
+            obj["units"] = [{k: v for k, v in u.items() if k not in ("decision", "note")}
+                            if isinstance(u, dict) else u for u in obj["units"]]
+    import difflib
+    before = json.dumps(old, sort_keys=True, indent=2, ensure_ascii=True).splitlines()
+    after = json.dumps(new, sort_keys=True, indent=2, ensure_ascii=True).splitlines()
+    return {"status": "compared", "diff": list(difflib.unified_diff(
+        before, after, fromfile="recorded authority", tofile="current authority", lineterm=""))}
+
+
+def review_import(product_root, run_id, *, actor, decisions, now, ingest=None, clock=None):
     """Capture an attributed acceptance record over a staged import run (spec 14.1), writing
-    `acceptance.json` into the run dir. This is the batch (decisions-list) contract surface; the interactive
+    `acceptance.json` into the run dir for an ordinary run, or only into the durable evidence home for an
+    ingest run. This is the batch (decisions-list) contract surface; the interactive
     front-end funnels into it. It NEVER mutates the active store and NEVER re-plans: it records accept/reject
     decisions and binds them to the exact run (run id + plan digest + inventory digest), so a regenerated
     plan (a new run) invalidates a prior acceptance by construction. A recorded reject makes a later apply
@@ -3210,22 +3765,17 @@ def review_import(product_root, run_id, *, actor, decisions, now):
         except OSError as exc:
             raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
         try:
-            # MIG-PR4a: REFUSE acceptance capture over a root-ingest run. Ingest acceptance capture is PR-4c;
-            # until then an ingest run (recognized by ANY of _INGEST_RUN_MARKERS, fail-closed no-follow) is
-            # NOT reviewable, refused CANNOT-EVALUATE BEFORE any acceptance work, mutating nothing. When the
-            # frozen review bundle is present, the bounded structural reader validates it (a malformed bundle
-            # is itself CANNOT-EVALUATE) and the refusal names the frozen snapshot's plan binding.
-            marker = _ingest_run_marker(store_root_fd, run_rel)
+            homes = _store_homes(resolution)
+            marker = _ingest_run_marker(store_root_fd, run_rel, homes)
             if marker is not None:
-                extra = ""
-                if marker == INGEST_REVIEW_NAME:
-                    frozen = _load_staged_ingest_for_review(store_root_fd, run_rel)
-                    if frozen is not None:
-                        extra = " (frozen review bundle binds plan {})".format(
-                            frozen["binding"]["plan_digest"])
-                raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest acceptance "
-                              "capture is not implemented in this build (PR-4c). Refused fail-closed; "
-                              "nothing captured.{}".format(run_id, marker, extra))
+                try:
+                    return _capture_ingest_review(resolution, run_id, actor, decisions, ingest, clock)
+                except _StageError:
+                    raise
+                except Exception as exc:
+                    raise _cannot("ingest capture could not be evaluated ({!r})".format(exc))
+            if ingest is not None:
+                raise _cannot("an ordinary run cannot consume an ingest decision envelope")
             plan_digest, inventory_digest, frag_by_id, key_meta, _ordered = \
                 _load_staged_run_for_review(store_root_fd, run_rel)
         finally:
@@ -3263,7 +3813,8 @@ def review_import(product_root, run_id, *, actor, decisions, now):
         # KeyboardInterrupt/SystemExit stay uncaught.
         try:
             import check_opf_import   # lazy: avoids a module-top circular import (see _gather_review_context)
-            gate_results = check_opf_import.check_staged_run(run_dir_path)
+            gate_results = check_opf_import.check_staged_run(run_dir_path, homes=homes)
+            _require_gate_results(gate_results, check_opf_import.EXPECTED_CHECKS, require_pass=False)
             gate_findings = sorted(cid for cid, (ok, _detail) in gate_results.items() if not ok)
             if gate_findings:
                 raise _cannot("staged run fails the import-operation gate; not reviewable until it is a "
@@ -3304,7 +3855,7 @@ def review_import(product_root, run_id, *, actor, decisions, now):
         return ReviewResult(CANNOT_EVALUATE, ["fail-closed on excessive input nesting: {}".format(exc)])
 
 
-def review_import_interactive(product_root, run_id, *, actor, now, in_stream=None, out_stream=None):
+def review_import_interactive(product_root, run_id, *, actor, now, in_stream=None, out_stream=None, clock=None):
     """A minimal interactive review front-end: prompt accept/reject (and an optional note) per fragment over
     a TTY, then funnel the collected decisions into review_import (the batch path is the contract surface,
     so this loop is kept deliberately thin). It REFUSES to start when stdin is not a TTY (CANNOT-EVALUATE):
@@ -3328,13 +3879,14 @@ def review_import_interactive(product_root, run_id, *, actor, now, in_stream=Non
         store_root_fd = _opf_store._open_store_root_fd(
             resolution.store_root, resolution.pointer_source != "default")
         try:
-            # MIG-PR4a: REFUSE ingest acceptance capture through the interactive entry point too, BEFORE
-            # prompting for a single fragment (PR-4c not implemented); mirror the batch review_import refusal.
-            marker = _ingest_run_marker(store_root_fd, run_rel)
+            marker = _ingest_run_marker(store_root_fd, run_rel, _store_homes(resolution))
             if marker is not None:
-                raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest acceptance "
-                              "capture is not implemented in this build (PR-4c). Refused fail-closed; "
-                              "nothing captured.".format(run_id, marker))
+                try:
+                    return _interactive_ingest_review(resolution, run_id, actor, now, stdin, stdout, clock)
+                except _StageError:
+                    raise
+                except Exception as exc:
+                    raise _cannot("ingest interactive review could not be evaluated ({!r})".format(exc))
             _pd, _id, _frag_by_id, _km, ordered = _load_staged_run_for_review(store_root_fd, run_rel)
         finally:
             os.close(store_root_fd)
@@ -4139,14 +4691,13 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
         except OSError as exc:
             raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
         try:
-            marker_name = _ingest_run_marker(_ingest_root_fd, run_rel)
+            marker_name = _ingest_run_marker(_ingest_root_fd, run_rel, _store_homes(resolution))
         finally:
             os.close(_ingest_root_fd)
         if marker_name is not None:
-            raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest plans are NOT "
-                          "promotable in this build (attributed review PR-A and ingest apply PR-C are not "
-                          "yet implemented). Refused fail-closed; nothing promoted.".format(
-                              run_id, marker_name))
+            detail = _ingest_acceptance_explanation(resolution, run_id)
+            raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest disposition "
+                          "execution is unavailable; nothing promoted. {}".format(run_id, marker_name, detail))
         journal_root = Path(resolution.store_root) / IMPORT_JOURNAL_REL
 
         try:
@@ -4427,9 +4978,13 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                 # promotion. At pre-promotion the transaction-schema/consistency checks pass ("run not yet
                 # applied"); a valid reviewed run passes every check.
                 run_dir_path = os.path.join(str(resolution.store_root), run_rel)
+                # The store's generation, derived once from the authoritative manifest for this gate and
+                # step 6; step 6's layout read must agree with it.
+                homes = _opf_store.homes_generation(
+                    _read_toml(root_fd, "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)))
                 try:
                     import check_opf_import   # lazy: mirrors review_import's call-time import (circular)
-                    gate_results = check_opf_import.check_staged_run(run_dir_path)
+                    gate_results = check_opf_import.check_staged_run(run_dir_path, homes=homes)
                     gate_findings = sorted(cid for cid, (ok, _d) in gate_results.items() if not ok)
                     if gate_findings:
                         raise _finding("staged run fails the import-operation gate at apply; not promotable "
@@ -4476,7 +5031,8 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                 active_types = _active_types(root_fd, machine_rel)
                 roster = _roster()
                 registered_vendors = _registered_vendors(root_fd, machine_rel)
-                homes = _opf_store.homes_generation(_require_inline_layout(root_fd, machine_rel))
+                if _opf_store.homes_generation(_require_inline_layout(root_fd, machine_rel)) != homes:
+                    raise _cannot("the store manifest's homes generation changed during apply; cannot promote")
                 cand_counters = _read_toml(root_fd, run_rel + "/candidate/counters.toml")
                 if cand_counters is None:
                     raise _cannot("staged run has no candidate/counters.toml (malformed run; cannot promote)")
@@ -5083,6 +5639,753 @@ def _self_test_pi(check, build_store, snapshot, now, nonce):
         test()
 
 
+
+def _memory_ingest_run():
+    """Synthetic staged bytes for read-only gate tests; no filesystem writer is used."""
+    import _opf_ingest as ingest
+    import _opf_importers as importers
+    import tomllib
+
+    now = datetime.datetime(2026, 9, 9, 12, tzinfo=datetime.timezone.utc)
+    raw = b"- [ ] synthetic task\n"
+    source = {"path": "legacy/tasks.md", "raw": raw, "sha256": _sha256_hex(raw), "size": len(raw)}
+    plan = _baseline_plan([source])
+    plan_bytes = _emit_bytes(plan, "plan")
+    rid = _run_id([source], plan_bytes, now, "memory")
+    stamp = _rfc3339(now)
+    inventory, inv_digest, _sources, _frags = _build_inventory([source])
+    r = dict(ingest._row(source["path"], "declared", "sha256:" + source["sha256"], len(raw)),
+             disposition="migrate")
+    worksheet, _digest = ingest._build_worksheet([r])
+    output = importers.run_importer("github-tasklist", source)
+    migrate = [dict(ingest.derive_migrate_scaffold(r, source["path"], "github-tasklist"),
+                    candidate_count=len(output.candidates), proposal_count=len(output.proposals), loss=output.lossy)]
+    crosswalk = [ingest.derive_crosswalk_row(r, source["path"])]
+    candidates = [dict(c, source_path=source["path"], importer_kind="github-tasklist") for c in output.candidates]
+    proposals = _sort_proposal_rows([dict(p, _origin=_IMPORTER_PROPOSAL_ORIGIN) for p in output.proposals])
+    files = {}
+    def put(name, obj):
+        files[name] = _emit_bytes(obj, name)
+    put("run.toml", _run_toml_model(rid, stamp, "memory", [source]))
+    files["plan.toml"] = plan_bytes
+    put("mappings.toml", _mappings_model({source["path"]: [
+        {"span": [0, len(raw)], "state": "unmapped", "target": None, "origin": "baseline"}]}))
+    put("candidate/counters.toml", {"schema": SCHEMA, "counters": {"LF": 1}})
+    put("fragments/legacy_fragment.index.toml", {"schema": SCHEMA, "record": [
+        _lf_record("LF-1", source["path"], source["sha256"], 0, len(raw), rid, stamp, raw.decode())]})
+    files["sources/" + source["sha256"]] = raw
+    put("report.toml", _run_report_model(rid, plan_bytes, inv_digest, {"unmapped": 1}, True, dict(files)))
+    put(INVENTORY_NAME, inventory)
+    put(INGEST_ACTIONS_NAME, {"format": INGEST_ACTIONS_FORMAT, "schema": SCHEMA, "run_id": rid, "action": []})
+    put(CANDIDATES_DRAFT_NAME, {"schema": SCHEMA, "run_id": rid, "candidate": candidates})
+    put(PROPOSALS_NAME, _proposals_model(rid, proposals))
+    files[REPORT_MD_NAME] = (_render_report_md(inv_digest, inventory["fragment"], proposals, rid)
+                            + _render_ingest_review_md(_ingest_render_model(
+                                rid, crosswalk, migrate, [], candidates))).encode()
+    binding = {"plan_digest": "sha256:" + _sha256_hex(plan_bytes), "inventory_digest": inv_digest}
+    for name, field in ((INGEST_ACTIONS_NAME, "ingest_actions_digest"),
+                        (CANDIDATES_DRAFT_NAME, "candidates_draft_digest"),
+                        (PROPOSALS_NAME, "proposals_digest"), (INVENTORY_NAME, "inventory_toml_digest")):
+        binding[field] = "sha256:" + _sha256_hex(files[name])
+    put(INGEST_REVIEW_NAME, {"format": INGEST_REVIEW_FORMAT, "schema": SCHEMA, "run_id": rid,
+        "include_declared": True, "include": [source["path"]], "binding": binding, "worksheet": worksheet,
+        "options": {"format": ingest.OPTIONS_FORMAT, "schema": SCHEMA, "option": [
+            {"scope": "declared", "source_path": source["path"], "importer_kind": "github-tasklist"}]},
+        "crosswalk": crosswalk, "migrate": migrate})
+    class Reader:
+        path = Path("/synthetic") / IMPORTS_REL / rid
+        tree = dict({name: "file" for name in files}, candidate="dir", fragments="dir", sources="dir")
+        def read_bytes(self, name):
+            return files[name]
+        def load_toml(self, name):
+            return tomllib.loads(files[name].decode())
+        def kind(self, name):
+            return self.tree.get(name)
+    return Reader(), files
+
+
+def _self_test_ingest_acceptance(check):
+    """In-memory discriminators; each named flip removes the condition the assertion needs."""
+    import copy
+    import io
+    from unittest.mock import patch
+    import check_opf_import as gate
+    import _opf_importers as importers
+    import opf as cli
+
+    rid = "imp-20260909T120000Z-0000000000000000"
+    digest = "sha256:" + "0" * 64
+    unit = {"kind": "disposition", "scope": "declared", "source_path": "a#conversion",
+            "authority": {"disposition": "keep", "source_removal": None}}
+    snapshot = {"run_id": rid, "binding": {"plan_digest": digest, "inventory_digest": digest,
+                "homes_generation": 2, "report_digest": digest, "presentation_digest": digest},
+                "units": [unit], "fragments": {}, "model": {}}
+    decision = dict(unit, decision="accept", note="")
+    acceptance = {"format": INGEST_ACCEPTANCE_FORMAT, "run_id": rid,
+                  "plan_digest": digest, "inventory_digest": digest,
+                  "actor": {"declared": "reviewer", "context": {"os_user": "", "git_identity": "", "hostname": ""}},
+                  "reviewed_at": "2026-09-09T12:00:00Z", "signature": None, "decisions": [],
+                  "ingest": {"format": INGEST_ACCEPTANCE_BLOCK, "binding": snapshot["binding"], "units": [decision]}}
+
+    def verdict(a):
+        binding, complete, rejected = validate_ingest_acceptance(snapshot, a)
+        return not binding and not complete, rejected
+
+    reader, files = _memory_ingest_run()
+    reads = {}
+    original_read = reader.read_bytes
+    def counted_read(name):
+        reads[name] = reads.get(name, 0) + 1
+        return original_read(name)
+    reader.read_bytes = counted_read
+    actual = _ingest_snapshot(reader, 1)
+    check("accept-single-byte-snapshot", set(reads) == set(files) and all(n == 1 for n in reads.values()))
+    reader.read_bytes = original_read
+    check("accept-full-model", actual["binding"]["review_model_digest"].startswith("sha256:"))
+    check("accept-removal-bound", len(actual["binding"]["source_removals"]) == 1
+          and actual["binding"]["source_removals"][0]["destination"].startswith(
+              _ingest_acceptance_home(reader.path.name) + "/originals/"))
+    before_model = actual["binding"]["review_model_digest"]
+    counters = reader.load_toml("candidate/counters.toml")
+    counters["counters"]["BI"] = 1
+    files["candidate/counters.toml"] = _emit_bytes(counters, "counters")
+    report = reader.load_toml("report.toml")
+    for entry in report["artifact"]:
+        entry["sha256"] = _sha256_hex(files[entry["path"]])
+    files["report.toml"] = _emit_bytes(report, "report")
+    check("accept-full-model-counters", _ingest_snapshot(reader, 1)["binding"]["review_model_digest"] != before_model)
+    # Flip: a refusal that comes only from the TOML parser admits the parse-valid report.toml tail;
+    # IMPORT-REPORT.md is never parsed, so its tail reaches only the byte-reproducibility check.
+    for name, tail in (("report.toml", b"# parse-valid, not byte-re-derivable\n"),
+                       (REPORT_MD_NAME, b"corruption")):
+        prior = files[name]
+        files[name] += tail
+        try:
+            if name == "report.toml":
+                check("accept-report-tail-parses",
+                      tomllib.loads(files[name].decode()) == tomllib.loads(prior.decode()))
+            _ingest_snapshot(reader, 1)
+            refused = False
+        except _StageError:
+            refused = True
+        finally:
+            files[name] = prior
+        check("accept-report-recompute-" + name, refused)
+    prior = files[INGEST_REVIEW_NAME]
+    files[INGEST_REVIEW_NAME] = prior.replace(b"opf-ingest-review-bundle-v2", b"opf-ingest-review-bundle-v1")
+    try:
+        _ingest_snapshot(reader, 1)
+        refused = False
+    except _StageError:
+        refused = True
+    finally:
+        files[INGEST_REVIEW_NAME] = prior
+    check("accept-old-bundle-replan", refused)
+    check("accept-schema-positive", verdict(acceptance) == (True, False))
+    rejected = copy.deepcopy(acceptance)
+    rejected["ingest"]["units"][0]["decision"] = "reject"
+    check("accept-reject-is-valid", verdict(rejected) == (True, True))
+    # Flip: comparing only plan/inventory loses homes/report/presentation and every added binding.
+    for name in snapshot["binding"]:
+        a = copy.deepcopy(acceptance)
+        a["ingest"]["binding"][name] = "changed"
+        check("accept-binding-" + name, verdict(a)[0] is False)
+    for units in ([], [decision, decision], [dict(decision, source_path="other")],
+                  [dict(decision, authority={})], [dict(decision, decision=[])], [{"group": "all"}]):
+        a = copy.deepcopy(acceptance)
+        a["ingest"]["units"] = units
+        check("accept-unit-totality", verdict(a)[0] is False)
+    for name, value in (("format", ACCEPTANCE_FORMAT), ("signature", "forged"),
+                        ("reviewed_at", "not a date"), ("run_id", rid + "0"), ("unexpected", 1)):
+        a = copy.deepcopy(acceptance)
+        a[name] = value
+        check("accept-schema-" + name, verdict(a)[0] is False)
+    # Flip: the schema-1 reader, duplicate-key decoder, or bool-as-int admission fails one of these legs.
+    envelope = _ingest_review_envelope(snapshot)
+    raw = _emit_acceptance_bytes(envelope)
+    check("accept-envelope-v2", cli._import_decode_decisions(raw, rid) == envelope)
+    oversized = copy.deepcopy(envelope)
+    oversized["ingest"]["units"][0]["note"] = "x" * _opf_store.MAX_STORE_READ_BYTES
+    hostile = [b'{"schema":2,' + raw[1:],
+               json.dumps({"schema": True, "run_id": rid, "decisions": []}).encode(),
+               json.dumps(oversized).encode()]
+    for value in hostile:
+        try:
+            cli._import_decode_decisions(value, rid)
+            refused = False
+        except ValueError:
+            refused = True
+        check("accept-envelope-discriminator", refused)
+    for raw in (b'{"schema":2,"schema":2}', b'{"schema":true}', b'{"schema":1.0}',
+                b"[" * 2000 + b"]" * 2000, b" " * (_opf_store.MAX_STORE_READ_BYTES + 1)):
+        try:
+            cli._import_decode_decisions(raw, rid)
+            refused = False
+        except (ValueError, RecursionError):
+            refused = True
+        check("accept-envelope-refuses", refused)
+    check("accept-envelope-v1", cli._import_decode_decisions(
+        _emit_acceptance_bytes({"schema": 1, "run_id": rid, "decisions": []}), rid) == [])
+    # Flip: an ordinary schema-1 --decisions file read under the store-read cap (or strictly decoded) refuses
+    # this file the unbounded reader accepts, and a generic wrapper loses the located run-binding message.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        row = dict(fragment_id="f", decision="accept", origin="o", proposed_state="s", note="x" * 4096)
+        rows = [row] * (_opf_store.MAX_STORE_READ_BYTES // 4096 + 8)
+        big = os.path.join(tmp, "big.json")
+        with open(big, "w", encoding="utf-8") as fh:
+            json.dump(dict(schema=1, run_id=rid, decisions=rows), fh)
+        try:
+            big_ok = cli._import_read_decisions(big, rid) == rows
+        except ValueError:
+            big_ok = False
+        check("decisions-v1-unbounded-size", os.path.getsize(big) > _opf_store.MAX_STORE_READ_BYTES and big_ok)
+        other = os.path.join(tmp, "other.json")
+        with open(other, "w", encoding="utf-8") as fh:
+            json.dump(dict(schema=1, run_id=rid + "0", decisions=[]), fh)
+        try:
+            cli._import_read_decisions(other, rid)
+            message = ""
+        except ValueError as exc:
+            message = str(exc)
+        check("decisions-v1-run-id-message", message.startswith("--decisions file run_id ")
+              and "does not match the --review run-id" in message)
+        # Flip: routing a schema-2 file through the schema-1 reader refuses this valid envelope (and would
+        # decode the duplicate key below leniently).
+        v2 = os.path.join(tmp, "v2.json")
+        with open(v2, "wb") as fh:
+            fh.write(_emit_acceptance_bytes(envelope))
+        try:
+            v2_ok = cli._import_read_decisions(v2, rid) == envelope
+        except ValueError:
+            v2_ok = False
+        check("decisions-v2-envelope", v2_ok)
+        dup = os.path.join(tmp, "dup.json")
+        with open(dup, "wb") as fh:
+            fh.write(_emit_acceptance_bytes(envelope).rstrip()[:-1] + b', "run_id": "' + rid.encode() + b'"' + b"}")
+        try:
+            cli._import_read_decisions(dup, rid)
+            refused = False
+        except ValueError:
+            refused = True
+        check("decisions-v2-strict", refused)
+    check("accept-template-undecided", all("decision" not in u for u in envelope["ingest"]["units"]))
+    # Flip: a statement placed above the docstring leaves the import verb undocumented (__doc__ is None).
+    check("accept-cli-import-doc", cli._cmd_import.__doc__ is not None)
+    # Flip: a subset pass, an extra result, a bool-like value, and a duplicate registry must each refuse.
+    for results, registry in (({}, ("a",)), ({"a": (True, "")}, ("a", "b")),
+                              ({"a": (1, "")}, ("a",)), ({"a": (True, 1)}, ("a",)),
+                              ({"a": (True, "")}, ("a", "a")), (None, ("a",))):
+        try:
+            _require_gate_results(results, registry)
+            refused = False
+        except _StageError:
+            refused = True
+        check("accept-gate-contract", refused)
+    _require_gate_results({"a": (True, "")}, ("a",))
+    # Flip: the old shared format and count-only loss check fail the frozen-loss negatives; selecting the
+    # validated bytes by the loss entry's own digest admits the cross-source substitution.
+    raw = b"- [ ] synthetic task\n"
+    source = {"path": "a", "raw": raw, "sha256": _sha256_hex(raw), "size": len(raw)}
+    result = importers.run_importer("github-tasklist", source)
+    check("accept-loss-fixture", result.verdict == CLEAN)
+    row = {"scope": "declared", "source_path": "a", "resolved_source_path": "a",
+           "importer_kind": "github-tasklist", "candidate_count": len(result.candidates),
+           "proposal_count": len(result.proposals), "loss": result.lossy}
+    docs = {"run.toml": {"source": [{"path": "a", "sha256": source["sha256"], "size": len(raw)}]},
+            CANDIDATES_DRAFT_NAME: {"candidate": [dict(c, source_path="a") for c in result.candidates]},
+            PROPOSALS_NAME: {"proposal": [dict(p, origin=_IMPORTER_PROPOSAL_ORIGIN) for p in result.proposals]}}
+    # A second preserved source whose own importer output is self-consistent under the same path "a".
+    other_raw = b"- [ ] a different, longer synthetic task\n"
+    other = importers.run_importer("github-tasklist", dict(
+        source, raw=other_raw, sha256=_sha256_hex(other_raw), size=len(other_raw)))
+    check("accept-loss-other-fixture", other.verdict == CLEAN)
+    staged = {"sources/" + source["sha256"]: raw, "sources/" + _sha256_hex(other_raw): other_raw}
+    class Reader:
+        def read_bytes(self, name):
+            if name not in staged:
+                raise _cannot("unexpected staged read: " + name)
+            return staged[name]
+    _validate_frozen_losses(Reader(), {"migrate": [row]}, docs)
+    for mutation in ("shrink-proposal", "loss-gap", "loss-overlap", "missing-loss", "extra-loss",
+                     "cross-source"):
+        m, ds = copy.deepcopy(row), copy.deepcopy(docs)
+        if mutation == "shrink-proposal":
+            ds[PROPOSALS_NAME]["proposal"][0]["span"][1] -= 1
+        elif mutation == "loss-gap":
+            m["loss"]["span"][0]["range"][0] = 1
+        elif mutation == "loss-overlap":
+            m["loss"]["span"].append(copy.deepcopy(m["loss"]["span"][0]))
+        elif mutation == "missing-loss":
+            m.pop("loss")
+        elif mutation == "cross-source":
+            m["loss"] = copy.deepcopy(other.lossy)
+            ds[CANDIDATES_DRAFT_NAME]["candidate"] = [dict(c, source_path="a") for c in other.candidates]
+            ds[PROPOSALS_NAME]["proposal"] = [dict(p, origin=_IMPORTER_PROPOSAL_ORIGIN) for p in other.proposals]
+        else:
+            m["loss"]["extra"] = {}
+        try:
+            _validate_frozen_losses(Reader(), {"migrate": [m]}, ds)
+            refused = False
+        except (KeyError, _StageError):
+            refused = True
+        check("accept-loss-" + mutation, refused)
+    zero = dict(row, candidate_count=0, proposal_count=0)
+    cw = [{"scope": "declared", "source_path": "a", "resolved_source_path": "a", "disposition": "migrate"}]
+    rendered = _ingest_render_model(rid, cw, [zero])
+    check("accept-zero-explicit-conversion", len(rendered["decision_units"]) == 2)
+    check("accept-home-constructor", _ingest_acceptance_home(rid) == _opf_store.evidence_run("import", rid))
+    # Flip: a manifest-only activation test (ignoring SUPPORTED_HOMES) admits the first row, a declaration
+    # the store's derived generation grades as 1 while this tooling supports only homes 1.
+    homes2 = dict(homes=2, spec_version=_opf_store.HOMES2_SPEC_VERSION)
+    for base, supported, allowed in ((homes2, 1, False), (homes2, 2, True),
+                                     (dict(homes=True, spec_version="2.0.0"), 2, False),
+                                     (dict(homes=1, spec_version="1.1.0"), 2, False), (dict(), 2, False)):
+        manifest = _opf_store.ManifestValidation(_opf_store.VALID, base=base)
+        with patch.object(_opf_store, "load_manifest", return_value=manifest), \
+                patch.object(_opf_store, "SUPPORTED_HOMES", supported):
+            try:
+                admitted = _require_ingest_homes(_store_homes(None)) == 2
+            except _StageError:
+                admitted = False
+        check("accept-homes-generation", admitted is allowed)
+    # Flip: the legacy location plus homes-2 staging names for generation 1 lets the gate treat an ordinary
+    # `.working/staging/...` ancestor as the store root.
+    check("accept-run-location-legacy-only", _import_run_locations(rid, 1) == (IMPORTS_REL + "/" + rid,))
+    check("accept-run-location-homes2", _import_run_locations(rid, 2)[1:] == (
+        _opf_store.stage_run("ingest", rid), _opf_store.stage_run("import", rid)))
+
+    changed = copy.deepcopy(envelope["ingest"])
+    changed["binding"]["homes_generation"] = 3
+    check("accept-diff-aid", _ingest_review_changes(acceptance["ingest"], changed)["diff"] != [])
+    # accept-explanation-invalid runs on the activated homes-2 fixture (_self_test_ingest_capture_homes2).
+    resolution = _opf_store.Resolution(_opf_store.RESOLVED, store_root="/synthetic", product_root="/synthetic")
+    # The gate imports `_opf_import`; under a direct-script run this module is `__main__`, a distinct module
+    # object. Flip: patching sys.modules[__name__] here leaves the gate's reader unmocked on descriptor 900,
+    # so the direct-script run fails while the imported run passes.
+    import _opf_import as consumed
+
+    class DurableReader:
+        path = Path(rid)
+    with patch.object(gate, "_ingest_store_fd", return_value=900), \
+            patch.object(consumed, "_read_ingest_acceptance", return_value=acceptance), \
+            patch.object(consumed, "_ingest_snapshot", return_value=snapshot), \
+            patch.object(_opf_store, "SUPPORTED_HOMES", 2), patch.object(os, "close"):
+        checks = gate._ingest_acceptance_checks(DurableReader(), 2)
+        check("accept-durable-gate", all(ok for ok, detail in checks.values())
+              and checks["ingest-acceptance-binding"][1] == "review recorded; execution unavailable")
+        with patch.object(gate, "_INGEST_EVIDENCE_REGISTRY", ()):
+            checks = gate._ingest_acceptance_checks(DurableReader(), 2)
+            check("accept-durable-registry", checks["ingest-acceptance-binding"][0] is False)
+    # Flip: dropping the generation guard probes the store from generation 1 (this locator raises).
+    with patch.object(gate, "_ingest_store_fd", side_effect=AssertionError("generation 1 probed")):
+        checks = gate._ingest_acceptance_checks(DurableReader(), 1)
+        check("accept-durable-legacy-not-probed", all(ok and detail.startswith("not applicable")
+                                                      for ok, detail in checks.values()))
+        # Flip: validating the registry before the generation early exit fails generation 1 on a registry
+        # it never consults.
+        with patch.object(gate, "_INGEST_EVIDENCE_REGISTRY", ()):
+            checks = gate._ingest_acceptance_checks(DurableReader(), 1)
+        check("accept-durable-registry-legacy", all(ok and detail.startswith("not applicable")
+                                                    for ok, detail in checks.values()))
+    # Flip: dropping the None refusal in _ingest_acceptance_checks reads from no descriptor and loses the
+    # located refusal: a detached ingest run still refuses in homes 2.
+    with patch.object(gate, "_ingest_store_fd", return_value=None), patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+        checks = gate._ingest_acceptance_checks(DurableReader(), 2)
+        check("accept-durable-detached-refused", not any(ok for ok, detail in checks.values())
+              and "detached run" in checks["ingest-acceptance-binding"][1])
+    with patch.object(_journal, "_lstat_contained", return_value=object()), \
+            patch.object(_journal, "_open_dir_contained", return_value=900), \
+            patch.object(os, "listdir", return_value=["acceptance.json.tmp-interrupted"]), \
+            patch.object(os, "close"):
+        try:
+            _read_ingest_acceptance(901, rid)
+            refused = False
+        except _StageError:
+            refused = True
+        check("accept-durable-temp-refused", refused)
+    run_rel = IMPORTS_REL + "/" + rid
+    # Flip: probing the durable home in generation 1 routes an ordinary run to ingest capture (the None leg).
+    # Flip: reading a non-regular staged acceptance (the S_ISREG guard dropped) marks the directory leg, and
+    # propagating the contained-read JournalError (the unreadable leg) bypasses ordinary acceptance grading.
+    regular = os.stat_result((stat.S_IFREG | 0o644,) + (0,) * 9)
+    directory = os.stat_result((stat.S_IFDIR,) + (0,) * 9)
+    unreadable = _journal.JournalError("injected unreadable acceptance")
+    for name, homes, expected, st, read in (
+            (_ingest_acceptance_home(rid), 2, "durable import evidence", regular, None),
+            (_ingest_acceptance_home(rid), 1, None, regular, None),
+            (run_rel + "/" + ACCEPTANCE_NAME, 1, None, regular, None),
+            (run_rel + "/" + ACCEPTANCE_NAME, 2, ACCEPTANCE_NAME, regular, None),
+            (run_rel + "/" + ACCEPTANCE_NAME, 2, None, directory, None),
+            (run_rel + "/" + ACCEPTANCE_NAME, 2, None, regular, unreadable)):
+        with patch.object(_journal, "_lstat_contained",
+                          side_effect=lambda fd, path: st if path == name else None), \
+                patch.object(_journal, "_read_contained", return_value=(_emit_acceptance_bytes(acceptance), None),
+                             side_effect=read):
+            try:
+                found = _ingest_run_marker(900, run_rel, homes)
+            except _journal.JournalError:
+                found = "raised"
+            check("accept-only-marker", found == expected)
+    # Flip: the strict decoder rejects duplicate members and misses this ingest marker.
+    check("accept-marker-json-loads-decoder", _acceptance_marks_ingest(
+        b'{"ingest": null, "ingest": {}}'))
+    # Intake and clock tests use explicit in-memory boundaries. They are not filesystem-writer evidence.
+    class TTY(io.StringIO):
+        def isatty(self):
+            return True
+    resolution.pointer_source = "default"
+    envelope = _ingest_review_envelope(snapshot)
+    with patch.object(gate, "_RunDir") as reader, \
+            patch.object(sys.modules[__name__], "_store_homes", return_value=1), \
+            patch.object(sys.modules[__name__], "_require_ingest_homes"), \
+            patch.object(sys.modules[__name__], "_require_review_gate"), \
+            patch.object(sys.modules[__name__], "_ingest_snapshot", return_value=snapshot), \
+            patch.object(sys.modules[__name__], "review_import") as submit:
+        submit.return_value = ReviewResult(CLEAN)
+        _interactive_ingest_review(resolution, rid, "reviewer", None, TTY("accept\n\n"), io.StringIO(), None)
+        sent = submit.call_args.kwargs
+        check("accept-intake-parity", sent["ingest"]["binding"] == envelope["ingest"]["binding"]
+              and sent["ingest"]["units"] == [decision])
+        for text in ("", "wrong\n", "accept\n"):
+            try:
+                _interactive_ingest_review(resolution, rid, "reviewer", None, TTY(text), io.StringIO(), None)
+                refused = False
+            except _StageError:
+                refused = True
+            check("accept-intake-eof-invalid", refused)
+
+
+    stamp = datetime.datetime(2026, 9, 9, 12, 1, tzinfo=datetime.timezone.utc)
+    installed = []
+    def writer(resolution, home, data):
+        installed.append((home, _strict_json(data)))
+        return home + "/" + ACCEPTANCE_NAME
+    with patch.object(gate, "_RunDir"), \
+            patch.object(sys.modules[__name__], "_store_homes", return_value=1), \
+            patch.object(sys.modules[__name__], "_require_review_gate"), \
+            patch.object(sys.modules[__name__], "_ingest_snapshot", return_value=snapshot), \
+            patch.object(sys.modules[__name__], "_require_ingest_homes"), \
+            patch.object(sys.modules[__name__], "_gather_review_context",
+                         return_value=acceptance["actor"]["context"]), \
+            patch.object(sys.modules[__name__], "_read_ingest_acceptance", return_value=None), \
+            patch.object(sys.modules[__name__], "_stage_acceptance", side_effect=writer), \
+            patch.object(_opf_store, "_open_store_root_fd", return_value=900), \
+            patch.object(_journal, "_open_dir_contained", return_value=901), patch.object(os, "close"):
+        captured = _capture_ingest_review(resolution, rid, "reviewer", [], acceptance["ingest"], lambda: stamp)
+        check("accept-clock-composition", captured.verdict == CLEAN
+              and installed[0][1]["reviewed_at"] == _rfc3339(stamp)
+              and installed[0][0] == _opf_store.evidence_run("import", rid))
+        current = copy.deepcopy(snapshot)
+        current["binding"]["homes_generation"] = 3
+        with patch.object(sys.modules[__name__], "_ingest_snapshot", side_effect=[snapshot, current]):
+            try:
+                _capture_ingest_review(resolution, rid, "reviewer", [], acceptance["ingest"], lambda: stamp)
+                refused = False
+            except _StageError as exc:
+                refused = exc.verdict == FINDING
+            check("accept-final-compare", refused and len(installed) == 1)
+
+
+def _self_test_ingest_capture_run(root, run, now, check):
+    """Exercise durable capture on planner fixtures; the fixture provisions the inactive home."""
+    import copy
+    import io
+    from unittest.mock import patch
+    import check_opf_import as gate
+
+    rd = gate._RunDir(run)
+    try:
+        # The planner fixture is a legacy store: its derived generation is 1.
+        snapshot = _ingest_snapshot(rd, 1)
+        # Flip: binding the constant INGEST_HOMES_GENERATION instead of the derived value records 2 here.
+        check("accept-binding-derived-homes", snapshot["binding"]["homes_generation"] == 1)
+        with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            check("accept-binding-homes2", _ingest_snapshot(rd, 2)["binding"]["homes_generation"] == 2)
+    finally:
+        rd.close()
+    envelope = _ingest_review_envelope(snapshot)
+    decisions = [dict(d, decision="accept", note="") for d in envelope["decisions"]]
+    ingest = dict(envelope["ingest"], units=[dict(d, decision="accept", note="") for d in snapshot["units"]])
+    stamp = now + datetime.timedelta(seconds=30)
+
+    def capture(block=ingest, actor="reviewer"):
+        return review_import(root, run.name, actor=actor, decisions=decisions,
+                             ingest=block, now=now, clock=lambda: stamp)
+
+    # Moving the interactive activation check past presentation or input must fail this control.
+    class TTY(io.StringIO):
+        reads = 0
+        def isatty(self):
+            return True
+        def readline(self, *args):
+            self.reads += 1
+            return super().readline(*args)
+
+    stdin = TTY("accept\n\n" * (len(decisions) + len(ingest["units"])))
+    stdout = io.StringIO()
+    with patch.object(sys.modules[__name__], "_require_review_gate", wraps=_require_review_gate) as checked:
+        interactive = review_import_interactive(root, run.name, actor="reviewer", now=now,
+                                                in_stream=stdin, out_stream=stdout)
+    check("accept-homes1-interactive-before-work", interactive.verdict == CANNOT_EVALUATE
+          and stdin.reads == 0 and stdout.getvalue() == "" and not checked.called)
+    # Removing only the early capture check validates this stale binding and returns FINDING instead.
+    stale = copy.deepcopy(ingest)
+    stale["binding"]["plan_digest"] = "sha256:" + "0" * 64
+    with patch.object(sys.modules[__name__], "_require_review_gate", wraps=_require_review_gate) as checked:
+        refused = capture(stale)
+    check("accept-homes1-stale-before-validation", refused.verdict == CANNOT_EVALUATE and not checked.called)
+
+    # Legacy-refusal control (generation 1, the shipped SUPPORTED_HOMES): capture never writes, and the
+    # durable home is ordinary content that neither the gate nor capture reads.
+    home = Path(root) / _ingest_acceptance_home(run.name)
+    home.mkdir(parents=True)
+    # Flip: dropping the activation call lets capture write into this operator-created home on the legacy
+    # fixture manifest; the homes-2 capture below, over the same home, is the positive control.
+    check("accept-home-not-activated", capture().verdict == CANNOT_EVALUATE
+          and not (home / ACCEPTANCE_NAME).exists())
+    # Flip: grading `.working/imported` in generation 1 (dropping both the gate's generation-1 routing and
+    # the guard in _ingest_acceptance_checks) reads this ordinary JSON-null file as a malformed record.
+    (home / ACCEPTANCE_NAME).write_bytes(b"null\n")
+    legacy = gate.check_staged_run(run)
+    check("accept-legacy-home-not-probed", all(ok for ok, detail in legacy.values())
+          and legacy["ingest-acceptance-binding"][1].startswith("not applicable"))
+    # Flip: the explanation's or the aid's generation guard dropped reads this ordinary file as a record.
+    check("accept-explanation-legacy-not-probed", _ingest_acceptance_explanation(
+        _resolve_store_for_review(root), run.name) == "No review has been recorded.")
+    check("accept-aid-legacy-not-probed", ingest_review_aid(root, run.name, previous_run=run.name)["comparison"]
+          == {"status": "cannot-evaluate", "detail": "homes generation 1 has no durable acceptance home"})
+    (home / ACCEPTANCE_NAME).unlink()
+    home.rmdir()
+    with _self_test_homes2_active(root):
+        _self_test_ingest_capture_homes2(root, run, now, check, stamp)
+
+
+def _self_test_homes2_active(root):
+    """Activate homes 2 over a fixture store the way apply's A11 test does: declare `homes = 2` in the
+    manifest and patch SUPPORTED_HOMES, HOMES2_SPEC_VERSION and validate_manifest (homes is not yet a
+    manifest schema key). The manifest bytes are restored on exit."""
+    import contextlib
+    import tomllib
+    from unittest.mock import patch
+    resolution = _opf_store.resolve_store(root)
+    path = Path(resolution.store_root) / resolution.machine_rel / _opf_store.MANIFEST_NAME
+    original = path.read_bytes()
+    model = tomllib.loads(original.decode("utf-8"))
+    model["opf"]["homes"] = 2
+    real_validate = _opf_store.validate_manifest
+
+    def validate_declared(data, *args, **kwargs):
+        # Validate the rest as shipped, then keep the declaration in the validated base: _store_homes
+        # derives the generation from that base.
+        opf = data.get("opf") if isinstance(data, dict) else None
+        if not (isinstance(opf, dict) and "homes" in opf):
+            return real_validate(data, *args, **kwargs)
+        result = real_validate(dict(data, opf=dict((k, v) for k, v in opf.items() if k != "homes")),
+                               *args, **kwargs)
+        if isinstance(result.base, dict):
+            result.base = dict(result.base, homes=opf["homes"])
+        return result
+
+    @contextlib.contextmanager
+    def active():
+        path.write_text(_opf_emit.emit_checked(model), encoding="utf-8")
+        try:
+            with patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
+                    patch.object(_opf_store, "HOMES2_SPEC_VERSION", _opf_store.SUPPORTED_SPEC_VERSION), \
+                    patch.object(_opf_store, "validate_manifest", validate_declared):
+                yield
+        finally:
+            path.write_bytes(original)
+    return active()
+
+
+def _self_test_ingest_capture_homes2(root, run, now, check, stamp):
+    """Positive capture control on an activated homes-2 store (no activation patch on capture)."""
+    import copy
+    import io
+    from unittest.mock import patch
+    import check_opf_import as gate
+
+    rd = gate._RunDir(run)
+    try:
+        snapshot = _ingest_snapshot(rd, 2)
+    finally:
+        rd.close()
+    envelope = _ingest_review_envelope(snapshot)
+    decisions = [dict(d, decision="accept", note="") for d in envelope["decisions"]]
+    ingest = dict(envelope["ingest"], units=[dict(d, decision="accept", note="") for d in snapshot["units"]])
+
+    def capture(block=ingest, actor="reviewer"):
+        return review_import(root, run.name, actor=actor, decisions=decisions,
+                             ingest=block, now=now, clock=lambda: stamp)
+
+    check("accept-homes2-derived", _store_homes(_resolve_store_for_review(root)) == 2)
+    # Flip: creating homes inside review would turn this refusal into a write.
+    check("accept-home-not-provisioned", capture().verdict == CANNOT_EVALUATE)
+    home = Path(root) / _ingest_acceptance_home(run.name)
+    home.mkdir(parents=True)
+    before = {str(p.relative_to(root)): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()}
+    result = capture()
+    check("accept-ingest-positive", result.verdict == CLEAN)
+    acc_path = home / ACCEPTANCE_NAME
+    if result.verdict != CLEAN:
+        return
+    saved = acc_path.read_bytes()
+    acc = _strict_json(saved)
+    check("accept-clock-final", acc["reviewed_at"] == _rfc3339(stamp))
+    check("accept-record-homes2", acc["ingest"]["binding"]["homes_generation"] == 2)
+    after = {str(p.relative_to(root)): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()}
+    after.pop(str(acc_path.relative_to(root)))
+    check("accept-only-durable-write", before == after and not (run / ACCEPTANCE_NAME).exists())
+    # Flip: the gate call `_ingest_acceptance_checks(rd)` (homes dropped) reaches _gate_homes unsupplied
+    # while SUPPORTED_HOMES is 2 and fails all six acceptance checks; a generation guard that skipped
+    # generation 2 would report "not applicable" instead of the evaluated durable record.
+    full = gate.check_staged_run(run, homes=2)
+    check("accept-full-gate-homes2", set(full) == set(gate.EXPECTED_CHECKS)
+          and len(full) == len(gate.EXPECTED_CHECKS) and all(full[cid][0] for cid in gate.EXPECTED_CHECKS)
+          and full["ingest-acceptance-binding"][1] == "review recorded; execution unavailable")
+    # Flip: an unsupplied generation is legacy only while no later generation can be active.
+    check("accept-gate-homes-unsupplied", gate.check_staged_run(run)["ingest-acceptance-binding"][0] is False)
+    # Flip: an entry point that derives no generation (or drops it before _require_review_gate or
+    # _ingest_snapshot) reaches the gate unsupplied and refuses here.
+    try:
+        aid = ingest_review_aid(root, run.name)
+        aid_ok = aid["template"]["ingest"]["binding"]["homes_generation"] == 2
+    except _StageError:
+        aid_ok = False
+    check("accept-aid-homes-threaded", aid_ok)
+    check("accept-explanation-homes-threaded", _ingest_acceptance_explanation(
+        _resolve_store_for_review(root), run.name).startswith("Recorded by"))
+    # Flip: dropping _require_review_gate from the explanation attributes this valid record after the injected
+    # gate failure; the call above is the positive control.
+    with patch.object(sys.modules[__name__], "_require_review_gate", side_effect=_cannot("injected gate failure")):
+        explained = _ingest_acceptance_explanation(_resolve_store_for_review(root), run.name)
+    check("accept-explanation-invalid", explained.startswith("Review could not be validated")
+          and "injected gate failure" in explained)
+    # Flip: a review or apply marker probe given generation 1 instead of the derived 2 misses this durable
+    # record once the staged markers are gone, and routes the run down the ordinary path.
+    stripped = {name: (run / name).read_bytes() for name in _INGEST_RUN_MARKERS if (run / name).is_file()}
+    for name in stripped:
+        (run / name).unlink()
+    try:
+        reviewed = capture()
+        check("accept-review-marker-homes-threaded", reviewed.verdict == CANNOT_EVALUATE and bool(stripped)
+              and reviewed.findings[0].startswith("import gate failed") and acc_path.read_bytes() == saved)
+        class TTY(io.StringIO):
+            def isatty(self):
+                return True
+        prompts = io.StringIO()
+        markers = []
+        real_marker = _ingest_run_marker
+
+        def probe(*args):
+            marker = real_marker(*args)
+            markers.append(marker)
+            return marker
+
+        with patch.object(sys.modules[__name__], "_ingest_run_marker", side_effect=probe):
+            interactive = review_import_interactive(root, run.name, actor="reviewer", now=now,
+                                                    in_stream=TTY("accept\n\n"), out_stream=prompts)
+        check("accept-review-marker-homes-threaded-interactive", interactive.verdict == CANNOT_EVALUATE
+              and markers == ["durable import evidence"] and prompts.getvalue() == ""
+              and interactive.findings[0].startswith("import gate failed") and acc_path.read_bytes() == saved)
+        applied = apply_import(root, run.name, now=now)
+        check("accept-apply-marker-homes-threaded", applied.verdict == CANNOT_EVALUATE
+              and "carries durable import evidence" in applied.findings[0])
+    finally:
+        for name, data in stripped.items():
+            (run / name).write_bytes(data)
+    # Flip: capture without the pre-write re-derivation writes a homes-2 record after the manifest changed.
+    derived = iter([2, 2])
+    with patch.object(sys.modules[__name__], "_store_homes", side_effect=lambda _r: next(derived, 1)):
+        changed = capture(actor="second")
+    check("accept-capture-homes-rederived", changed.verdict == CANNOT_EVALUATE
+          and "changed during capture" in changed.findings[0] and acc_path.read_bytes() == saved)
+    # Flip: stale binding admission, gate omission, and a pre-rename overwrite each violate byte preservation.
+    stale = copy.deepcopy(ingest)
+    stale["binding"]["homes_generation"] = 1   # the activated fixture's derived generation is 2
+    check("accept-stale-submission", capture(stale).verdict == FINDING and acc_path.read_bytes() == saved)
+    with patch.object(os, "rename", side_effect=OSError("injected pre-rename failure")):
+        check("accept-writer-pre-rename", capture(actor="second").verdict == CANNOT_EVALUATE
+              and acc_path.read_bytes() == saved)
+    # Flip: accepting a coherent model changed during the last gate silently rebinds human decisions.
+    current = copy.deepcopy(snapshot)
+    current["binding"]["homes_generation"] = 3
+    with patch.object(sys.modules[__name__], "_require_review_gate"), \
+            patch.object(sys.modules[__name__], "_ingest_snapshot", side_effect=[snapshot, current]):
+        check("accept-prompt-mutation", capture().verdict == FINDING and acc_path.read_bytes() == saved)
+    for payload in (None, acc, dict(acc, format="unknown")):
+        if payload is None:
+            acc_path.unlink()
+        else:
+            acc_path.write_bytes(_emit_acceptance_bytes(payload))
+        before_apply = {str(p): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()}
+        applied = apply_import(root, run.name, now=now)
+        check("accept-apply-routing", applied.verdict == CANNOT_EVALUATE and applied.promoted is False
+              and before_apply == {str(p): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()})
+    acc_path.write_bytes(saved)
+    # Flip: without the TTY guard this piped stream carries a complete review and is captured; the TTY run
+    # over the same answers is the positive control.
+    class TTY(io.StringIO):
+        def isatty(self):
+            return True
+    answers = "accept\n\n" * (len(envelope["decisions"]) + len(envelope["ingest"]["units"]))
+    piped = review_import_interactive(root, run.name, actor="second", now=now,
+                                      in_stream=io.StringIO(answers), out_stream=io.StringIO(),
+                                      clock=lambda: stamp)
+    check("accept-intake-non-tty", piped.verdict == CANNOT_EVALUATE and acc_path.read_bytes() == saved)
+    attended = review_import_interactive(root, run.name, actor="reviewer", now=now,
+                                         in_stream=TTY(answers), out_stream=io.StringIO(),
+                                         clock=lambda: stamp)
+    check("accept-intake-tty-control", attended.verdict == CLEAN)
+    acc_path.write_bytes(saved)
+    reject = copy.deepcopy(ingest)
+    reject["units"][0]["decision"] = "reject"
+    check("accept-reject-captured", capture(reject).verdict == CLEAN)
+    # A recorded rejection is valid evidence (the gate grades well-formedness, as for ordinary runs); it is
+    # never promotable because apply refuses every ingest run before its gate.
+    # Flip: failing the acceptance checks on `rejected` fails this gate and loses the explained rejection.
+    rejected_gate = gate.check_staged_run(run, homes=2)
+    check("accept-reject-gate-valid", all(ok for ok, detail in rejected_gate.values())
+          and rejected_gate["ingest-acceptance-binding"][1] == "recorded rejection; not promotable")
+    check("accept-reject-explained", _ingest_acceptance_explanation(
+        _resolve_store_for_review(root), run.name).endswith("rejection=True."))
+    before_apply = {str(p): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()}
+    applied = apply_import(root, run.name, now=now)
+    check("accept-reject-not-promoted", applied.verdict == CANNOT_EVALUATE and applied.promoted is False
+          and before_apply == {str(p): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()})
+    check("accept-reject-needs-fresh-plan", capture().verdict == CANNOT_EVALUATE)
+    rejected_bytes = acc_path.read_bytes()
+    # Flip: an aggregate "some reject remains" guard admits both captures and replaces the attributed reject.
+    check("accept-reject-not-replaced", capture(reject, actor="second").verdict == CANNOT_EVALUATE
+          and acc_path.read_bytes() == rejected_bytes)
+    if len(ingest["units"]) > 1:
+        swapped = copy.deepcopy(ingest)
+        swapped["units"][1]["decision"] = "reject"
+        check("accept-reject-not-swapped", capture(swapped).verdict == CANNOT_EVALUATE
+              and acc_path.read_bytes() == rejected_bytes)
+    # A stale existing record is never repaired in place, even with otherwise complete new decisions.
+    corrupt = _strict_json(acc_path.read_bytes())
+    corrupt["ingest"]["binding"]["report_digest"] = "sha256:" + "f" * 64
+    acc_path.write_bytes(_emit_acceptance_bytes(corrupt))
+    prior = acc_path.read_bytes()
+    check("accept-repair-fresh-run", capture().verdict == CANNOT_EVALUATE and acc_path.read_bytes() == prior)
+    # Flip: decoding JSON null to None reads this present record as "not yet reviewed", so the gate passes it
+    # and capture replaces it.
+    acc_path.write_bytes(b"null\n")
+    check("accept-null-record-gate",
+          gate.check_staged_run(run, homes=2).get("ingest-acceptance-binding", (True, ""))[0] is False)
+    # Flip: an unvalidated generation (3, "2", True, 1.0 each unequal to 2 or equal to 1) grades this ingest
+    # run as legacy and passes the malformed durable record "not applicable".
+    for bad in (3, "2", True, 1.0):
+        graded = gate.check_staged_run(run, homes=bad)
+        check("accept-gate-homes-invalid", not any(graded[cid][0] for cid in (
+            "acceptance-schema", "ingest-acceptance-binding", "ingest-acceptance-completeness")))
+    check("accept-null-record-kept", capture().verdict == CANNOT_EVALUATE
+          and acc_path.read_bytes() == b"null\n")
+
+
 def self_test():
     """Import-staging invariants over synthetic stores. Judged on the returned verdict values, never by
     grepping output. Fixtures live under a private tempdir removed in a finally; the injected instant and
@@ -5108,6 +6411,7 @@ def self_test():
 
     NOW = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
     NONCE = "selftest-nonce"
+    _self_test_ingest_acceptance(check)
 
     # An INDEPENDENT run-id oracle: this literal re-checks that a PRODUCED run-id conforms to the expected
     # grammar, independent of the production _RUN_ID_RE. It does NOT catch a broadened _RUN_ID_RE: _run_id
@@ -6690,7 +7994,12 @@ def self_test():
         check("A1-plan-clean", prA1.verdict == 0 and bool(prA1.run_id))
         rvA1 = review_accept_all(rootA1, prA1.run_id)
         check("A1-review-clean", rvA1.verdict == 0)
-        apA1 = apply_import(rootA1, prA1.run_id, now=NOW)
+        import check_opf_import as _gate_spy
+        from unittest.mock import patch as _patch
+        with _patch.object(_gate_spy, "check_staged_run", wraps=_gate_spy.check_staged_run) as spy:
+            apA1 = apply_import(rootA1, prA1.run_id, now=NOW)
+        # Flip: the pre-promotion gate called without the derived generation records no `homes` here.
+        check("A1-apply-gate-homes", [c.kwargs.get("homes") for c in spy.call_args_list] == [1])
         check("A1-apply-promoted",
               apA1.verdict == 0 and apA1.promoted is True and apA1.outcome == "promoted")
         runA1 = mA1.parent / "imports" / (prA1.run_id or "X")
@@ -7135,6 +8444,25 @@ def self_test():
         review_accept_all(rootA3, prA3.run_id)
         apA3b = apply_import(rootA3, prA3.run_id, now=NOW)   # lock not leaked by the abort above
         check("A3-lock-not-leaked", apA3b.verdict == 0 and apA3b.promoted is True)
+
+        # Flip: disabling step 6's generation re-check promotes after this manifest read changes homes.
+        rootHG, mHG = build_apply_store()
+        prHG = plan_import(rootHG, ["a.txt"], now=NOW, run_nonce="apply-homes-change")
+        rvHG = review_accept_all(rootHG, prHG.run_id)
+        beforeHG = snapshot(rootHG)
+        real_layout = _require_inline_layout
+
+        def changed_layout(fd, machine_rel):
+            manifest = real_layout(fd, machine_rel)
+            return dict(manifest, opf=dict(manifest["opf"], homes=2, spec_version=_opf_store.HOMES2_SPEC_VERSION))
+
+        with _patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
+                _patch.object(sys.modules[__name__], "_require_inline_layout", side_effect=changed_layout) as readHG:
+            apHG = apply_import(rootHG, prHG.run_id, now=NOW)
+        check("accept-apply-homes-rederived", rvHG.verdict == CLEAN and readHG.call_count == 1
+              and apHG.verdict == CANNOT_EVALUATE and apHG.promoted is False and apHG.outcome == "aborted"
+              and "homes generation changed during apply" in apHG.findings[0]
+              and snapshot(rootHG) == beforeHG)
 
         # A4 (reject blocks): a reject decision in the acceptance record blocks promotion -> exit 1
         # (outcome=rejected), and nothing is promoted or mutated.

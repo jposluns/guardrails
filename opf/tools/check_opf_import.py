@@ -79,8 +79,8 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
                            and confined to a migrate row's resolved source, each migrate row's candidate/proposal
                            counts correspond to the staged evidence, ALL proposals validate through plan_import's
                            own _validate_proposals, and the whole proposals.toml EQUALS the producer's shared
-                           _proposals_model over the sorted validated rows; the importer is never re-run (loss-tiling
-                           residual PD-MIG-PR4B-LOSS-EVIDENCE, PR 1B).
+                           _proposals_model over the sorted validated rows; frozen loss validates byte tiling,
+                           proposal/span and candidate/span correspondence. The importer is never re-run.
   - ingest-report-reproducibility : the staged IMPORT-REPORT.md (with its ingest section) byte-reproduces
                            from the validated model via _render_report_md + _render_ingest_review_md.
   - ingest-artefact-completeness : the staged run dir, enumerated by a fail-closed no-follow listing, is
@@ -178,6 +178,7 @@ EXPECTED_CHECKS = (
     # applied). transaction-schema validates its shape; transaction-consistency validates the state machine
     # and that the archived acceptance exists once the record's state reaches published (spec 14.1 / apply).
     "transaction-schema", "transaction-consistency",
+    "ingest-acceptance-binding", "ingest-acceptance-completeness",
 )
 
 
@@ -713,16 +714,9 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
     and the relocated-store working-tree arm of the move boundary and of the include check falls back to the
     literal product-root `.working` only (disclosed).
 
-    Named F6 residual, deliberately NOT closed this round (PD-MIG-PR4B-LOSS-EVIDENCE / PR 1B): the review
-    verifies each migrate row's proposal COUNT, proposal CONFINEMENT (via _validate_proposals: span within
-    [0, size], state vocabulary, a migrate source) and the proposals_digest, but NOT the proposal<->loss-span
-    TILING correspondence, because MIG-PR4a freezes the drafts and proposals but NOT the importer LOSS (lossy)
-    entry, so the loss-tiling arm of _opf_importers.validate_importer_output has no frozen input to re-derive
-    from and the importer must never be re-run. So a fully self-consistent rewrite that SHRINKS a proposal
-    span (still confined, still counted, digest refreshed) PASSES the gate. This is bounded: such a run is
-    NON-PROMOTING (apply refuses an ingest run, PR-4c/P1-1), so the escape cannot reach a live store; closing
-    it needs the loss evidence frozen in the 4a bundle (an Architect-weighable format extension), tracked as
-    PD-MIG-PR4B-LOSS-EVIDENCE. Disclosed here as the honest boundary, not a silent gap.
+    Frozen loss entries now drive byte tiling, physical line ranges, proposal/span bijection, and candidate
+    references through validate_importer_output over staged source bytes. This proves internal consistency,
+    not that the named importer produced the frozen result.
 
     Residual boundaries (authenticity vs consistency; disclose-guard-residuals): even the full re-derivation
     proves CONSISTENCY and FAITHFULNESS-TO-THE-DETERMINISTIC-PRODUCER, never AUTHENTICITY. It cannot prove the
@@ -1172,7 +1166,7 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
                                     expected_scaffold = ing.derive_migrate_scaffold(
                                         r, ing.resolve_by_scope(base, r["scope"], r["source_path"]),
                                         opt_by_key[key].get("importer_kind"))
-                                    counts = {"candidate_count", "proposal_count"}
+                                    counts = {"candidate_count", "proposal_count", "loss"}
                                     if set(m) != set(expected_scaffold) | counts:
                                         ok, detail = False, ("migrate row {!r} is not the closed scaffold + "
                                                              "counts keyset".format(r["source_path"]))
@@ -1329,6 +1323,11 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
             IndexError) as exc:
         ok, detail = False, "ingest-draft-loss-binding failed closed ({!r})".format(exc)
     if ok:
+        try:
+            imp._validate_frozen_losses(rd, bundle, docs)
+        except Exception as exc:
+            ok, detail = False, "frozen loss validation failed ({})".format(exc)
+    if ok:
         covered.update({imp.CANDIDATES_DRAFT_NAME, imp.PROPOSALS_NAME})
     out["ingest-draft-loss-binding"] = (ok, detail)
 
@@ -1343,7 +1342,8 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
         ordinary = imp._render_report_md(inventory.get("inventory_digest"), inventory.get("fragment"),
                                          norm, run_dir.name)
         section = imp._render_ingest_review_md(imp._ingest_render_model(
-            run_dir.name, bundle["crosswalk"], bundle["migrate"]))
+            run_dir.name, bundle["crosswalk"], bundle["migrate"],
+            docs[imp.INGEST_ACTIONS_NAME]["action"], docs[imp.CANDIDATES_DRAFT_NAME]["candidate"]))
         expected = (ordinary + section).encode("utf-8")
         actual = rd.read_bytes("IMPORT-REPORT.md")
         if expected != actual:
@@ -1525,6 +1525,92 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
     return out
 
 
+# Durable acceptance is outside the staged registry. A staged copy remains an unexpected artefact.
+_INGEST_EVIDENCE_REGISTRY = (("acceptance.json", "VALIDATE", "ingest-acceptance-binding", "if-reviewed"),)
+_INGEST_ACCEPTANCE_CHECKS = ("ingest-acceptance-binding", "ingest-acceptance-completeness")
+
+
+def _gate_homes(homes):
+    """The validated generation the gate evaluates under: an unsupplied generation is the legacy generation 1
+    only while no later generation can be active (the rule _row_scope_error applies). A supplied generation
+    other than the integer 1 or 2 (a bool, a str, a float, 3), or one above the tooling's supported
+    generation, raises. The staged-run gate takes no generation-dependent path on an invalid value:
+    ingest and ingest-acceptance checks fail with that error, as do an ingest-marked run's staged
+    acceptance checks. Listing-based marker classification and ordinary runs' staged-data grading
+    are generation-independent and still run."""
+    import _opf_store
+    if homes is None:
+        if _opf_store.SUPPORTED_HOMES >= 2:
+            raise _GateError("the store's homes generation was not supplied to this manifest-free gate")
+        return 1
+    if type(homes) is not int or homes not in (1, 2) or homes > _opf_store.SUPPORTED_HOMES:
+        raise _GateError("the supplied homes generation {!r} is not 1 or 2, or is above the tooling's "
+                         "supported generation {}".format(homes, _opf_store.SUPPORTED_HOMES))
+    return homes
+
+
+def _ingest_store_fd(rd, homes=None):
+    """Bind the store to this opened run, through the shared generation-aware run-location constructor
+    (_opf_import._import_run_locations) and inode comparison. Returns None for a detached copy (no
+    store-relative home matches): it cannot establish absence of durable acceptance, so an ingest run's
+    durable checks refuse, while an ordinary run is classified from its own listing. Staged snapshot
+    checks still evaluate the supplied bytes.
+    """
+    import _journal
+    import _opf_import as imp
+    for rel in imp._import_run_locations(rd.path.name, _gate_homes(homes)):
+        if tuple(rd.path.parts[-len(rel.split("/")):]) != tuple(rel.split("/")):
+            continue
+        depth = len(rel.split("/"))
+        fd = os.open("/".join([".."] * depth), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)
+        try:
+            check_fd = _journal._open_dir_contained(fd, rel)
+            try:
+                a, b = os.fstat(check_fd), os.fstat(rd.fd)
+                if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+                    raise _GateError("run identity changed while locating durable evidence")
+            finally:
+                os.close(check_fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+    return None
+
+
+def _ingest_acceptance_checks(rd, homes=None):
+    import _opf_import as imp
+    ids = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
+    ids += _INGEST_ACCEPTANCE_CHECKS
+    try:
+        homes = _gate_homes(homes)
+        # Generation 1 has no durable home: `.working/imported` is ordinary content there, never probed.
+        if homes != imp.INGEST_HOMES_GENERATION:
+            return {cid: (True, "not applicable: homes generation 1 has no durable acceptance home")
+                    for cid in ids}
+        if _INGEST_EVIDENCE_REGISTRY != ((imp.ACCEPTANCE_NAME, "VALIDATE",
+                                        "ingest-acceptance-binding", "if-reviewed"),):
+            raise _GateError("durable acceptance registry does not match its validator")
+        fd = _ingest_store_fd(rd, homes)
+        if fd is None:
+            raise _GateError("durable acceptance cannot be located from a detached run; "
+                             "retain its store-relative home")
+        try:
+            acceptance = imp._read_ingest_acceptance(fd, rd.path.name)
+        finally:
+            os.close(fd)
+        if acceptance is None:
+            return {cid: (True, "not yet reviewed") for cid in ids}
+        snapshot = imp._ingest_snapshot(rd, homes)
+        binding, complete, rejected = imp.validate_ingest_acceptance(snapshot, acceptance)
+        detail = "recorded rejection; not promotable" if rejected else "review recorded; execution unavailable"
+        return {cid: (not (complete if cid.endswith("completeness") else binding),
+                      "; ".join(complete if cid.endswith("completeness") else binding) or detail) for cid in ids}
+    except Exception as exc:
+        return {cid: (False, "durable acceptance cannot be evaluated ({}); create a fresh run".format(exc))
+                for cid in ids}
+
+
 def check_staged_run(run_dir, homes=None):
     """Run the explicit check registry over one staged run directory. Returns an ordered dict
     check-id -> (ok: bool, detail: str). Each check fails closed on an artefact it cannot read: an
@@ -1556,6 +1642,17 @@ def _check_staged_run(rd, homes=None):
     def record(cid, ok, detail=""):
         results[cid] = (bool(ok), detail)
 
+    # A generation validation failure takes no generation-dependent path.
+    # Listing-based marker classification, ordinary runs' staged-data grading, and transaction checks
+    # remain generation-independent. Every ingest and ingest-acceptance check records the generation
+    # error, as do an ingest-marked run's staged acceptance checks.
+    _ingest_ids = ("ingest-run-structure",) + _INGEST_CHECK_IDS
+    generation_checks = _ingest_ids + _INGEST_ACCEPTANCE_CHECKS
+    try:
+        gen, gen_error = _gate_homes(homes), ""
+    except _GateError as exc:
+        gen, gen_error = None, str(exc)
+
     # --- staged-run-structure -----------------------------------------------------------------------
     required = ["run.toml", "plan.toml", "mappings.toml", "report.toml", "inventory.toml",
                 "IMPORT-REPORT.md"]
@@ -1580,7 +1677,7 @@ def _check_staged_run(rd, homes=None):
         # from the single-source registry (not a hand-maintained tuple) so this early-return path can
         # never drift from EXPECTED_CHECKS and silently omit a future check.
         for cid in EXPECTED_CHECKS:
-            record(cid, False, str(exc))
+            record(cid, False, gen_error if gen is None and cid in generation_checks else str(exc))
         return results
 
     # --- ingest-review bundle detection (MIG-PR4b) --------------------------------------------------
@@ -1598,9 +1695,33 @@ def _check_staged_run(rd, homes=None):
     ingest_is_run = False
     ingest_load_failed = False
     ingest_load_detail = ""
+    durable_unavailable = ""
     marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)
-    if marker is not None:
-        ingest_is_run = True
+    if gen is not None and marker is None:
+        try:
+            # The durable home is control storage only in generation 2; in generation 1 it and the homes-2
+            # staging names are ordinary content, never probed. A detached copy has no store to consult.
+            fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None
+            if fd is not None:
+                try:
+                    import _journal
+                    if _journal._lstat_contained(fd, imp._ingest_acceptance_home(run_dir.name)) is not None:
+                        marker = "durable import evidence"
+                finally:
+                    os.close(fd)
+        except Exception as exc:
+            durable_unavailable = "durable acceptance cannot be located ({})".format(exc)
+    if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":
+        # Decoded with the ordinary acceptance reader's json.loads; unreadable or undecodable bytes are no
+        # marker, and the ordinary acceptance grading below reports the read or decode failure.
+        try:
+            acc_raw = rd.read_bytes(imp.ACCEPTANCE_NAME)
+        except _GateError:
+            acc_raw = None
+        if acc_raw is not None and imp._acceptance_marks_ingest(acc_raw):
+            marker = imp.ACCEPTANCE_NAME
+    ingest_is_run = marker is not None
+    if gen is not None and ingest_is_run:
         if rd.kind(imp.INGEST_REVIEW_NAME) is None:
             ingest_load_failed = True
             ingest_load_detail = ("ingest markers present (marker {!r}) but the review bundle "
@@ -1905,7 +2026,16 @@ def _check_staged_run(rd, homes=None):
     # through the regular-file-validated reader); a symlink or any other non-regular entry is a FINDING
     # (fail-closed), never pass-as-absent. An unclassifiable entry already failed the listing closed.
     acc_kind = rd.kind(imp.ACCEPTANCE_NAME)
-    if acc_kind is None:
+    # Durable acceptance exists only in generation 2. In generation 1 every run keeps ordinary staged
+    # acceptance grading below; invalid generations fail ingest acceptance without probing its home.
+    legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION
+    if ingest_is_run and gen is None:
+        for cid in acc_checks:
+            record(cid, False, gen_error)
+    elif ingest_is_run and not legacy_generation:
+        for cid, (ok, detail) in _ingest_acceptance_checks(rd, gen).items():
+            record(cid, ok, detail)
+    elif acc_kind is None:
         for cid in acc_checks:
             record(cid, True, "not yet reviewed")
     elif acc_kind != "file":
@@ -2039,10 +2169,12 @@ def _check_staged_run(rd, homes=None):
     # CONDITIONALLY PRESENT. On an ordinary run (no ingest markers) all six are non-applicable PASSes. On an
     # ingest run whose bundle is absent/malformed/unclassifiable the whole ingest surface is a located FINDING
     # (fail-closed, never nothing-to-check). On a well-formed bundle, ingest-run-structure PASSes and the
-    # shared validator performs the binding-digest RECOMPUTE + correspondence for the other five. Read-only:
-    # this enables no acceptance capture (that stays refused at the review entry points, PR-4c).
-    _ingest_ids = ("ingest-run-structure",) + _INGEST_CHECK_IDS
-    if not ingest_is_run:
+    # shared validator performs the binding-digest recompute and correspondence for the other five.
+    # Acceptance has a separate durable home and its own read-only checks.
+    if gen is None:
+        for cid in _ingest_ids:
+            record(cid, False, gen_error)
+    elif not ingest_is_run:
         for cid in _ingest_ids:
             record(cid, True, "not an ingest run")
     elif ingest_load_failed or ingest_bundle is None:
@@ -2055,7 +2187,7 @@ def _check_staged_run(rd, homes=None):
         # The whole shared-validator step is fail-closed: a first-party contract violation (a raise, a
         # malformed return) becomes located FINDINGs, never an uncaught crash for a check_staged_run caller.
         try:
-            ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, homes)
+            ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, gen)
         except Exception as exc:   # noqa: BLE001 - fail-closed; KeyboardInterrupt/SystemExit still propagate
             ing_results = {}
             _vfail = "ingest review validator raised ({!r})".format(exc)
@@ -2067,6 +2199,16 @@ def _check_staged_run(rd, homes=None):
                 record(cid, ok, detail)
             else:
                 record(cid, False, _vfail or "ingest check did not run (fail-closed)")
+
+    if gen is None:
+        for cid in _INGEST_ACCEPTANCE_CHECKS:
+            record(cid, False, gen_error)
+    elif not ingest_is_run:
+        for cid in _INGEST_ACCEPTANCE_CHECKS:
+            record(cid, not durable_unavailable, durable_unavailable or "not an ingest run")
+    elif legacy_generation:
+        for cid in _INGEST_ACCEPTANCE_CHECKS:
+            record(cid, True, "not applicable: homes generation 1 has no durable acceptance home")
 
     # --- Group C: the per-run transaction record (apply-promotion, PR-C) --------------------------------
     # The record lives OUTSIDE .working/ at the store-root `.aiqt/import/<run-id>/transaction.toml` (D2/D3:
@@ -2169,6 +2311,715 @@ def _check_staged_run(rd, homes=None):
     return results
 
 
+def _self_test_gate_generation_sites(expect):
+    """Structural pins over the staged-run gate's source; each checks only what is stated here.
+    gate-generation-read-sites: every ast.Name node (any context) of the fourteen listed names sits on one of these
+    statements, so a new read or plain assignment of a listed name fails until the statement is deliberately added.
+    gate-generation-branch-bindings: in the body (never the else branch) of an if or while statement whose test
+    names gen, homes, gen_error or legacy_generation, every ast.Name with Store context and every except-handler
+    name is a listed name or the loop-local exc, cid, ok or detail. It does not see state carried by a method call,
+    an attribute or subscript store, an import alias, or an else branch, nor a reuse of one of the four exempt names.
+    gate-generation-no-dynamic-access: the gate names none of locals, vars, globals, eval, exec, compile, __import__.
+    These pins cannot enumerate every way to carry generation-derived state; the behavioural sweep covers the
+    rest, for the fixtures it grades. _self_test_gate_generation grades the staged-acceptance table
+    (_self_test_gate_generation_acceptance_cases) on a synthetic run with no store. _self_test_gate_generation_applied
+    grades on disk, beneath a real store located at generation 2: every discriminator fixture of _self_test, the same
+    acceptance table, the transaction table (_self_test_gate_generation_transaction_cases) on a genuinely applied run,
+    and ingest runs beside a provisioned durable home. Each requires every generation-independent result to be
+    identical under generation 2 and every invalid generation. The coverage assertion (gate-generation-sweep-coverage)
+    requires every registered id to be credited by a swept fixture under the rule of
+    _self_test_gate_generation_coverage: the fixture passes staged-run-structure and the id's other prerequisites and
+    fails that id with its own located detail, so a blanket failure (an empty run, an unreadable core) credits
+    nothing. Its controls show that an always-passing id registered beside the others is reported uncovered, and
+    that the blanket fixtures alone credit no id, and synthetic rows pin each clause of the rule
+    (gate-generation-sweep-coverage-control-*). Coverage is per id and per store state: every credited ordinary and
+    staged-acceptance discriminator is also graded as a detached copy, whose generation 2 takes the no-store branch,
+    and must credit those ids there (gate-generation-detached-coverage); every ordinary id is failed on an ingest run
+    beside a durable home (gate-generation-ingest-ordinary-coverage). Per condition, the report-schema conjunction and
+    the proposals.toml header conjunction of proposals-artifact (schema type, schema value, run_id, proposal array)
+    each carry their own swept fixture (gate-generation-report-schema-conditions,
+    gate-generation-proposals-artifact-conditions). Residual: every other check's conditions are covered only by the
+    discriminators _self_test lists, so a generation-2-only bypass of a condition that no fixture fails (for example
+    one proposals.toml row condition, or one acceptance-schema finding in a detached copy whose fixture is a FIFO or
+    unreadable and so is not copied), or one that needs a store state no fixture builds, is not detected."""
+    import ast
+    import inspect
+    src = inspect.getsource(_check_staged_run)
+    lines = src.split("\n")
+    tree = ast.parse(src)
+    names = ("gen", "homes", "gen_error", "legacy_generation", "fd", "ing_results", "marker", "ingest_is_run",
+             "durable_unavailable", "ingest_bundle", "ingest_load_failed", "ingest_load_detail", "acc_raw",
+             "results")
+    found = sorted((n.id, lines[n.lineno - 1].strip()) for n in ast.walk(tree)
+                   if isinstance(n, ast.Name) and n.id in names)
+    expected = sorted((
+        ('acc_raw', 'acc_raw = None'),
+        ('acc_raw', 'acc_raw = rd.read_bytes(imp.ACCEPTANCE_NAME)'),
+        ('acc_raw', 'if acc_raw is not None and imp._acceptance_marks_ingest(acc_raw):'),
+        ('acc_raw', 'if acc_raw is not None and imp._acceptance_marks_ingest(acc_raw):'),
+        ('durable_unavailable', 'durable_unavailable = ""'),
+        ('durable_unavailable', 'durable_unavailable = "durable acceptance cannot be located ({})".format(exc)'),
+        ('durable_unavailable', 'record(cid, not durable_unavailable, durable_unavailable or "not an ingest run")'),
+        ('durable_unavailable', 'record(cid, not durable_unavailable, durable_unavailable or "not an ingest run")'),
+        ('fd', 'fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None'),
+        ('fd', 'if _journal._lstat_contained(fd, imp._ingest_acceptance_home(run_dir.name)) is not None:'),
+        ('fd', 'if fd is not None:'),
+        ('fd', 'os.close(fd)'),
+        ('gen', 'fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None'),
+        ('gen', 'fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None'),
+        ('gen', 'for cid, (ok, detail) in _ingest_acceptance_checks(rd, gen).items():'),
+        ('gen', 'gen, gen_error = None, str(exc)'),
+        ('gen', 'gen, gen_error = _gate_homes(homes), ""'),
+        ('gen', 'if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":'),
+        ('gen', 'if gen is None:'),
+        ('gen', 'if gen is None:'),
+        ('gen', 'if gen is not None and ingest_is_run:'),
+        ('gen', 'if gen is not None and marker is None:'),
+        ('gen', 'if ingest_is_run and gen is None:'),
+        ('gen', 'ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, gen)'),
+        ('gen', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
+        ('gen', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
+        ('gen', 'record(cid, False, gen_error if gen is None and cid in generation_checks else str(exc))'),
+        ('gen_error', 'gen, gen_error = None, str(exc)'),
+        ('gen_error', 'gen, gen_error = _gate_homes(homes), ""'),
+        ('gen_error', 'record(cid, False, gen_error if gen is None and cid in generation_checks else str(exc))'),
+        ('gen_error', 'record(cid, False, gen_error)'),
+        ('gen_error', 'record(cid, False, gen_error)'),
+        ('gen_error', 'record(cid, False, gen_error)'),
+        ('homes', 'gen, gen_error = _gate_homes(homes), ""'),
+        ('ing_results', 'if cid in ing_results:'),
+        ('ing_results', 'ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, gen)'),
+        ('ing_results', 'ing_results = {}'),
+        ('ing_results', 'ok, detail = ing_results[cid]'),
+        ('ingest_bundle', 'elif ingest_load_failed or ingest_bundle is None:'),
+        ('ingest_bundle', 'ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, gen)'),
+        ('ingest_bundle', 'ingest_bundle = None'),
+        ('ingest_bundle', 'ingest_bundle = imp._validate_staged_ingest_bundle(rd.load_toml(imp.INGEST_REVIEW_NAME),'),
+        ('ingest_is_run', 'elif ingest_is_run and not legacy_generation:'),
+        ('ingest_is_run', 'elif not ingest_is_run:'),
+        ('ingest_is_run', 'elif not ingest_is_run:'),
+        ('ingest_is_run', 'if gen is not None and ingest_is_run:'),
+        ('ingest_is_run', 'if ingest_is_run and gen is None:'),
+        ('ingest_is_run', 'if pa_ok and not ingest_is_run:'),
+        ('ingest_is_run', 'ingest_is_run = False'),
+        ('ingest_is_run', 'ingest_is_run = marker is not None'),
+        ('ingest_load_detail', 'ingest_load_detail = ""'),
+        ('ingest_load_detail', 'ingest_load_detail = "ingest-review bundle present but malformed ({})".format(exc.message)'),
+        ('ingest_load_detail', 'ingest_load_detail = "ingest-review bundle present but unreadable ({})".format(exc)'),
+        ('ingest_load_detail', 'ingest_load_detail = ("ingest markers present (marker {!r}) but the review bundle "'),
+        ('ingest_load_detail', 'ingest_load_detail))'),
+        ('ingest_load_detail', 'record("ingest-run-structure", False, ingest_load_detail or "ingest bundle could not be loaded")'),
+        ('ingest_load_failed', 'elif ingest_load_failed or ingest_bundle is None:'),
+        ('ingest_load_failed', 'ingest_load_failed = False'),
+        ('ingest_load_failed', 'ingest_load_failed = True'),
+        ('ingest_load_failed', 'ingest_load_failed = True'),
+        ('ingest_load_failed', 'ingest_load_failed = True'),
+        ('legacy_generation', 'elif ingest_is_run and not legacy_generation:'),
+        ('legacy_generation', 'elif legacy_generation:'),
+        ('legacy_generation', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
+        ('marker', '"ingest-review.toml is absent (partial ingest run)".format(marker))'),
+        ('marker', 'if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":'),
+        ('marker', 'if gen is not None and marker is None:'),
+        ('marker', 'ingest_is_run = marker is not None'),
+        ('marker', 'marker = "durable import evidence"'),
+        ('marker', 'marker = imp.ACCEPTANCE_NAME'),
+        ('marker', 'marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)'),
+        ('results', 'if cid not in results:'),
+        ('results', 'results = {}'),
+        ('results', 'results[cid] = (bool(ok), detail)'),
+        ('results', 'return results'),
+        ('results', 'return results'),
+    ))
+    expect("gate-generation-read-sites", found == expected)
+    # A name bound in the body of a branch that tests the generation itself is generation-derived: it must be listed.
+    direct = {"gen", "homes", "gen_error", "legacy_generation"}
+    bound = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.If, ast.While)):
+            continue
+        tested = {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
+        if direct & tested:
+            for stmt in node.body:
+                for n in ast.walk(stmt):
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                        bound.add(n.id)
+                    elif isinstance(n, ast.ExceptHandler) and n.name:
+                        bound.add(n.name)
+    # Loop targets and the handler name there are local to their own statement; they are pinned so a new one fails.
+    expect("gate-generation-branch-bindings", bound <= set(names) | {"exc", "cid", "ok", "detail"})
+    # A dynamic lookup reads the generation without naming it; the gate makes none.
+    dynamic = ("locals", "vars", "globals", "eval", "exec", "compile", "__import__")
+    expect("gate-generation-no-dynamic-access", not any(
+        (isinstance(n, ast.Name) and n.id in dynamic) or (isinstance(n, ast.Attribute) and n.attr in dynamic)
+        for n in ast.walk(tree)))
+
+
+def _self_test_gate_generation_cases():
+    """The invalid generations every generation test sweeps, as (label, supplied value); None is unsupplied."""
+    return (("bool", True), ("false", False), ("string", "2"), ("one-string", "1"), ("future", 3), ("zero", 0),
+            ("negative", -1), ("float", 2.0), ("one-float", 1.0), ("nan", float("nan")), ("unsupplied", None))
+
+
+def _self_test_gate_generation_acceptance_cases():
+    """Every staged-acceptance condition the gate grades on an ordinary run, as (fixture, the ids its one corruption
+    fails at generation 1, the (id, located detail) pairs naming that condition). "accepted" and
+    "accepted-model-proposal" are the clean controls; _self_test_gate_generation_accept applies each corruption."""
+    sch, bind, attr, comp = ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
+                             "acceptance-completeness")
+    every = (sch, bind, attr, comp)
+    unreadable = tuple((cid, "unreadable/unparseable") for cid in every)
+    unbound = ((bind, "do not bind the run"),)
+    echo = ((bind, "echoes an origin/proposed_state"),)
+    uncovered = ((comp, "a missing or unknown fragment"),)
+    unattributed = ((attr, "actor.declared is missing or empty"),)
+    uncorrelated = ((bind, "correlation malformed"), (comp, "correlation malformed"))
+    return (
+        ("accepted", (), ()),
+        ("accepted-model-proposal", (), ()),
+        # A present acceptance that cannot be graded fails all four.
+        ("accepted-not-regular", every, tuple((cid, "not a regular file") for cid in every)),
+        ("accepted-undecodable", every, unreadable),
+        ("accepted-unparseable", every, unreadable),
+        ("accepted-too-deep", every, unreadable),
+        ("accepted-not-object", every, tuple((cid, "not a JSON object") for cid in every)),
+        # A regular acceptance whose read fails (the marker probe and the ordinary reader both meet it).
+        ("accepted-unreadable", every, unreadable),
+        # acceptance-schema: each finding _opf_import._validate_acceptance returns.
+        ("accepted-unknown-key", (sch,), ((sch, "unknown top-level key"),)),
+        ("accepted-format", (sch,), ((sch, "format must be"),)),
+        ("accepted-run-id-grammar", (sch, bind), ((sch, "run_id is missing or not a valid run-id"),) + unbound),
+        ("accepted-plan-digest-shape", (sch, bind), ((sch, "plan_digest must be"),) + unbound),
+        ("accepted-inventory-digest-shape", (sch, bind), ((sch, "inventory_digest must be"),) + unbound),
+        ("accepted-actor-unknown-key", (sch,), ((sch, "actor carries unknown key"),)),
+        ("accepted-declared-control", (sch,), ((sch, "control character"),)),
+        ("accepted-context-not-object", (sch,), ((sch, "actor.context must be an object"),)),
+        ("accepted-context-unknown-key", (sch,), ((sch, "actor.context must be an object"),)),
+        ("accepted-context-field", (sch,), ((sch, "actor.context fields must be strings"),)),
+        ("accepted-reviewed-at-empty", (sch,), ((sch, "reviewed_at must be a non-empty"),)),
+        ("accepted-reviewed-at-shape", (sch,), ((sch, "reviewed_at is not a well-formed"),)),
+        ("accepted-reviewed-at-value", (sch,), ((sch, "reviewed_at is not a well-formed"),)),
+        ("accepted-signature", (sch,), ((sch, "signature is reserved"),)),
+        ("accepted-decisions-not-array", (sch, comp), ((sch, "decisions must be an array"),) + uncovered),
+        ("accepted-decision-unknown-key", (sch,), ((sch, "decision[0]: unknown key"),)),
+        ("accepted-decision-fragment-id-empty", (sch, comp),
+         ((sch, "fragment_id must be a non-empty string"),) + uncovered),
+        ("accepted-decision-verb", (sch,), ((sch, "decision must be 'accept' or 'reject'"),)),
+        ("accepted-decision-origin-vocab", (sch, bind), ((sch, "origin is not a mapping origin"),) + echo),
+        ("accepted-decision-state-vocab", (sch, bind), ((sch, "proposed_state is not a mapping state"),) + echo),
+        ("accepted-decision-note", (sch,), ((sch, "note must be a string"),)),
+        # acceptance-attribution.
+        ("accepted-actor-not-object", (sch, attr), ((sch, "actor must be an object"),) + unattributed),
+        ("accepted-declared-missing", (sch, attr), unattributed),
+        ("accepted-declared-not-string", (sch, attr), unattributed),
+        ("accepted-declared-blank", (sch, attr), unattributed),
+        # The inventory/mappings correlation that binding and completeness rest on.
+        ("accepted-mapping-span", ("mapping-totality", "lf-bijection", bind, comp), uncorrelated),
+        ("accepted-fragment-span", ("inventory-digest", "proposals-artifact", bind, comp), uncorrelated),
+        # The correlation's array-type guard, on each side.
+        ("accepted-fragment-not-array", ("inventory-digest", "proposals-artifact", bind, comp), uncorrelated),
+        ("accepted-mapping-not-array", ("mapping-totality", "mapping-state-vocab", "mapping-origin-vocab",
+                                        "lf-bijection", "lf-quad-completeness", bind, comp),
+         (("mapping-totality", "is not an array"),) + uncorrelated),
+        # acceptance-binding.
+        ("accepted-run-id", (bind,), unbound),
+        ("accepted-plan-digest", (bind,), unbound),
+        ("accepted-inventory-digest", (bind,), unbound),
+        ("accepted-decision-not-object", (sch, bind, comp),
+         ((bind, "a decision is not an object"), (comp, "a decision is not an object"))),
+        ("accepted-decision-fragment-id-type", (sch, bind, comp),
+         ((bind, "fragment_id is not a string"), (comp, "fragment_id is not a string"))),
+        ("accepted-decision-origin", (bind,), echo),
+        ("accepted-decision-state", (bind,), echo),
+        # acceptance-completeness.
+        ("accepted-duplicate", (comp,), ((comp, "a fragment carries more than one decision"),)),
+        ("accepted-missing", (comp,), uncovered),
+        ("accepted-unknown-fragment", (comp,), uncovered),
+        ("accepted-model-proposal-unaccepted", (comp,), ((comp, "lacks an explicit accept"),)),
+        # The report fields a staged acceptance's promotion rests on.
+        ("accepted-verdict-1", ("report-schema",), (("report-schema", "malformed"),)),
+        ("accepted-verdict-false", ("report-schema",), (("report-schema", "malformed"),)),
+        ("accepted-not-ready", ("report-schema",), (("report-schema", "malformed"),)),
+    )
+
+
+def _self_test_gate_generation_accept(rd, files, fixture):
+    """Stage a valid acceptance on the synthetic ordinary run `rd`, then apply the fixture's one corruption (a fixture
+    of _self_test_gate_generation_acceptance_cases). An edited mapping refreshes its report artifact digest, so
+    artifact-digest-integrity stays clean."""
+    import _opf_import as imp
+    import _opf_emit
+    rep = rd.load_toml("report.toml")
+    mappings = rd.load_toml("mappings.toml")
+    inventory = rd.load_toml("inventory.toml")
+    if fixture.startswith("accepted-model-proposal"):
+        # ignored is both a quarantine and a resting state, so lf-bijection stays coherent.
+        mappings["mapping"][0].update(origin=imp._MODEL_PROPOSAL_ORIGIN, state="ignored")
+    rows = {(r["source_path"], tuple(r["span"])): r for r in mappings["mapping"]}
+    decisions = []
+    for fr in inventory["fragment"]:
+        row = rows[(fr["source_path"], tuple(fr["span"]))]
+        decisions.append({"fragment_id": fr["fragment_id"], "decision": "accept", "origin": row["origin"],
+                          "proposed_state": row["state"]})
+    rid = rd.path.name
+    acc = {"format": imp.ACCEPTANCE_FORMAT, "run_id": rid, "plan_digest": rep["plan_digest"],
+           "inventory_digest": rep["inventory_digest"], "reviewed_at": "2026-09-09T12:00:00Z",
+           "actor": {"declared": "Gate Reviewer", "context": {"os_user": "", "git_identity": "", "hostname": ""}},
+           "decisions": decisions}
+    d0, actor, stale = decisions[0], acc["actor"], "sha256:" + "0" * 64
+    edits = {
+        "accepted-model-proposal-unaccepted": lambda: d0.update(decision="reject"),
+        "accepted-unknown-key": lambda: acc.update(extra=True),
+        "accepted-format": lambda: acc.update(format="opf.import.not-acceptance/v1"),
+        "accepted-run-id-grammar": lambda: acc.update(run_id="not-a-run-id"),
+        "accepted-plan-digest-shape": lambda: acc.update(plan_digest="sha256:short"),
+        "accepted-inventory-digest-shape": lambda: acc.update(inventory_digest="sha256:short"),
+        "accepted-actor-unknown-key": lambda: actor.update(extra=""),
+        "accepted-declared-control": lambda: actor.update(declared="Gate\x07Reviewer"),
+        "accepted-context-not-object": lambda: actor.update(context="none"),
+        "accepted-context-field": lambda: actor["context"].update(hostname=7),
+        "accepted-context-unknown-key": lambda: actor["context"].update(extra=""),
+        "accepted-reviewed-at-empty": lambda: acc.update(reviewed_at=""),
+        "accepted-reviewed-at-shape": lambda: acc.update(reviewed_at="2026-9-9T12:00:00Z"),
+        "accepted-reviewed-at-value": lambda: acc.update(reviewed_at="2026-13-40T12:00:00Z"),
+        "accepted-signature": lambda: acc.update(signature="unsigned"),
+        "accepted-decisions-not-array": lambda: acc.update(decisions={}),
+        "accepted-decision-unknown-key": lambda: d0.update(extra=""),
+        "accepted-decision-fragment-id-empty": lambda: d0.update(fragment_id=""),
+        "accepted-decision-verb": lambda: d0.update(decision="defer"),
+        "accepted-decision-origin-vocab": lambda: d0.update(origin="unknown-origin"),
+        "accepted-decision-state-vocab": lambda: d0.update(proposed_state="unknown-state"),
+        "accepted-decision-note": lambda: d0.update(note=7),
+        "accepted-actor-not-object": lambda: acc.update(actor="Gate Reviewer"),
+        "accepted-declared-missing": lambda: actor.pop("declared"),
+        "accepted-declared-not-string": lambda: actor.update(declared=7),
+        "accepted-declared-blank": lambda: actor.update(declared="   "),
+        "accepted-mapping-span": lambda: mappings["mapping"][0].update(span=[0, 1, 2]),
+        "accepted-fragment-span": lambda: inventory["fragment"][0].update(span=[0, 1, 2]),
+        "accepted-fragment-not-array": lambda: inventory.update(fragment="none"),
+        "accepted-mapping-not-array": lambda: mappings.update(mapping="none"),
+        "accepted-run-id": lambda: acc.update(run_id=rid[:-1] + ("1" if rid[-1] != "1" else "2")),
+        "accepted-plan-digest": lambda: acc.update(plan_digest=stale),
+        "accepted-inventory-digest": lambda: acc.update(inventory_digest=stale),
+        "accepted-decision-not-object": lambda: decisions.__setitem__(0, "accept"),
+        "accepted-decision-fragment-id-type": lambda: d0.update(fragment_id=7),
+        "accepted-decision-origin": lambda: d0.update(origin="human_revision"),
+        "accepted-decision-state": lambda: d0.update(proposed_state="mapped"),
+        "accepted-duplicate": lambda: decisions.append(dict(d0)),
+        "accepted-missing": lambda: decisions.clear(),
+        "accepted-unknown-fragment": lambda: decisions.append(dict(d0, fragment_id="LF-unknown")),
+        "accepted-verdict-1": lambda: rep.update(verdict=1),
+        "accepted-verdict-false": lambda: rep.update(verdict=False),
+        "accepted-not-ready": lambda: rep.update(promotion_ready=False),
+    }
+    if fixture in edits:
+        edits[fixture]()
+    files[imp.ACCEPTANCE_NAME] = imp._emit_acceptance_bytes(acc)
+    rd.tree[imp.ACCEPTANCE_NAME] = "file"
+    raw = {"accepted-undecodable": b"\xff\n", "accepted-unparseable": b"{\n", "accepted-too-deep": b"[" * 100000,
+           "accepted-not-object": b"[]\n"}
+    if fixture == "accepted-not-regular":
+        rd.tree[imp.ACCEPTANCE_NAME] = "other"
+    elif fixture == "accepted-unreadable":
+        # A regular entry whose read fails; on disk the file is made unreadable instead.
+        real_read = rd.read_bytes
+
+        def read_bytes(name):
+            if name == imp.ACCEPTANCE_NAME:
+                raise _GateError("staged artefact {!r} unreadable (injected)".format(name))
+            return real_read(name)
+        rd.read_bytes = read_bytes
+    elif fixture in raw:
+        files[imp.ACCEPTANCE_NAME] = raw[fixture]
+    edited = {"accepted-mapping-span": "mappings.toml", "accepted-mapping-not-array": "mappings.toml",
+              "accepted-fragment-not-array": "inventory.toml", "accepted-fragment-span": "inventory.toml"}.get(fixture)
+    if fixture.startswith("accepted-model-proposal"):
+        edited = "mappings.toml"
+    if edited is not None:
+        files[edited] = _opf_emit.emit(mappings if edited == "mappings.toml" else inventory).encode("utf-8")
+        for entry in rep["artifact"]:
+            if entry["path"] == edited:
+                entry["sha256"] = _sha256_hex(files[edited])
+    if edited is not None or fixture in ("accepted-verdict-1", "accepted-verdict-false", "accepted-not-ready"):
+        files["report.toml"] = _opf_emit.emit(rep).encode("utf-8")
+
+
+def _self_test_gate_generation_transaction_cases():
+    """Every transaction condition the gate grades, as (label, corruption of a clone of a genuinely applied store,
+    transaction-schema ok, transaction-consistency ok, (id, located detail)). A corruption that must hold while the
+    run is graded returns that context manager. _self_test grades the complete and archive-absent runs separately."""
+    import json
+    import shutil
+    from unittest.mock import patch
+    import _journal
+    import _opf_import as imp
+    import _opf_emit
+
+    def record(run, store):
+        return store / imp.IMPORT_OPS_REL / run.name / imp.TRANSACTION_NAME
+
+    def journal(store):
+        return store / imp.IMPORT_JOURNAL_REL
+
+    def txn_dir(run, store):
+        return journal(store) / _load_toml(record(run, store))["txn_id"]
+
+    def edit(change):
+        def mutate(run, store):
+            txn = _load_toml(record(run, store))
+            change(txn)
+            record(run, store).write_text(_opf_emit.emit(txn), encoding="utf-8")
+        return mutate
+
+    def fifo(path):
+        path.unlink()
+        os.mkfifo(str(path))
+
+    def store_root_unopenable(run, store):
+        real_open = os.open
+
+        def refuse(path, *args, **kwargs):
+            if path == "../../..":
+                raise OSError("store root unavailable (injected)")
+            return real_open(path, *args, **kwargs)
+        return patch.object(os, "open", side_effect=refuse)
+
+    def rehash(run, store):
+        record(run, store).write_bytes(record(run, store).read_bytes() + b"\n")
+
+    def journal_not_regular(run, store):
+        shutil.rmtree(str(journal(store)))
+        os.mkfifo(str(journal(store)))
+
+    def reframe(change):
+        # The genuine frames re-encoded after `change` edits the decoded frame list in place.
+        def mutate(run, store):
+            fd = os.open(str(journal(store)), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                frames, _torn, _good = _journal.read_frames(fd, txn_dir(run, store).name)
+            finally:
+                os.close(fd)
+            change(frames)
+            (txn_dir(run, store) / "frames.log").write_bytes(b"".join(
+                _journal._frame(ft, json.dumps(obj, sort_keys=True, separators=(",", ":")).encode())
+                for ft, obj in frames))
+        return mutate
+
+    def intent_header(**fields):
+        return reframe(lambda frames: frames[0][1]["header"].update(fields))
+
+    # The genuine frames with the terminal COMPLETE dropped: an interrupted promotion.
+    journal_not_terminal = reframe(lambda frames: frames.__setitem__(
+        slice(None), [(ft, obj) for ft, obj in frames if ft != _journal.F_COMPLETE]))
+
+    def archive(run, store):
+        return store / imp.IMPORT_ARCHIVE_REL / run.name / imp.ACCEPTANCE_NAME
+
+    def dangling(path):
+        path.unlink()
+        os.symlink(str(path.parent / "nowhere"), str(path))
+
+    def unapplied(also):
+        # No transaction record, beside one broken control path.
+        def mutate(run, store):
+            record(run, store).unlink()
+            also(run, store)
+        return mutate
+
+    def run_other(rid):
+        return rid[:-1] + ("1" if rid[-1] != "1" else "2")
+
+    schema, consistency = "transaction-schema", "transaction-consistency"
+    return (
+        ("store-root-unopenable", store_root_unopenable, False, False, (schema, "cannot open the store root")),
+        ("record-absent", lambda run, store: record(run, store).unlink(), True, True,
+         (schema, "no transaction record")),
+        ("record-not-regular", lambda run, store: fifo(record(run, store)), False, False,
+         (schema, "not a regular file")),
+        ("record-unparseable", lambda run, store: record(run, store).write_bytes(b"state =\n"), False, False,
+         (consistency, "unreadable/unparseable")),
+        ("record-schema", edit(lambda txn: txn.update(format="wrong/format/v9")), False, False,
+         (schema, "format is not")),
+        # Every other _opf_import._validate_transaction_record condition. The edited bytes no longer hash to the
+        # journal-recorded create, so consistency fails too.
+        ("record-schema-bool", edit(lambda txn: txn.update(schema=True)), False, False,
+         (schema, "transaction schema is not the integer")),
+        ("record-schema-value", edit(lambda txn: txn.update(schema=2)), False, False,
+         (schema, "transaction schema is not the integer")),
+        ("record-run-id", edit(lambda txn: txn.update(run_id=run_other(txn["run_id"]))), False, False,
+         (schema, "run_id does not name this run")),
+        ("record-state", edit(lambda txn: txn.update(state="unknown")), False, False,
+         (schema, "is not a transaction state")),
+        ("record-plan-digest-shape", edit(lambda txn: txn.update(plan_digest="sha256:short")), False, False,
+         (schema, "plan_digest is not")),
+        ("record-inventory-digest-shape", edit(lambda txn: txn.update(inventory_digest="sha256:short")), False,
+         False, (schema, "inventory_digest is not")),
+        ("record-txn-id-missing", edit(lambda txn: txn.pop("txn_id")), False, False,
+         (schema, "txn_id is missing")),
+        ("record-allocation", edit(lambda txn: txn.update(allocation="none")), False, False,
+         (schema, "allocation is not a table")),
+        ("record-allocation-entry", edit(lambda txn: txn.update(allocation=dict(LF=[" "]))), False, False,
+         (schema, "is not a namespace -> list-of-id-strings mapping")),
+        ("record-restore-ref", edit(lambda txn: txn.update(restore_ref="none")), False, False,
+         (schema, "restore_ref is not a table")),
+        ("record-restore-txn-id", edit(lambda txn: txn["restore_ref"].pop("txn_id")), False, False,
+         (schema, "restore_ref.txn_id is missing")),
+        ("record-restore-journal-rel", edit(lambda txn: txn["restore_ref"].pop("journal_rel")), False, False,
+         (schema, "restore_ref.journal_rel is missing")),
+        ("record-hash", rehash, True, False, (consistency, "do not hash")),
+        ("record-downgraded", edit(lambda txn: txn.update(state="published")), True, False,
+         (consistency, "is not 'complete'")),
+        ("restore-ref", edit(lambda txn: txn["restore_ref"].update(journal_rel="elsewhere")), True, False,
+         (consistency, "restore_ref does not name")),
+        ("txn-id", edit(lambda txn: (txn.update(txn_id="a/b"), txn["restore_ref"].update(txn_id="a/b"))), True,
+         False, (consistency, "is not a single journal transaction name")),
+        ("intent-plan-digest", edit(lambda txn: txn.update(plan_digest="sha256:" + "0" * 64)), True, False,
+         (consistency, "INTENT does not bind")),
+        ("intent-unit", intent_header(unit="imp-20260101T000000Z-0000000000000000"), True, False,
+         (consistency, "INTENT does not bind")),
+        ("intent-kind", intent_header(kind="import-other"), True, False, (consistency, "INTENT does not bind")),
+        ("journal-absent", lambda run, store: shutil.rmtree(str(journal(store))), True, False,
+         (consistency, "import journal is absent")),
+        ("journal-not-regular", journal_not_regular, True, False, (consistency, "cannot evaluate: import journal")),
+        ("journal-txn-absent", lambda run, store: shutil.rmtree(str(txn_dir(run, store))), True, False,
+         (consistency, "journal transaction")),
+        ("journal-not-terminal", journal_not_terminal, True, False, (consistency, "not terminal COMPLETE")),
+        ("archive-not-regular", lambda run, store: fifo(archive(run, store)), True, False,
+         (consistency, "archived acceptance")),
+        # No record: the journal and the archive are still classified.
+        ("record-absent-journal-not-regular", unapplied(journal_not_regular), True, False,
+         (consistency, "cannot evaluate: import journal")),
+        ("record-absent-archive-not-regular", unapplied(lambda run, store: fifo(archive(run, store))), True, False,
+         (consistency, "archived acceptance")),
+        ("record-absent-archive-dangling", unapplied(lambda run, store: dangling(archive(run, store))), True,
+         False, (consistency, "archived acceptance")),
+    )
+
+
+def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, ingest=False, credit=()):
+    """One fixture graded on disk beneath its store, with the located-store branch and transaction grading live (no
+    store failure is injected): every generation-independent id keeps its generation-1 result under generation 2 and
+    under every invalid generation, and every invalid generation fails each dependent id. On an ingest run (`ingest`)
+    the staged acceptance ids route by generation, so every invalid generation fails them too, and generation 2 keeps
+    every result except the two ingest-acceptance ids, which grade the durable home, and the staged acceptance ids,
+    which must then report that grading (a completeness id the completeness result, every other the binding
+    result). Appends (label, generation-1
+    results, generation-2 results, credit) to `swept` and returns the generation-1 results; `credit` is the (id,
+    located detail) pairs the fixture claims, which count only as _self_test_gate_generation_coverage allows."""
+    from unittest.mock import patch
+    import _opf_store
+    dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
+    staged = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
+    routed = dependent + (staged if ingest else ())
+    second = None
+    with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+        baseline = check_staged_run(run_dir, homes=1)
+        for case, homes in (("generation-2", 2),) + _self_test_gate_generation_cases():
+            result = check_staged_run(run_dir) if homes is None else check_staged_run(run_dir, homes=homes)
+            if case == "generation-2":
+                second = result
+                varies = _INGEST_ACCEPTANCE_CHECKS + staged if ingest else dependent
+                ok = all(result[cid] == value for cid, value in baseline.items() if cid not in varies) and (
+                    not ingest or all(result[cid] == result[_INGEST_ACCEPTANCE_CHECKS[cid.endswith("completeness")]]
+                                      for cid in staged))
+            else:
+                ok = (all(result[cid] == value for cid, value in baseline.items() if cid not in routed)
+                      and not any(result[cid][0] for cid in routed))
+            expect("gate-generation-applied-{}-{}".format(label, case), set(result) == set(EXPECTED_CHECKS) and ok)
+    if swept is not None:
+        swept.append((label, baseline, second, tuple(credit)))
+    return baseline
+
+
+def _self_test_gate_generation_prerequisites(cid):
+    """The ids that must pass in a fixture before its failure of `cid` earns coverage credit: staged-run-structure for
+    every other id; ingest-run-structure for each ingest check, and every ingest check as well for the two durable
+    ingest-acceptance ids (a review is graded only over a validated model); report-schema for the checks that read
+    report fields; acceptance-schema for acceptance binding and completeness; transaction-schema for
+    transaction-consistency."""
+    if cid == "staged-run-structure":
+        return ()
+    if cid in _INGEST_CHECK_IDS:
+        return ("staged-run-structure", "ingest-run-structure")
+    if cid in _INGEST_ACCEPTANCE_CHECKS:
+        return ("staged-run-structure", "ingest-run-structure") + _INGEST_CHECK_IDS
+    return ("staged-run-structure",) + {"artifact-digest-integrity": ("report-schema",),
+                                        "report-binding-digests": ("report-schema",),
+                                        "acceptance-binding": ("acceptance-schema",),
+                                        "acceptance-completeness": ("acceptance-schema",),
+                                        "transaction-consistency": ("transaction-schema",)}.get(cid, ())
+
+
+def _self_test_gate_generation_coverage(swept, ids):
+    """Map each id of `ids` that a swept fixture covers to the first such fixture's label; an id missing from the
+    result is uncovered. A fixture's claimed (id, located detail) covers the id only when some check passes (a
+    blanket failure credits nothing), every prerequisite (_self_test_gate_generation_prerequisites) passes, the id
+    fails with a detail containing the located text, no other failing id carries that text unless it depends on the
+    id, and generation 2 gives the same result. The two ingest-acceptance ids are judged on the generation-2 result,
+    the only generation that grades the durable home; there the staged acceptance ids report the same durable
+    grading, so they may carry the text. Every other id is judged on the generation-1 result."""
+    staged_acceptance = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
+    covered = {}
+    for label, first, second, credit in swept:
+        for cid, needle in credit:
+            results = second if cid in _INGEST_ACCEPTANCE_CHECKS else first
+            shared = {c for c in results if cid in _self_test_gate_generation_prerequisites(c)}
+            if cid in _INGEST_ACCEPTANCE_CHECKS:
+                shared.update(staged_acceptance)
+            if (cid in ids and cid not in covered and any(ok for ok, _d in results.values())
+                    and all(results[p][0] for p in _self_test_gate_generation_prerequisites(cid))
+                    and not results[cid][0] and needle in results[cid][1]
+                    and not any(not ok and needle in detail for c, (ok, detail) in results.items()
+                                if c != cid and c not in shared)
+                    and second[cid] == results[cid]):
+                covered[cid] = label
+    return covered
+
+
+def _self_test_gate_generation_disk(store, fixture=None):
+    """Write the synthetic run of _opf_import._memory_ingest_run beneath `store` at its staging location and return the
+    run directory. With `fixture` (one of _self_test_gate_generation_acceptance_cases) the ingest markers are dropped,
+    the report is re-rendered for the ordinary run, and that fixture's corruption is applied, as
+    _self_test_gate_generation does in memory; a non-regular acceptance is a FIFO and an unreadable one is mode 000.
+    Without `fixture` the ingest run is written as built."""
+    import _opf_import as imp
+    rd, files = imp._memory_ingest_run()
+    if fixture is not None:
+        for name in imp._INGEST_RUN_MARKERS:
+            files.pop(name, None)
+            rd.tree.pop(name, None)
+        inv = rd.load_toml("inventory.toml")
+        norm = [dict(p, _origin=p["origin"]) for p in rd.load_toml(imp.PROPOSALS_NAME)["proposal"]]
+        files[imp.REPORT_MD_NAME] = imp._render_report_md(
+            inv["inventory_digest"], inv["fragment"], norm, rd.path.name).encode("utf-8")
+        _self_test_gate_generation_accept(rd, files, fixture)
+    run_dir = Path(store) / imp.IMPORTS_REL / rd.path.name
+    for name, data in files.items():
+        (run_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        if rd.tree.get(name) == "other":
+            os.mkfifo(str(run_dir / name))
+        else:
+            (run_dir / name).write_bytes(data)
+    if fixture == "accepted-unreadable":
+        os.chmod(str(run_dir / imp.ACCEPTANCE_NAME), 0)
+    return run_dir
+
+
+def _self_test_gate_generation(expect):
+    """Invalid generations fail every dependent id without suppressing ordinary grading, and generation 2 changes no
+    generation-independent id of an ordinary run. The ordinary fixtures include a valid staged acceptance and, for
+    every staged-acceptance condition the gate grades (_self_test_gate_generation_acceptance_cases: the read and
+    decode routing, each schema finding, attribution, the inventory/mappings correlation, each binding and
+    completeness condition including a duplicated decision, and the report fields the acceptance rests on), one
+    corruption that fails that condition at generation 1. Every generation-independent result must be identical under
+    generation 2 and every invalid generation. The run here has no store, so generation 2 never reaches the
+    located-store branch; _self_test grades the same table on disk through _self_test_gate_generation_applied."""
+    import sys
+    from unittest.mock import patch
+    import _opf_import as imp
+    import _opf_emit
+    import _opf_store
+
+    gate = sys.modules[__name__]
+    dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
+    staged_acceptance = ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
+                         "acceptance-completeness")
+    cases = _self_test_gate_generation_cases()
+    # A valid staged acceptance and one corruption per graded condition, each mapped to the ids it fails at
+    # generation 1 and the located details naming that condition.
+    accepted = {fixture: (fails, located) for fixture, fails, located in _self_test_gate_generation_acceptance_cases()}
+    ordinary = ("ordinary", "ordinary-marked-acceptance") + tuple(accepted)
+    for fixture in ordinary + ("ingest", "malformed-core"):
+        rd, files = imp._memory_ingest_run()
+        rd.fd = -1
+        if fixture in ordinary:
+            for name in imp._INGEST_RUN_MARKERS:
+                files.pop(name, None)
+                rd.tree.pop(name, None)
+            inv = rd.load_toml("inventory.toml")
+            proposals = rd.load_toml(imp.PROPOSALS_NAME)["proposal"]
+            norm = [dict(p, _origin=p["origin"]) for p in proposals]
+            files[imp.REPORT_MD_NAME] = imp._render_report_md(
+                inv["inventory_digest"], inv["fragment"], norm, rd.path.name).encode("utf-8")
+            if fixture == "ordinary-marked-acceptance":
+                files[imp.ACCEPTANCE_NAME] = b'{"ingest": {}}'
+                rd.tree[imp.ACCEPTANCE_NAME] = "file"
+                # Located ordinary findings (a non-integer verdict, a report that is not byte-reproducible)
+                # must survive every invalid generation unchanged.
+                rep = rd.load_toml("report.toml")
+                rep["verdict"] = False
+                files["report.toml"] = _opf_emit.emit(rep).encode("utf-8")
+                files[imp.REPORT_MD_NAME] += b"x"
+            elif fixture in accepted:
+                _self_test_gate_generation_accept(rd, files, fixture)
+        elif fixture == "malformed-core":
+            real_load = rd.load_toml
+
+            def load(name):
+                if name == "report.toml":
+                    raise _GateError("report.toml is unreadable (injected)")
+                return real_load(name)
+
+            rd.load_toml = load
+
+        # The synthetic reader has no store descriptor; transaction checks still record their failures.
+        with patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
+                patch.object(os, "open", side_effect=OSError("synthetic store unavailable")):
+            baseline = _check_staged_run(rd, homes=1)
+            if fixture in accepted:
+                # The controls grade clean; each corruption fails exactly its listed ids, for its located reason.
+                fails, located = accepted[fixture]
+                expect("gate-generation-{}-baseline".format(fixture),
+                       {cid for cid, (ok, _detail) in baseline.items() if not ok
+                        and cid not in ("transaction-schema", "transaction-consistency")} == set(fails)
+                       and all(needle in baseline[cid][1] for cid, needle in located))
+            if fixture == "ordinary" or fixture in accepted:
+                # Generation 2 probes the durable home (unavailable here) and reads the staged acceptance bytes;
+                # an ordinary run keeps every generation-independent result.
+                current = _check_staged_run(rd, homes=2)
+                expect("gate-generation-{}-generation-2".format(fixture),
+                       set(current) == set(EXPECTED_CHECKS) and all(
+                           current[cid] == value for cid, value in baseline.items() if cid not in dependent)
+                       and current["ingest-run-structure"] == (True, "not an ingest run"))
+            if fixture == "ordinary-marked-acceptance":
+                # The fixture really carries the findings the invalid cases must preserve.
+                expect("gate-generation-ordinary-marked-acceptance-baseline-findings", all(
+                    not baseline[cid][0] for cid in ("report-schema", "proposals-artifact", "acceptance-schema")))
+            for label, bad in cases:
+                error = ("the store's homes generation was not supplied to this manifest-free gate"
+                         if bad is None else
+                         "the supplied homes generation {!r} is not 1 or 2, or is above the tooling's "
+                         "supported generation 2".format(bad))
+                # Named flips: allow this value's ingest checks to pass, probe its durable home,
+                # run ingest validation, lose the located error, or return an incomplete registry.
+                with patch.object(gate, "_ingest_store_fd") as locate, \
+                        patch.object(gate, "_ingest_acceptance_checks") as acceptance, \
+                        patch.object(gate, "_verify_ingest_review_model") as validate, \
+                        patch.object(imp, "_validate_staged_ingest_bundle") as bundle:
+                    result = (_check_staged_run(rd) if bad is None
+                              else _check_staged_run(rd, homes=bad))
+                # Every generation-independent id keeps its generation-1 result; on an ingest run the staged
+                # acceptance ids route by generation, so only an ordinary run compares them too.
+                ordinary_unchanged = all(
+                    result.get(cid) == value for cid, value in baseline.items()
+                    if cid not in dependent and (fixture in ordinary or cid not in staged_acceptance))
+                ordinary_clean = (fixture != "ordinary" or all(
+                    ok for cid, (ok, _detail) in baseline.items()
+                    if cid not in ("transaction-schema", "transaction-consistency")))
+                if fixture == "ingest":
+                    expect("gate-generation-ingest-staged-acceptance-{}".format(label),
+                           all(result.get(cid) == (False, error) for cid in staged_acceptance))
+                elif fixture in ("ordinary-marked-acceptance", "malformed-core"):
+                    # An unreadable core report takes precedence over the generation on every run kind.
+                    expect("gate-generation-{}-staged-acceptance-{}".format(
+                               "ordinary" if fixture == "ordinary-marked-acceptance" else fixture, label),
+                           all(result.get(cid) == baseline[cid] for cid in staged_acceptance))
+                expect("gate-generation-{}-{}".format(fixture, label),
+                       set(result) == set(EXPECTED_CHECKS)
+                       and all(result.get(cid) == (False, error) for cid in dependent)
+                       and ordinary_unchanged and ordinary_clean
+                       and not any(p.called for p in (locate, acceptance, validate, bundle)))
+
+
 def _self_test():
     """Build synthetic staged runs and assert every registered check PASSes on a clean run and FINDINGs on
     its own discriminator (a single deliberate mutation), plus the scan-layer checks. Returns 0 clean, 1 on
@@ -2188,6 +3039,42 @@ def _self_test():
     def expect(label, cond):
         if not cond:
             failures.append(label)
+
+    _self_test_gate_generation(expect)
+    _self_test_gate_generation_sites(expect)
+
+    # Every on-disk fixture below is graded through the generation sweep (_self_test_gate_generation_applied): its
+    # generation-independent results must not change under generation 2 or any invalid generation.
+    swept = []
+    # The ids a detached ordinary run grades from its own bytes: at generation 2 _ingest_store_fd finds no store and
+    # the gate takes the detached branch, so each credited discriminator for these ids is graded again as a detached
+    # copy (the store-relative transaction ids and the ingest ids are graded apart).
+    detached_ids = EXPECTED_CHECKS[:EXPECTED_CHECKS.index("acceptance-completeness") + 1]
+    detached_labels = []
+
+    def detach(run_dir):
+        """A copy of `run_dir`, under the same basename, where no store-relative home matches; None when an entry is
+        not a readable regular file or directory (a FIFO or mode-000 fixture is not copied)."""
+        import stat
+        for top, dirs, files in os.walk(str(run_dir)):
+            for name in dirs + files:
+                st = os.lstat(os.path.join(top, name))
+                if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)) \
+                        or not os.access(os.path.join(top, name), os.R_OK):
+                    return None
+        dest = base / "detached-{:03d}".format(len(detached_labels)) / run_dir.name
+        shutil.copytree(str(run_dir), str(dest))
+        return dest
+
+    def graded(run_dir, label=None, ingest=False, credit=()):
+        label = label or "sweep-{:03d}".format(len(swept))
+        first = _self_test_gate_generation_applied(expect, label, run_dir, swept, ingest, credit)
+        twin = None if ingest or not any(cid in detached_ids for cid, _n in credit) else detach(run_dir)
+        if twin is not None:
+            detached_labels.append(label + "-detached")
+            _self_test_gate_generation_applied(expect, label + "-detached", twin, swept, False, credit)
+            expect("gate-generation-detached-{}".format(label), swept[-1][1] == first)
+        return first
 
     NOW = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
@@ -2274,8 +3161,9 @@ def _self_test():
         # Preserve the original imp-... run-id BASENAME (under a unique parent) so a clean copy still
         # passes staged-run-structure (run-id grammar) and report-schema (report.run_id == dir name);
         # otherwise every copy would fail those on the rename alone and no discriminator would isolate.
-        parent = base / "mut-{:03d}".format(counter[0] * 100 + len(list(base.glob("mut-*"))))
-        parent.mkdir()
+        # The copy sits at its store's staging location, so generation 2 locates the store (never a detached copy).
+        parent = base / "mut-{:03d}".format(counter[0] * 100 + len(list(base.glob("mut-*")))) / imp.IMPORTS_REL
+        parent.mkdir(parents=True)
         dest = parent / run_dir.name
         shutil.copytree(str(run_dir), str(dest))
         return dest
@@ -2299,7 +3187,7 @@ def _self_test():
     try:
         # --- clean run: every check PASSes -----------------------------------------------------------
         clean = stage_clean()
-        clean_results = check_staged_run(clean)
+        clean_results = graded(clean)
         for cid, (ok, detail) in clean_results.items():
             expect("clean:{}:{}".format(cid, detail), ok)
         # The emitted check-set must be EXACTLY the declared registry (no omission, no stray): an omitted
@@ -2370,14 +3258,14 @@ def _self_test():
         write_txn(tcb.parent.parent.parent, tcb.name)
         write_archived_acceptance(tcb.parent.parent.parent, tcb.name)
         write_journal(tcb.parent.parent.parent, tcb.name)
-        tcb_res = check_staged_run(tcb)
+        tcb_res = graded(tcb)
         expect("txn-valid-schema-pass", tcb_res["transaction-schema"][0] is True)
         expect("txn-valid-consistency-pass", tcb_res["transaction-consistency"][0] is True)
         # (c) a malformed record (wrong format): transaction-schema FINDING.
         tcc = stage_clean()
         write_txn(tcc.parent.parent.parent, tcc.name, format="wrong/format/v9")
         write_archived_acceptance(tcc.parent.parent.parent, tcc.name)
-        expect("disc-txn-schema", check_staged_run(tcc)["transaction-schema"][0] is False)
+        expect("disc-txn-schema", graded(tcc)["transaction-schema"][0] is False)
         # (d) state >= published but the archived acceptance is absent: asserted below as "disc-txn-consistency"
         # on a GENUINE, journal-bound applied store with ONLY the archive removed (round-6 F3: the former
         # fixture, a journal-less published record, failed on the journal bind whether or not the archive
@@ -2395,7 +3283,7 @@ def _self_test():
         (store_e / ".aiqt").mkdir()
         os.symlink(str(outside / "ops" / imp.IMPORT_OPS_REL), str(store_e / imp.IMPORT_OPS_REL))
         os.symlink(str(outside / "arc" / imp.IMPORT_ARCHIVE_REL), str(store_e / imp.IMPORT_ARCHIVE_REL))
-        tce_res = check_staged_run(tce)
+        tce_res = graded(tce)
         expect("pr4b-disc-r4f3-txn-parent-symlink-outside-store",
                tce_res["transaction-schema"][0] is False and tce_res["transaction-consistency"][0] is False
                and "no-follow" in tce_res["transaction-schema"][1])
@@ -2407,7 +3295,7 @@ def _self_test():
         (store_f / imp.IMPORT_OPS_REL).mkdir(parents=True)
         os.symlink(str(store_f / "r4f3-elsewhere" / imp.IMPORT_OPS_REL / tcf.name),
                    str(store_f / imp.IMPORT_OPS_REL / tcf.name))
-        tcf_res = check_staged_run(tcf)
+        tcf_res = graded(tcf)
         expect("pr4b-disc-r4f3-txn-parent-symlink-in-store",
                tcf_res["transaction-schema"][0] is False and "no-follow" in tcf_res["transaction-schema"][1])
         # (g) a valid record whose archived acceptance.json is a symlink to a regular file outside the store.
@@ -2418,7 +3306,7 @@ def _self_test():
         (store_g / imp.IMPORT_ARCHIVE_REL / tcg.name).mkdir(parents=True)
         os.symlink(str(outside / "arc" / imp.IMPORT_ARCHIVE_REL / tce.name / imp.ACCEPTANCE_NAME),
                    str(store_g / imp.IMPORT_ARCHIVE_REL / tcg.name / imp.ACCEPTANCE_NAME))
-        tcg_res = check_staged_run(tcg)
+        tcg_res = graded(tcg)
         expect("pr4b-disc-r4f3-archived-acceptance-symlink",
                tcg_res["transaction-schema"][0] is True and tcg_res["transaction-consistency"][0] is False
                and "not a regular file" in tcg_res["transaction-consistency"][1])
@@ -2429,7 +3317,7 @@ def _self_test():
         write_journal(store_h, tch.name)   # round-6 F3 sweep: journal-bound, so ONLY the archive can fail
         (store_h / imp.IMPORT_ARCHIVE_REL / tch.name).mkdir(parents=True)
         os.mkfifo(str(store_h / imp.IMPORT_ARCHIVE_REL / tch.name / imp.ACCEPTANCE_NAME))
-        tch_res = check_staged_run(tch)
+        tch_res = graded(tch)
         expect("pr4b-disc-r4f3-archived-acceptance-fifo",
                tch_res["transaction-consistency"][0] is False
                and "not a regular file" in tch_res["transaction-consistency"][1])
@@ -2438,7 +3326,7 @@ def _self_test():
         store_i = tci.parent.parent.parent
         (store_i / imp.IMPORT_OPS_REL / tci.name).mkdir(parents=True)
         os.mkfifo(str(store_i / imp.IMPORT_OPS_REL / tci.name / imp.TRANSACTION_NAME))
-        tci_res = check_staged_run(tci)
+        tci_res = graded(tci)
         expect("pr4b-disc-r4f3-txn-fifo",
                tci_res["transaction-schema"][0] is False and "not a regular file" in tci_res["transaction-schema"][1])
 
@@ -2460,7 +3348,7 @@ def _self_test():
             return run, store
 
         def txc(run):
-            res = check_staged_run(run)
+            res = graded(run)
             return res["transaction-schema"], res["transaction-consistency"]
 
         r5b, _s = applied()
@@ -2645,7 +3533,7 @@ def _self_test():
             shutil.copytree(str(g_root), str(dst), symlinks=True)
             return dst / g_run.relative_to(g_root), dst
 
-        g_res = check_staged_run(g_run)
+        g_res = graded(g_run)
         expect("pr4b-r6-genuine-complete-all-pass", all(ok for ok, _d in g_res.values()))
         g_rec = g_root / imp.IMPORT_OPS_REL / g_run.name / imp.TRANSACTION_NAME
         expect("pr4b-r6-genuine-complete-is-complete",
@@ -2655,6 +3543,26 @@ def _self_test():
         (g3s / imp.IMPORT_ARCHIVE_REL / g3.name / imp.ACCEPTANCE_NAME).unlink()
         _ts, tc = txc(g3)
         expect("disc-txn-consistency", tc[0] is False and "archived acceptance.json is absent" in tc[1])
+        # Both applied runs under every generation, with transaction grading live on the real store: the
+        # archive-absent run keeps its transaction finding, so a generation-dependent value (an ingest result, a
+        # durable-home probe) reaching that grading flips it.
+        g_gen1 = graded(g_run, "complete")
+        g3_gen1 = graded(g3, "archive-absent")
+        expect("gate-generation-applied-baselines", all(ok for ok, _d in g_gen1.values())
+               and not g3_gen1["transaction-consistency"][0]
+               and "archived acceptance.json is absent" in g3_gen1["transaction-consistency"][1])
+        # Every other transaction condition, each one corruption of a clone of the applied store, graded the same
+        # way: at generation 1 it is that condition's located result, with every other id clean.
+        for label, mutate, schema_ok, consistency_ok, (cid, needle) in _self_test_gate_generation_transaction_cases():
+            gt, gts = genuine_clone()
+            context = mutate(gt, gts)
+            with context if hasattr(context, "__enter__") else contextlib.nullcontext():
+                gt_gen1 = graded(gt, label, credit=((cid, needle),))
+            expect("gate-generation-applied-{}-baseline".format(label),
+                   gt_gen1["transaction-schema"][0] is schema_ok
+                   and gt_gen1["transaction-consistency"][0] is consistency_ok and needle in gt_gen1[cid][1]
+                   and all(ok for c, (ok, _d) in gt_gen1.items()
+                           if c not in ("transaction-schema", "transaction-consistency")))
         # F1 on the genuine store: the producer's complete record downgraded (published / prepared, allocation
         # LF-999), the genuine terminal journal unchanged.
         for st in ("published", "prepared"):
@@ -2777,7 +3685,7 @@ def _self_test():
                 os.close(c_jfd)
         finally:
             os.close(c_rfd)
-        c_res = check_staged_run(c_run)
+        c_res = graded(c_run)
         expect("pr4b-r6-genuine-rolled-back-all-pass",
                c_states == ["rolled-back"] and not (c_root / c_rec_rel).exists()
                and all(ok for ok, _d in c_res.values()))
@@ -2786,12 +3694,12 @@ def _self_test():
         # structure: remove plan.toml.
         m = copy_run(clean)
         (m / "plan.toml").unlink()
-        expect("disc-structure", check_staged_run(m)["staged-run-structure"][0] is False)
+        expect("disc-structure", graded(m)["staged-run-structure"][0] is False)
 
         # structure (parse): a present-but-UNPARSEABLE plan.toml fails closed (not merely is_file()).
         m = copy_run(clean)
         (m / "plan.toml").write_bytes(b"not valid toml [")
-        expect("disc-structure-malformed-plan", check_staged_run(m)["staged-run-structure"][0] is False)
+        expect("disc-structure-malformed-plan", graded(m)["staged-run-structure"][0] is False)
 
         # N6: a run dir renamed with a TRAILING NEWLINE must fail staged-run-structure. The run-id grammar
         # is \Z-anchored, not $ (which also matches just before a final "\n"), so "imp-...\n" is not a run
@@ -2800,42 +3708,39 @@ def _self_test():
         nl_dir = m.parent / (m.name + "\n")
         m.rename(nl_dir)
         expect("disc-structure-trailing-newline",
-               check_staged_run(nl_dir)["staged-run-structure"][0] is False)
+               graded(nl_dir, credit=(("staged-run-structure", "is not a run id"),))["staged-run-structure"][0] is False)
 
-        # report-schema: flip verdict to 1 (report.toml is not in its own artefact list, so the digest
-        # check stays green).
-        m = copy_run(clean)
-        rep = _load_toml(m / "report.toml")
-        rep["verdict"] = 1
-        (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
-        expect("disc-report-schema", check_staged_run(m)["report-schema"][0] is False)
-
-        # report-schema (strict-int verdict): a report.toml verdict of `false` (a bool) must NOT pass via
-        # Python's `False == 0`. The `type(...) is int` guard (bool excluded) makes it a FINDING, so a
-        # not-promotion-ready run cannot clear all 16 checks. report.toml is not in its own artefact list, so
-        # the digest check stays green and only report-schema fires.
-        m = copy_run(clean)
-        rep = _load_toml(m / "report.toml")
-        rep["verdict"] = False
-        (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
-        expect("disc-report-schema-bool-verdict", check_staged_run(m)["report-schema"][0] is False)
-
-        # report-schema (strict-int schema, R5-F2): a report.toml schema of `true` (a bool) must NOT pass via
-        # Python's `True == 1`. The `type(...) is int` guard (bool excluded) makes it a FINDING, the class
-        # sibling of the bool-verdict discriminator above. report.toml is not in its own artefact list, so the
-        # digest check stays green and only report-schema fires.
-        m = copy_run(clean)
-        rep = _load_toml(m / "report.toml")
-        rep["schema"] = True
-        (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
-        expect("disc-report-schema-bool-schema", check_staged_run(m)["report-schema"][0] is False)
+        # report-schema: one swept fixture per condition of its conjunction (report.toml is not in its own artefact
+        # list, so the digest check stays green). Each must fail report-schema and nothing else at generation 1:
+        # verdict 1, and verdict / schema a bool (the strict-int guards: Python's `False == 0` and `True == 1` would
+        # slip a bare comparison, R5-F2), schema an integer other than 1, a report.run_id naming another run, and
+        # promotion_ready false. The non-list artifact condition is swept below (it also fails
+        # artifact-digest-integrity, which reads the same field).
+        report_conditions = (
+            ("disc-report-schema", lambda rep: rep.update(verdict=1)),
+            ("disc-report-schema-bool-verdict", lambda rep: rep.update(verdict=False)),
+            ("disc-report-schema-bool-schema", lambda rep: rep.update(schema=True)),
+            ("disc-report-schema-schema-value", lambda rep: rep.update(schema=2)),
+            ("disc-report-schema-run-id", lambda rep: rep.update(
+                run_id=rep["run_id"][:-1] + ("1" if rep["run_id"][-1] != "1" else "2"))),
+            ("disc-report-schema-not-ready", lambda rep: rep.update(promotion_ready=False)),
+        )
+        for rlabel, redit in report_conditions:
+            m = copy_run(clean)
+            rep = _load_toml(m / "report.toml")
+            redit(rep)
+            (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
+            rres = graded(m, rlabel, credit=(("report-schema", "report.toml schema/run_id/verdict/promotion_ready/artifact malformed"),))
+            expect(rlabel, [cid for cid, (ok, _d) in rres.items() if not ok] == ["report-schema"]
+                   and rres["report-schema"][1] == "report.toml schema/run_id/verdict/promotion_ready/artifact malformed")
 
         # artifact-digest-integrity: append an inert TOML comment to run.toml WITHOUT refreshing its
         # recorded digest (run.toml still parses identically, so only the digest check fires).
         m = copy_run(clean)
         with open(m / "run.toml", "ab") as fh:
             fh.write(b"\n# tampered\n")
-        expect("disc-artifact-digest", check_staged_run(m)["artifact-digest-integrity"][0] is False)
+        expect("disc-artifact-digest", graded(m, credit=(
+            ("artifact-digest-integrity", "do not match recorded digest"),))["artifact-digest-integrity"][0] is False)
 
         # artifact-digest-integrity (non-list shape, R5-F1): a report.toml `artifact` of a NON-LIST type
         # (int or bool) must be a located FINDING, never an uncaught TypeError from iterating a
@@ -2849,7 +3754,7 @@ def _self_test():
             rep["artifact"] = bad_artifact
             (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
             try:
-                res = check_staged_run(m)
+                res = graded(m)
             except Exception as exc:  # the guard makes this unreachable; without it the loop raises
                 expect("disc-artifact-non-list-noraise:{!r}:{!r}".format(bad_artifact, exc), False)
             else:
@@ -2863,7 +3768,7 @@ def _self_test():
         mp["mapping"][0]["span"] = [0, mp["mapping"][0]["span"][1] - 1]
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
-        expect("disc-mapping-totality", check_staged_run(m)["mapping-totality"][0] is False)
+        expect("disc-mapping-totality", graded(m, credit=(("mapping-totality", "spans"),))["mapping-totality"][0] is False)
 
         # mapping-state-vocab: set a row state outside the vocabulary; refresh the digest.
         m = copy_run(clean)
@@ -2871,7 +3776,8 @@ def _self_test():
         mp["mapping"][0]["state"] = "renamed"
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
-        expect("disc-state-vocab", check_staged_run(m)["mapping-state-vocab"][0] is False)
+        expect("disc-state-vocab", graded(m, credit=(
+            ("mapping-state-vocab", "outside the 8-state vocabulary"),))["mapping-state-vocab"][0] is False)
 
         # mapping-origin-vocab: delete one row's origin (state/spans unchanged, so state-vocab, totality and
         # bijection stay coherent); refresh the digest so only the origin-vocab check fires.
@@ -2880,7 +3786,7 @@ def _self_test():
         del mp["mapping"][0]["origin"]
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
-        expect("disc-origin-vocab-deleted", check_staged_run(m)["mapping-origin-vocab"][0] is False)
+        expect("disc-origin-vocab-deleted", graded(m)["mapping-origin-vocab"][0] is False)
 
         # mapping-origin-vocab: set a row's origin outside the provenance vocabulary; refresh the digest.
         m = copy_run(clean)
@@ -2888,7 +3794,8 @@ def _self_test():
         mp["mapping"][0]["origin"] = "guessed"
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
-        expect("disc-origin-vocab-bad", check_staged_run(m)["mapping-origin-vocab"][0] is False)
+        expect("disc-origin-vocab-bad", graded(m, credit=(
+            ("mapping-origin-vocab", "outside the provenance vocabulary"),))["mapping-origin-vocab"][0] is False)
 
         # N4: an UNHASHABLE mapping origin/state ([]) is a located FINDING, never a TypeError at the
         # membership test. origin=[] is the real crash flip (imp._ORIGIN_SET is a frozenset); state=[] is
@@ -2898,14 +3805,14 @@ def _self_test():
         mp["mapping"][0]["origin"] = []
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
-        expect("disc-origin-vocab-unhashable", check_staged_run(m)["mapping-origin-vocab"][0] is False)
+        expect("disc-origin-vocab-unhashable", graded(m)["mapping-origin-vocab"][0] is False)
 
         m = copy_run(clean)
         mp = _load_toml(m / "mappings.toml")
         mp["mapping"][0]["state"] = []
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
-        expect("disc-state-vocab-unhashable", check_staged_run(m)["mapping-state-vocab"][0] is False)
+        expect("disc-state-vocab-unhashable", graded(m)["mapping-state-vocab"][0] is False)
 
         # lf-bijection: delete one legacy_fragment record; refresh the digest.
         m = copy_run(clean)
@@ -2913,7 +3820,8 @@ def _self_test():
         lf["record"] = lf["record"][:-1]
         (m / "fragments" / "legacy_fragment.index.toml").write_text(_opf_emit.emit(lf), encoding="utf-8")
         rewrite_report_digest(m, "fragments/legacy_fragment.index.toml")
-        expect("disc-lf-bijection", check_staged_run(m)["lf-bijection"][0] is False)
+        expect("disc-lf-bijection", graded(m, credit=(
+            ("lf-bijection", "do not correspond one-to-one"),))["lf-bijection"][0] is False)
 
         # lf-bijection (count-preserving): duplicate one record over another so the COUNT is unchanged but
         # a quarantined source loses its correspondence; the keyed check must still FINDING.
@@ -2924,7 +3832,7 @@ def _self_test():
             (m / "fragments" / "legacy_fragment.index.toml").write_text(
                 _opf_emit.emit(lf), encoding="utf-8")
             rewrite_report_digest(m, "fragments/legacy_fragment.index.toml")
-            expect("disc-lf-bijection-swap", check_staged_run(m)["lf-bijection"][0] is False)
+            expect("disc-lf-bijection-swap", graded(m)["lf-bijection"][0] is False)
 
         # lf-quad-completeness: drop the `span` field from one legacy_fragment; refresh the digest.
         m = copy_run(clean)
@@ -2932,7 +3840,8 @@ def _self_test():
         del lf["record"][0]["span"]
         (m / "fragments" / "legacy_fragment.index.toml").write_text(_opf_emit.emit(lf), encoding="utf-8")
         rewrite_report_digest(m, "fragments/legacy_fragment.index.toml")
-        expect("disc-lf-quad", check_staged_run(m)["lf-quad-completeness"][0] is False)
+        expect("disc-lf-quad", graded(m, credit=(
+            ("lf-quad-completeness", "omits a provenance-quad field"),))["lf-quad-completeness"][0] is False)
 
         # source-preservation: tamper preserved source bytes; refresh the report digest for that file so
         # only the preservation check (bytes no longer hash to the recorded/named digest) fires.
@@ -2941,7 +3850,8 @@ def _self_test():
         victim = run["source"][0]["sha256"]
         (m / "sources" / victim).write_bytes(b"tampered-bytes")
         rewrite_report_digest(m, "sources/" + victim)
-        expect("disc-source-preservation", check_staged_run(m)["source-preservation"][0] is False)
+        expect("disc-source-preservation", graded(m, credit=(
+            ("source-preservation", "do not hash to the recorded digest"),))["source-preservation"][0] is False)
 
         # inventory-digest: corrupt the recorded inventory_digest (inventory.toml is not in report's
         # artefact list, so only the inventory-digest check fires).
@@ -2949,7 +3859,8 @@ def _self_test():
         inv = _load_toml(m / "inventory.toml")
         inv["inventory_digest"] = "sha256:" + ("0" * 64)
         (m / "inventory.toml").write_text(_opf_emit.emit(inv), encoding="utf-8")
-        expect("disc-inventory-digest", check_staged_run(m)["inventory-digest"][0] is False)
+        expect("disc-inventory-digest", graded(m, credit=(
+            ("inventory-digest", "does not recompute"),))["inventory-digest"][0] is False)
 
         # report-binding-digests: corrupt report.toml's plan_digest (report.toml is not in its own artefact
         # list, so the digest-integrity check stays green and only the binding-digest check fires).
@@ -2957,25 +3868,28 @@ def _self_test():
         rep = _load_toml(m / "report.toml")
         rep["plan_digest"] = "sha256:" + ("0" * 64)
         (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
-        expect("disc-report-binding-digests", check_staged_run(m)["report-binding-digests"][0] is False)
+        expect("disc-report-binding-digests", graded(m, credit=(
+            ("report-binding-digests", "plan_digest does not recompute"),))["report-binding-digests"][0] is False)
 
-        # proposals-artifact: tamper proposals.toml (proposals.toml is not in report's artefact list, so
-        # only the proposals-artifact check fires).
-        m = copy_run(clean)
-        props = _load_toml(m / "proposals.toml")
-        props["run_id"] = "imp-20260101T000000Z-0000000000000000"
-        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
-        expect("disc-proposals-artifact", check_staged_run(m)["proposals-artifact"][0] is False)
-
-        # proposals-artifact (strict-int schema, R5-F2): a proposals.toml schema of `true` (a bool) must NOT
-        # pass via Python's `True == 1`. The `type(...) is int` guard (bool excluded) makes it a FINDING, the
-        # class sibling of the report-schema bool-schema discriminator. proposals.toml is not in report's
-        # artefact list, so only the proposals-artifact check fires.
-        m = copy_run(clean)
-        props = _load_toml(m / "proposals.toml")
-        props["schema"] = True
-        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
-        expect("disc-proposals-artifact-bool-schema", check_staged_run(m)["proposals-artifact"][0] is False)
+        # proposals-artifact: one swept fixture per condition of its proposals.toml header conjunction
+        # (proposals.toml is not in report's artefact list, so only the proposals-artifact check fires): a run_id
+        # naming another run, a schema of `true` (a bool must NOT pass via Python's `True == 1`: the strict-int
+        # guard, R5-F2, the class sibling of the report-schema bool-schema discriminator), a schema integer other
+        # than 1, and a missing proposal array. Each must fail proposals-artifact alone, with the header detail.
+        proposals_conditions = (
+            ("disc-proposals-artifact", lambda props: props.update(run_id="imp-20260101T000000Z-0000000000000000")),
+            ("disc-proposals-artifact-bool-schema", lambda props: props.update(schema=True)),
+            ("disc-proposals-artifact-schema-value", lambda props: props.update(schema=2)),
+            ("disc-proposals-artifact-no-array", lambda props: props.pop("proposal")),
+        )
+        for plabel, pedit in proposals_conditions:
+            m = copy_run(clean)
+            props = _load_toml(m / "proposals.toml")
+            pedit(props)
+            (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+            pres = graded(m, plabel, credit=(("proposals-artifact", "schema/run_id/proposal array malformed"),))
+            expect(plabel, [cid for cid, (ok, _d) in pres.items() if not ok] == ["proposals-artifact"]
+                   and pres["proposals-artifact"][1] == "proposals.toml schema/run_id/proposal array malformed")
 
         # proposals-artifact (byte reproducibility): rewrite IMPORT-REPORT.md line endings LF->CRLF. The
         # rendered surface is LF, so a byte compare (not a universal-newline read) must FINDING; refresh the
@@ -2984,7 +3898,58 @@ def _self_test():
         crlf = (m / "IMPORT-REPORT.md").read_bytes().replace(b"\n", b"\r\n")
         (m / "IMPORT-REPORT.md").write_bytes(crlf)
         rewrite_report_digest(m, "IMPORT-REPORT.md")
-        expect("disc-proposals-artifact-crlf", check_staged_run(m)["proposals-artifact"][0] is False)
+        capa = graded(m, credit=(("proposals-artifact", "not byte-reproducible"),))["proposals-artifact"]
+        expect("disc-proposals-artifact-crlf", capa[0] is False and "not byte-reproducible" in capa[1])
+
+        # proposals-artifact (suggested_state vocabulary, per-row condition): a proposal row whose suggested_state
+        # is outside imp.MAPPING_STATES is a located row FINDING, and graded's twin re-grades it as a detached copy
+        # (proposals-artifact is in detached_ids), so the row vocabulary guard fires at BOTH generations and a
+        # generation-2-only bypass cannot survive. Only proposals-artifact fires (proposals.toml is not in report's
+        # artefact list); the row check finds before the byte-repro block, so no report/digest refresh is needed.
+        m = copy_run(clean)
+        props = _load_toml(m / "proposals.toml")
+        props["proposal"] = [{"origin": imp._MODEL_PROPOSAL_ORIGIN, "source_path": "a.txt",
+                              "span": [0, 2], "suggested_state": "renamed", "note": ""}]
+        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        pres = graded(m, "disc-proposals-artifact-suggested-state", credit=(
+            ("proposals-artifact", "a proposals.toml row is malformed"),))
+        expect("disc-proposals-artifact-suggested-state",
+               [cid for cid, (ok, _d) in pres.items() if not ok] == ["proposals-artifact"]
+               and pres["proposals-artifact"][1] == ("a proposals.toml row is malformed or carries an origin "
+                                                     "outside the proposal-provenance vocabulary"))
+
+        # proposals-artifact (per-row shape, non-dict row): a proposal row that is not a dict is a located row
+        # FINDING (the isinstance(pr, dict) clause), and graded's twin re-grades it as a detached copy
+        # (proposals-artifact is in detached_ids), so the shape guard fires at BOTH generations. Only
+        # proposals-artifact fires (proposals.toml is not in report's artefact list). Without the
+        # isinstance(pr, dict) clause `pr.get("origin")` would raise AttributeError out of check_staged_run
+        # rather than returning the located False result.
+        m = copy_run(clean)
+        props = _load_toml(m / "proposals.toml")
+        props["proposal"] = ["not-a-dict"]
+        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        pres = graded(m, "disc-proposals-artifact-row-nondict", credit=(
+            ("proposals-artifact", "a proposals.toml row is malformed"),))
+        expect("disc-proposals-artifact-row-nondict",
+               [cid for cid, (ok, _d) in pres.items() if not ok] == ["proposals-artifact"]
+               and pres["proposals-artifact"][1] == ("a proposals.toml row is malformed or carries an origin "
+                                                     "outside the proposal-provenance vocabulary"))
+
+        # proposals-artifact (per-row shape, non-string source_path): a full valid model_proposal row whose
+        # source_path is not a string is a located row FINDING (the isinstance(pr.get("source_path"), str)
+        # clause), re-graded detached by graded's twin. Only proposals-artifact fires. Without the
+        # source_path isinstance clause the non-string source_path would slip the row conjunction.
+        m = copy_run(clean)
+        props = _load_toml(m / "proposals.toml")
+        props["proposal"] = [{"origin": imp._MODEL_PROPOSAL_ORIGIN, "source_path": 123,
+                              "span": [0, 2], "suggested_state": "unmapped", "note": ""}]
+        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        pres = graded(m, "disc-proposals-artifact-row-nonstr-source", credit=(
+            ("proposals-artifact", "a proposals.toml row is malformed"),))
+        expect("disc-proposals-artifact-row-nonstr-source",
+               [cid for cid, (ok, _d) in pres.items() if not ok] == ["proposals-artifact"]
+               and pres["proposals-artifact"][1] == ("a proposals.toml row is malformed or carries an origin "
+                                                     "outside the proposal-provenance vocabulary"))
 
         # proposals-artifact (R6-F1, proposal span shape): a proposal span that is a list but NOT a 2-element
         # int pair ([] or [5]) must be a located row FINDING, never an uncaught IndexError when
@@ -3001,9 +3966,42 @@ def _self_test():
             props["proposal"] = [{"origin": imp._MODEL_PROPOSAL_ORIGIN, "source_path": "a.txt",
                                   "span": bad_span, "suggested_state": "unmapped", "note": ""}]
             (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
-            pa = check_staged_run(m)["proposals-artifact"]
+            res = graded(m, "disc-proposals-artifact-span-{}".format(len(bad_span)), credit=(
+                ("proposals-artifact", "row is malformed"),))
+            pa = res["proposals-artifact"]
             expect("disc-proposals-artifact-span-{}".format(len(bad_span)),
-                   pa[0] is False and "row is malformed" in pa[1])
+                   pa[0] is False and "row is malformed" in pa[1]
+                   and [cid for cid, (ok, _d) in res.items() if not ok] == ["proposals-artifact"])
+
+        # proposals-artifact (R6-F1 span sub-clause coverage, r20 gemini/codex/claude): the [] and [5] fixtures
+        # above pin only the list-of-two-ints shape as a whole; each individual sub-clause of the span guard
+        # `isinstance(span, list) and len(span) == 2 and all(type(x) is int for x in span)` needs its own
+        # boundary fixture, otherwise dropping `all(type(x) is int ...)` (a 2-element non-int span), relaxing
+        # `type(x) is int` to `isinstance(x, int)` (a bool span, admitted by isinstance), widening
+        # `len(span) == 2` to `>= 2` (an overlong int span), or dropping `isinstance(span, list)` (a scalar or
+        # missing span then raises TypeError instead of the located row FINDING) each leaves the self-test at
+        # exit 0. Each fixture starts from a single otherwise-valid row and fires the row-check BEFORE the
+        # byte-repro block, so no report regen is needed; grade with the row-malformed credit (so the detached
+        # twin is graded too) and assert proposals-artifact fires ALONE with the row-malformed detail. Each label
+        # self-asserts fires-alone here and is twin-graded via graded()'s `-detached` equality expect.
+        for span_suffix, span_mutate in (
+                ("nonint", lambda row: row.update(span=[1.5, 2.5])),
+                ("bool", lambda row: row.update(span=[True, False])),
+                ("overlong", lambda row: row.update(span=[0, 1, 2])),
+                ("scalar", lambda row: row.update(span=5)),
+                ("missing", lambda row: row.pop("span")),
+        ):
+            m = copy_run(clean)
+            props = _load_toml(m / "proposals.toml")
+            span_row = {"origin": imp._MODEL_PROPOSAL_ORIGIN, "source_path": "a.txt",
+                        "span": [0, 2], "suggested_state": "unmapped", "note": ""}
+            span_mutate(span_row)
+            props["proposal"] = [span_row]
+            (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+            span_label = "disc-proposals-artifact-span-" + span_suffix
+            spres = graded(m, span_label, credit=(("proposals-artifact", "row is malformed"),))
+            expect(span_label, [cid for cid, (ok, _d) in spres.items() if not ok] == ["proposals-artifact"]
+                   and "row is malformed" in spres["proposals-artifact"][1])
 
         # proposals-artifact (R6-F1, IndexError backstop): a malformed inventory FRAGMENT span ([]) reaches
         # _render_report_md (which indexes frag["span"][0]/[1]) because the proposals-artifact check does not
@@ -3014,7 +4012,7 @@ def _self_test():
         inv = _load_toml(m / "inventory.toml")
         inv["fragment"][0]["span"] = []
         (m / "inventory.toml").write_text(_opf_emit.emit(inv), encoding="utf-8")
-        pa = check_staged_run(m)["proposals-artifact"]
+        pa = graded(m)["proposals-artifact"]
         expect("disc-proposals-artifact-fragment-span-index",
                pa[0] is False and "cannot reproduce" in pa[1])
 
@@ -3038,7 +4036,7 @@ def _self_test():
                any(p.get("origin") == imp._IMPORTER_PROPOSAL_ORIGIN
                    for p in iprops.get("proposal", [])))
         expect("proposals-artifact-importer-origin",
-               check_staged_run(irun)["proposals-artifact"][0] is True)
+               graded(irun)["proposals-artifact"][0] is True)
         # an origin OUTSIDE the closed proposal-provenance vocabulary is still REJECTED (the widening admits
         # the declared set, not anything): a "guessed" origin FINDINGs at the vocabulary arm. The staged
         # IMPORT-REPORT.md is REGENERATED to byte-reproduce the guessed-origin proposals (a coherent report)
@@ -3060,19 +4058,27 @@ def _self_test():
             imp._render_report_md(m_inv.get("inventory_digest"), m_inv.get("fragment"),
                                   m_norm, m.name).encode("utf-8"))
         rewrite_report_digest(m, "IMPORT-REPORT.md")
-        expect("disc-proposals-origin-unknown", check_staged_run(m)["proposals-artifact"][0] is False)
+        # Assert the LOCATED row-malformed detail, not merely [0] is False: the coherent report above keeps the
+        # byte-repro arm green, so this must prove the origin-VOCAB guard fired (its detail carries "row is
+        # malformed") rather than the byte-reproducibility fallback ("not byte-reproducible"), and that it fires
+        # alone (r20 gemini/F-B).
+        opres = graded(m, "disc-proposals-origin-unknown", credit=(
+            ("proposals-artifact", "a proposals.toml row is malformed"),))
+        expect("disc-proposals-origin-unknown",
+               [cid for cid, (ok, _d) in opres.items() if not ok] == ["proposals-artifact"]
+               and "row is malformed" in opres["proposals-artifact"][1])
 
         # --- acceptance.json (conditionally present): absent PASSes, present-and-valid PASSes, and each
         #     new acceptance check FINDINGs on its single mutation (acceptance.json is not in report's
         #     artefact list, so a mutation trips only the acceptance layer). ------------------------------
         # absent: recorded PASS "not yet reviewed" on the (unreviewed) clean run.
         expect("acceptance-absent-pass",
-               all(check_staged_run(clean)[cid][0] for cid in
+               all(graded(clean)[cid][0] for cid in
                    ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
                     "acceptance-completeness")))
         # present-and-valid: a reviewed run passes every acceptance check.
         reviewed = review_clean()
-        rres = check_staged_run(reviewed)
+        rres = graded(reviewed)
         expect("acceptance-present-valid",
                all(rres[cid][0] for cid in ("acceptance-schema", "acceptance-binding",
                                             "acceptance-attribution", "acceptance-completeness")))
@@ -3080,7 +4086,7 @@ def _self_test():
         # present-but-unparseable: every acceptance check FINDINGs (fail-closed), never a clean pass.
         m = copy_run(reviewed)
         (m / imp.ACCEPTANCE_NAME).write_bytes(b"{ not valid json")
-        munp = check_staged_run(m)
+        munp = graded(m)
         expect("acceptance-unparseable-all-finding",
                all(munp[cid][0] is False for cid in ("acceptance-schema", "acceptance-binding",
                                                      "acceptance-attribution", "acceptance-completeness")))
@@ -3090,38 +4096,135 @@ def _self_test():
         m = copy_run(reviewed)
         (m / imp.ACCEPTANCE_NAME).unlink()
         (m / imp.ACCEPTANCE_NAME).symlink_to("acceptance-target-does-not-exist")
-        mdang = check_staged_run(m)
+        mdang = graded(m)
         expect("acceptance-dangling-symlink-all-finding",
                all(mdang[cid][0] is False for cid in ("acceptance-schema", "acceptance-binding",
                                                       "acceptance-attribution", "acceptance-completeness")))
+
+        # Generation 1 (item 3): `.working/imported` and the homes-2 staging names are ordinary content, never
+        # probed. Flip: probing the durable home in generation 1 (the marker or gate guard) meets this regular
+        # FILE as a non-directory control path: review refuses and both ingest-acceptance checks fail.
+        h1_root, h1_machine = build_store({"a.txt": "hello"})
+        h1 = imp.plan_import(h1_root, ["a.txt"], now=NOW, run_nonce="gate-homes1-imported")
+        h1_run = h1_machine.parent / "imports" / h1.run_id
+        (h1_machine.parent / "imported").write_text("ordinary user content\n", encoding="utf-8")
+        h1_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
+                                  decisions=accept_all_decisions(h1_run), now=NOW)
+        h1_res = graded(h1_run)
+        expect("homes1-imported-file-ordinary", h1_rr.verdict == 0 and all(ok for ok, _d in h1_res.values())
+               and h1_res["ingest-acceptance-binding"][1] == "not an ingest run")
+        import json
+        import unittest.mock
+        import _opf_store
+        # Flip: ordinary review dropping its derived generation at the gate call refuses this unchanged homes-1
+        # store once the tooling supports homes 2; review with the derived generation remains CLEAN.
+        with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            h1_rr2 = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
+                                       decisions=accept_all_decisions(h1_run), now=NOW)
+            h1_res2 = check_staged_run(h1_run, homes=1)
+        expect("ordinary-review-homes2-tooling", h1_rr2.verdict == 0 and all(ok for ok, _d in h1_res2.values()))
+        # Flip: the strict ingest decoder in ordinary grading fails this duplicate
+        # member that json.loads accepts; ordinary grading passes every check and re-reviews CLEAN.
+        h1_acc = h1_run / "acceptance.json"
+        dup_raw = h1_acc.read_bytes().rstrip()
+        h1_acc.write_bytes(dup_raw[:-1] + b', "run_id": ' + json.dumps(h1.run_id).encode("ascii") + b"}\n")
+        dup_res = graded(h1_run)
+        dup_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
+                                   decisions=accept_all_decisions(h1_run), now=NOW)
+        expect("ordinary-acceptance-json-loads-decoder", dup_raw.endswith(b"}") and dup_rr.verdict == 0
+               and all(ok for ok, _d in dup_res.values()))
+        # Flip: either staged-acceptance marker probe running in homes 1 bypasses ordinary schema grading.
+        ordinary_raw = h1_acc.read_bytes()
+        for marker_fields in ({"ingest": {}}, {"format": imp.INGEST_ACCEPTANCE_FORMAT}):
+            marked = dict(json.loads(ordinary_raw), **marker_fields)
+            h1_acc.write_text(json.dumps(marked), encoding="utf-8")
+            marked_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
+                                          decisions=accept_all_decisions(h1_run), now=NOW)
+            marked_ap = imp.apply_import(h1_root, h1.run_id, now=NOW)
+            expect("ordinary-homes1-acceptance-marker-review", marked_rr.verdict == 2 and marked_rr.findings == [
+                "staged run fails the import-operation gate; not reviewable until it is a coherent, "
+                "promotion-ready run (failing gate checks: acceptance-schema)"])
+            expect("ordinary-homes1-acceptance-marker-apply", marked_ap.verdict == 1
+                   and marked_ap.outcome == "rejected" and marked_ap.promoted is False and marked_ap.findings == [
+                       "staged run fails the import-operation gate at apply; not promotable until it is a "
+                       "coherent, promotion-ready run (failing checks: acceptance-schema)"])
+        # Flip: raising every failing check through _require_gate_results loses the ordinary gate's located message.
+        h1_acc.write_bytes(b"[]\n")
+        bad_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
+                                   decisions=accept_all_decisions(h1_run), now=NOW)
+        expect("ordinary-review-located-gate-message", bad_rr.verdict == 2 and bad_rr.findings[0].startswith(
+            "staged run fails the import-operation gate; not reviewable until it is a coherent, promotion-ready "
+            "run (failing gate checks: acceptance-attribution, acceptance-binding"))
+        h1_acc.unlink()
+        # Flip: removing the gen-is-None refusal makes an ordinary run pass these acceptance checks.
+        for supported, supplied in ((1, (3, "2", True, 1.0, 0, 2)), (2, (3, "2", True, 1.0, 0))):
+            with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", supported):
+                for bad in supplied:
+                    invalid = check_staged_run(h1_run, homes=bad)
+                    expect("ordinary-gate-homes-invalid-{}-{!r}".format(supported, bad),
+                           all(invalid[cid][0] is False for cid in
+                               ("ingest-acceptance-binding", "ingest-acceptance-completeness")))
+        with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            unsupplied = check_staged_run(h1_run, homes=None)
+        expect("ordinary-gate-homes-unsupplied", all(unsupplied[cid][0] is False for cid in
+               ("ingest-acceptance-binding", "ingest-acceptance-completeness")))
+        # Flip: a _gate_homes that returns its input unvalidated admits each malformed generation.
+        with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            refused = []
+            for bad in (3, "2", True, 1.0, 0):
+                try:
+                    _gate_homes(bad)
+                    refused.append(False)
+                except _GateError:
+                    refused.append(True)
+            expect("gate-homes-validated", all(refused) and _gate_homes(2) == 2 and _gate_homes(1) == 1)
+        try:
+            _gate_homes(2)
+            above = False
+        except _GateError:
+            above = True
+        expect("gate-homes-above-supported", above)
+        # Flip: raising for a detached copy (a store required for an ordinary run) fails both
+        # ingest-acceptance checks here, in either generation; a detached ordinary run passes every check.
+        import unittest.mock
+        import _opf_store
+        detached = base / "detached" / reviewed.name
+        shutil.copytree(str(reviewed), str(detached))
+        det1 = graded(detached)
+        with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            det2 = check_staged_run(detached, homes=2)
+        expect("detached-ordinary-copy", all(ok for ok, _d in det1.values())
+               and all(ok for ok, _d in det2.values()))
 
         # acceptance-schema: a wrong `format` keeps every other field intact, so only the schema check fires.
         m = copy_run(reviewed)
         acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
         acc["format"] = "opf.import.acceptance/v2"
         (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
-        expect("disc-acceptance-schema", check_staged_run(m)["acceptance-schema"][0] is False)
+        # This format is the ingest acceptance format, an ingest marker at generation 2, so the fixture is graded at
+        # generation 1 only; the swept on-disk "accepted-format" fixture carries a format that marks nothing.
+        expect("disc-acceptance-schema", check_staged_run(m, homes=1)["acceptance-schema"][0] is False)
 
         # acceptance-attribution: blank the self-asserted actor.declared.
         m = copy_run(reviewed)
         acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
         acc["actor"]["declared"] = ""
         (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
-        expect("disc-acceptance-attribution", check_staged_run(m)["acceptance-attribution"][0] is False)
+        expect("disc-acceptance-attribution", graded(m)["acceptance-attribution"][0] is False)
 
         # acceptance-binding: a stale plan_digest breaks the {run_id, plan_digest, inventory_digest} binding.
         m = copy_run(reviewed)
         acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
         acc["plan_digest"] = "sha256:" + ("0" * 64)
         (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
-        expect("disc-acceptance-binding", check_staged_run(m)["acceptance-binding"][0] is False)
+        expect("disc-acceptance-binding", graded(m)["acceptance-binding"][0] is False)
 
         # acceptance-completeness: drop one decision so a fragment is left with no decision.
         m = copy_run(reviewed)
         acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
         acc["decisions"] = acc["decisions"][:-1]
         (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
-        expect("disc-acceptance-completeness", check_staged_run(m)["acceptance-completeness"][0] is False)
+        expect("disc-acceptance-completeness", graded(m)["acceptance-completeness"][0] is False)
 
         # N4: an UNHASHABLE decision fragment_id ([]) is a located FINDING at BOTH the schema and binding
         # checks (and completeness), never a TypeError at the `in frag_by_id` dict membership or the
@@ -3130,7 +4233,7 @@ def _self_test():
         acc = json.loads((m / imp.ACCEPTANCE_NAME).read_text())
         acc["decisions"][0]["fragment_id"] = []
         (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
-        macc = check_staged_run(m)
+        macc = graded(m)
         expect("disc-acceptance-fragment-id-unhashable-schema", macc["acceptance-schema"][0] is False)
         expect("disc-acceptance-fragment-id-unhashable-binding", macc["acceptance-binding"][0] is False)
         expect("disc-acceptance-fragment-id-unhashable-completeness",
@@ -3144,7 +4247,7 @@ def _self_test():
         mp["mapping"][0]["state"] = []
         (m / "mappings.toml").write_text(_opf_emit.emit(mp), encoding="utf-8")
         rewrite_report_digest(m, "mappings.toml")
-        mstate = check_staged_run(m)
+        mstate = graded(m)
         expect("disc-acceptance-completeness-unhashable-state-nocrash",
                set(mstate) == set(EXPECTED_CHECKS) and mstate["mapping-state-vocab"][0] is False)
 
@@ -3163,13 +4266,13 @@ def _self_test():
         m = copy_run(reviewed)
         inject_nested_span(m / "mappings.toml", _load_toml(m / "mappings.toml")["mapping"][0]["span"])
         rewrite_report_digest(m, "mappings.toml")
-        mnest_map = check_staged_run(m)
+        mnest_map = graded(m)
         expect("disc-acceptance-span-unhashable-mapping-nocrash",
                set(mnest_map) == set(EXPECTED_CHECKS) and mnest_map["acceptance-binding"][0] is False)
 
         m = copy_run(reviewed)
         inject_nested_span(m / "inventory.toml", _load_toml(m / "inventory.toml")["fragment"][0]["span"])
-        mnest_inv = check_staged_run(m)
+        mnest_inv = graded(m)
         expect("disc-acceptance-span-unhashable-fragment-nocrash",
                set(mnest_inv) == set(EXPECTED_CHECKS) and mnest_inv["acceptance-binding"][0] is False)
 
@@ -3181,12 +4284,12 @@ def _self_test():
             d["decision"] = "reject"
         (m / imp.ACCEPTANCE_NAME).write_text(json.dumps(acc), encoding="utf-8")
         expect("disc-acceptance-model-proposal-omission",
-               check_staged_run(m)["acceptance-completeness"][0] is False)
+               graded(m)["acceptance-completeness"][0] is False)
 
         # fail-closed read: a run dir missing every artefact is all-FINDING, never a clean pass.
         empty = base / "empty-run"
         empty.mkdir()
-        empty_results = check_staged_run(empty)
+        empty_results = graded(empty)
         expect("fail-closed-empty", all(not ok for ok, _ in empty_results.values()))
 
         # --- R8-F1: untrusted read/parse boundaries fail closed to a located FINDING, never an uncaught
@@ -3199,7 +4302,7 @@ def _self_test():
         #     loaded in its own check and is not in report's artefact list, so ONLY proposals-artifact fires.
         m = copy_run(clean)
         (m / "proposals.toml").write_text("a = " + "[" * 3000 + "]" * 3000, encoding="utf-8")
-        r8_toml = check_staged_run(m)
+        r8_toml = graded(m)
         expect("disc-r8f1-deep-nested-toml-proposals",
                set(r8_toml) == set(EXPECTED_CHECKS) and r8_toml["proposals-artifact"][0] is False)
 
@@ -3207,7 +4310,7 @@ def _self_test():
         #     except makes every acceptance check a located FINDING (fail-closed), never a crash.
         m = copy_run(reviewed)
         (m / imp.ACCEPTANCE_NAME).write_text("[" * 100000 + "]" * 100000, encoding="utf-8")
-        r8_json = check_staged_run(m)
+        r8_json = graded(m)
         expect("disc-r8f1-deep-nested-json-acceptance",
                set(r8_json) == set(EXPECTED_CHECKS)
                and all(r8_json[cid][0] is False for cid in
@@ -3225,7 +4328,7 @@ def _self_test():
         (m / "report.toml").write_text(_opf_emit.emit(rep), encoding="utf-8")
         txt = (m / "report.toml").read_text(encoding="utf-8").replace("NULPATHSENTINEL", "a\\u0000b")
         (m / "report.toml").write_text(txt, encoding="utf-8")
-        r8_art = check_staged_run(m)
+        r8_art = graded(m)
         expect("disc-r8f1-embedded-nul-artifact-path",
                set(r8_art) == set(EXPECTED_CHECKS) and r8_art["artifact-digest-integrity"][0] is False)
 
@@ -3239,7 +4342,7 @@ def _self_test():
         txt = (m / "run.toml").read_text(encoding="utf-8").replace("NULSHASENTINEL", "a\\u0000b")
         (m / "run.toml").write_text(txt, encoding="utf-8")
         rewrite_report_digest(m, "run.toml")
-        r8_src = check_staged_run(m)
+        r8_src = graded(m)
         expect("disc-r8f1-embedded-nul-source-path",
                set(r8_src) == set(EXPECTED_CHECKS) and r8_src["source-preservation"][0] is False)
 
@@ -3254,6 +4357,233 @@ def _self_test():
         # The operation-layer module's own unit suite (scan/plan/apply internals, including the
         # apply-deferred-cannot-evaluate and plan-leaves-the-active-store-unchanged invariants) is part of
         # this gate's assurance and must run in CI: delegate to it and require it green.
+        # The staged-acceptance table on disk, beneath a store the gate locates at generation 2 (the synthetic run of
+        # _self_test_gate_generation has none): each fixture fails exactly its listed ids, for its located reason.
+        for fixture, fails, located in _self_test_gate_generation_acceptance_cases():
+            counter[0] += 1
+            disk_run = _self_test_gate_generation_disk(base / "accept-disk-{:03d}".format(counter[0]), fixture)
+            disk = graded(disk_run, "disk-" + fixture, credit=located)
+            expect("gate-generation-disk-{}-baseline".format(fixture),
+                   (fixture == "accepted-unreadable" and os.geteuid() == 0)
+                   or (set(cid for cid, (ok, _d) in disk.items() if not ok) == set(fails)
+                       and all(needle in disk[cid][1] for cid, needle in located)))
+        # Ingest runs on a real store whose durable home is provisioned, graded through the sweep: generation 2 must
+        # keep every result but the two ingest-acceptance ids, which grade the durable home. Each corruption fails at
+        # generation 1 exactly the listed ids, the last one for its own located reason; the ordinary tamper of
+        # run.toml also fails ingest-artefact-completeness, which re-derives that record.
+        def bundle_edit(change):
+            def mutate(run_dir):
+                model = _load_toml(run_dir / imp.INGEST_REVIEW_NAME)
+                change(model)
+                (run_dir / imp.INGEST_REVIEW_NAME).write_bytes(imp._emit_bytes(model, imp.INGEST_REVIEW_NAME))
+            return mutate
+
+        def stale_binding(field):
+            return bundle_edit(lambda model: model["binding"].update({field: "sha256:" + "0" * 64}))
+
+        def append(name, data):
+            return lambda run_dir: (run_dir / name).write_bytes((run_dir / name).read_bytes() + data)
+
+        def toml_edit(name, change, refresh=False):
+            def mutate(run_dir):
+                data = _load_toml(run_dir / name)
+                change(data)
+                (run_dir / name).write_text(_opf_emit.emit(data), encoding="utf-8")
+                if refresh:
+                    rewrite_report_digest(run_dir, name)
+            return mutate
+
+        def source_tamper(run_dir):
+            victim = "sources/" + _load_toml(run_dir / "run.toml")["source"][0]["sha256"]
+            (run_dir / victim).write_bytes(b"tampered-bytes")
+            rewrite_report_digest(run_dir, victim)
+
+        lf_index = "fragments/legacy_fragment.index.toml"
+        zero = "sha256:" + "0" * 64
+
+        ingest_cases = (
+            ("ingest-durable-home", None, (), None),
+            ("ingest-bundle-malformed", lambda run_dir: (run_dir / imp.INGEST_REVIEW_NAME).write_bytes(b"format = 1\n"),
+             ("ingest-run-structure",) + _INGEST_CHECK_IDS, ("ingest-run-structure", "present but malformed")),
+            ("ingest-source-binding", stale_binding("inventory_toml_digest"), ("ingest-source-binding",),
+             ("ingest-source-binding", "binding.inventory_toml_digest does not recompute")),
+            ("ingest-disposition-totality", bundle_edit(lambda model: model.update(migrate=[])),
+             ("ingest-disposition-totality", "ingest-draft-loss-binding", "ingest-report-reproducibility"),
+             ("ingest-disposition-totality", "do not correspond one-to-one to the migrate worksheet rows")),
+            ("ingest-draft-loss-binding", stale_binding("candidates_draft_digest"), ("ingest-draft-loss-binding",),
+             ("ingest-draft-loss-binding", "binding.candidates_draft_digest does not recompute")),
+            ("ingest-report-reproducibility", append(imp.REPORT_MD_NAME, b"x"), ("ingest-report-reproducibility",),
+             ("ingest-report-reproducibility", "is not byte-reproducible from the validated model")),
+            ("ingest-artefact-completeness", lambda run_dir: (run_dir / "stray.txt").write_bytes(b"x"),
+             ("ingest-artefact-completeness",), ("ingest-artefact-completeness", "outside the ingest artefact registry")),
+            ("ingest-artifact-digest", append("run.toml", b"\n# tampered\n"),
+             ("artifact-digest-integrity", "ingest-artefact-completeness"),
+             ("artifact-digest-integrity", "do not match recorded digest")),
+            # Every other ordinary check, each failed on the ingest run by its ordinary discriminator (the ingest
+            # re-derivation fails as well): generation 2 must keep that failure, so a bypass of an ordinary check on
+            # the ingest branch alone fails the sweep.
+            ("ingest-ordinary-staged-run-structure", lambda run_dir: (run_dir / imp.REPORT_MD_NAME).unlink(),
+             ("staged-run-structure", "ingest-report-reproducibility", "ingest-artefact-completeness"),
+             ("staged-run-structure", "missing ['IMPORT-REPORT.md']")),
+            ("ingest-ordinary-report-schema", toml_edit("report.toml", lambda rep: rep.update(schema=2)),
+             ("report-schema",) + _INGEST_CHECK_IDS,
+             ("report-schema", "report.toml schema/run_id/verdict/promotion_ready/artifact malformed")),
+            ("ingest-ordinary-mapping-totality", toml_edit("mappings.toml", lambda mp: mp["mapping"][0].update(
+                span=[0, mp["mapping"][0]["span"][1] - 1]), True),
+             ("mapping-totality", "lf-bijection", "ingest-artefact-completeness"), ("mapping-totality", "spans")),
+            ("ingest-ordinary-mapping-state-vocab", toml_edit("mappings.toml", lambda mp: mp["mapping"][0].update(
+                state="renamed"), True), ("mapping-state-vocab", "lf-bijection", "ingest-artefact-completeness"),
+             ("mapping-state-vocab", "outside the 8-state vocabulary")),
+            ("ingest-ordinary-mapping-origin-vocab", toml_edit("mappings.toml", lambda mp: mp["mapping"][0].update(
+                origin="guessed"), True), ("mapping-origin-vocab", "ingest-artefact-completeness"),
+             ("mapping-origin-vocab", "outside the provenance vocabulary")),
+            ("ingest-ordinary-lf-bijection", toml_edit(lf_index, lambda lf: lf.update(record=lf["record"][:-1]), True),
+             ("lf-bijection", "ingest-artefact-completeness"), ("lf-bijection", "do not correspond one-to-one")),
+            ("ingest-ordinary-lf-quad-completeness", toml_edit(lf_index, lambda lf: lf["record"][0].pop("span"), True),
+             ("lf-bijection", "lf-quad-completeness", "ingest-artefact-completeness"),
+             ("lf-quad-completeness", "omits a provenance-quad field")),
+            ("ingest-ordinary-source-preservation", source_tamper,
+             ("source-preservation", "ingest-source-binding", "ingest-draft-loss-binding",
+              "ingest-artefact-completeness"), ("source-preservation", "do not hash to the recorded digest")),
+            ("ingest-ordinary-inventory-digest", toml_edit("inventory.toml", lambda inv: inv.update(
+                inventory_digest=zero)), ("inventory-digest", "report-binding-digests", "ingest-source-binding",
+                                          "ingest-report-reproducibility"), ("inventory-digest", "does not recompute")),
+            ("ingest-ordinary-report-binding-digests", toml_edit("report.toml", lambda rep: rep.update(
+                plan_digest=zero)), ("report-binding-digests", "ingest-source-binding", "ingest-artefact-completeness"),
+             ("report-binding-digests", "plan_digest does not recompute")),
+            ("ingest-ordinary-proposals-artifact", toml_edit(imp.PROPOSALS_NAME, lambda props: props.update(schema=2)),
+             ("proposals-artifact",) + _INGEST_CHECK_IDS,
+             ("proposals-artifact", "schema/run_id/proposal array malformed")),
+        )
+        for label, corrupt, fails, claim in ingest_cases:
+            counter[0] += 1
+            ingest_store = base / "ingest-disk-{:03d}".format(counter[0])
+            ingest_run = _self_test_gate_generation_disk(ingest_store)
+            (ingest_store / imp._ingest_acceptance_home(ingest_run.name)).mkdir(parents=True)
+            if corrupt is not None:
+                corrupt(ingest_run)
+            first = graded(ingest_run, label, ingest=True, credit=(claim,) if claim else ())
+            second = swept[-1][2]
+            expect("gate-generation-disk-{}-generation-2".format(label),
+                   {cid for cid, (ok, _d) in first.items() if not ok} == set(fails)
+                   and (claim is None or (claim[1] in first[claim[0]][1] and second[claim[0]] == first[claim[0]]))
+                   and all(second[cid] == (True, "not yet reviewed") for cid in _INGEST_ACCEPTANCE_CHECKS))
+        # Every ordinary id is failed on a generation-2 ingest run, with the same result at both generations.
+        ingest_labels = {label for label, _corrupt, _fails, _claim in ingest_cases}
+        expect("gate-generation-ingest-ordinary-coverage", all(any(
+            label in ingest_labels and not first[cid][0] and second[cid] == first[cid]
+            for label, first, second, _credit in swept) for cid in EXPECTED_CHECKS[:EXPECTED_CHECKS.index(
+                "proposals-artifact") + 1]))
+        # A durable home holding an actual review, graded at generation 2: a valid review over the model the gate
+        # itself validates, then that review with a stale plan_digest (binding), a typed unit left undecided
+        # (completeness), a recorded rejection, and a record that is not an object (every acceptance id fails).
+        from unittest.mock import patch as _patch
+        counter[0] += 1
+        review_store = base / "ingest-review-{:03d}".format(counter[0])
+        review_run = _self_test_gate_generation_disk(review_store)
+        review_home = review_store / imp._ingest_acceptance_home(review_run.name)
+        review_home.mkdir(parents=True)
+        with _patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            review_rd = _RunDir(review_run)
+            try:
+                snapshot = imp._ingest_snapshot(review_rd, 2)
+            finally:
+                review_rd.close()
+        review = dict(format=imp.INGEST_ACCEPTANCE_FORMAT, run_id=review_run.name,
+                      plan_digest=snapshot["binding"]["plan_digest"],
+                      inventory_digest=snapshot["binding"]["inventory_digest"], reviewed_at="2026-09-09T12:00:00Z",
+                      actor=dict(declared="Gate Reviewer", context=dict(os_user="", git_identity="", hostname="")),
+                      decisions=[dict(f, decision="accept") for f in snapshot["fragments"].values()],
+                      ingest=dict(format=imp.INGEST_ACCEPTANCE_BLOCK, binding=snapshot["binding"],
+                                  units=[dict(u, decision="accept", note="") for u in snapshot["units"]]))
+        binding_id, complete_id = _INGEST_ACCEPTANCE_CHECKS
+        recorded, rejected = "review recorded; execution unavailable", "recorded rejection; not promotable"
+        staged_ids = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
+        for label, change, raw, expected in (
+                ("ingest-review-valid", None, None, {binding_id: (True, recorded), complete_id: (True, recorded)}),
+                ("ingest-review-stale-binding", lambda r: r.update(plan_digest="sha256:" + "0" * 64), None,
+                 {binding_id: (False, "plan_digest is stale"), complete_id: (True, recorded)}),
+                ("ingest-review-unit-undecided", lambda r: r["ingest"]["units"].pop(), None,
+                 {binding_id: (True, recorded),
+                  complete_id: (False, "every typed ingest unit needs an explicit decision")}),
+                ("ingest-review-rejected", lambda r: r["ingest"]["units"][0].update(decision="reject"), None,
+                 {binding_id: (True, rejected), complete_id: (True, rejected)}),
+                ("ingest-review-not-object", None, b"[]\n", None)):
+            record = json.loads(json.dumps(review))
+            if change is not None:
+                change(record)
+            (review_home / imp.ACCEPTANCE_NAME).write_bytes(raw or imp._emit_acceptance_bytes(record))
+            claims = tuple((cid, detail) for cid, (ok, detail) in (expected or {}).items() if not ok)
+            first = graded(review_run, label, ingest=True, credit=claims)
+            second = swept[-1][2]
+            expect("gate-generation-disk-{}-generation-2".format(label),
+                   all(ok for ok, _d in first.values())
+                   and (all(second[cid] == value for cid, value in expected.items()) if expected else
+                        all(not second[cid][0] and "not a JSON object" in second[cid][1]
+                            for cid in _INGEST_ACCEPTANCE_CHECKS))
+                   and all(second[cid] == first[cid] for cid in first
+                           if cid not in _INGEST_ACCEPTANCE_CHECKS + staged_ids))
+        # Coverage: every registered id is credited by a swept fixture under _self_test_gate_generation_coverage (it
+        # passes staged-run-structure and the id's prerequisites, and fails the id with its own located detail).
+        coverage = _self_test_gate_generation_coverage(swept, EXPECTED_CHECKS)
+        uncovered = [cid for cid in EXPECTED_CHECKS if cid not in coverage]
+        expect("gate-generation-sweep-coverage (no crediting fixture: {})".format(", ".join(uncovered)), not uncovered)
+        # Controls: an always-passing id registered beside the others is reported uncovered, and the blanket fixtures
+        # (every check failing, as for the empty run) credit no id even when they claim every id.
+        extra = "untested-always-pass"
+        padded = [(label, dict(first, **{extra: (True, "")}), dict(second, **{extra: (True, "")}),
+                   credit + ((extra, ""),)) for label, first, second, credit in swept]
+        blanket = [(label, first, second, tuple((cid, "") for cid in EXPECTED_CHECKS))
+                   for label, first, second, _credit in swept if not any(ok for ok, _d in first.values())]
+        expect("gate-generation-sweep-coverage-control-always-pass",
+               set(_self_test_gate_generation_coverage(padded, EXPECTED_CHECKS + (extra,))) == set(EXPECTED_CHECKS))
+        expect("gate-generation-sweep-coverage-control-blanket",
+               len(blanket) >= 2 and not _self_test_gate_generation_coverage(blanket, EXPECTED_CHECKS))
+
+        # Controls on each clause of the rule: a synthetic row failing only the claimed id with the claimed text earns
+        # credit, and so does one whose text is also carried by an id that depends on the claim; the row with a failing
+        # prerequisite, with the text on a failing id that does not depend on the claim, or with a different
+        # generation-2 result earns none.
+        def credited(first, second_changes=(), cid="artifact-digest-integrity"):
+            row = dict({c: (True, "") for c in EXPECTED_CHECKS}, **first)
+            return cid in _self_test_gate_generation_coverage(
+                [("control", row, dict(row, **dict(second_changes)), ((cid, "control-text"),))], (cid,))
+
+        claimed = {"artifact-digest-integrity": (False, "control-text")}
+        expect("gate-generation-sweep-coverage-control-credited", credited(claimed))
+        expect("gate-generation-sweep-coverage-control-dependent-text", credited(
+            {"report-schema": (False, "control-text"), "artifact-digest-integrity": (False, "control-text")},
+            cid="report-schema"))
+        expect("gate-generation-sweep-coverage-control-prerequisite",
+               not credited(dict(claimed, **{"report-schema": (False, "another reason")})))
+        expect("gate-generation-sweep-coverage-control-text-elsewhere",
+               not credited(dict(claimed, **{"mapping-totality": (False, "control-text")})))
+        expect("gate-generation-sweep-coverage-control-generation-2",
+               not credited(claimed, {"artifact-digest-integrity": (False, "control-text at generation 2")}))
+        expect("gate-generation-sweep-coverage-control-own-detail",
+               not credited({"artifact-digest-integrity": (False, "unrelated failure")}))
+        # own-detail, text-elsewhere sibling: the target fails with an unrelated detail while the claimed
+        # needle text sits on a DIFFERENT, PASSING id. The correct rule reads the needle from the target's
+        # OWN detail (needle in results[cid][1]), so it is NOT credited; a `needle in repr(results)` mutant
+        # (M5, text found anywhere in the results dict) WOULD credit it, since the passing id's detail carries
+        # the text and the text-elsewhere guard only inspects FAILING ids. So this control has teeth against M5
+        # where the own-detail control above (text nowhere in the dict) does not.
+        expect("gate-generation-sweep-coverage-control-own-detail-elsewhere",
+               not credited({"artifact-digest-integrity": (False, "unrelated failure"),
+                             "mapping-totality": (True, "control-text")}))
+        # Per store state: the detached copies alone credit every id a detached ordinary run grades.
+        detached_coverage = _self_test_gate_generation_coverage(
+            [entry for entry in swept if entry[0] in detached_labels], detached_ids)
+        expect("gate-generation-detached-coverage (no crediting detached copy: {})".format(", ".join(
+            cid for cid in detached_ids if cid not in detached_coverage)), set(detached_coverage) == set(detached_ids))
+        # Condition coverage for report-schema and the proposals.toml header: each condition's own swept fixture, and
+        # its detached copy, failed that id alone.
+        for cond_id, conditions in (("report-schema", report_conditions), ("proposals-artifact", proposals_conditions)):
+            expect("gate-generation-{}-conditions".format(cond_id), all(any(
+                label == clabel + suffix and [cid for cid, (ok, _d) in first.items() if not ok] == [cond_id]
+                for label, first, _second, _credit in swept) for clabel, _edit in conditions
+                for suffix in ("", "-detached")))
+
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
         print("check_opf_import self-test: harness error: {}".format(exc), file=sys.stderr)

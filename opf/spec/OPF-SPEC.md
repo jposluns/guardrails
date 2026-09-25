@@ -1246,7 +1246,7 @@ section fixes the posture the tooling must honour.
   evidence bundle at `.working/imported/import/<run-id>/`, preserving full bytes, identity, and digests.
   Destination durability and digest verification precede source removal; removal participates in the
   same recoverable transaction as record and view publication. Acceptance binds the removal action,
-  resolved roots, homes generation, plan digest, and inventory digest. A copy-preserving legacy
+  relative scope resolution, homes generation, plan digest, and inventory digest. A copy-preserving legacy
   acceptance never authorizes removal. A source outside the participating roots is a plan-time
   cannot-evaluate naming that source. Both staging and evidence are store-level areas beside the
   machine store, which carries TOML records only.
@@ -1275,6 +1275,59 @@ section fixes the posture the tooling must honour.
   requested operation, so it runs only against a resolved, initialized store; where no store is present
   the tooling reports that the store must be initialized first rather than treating the absence as
   not-applicable.
+
+Ingest review uses `opf.import.acceptance/v2`; ordinary fragment review retains
+`opf.import.acceptance/v1`. The v2 record retains the ordinary actor, timestamp, run, plan,
+inventory, fragment decisions, and reserved null signature, and adds an `ingest` object with
+`format = "opf.ingest.acceptance/v1"`, `binding`, and `units`.
+
+The binding includes the bundle format and digest, a full review-model digest, digests of
+`report.toml` and `IMPORT-REPORT.md`, the bundle's recomputed subordinate bindings, the intended
+homes generation (2), the constructed evidence home, and the source-removal action set.
+Scope resolution is relative to the participating roots; absolute host paths are not identity.
+Relocating a byte-identical store preserves acceptance. Changing a removal, destination, exemption,
+importer, worksheet, draft, proposal, loss entry, staged source, or counter invalidates it.
+The full model contains the frozen bundle, every staged file's recomputed digest, preserved source
+text, typed units, and removal actions. Its canonical bytes are ASCII JSON with sorted keys, compact separators,
+and one trailing newline. The model includes neither acceptance nor its own digest.
+Validation and hashing use the same bounded byte snapshot; the combined staged payload and the
+canonical model must each fit the contained store-read cap. Oversized reviews refuse explicitly.
+
+Each file requires an explicit disposition decision. Each migrate file also requires an explicit
+conversion decision carrying the exact importer, candidate records, proposal rows, and loss entry,
+including defaults and unresolved spans. Identity is the tuple `(kind, scope, source_path)`;
+display labels are not authority. No grouping or implicit accept-all is supported. Zero-result
+and unresolved conversions explicitly retain quarantine; review does not clear
+`migration_incomplete`. Fragment decisions remain independently required.
+
+The frozen bundle format is `opf-ingest-review-bundle-v2`. Each migrate row retains its validated
+`loss` entry. Review checks byte tiling, physical line ranges, proposal/span correspondence,
+and candidate references against staged source bytes without rerunning the importer.
+An older bundle requires a fresh plan from the original inputs; retain the old run as evidence.
+
+`opf import --review RUN --show-review` emits the validated model and an undecided schema-2
+template. Submit the template's object through `--decisions FILE --actor NAME`, after filling
+every decision. Interactive review collects the same decisions and compares the displayed
+binding again at submission. The timestamp is sampled at final composition, after input.
+A complete review containing rejects is successfully recorded and remains non-promotable.
+A reject cannot be relabelled as acceptance in the same run. A stale or malformed acceptance
+requires a fresh run; `--review NEW_RUN --diff-review OLD_RUN` compares recorded authority
+without copying decisions. If the old record is unreadable, the aid reports that limitation.
+
+Ingest acceptance is read and written only at
+`.working/imported/import/<run-id>/acceptance.json`, through the shared evidence-home constructor.
+The reference writer requires a validated homes-2 manifest and a provisioned evidence directory.
+Until layout migration and writer activation support that manifest, capture refuses; it does not
+create a durable home or fall back to staging. A staged acceptance copy remains an unexpected
+ingest artefact. An interrupted acceptance temp file in the durable home fails validation.
+
+A pre-rename failure preserves prior acceptance bytes. A post-rename directory-fsync failure
+reports the new record as installed with uncertain durability. The final verification-to-rename
+window and unsigned same-store writers remain outside the guarantee. Digests establish binding,
+not reviewer authenticity, importer authenticity, or semantic correctness. Review validates the
+frozen snapshot. Live source identity, destination collisions, exemption anchoring, locking,
+recoverable publication, and source removal require independent execution-time checks.
+Ingest apply still refuses before journal or lock creation, regardless of acceptance state.
 
 ### 14.2 Pre-existing files at the store location
 
