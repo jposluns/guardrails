@@ -138,14 +138,15 @@ class DetectResult:
     output. On a clean detection `worksheet` is the frozen, canonical worksheet payload (carrying its own
     `worksheet_digest`), `rows` the ordered disposition rows, and `worksheet_digest` the reproducibility
     anchor. Detect writes NOTHING and allocates no run id (SECI-preview-has-no-side-effects)."""
-    __slots__ = ("verdict", "findings", "worksheet", "worksheet_digest", "rows")
+    __slots__ = ("verdict", "findings", "worksheet", "worksheet_digest", "rows", "homes")
 
-    def __init__(self, verdict, findings=None, worksheet=None, worksheet_digest=None, rows=None):
+    def __init__(self, verdict, findings=None, worksheet=None, worksheet_digest=None, rows=None, homes=1):
         self.verdict = verdict                    # CLEAN / FINDING / CANNOT_EVALUATE
         self.findings = findings or []
         self.worksheet = worksheet or {}
         self.worksheet_digest = worksheet_digest
         self.rows = rows or []
+        self.homes = homes                        # the store homes generation the detection pruned by
 
 
 class _DetectError(Exception):
@@ -323,13 +324,11 @@ def _digest_of(root_fd, rel):
 # `_opf_store.STORE_ROOT_CONTROL_DIRS`, the EXACT tuple `_opf_import._assemble_preview` drops at the store
 # root (its `_ignore`, which drops these at the store root only, never a same-named dir nested deeper). Ingest
 # holds NO parallel literal of its own and derives its store-root control exclusion from that one constant, so
-# the two can never mirror-drift (the true single-authority premise shift: one source, no mirror). `.aiqt` is
-# the control UMBRELLA: the apply-promotion ops + archive trees (`_opf_import.IMPORT_OPS_REL` /
-# `IMPORT_JOURNAL_REL` / `IMPORT_ARCHIVE_REL`) and migrate's `.aiqt/migration/journal` ALL nest under it, so
-# excluding the whole `.aiqt` SUBTREE covers every control / journal / archive tree BY CONSTRUCTION rather
-# than by re-enumerating each; `.git` is the VCS dir. The self-test asserts SET EQUALITY between the exclusion
-# ingest builds and that authority, and that those import-layer constants stay under `.aiqt`, so a reintroduced
-# literal or an ops tree relocated out from under `.aiqt` is caught as drift.
+# the two cannot mirror-drift. The store-root .aiqt exclusion still covers legacy import state and
+# AIQT migration machinery until the import writers move. Store-tree control roots derive from the
+# containment classifier's control_roots for the store's homes generation: a legacy store prunes only
+# the imports tree, while homes 2 also prunes the evidence, staging and journal homes. The self-tests
+# compare the exact prune set with that authority in both generations.
 
 
 # The generated PUBLIC deliverables live at the PRODUCT repository root in EVERY topology (spec 5.8;
@@ -447,7 +446,7 @@ def _managed_paths(resolution, manifest_data):
     contained-only, collision-filtered, canonicalized `valid_unmanaged`.
       - prune_prefixes: store-relative directory subtrees never detected under `.working/`: the machine
         store subtree (`resolution.machine_rel`, which contains the manifest, the typed indexes, and the
-        control ledgers) and the reserved `.working/imports/` run tree (`_opf_import.IMPORTS_REL`). This is
+        control ledgers) and the classifier-registered store control roots, including legacy imports. This is
         OPF's control area, the checker's C-CONTAINMENT ground, not this adoption-source detector's, so it is
         pruned wholesale by design (F10-2 / F10-3, ratified).
       - store_leaf / declared_leaf: EXACT-LEAF managed destinations, matched by EXACT path EQUALITY, exactly
@@ -489,12 +488,12 @@ def _managed_paths(resolution, manifest_data):
         real store stray (F1). For an inline / default store re-anchoring is IDENTITY, so inline behaviour is
         unchanged. The R7-1 three-valued no-match consults ONLY the SUBTREE set, since an exact-leaf entry is
         a single file matched in results, not an unread covered subtree."""
-    prune = {resolution.machine_rel, _opf_import.IMPORTS_REL}
     # DERIVE the adoption-content managed classification from the checker's SINGLE pure authority rather than
     # re-deriving it here, so ingest and C-CONTAINMENT cannot diverge on the [unmanaged] cover or the view
     # targets (F10-1). The helper is pure (no I/O, no `rep`) and derives enabled_types / layout internally
     # from the manifest the caller already validated (D2).
     cls = _opf_check.classify_containment(manifest_data, resolution.machine_rel)
+    prune = {resolution.machine_rel} | set(cls.control_roots)
     # A malformed [unmanaged] entry is a located CANNOT-EVALUATE (a by-construction backstop: the manifest
     # validator `_opf_store._validate_unmanaged` normally rejects an escaping / non-string entry upstream, so
     # `detect` fails closed at init-first validation before reaching here; this mirrors the checker's cant).
@@ -567,7 +566,7 @@ def _managed_paths(resolution, manifest_data):
 
 # --- detection ---------------------------------------------------------------------------------------
 
-def _detect_store_scope(store_fd, prune, leaf, subtree):
+def _detect_store_scope(store_fd, prune, leaf, subtree, homes=1):
     """Enumerate every non-OPF-managed regular file under `.working/` (the mandatory store scope). Opens
     the `.working/` directory no-follow beneath the resolved store-root fd, walks it pruning the managed
     SUBTREE covers, and drops any file a covered entry manages, matched the SAME two ways the checker does:
@@ -576,7 +575,8 @@ def _detect_store_scope(store_fd, prune, leaf, subtree):
     while a `subtree` cover (a declared-unmanaged path) is dropped by SUBTREE containment (`_under_any`): a
     path that equals it OR lies under a declared-unmanaged directory is skipped BEFORE it is read, so an
     unmanaged subtree's contents are never digested (spec 14.2). Each survivor is a `store`-scope row
-    defaulting to `unresolved` / `baseline`."""
+    defaulting to `unresolved` / `baseline`. In homes 2 (`homes`) a regular FILE at a pruned control root
+    is dropped too, never read; a legacy store keeps its legacy row for such a file."""
     try:
         working_fd = os.open(_opf_store.WORKING_DIRNAME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                              dir_fd=store_fd)
@@ -599,8 +599,9 @@ def _detect_store_scope(store_fd, prune, leaf, subtree):
     finally:
         os.close(working_fd)
     rows = []
+    dropped = subtree | prune if homes >= 2 else subtree
     for rel in files:
-        if rel in leaf or _under_any(rel, subtree):
+        if rel in leaf or _under_any(rel, dropped):
             continue
         digest, size = _digest_of(store_fd, rel)
         rows.append(_row(rel, "store", digest, size))
@@ -823,7 +824,8 @@ def _detect_declared_scope(product_root, include, leaf, subtree, store_working_r
 def _detect_rows(product_root, resolution, include):
     """Assemble the ordered disposition rows: the mandatory store scope plus the opt-in declared scope. The
     rows are sorted by (source_path bytes, scope) so the worksheet digest is invariant to enumeration and
-    `--include` order (determinism)."""
+    `--include` order (determinism). Returns (rows, homes): the store homes generation is derived from the
+    same validated manifest re-read that fixes the exclusions."""
     store_fd = _opf_store._open_store_root_fd(resolution.store_root,
                                               resolution.pointer_source != "default")
     try:
@@ -843,7 +845,8 @@ def _detect_rows(product_root, resolution, include):
                 manifest_rel, reval.status, "; ".join(reval.findings)))
         prune, store_leaf, store_subtree, declared_leaf, declared_subtree = _managed_paths(
             resolution, manifest_data)
-        rows = _detect_store_scope(store_fd, prune, store_leaf, store_subtree)
+        homes = _opf_store.homes_generation(manifest_data)
+        rows = _detect_store_scope(store_fd, prune, store_leaf, store_subtree, homes=homes)
     finally:
         os.close(store_fd)
     if include:
@@ -855,7 +858,7 @@ def _detect_rows(product_root, resolution, include):
         rows += _detect_declared_scope(product_root, include, declared_leaf, declared_subtree,
                                        _store_working_under_product(resolution))
     rows.sort(key=lambda r: (r["source_path"].encode("utf-8"), r["scope"]))
-    return rows
+    return rows, homes
 
 
 def detect(product_root, include=None):
@@ -891,7 +894,7 @@ def detect(product_root, include=None):
             raise _cannot("store manifest is not VALID ({}: {}); run `opf init` first".format(
                 mv.status, "; ".join(mv.findings)))
 
-        rows = _detect_rows(product_root, resolution, include)
+        rows, homes = _detect_rows(product_root, resolution, include)
         worksheet, digest = _build_worksheet(rows)
         # Validate the assembled worksheet against its own validator BEFORE returning CLEAN: `validate_worksheet`
         # is the SINGLE authority on what is a legal worksheet, so a source_path detection accepted (the
@@ -906,7 +909,7 @@ def detect(product_root, include=None):
             raise _cannot("the assembled worksheet fails its own validator (fail-closed, never a clean "
                           "detection whose worksheet is invalid); detected source_path(s): {}; findings: "
                           "{}".format(bad, "; ".join(ws_findings)))
-        return DetectResult(CLEAN, worksheet=worksheet, worksheet_digest=digest, rows=rows)
+        return DetectResult(CLEAN, worksheet=worksheet, worksheet_digest=digest, rows=rows, homes=homes)
     except _DetectError as exc:
         return DetectResult(exc.verdict, [exc.message])
     except _journal.JournalError as exc:
@@ -1161,12 +1164,13 @@ def admit_row_binding(r, opt):
                                "disabled (ruling 3a requires an explicit dest)".format(sp))
 
 
-def admit_row_scope(scope, sp, base):
+def admit_row_scope(scope, sp, base, homes=1):
     """The PURE static SCOPE admissibility of one worksheet row's (scope, source_path), raising a FINDING
     _DetectError: exactly the scope boundaries detection enforces that are decidable from the frozen path
     and the re-anchor `base` alone (no live tree, no manifest). A STORE-scope row is store-relative and
     detection emits it only from the mandatory `.working/` subtree (the store walk root), never from the
-    reserved imports tree it prunes. A DECLARED-scope row is product-relative and detection never emits one
+    store control roots it prunes for the store's homes generation `homes` (legacy 1 by default: only the
+    imports tree). A DECLARED-scope row is product-relative and detection never emits one
     from the literal product-root `.working/`, from the RESOLVED store working subtree
     (`include_scope_prefixes`), from the store-root control / VCS dirs re-anchored at `base`
     (`_opf_store.STORE_ROOT_CONTROL_DIRS`), or at a store pointer control file. `base` is the store-under-
@@ -1181,9 +1185,12 @@ def admit_row_scope(scope, sp, base):
         if not sp.startswith(working + "/"):
             raise _finding("store-scope row {!r} does not lie in the mandatory store subtree {!r}/ (a store "
                            "row is store-relative and detected only under it)".format(sp, working))
-        if _under_any(sp, (_opf_import.IMPORTS_REL,)):
+        if homes < 2 and _under_any(sp, (_opf_import.IMPORTS_REL,)):
             raise _finding("store-scope row {!r} lies in the reserved imports tree {!r}, which detection "
                            "prunes wholesale".format(sp, _opf_import.IMPORTS_REL))
+        if homes >= 2 and _under_any(sp, _opf_store.store_control_roots(homes)):
+            raise _finding("store-scope row {!r} lies in reserved store control area, which detection "
+                           "prunes wholesale".format(sp))
     elif scope == "declared":
         store_working_rel = (None if base is None
                              else posixpath.normpath(posixpath.join(base, working)))
@@ -1440,8 +1447,8 @@ def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonc
                 admit_row_binding(r, opt)
                 # Static scope admissibility (the SHARED admit_row_scope authority the review gate applies to
                 # the frozen worksheet): defence in depth behind the reconcile above, which already requires
-                # every row to be one detection emitted.
-                admit_row_scope(r["scope"], sp, reanchor_base)
+                # every row to be one detection emitted, under the generation that fresh detection pruned by.
+                admit_row_scope(r["scope"], sp, reanchor_base, homes=fresh.homes)
                 resolved_sp = _resolve_by_scope(r["scope"], sp)
                 if resolved_sp in expected:
                     raise _cannot("worksheet row {!r} and another row both resolve to product path {!r}; "
@@ -3231,6 +3238,44 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                              "duplicate resolved_source_path")
                 finally:
                     _gate_ing.admit_row_scope = _real_scope
+
+                # The gate's static scope check uses the store homes generation its caller supplies: a store
+                # row in the journal home is refused as a control-area row only for a homes-2 store, an
+                # unsupplied generation cannot evaluate once homes 2 can be active, and legacy is unchanged.
+                def _journal_row(b):
+                    keep_row = first(b["worksheet"]["row"], source_path="legacy/keep.md")
+                    twin = dict(keep_row, scope="store", source_path=".working/journals/keep.md")
+                    b["worksheet"]["row"].append(twin)
+                    restamp(b)
+                    b["crosswalk"].append(derive_crosswalk_row(twin, ".working/journals/keep.md"))
+
+                def scope_detail(**gate):
+                    snap = snapshot_run()
+                    try:
+                        b = copy.deepcopy(pristine)
+                        _journal_row(b)
+                        rebind(run, b)
+                        return _chk.check_staged_run(rundir, **gate)["ingest-source-binding"]
+                    finally:
+                        restore_run(snap)
+
+                legacy_scope = scope_detail()
+                check("pr4b-homes-legacy-journal-row-admissible", legacy_scope[0] is False
+                      and "not scope-admissible" not in legacy_scope[1])
+                check("pr4b-homes-legacy-explicit-unchanged", scope_detail(homes=1) == legacy_scope)
+                _prior_homes = _opf_store.SUPPORTED_HOMES
+                _opf_store.SUPPORTED_HOMES = 2
+                try:
+                    homes2_scope = scope_detail(homes=2)
+                    check("pr4b-homes2-journal-row-refused", homes2_scope[0] is False
+                          and "reserved store control area" in homes2_scope[1])
+                    unbound_scope = scope_detail()
+                    check("pr4b-homes2-unsupplied-generation-cannot", unbound_scope[0] is False
+                          and "homes generation was not supplied" in unbound_scope[1])
+                    homes2_clean = _chk.check_staged_run(rundir, homes=2)
+                    check("pr4b-homes2-coherent-run-passes", all(homes2_clean[cid][0] for cid in _pr4b_ids))
+                finally:
+                    _opf_store.SUPPORTED_HOMES = _prior_homes
 
                 # A-m4 (PROPOSALS DOCUMENT RE-DERIVE-AND-EQUAL): the staged importer proposals REVERSED (each
                 # row still valid, confined, counted, and the report regenerated to match) no longer equal the

@@ -627,18 +627,31 @@ def _envelope_findings(doc, env, run_id, imp):
     return ""
 
 
-def _row_scope_error(ing, ws_rows, base):
+def _row_scope_error(ing, ws_rows, base, homes):
     """A-M3: the first worksheet row that fails the shared static scope admissibility
-    (_opf_ingest.admit_row_scope) under the recovered re-anchor `base`, as a located finding, else ""."""
+    (_opf_ingest.admit_row_scope) under the recovered re-anchor `base` and the store's homes generation
+    `homes`, as a located finding, else "". This gate reads no manifest, so the generation is the caller's;
+    an unsupplied one (None) is the legacy generation only while no later generation can be active, and
+    otherwise cannot evaluate rather than grade a store by the wrong reserved roots. A supplied generation
+    other than the integer 1 or 2 (a bool, a float, NaN, or any other value), or one above the generation the
+    tooling supports, cannot evaluate either."""
+    import _opf_store
+    if homes is None:
+        if _opf_store.SUPPORTED_HOMES >= 2:
+            return "cannot evaluate: the store's homes generation was not supplied to this manifest-free gate"
+        homes = 1
+    elif type(homes) is not int or homes not in (1, 2) or homes > _opf_store.SUPPORTED_HOMES:
+        return ("cannot evaluate: the supplied homes generation {!r} is not 1 or 2, or is above the tooling's "
+                "supported generation {}".format(homes, _opf_store.SUPPORTED_HOMES))
     for r in ws_rows:
         try:
-            ing.admit_row_scope(r["scope"], r["source_path"], base)
+            ing.admit_row_scope(r["scope"], r["source_path"], base, homes=homes)
         except ing._DetectError as exc:
             return "worksheet row {!r} is not scope-admissible ({})".format(r["source_path"], exc.message)
     return ""
 
 
-def _verify_ingest_review_model(rd, bundle, run, report, inventory):
+def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
     """MIG-PR4b RE-DERIVATION gate: prove the frozen ingest-review.toml bundle plus the staged run are a
     FAITHFUL record of what plan_ingest produced, by RE-DERIVING each DETERMINISTIC staged artefact from the
     authoritative frozen/staged inputs (the frozen worksheet + options + include + the preserved source bytes
@@ -907,7 +920,7 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory):
                 ok, detail = False, base_err
             elif _duplicates([(r["scope"], r["source_path"]) for r in ws_rows]):
                 ok, detail = False, "worksheet carries a duplicate (scope, source_path) row"
-            elif (scope_err := _row_scope_error(ing, ws_rows, base)):
+            elif (scope_err := _row_scope_error(ing, ws_rows, base, homes)):
                 # A-M3 (STATIC SCOPE ADMISSIBILITY): a row re-scoped across the store / product boundary
                 # re-derives FAITHFULLY (the crosswalk, keep action and resolved path all follow the forged
                 # scope), so equality alone cannot refuse it; the shared admit_row_scope applies the scope
@@ -1512,25 +1525,26 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory):
     return out
 
 
-def check_staged_run(run_dir):
+def check_staged_run(run_dir, homes=None):
     """Run the explicit check registry over one staged run directory. Returns an ordered dict
     check-id -> (ok: bool, detail: str). Each check fails closed on an artefact it cannot read: an
     unreadable required input is that check's FINDING, never a silent pass. The SUPPLIED directory is opened
     once no-follow and its entries classified FIRST (_RunDir); every run-dir artefact is then read through
     that one descriptor with a non-blocking, regular-file-validated open, so an unopenable or unlistable run
     dir fails every check closed and a FIFO or symlink in an artefact's place is a located FINDING, never a
-    hang (A-M1/A-M2)."""
+    hang (A-M1/A-M2). `homes` is the store's homes generation for a caller that read the store manifest; the
+    ingest scope check fails closed on an unsupplied generation once a later generation can be active."""
     try:
         rd = _RunDir(run_dir)
     except _GateError as exc:
         return {cid: (False, "cannot evaluate: {}".format(exc)) for cid in EXPECTED_CHECKS}
     try:
-        return _check_staged_run(rd)
+        return _check_staged_run(rd, homes)
     finally:
         rd.close()
 
 
-def _check_staged_run(rd):
+def _check_staged_run(rd, homes=None):
     """check_staged_run over the opened, classified run directory `rd` (a _RunDir)."""
     import json
     import re
@@ -2041,7 +2055,7 @@ def _check_staged_run(rd):
         # The whole shared-validator step is fail-closed: a first-party contract violation (a raise, a
         # malformed return) becomes located FINDINGs, never an uncaught crash for a check_staged_run caller.
         try:
-            ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory)
+            ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, homes)
         except Exception as exc:   # noqa: BLE001 - fail-closed; KeyboardInterrupt/SystemExit still propagate
             ing_results = {}
             _vfail = "ingest review validator raised ({!r})".format(exc)

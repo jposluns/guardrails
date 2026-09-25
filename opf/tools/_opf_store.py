@@ -65,6 +65,7 @@ fail-closed way and names it so the choice is reviewable, per disclose-guard-res
 import collections.abc
 import operator
 import os
+import posixpath
 import re
 import stat
 import sys
@@ -92,6 +93,9 @@ WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root
 # _opf_import._assemble_preview and _opf_ingest derive their root exclusions from this tuple.
 STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
 # Homes-2 topology is inert until migration and writer activation (spec 4.2 / 9.2).
+# SUPPORTED_HOMES is the highest homes generation this tooling activates; homes 2 activates with the
+# migration, so until then every store, whatever it declares, keeps its legacy grading (generation 1).
+SUPPORTED_HOMES = 1
 IMPORTED_DIRNAME = "imported"
 ARCHIVE_DIRNAME_STORE = "archive"       # distinct from the machine-store record archive
 STAGING_DIRNAME = "staging"
@@ -109,6 +113,8 @@ STAGING_KINDS = ("import", "ingest", "adoption", "layout", "preview")
 _HOME_RUN_PREFIXES = {"import": "imp", "ingest": "imp", "adoption": "adopt",
                       "layout": "layout", "preview": "preview"}
 _HOME_RUN_SUFFIX = r"-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
+# Evidence-bundle inventories: inventory.toml, then one inventory-<phase>.toml per later phase.
+_EVIDENCE_INVENTORY_RE = re.compile(r"inventory(?:-[a-z][a-z0-9]{0,31})?\.toml")
 GITIGNORE_BEGIN = "# >>> opf-managed >>>"
 GITIGNORE_END = "# <<< opf-managed <<<"
 DEFAULT_MACHINE_SUBDIR = "toml"        # standard machine-store subdir name, tried first (spec 4.4)
@@ -265,6 +271,63 @@ def txn_record(kind, run_id):
     run = _home_run(kind, run_id)
     kind, run_id = run.split("/")
     return "{}/{}/runs/{}/transaction.toml".format(JOURNALS_REL, kind, run_id)
+
+
+def evidence_inventory(kind, run_id, phase=None):
+    """Store-root-relative inventory of one evidence bundle. A later phase adds its own
+    inventory-<phase>.toml beside the first; an inventory is never rewritten."""
+    name = "inventory.toml" if phase is None else "inventory-{}.toml".format(phase)
+    if not is_evidence_inventory_name(name):
+        raise ValueError("invalid evidence inventory phase: {!r}".format(phase))
+    return "{}/{}".format(evidence_run(kind, run_id), name)
+
+
+def is_evidence_inventory_name(name):
+    """Whether a bundle-root file name is reserved for an evidence inventory."""
+    return isinstance(name, str) and _EVIDENCE_INVENTORY_RE.fullmatch(name) is not None
+
+
+HOMES2_SPEC_VERSION = "2.0.0"           # the only spec_version the homes-2 contract applies to (spec 4.2)
+
+
+def homes_generation(manifest_data):
+    """The store's active homes generation: 2 only when this tooling activates homes 2 and the
+    manifest declares both exactly the integer 2 and spec_version 2.0.0, otherwise the legacy
+    generation 1. Raising SUPPORTED_HOMES alone therefore activates nothing for a store at the
+    current spec_version. Manifest validation, not this helper, reports a malformed or unknown
+    declaration."""
+    opf = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
+    declared = opf.get("homes") if isinstance(opf, dict) else None
+    version = opf.get("spec_version") if isinstance(opf, dict) else None
+    return 2 if (SUPPORTED_HOMES >= 2 and type(declared) is int and declared == 2
+                 and version == HOMES2_SPEC_VERSION) else 1
+
+
+def store_control_roots(homes):
+    """Store-relative control roots for a homes generation. A legacy store reserves only the
+    imports staging tree; the homes-2 names are ordinary store paths there."""
+    if type(homes) is not int or homes not in (1, 2):
+        raise ValueError("unknown homes generation: {!r}".format(homes))
+    names = RESERVED_MACHINE_SUBDIRS if homes == 2 else RESERVED_MACHINE_SUBDIRS[:1]
+    return tuple("{}/{}".format(WORKING_DIRNAME, n) for n in names)
+
+
+def overlaps_home(path, home):
+    """Whether a contained operand equals, contains, or lies within a reserved home. The comparison
+    is byte-exact: on a case-insensitive or normalizing filesystem a differently cased or composed
+    spelling can alias a home and is not caught here (disclosed residual, spec 4.2)."""
+    if not _is_contained_relpath(path):
+        raise ValueError("not a contained store-relative path: {!r}".format(path))
+    path = posixpath.normpath(path)
+    return path == "." or path == home or path.startswith(home + "/") or home.startswith(path + "/")
+
+
+def require_ordinary_target(path):
+    """Homes-2 boundary: refuse journal operands, including ancestors. Internal journal writes use
+    the held capability. Only homes-2 entry points call this (the capability-bound journal API and
+    homes-2 view planning); legacy transactions keep their legacy operand handling."""
+    if overlaps_home(path, JOURNALS_REL):
+        raise ValueError("ordinary operation target {!r} overlaps the journal home".format(path))
 
 
 def render_homes_gitignore():

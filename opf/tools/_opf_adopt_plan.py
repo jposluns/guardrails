@@ -204,18 +204,25 @@ def _inventory(root, sources, targets):
             if checked.status != store.VALID:
                 raise PlanError("resolved manifest is not valid: " + "; ".join(checked.findings))
             excluded.append({"path": resolution.machine_rel, "reason": "machine-store"})
+            # A legacy store (homes 1) reserves only the imports tree and excludes nothing more; homes 2
+            # also reserves every store control root and excludes it from investigation (spec 14.2).
+            homes = store.homes_generation(manifest)
+            control = list(store.store_control_roots(homes))
             for path in manifest.get("unmanaged", {}).get("paths", []):
                 # Conservative collision check: do not let an exclusion conceal the
-                # machine subtree or a declared view. Fine-grained store membership
-                # remains the doctor's job, not an adoption-planner reimplementation.
+                # machine subtree, a store control root, or a declared view. Fine-grained store
+                # membership remains the doctor's job, not an adoption-planner reimplementation.
                 path = _path(path)
-                reserved = [resolution.machine_rel, ".working/imports"]
+                reserved = [resolution.machine_rel] + control
                 reserved += [v["target"] for v in manifest.get("views", {}).values()]
                 if any(_under(path, p) or _under(p, path) for p in reserved):
                     raise PlanError("unmanaged exclusion overlaps a reserved store path")
                 excluded.append({"path": path, "reason": "registered-unmanaged"})
+            if homes >= 2:
+                excluded.extend({"path": path, "reason": "store-control"} for path in control)
             manifest_digest = _digest(raw)
         else:
+            homes = 1
             manifest_path = ""
             manifest_digest = ""
         exclusions = sorted(excluded, key=lambda row: (row["path"], row["reason"]))
@@ -314,6 +321,8 @@ def _inventory(root, sources, targets):
                 raise PlanError("product root changed during investigation")
         finally:
             os.close(check_fd)
+        # The homes generation is returned beside the observation, never inside it, so the observation
+        # bytes are unchanged; it comes from the same manifest read that fixed the exclusions.
         return {
             "format": OBS_FORMAT,
             "product_root": str(root),
@@ -338,24 +347,29 @@ def _inventory(root, sources, targets):
                 for path in DETECTION_ROOTS if path in entries
             ],
             "coverage_residuals": list(RESIDUALS),
-        }
+        }, homes
     finally:
         os.close(root_fd)
 
 
 def investigate(product_root, *, sources, targets=()):
     """No output path: return inert canonical bytes. Required source absence refuses."""
+    return _investigate(product_root, sources, targets)[0]
+
+
+def _investigate(product_root, sources, targets):
+    """investigate, plus the resolved store's homes generation (legacy 1 when nothing resolved)."""
     try:
         if not isinstance(product_root, (str, os.PathLike)):
             raise PlanError("product_root must be an absolute path")
         root = Path(product_root)
         if not root.is_absolute() or ".." in root.parts:
             raise PlanError("product_root must be absolute and contain no '..'")
-        doc = _inventory(root, _roots(sources), _roots(targets))
-        return AdoptResult(store.VALID, observation=_seal(doc, "observation_digest"))
+        doc, homes = _inventory(root, _roots(sources), _roots(targets))
+        return AdoptResult(store.VALID, observation=_seal(doc, "observation_digest")), homes
     except (OSError, ValueError, UnicodeError, RecursionError, EmitError,
             store.StoreError, store._journal.JournalError) as exc:
-        return AdoptResult(store.CANNOT_EVALUATE, [str(exc)])
+        return AdoptResult(store.CANNOT_EVALUATE, [str(exc)]), 1
 
 
 def _decisions(observation, decisions):
@@ -416,7 +430,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
     acceptance references remain unverified inputs to later PRs. No generic op
     can substitute for the explicit per-candidate dispositions below.
     """
-    observed = investigate(product_root, sources=sources, targets=targets)
+    observed, homes = _investigate(product_root, sources, targets)
     if observed.status != store.VALID:
         return observed
     try:
@@ -433,7 +447,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
         if type(ops) is not list:
             raise PlanError("ops must be an ordered list")
         for row in ops:
-            checked = schema.validate_op(row)
+            checked = schema.validate_op(row, homes=homes)
             if checked.status != store.VALID:
                 return AdoptResult(checked.status, checked.findings, observation=observed.observation)
             if row["op"] in ("register-unmanaged", "move-file", "retire-file", "import-file"):
@@ -446,7 +460,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
                     _path(member["path"])
         disposition_ops, unresolved = _decisions(doc, decisions)
         for row in disposition_ops:
-            checked = schema.validate_op(row)
+            checked = schema.validate_op(row, homes=homes)
             if checked.status != store.VALID:
                 return AdoptResult(checked.status, checked.findings, observation=observed.observation)
         unresolved += doc["empty_directories"]
@@ -475,7 +489,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
             "ops": _order_ops(disposition_ops, ops),
         }
         frozen = _seal(proposal, "plan_digest")
-        checked = schema.validate_plan(tomllib.loads(frozen.decode("utf-8")))
+        checked = schema.validate_plan(tomllib.loads(frozen.decode("utf-8")), homes=homes)
         if checked.status != store.VALID:
             return AdoptResult(checked.status, checked.findings, observation=observed.observation)
         return AdoptResult(store.VALID, observation=observed.observation,

@@ -90,7 +90,7 @@ Two roots organize every path in this standard:
 ### 4.2 Layout overview
 
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
-The current reference tooling reserves these names and provides inert constructors only. It still
+The current reference tooling reserves these names and implements their homes-2 boundary checks. It still
 supports `1.1.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
 legacy paths until homes 2 is activated, which requires the homes migration (`opf upgrade`) to be
 available. The section 9 manifest example
@@ -182,6 +182,52 @@ indexed-ignore candidate set. Gitignore is not access control: `git add -f` can 
 state. Journals are machine-local even after completion; a clone without them cannot recover those
 transactions, and requested recovery fails closed on a missing journal. Containment and doctor
 exclude journals and make no recovery claim; a rogue file there is outside their coverage.
+
+Until homes 2 is activated, every store, whatever it declares, keeps its legacy grading: the
+homes-2 names are ordinary store paths there, graded, detected, and dispositioned exactly as
+before, C-EVIDENCE-ENUM neither runs nor reads anything, and the doctor report's check roster and
+residuals are unchanged. The boundary below applies only to a store that declares both
+`homes = 2` and `spec_version = "2.0.0"` once the tooling activates that generation.
+
+Each evidence bundle `.working/imported/<kind>/<run-id>/` carries its own inventories at its
+root: `inventory.toml`, plus a new `inventory-<phase>.toml` for each later phase, where `<phase>`
+is a lowercase letter followed by up to 31 lowercase letters or digits. Each holds exactly
+`format = "opf.evidence.inventory/v1"` and a `file` array whose rows have exactly `path` (a
+canonical store-relative file path spelled from `.working/`), `size` (a nonnegative integer), and
+`sha256` (64 lowercase hex digits). A row may name a member of its own bundle other than a
+bundle-root inventory, a default Move destination under `.working/archive/moved/`, or, for an
+adoption bundle, a retire preimage of the same run under `.working/archive/adoption/<run-id>/`.
+The owning writer or migration derives each inventory from the run's transaction record or
+receipt and publishes it exclusively with the retained bytes. An inventory is never rewritten, so
+a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is
+not a journal projection and remains available in a clone without journals.
+
+C-EVIDENCE-ENUM reconciles exact membership, directory structure, regular-file types, sizes and
+digests: every payload file under `.working/imported/` and `.working/archive/`, meaning every file
+other than a bundle-root inventory, is claimed by exactly one row, and every inventory is itself
+schema-checked against the shape above rather than claimed. Unlisted or unclaimed entries, a bundle
+without an inventory, and missing listed files are findings; unreadable or malformed inputs,
+including a path claimed twice, cannot evaluate. A phase inventory never substitutes for a missing
+`inventory.toml`: such a bundle cannot evaluate. Deleting a whole bundle, inventory and payload
+together, is outside this local snapshot check; independent history is required to detect that
+loss. Inventories assert membership, not authenticated actor history. The contained reader's size
+ceiling still applies.
+
+The legacy `imports/` exclusion remains registered until its writers migrate. In homes 2,
+`staging/` is walked and stray-graded, including empty runs; an unknown kind is always a finding.
+The existing staged-plan presence test also recognizes import and ingest runs in their typed
+staging homes. Other kinds cannot substantiate partial import status until their plan readers
+are registered. Doctor never consults a journal to decide partial status and makes no claim that
+a staged plan has a recoverable transaction. In homes 2, ordinary transaction operands, including
+those of an open transaction being recovered, cannot equal, descend from, or contain `journals/`; a
+legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer
+targets that home. Capability-bound journal APIs derive their destinations from kind and run
+identity. Legacy journal transport must preserve bytes through the migration's receipt binding.
+These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently
+cased or composed spelling can alias a reserved home and is not caught. Discovery precedes the
+manifest, so it cannot know the generation: it examines `manifest.toml` in every immediate
+subdirectory, including `journals/`, and fails closed on a reserved-name match or ambiguity; it
+reads nothing deeper there.
 
 
 ### 4.3 The pointer
@@ -1269,10 +1315,10 @@ attribution like any other decision.
 
 The reserved children `archive/`, `imported/`, `staging/`, and `journals/` are OPF control area.
 Detection never surfaces them as adopter content, no adoption option selects them, and no
-`[unmanaged]` declaration may name or contain them. Adoption retire preserves the exact preimage
-under `.working/archive/adoption/<run-id>/` before removal or replacement. Adoption evidence is
-committed and immutable under `.working/imported/adoption/<run-id>/`; events are transaction
-records under `.working/journals/adoption/`.
+`[unmanaged]` declaration may equal, contain, or lie within them. Adoption retire preserves the
+exact preimage under `.working/archive/adoption/<run-id>/` before removal or replacement. Adoption
+evidence is committed and immutable under `.working/imported/adoption/<run-id>/`; events are
+transaction records under `.working/journals/adoption/`.
 
 After adoption, the same detection keeps running, scoped by phase. `import_status = "partial"`
 denotes an in-progress import or migration only: it is set only while an import or migration is
