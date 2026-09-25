@@ -1535,8 +1535,9 @@ def _gate_homes(homes):
     only while no later generation can be active (the rule _row_scope_error applies). A supplied generation
     other than the integer 1 or 2 (a bool, a str, a float, 3), or one above the tooling's supported
     generation, raises. The staged-run gate takes no generation-dependent path on an invalid value:
-    ingest and ingest-acceptance checks fail with that error. Listing-based marker classification and
-    ordinary staged-data grading are generation-independent and still run."""
+    ingest and ingest-acceptance checks fail with that error, as do an ingest-marked run's staged
+    acceptance checks. Listing-based marker classification and ordinary runs' staged-data grading
+    are generation-independent and still run."""
     import _opf_store
     if homes is None:
         if _opf_store.SUPPORTED_HOMES >= 2:
@@ -1642,8 +1643,9 @@ def _check_staged_run(rd, homes=None):
         results[cid] = (bool(ok), detail)
 
     # A generation validation failure takes no generation-dependent path.
-    # Listing-based marker classification, ordinary staged-data grading, and transaction checks remain
-    # generation-independent. Every ingest and ingest-acceptance check records the generation error.
+    # Listing-based marker classification, ordinary runs' staged-data grading, and transaction checks
+    # remain generation-independent. Every ingest and ingest-acceptance check records the generation
+    # error, as do an ingest-marked run's staged acceptance checks.
     _ingest_ids = ("ingest-run-structure",) + _INGEST_CHECK_IDS
     generation_checks = _ingest_ids + _INGEST_ACCEPTANCE_CHECKS
     try:
@@ -2318,12 +2320,14 @@ def _self_test_gate_generation(expect):
 
     gate = sys.modules[__name__]
     dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
+    staged_acceptance = ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
+                         "acceptance-completeness")
     cases = (("bool", True), ("string", "2"), ("future", 3), ("float", 2.0),
              ("nan", float("nan")), ("unsupplied", None))
-    for fixture in ("ordinary", "ingest", "malformed-core"):
+    for fixture in ("ordinary", "ordinary-marked-acceptance", "ingest", "malformed-core"):
         rd, files = imp._memory_ingest_run()
         rd.fd = -1
-        if fixture == "ordinary":
+        if fixture in ("ordinary", "ordinary-marked-acceptance"):
             for name in imp._INGEST_RUN_MARKERS:
                 files.pop(name, None)
                 rd.tree.pop(name, None)
@@ -2332,6 +2336,9 @@ def _self_test_gate_generation(expect):
             norm = [dict(p, _origin=p["origin"]) for p in proposals]
             files[imp.REPORT_MD_NAME] = imp._render_report_md(
                 inv["inventory_digest"], inv["fragment"], norm, rd.path.name).encode("utf-8")
+            if fixture == "ordinary-marked-acceptance":
+                files[imp.ACCEPTANCE_NAME] = b'{"ingest": {}}'
+                rd.tree[imp.ACCEPTANCE_NAME] = "file"
         elif fixture == "malformed-core":
             real_load = rd.load_toml
 
@@ -2363,10 +2370,17 @@ def _self_test_gate_generation(expect):
                 # acceptance ids route by generation, so only an ordinary run compares them too.
                 ordinary_unchanged = all(
                     result.get(cid) == value for cid, value in baseline.items()
-                    if cid not in dependent and (fixture == "ordinary" or not cid.startswith("acceptance-")))
+                    if cid not in dependent and (fixture in ("ordinary", "ordinary-marked-acceptance")
+                                                 or cid not in staged_acceptance))
                 ordinary_clean = (fixture != "ordinary" or all(
                     ok for cid, (ok, _detail) in baseline.items()
                     if cid not in ("transaction-schema", "transaction-consistency")))
+                if fixture == "ingest":
+                    expect("gate-generation-ingest-staged-acceptance-{}".format(label),
+                           all(result.get(cid) == (False, error) for cid in staged_acceptance))
+                elif fixture == "ordinary-marked-acceptance":
+                    expect("gate-generation-ordinary-staged-acceptance-{}".format(label),
+                           all(result.get(cid) == baseline[cid] for cid in staged_acceptance))
                 expect("gate-generation-{}-{}".format(fixture, label),
                        set(result) == set(EXPECTED_CHECKS)
                        and all(result.get(cid) == (False, error) for cid in dependent)
