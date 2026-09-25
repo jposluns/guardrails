@@ -2343,7 +2343,7 @@ def _self_test_gate_generation(expect):
                 # Located ordinary findings (a non-integer verdict, a report that is not byte-reproducible)
                 # must survive every invalid generation unchanged.
                 rep = rd.load_toml("report.toml")
-                rep["verdict"] = 1
+                rep["verdict"] = False
                 files["report.toml"] = _opf_emit.emit(rep).encode("utf-8")
                 files[imp.REPORT_MD_NAME] += b"x"
         elif fixture == "malformed-core":
