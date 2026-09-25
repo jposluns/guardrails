@@ -3214,10 +3214,36 @@ def _require_gate_results(results, expected):
         raise _cannot("import gate failed: " + ", ".join(failed))
 
 
-def _require_review_gate(run_dir):
+def _store_homes(resolution):
+    """The store's homes generation, derived ONCE per entry point from the authoritative manifest through
+    _opf_store.homes_generation (never a constant); every gate call and snapshot that entry point makes
+    receives this value."""
+    manifest = _opf_store.load_manifest(resolution)
+    if manifest.status != _opf_store.VALID or not isinstance(manifest.base, dict):
+        raise _cannot("the store manifest is not VALID; its homes generation cannot be derived")
+    return _opf_store.homes_generation({"opf": manifest.base})
+
+
+def _import_run_locations(run_id, homes):
+    """Store-relative locations of a staged import run, shared by the gate (_ingest_store_fd) and every PR4c
+    entry point. Generation 1 has only the legacy location: the homes-2 staging names are ordinary store
+    paths there. The first location is where staging writes a run."""
+    legacy = "{}/{}".format(IMPORTS_REL, run_id)
+    if type(homes) is int and homes == 1:
+        return (legacy,)
+    if type(homes) is int and homes == 2:
+        return (legacy, _opf_store.stage_run("ingest", run_id), _opf_store.stage_run("import", run_id))
+    raise ValueError("unknown homes generation: {!r}".format(homes))
+
+
+def _import_run_dir(resolution, run_id, homes):
+    return os.path.join(resolution.store_root, _import_run_locations(run_id, homes)[0])
+
+
+def _require_review_gate(run_dir, homes):
     try:
         import check_opf_import as gate
-        _require_gate_results(gate.check_staged_run(run_dir), gate.EXPECTED_CHECKS)
+        _require_gate_results(gate.check_staged_run(run_dir, homes=homes), gate.EXPECTED_CHECKS)
     except _StageError:
         raise
     except Exception as exc:
@@ -3327,8 +3353,9 @@ def _freeze_ingest_bytes(rd):
     return Frozen()
 
 
-def _ingest_snapshot(rd):
-    """Revalidate and hash the full frozen payload, not the narrower render projection."""
+def _ingest_snapshot(rd, homes):
+    """Revalidate and hash the full frozen payload, not the narrower render projection. `homes` is the
+    store's derived generation; the binding records the generation the model was validated under."""
     rd = _freeze_ingest_bytes(rd)
     import check_opf_import as gate
     bundle = _validate_staged_ingest_bundle(rd.load_toml(INGEST_REVIEW_NAME), rd.path.name)
@@ -3336,8 +3363,10 @@ def _ingest_snapshot(rd):
             ("run.toml", "report.toml", INVENTORY_NAME, INGEST_ACTIONS_NAME, CANDIDATES_DRAFT_NAME,
              PROPOSALS_NAME, "mappings.toml")}
     result = gate._verify_ingest_review_model(rd, bundle, docs["run.toml"],
-                                             docs["report.toml"], docs[INVENTORY_NAME])
+                                             docs["report.toml"], docs[INVENTORY_NAME], homes)
     _require_gate_results(result, gate._INGEST_CHECK_IDS)
+    # An unsupplied generation passes the scope check above only as the legacy generation 1.
+    homes = 1 if homes is None else homes
     payload = {name: "sha256:" + _sha256_hex(rd.read_bytes(name))
                for name, kind in sorted(rd.tree.items()) if kind == "file"}
     units, removals = _ingest_authority(bundle, docs)
@@ -3349,7 +3378,7 @@ def _ingest_snapshot(rd):
                    bundle_digest=payload[INGEST_REVIEW_NAME],
                    review_model_digest="sha256:" + _sha256_hex(_emit_acceptance_bytes(model)),
                    report_digest=payload["report.toml"], presentation_digest=payload[REPORT_MD_NAME],
-                   homes_generation=INGEST_HOMES_GENERATION,
+                   homes_generation=homes,
                    evidence_home=_ingest_acceptance_home(rd.path.name), source_removals=removals)
     fragments = {}
     mappings = {(m["source_path"], tuple(m["span"])): m for m in docs["mappings.toml"]["mapping"]}
@@ -3461,24 +3490,24 @@ def _read_ingest_acceptance(root_fd, run_id):
         os.close(fd)
 
 
-def _require_ingest_homes(resolution):
-    """Require layout activation, not just the existence of an operator-created directory."""
-    manifest = _opf_store.load_manifest(resolution)
-    base = manifest.base
-    if (manifest.status != _opf_store.VALID or type(base.get("homes")) is not int
-            or base["homes"] != INGEST_HOMES_GENERATION or base.get("spec_version") != "2.0.0"):
+def _require_ingest_homes(homes):
+    """Require layout activation, not just the existence of an operator-created directory. `homes` is the
+    generation _store_homes derived from the authoritative manifest (so SUPPORTED_HOMES gates it); the
+    value returned is the one the capture's binding carries."""
+    if type(homes) is not int or homes != INGEST_HOMES_GENERATION:
         raise _cannot("durable acceptance writing requires activated homes 2; the legacy layout is read-only here")
+    return homes
 
 
 def _capture_ingest_review(resolution, run_id, actor, decisions, ingest, clock):
     """Capture only to a provisioned durable home after the final binding comparison."""
     import check_opf_import as gate
-    run_rel = "{}/{}".format(IMPORTS_REL, run_id)
-    run_dir = os.path.join(resolution.store_root, run_rel)
-    _require_review_gate(run_dir)
+    homes = _store_homes(resolution)
+    run_dir = _import_run_dir(resolution, run_id, homes)
+    _require_review_gate(run_dir, homes)
     rd = gate._RunDir(run_dir)
     try:
-        snapshot = _ingest_snapshot(rd)
+        snapshot = _ingest_snapshot(rd, homes)
     finally:
         rd.close()
     if not isinstance(ingest, dict) or set(ingest) != {"format", "binding", "units"}:
@@ -3506,15 +3535,15 @@ def _capture_ingest_review(resolution, run_id, actor, decisions, ingest, clock):
         raise _finding("; ".join(binding + complete))
     data = _emit_acceptance_bytes(model)
     # A final full gate includes any prior durable acceptance. Repair never bypasses its failure.
-    _require_review_gate(run_dir)
+    _require_review_gate(run_dir, homes)
     rd = gate._RunDir(run_dir)
     try:
-        current = _ingest_snapshot(rd)
+        current = _ingest_snapshot(rd, homes)
     finally:
         rd.close()
     if not gate._strict_eq(snapshot["binding"], current["binding"]):
         raise _finding("review changed during capture; no decisions were rebound")
-    _require_ingest_homes(resolution)
+    _require_ingest_homes(homes)
     home = _ingest_acceptance_home(run_id)
     fd = _opf_store._open_store_root_fd(resolution.store_root, resolution.pointer_source != "default")
     try:
@@ -3550,11 +3579,12 @@ def _ingest_review_envelope(snapshot):
 
 def _interactive_ingest_review(resolution, run_id, actor, now, stdin, stdout, clock):
     import check_opf_import as gate
-    run_dir = os.path.join(resolution.store_root, IMPORTS_REL, run_id)
-    _require_review_gate(run_dir)
+    homes = _store_homes(resolution)
+    run_dir = _import_run_dir(resolution, run_id, homes)
+    _require_review_gate(run_dir, homes)
     rd = gate._RunDir(run_dir)
     try:
-        snapshot = _ingest_snapshot(rd)
+        snapshot = _ingest_snapshot(rd, homes)
     finally:
         rd.close()
     envelope = _ingest_review_envelope(snapshot)
@@ -3583,13 +3613,14 @@ def _interactive_ingest_review(resolution, run_id, actor, now, stdin, stdout, cl
 def _ingest_acceptance_explanation(resolution, run_id):
     """Only a freshly validated durable record may supply attribution in the refusal."""
     import check_opf_import as gate
-    run_dir = os.path.join(resolution.store_root, IMPORTS_REL, run_id)
     try:
-        _require_review_gate(run_dir)
+        homes = _store_homes(resolution)
+        run_dir = _import_run_dir(resolution, run_id, homes)
+        _require_review_gate(run_dir, homes)
         rd = gate._RunDir(run_dir)
         try:
-            snapshot = _ingest_snapshot(rd)
-            fd = gate._ingest_store_fd(rd)
+            snapshot = _ingest_snapshot(rd, homes)
+            fd = gate._ingest_store_fd(rd, homes)
             try:
                 acceptance = _read_ingest_acceptance(fd, run_id)
             finally:
@@ -3619,11 +3650,12 @@ def ingest_review_aid(product_root, run_id, previous_run=None):
         if not isinstance(rid, str) or not _RUN_ID_RE.fullmatch(rid):
             raise _cannot("review aid requires valid run identifiers")
     resolution = _resolve_store_for_review(product_root)
-    run_dir = os.path.join(resolution.store_root, IMPORTS_REL, run_id)
-    _require_review_gate(run_dir)
+    homes = _store_homes(resolution)
+    run_dir = _import_run_dir(resolution, run_id, homes)
+    _require_review_gate(run_dir, homes)
     rd = gate._RunDir(run_dir)
     try:
-        snapshot = _ingest_snapshot(rd)
+        snapshot = _ingest_snapshot(rd, homes)
     finally:
         rd.close()
     output = {"template": _ingest_review_envelope(snapshot), "model": snapshot["model"]}
@@ -4917,9 +4949,13 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                 # promotion. At pre-promotion the transaction-schema/consistency checks pass ("run not yet
                 # applied"); a valid reviewed run passes every check.
                 run_dir_path = os.path.join(str(resolution.store_root), run_rel)
+                # The store's generation, derived once from the authoritative manifest for this gate and
+                # step 6; step 6's layout read must agree with it.
+                homes = _opf_store.homes_generation(
+                    _read_toml(root_fd, "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)))
                 try:
                     import check_opf_import   # lazy: mirrors review_import's call-time import (circular)
-                    gate_results = check_opf_import.check_staged_run(run_dir_path)
+                    gate_results = check_opf_import.check_staged_run(run_dir_path, homes=homes)
                     gate_findings = sorted(cid for cid, (ok, _d) in gate_results.items() if not ok)
                     if gate_findings:
                         raise _finding("staged run fails the import-operation gate at apply; not promotable "
@@ -4966,7 +5002,8 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
                 active_types = _active_types(root_fd, machine_rel)
                 roster = _roster()
                 registered_vendors = _registered_vendors(root_fd, machine_rel)
-                homes = _opf_store.homes_generation(_require_inline_layout(root_fd, machine_rel))
+                if _opf_store.homes_generation(_require_inline_layout(root_fd, machine_rel)) != homes:
+                    raise _cannot("the store manifest's homes generation changed during apply; cannot promote")
                 cand_counters = _read_toml(root_fd, run_rel + "/candidate/counters.toml")
                 if cand_counters is None:
                     raise _cannot("staged run has no candidate/counters.toml (malformed run; cannot promote)")
@@ -5672,7 +5709,7 @@ def _self_test_ingest_acceptance(check):
         reads[name] = reads.get(name, 0) + 1
         return original_read(name)
     reader.read_bytes = counted_read
-    actual = _ingest_snapshot(reader)
+    actual = _ingest_snapshot(reader, 1)
     check("accept-single-byte-snapshot", set(reads) == set(files) and all(n == 1 for n in reads.values()))
     reader.read_bytes = original_read
     check("accept-full-model", actual["binding"]["review_model_digest"].startswith("sha256:"))
@@ -5687,7 +5724,7 @@ def _self_test_ingest_acceptance(check):
     for entry in report["artifact"]:
         entry["sha256"] = _sha256_hex(files[entry["path"]])
     files["report.toml"] = _emit_bytes(report, "report")
-    check("accept-full-model-counters", _ingest_snapshot(reader)["binding"]["review_model_digest"] != before_model)
+    check("accept-full-model-counters", _ingest_snapshot(reader, 1)["binding"]["review_model_digest"] != before_model)
     # Flip: a refusal that comes only from the TOML parser admits the parse-valid report.toml tail;
     # IMPORT-REPORT.md is never parsed, so its tail reaches only the byte-reproducibility check.
     for name, tail in (("report.toml", b"# parse-valid, not byte-re-derivable\n"),
@@ -5698,7 +5735,7 @@ def _self_test_ingest_acceptance(check):
             if name == "report.toml":
                 check("accept-report-tail-parses",
                       tomllib.loads(files[name].decode()) == tomllib.loads(prior.decode()))
-            _ingest_snapshot(reader)
+            _ingest_snapshot(reader, 1)
             refused = False
         except _StageError:
             refused = True
@@ -5708,7 +5745,7 @@ def _self_test_ingest_acceptance(check):
     prior = files[INGEST_REVIEW_NAME]
     files[INGEST_REVIEW_NAME] = prior.replace(b"opf-ingest-review-bundle-v2", b"opf-ingest-review-bundle-v1")
     try:
-        _ingest_snapshot(reader)
+        _ingest_snapshot(reader, 1)
         refused = False
     except _StageError:
         refused = True
@@ -5826,17 +5863,25 @@ def _self_test_ingest_acceptance(check):
     rendered = _ingest_render_model(rid, cw, [zero])
     check("accept-zero-explicit-conversion", len(rendered["decision_units"]) == 2)
     check("accept-home-constructor", _ingest_acceptance_home(rid) == _opf_store.evidence_run("import", rid))
-    for base, allowed in (({"homes": 2, "spec_version": "2.0.0"}, True),
-                          ({"homes": True, "spec_version": "2.0.0"}, False),
-                          ({"homes": 1, "spec_version": "1.1.0"}, False), ({}, False)):
+    # Flip: a manifest-only activation test (ignoring SUPPORTED_HOMES) admits the first row, a declaration
+    # the store's derived generation grades as 1 while this tooling supports only homes 1.
+    homes2 = dict(homes=2, spec_version=_opf_store.HOMES2_SPEC_VERSION)
+    for base, supported, allowed in ((homes2, 1, False), (homes2, 2, True),
+                                     (dict(homes=True, spec_version="2.0.0"), 2, False),
+                                     (dict(homes=1, spec_version="1.1.0"), 2, False), (dict(), 2, False)):
         manifest = _opf_store.ManifestValidation(_opf_store.VALID, base=base)
-        with patch.object(_opf_store, "load_manifest", return_value=manifest):
+        with patch.object(_opf_store, "load_manifest", return_value=manifest), \
+                patch.object(_opf_store, "SUPPORTED_HOMES", supported):
             try:
-                _require_ingest_homes(None)
-                admitted = True
+                admitted = _require_ingest_homes(_store_homes(None)) == 2
             except _StageError:
                 admitted = False
         check("accept-homes-generation", admitted is allowed)
+    # Flip: the legacy location plus homes-2 staging names for generation 1 lets the gate treat an ordinary
+    # `.working/staging/...` ancestor as the store root.
+    check("accept-run-location-legacy-only", _import_run_locations(rid, 1) == (IMPORTS_REL + "/" + rid,))
+    check("accept-run-location-homes2", _import_run_locations(rid, 2)[1:] == (
+        _opf_store.stage_run("ingest", rid), _opf_store.stage_run("import", rid)))
 
     changed = copy.deepcopy(envelope["ingest"])
     changed["binding"]["homes_generation"] = 3
@@ -5880,6 +5925,7 @@ def _self_test_ingest_acceptance(check):
     resolution.pointer_source = "default"
     envelope = _ingest_review_envelope(snapshot)
     with patch.object(gate, "_RunDir") as reader, \
+            patch.object(sys.modules[__name__], "_store_homes", return_value=1), \
             patch.object(sys.modules[__name__], "_require_review_gate"), \
             patch.object(sys.modules[__name__], "_ingest_snapshot", return_value=snapshot), \
             patch.object(sys.modules[__name__], "review_import") as submit:
@@ -5903,6 +5949,7 @@ def _self_test_ingest_acceptance(check):
         installed.append((home, _strict_json(data)))
         return home + "/" + ACCEPTANCE_NAME
     with patch.object(gate, "_RunDir"), \
+            patch.object(sys.modules[__name__], "_store_homes", return_value=1), \
             patch.object(sys.modules[__name__], "_require_review_gate"), \
             patch.object(sys.modules[__name__], "_ingest_snapshot", return_value=snapshot), \
             patch.object(sys.modules[__name__], "_require_ingest_homes"), \
@@ -5936,7 +5983,12 @@ def _self_test_ingest_capture_run(root, run, now, check):
 
     rd = gate._RunDir(run)
     try:
-        snapshot = _ingest_snapshot(rd)
+        # The planner fixture is a legacy store: its derived generation is 1.
+        snapshot = _ingest_snapshot(rd, 1)
+        # Flip: binding the constant INGEST_HOMES_GENERATION instead of the derived value records 2 here.
+        check("accept-binding-derived-homes", snapshot["binding"]["homes_generation"] == 1)
+        with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            check("accept-binding-homes2", _ingest_snapshot(rd, 2)["binding"]["homes_generation"] == 2)
     finally:
         rd.close()
     envelope = _ingest_review_envelope(snapshot)
@@ -5971,9 +6023,28 @@ def _self_test_ingest_capture_run(root, run, now, check):
     after.pop(str(acc_path.relative_to(root)))
     check("accept-only-durable-write", before == after and not (run / ACCEPTANCE_NAME).exists())
     check("accept-full-gate", all(ok for ok, detail in gate.check_staged_run(run).values()))
+    # Flip: once a later generation can be active, dropping `homes` anywhere between check_staged_run and
+    # _verify_ingest_review_model (acceptance checks, snapshot) makes the nested scope check "not supplied"
+    # and fails every acceptance check; the generation-2 grading of a generation-1 record must not pass.
+    with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+        check("accept-gate-homes-threaded", all(ok for ok, detail in gate.check_staged_run(run, homes=1).values()))
+        check("accept-gate-homes-bound",
+              gate.check_staged_run(run, homes=2)["ingest-acceptance-binding"][0] is False)
+        # Flip: an entry point that derives no generation (or drops it before _require_review_gate or
+        # _ingest_snapshot) reaches the gate unsupplied and refuses here.
+        try:
+            aid = ingest_review_aid(root, run.name)
+            aid_ok = aid["template"]["ingest"]["binding"]["homes_generation"] == 1
+        except _StageError:
+            aid_ok = False
+        check("accept-aid-homes-threaded", aid_ok)
+        check("accept-explanation-homes-threaded", _ingest_acceptance_explanation(
+            _resolve_store_for_review(root), run.name).startswith("Recorded by"))
+        check("accept-capture-homes-threaded", capture().verdict == CLEAN)
+        acc_path.write_bytes(saved)
     # Flip: stale binding admission, gate omission, and a pre-rename overwrite each violate byte preservation.
     stale = copy.deepcopy(ingest)
-    stale["binding"]["homes_generation"] = 1
+    stale["binding"]["homes_generation"] = 2   # the fixture's derived generation is 1
     check("accept-stale-submission", capture(stale).verdict == FINDING and acc_path.read_bytes() == saved)
     with patch.object(os, "rename", side_effect=OSError("injected pre-rename failure")):
         check("accept-writer-pre-rename", capture(actor="second").verdict == CANNOT_EVALUATE
@@ -7647,7 +7718,12 @@ def self_test():
         check("A1-plan-clean", prA1.verdict == 0 and bool(prA1.run_id))
         rvA1 = review_accept_all(rootA1, prA1.run_id)
         check("A1-review-clean", rvA1.verdict == 0)
-        apA1 = apply_import(rootA1, prA1.run_id, now=NOW)
+        import check_opf_import as _gate_spy
+        from unittest.mock import patch as _patch
+        with _patch.object(_gate_spy, "check_staged_run", wraps=_gate_spy.check_staged_run) as spy:
+            apA1 = apply_import(rootA1, prA1.run_id, now=NOW)
+        # Flip: the pre-promotion gate called without the derived generation records no `homes` here.
+        check("A1-apply-gate-homes", [c.kwargs.get("homes") for c in spy.call_args_list] == [1])
         check("A1-apply-promoted",
               apA1.verdict == 0 and apA1.promoted is True and apA1.outcome == "promoted")
         runA1 = mA1.parent / "imports" / (prA1.run_id or "X")

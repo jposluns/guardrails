@@ -1530,17 +1530,26 @@ _INGEST_EVIDENCE_REGISTRY = (("acceptance.json", "VALIDATE", "ingest-acceptance-
 _INGEST_ACCEPTANCE_CHECKS = ("ingest-acceptance-binding", "ingest-acceptance-completeness")
 
 
-def _ingest_store_fd(rd):
-    """Bind the store to this opened run, through a recognized constructor and inode comparison.
-    A detached copy without its store-relative home cannot establish absence of durable acceptance;
-    its durable checks refuse. Staged snapshot checks still evaluate the supplied bytes.
+def _gate_homes(homes):
+    """The generation the gate evaluates under: an unsupplied generation is the legacy generation 1 only
+    while no later generation can be active (the rule _row_scope_error applies)."""
+    import _opf_store
+    if homes is None:
+        if _opf_store.SUPPORTED_HOMES >= 2:
+            raise _GateError("the store's homes generation was not supplied to this manifest-free gate")
+        return 1
+    return homes
+
+
+def _ingest_store_fd(rd, homes=None):
+    """Bind the store to this opened run, through the shared generation-aware run-location constructor
+    (_opf_import._import_run_locations) and inode comparison. A detached copy without its store-relative
+    home cannot establish absence of durable acceptance; its durable checks refuse. Staged snapshot checks
+    still evaluate the supplied bytes.
     """
     import _journal
     import _opf_import as imp
-    import _opf_store as store
-    candidates = (imp.IMPORTS_REL + "/" + rd.path.name,
-                  store.stage_run("ingest", rd.path.name), store.stage_run("import", rd.path.name))
-    for rel in candidates:
+    for rel in imp._import_run_locations(rd.path.name, _gate_homes(homes)):
         if tuple(rd.path.parts[-len(rel.split("/")):]) != tuple(rel.split("/")):
             continue
         depth = len(rel.split("/"))
@@ -1560,7 +1569,7 @@ def _ingest_store_fd(rd):
     raise _GateError("durable acceptance cannot be located from a detached run; retain its store-relative home")
 
 
-def _ingest_acceptance_checks(rd):
+def _ingest_acceptance_checks(rd, homes=None):
     import _opf_import as imp
     ids = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
     ids += _INGEST_ACCEPTANCE_CHECKS
@@ -1568,14 +1577,14 @@ def _ingest_acceptance_checks(rd):
         if _INGEST_EVIDENCE_REGISTRY != ((imp.ACCEPTANCE_NAME, "VALIDATE",
                                         "ingest-acceptance-binding", "if-reviewed"),):
             raise _GateError("durable acceptance registry does not match its validator")
-        fd = _ingest_store_fd(rd)
+        fd = _ingest_store_fd(rd, homes)
         try:
             acceptance = imp._read_ingest_acceptance(fd, rd.path.name)
         finally:
             os.close(fd)
         if acceptance is None:
             return {cid: (True, "not yet reviewed") for cid in ids}
-        snapshot = imp._ingest_snapshot(rd)
+        snapshot = imp._ingest_snapshot(rd, homes)
         binding, complete, rejected = imp.validate_ingest_acceptance(snapshot, acceptance)
         detail = "recorded rejection; not promotable" if rejected else "review recorded; execution unavailable"
         return {cid: (not (complete if cid.endswith("completeness") else binding),
@@ -1662,7 +1671,7 @@ def _check_staged_run(rd, homes=None):
     marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)
     if marker is None:
         try:
-            fd = _ingest_store_fd(rd)
+            fd = _ingest_store_fd(rd, homes)
             try:
                 import _journal
                 if _journal._lstat_contained(fd, imp._ingest_acceptance_home(run_dir.name)) is not None:
@@ -1983,7 +1992,7 @@ def _check_staged_run(rd, homes=None):
     # (fail-closed), never pass-as-absent. An unclassifiable entry already failed the listing closed.
     acc_kind = rd.kind(imp.ACCEPTANCE_NAME)
     if ingest_is_run:
-        for cid, (ok, detail) in _ingest_acceptance_checks(rd).items():
+        for cid, (ok, detail) in _ingest_acceptance_checks(rd, homes).items():
             record(cid, ok, detail)
     elif acc_kind is None:
         for cid in acc_checks:
