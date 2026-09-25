@@ -11,16 +11,16 @@ control directory under the SAME authoritative control root (the common git dire
 module resolves through git itself, or, for a store nested inside a repository, that store's own
 home keyed by its path relative to the ENCLOSING repository's toplevel beneath that repository's
 common git dir, so distinct nested stores never see each other's operations, or the store root
-when neither it nor any ancestor carries a .git entry). It COMPOSES the merged lock
-facility (_opf_oplock) rather than reinventing it: the control-root resolution (the shared
-_control_root_dir, over _classify_git_entry and _git_common_dir), the single-component
-control-home open (_open_control_dir, parameterized for this second home), the no-follow dir_fd
-primitives, and the exclusive fsynced control-file creation (_create_control_file, whose atomic
-staging-then-link publication and failure cleanup this module inherits) are the lock module's
-own. So a substrate writer killed mid-record leaves no torn record at the final name, only a
-staging leftover (".<name>.opf-stage-<32 hex>"); the lock module sweeps such leftovers only from
-its own control directory and machine store, so in an operation directory the classifier reads
-one as a foreign entry (CANNOT-EVALUATE, preserved), never as a record.
+when neither it nor any ancestor carries a .git entry). It COMPOSES the merged lock facility
+(_opf_oplock) rather than reinventing it: the control-root resolution (the shared
+_control_root_dir, over _classify_git_entry and git's one rev-parse answer, _git_view), the
+single-component control-home open (_open_control_dir, parameterized for this second home), the
+no-follow dir_fd primitives, and the exclusive fsynced control-file creation (_create_control_file,
+whose atomic staging-then-link publication and failure cleanup this module inherits) are the lock
+module's own. So a substrate writer killed mid-record leaves no torn record at the final name, only
+a staging leftover (".<name>.opf-stage-<32 hex>"); the lock module sweeps such leftovers only from
+its own control directory and machine store, so in an operation directory the classifier reads one
+as a foreign entry (CANNOT-EVALUATE, preserved), never as a record.
 
 Per held operation (an _opf_oplock.OpCapability) the substrate records, under ops/<op_id>/:
 
@@ -422,7 +422,12 @@ def _open_control_root(store_root):
 
 
 def _open_control_root_deferred(store_root):
-    """_open_control_root's body, run inside its signal deferral."""
+    """_open_control_root's body, run inside its signal deferral. ONE descriptor owner
+    (_opf_oplock._FdOwner) holds every descriptor this opens, from the moment each open returns:
+    the store root, the common git dir, and the descriptor returned (a duplicate of the store root,
+    the common git dir itself, or a nested store's keyed home). The returned descriptor leaves the
+    owner only after every other one has been closed, so a failing close (EIO) raises with it
+    still owned and closes it too, never leaking it."""
     res = _opf_store.resolve_store(store_root)
     if res.status != _opf_store.RESOLVED:
         raise InitSubstrateError("no RESOLVED machine store at {} ({}: {}); the resume substrate "
@@ -430,35 +435,36 @@ def _open_control_root_deferred(store_root):
                                      store_root, res.status, res.detail))
     store_root_abs = str(res.store_root)
     try:
-        store_fd = _opf_store._open_dir_nofollow(store_root_abs)
-    except OSError as exc:
-        raise InitSubstrateError("cannot open store root {} no-follow ({})".format(
-            store_root_abs, exc))
-    try:
-        try:
-            resolved = _opf_oplock._control_root_dir(store_fd, store_root_abs)
-        except _opf_oplock.OpLockError as exc:
-            raise InitSubstrateError(str(exc))
-        if resolved is None:
-            return os.dup(store_fd), store_root_abs
-        desc, key = resolved
-        try:
-            fd = _opf_store._open_dir_nofollow(desc)
-        except OSError as exc:
-            raise InitSubstrateError("cannot open common git dir {} no-follow ({})".format(
-                desc, exc))
-        if key is None:
-            return fd, desc
-        try:
+        with _opf_oplock._FdOwner() as owner:
             try:
-                home_fd = _opf_oplock._open_store_home(fd, desc, key, False)
-            except _opf_oplock.OpLockError as exc:
-                raise InitSubstrateError(str(exc))
-        finally:
-            os.close(fd)
-        return home_fd, os.path.join(desc, _opf_oplock.CONTROL_DIRNAME, key)
-    finally:
-        os.close(store_fd)
+                store_fd = owner.adopt(_opf_store._open_dir_nofollow(store_root_abs))
+            except OSError as exc:
+                raise InitSubstrateError("cannot open store root {} no-follow ({})".format(
+                    store_root_abs, exc))
+            resolved = _opf_oplock._control_root_dir(store_fd, store_root_abs)
+            if resolved is None:
+                fd, desc = owner.adopt(_opf_oplock._dup_store_root(store_fd)), store_root_abs
+            else:
+                desc, key = resolved
+                try:
+                    fd = owner.adopt(_opf_store._open_dir_nofollow(desc))
+                except OSError as exc:
+                    raise InitSubstrateError("cannot open common git dir {} no-follow ({})".format(
+                        desc, exc))
+                if key is not None:
+                    common_fd = fd
+                    fd = _opf_oplock._open_store_home(common_fd, desc, key, False)
+                    if fd is not None:
+                        owner.adopt(fd)
+                    owner.close(common_fd, "cannot close the common-git-dir descriptor ({})")
+                    desc = os.path.join(desc, _opf_oplock.CONTROL_DIRNAME, key)
+            owner.close(store_fd, "cannot close the store-root descriptor ({})")
+            return (None if fd is None else owner.transfer(fd)), desc
+    except _opf_oplock.OpLockError as exc:
+        err = InitSubstrateError(str(exc))
+        for note in getattr(exc, "__notes__", ()):
+            err.add_note(note)
+        raise err
 
 
 def _require_live_capability(cap):
@@ -1524,9 +1530,12 @@ def _t_s15_distinct_nested_homes(d, env):
     """T-s15: DISTINCT stores nested in ONE repository keep DISTINCT
     substrate homes, so the classifier sees only its OWN store's operations: an operation
     recorded for pkg-a is INTACT for pkg-a in a sibling worktree and invisible to pkg-b, which
-    reads NO-SUBSTRATE. Before the fix pkg-b's survey reported pkg-a's operation as INTACT."""
+    reads NO-SUBSTRATE; likewise one recorded for a/pkg is invisible to b/pkg, which shares its
+    final component (so a key built from the final component alone fails here), and its plan sits
+    in the home keyed by the whole relative path (_st_nested_home). Before the fix pkg-b's survey
+    reported pkg-a's operation as INTACT."""
     mono = _opf_oplock._st_git_store(d, "mono", env)
-    for rel in ("pkg-a", "pkg-b"):
+    for rel in ("pkg-a", "pkg-b", "a/pkg", "b/pkg"):
         _opf_oplock._st_store_tree(os.path.join(mono, rel))
     _opf_oplock._st_git(["add", "-A"], mono, env)
     _opf_oplock._st_git(["-c", "user.name=opf-selftest", "-c",
@@ -1544,6 +1553,21 @@ def _t_s15_distinct_nested_homes(d, env):
     assert [(r.op_id, r.status) for r in survey.operations] == [(cap.op_id, INTACT)], \
         [(r.op_id, r.status, r.detail) for r in survey.operations]
     for store in (os.path.join(mono, "pkg-b"), os.path.join(wt, "pkg-b"), mono):
+        survey = classify_operations(store)
+        assert survey.status == NO_SUBSTRATE, (store, survey.status, [
+            (r.op_id, r.status) for r in survey.operations])
+    cap = _opf_oplock.acquire_operation(os.path.join(mono, "a", "pkg"), "opf-init")
+    sub = begin_operation(cap, _st_plan_bytes(cap.op_id))
+    record_phase(sub, cap, "plan-recorded")
+    close_operation(sub)
+    _opf_oplock.release_operation(cap)
+    plan = os.path.join(_opf_oplock._st_nested_home(mono, "a/pkg"), SUBSTRATE_DIRNAME, OPS_DIRNAME,
+                        cap.op_id, PLAN_NAME)
+    assert os.path.isfile(plan), "a/pkg's plan must sit in the home keyed by its whole path"
+    survey = classify_operations(os.path.join(wt, "a", "pkg"))
+    assert [(r.op_id, r.status) for r in survey.operations] == [(cap.op_id, INTACT)], \
+        [(r.op_id, r.status, r.detail) for r in survey.operations]
+    for store in (os.path.join(mono, "b", "pkg"), os.path.join(wt, "b", "pkg")):
         survey = classify_operations(store)
         assert survey.status == NO_SUBSTRATE, (store, survey.status, [
             (r.op_id, r.status) for r in survey.operations])
@@ -1636,6 +1660,59 @@ def _t_s16_deferred_resolution(d, env):
         [(r.op_id, r.status, r.detail) for r in survey.operations]
 
 
+def _t_s17_close_failure_unwind(d, env):
+    """T-s17: a FAILING descriptor close (EIO raised after the close ran, as Linux releases the
+    number even then) at ANY close in the substrate's control-root open after the store's
+    resolution (resolve_store's own reads belong to the store module), each in turn, leaks no
+    descriptor: for a nested store (the keyed home is returned after the common git dir's close),
+    a store root that is its own repository (the common git dir is returned after the store root's
+    close), and a store with no repository (a duplicate of the store root is returned after the
+    store root's close). Before the fix the descriptor to be returned was owned by nobody while
+    the later close ran, so its failure leaked it."""
+    import errno
+    main, nested = _opf_oplock._st_nested_git_store(d, "main", env)
+    cap = _opf_oplock.acquire_operation(nested, "opf-init")
+    close_operation(begin_operation(cap, _st_plan_bytes(cap.op_id)))
+    _opf_oplock.release_operation(cap)
+    own = _opf_oplock._st_git_store(d, "own", env)
+    plain = os.path.join(d, "plain")
+    os.mkdir(plain)
+    _opf_oplock._st_store_tree(plain)
+    real_close = os.close
+    within = _open_control_root_deferred.__code__
+    resolution = _opf_store.resolve_store.__code__
+    for store in (nested, own, plain):
+        k = 1
+        while True:
+            state = {"seen": 0, "fired": False}
+
+            def failing_close(fd, _k=k, _state=state):
+                real_close(fd)
+                frame = sys._getframe(1)
+                while frame is not None and frame.f_code not in (within, resolution):
+                    frame = frame.f_back
+                if frame is not None and frame.f_code is within:
+                    _state["seen"] += 1
+                    if _state["seen"] == _k:
+                        _state["fired"] = True
+                        raise OSError(errno.EIO, "injected close failure (T-s17)")
+
+            baseline = _opf_oplock._st_open_fds()
+            os.close = failing_close
+            try:
+                classify_operations(store)
+            except (InitSubstrateError, OSError):
+                pass
+            finally:
+                os.close = real_close
+            if not state["fired"]:
+                break
+            assert _opf_oplock._st_open_fds() == baseline, \
+                "no descriptor may leak ({}, failing close {})".format(store, k)
+            k += 1
+        assert k > 1, "the sweep must see closes in the control-root open ({})".format(store)
+
+
 def self_test():
     """Regression roster (the PR2 resume-substrate T-s witnesses), each a fail-to-pass
     discriminator against a named behaviour: the sibling-home placement under the composed
@@ -1648,8 +1725,9 @@ def self_test():
     the plan-membership re-check in the same fresh listing (T-s11), the early entry-count bound
     refusing before any phase record read (T-s12), mid-read OSError containment (T-s13), and the
     nested store's substrate home shared under its enclosing repository's common git dir (T-s14),
-    distinct nested stores' distinct homes (T-s15), and the signal-deferred control-root
-    resolution and classifier (T-s16). A missing containment primitive or git binary, or a fixture base inside
+    distinct nested stores' distinct homes (T-s15), the signal-deferred control-root
+    resolution and classifier (T-s16), and the leak-free unwind of a failing close in the
+    control-root open (T-s17). A missing containment primitive or git binary, or a fixture base inside
     a git repository, is a REFUSAL (non-zero), never a clean skip. The git
     fixtures are pinned hermetically exactly as the lock module's self-test pins them."""
     import tempfile
@@ -1688,6 +1766,8 @@ def self_test():
          _t_s15_distinct_nested_homes),
         ("T-s16 a real signal at any descriptor open of a nested store's resolution leaks nothing",
          _t_s16_deferred_resolution),
+        ("T-s17 a failing close anywhere in the control-root open leaks no descriptor",
+         _t_s17_close_failure_unwind),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-substrate-selftest-"))
@@ -1698,7 +1778,7 @@ def self_test():
               "non-zero)".format(enclosed))
         return 2
     # Pin the git fixtures AND the composed rev-parse hermetically, exactly as the lock module's
-    # self-test does: bind HOME and XDG_CONFIG_HOME (which the production _git_common_dir keeps,
+    # self-test does: bind HOME and XDG_CONFIG_HOME (which the production rev-parse keeps,
     # scrubbing only GIT_*) plus GIT_CONFIG_GLOBAL/SYSTEM into the per-run temp dir, and restore
     # them afterwards, so no ambient user or system git config can affect a fixture command or
     # the module's own control-root resolution.
