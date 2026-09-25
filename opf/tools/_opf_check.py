@@ -2686,6 +2686,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         if not (isinstance(hw, int) and not isinstance(hw, bool) and hw >= 0):
             continue     # an absent / malformed counter is C-COUNTERS' finding, not this check's
         base = floor.get(ns, 0)
+        # A present id at or below the ancestral floor is NOT reported by C-NO-DELETION: a
+        # re-adoption restores no ancestral record, so such an id is id-REUSE (spec 8.2), not a
+        # deletion; the guard leaves it to the id-space / contiguity checks (this `n > base` filter,
+        # and the WL scan's above, skip it deliberately).
         nums = sorted(n for n in present_by_ns.get(ns, ()) if n > base)
         max_present = nums[-1] if nums else base
         if hw > max_present:

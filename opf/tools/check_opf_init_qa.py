@@ -202,6 +202,17 @@ class InitQA(unittest.TestCase):
                 health = op._opf_check.validate_store(res, ancestral_floor=floor)
                 self.assertEqual(health.checks["C-NO-DELETION"], "CANNOT-EVALUATE")
 
+    def test_max_ancestral_floor_is_accepted(self):
+        # Positive boundary discriminator: the exact signed 64-bit maximum is a VALID floor value,
+        # not malformed, so C-NO-DELETION evaluates rather than routing to CANNOT-EVALUATE. Guards
+        # against an off-by-one in the `0 <= v <= (1 << 63) - 1` range that would wrongly reject it.
+        self.ready()
+        res = op._opf_store.resolve_store(self.root)
+        for floor in ({"BI": (1 << 63) - 1}, {"WL": (1 << 63) - 1}):
+            with self.subTest(floor=floor):
+                health = op._opf_check.validate_store(res, ancestral_floor=floor)
+                self.assertNotEqual(health.checks["C-NO-DELETION"], "CANNOT-EVALUATE")
+
     def test_worklog_gap_above_floor_is_a_deletion(self):
         # R3 HIGH: C-NO-DELETION runs the floor-aware gap scan for WL as for every other
         # namespace, so a worklog id deleted from between the floor and the max is its finding
