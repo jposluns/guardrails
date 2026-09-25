@@ -560,6 +560,7 @@ opf/tools/check_opf_import.py text eol=lf
 opf/tools/check_opf_ingest.py text eol=lf
 opf/tools/check_opf_init.py text eol=lf
 opf/tools/check_opf_init_contract.py text eol=lf
+opf/tools/check_opf_init_qa.py text eol=lf
 opf/tools/check_opf_upgrade.py text eol=lf
 opf/tools/opf.py text eol=lf
 opf/tools/run_all_checks.sh text eol=lf
