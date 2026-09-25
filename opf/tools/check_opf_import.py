@@ -3901,6 +3901,23 @@ def _self_test():
         expect("disc-proposals-artifact-crlf", graded(m, credit=(
             ("proposals-artifact", "not byte-reproducible"),))["proposals-artifact"][0] is False)
 
+        # proposals-artifact (suggested_state vocabulary, per-row condition): a proposal row whose suggested_state
+        # is outside imp.MAPPING_STATES is a located row FINDING, and graded's twin re-grades it as a detached copy
+        # (proposals-artifact is in detached_ids), so the row vocabulary guard fires at BOTH generations and a
+        # generation-2-only bypass cannot survive. Only proposals-artifact fires (proposals.toml is not in report's
+        # artefact list); the row check finds before the byte-repro block, so no report/digest refresh is needed.
+        m = copy_run(clean)
+        props = _load_toml(m / "proposals.toml")
+        props["proposal"] = [{"origin": imp._MODEL_PROPOSAL_ORIGIN, "source_path": "a.txt",
+                              "span": [0, 2], "suggested_state": "renamed", "note": ""}]
+        (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+        pres = graded(m, "disc-proposals-artifact-suggested-state", credit=(
+            ("proposals-artifact", "a proposals.toml row is malformed"),))
+        expect("disc-proposals-artifact-suggested-state",
+               [cid for cid, (ok, _d) in pres.items() if not ok] == ["proposals-artifact"]
+               and pres["proposals-artifact"][1] == ("a proposals.toml row is malformed or carries an origin "
+                                                     "outside the proposal-provenance vocabulary"))
+
         # proposals-artifact (R6-F1, proposal span shape): a proposal span that is a list but NOT a 2-element
         # int pair ([] or [5]) must be a located row FINDING, never an uncaught IndexError when
         # _render_report_md indexes span[0]/span[1]. proposals.toml is not in report's artefact list, so only
@@ -4469,6 +4486,8 @@ def _self_test():
                not credited(dict(claimed, **{"mapping-totality": (False, "control-text")})))
         expect("gate-generation-sweep-coverage-control-generation-2",
                not credited(claimed, {"artifact-digest-integrity": (False, "control-text at generation 2")}))
+        expect("gate-generation-sweep-coverage-control-own-detail",
+               not credited({"artifact-digest-integrity": (False, "unrelated failure")}))
         # Per store state: the detached copies alone credit every id a detached ordinary run grades.
         detached_coverage = _self_test_gate_generation_coverage(
             [entry for entry in swept if entry[0] in detached_labels], detached_ids)
