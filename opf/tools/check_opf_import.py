@@ -3898,8 +3898,8 @@ def _self_test():
         crlf = (m / "IMPORT-REPORT.md").read_bytes().replace(b"\n", b"\r\n")
         (m / "IMPORT-REPORT.md").write_bytes(crlf)
         rewrite_report_digest(m, "IMPORT-REPORT.md")
-        expect("disc-proposals-artifact-crlf", graded(m, credit=(
-            ("proposals-artifact", "not byte-reproducible"),))["proposals-artifact"][0] is False)
+        capa = graded(m, credit=(("proposals-artifact", "not byte-reproducible"),))["proposals-artifact"]
+        expect("disc-proposals-artifact-crlf", capa[0] is False and "not byte-reproducible" in capa[1])
 
         # proposals-artifact (suggested_state vocabulary, per-row condition): a proposal row whose suggested_state
         # is outside imp.MAPPING_STATES is a located row FINDING, and graded's twin re-grades it as a detached copy
@@ -3971,6 +3971,36 @@ def _self_test():
             expect("disc-proposals-artifact-span-{}".format(len(bad_span)),
                    pa[0] is False and "row is malformed" in pa[1])
 
+        # proposals-artifact (R6-F1 span sub-clause coverage, r20 gemini/codex/claude): the [] and [5] fixtures
+        # above pin only the list-of-two-ints shape as a whole; each individual sub-clause of the span guard
+        # `isinstance(span, list) and len(span) == 2 and all(type(x) is int for x in span)` needs its own
+        # boundary fixture, otherwise dropping `all(type(x) is int ...)` (a 2-element non-int span), relaxing
+        # `type(x) is int` to `isinstance(x, int)` (a bool span, admitted by isinstance), widening
+        # `len(span) == 2` to `>= 2` (an overlong int span), or dropping `isinstance(span, list)` (a scalar or
+        # missing span then raises TypeError instead of the located row FINDING) each leaves the self-test at
+        # exit 0. Each fixture starts from a single otherwise-valid row and fires the row-check BEFORE the
+        # byte-repro block, so no report regen is needed; grade with the row-malformed credit (so the detached
+        # twin is graded too) and assert proposals-artifact fires ALONE with the row-malformed detail. F-A's
+        # dynamic proposals-row assertion below auto-covers these labels, so they are NOT hand-listed anywhere.
+        for span_suffix, span_mutate in (
+                ("nonint", lambda row: row.update(span=[1.5, 2.5])),
+                ("bool", lambda row: row.update(span=[True, False])),
+                ("overlong", lambda row: row.update(span=[0, 1, 2])),
+                ("scalar", lambda row: row.update(span=5)),
+                ("missing", lambda row: row.pop("span")),
+        ):
+            m = copy_run(clean)
+            props = _load_toml(m / "proposals.toml")
+            span_row = {"origin": imp._MODEL_PROPOSAL_ORIGIN, "source_path": "a.txt",
+                        "span": [0, 2], "suggested_state": "unmapped", "note": ""}
+            span_mutate(span_row)
+            props["proposal"] = [span_row]
+            (m / "proposals.toml").write_text(_opf_emit.emit(props), encoding="utf-8")
+            span_label = "disc-proposals-artifact-span-" + span_suffix
+            spres = graded(m, span_label, credit=(("proposals-artifact", "row is malformed"),))
+            expect(span_label, [cid for cid, (ok, _d) in spres.items() if not ok] == ["proposals-artifact"]
+                   and "row is malformed" in spres["proposals-artifact"][1])
+
         # proposals-artifact (R6-F1, IndexError backstop): a malformed inventory FRAGMENT span ([]) reaches
         # _render_report_md (which indexes frag["span"][0]/[1]) because the proposals-artifact check does not
         # shape-validate inventory fragments upstream. The proposal rows stay valid so the render is reached;
@@ -4026,8 +4056,15 @@ def _self_test():
             imp._render_report_md(m_inv.get("inventory_digest"), m_inv.get("fragment"),
                                   m_norm, m.name).encode("utf-8"))
         rewrite_report_digest(m, "IMPORT-REPORT.md")
-        expect("disc-proposals-origin-unknown", graded(m, "disc-proposals-origin-unknown", credit=(
-            ("proposals-artifact", "a proposals.toml row is malformed"),))["proposals-artifact"][0] is False)
+        # Assert the LOCATED row-malformed detail, not merely [0] is False: the coherent report above keeps the
+        # byte-repro arm green, so this must prove the origin-VOCAB guard fired (its detail carries "row is
+        # malformed") rather than the byte-reproducibility fallback ("not byte-reproducible"), and that it fires
+        # alone (r20 gemini/F-B).
+        opres = graded(m, "disc-proposals-origin-unknown", credit=(
+            ("proposals-artifact", "a proposals.toml row is malformed"),))
+        expect("disc-proposals-origin-unknown",
+               [cid for cid, (ok, _d) in opres.items() if not ok] == ["proposals-artifact"]
+               and "row is malformed" in opres["proposals-artifact"][1])
 
         # --- acceptance.json (conditionally present): absent PASSes, present-and-valid PASSes, and each
         #     new acceptance check FINDINGs on its single mutation (acceptance.json is not in report's
@@ -4544,12 +4581,25 @@ def _self_test():
                 label == clabel + suffix and [cid for cid, (ok, _d) in first.items() if not ok] == [cond_id]
                 for label, first, _second, _credit in swept) for clabel, _edit in conditions
                 for suffix in ("", "-detached")))
-        # Every proposals ROW condition (per-row vocab, shape, and span) fired proposals-artifact alone at base
-        # AND detached, mirroring the header proposals_conditions coverage above (gemini/F3-uniformity).
-        proposals_row_labels = ("disc-proposals-artifact-suggested-state", "disc-proposals-origin-unknown",
-                                "disc-proposals-artifact-row-nondict", "disc-proposals-artifact-row-nonstr-source",
-                                "disc-proposals-artifact-span-0", "disc-proposals-artifact-span-1")
-        expect("gate-generation-proposals-row-conditions", all(any(
+        # Every proposals discriminator that fires proposals-artifact ALONE fired it at base AND detached,
+        # mirroring the header proposals_conditions coverage above (gemini/F3-uniformity). The base label set is
+        # derived DYNAMICALLY from `swept` rather than hand-listed (r20 gemini/F-A: a hardcoded tuple passes
+        # vacuously for any row discriminator omitted from it -- the omitted one is simply never checked). A
+        # label qualifies when it carries the `disc-proposals-` prefix (its own explicitly-passed graded() label;
+        # the crlf and fragment-span fixtures grade with auto `sweep-NNN` labels and so never match) AND its base
+        # generation-1 result set fails EXACTLY ["proposals-artifact"]. That predicate admits every per-row and
+        # header proposals discriminator that fires alone -- so any current or future disc-proposals-* one is
+        # covered automatically -- and excludes one that fires proposals-artifact together with another id (e.g.
+        # a fixture that also trips artifact-digest-integrity). Each qualifying base must then have BOTH
+        # `<label>` and `<label>-detached` in swept, each failing proposals-artifact alone, proving the guard
+        # fires at BOTH generations. The non-empty guard catches a mistyped prefix that would match nothing and
+        # make the all() pass vacuously.
+        proposals_row_labels = sorted(
+            label for label, first, _second, _credit in swept
+            if label.startswith("disc-proposals-") and not label.endswith("-detached")
+            and [cid for cid, (ok, _d) in first.items() if not ok] == ["proposals-artifact"])
+        expect("gate-generation-proposals-row-conditions-nonempty", len(proposals_row_labels) >= 1)
+        expect("gate-generation-proposals-row-conditions", bool(proposals_row_labels) and all(any(
             label == clabel + suffix and [cid for cid, (ok, _d) in first.items() if not ok] == ["proposals-artifact"]
             for label, first, _second, _credit in swept) for clabel in proposals_row_labels
             for suffix in ("", "-detached")))
