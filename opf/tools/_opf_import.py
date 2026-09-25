@@ -3241,9 +3241,9 @@ def _store_homes(resolution):
 
 
 def _import_run_locations(run_id, homes):
-    """Store-relative locations of a staged import run, shared by the gate (_ingest_store_fd) and every PR4c
-    entry point. Generation 1 has only the legacy location: the homes-2 staging names are ordinary store
-    paths there. The first location is where staging writes a run."""
+    """Store-relative locations of a staged import run, shared by the gate (_ingest_store_fd) and every
+    ingest-acceptance entry point. Generation 1 has only the legacy location: the homes-2 staging names are ordinary
+    store paths there. The first location is where staging writes a run."""
     legacy = "{}/{}".format(IMPORTS_REL, run_id)
     if type(homes) is int and homes == 1:
         return (legacy,)
