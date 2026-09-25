@@ -2312,15 +2312,26 @@ def _check_staged_run(rd, homes=None):
 
 
 def _self_test_gate_generation_sites(expect):
-    """Every read of the generation in the staged-run gate is one of these statements. Ordinary grading never
-    consults it, so a new generation dependence (or an alias of one) fails here until it is deliberately added."""
+    """Every read of the generation, or of a value derived from it (by assignment or under a generation-dependent
+    branch), in the staged-run gate is one of these statements. A new alias must itself read a name listed here, so
+    any new generation dependence in ordinary grading fails this pin until it is deliberately added."""
     import ast
     import inspect
     src = inspect.getsource(_check_staged_run)
     lines = src.split("\n")
+    names = ("gen", "homes", "gen_error", "legacy_generation", "fd", "ing_results", "marker", "ingest_is_run",
+             "durable_unavailable", "ingest_bundle", "ingest_load_failed", "ingest_load_detail")
     found = sorted((n.id, lines[n.lineno - 1].strip()) for n in ast.walk(ast.parse(src))
-                   if isinstance(n, ast.Name) and n.id in ("gen", "homes", "gen_error"))
+                   if isinstance(n, ast.Name) and n.id in names)
     expected = sorted((
+        ('durable_unavailable', 'durable_unavailable = ""'),
+        ('durable_unavailable', 'durable_unavailable = "durable acceptance cannot be located ({})".format(exc)'),
+        ('durable_unavailable', 'record(cid, not durable_unavailable, durable_unavailable or "not an ingest run")'),
+        ('durable_unavailable', 'record(cid, not durable_unavailable, durable_unavailable or "not an ingest run")'),
+        ('fd', 'fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None'),
+        ('fd', 'if _journal._lstat_contained(fd, imp._ingest_acceptance_home(run_dir.name)) is not None:'),
+        ('fd', 'if fd is not None:'),
+        ('fd', 'os.close(fd)'),
         ('gen', 'fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None'),
         ('gen', 'fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None'),
         ('gen', 'for cid, (ok, detail) in _ingest_acceptance_checks(rd, gen).items():'),
@@ -2343,6 +2354,43 @@ def _self_test_gate_generation_sites(expect):
         ('gen_error', 'record(cid, False, gen_error)'),
         ('gen_error', 'record(cid, False, gen_error)'),
         ('homes', 'gen, gen_error = _gate_homes(homes), ""'),
+        ('ing_results', 'if cid in ing_results:'),
+        ('ing_results', 'ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, gen)'),
+        ('ing_results', 'ing_results = {}'),
+        ('ing_results', 'ok, detail = ing_results[cid]'),
+        ('ingest_bundle', 'elif ingest_load_failed or ingest_bundle is None:'),
+        ('ingest_bundle', 'ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, gen)'),
+        ('ingest_bundle', 'ingest_bundle = None'),
+        ('ingest_bundle', 'ingest_bundle = imp._validate_staged_ingest_bundle(rd.load_toml(imp.INGEST_REVIEW_NAME),'),
+        ('ingest_is_run', 'elif ingest_is_run and not legacy_generation:'),
+        ('ingest_is_run', 'elif not ingest_is_run:'),
+        ('ingest_is_run', 'elif not ingest_is_run:'),
+        ('ingest_is_run', 'if gen is not None and ingest_is_run:'),
+        ('ingest_is_run', 'if ingest_is_run and gen is None:'),
+        ('ingest_is_run', 'if pa_ok and not ingest_is_run:'),
+        ('ingest_is_run', 'ingest_is_run = False'),
+        ('ingest_is_run', 'ingest_is_run = marker is not None'),
+        ('ingest_load_detail', 'ingest_load_detail = ""'),
+        ('ingest_load_detail', 'ingest_load_detail = "ingest-review bundle present but malformed ({})".format(exc.message)'),
+        ('ingest_load_detail', 'ingest_load_detail = "ingest-review bundle present but unreadable ({})".format(exc)'),
+        ('ingest_load_detail', 'ingest_load_detail = ("ingest markers present (marker {!r}) but the review bundle "'),
+        ('ingest_load_detail', 'ingest_load_detail))'),
+        ('ingest_load_detail', 'record("ingest-run-structure", False, ingest_load_detail or "ingest bundle could not be loaded")'),
+        ('ingest_load_failed', 'elif ingest_load_failed or ingest_bundle is None:'),
+        ('ingest_load_failed', 'ingest_load_failed = False'),
+        ('ingest_load_failed', 'ingest_load_failed = True'),
+        ('ingest_load_failed', 'ingest_load_failed = True'),
+        ('ingest_load_failed', 'ingest_load_failed = True'),
+        ('legacy_generation', 'elif ingest_is_run and not legacy_generation:'),
+        ('legacy_generation', 'elif legacy_generation:'),
+        ('legacy_generation', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
+        ('marker', '"ingest-review.toml is absent (partial ingest run)".format(marker))'),
+        ('marker', 'if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":'),
+        ('marker', 'if gen is not None and marker is None:'),
+        ('marker', 'ingest_is_run = marker is not None'),
+        ('marker', 'marker = "durable import evidence"'),
+        ('marker', 'marker = imp.ACCEPTANCE_NAME'),
+        ('marker', 'marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)'),
     ))
     expect("gate-generation-read-sites", found == expected)
 
