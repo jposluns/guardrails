@@ -2316,6 +2316,7 @@ def _self_test_gate_generation(expect):
     import sys
     from unittest.mock import patch
     import _opf_import as imp
+    import _opf_emit
     import _opf_store
 
     gate = sys.modules[__name__]
@@ -2339,6 +2340,12 @@ def _self_test_gate_generation(expect):
             if fixture == "ordinary-marked-acceptance":
                 files[imp.ACCEPTANCE_NAME] = b'{"ingest": {}}'
                 rd.tree[imp.ACCEPTANCE_NAME] = "file"
+                # Located ordinary findings (a non-integer verdict, a report that is not byte-reproducible)
+                # must survive every invalid generation unchanged.
+                rep = rd.load_toml("report.toml")
+                rep["verdict"] = 1
+                files["report.toml"] = _opf_emit.emit(rep).encode("utf-8")
+                files[imp.REPORT_MD_NAME] += b"x"
         elif fixture == "malformed-core":
             real_load = rd.load_toml
 
@@ -2378,8 +2385,10 @@ def _self_test_gate_generation(expect):
                 if fixture == "ingest":
                     expect("gate-generation-ingest-staged-acceptance-{}".format(label),
                            all(result.get(cid) == (False, error) for cid in staged_acceptance))
-                elif fixture == "ordinary-marked-acceptance":
-                    expect("gate-generation-ordinary-staged-acceptance-{}".format(label),
+                elif fixture in ("ordinary-marked-acceptance", "malformed-core"):
+                    # An unreadable core report takes precedence over the generation on every run kind.
+                    expect("gate-generation-{}-staged-acceptance-{}".format(
+                               "ordinary" if fixture == "ordinary-marked-acceptance" else fixture, label),
                            all(result.get(cid) == baseline[cid] for cid in staged_acceptance))
                 expect("gate-generation-{}-{}".format(fixture, label),
                        set(result) == set(EXPECTED_CHECKS)
