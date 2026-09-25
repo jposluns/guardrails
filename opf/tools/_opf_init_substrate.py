@@ -70,6 +70,11 @@ validation of the plan's composite members (versions, binding, head, acceptance,
 rest) is likewise the producer's; the phase-name vocabulary is not fixed here (PR3 names the
 mutation phases); and everything the lock module itself discloses (advisory locking, the
 stat-to-unlink adjacency, non-Linux identity degradation) applies unchanged to the composed legs.
+The control-root resolution and the whole read-only classifier run with the Python-handled signals
+deferred (the lock module's _SignalDeferral); the write path defers only its control-root
+resolution, so its other steps (the operation directory, the plan and phase records, and the
+hand-off of a descriptor between steps) run under the structural protections only, the bound the
+lock module discloses for the helpers composed here.
 Under the same cooperating-writer, no-lock model the pre-append re-verification is bounded, not
 adversarial: the digest verify and the append are two steps, so an out-of-band writer that
 retains an open descriptor to a record can mutate it AFTER the verify (the digest-verify-to-
@@ -393,7 +398,31 @@ def _open_control_root(store_root):
     control_root_desc); the caller owns and closes the fd. For a store NESTED in a repository the
     control root is that store's own keyed home (_opf_oplock._open_store_home), opened and never
     created here: when it is genuinely absent the fd is None (no operation was ever acquired for
-    that store). Every other failure refuses."""
+    that store). Every other failure refuses.
+
+    The whole resolution, the store-root and ancestor .git walk and every descriptor it opens
+    included, runs with the Python-handled signals DEFERRED (_opf_oplock._SignalDeferral), as the
+    lock module's acquisition does, so no signal-raised exception (a KeyboardInterrupt) can land
+    between a descriptor's open and its close or hand-off; a signal delivered as the deferral ends
+    first closes the descriptor this call would have returned. A git rev-parse started inside
+    inherits the blocked mask, bounded by the lock module's git timeout."""
+    held = []
+    try:
+        with _opf_oplock._SignalDeferral():
+            held.append(_open_control_root_deferred(store_root))
+    except BaseException as exc:
+        if held and held[0][0] is not None:
+            try:
+                os.close(held[0][0])
+            except OSError as cexc:
+                exc.add_note("opf-init: additionally cannot close the control-root descriptor "
+                             "({})".format(cexc))
+        raise
+    return held[0]
+
+
+def _open_control_root_deferred(store_root):
+    """_open_control_root's body, run inside its signal deferral."""
     res = _opf_store.resolve_store(store_root)
     if res.status != _opf_store.RESOLVED:
         raise InitSubstrateError("no RESOLVED machine store at {} ({}: {}); the resume substrate "
@@ -755,8 +784,16 @@ def classify_operations(store_root):
     or a named per-entry CANNOT-EVALUATE). It deletes NOTHING and repairs NOTHING; a store or
     control root that cannot be resolved, or a substrate home or ops tree of the wrong type,
     refuses outright rather than reading as a clean survey. The classifier takes no lock: a
-    resume dispatch runs it only after the lock module's explicit recovery has succeeded.
+    resume dispatch runs it only after the lock module's explicit recovery has succeeded. The
+    whole survey runs with the Python-handled signals DEFERRED (_opf_oplock._SignalDeferral), so
+    an interruption is delivered only after every descriptor it opened has been closed.
     """
+    with _opf_oplock._SignalDeferral():
+        return _classify_operations(store_root)
+
+
+def _classify_operations(store_root):
+    """classify_operations' body, run inside its signal deferral."""
     control_root_fd, desc = _open_control_root(store_root)
     if control_root_fd is None:
         return ResumeSurvey(NO_SUBSTRATE, ())
@@ -1443,7 +1480,7 @@ def _t_s13_midread_containment(d, env):
 
 
 def _t_s14_nested_store_home(d, env):
-    """T-s14 (F-OPLOCK-NESTED-NOT-E, layout decision E): a store NESTED inside a git repository
+    """T-s14: a store NESTED inside a git repository
     (no .git of its own) roots the substrate home under the ENCLOSING repository's common git dir,
     beside the lock's control directory, so the same nested store in a sibling worktree classifies
     the same recorded operation; nothing is created at either nested store root; and a bogus
@@ -1484,7 +1521,7 @@ def _t_s14_nested_store_home(d, env):
 
 
 def _t_s15_distinct_nested_homes(d, env):
-    """T-s15 (claude MED2, gemini MED): DISTINCT stores nested in ONE repository keep DISTINCT
+    """T-s15: DISTINCT stores nested in ONE repository keep DISTINCT
     substrate homes, so the classifier sees only its OWN store's operations: an operation
     recorded for pkg-a is INTACT for pkg-a in a sibling worktree and invisible to pkg-b, which
     reads NO-SUBSTRATE. Before the fix pkg-b's survey reported pkg-a's operation as INTACT."""
@@ -1512,6 +1549,93 @@ def _t_s15_distinct_nested_homes(d, env):
             (r.op_id, r.status) for r in survey.operations])
 
 
+def _st_arm_return_signal(codes, within, k):
+    """Arm ONE REAL SIGINT at the k-th RETURN of a frame whose code is in `codes` (and, when
+    `within` is a code object, only while a frame running `within` is on the stack): the trace
+    sends the signal with os.kill as the helper returns its freshly opened descriptor, so the
+    interpreter runs the handler at its next check point, before the caller can own it. Returns
+    the state dict; the caller disarms with sys.settrace(None) in a finally."""
+    import signal
+    state = {"seen": 0, "fired": False}
+
+    def inside(frame):
+        while frame is not None:
+            if frame.f_code is within:
+                return True
+            frame = frame.f_back
+        return False
+
+    def local(frame, event, arg):
+        if event == "return" and not state["fired"] and (within is None or inside(frame)):
+            state["seen"] += 1
+            if state["seen"] == k:
+                state["fired"] = True
+                sys.settrace(None)
+                os.kill(os.getpid(), signal.SIGINT)
+        return local
+
+    sys.settrace(lambda frame, event, arg: local if frame.f_code in codes else None)
+    return state
+
+
+def _st_s16_sweep(nested, cap):
+    """T-s16's sweep, run in a child (_opf_oplock._st_in_child) under the default SIGINT handler:
+    for the classifier and for the write path's control-root resolution, a REAL SIGINT at each
+    return of a descriptor-opening helper in turn must propagate as a KeyboardInterrupt with no
+    descriptor-count delta."""
+    import signal
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    codes = set(f.__code__ for f in (
+        _opf_oplock._open_path_dir_nofollow, _opf_store._open_dir_nofollow,
+        _opf_oplock._open_dir_at, _opf_oplock._open_store_home))
+
+    def write_path():
+        os.close(_open_ops_for_write(cap))
+
+    for label, run, within in (("classify_operations", lambda: classify_operations(nested), None),
+                               ("_open_ops_for_write", write_path, _open_control_root.__code__)):
+        k = 1
+        while True:
+            baseline = _opf_oplock._st_open_fds()
+            state = _st_arm_return_signal(codes, within, k)
+            interrupted = False
+            try:
+                run()
+            except KeyboardInterrupt:
+                interrupted = True
+            finally:
+                sys.settrace(None)
+            if not state["fired"]:
+                break
+            where = "{}, descriptor-opening return {}".format(label, k)
+            assert interrupted, "the KeyboardInterrupt must propagate ({})".format(where)
+            assert _opf_oplock._st_open_fds() == baseline, \
+                "no descriptor may leak ({})".format(where)
+            k += 1
+        assert k > 1, "the sweep must see descriptor-opening returns ({})".format(label)
+
+
+def _t_s16_deferred_resolution(d, env):
+    """T-s16: the substrate's control-root resolution (the store-root and ancestor .git walk,
+    git's toplevel cross-check, the common git dir, and the keyed home) and its classifier run
+    with the Python-handled signals deferred: over a NESTED store with a recorded operation, a
+    REAL SIGINT sent as each descriptor-opening helper returns, at every such return in turn,
+    propagates as a KeyboardInterrupt with no descriptor-count delta, for classify_operations and
+    for the write path's resolution. Before the fix these ran without the deferral, so an
+    interruption between an open and its adoption leaked that descriptor."""
+    _main, nested = _opf_oplock._st_nested_git_store(d, "main", env)
+    cap = _opf_oplock.acquire_operation(nested, "opf-init")
+    try:
+        close_operation(begin_operation(cap, _st_plan_bytes(cap.op_id)))
+        failure = _opf_oplock._st_in_child(lambda: _st_s16_sweep(nested, cap))
+    finally:
+        _opf_oplock.release_operation(cap)
+    assert failure is None, failure
+    survey = classify_operations(nested)
+    assert [(r.op_id, r.status) for r in survey.operations] == [(cap.op_id, INTACT)], \
+        [(r.op_id, r.status, r.detail) for r in survey.operations]
+
+
 def self_test():
     """Regression roster (the PR2 resume-substrate T-s witnesses), each a fail-to-pass
     discriminator against a named behaviour: the sibling-home placement under the composed
@@ -1523,8 +1647,9 @@ def self_test():
     classifier bounds and utc validity (T-s9), the lseek-free fresh-descriptor listings (T-s10),
     the plan-membership re-check in the same fresh listing (T-s11), the early entry-count bound
     refusing before any phase record read (T-s12), mid-read OSError containment (T-s13), and the
-    nested store's substrate home shared under its enclosing repository's common git dir (T-s14,
-    F-OPLOCK-NESTED-NOT-E). A missing containment primitive or git binary, or a fixture base inside
+    nested store's substrate home shared under its enclosing repository's common git dir (T-s14),
+    distinct nested stores' distinct homes (T-s15), and the signal-deferred control-root
+    resolution and classifier (T-s16). A missing containment primitive or git binary, or a fixture base inside
     a git repository, is a REFUSAL (non-zero), never a clean skip. The git
     fixtures are pinned hermetically exactly as the lock module's self-test pins them."""
     import tempfile
@@ -1561,6 +1686,8 @@ def self_test():
          _t_s14_nested_store_home),
         ("T-s15 distinct nested stores keep distinct substrate homes",
          _t_s15_distinct_nested_homes),
+        ("T-s16 a real signal at any descriptor open of a nested store's resolution leaks nothing",
+         _t_s16_deferred_resolution),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-substrate-selftest-"))
