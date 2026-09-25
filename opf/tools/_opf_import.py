@@ -2318,6 +2318,8 @@ def _ingest_run_marker(store_root_fd, run_rel, homes):
     if (homes == INGEST_HOMES_GENERATION
             and _journal._lstat_contained(store_root_fd, _ingest_acceptance_home(run_id)) is not None):
         return "durable import evidence"
+    if homes != INGEST_HOMES_GENERATION:
+        return None
     # A staged acceptance that is not a readable regular file, or does not decode, is no marker: the ordinary
     # gate diagnoses it (acceptance-*) with main's verdict routing.
     st = _journal._lstat_contained(store_root_fd, run_rel + "/" + ACCEPTANCE_NAME)
@@ -6010,9 +6012,10 @@ def _self_test_ingest_acceptance(check):
     for name, homes, expected, st, read in (
             (_ingest_acceptance_home(rid), 2, "durable import evidence", regular, None),
             (_ingest_acceptance_home(rid), 1, None, regular, None),
-            (run_rel + "/" + ACCEPTANCE_NAME, 1, ACCEPTANCE_NAME, regular, None),
-            (run_rel + "/" + ACCEPTANCE_NAME, 1, None, directory, None),
-            (run_rel + "/" + ACCEPTANCE_NAME, 1, None, regular, unreadable)):
+            (run_rel + "/" + ACCEPTANCE_NAME, 1, None, regular, None),
+            (run_rel + "/" + ACCEPTANCE_NAME, 2, ACCEPTANCE_NAME, regular, None),
+            (run_rel + "/" + ACCEPTANCE_NAME, 2, None, directory, None),
+            (run_rel + "/" + ACCEPTANCE_NAME, 2, None, regular, unreadable)):
         with patch.object(_journal, "_lstat_contained",
                           side_effect=lambda fd, path: st if path == name else None), \
                 patch.object(_journal, "_read_contained", return_value=(_emit_acceptance_bytes(acceptance), None),
@@ -6022,6 +6025,9 @@ def _self_test_ingest_acceptance(check):
             except _journal.JournalError:
                 found = "raised"
             check("accept-only-marker", found == expected)
+    # Flip: the strict decoder rejects duplicate members and misses this ingest marker.
+    check("accept-marker-main-decoder", _acceptance_marks_ingest(
+        b'{"ingest": null, "ingest": {}}'))
     # Intake and clock tests use explicit in-memory boundaries. They are not filesystem-writer evidence.
     class TTY(io.StringIO):
         def isatty(self):
@@ -6240,6 +6246,24 @@ def _self_test_ingest_capture_homes2(root, run, now, check, stamp):
         reviewed = capture()
         check("accept-review-marker-homes-threaded", reviewed.verdict == CANNOT_EVALUATE and bool(stripped)
               and reviewed.findings[0].startswith("import gate failed") and acc_path.read_bytes() == saved)
+        class TTY(io.StringIO):
+            def isatty(self):
+                return True
+        prompts = io.StringIO()
+        markers = []
+        real_marker = _ingest_run_marker
+
+        def probe(*args):
+            marker = real_marker(*args)
+            markers.append(marker)
+            return marker
+
+        with patch.object(sys.modules[__name__], "_ingest_run_marker", side_effect=probe):
+            interactive = review_import_interactive(root, run.name, actor="reviewer", now=now,
+                                                    in_stream=TTY("accept\n\n"), out_stream=prompts)
+        check("accept-review-marker-homes-threaded-interactive", interactive.verdict == CANNOT_EVALUATE
+              and markers == ["durable import evidence"] and prompts.getvalue() == ""
+              and interactive.findings[0].startswith("import gate failed") and acc_path.read_bytes() == saved)
         applied = apply_import(root, run.name, now=now)
         check("accept-apply-marker-homes-threaded", applied.verdict == CANNOT_EVALUATE
               and "carries durable import evidence" in applied.findings[0])
@@ -8394,6 +8418,25 @@ def self_test():
         review_accept_all(rootA3, prA3.run_id)
         apA3b = apply_import(rootA3, prA3.run_id, now=NOW)   # lock not leaked by the abort above
         check("A3-lock-not-leaked", apA3b.verdict == 0 and apA3b.promoted is True)
+
+        # Flip: disabling step 6's generation re-check promotes after this manifest read changes homes.
+        rootHG, mHG = build_apply_store()
+        prHG = plan_import(rootHG, ["a.txt"], now=NOW, run_nonce="apply-homes-change")
+        rvHG = review_accept_all(rootHG, prHG.run_id)
+        beforeHG = snapshot(rootHG)
+        real_layout = _require_inline_layout
+
+        def changed_layout(fd, machine_rel):
+            manifest = real_layout(fd, machine_rel)
+            return dict(manifest, opf=dict(manifest["opf"], homes=2, spec_version=_opf_store.HOMES2_SPEC_VERSION))
+
+        with _patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
+                _patch.object(sys.modules[__name__], "_require_inline_layout", side_effect=changed_layout) as readHG:
+            apHG = apply_import(rootHG, prHG.run_id, now=NOW)
+        check("accept-apply-homes-rederived", rvHG.verdict == CLEAN and readHG.call_count == 1
+              and apHG.verdict == CANNOT_EVALUATE and apHG.promoted is False and apHG.outcome == "aborted"
+              and "homes generation changed during apply" in apHG.findings[0]
+              and snapshot(rootHG) == beforeHG)
 
         # A4 (reject blocks): a reject decision in the acceptance record blocks promotion -> exit 1
         # (outcome=rejected), and nothing is promoted or mutated.

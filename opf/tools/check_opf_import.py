@@ -1705,7 +1705,7 @@ def _check_staged_run(rd, homes=None):
                     os.close(fd)
         except Exception as exc:
             durable_unavailable = "durable acceptance cannot be located ({})".format(exc)
-    if marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":
+    if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":
         # Decoded as main's ordinary reader decodes it; an unreadable or undecodable staged acceptance is no
         # marker, and the ordinary acceptance grading below reports it as main does.
         try:
@@ -3245,7 +3245,7 @@ def _self_test():
                                        decisions=accept_all_decisions(h1_run), now=NOW)
             h1_res2 = check_staged_run(h1_run, homes=1)
         expect("ordinary-review-homes2-tooling", h1_rr2.verdict == 0 and all(ok for ok, _d in h1_res2.values()))
-        # Flip: the strict ingest decoder (in the marker probe or the ordinary grading) fails this duplicate
+        # Flip: the strict ingest decoder in ordinary grading fails this duplicate
         # member that main's decoder accepts; main passes every check and re-reviews CLEAN.
         h1_acc = h1_run / "acceptance.json"
         dup_raw = h1_acc.read_bytes().rstrip()
@@ -3255,6 +3255,21 @@ def _self_test():
                                    decisions=accept_all_decisions(h1_run), now=NOW)
         expect("ordinary-acceptance-main-decoder", dup_raw.endswith(b"}") and dup_rr.verdict == 0
                and all(ok for ok, _d in dup_res.values()))
+        # Flip: either staged-acceptance marker probe running in homes 1 changes main's located grading.
+        ordinary_raw = h1_acc.read_bytes()
+        for marker_fields in ({"ingest": {}}, {"format": imp.INGEST_ACCEPTANCE_FORMAT}):
+            marked = dict(json.loads(ordinary_raw), **marker_fields)
+            h1_acc.write_text(json.dumps(marked), encoding="utf-8")
+            marked_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
+                                          decisions=accept_all_decisions(h1_run), now=NOW)
+            marked_ap = imp.apply_import(h1_root, h1.run_id, now=NOW)
+            expect("ordinary-homes1-acceptance-marker-review", marked_rr.verdict == 2 and marked_rr.findings == [
+                "staged run fails the import-operation gate; not reviewable until it is a coherent, "
+                "promotion-ready run (failing gate checks: acceptance-schema)"])
+            expect("ordinary-homes1-acceptance-marker-apply", marked_ap.verdict == 1
+                   and marked_ap.outcome == "rejected" and marked_ap.promoted is False and marked_ap.findings == [
+                       "staged run fails the import-operation gate at apply; not promotable until it is a "
+                       "coherent, promotion-ready run (failing checks: acceptance-schema)"])
         # Flip: raising every failing check through _require_gate_results loses main's located message.
         h1_acc.write_bytes(b"[]\n")
         bad_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
@@ -3263,6 +3278,18 @@ def _self_test():
             "staged run fails the import-operation gate; not reviewable until it is a coherent, promotion-ready "
             "run (failing gate checks: acceptance-attribution, acceptance-binding"))
         h1_acc.unlink()
+        # Flip: removing the gen-is-None refusal makes an ordinary run pass these acceptance checks.
+        for supported, supplied in ((1, (3, "2", True, 1.0, 0, 2)), (2, (3, "2", True, 1.0, 0))):
+            with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", supported):
+                for bad in supplied:
+                    invalid = check_staged_run(h1_run, homes=bad)
+                    expect("ordinary-gate-homes-invalid-{}-{!r}".format(supported, bad),
+                           all(invalid[cid][0] is False for cid in
+                               ("ingest-acceptance-binding", "ingest-acceptance-completeness")))
+        with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            unsupplied = check_staged_run(h1_run)
+        expect("ordinary-gate-homes-unsupplied", all(unsupplied[cid][0] is False for cid in
+               ("ingest-acceptance-binding", "ingest-acceptance-completeness")))
         # Flip: a _gate_homes that returns its input unvalidated admits each malformed generation.
         with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
             refused = []
