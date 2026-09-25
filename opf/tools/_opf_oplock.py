@@ -283,7 +283,7 @@ whose superproject keeps its git dir under another name (--separate-git-dir) pas
 store nested in an independent clone lying inside another repository's work tree, with no gitlink,
 anchors at that clone's own common git dir, so either, reached through two superproject worktrees,
 takes two independent locks); git's submodule probe starts a git ls-files child in the parent
-directory of the enclosing repository's toplevel, so for every nested store, acquired or refused,
+directory of the enclosing repository's toplevel, so for every nested store git is asked about,
 that child reads the configuration and the index of whatever repository encloses that directory
 (the superproject, or any repository whose work tree holds the enclosing one, gitlink or not), and
 runs any command that repository configures for reading its index (core.fsmonitor), inside the
@@ -354,7 +354,8 @@ and the acquisition and each resume-substrate call run one resolution, so the gi
 most one git timeout to the time a section holds the signals; a grandchild git starts (the
 submodule probe's ls-files, in the superproject, disclosed above) inherits the mask too and runs
 inside that same timeout, which bounds
-the section's wait on the git child, not the grandchild's own lifetime. A
+the section's wait on the git child, not the grandchild's own lifetime, and a descendant that outlives
+the section (a background fsmonitor daemon, say) keeps the deferred signals blocked for its whole life. A
 second signal arriving in the few bytecodes between a first deferred signal's delivery
 and the start of the unreturned capability's release can skip that release (its complete,
 owner-bearing records then wait for a later recover=True, and its descriptors for process exit), and
