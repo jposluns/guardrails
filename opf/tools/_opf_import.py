@@ -2321,7 +2321,7 @@ def _ingest_run_marker(store_root_fd, run_rel, homes):
     if homes != INGEST_HOMES_GENERATION:
         return None
     # A staged acceptance that is not a readable regular file, or does not decode, is no marker: the ordinary
-    # gate diagnoses it (acceptance-*) with main's verdict routing.
+    # gate diagnoses it (acceptance-*) through the ordinary review/apply verdict routing.
     st = _journal._lstat_contained(store_root_fd, run_rel + "/" + ACCEPTANCE_NAME)
     if st is None or not stat.S_ISREG(st.st_mode):
         return None
@@ -2333,7 +2333,7 @@ def _ingest_run_marker(store_root_fd, run_rel, homes):
 
 
 def _acceptance_marks_ingest(raw):
-    """Whether staged acceptance bytes carry an ingest acceptance, decoded exactly as main's ordinary
+    """Whether staged acceptance bytes carry an ingest acceptance, decoded exactly as the ordinary
     acceptance reader decodes them (json.loads over UTF-8). Undecodable bytes are no marker; the ordinary
     grading reports them. Strict decoding (_strict_json) is for ingest evidence only."""
     try:
@@ -5827,7 +5827,7 @@ def _self_test_ingest_acceptance(check):
     check("accept-envelope-v1", cli._import_decode_decisions(
         _emit_acceptance_bytes({"schema": 1, "run_id": rid, "decisions": []}), rid) == [])
     # Flip: an ordinary schema-1 --decisions file read under the store-read cap (or strictly decoded) refuses
-    # this file main accepts, and a generic wrapper loses main's located run-binding message.
+    # this file the unbounded reader accepts, and a generic wrapper loses the located run-binding message.
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         row = dict(fragment_id="f", decision="accept", origin="o", proposed_state="s", note="x" * 4096)
@@ -5839,7 +5839,7 @@ def _self_test_ingest_acceptance(check):
             big_ok = cli._import_read_decisions(big, rid) == rows
         except ValueError:
             big_ok = False
-        check("decisions-v1-main-size", os.path.getsize(big) > _opf_store.MAX_STORE_READ_BYTES and big_ok)
+        check("decisions-v1-unbounded-size", os.path.getsize(big) > _opf_store.MAX_STORE_READ_BYTES and big_ok)
         other = os.path.join(tmp, "other.json")
         with open(other, "w", encoding="utf-8") as fh:
             json.dump(dict(schema=1, run_id=rid + "0", decisions=[]), fh)
@@ -6007,7 +6007,7 @@ def _self_test_ingest_acceptance(check):
     run_rel = IMPORTS_REL + "/" + rid
     # Flip: probing the durable home in generation 1 routes an ordinary run to ingest capture (the None leg).
     # Flip: reading a non-regular staged acceptance (the S_ISREG guard dropped) marks the directory leg, and
-    # propagating the contained-read JournalError (the unreadable leg) aborts where main's gate reports it.
+    # propagating the contained-read JournalError (the unreadable leg) bypasses ordinary acceptance grading.
     regular = os.stat_result((stat.S_IFREG | 0o644,) + (0,) * 9)
     directory = os.stat_result((stat.S_IFDIR,) + (0,) * 9)
     unreadable = _journal.JournalError("injected unreadable acceptance")
@@ -6028,7 +6028,7 @@ def _self_test_ingest_acceptance(check):
                 found = "raised"
             check("accept-only-marker", found == expected)
     # Flip: the strict decoder rejects duplicate members and misses this ingest marker.
-    check("accept-marker-main-decoder", _acceptance_marks_ingest(
+    check("accept-marker-json-loads-decoder", _acceptance_marks_ingest(
         b'{"ingest": null, "ingest": {}}'))
     # Intake and clock tests use explicit in-memory boundaries. They are not filesystem-writer evidence.
     class TTY(io.StringIO):

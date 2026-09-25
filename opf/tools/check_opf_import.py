@@ -1534,7 +1534,9 @@ def _gate_homes(homes):
     """The validated generation the gate evaluates under: an unsupplied generation is the legacy generation 1
     only while no later generation can be active (the rule _row_scope_error applies). A supplied generation
     other than the integer 1 or 2 (a bool, a str, a float, 3), or one above the tooling's supported
-    generation, raises: no applicability decision is taken on an unvalidated value."""
+    generation, raises. The staged-run gate takes no generation-dependent path on an invalid value:
+    ingest and ingest-acceptance checks fail with that error. Listing-based marker classification and
+    ordinary staged-data grading are generation-independent and still run."""
     import _opf_store
     if homes is None:
         if _opf_store.SUPPORTED_HOMES >= 2:
@@ -1550,7 +1552,7 @@ def _ingest_store_fd(rd, homes=None):
     """Bind the store to this opened run, through the shared generation-aware run-location constructor
     (_opf_import._import_run_locations) and inode comparison. Returns None for a detached copy (no
     store-relative home matches): it cannot establish absence of durable acceptance, so an ingest run's
-    durable checks refuse, while an ordinary run is classified from its own listing (A-M1). Staged snapshot
+    durable checks refuse, while an ordinary run is classified from its own listing. Staged snapshot
     checks still evaluate the supplied bytes.
     """
     import _journal
@@ -1639,6 +1641,16 @@ def _check_staged_run(rd, homes=None):
     def record(cid, ok, detail=""):
         results[cid] = (bool(ok), detail)
 
+    # A generation validation failure takes no generation-dependent path.
+    # Listing-based marker classification, ordinary staged-data grading, and transaction checks remain
+    # generation-independent. Every ingest and ingest-acceptance check records the generation error.
+    _ingest_ids = ("ingest-run-structure",) + _INGEST_CHECK_IDS
+    generation_checks = _ingest_ids + _INGEST_ACCEPTANCE_CHECKS
+    try:
+        gen, gen_error = _gate_homes(homes), ""
+    except _GateError as exc:
+        gen, gen_error = None, str(exc)
+
     # --- staged-run-structure -----------------------------------------------------------------------
     required = ["run.toml", "plan.toml", "mappings.toml", "report.toml", "inventory.toml",
                 "IMPORT-REPORT.md"]
@@ -1663,7 +1675,7 @@ def _check_staged_run(rd, homes=None):
         # from the single-source registry (not a hand-maintained tuple) so this early-return path can
         # never drift from EXPECTED_CHECKS and silently omit a future check.
         for cid in EXPECTED_CHECKS:
-            record(cid, False, str(exc))
+            record(cid, False, gen_error if gen is None and cid in generation_checks else str(exc))
         return results
 
     # --- ingest-review bundle detection (MIG-PR4b) --------------------------------------------------
@@ -1682,17 +1694,9 @@ def _check_staged_run(rd, homes=None):
     ingest_load_failed = False
     ingest_load_detail = ""
     durable_unavailable = ""
-    # The generation, validated once: every applicability decision below uses only `gen`. An invalid
-    # generation, or an unsupplied one once a later generation can be active (gen None), fails closed.
-    try:
-        gen, gen_error = _gate_homes(homes), ""
-    except _GateError as exc:
-        gen, gen_error = None, str(exc)
     marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)
-    if marker is None:
+    if gen is not None and marker is None:
         try:
-            if gen is None:
-                raise _GateError(gen_error)
             # The durable home is control storage only in generation 2; in generation 1 it and the homes-2
             # staging names are ordinary content, never probed. A detached copy has no store to consult.
             fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None
@@ -1706,16 +1710,16 @@ def _check_staged_run(rd, homes=None):
         except Exception as exc:
             durable_unavailable = "durable acceptance cannot be located ({})".format(exc)
     if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":
-        # Decoded as main's ordinary reader decodes it; an unreadable or undecodable staged acceptance is no
-        # marker, and the ordinary acceptance grading below reports it as main does.
+        # Decoded with the ordinary acceptance reader's json.loads; unreadable or undecodable bytes are no
+        # marker, and the ordinary acceptance grading below reports the read or decode failure.
         try:
             acc_raw = rd.read_bytes(imp.ACCEPTANCE_NAME)
         except _GateError:
             acc_raw = None
         if acc_raw is not None and imp._acceptance_marks_ingest(acc_raw):
             marker = imp.ACCEPTANCE_NAME
-    if marker is not None:
-        ingest_is_run = True
+    ingest_is_run = marker is not None
+    if gen is not None and ingest_is_run:
         if rd.kind(imp.INGEST_REVIEW_NAME) is None:
             ingest_load_failed = True
             ingest_load_detail = ("ingest markers present (marker {!r}) but the review bundle "
@@ -2020,11 +2024,14 @@ def _check_staged_run(rd, homes=None):
     # through the regular-file-validated reader); a symlink or any other non-regular entry is a FINDING
     # (fail-closed), never pass-as-absent. An unclassifiable entry already failed the listing closed.
     acc_kind = rd.kind(imp.ACCEPTANCE_NAME)
-    # Durable acceptance exists only in generation 2. In generation 1 every run keeps main's staged
-    # acceptance grading below; an unsupplied generation that cannot be graded fails the durable path closed.
+    # Durable acceptance exists only in generation 2. In generation 1 every run keeps ordinary staged
+    # acceptance grading below; invalid generations fail ingest acceptance without probing its home.
     legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION
-    if ingest_is_run and not legacy_generation:
-        for cid, (ok, detail) in _ingest_acceptance_checks(rd, homes).items():
+    if ingest_is_run and gen is None:
+        for cid in acc_checks:
+            record(cid, False, gen_error)
+    elif ingest_is_run and not legacy_generation:
+        for cid, (ok, detail) in _ingest_acceptance_checks(rd, gen).items():
             record(cid, ok, detail)
     elif acc_kind is None:
         for cid in acc_checks:
@@ -2162,8 +2169,10 @@ def _check_staged_run(rd, homes=None):
     # (fail-closed, never nothing-to-check). On a well-formed bundle, ingest-run-structure PASSes and the
     # shared validator performs the binding-digest recompute and correspondence for the other five.
     # Acceptance has a separate durable home and its own read-only checks.
-    _ingest_ids = ("ingest-run-structure",) + _INGEST_CHECK_IDS
-    if not ingest_is_run:
+    if gen is None:
+        for cid in _ingest_ids:
+            record(cid, False, gen_error)
+    elif not ingest_is_run:
         for cid in _ingest_ids:
             record(cid, True, "not an ingest run")
     elif ingest_load_failed or ingest_bundle is None:
@@ -2176,7 +2185,7 @@ def _check_staged_run(rd, homes=None):
         # The whole shared-validator step is fail-closed: a first-party contract violation (a raise, a
         # malformed return) becomes located FINDINGs, never an uncaught crash for a check_staged_run caller.
         try:
-            ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, homes)
+            ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, gen)
         except Exception as exc:   # noqa: BLE001 - fail-closed; KeyboardInterrupt/SystemExit still propagate
             ing_results = {}
             _vfail = "ingest review validator raised ({!r})".format(exc)
@@ -2189,7 +2198,10 @@ def _check_staged_run(rd, homes=None):
             else:
                 record(cid, False, _vfail or "ingest check did not run (fail-closed)")
 
-    if not ingest_is_run:
+    if gen is None:
+        for cid in _INGEST_ACCEPTANCE_CHECKS:
+            record(cid, False, gen_error)
+    elif not ingest_is_run:
         for cid in _INGEST_ACCEPTANCE_CHECKS:
             record(cid, not durable_unavailable, durable_unavailable or "not an ingest run")
     elif legacy_generation:
@@ -2297,6 +2309,68 @@ def _check_staged_run(rd, homes=None):
     return results
 
 
+def _self_test_gate_generation(expect):
+    """Invalid generations fail every dependent id without suppressing ordinary grading."""
+    import sys
+    from unittest.mock import patch
+    import _opf_import as imp
+    import _opf_store
+
+    gate = sys.modules[__name__]
+    dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
+    cases = (("bool", True), ("string", "2"), ("future", 3), ("float", 2.0),
+             ("nan", float("nan")), ("unsupplied", None))
+    for fixture in ("ordinary", "ingest", "malformed-core"):
+        rd, files = imp._memory_ingest_run()
+        rd.fd = -1
+        if fixture == "ordinary":
+            for name in imp._INGEST_RUN_MARKERS:
+                files.pop(name, None)
+                rd.tree.pop(name, None)
+            inv = rd.load_toml("inventory.toml")
+            proposals = rd.load_toml(imp.PROPOSALS_NAME)["proposal"]
+            norm = [dict(p, _origin=p["origin"]) for p in proposals]
+            files[imp.REPORT_MD_NAME] = imp._render_report_md(
+                inv["inventory_digest"], inv["fragment"], norm, rd.path.name).encode("utf-8")
+        elif fixture == "malformed-core":
+            real_load = rd.load_toml
+
+            def load(name):
+                if name == "report.toml":
+                    raise _GateError("report.toml is unreadable (injected)")
+                return real_load(name)
+
+            rd.load_toml = load
+
+        # The synthetic reader has no store descriptor; transaction checks still record their failures.
+        with patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
+                patch.object(os, "open", side_effect=OSError("synthetic store unavailable")):
+            baseline = _check_staged_run(rd, homes=1)
+            for label, bad in cases:
+                error = ("the store's homes generation was not supplied to this manifest-free gate"
+                         if bad is None else
+                         "the supplied homes generation {!r} is not 1 or 2, or is above the tooling's "
+                         "supported generation 2".format(bad))
+                # Named flips: allow this value's ingest checks to pass, probe its durable home,
+                # run ingest validation, lose the located error, or return an incomplete registry.
+                with patch.object(gate, "_ingest_store_fd") as locate, \
+                        patch.object(gate, "_ingest_acceptance_checks") as acceptance, \
+                        patch.object(gate, "_verify_ingest_review_model") as validate, \
+                        patch.object(imp, "_validate_staged_ingest_bundle") as bundle:
+                    result = (_check_staged_run(rd) if bad is None
+                              else _check_staged_run(rd, homes=bad))
+                ordinary_unchanged = (fixture != "ordinary" or all(
+                    result.get(cid) == value for cid, value in baseline.items() if cid not in dependent))
+                ordinary_clean = (fixture != "ordinary" or all(
+                    ok for cid, (ok, _detail) in baseline.items()
+                    if cid not in ("transaction-schema", "transaction-consistency")))
+                expect("gate-generation-{}-{}".format(fixture, label),
+                       set(result) == set(EXPECTED_CHECKS)
+                       and all(result.get(cid) == (False, error) for cid in dependent)
+                       and ordinary_unchanged and ordinary_clean
+                       and not any(p.called for p in (locate, acceptance, validate, bundle)))
+
+
 def _self_test():
     """Build synthetic staged runs and assert every registered check PASSes on a clean run and FINDINGs on
     its own discriminator (a single deliberate mutation), plus the scan-layer checks. Returns 0 clean, 1 on
@@ -2316,6 +2390,8 @@ def _self_test():
     def expect(label, cond):
         if not cond:
             failures.append(label)
+
+    _self_test_gate_generation(expect)
 
     NOW = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
@@ -3239,23 +3315,23 @@ def _self_test():
         import unittest.mock
         import _opf_store
         # Flip: ordinary review dropping its derived generation at the gate call refuses this unchanged homes-1
-        # store once the tooling supports homes 2 (both ingest-acceptance checks unsupplied); main is CLEAN.
+        # store once the tooling supports homes 2; review with the derived generation remains CLEAN.
         with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
             h1_rr2 = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
                                        decisions=accept_all_decisions(h1_run), now=NOW)
             h1_res2 = check_staged_run(h1_run, homes=1)
         expect("ordinary-review-homes2-tooling", h1_rr2.verdict == 0 and all(ok for ok, _d in h1_res2.values()))
         # Flip: the strict ingest decoder in ordinary grading fails this duplicate
-        # member that main's decoder accepts; main passes every check and re-reviews CLEAN.
+        # member that json.loads accepts; ordinary grading passes every check and re-reviews CLEAN.
         h1_acc = h1_run / "acceptance.json"
         dup_raw = h1_acc.read_bytes().rstrip()
         h1_acc.write_bytes(dup_raw[:-1] + b', "run_id": ' + json.dumps(h1.run_id).encode("ascii") + b"}\n")
         dup_res = check_staged_run(h1_run)
         dup_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
                                    decisions=accept_all_decisions(h1_run), now=NOW)
-        expect("ordinary-acceptance-main-decoder", dup_raw.endswith(b"}") and dup_rr.verdict == 0
+        expect("ordinary-acceptance-json-loads-decoder", dup_raw.endswith(b"}") and dup_rr.verdict == 0
                and all(ok for ok, _d in dup_res.values()))
-        # Flip: either staged-acceptance marker probe running in homes 1 changes main's located grading.
+        # Flip: either staged-acceptance marker probe running in homes 1 bypasses ordinary schema grading.
         ordinary_raw = h1_acc.read_bytes()
         for marker_fields in ({"ingest": {}}, {"format": imp.INGEST_ACCEPTANCE_FORMAT}):
             marked = dict(json.loads(ordinary_raw), **marker_fields)
@@ -3270,7 +3346,7 @@ def _self_test():
                    and marked_ap.outcome == "rejected" and marked_ap.promoted is False and marked_ap.findings == [
                        "staged run fails the import-operation gate at apply; not promotable until it is a "
                        "coherent, promotion-ready run (failing checks: acceptance-schema)"])
-        # Flip: raising every failing check through _require_gate_results loses main's located message.
+        # Flip: raising every failing check through _require_gate_results loses the ordinary gate's located message.
         h1_acc.write_bytes(b"[]\n")
         bad_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
                                    decisions=accept_all_decisions(h1_run), now=NOW)
@@ -3307,7 +3383,7 @@ def _self_test():
             above = True
         expect("gate-homes-above-supported", above)
         # Flip: raising for a detached copy (a store required for an ordinary run) fails both
-        # ingest-acceptance checks here, in either generation; main passes every check (A-M1).
+        # ingest-acceptance checks here, in either generation; a detached ordinary run passes every check.
         import unittest.mock
         import _opf_store
         detached = copy_run(reviewed)
