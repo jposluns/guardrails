@@ -29,6 +29,16 @@ def _backlog_items(numbers):
     } for n in numbers]}).encode("utf-8")
 
 
+def _worklog(numbers):
+    return _opf_emit.emit_checked({"schema": 1, "entry": [{
+        "id": "WL-{}".format(n),
+        "date": "2026-06-01T00:00:00Z",
+        "actor": {"kind": "maintainer"},
+        "kind": "added",
+        "summary": "w{}".format(n),
+    } for n in numbers]}).encode("utf-8")
+
+
 class InitQA(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="opf-init-qa-")
@@ -185,10 +195,38 @@ class InitQA(unittest.TestCase):
     def test_malformed_ancestral_floor_cannot_evaluate(self):
         self.ready()
         res = op._opf_store.resolve_store(self.root)
-        for floor in ({"BI": -1}, {"BI": True}, {"BI": "7"}, ["BI"]):
+        # R3: a floor past the signed 64-bit counter range is malformed too, never a wider pass.
+        for floor in ({"BI": -1}, {"BI": True}, {"BI": "7"}, ["BI"], {"BI": 1 << 63},
+                      {"BI": 10 ** 100}):
             with self.subTest(floor=floor):
                 health = op._opf_check.validate_store(res, ancestral_floor=floor)
                 self.assertEqual(health.checks["C-NO-DELETION"], "CANNOT-EVALUATE")
+
+    def test_worklog_gap_above_floor_is_a_deletion(self):
+        # R3 HIGH: C-NO-DELETION runs the floor-aware gap scan for WL as for every other
+        # namespace, so a worklog id deleted from between the floor and the max is its finding
+        # (C-CONTIGUITY knows no ancestral floor). ids at or below the floor stay unowed.
+        self.ready()
+        counters = Path(self.root, op.COUNTERS_RELPATH)
+        worklog = Path(self.root, op._MACHINE_HOME, "worklog.toml")
+        seeded, empty = counters.read_bytes(), worklog.read_bytes()
+        self.assertIn(b"WL = 0", seeded)
+        vectors = [
+            ([9], "FINDING"),        # WL-8 removed from above the floor, below the max
+            ([8, 9], "PASS"),        # a valid sequence above the floor
+        ]
+        for ids, status in vectors:
+            with self.subTest(ids=ids):
+                counters.write_bytes(seeded.replace(b"WL = 0", b"WL = 9"))
+                worklog.write_bytes(_worklog(ids))
+                try:
+                    res = op._opf_store.resolve_store(self.root)
+                    health = op._opf_check.validate_store(res, ancestral_floor={"WL": 7})
+                    self.assertEqual(health.checks["C-NO-DELETION"], status,
+                                     health.by_check.get("C-NO-DELETION"))
+                finally:
+                    counters.write_bytes(seeded)
+                    worklog.write_bytes(empty)
 
     def test_completed_provenance_bound_to_plan(self):
         self.ready()

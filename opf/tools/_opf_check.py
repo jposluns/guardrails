@@ -2632,16 +2632,18 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     rep.ran("C-NO-DELETION")
     # No expansion of the high-water into an expected range (F15): an id is never deleted or reused, so the
-    # present ids of a namespace must equal 1..high-water. For WL, C-CONTIGUITY checks the 1..max side and
-    # this O(1) arithmetic overhang catches the max..high-water side, reporting the COUNT of allocated ids
-    # absent from both locations, never an enumerated list. A B6 re-adoption's ancestral floor lifts the
-    # base of the expected range to floor+1: ids 1..floor were allocated before the store was retired and
-    # counter preservation restores no record, while an id allocated above the floor stays owed. A
-    # malformed floor is CANNOT-EVALUATE, never a silently wider pass.
+    # present ids of a namespace must equal 1..high-water. Every namespace, WL included, gets an O(1)
+    # arithmetic overhang for the max..high-water side, reporting the COUNT of allocated ids absent from
+    # both locations, never an enumerated list, and an O(present) scan for a gap below the max. A B6
+    # re-adoption's ancestral floor lifts the base of the expected range to floor+1: ids 1..floor were
+    # allocated before the store was retired and counter preservation restores no record, while an id
+    # allocated above the floor stays owed. A malformed floor, including one past the signed 64-bit range
+    # a counters ledger can carry, is CANNOT-EVALUATE, never a silently wider pass.
     floor = {}
     if ancestral_floor is not None:
         if isinstance(ancestral_floor, dict) and all(
-                isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) and v >= 0
+                isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+                and 0 <= v <= (1 << 63) - 1
                 for k, v in ancestral_floor.items()):
             floor = ancestral_floor
         else:
@@ -2655,11 +2657,22 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             rep.finding("C-NO-DELETION: {} allocated worklog id(s) above WL-{} are absent from both the "
                         "active worklog and the archive (counters WL high-water is {}; nothing is ever "
                         "deleted, spec 12/13)".format(wl_hw - max_present, max_present, wl_hw))
-    # Every OTHER roster namespace has no contiguity check, so C-NO-DELETION owns BOTH sides here: an
-    # overhang above the max present id AND any gap below it (an id deleted from between). The present set
-    # is the committed active + archive records for the namespace (B1); staging is excluded because it
-    # legitimately mints ids above the committed high-water pending promotion (not durable). Both scans are
-    # O(present) arithmetic, never a range() expansion of the high-water (F15).
+        # The gap below the max is scanned here too, from the floor: C-CONTIGUITY tiles from WL-1 and knows
+        # no ancestral floor, so it cannot own a deletion from between floor+1 and the max.
+        base = floor.get("WL", 0)
+        expected = base + 1
+        for n in (n for n in present_wl if n > base):
+            if n != expected:
+                rep.finding("C-NO-DELETION: WL-{} is absent from both the active worklog and the archive "
+                            "(an allocated id between 1 and WL-{} cannot be deleted; spec 12/13)".format(
+                                expected, max_present))
+                break
+            expected += 1
+    # Every OTHER roster namespace likewise owns BOTH sides here: an overhang above the max present id AND
+    # any gap below it (an id deleted from between). The present set is the committed active + archive
+    # records for the namespace (B1); staging is excluded because it legitimately mints ids above the
+    # committed high-water pending promotion (not durable). Both scans are O(present) arithmetic, never a
+    # range() expansion of the high-water (F15).
     present_by_ns = {}
     for r in active_recs + archive_recs:
         if isinstance(r.id, str):
