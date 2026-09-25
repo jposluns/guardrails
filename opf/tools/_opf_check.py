@@ -2359,7 +2359,7 @@ def _normalize_observations(observations):
 
 # --- the whole-store validator -----------------------------------------------------------------------
 
-def validate_store(resolution, supported_profiles=None, *, observations=None):
+def validate_store(resolution, supported_profiles=None, *, observations=None, ancestral_floor=None):
     """Validate a RESOLVED store's whole-store integrity (OPF-SPEC 11). `resolution` is the object
     _opf_store.resolve_store returns; a resolution that is not RESOLVED is CANNOT-EVALUATE. `observations`
     is the inert, all-optional git-derived-facts object the git-aware caller (the future doctor verb; the
@@ -2369,6 +2369,9 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
     cross-record, historical, archive, view, changelog, and topology invariants no single-record or
     single-ledger pass can see. Returns a StoreValidation (VALID / INVALID / CANNOT-EVALUATE) plus the
     per-check verdicts, the partial-import triage surface, the profile scope, and the disclosed residuals.
+    `ancestral_floor` is the {namespace: high-water} a B6 re-adoption seeded its counters from (the init
+    health gate passes its validated plan's seed); ids at or below it are ancestral, never restored, so
+    C-NO-DELETION does not read their absence as a deletion. None (every other caller) is a zero floor.
     """
     rep = _Report()
     if resolution is None or getattr(resolution, "status", None) != RESOLVED:
@@ -2409,7 +2412,7 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
     try:
         evaluated_profiles, unevaluated_profiles = _validate_opened_store(
             root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target, pointer_source,
-            in_repo, rep)
+            in_repo, rep, ancestral_floor)
     except Exception as exc:
         # Top-level fail-closed barrier (B6): any unexpected error (a RecursionError from a hostile-shaped
         # store, or any other escape no specific guard anticipated) becomes a CANNOT-EVALUATE naming the
@@ -2427,7 +2430,7 @@ def validate_store(resolution, supported_profiles=None, *, observations=None):
 
 
 def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target,
-                           pointer_source, in_repo, rep):
+                           pointer_source, in_repo, rep, ancestral_floor=None):
     # --- C-MANIFEST: identify the store, derive enabled types / vendors / layout ----------------------
     rep.ran("C-MANIFEST")
     manifest_rel = _rel(machine_rel, MANIFEST_NAME)
@@ -2631,11 +2634,23 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # No expansion of the high-water into an expected range (F15): an id is never deleted or reused, so the
     # present ids of a namespace must equal 1..high-water. For WL, C-CONTIGUITY checks the 1..max side and
     # this O(1) arithmetic overhang catches the max..high-water side, reporting the COUNT of allocated ids
-    # absent from both locations, never an enumerated list.
+    # absent from both locations, never an enumerated list. A B6 re-adoption's ancestral floor lifts the
+    # base of the expected range to floor+1: ids 1..floor were allocated before the store was retired and
+    # counter preservation restores no record, while an id allocated above the floor stays owed. A
+    # malformed floor is CANNOT-EVALUATE, never a silently wider pass.
+    floor = {}
+    if ancestral_floor is not None:
+        if isinstance(ancestral_floor, dict) and all(
+                isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) and v >= 0
+                for k, v in ancestral_floor.items()):
+            floor = ancestral_floor
+        else:
+            rep.cant("C-NO-DELETION: the ancestral floor is malformed; the seeded-store deletion floor is "
+                     "not evaluable")
     present_wl = sorted(merged)
     wl_hw = high.get("WL")
     if isinstance(wl_hw, int) and not isinstance(wl_hw, bool) and wl_hw >= 0:
-        max_present = present_wl[-1] if present_wl else 0
+        max_present = max(present_wl[-1] if present_wl else 0, floor.get("WL", 0))
         if wl_hw > max_present:
             rep.finding("C-NO-DELETION: {} allocated worklog id(s) above WL-{} are absent from both the "
                         "active worklog and the archive (counters WL high-water is {}; nothing is ever "
@@ -2657,13 +2672,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         hw = high.get(ns)
         if not (isinstance(hw, int) and not isinstance(hw, bool) and hw >= 0):
             continue     # an absent / malformed counter is C-COUNTERS' finding, not this check's
-        nums = sorted(present_by_ns.get(ns, ()))
-        max_present = nums[-1] if nums else 0
+        base = floor.get(ns, 0)
+        nums = sorted(n for n in present_by_ns.get(ns, ()) if n > base)
+        max_present = nums[-1] if nums else base
         if hw > max_present:
             rep.finding("C-NO-DELETION: {} allocated {}-<n> id(s) above {}-{} are absent from both the "
                         "active store and the archive (counters {} high-water is {}; nothing is ever "
                         "deleted, spec 12/13)".format(hw - max_present, ns, ns, max_present, ns, hw))
-        expected = 1
+        expected = base + 1
         for n in nums:
             if n != expected:
                 rep.finding("C-NO-DELETION: {}-{} is absent from both the active store and the archive (an "

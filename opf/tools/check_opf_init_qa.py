@@ -17,6 +17,18 @@ import _opf_emit
 import _opf_init_operation as op
 
 
+def _backlog_items(numbers):
+    return _opf_emit.emit_checked({"schema": 1, "record": [{
+        "id": "BI-{}".format(n),
+        "type": "backlog_item",
+        "status": "open",
+        "title": "later",
+        "created_at": "2026-06-01T00:00:00Z",
+        "updated_at": "2026-06-01T00:00:00Z",
+        "actor": {"kind": "maintainer"},
+    } for n in numbers]}).encode("utf-8")
+
+
 class InitQA(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="opf-init-qa-")
@@ -31,6 +43,31 @@ class InitQA(unittest.TestCase):
     def ready(self):
         result = op.init_operation(self.root)
         self.assertEqual(result.status, op.SOURCES_READY, result.primary_failure)
+        return result
+
+    def readopt(self, **high):
+        # B6: a committed store later retired in a commit; re-adoption seeds the counters from
+        # the pinned snapshot and publishes EMPTY indexes (no historical record is restored).
+        baseline, importer, _ = op._roster_namespaces()
+        values = {ns: 0 for ns in baseline | importer}
+        values.update(high)
+        op._write(str(Path(self.root, op.COUNTERS_RELPATH)), op._counters_toml(values))
+        op._git(["add", "--", op.COUNTERS_RELPATH], self.root, self.env)
+        op._git(["commit", "-q", "-m", "seed"], self.root, self.env)
+        seed = op._head(self.root, self.env)
+        op._git(["rm", "--", op.COUNTERS_RELPATH], self.root, self.env)
+        op._git(["commit", "-q", "-m", "retire store"], self.root, self.env)
+        result = op.init_operation(self.root, ancestral=seed)
+        self.assertEqual(result.status, op.SOURCES_READY, result.primary_failure)
+        return result
+
+    def assert_rerun(self, status, check=None):
+        before = op._snapshot_all(self.root)
+        result = op.init_operation(self.root)
+        self.assertEqual(result.status, status, result.primary_failure)
+        if check is not None:
+            self.assertIn(check, result.primary_failure["detail"])
+        self.assertEqual(op._snapshot_all(self.root), before)
         return result
 
     def test_library_journal_atomic_publication_and_rerun(self):
@@ -102,21 +139,56 @@ class InitQA(unittest.TestCase):
         self.assertEqual(op._read_plan(self.root), (ops, raw))
 
     def test_library_pinned_b6_seed(self):
-        baseline, importer, _ = op._roster_namespaces()
-        values = {ns: 0 for ns in baseline | importer}
-        values["BI"] = 7
+        self.readopt(BI=7)
         path = Path(self.root, op.COUNTERS_RELPATH)
-        op._write(str(path), op._counters_toml(values))
-        op._git(["add", "--", op.COUNTERS_RELPATH], self.root, self.env)
-        op._git(["commit", "-q", "-m", "seed"], self.root, self.env)
-        seed = op._head(self.root, self.env)
-        op._git(["rm", "--", op.COUNTERS_RELPATH], self.root, self.env)
-        op._git(["commit", "-q", "-m", "retire store"], self.root, self.env)
-        result = op.init_operation(self.root, ancestral=seed)
-        self.assertEqual(result.status, op.SOURCES_READY, result.primary_failure)
         self.assertEqual(
             tomllib.loads(path.read_text(encoding="utf-8"))["counters"]["BI"], 7
         )
+
+    def test_completed_b6_seeded_rerun(self):
+        # R2 HIGH: ids at or below the pinned ancestral high-water were allocated before the
+        # store was retired and are not restored, so their absence is not a deletion.
+        first = self.readopt(BI=7, WL=7)
+        result = self.assert_rerun(op.ALREADY_INITIALIZED)
+        self.assertEqual(result.operation_id, first.operation_id)
+        # An id allocated ABOVE the seed and then removed is still a deletion.
+        counters = Path(self.root, op.COUNTERS_RELPATH)
+        index = Path(self.root, op._MACHINE_HOME, "backlog_item.index.toml")
+        seeded, empty = counters.read_bytes(), index.read_bytes()
+        vectors = [
+            (8, [8], op.ALREADY_INITIALIZED),   # a valid later allocation
+            (9, [9], op.REFUSED),               # BI-8 removed from below the max
+            (9, [8], op.REFUSED),               # BI-9 removed from above the max
+        ]
+        for high, ids, status in vectors:
+            with self.subTest(high=high, ids=ids):
+                counters.write_bytes(seeded.replace(b"BI = 7", b"BI = %d" % high))
+                index.write_bytes(_backlog_items(ids))
+                try:
+                    self.assert_rerun(status, None if status == op.ALREADY_INITIALIZED
+                                      else "C-NO-DELETION")
+                finally:
+                    counters.write_bytes(seeded)
+                    index.write_bytes(empty)
+        self.assert_rerun(op.ALREADY_INITIALIZED)
+
+    def test_completed_deletion_refused(self):
+        # C-NO-DELETION is a current-source check (counters against present ids, no history):
+        # a completed first adoption with BI-2 removed from below the max stays REFUSED.
+        self.ready()
+        counters = Path(self.root, op.COUNTERS_RELPATH)
+        counters.write_bytes(counters.read_bytes().replace(b"BI = 0", b"BI = 3"))
+        Path(self.root, op._MACHINE_HOME, "backlog_item.index.toml").write_bytes(
+            _backlog_items([1, 3]))
+        self.assert_rerun(op.REFUSED, "C-NO-DELETION")
+
+    def test_malformed_ancestral_floor_cannot_evaluate(self):
+        self.ready()
+        res = op._opf_store.resolve_store(self.root)
+        for floor in ({"BI": -1}, {"BI": True}, {"BI": "7"}, ["BI"]):
+            with self.subTest(floor=floor):
+                health = op._opf_check.validate_store(res, ancestral_floor=floor)
+                self.assertEqual(health.checks["C-NO-DELETION"], "CANNOT-EVALUATE")
 
     def test_completed_provenance_bound_to_plan(self):
         self.ready()

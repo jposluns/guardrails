@@ -1732,8 +1732,14 @@ def _health_check(root, root_fd, plan, binding):
     # Subtract from the authoritative roster so future checks fail closed by default.
     deferred = {"C-TRACKED", "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS",
                 "C-HISTORY-RESURRECTION"}
+    # C-NO-DELETION reads only current sources (counters against present ids), so it stays
+    # required. A re-adoption's validated plan carries the ancestral seed its counters copied
+    # with no record restored; ids at or below it are not deletions, ids above it still are.
+    floor = None
+    if not plan["first_adoption"]:
+        floor = tomllib.loads(payloads[COUNTERS_RELPATH].decode("utf-8"))["counters"]
     observations, _notes = _opf_observe.gather(res)
-    health = _opf_check.validate_store(res, observations=observations)
+    health = _opf_check.validate_store(res, observations=observations, ancestral_floor=floor)
     required = set(_opf_check.source_checks(health)) - deferred
     bad = sorted(cid for cid in required if health.checks.get(cid) != "PASS")
     if health.unattributed or health.triage or bad:
