@@ -8,7 +8,8 @@ files through a create-only, preserving journal, resumes an interrupted operatio
 ORIGINAL operation id, deduplicates exact poststates, emits the managed bootstrap provenance
 (`.working/toml/init.toml`), and consumes a PINNED ancestral counters seed (B6). It is a LIBRARY
 milestone: it adds no CLI verb, stages nothing in the git index (PR5), renders no view (PR3b), and
-never reports coupled-init success (PR7). The shipped D2a `opf init` (opf.py) is unchanged.
+never reports coupled-init success (PR7). The opf init CLI retains the shipped base exit-0 store
+scaffolding; wiring it to init_operation and exposing coupled-init CLI milestones are deferred to PR7.
 
 The Architect's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
 
@@ -1672,17 +1673,22 @@ def _final_check(root, root_fd, plan, lease_held):
     return list(REQUIRED_CHECKS)
 
 
-def _health_check(root, root_fd, operation_id, binding):
-    """FRESH HEALTH validation of an already-completed adoption (decision 5): it may carry
-    legitimate later edits, so it is never held to the plan's bytes; the store must resolve at the
-    product root with a VALID manifest, the provenance must be structurally valid and name this
-    operation, the counters must validate, and the pointer must be present. Nothing is written."""
+def _health_check(root, root_fd, plan, binding):
+    """Validate immutable bootstrap provenance and CURRENT source health (decision 5).
+
+    The digest is recomputed from the validated plan payloads, never from later edited
+    sources. The plan's binding must still identify this root; its historical HEAD need
+    not equal today's HEAD. Current source validation permits legitimate later edits.
+    """
+    plan = validate_init_plan(_opf_init_contract.canonical_json_bytes(plan),
+                              expected_binding=binding)
     res = _opf_store.resolve_store(root)
-    if res.status != _opf_store.RESOLVED or os.path.abspath(str(res.store_root)) != root:
+    if res.status != _opf_store.RESOLVED or os.path.abspath(str(res.store_root)) != root \
+            or res.machine_rel != _MACHINE_HOME:
         raise InitOperationError("the completed adoption's store does not resolve ({}: {})".format(
             res.status, res.detail))
     manifest = _opf_store.load_manifest(res)
-    if manifest.status != _opf_store.VALID:
+    if manifest.status != _opf_store.VALID or manifest.findings:
         raise InitOperationError("the completed adoption's manifest is not VALID ({})".format(
             manifest.findings))
     prov_path = "{}/{}".format(res.machine_rel, PROVENANCE_NAME)
@@ -1691,8 +1697,16 @@ def _health_check(root, root_fd, operation_id, binding):
         raw, _st = _read_regular(pfd, name, prov_path, _opf_init_contract.MAX_RAW_BYTES)
     finally:
         os.close(pfd)
-    check = validate_bootstrap_provenance(raw)
-    if check.status != VALID or check.model["operation_id"] != operation_id:
+    basis = {"spec_version": plan["versions"]["spec_version"],
+             "operation_id": plan["operation_id"], "binding": plan["binding"],
+             "head": plan["head"], "first_adoption": plan["first_adoption"],
+             "inventory_digest": plan["inventory_digest"], "acceptance": plan["acceptance"]}
+    payloads = {p: b for p, b in plan_payloads(plan).items() if p != PROVENANCE_RELPATH}
+    source_set, source_digest = compute_bootstrap_source_digest(payloads)
+    check = validate_bootstrap_provenance(raw, expected_basis=basis,
+                                          expected_source_digest=source_digest,
+                                          expected_source_set=source_set)
+    if check.status != VALID:
         raise InitOperationError("the completed adoption's provenance is invalid or names another "
                                  "operation ({})".format(check.findings))
     counters_rel = "{}/{}".format(res.machine_rel, _opf_check.COUNTERS_NAME)
@@ -1713,6 +1727,20 @@ def _health_check(root, root_fd, operation_id, binding):
             findings))
     if _lstat(root_fd, _opf_store.POINTER_REL, _opf_store.POINTER_REL) is None:
         raise InitOperationError("the completed adoption's store pointer is absent")
+    # This is a source milestone, not a whole-store/doctor verdict. Tracking,
+    # deliverables and across-time history are outside current-source health.
+    # Subtract from the authoritative roster so future checks fail closed by default.
+    deferred = {"C-TRACKED", "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS",
+                "C-HISTORY-RESURRECTION"}
+    observations, _notes = _opf_observe.gather(res)
+    health = _opf_check.validate_store(res, observations=observations)
+    required = set(_opf_check.source_checks(health)) - deferred
+    bad = sorted(cid for cid in required if health.checks.get(cid) != "PASS")
+    if health.unattributed or health.triage or bad:
+        details = {cid: health.by_check.get(cid, []) for cid in bad}
+        raise InitOperationError("the completed adoption's current sources are unhealthy "
+                                 "(checks {}; details {}; unattributed {}; triage {})".format(
+                                     bad, details, health.unattributed, health.triage))
 
 
 # --- the operation: select, plan or resume, journal, attach, verify, finalize (plan steps 1-10) ----
@@ -2059,7 +2087,7 @@ def run_init_sources(product_root, *, ancestral=None, recover=False):
             raise InitOperationError("the product root changed identity after it was observed")
         kind, rep = _select(run, binding)
         if kind == "completed":
-            _health_check(root, run.root_fd, rep.op_id, binding)
+            _health_check(root, run.root_fd, rep.plan, binding)
             result.status = ALREADY_INITIALIZED
             result.operation_id = rep.op_id
             result.plan_digest = rep.plan["plan_digest"]
@@ -2125,6 +2153,11 @@ def run_init_sources(product_root, *, ancestral=None, recover=False):
         result.phases = tuple(run.phases) or result.phases
         _release_all(run)
     return result
+
+
+def init_operation(product_root, *, ancestral=None, recover=False):
+    """Public CLI seam; preserve the library result and decision-7 milestone boundary."""
+    return run_init_sources(product_root, ancestral=ancestral, recover=recover)
 
 
 # --- self-test ------------------------------------------------------------------------------------
@@ -2559,6 +2592,8 @@ def _run_self_test():
         tests_run.append("b6")
         _physical_tests(base, env, ok, signal)
         tests_run.append("physical")
+        import check_opf_init_qa
+        ok("PR3a-QA-regressions", check_opf_init_qa.self_test() == 0)
     except Exception:
         ok("self-test-harness", False, traceback.format_exc())
     finally:
@@ -2773,12 +2808,17 @@ def _physical_tests(base, env, ok, signal):
     rc, res, _err = _child(root, env)
     ok("R2-repeatable", res and res["status"] == ALREADY_INITIALIZED)
 
-    # R2b a completed adoption with LEGITIMATE later edits (a committed counters change) is health-
+    # R2b a completed adoption with LEGITIMATE later edits (a record and its counter) is health-
     # validated, never held to its plan's bytes (decision 5): ALREADY-INITIALIZED, the edit untouched.
     root = os.path.join(base, "fresh-77")
     counters_path = os.path.join(root, COUNTERS_RELPATH)
-    edited = open(counters_path, "rb").read().replace(b"BI = 0", b"BI = 4")
+    edited = open(counters_path, "rb").read().replace(b"BI = 0", b"BI = 1")
     _write(counters_path, edited)
+    record = {"id": "BI-1", "type": "backlog_item", "status": "open", "title": "later",
+              "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z",
+              "actor": {"kind": "maintainer"}}
+    _write(os.path.join(root, _MACHINE_HOME, "backlog_item.index.toml"),
+           _opf_emit.emit_checked({"schema": 1, "record": [record]}).encode("utf-8"))
     before = _snapshot_all(root)
     rc, res, err = _child(root, env)
     ok("R2b-edited-completed-is-healthy", res and res["status"] == ALREADY_INITIALIZED
