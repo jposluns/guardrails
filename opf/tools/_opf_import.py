@@ -3519,6 +3519,7 @@ def _capture_ingest_review(resolution, run_id, actor, decisions, ingest, clock):
     """Capture only to a provisioned durable home after the final binding comparison."""
     import check_opf_import as gate
     homes = _store_homes(resolution)
+    _require_ingest_homes(homes)
     run_dir = _import_run_dir(resolution, run_id, homes)
     _require_review_gate(run_dir, homes)
     rd = gate._RunDir(run_dir)
@@ -3599,6 +3600,7 @@ def _ingest_review_envelope(snapshot):
 def _interactive_ingest_review(resolution, run_id, actor, now, stdin, stdout, clock):
     import check_opf_import as gate
     homes = _store_homes(resolution)
+    _require_ingest_homes(homes)
     run_dir = _import_run_dir(resolution, run_id, homes)
     _require_review_gate(run_dir, homes)
     rd = gate._RunDir(run_dir)
@@ -6036,6 +6038,7 @@ def _self_test_ingest_acceptance(check):
     envelope = _ingest_review_envelope(snapshot)
     with patch.object(gate, "_RunDir") as reader, \
             patch.object(sys.modules[__name__], "_store_homes", return_value=1), \
+            patch.object(sys.modules[__name__], "_require_ingest_homes"), \
             patch.object(sys.modules[__name__], "_require_review_gate"), \
             patch.object(sys.modules[__name__], "_ingest_snapshot", return_value=snapshot), \
             patch.object(sys.modules[__name__], "review_import") as submit:
@@ -6109,6 +6112,29 @@ def _self_test_ingest_capture_run(root, run, now, check):
     def capture(block=ingest, actor="reviewer"):
         return review_import(root, run.name, actor=actor, decisions=decisions,
                              ingest=block, now=now, clock=lambda: stamp)
+
+    # Moving the interactive activation check past presentation or input must fail this control.
+    class TTY(io.StringIO):
+        reads = 0
+        def isatty(self):
+            return True
+        def readline(self, *args):
+            self.reads += 1
+            return super().readline(*args)
+
+    stdin = TTY("accept\n\n" * (len(decisions) + len(ingest["units"])))
+    stdout = io.StringIO()
+    with patch.object(sys.modules[__name__], "_require_review_gate", wraps=_require_review_gate) as checked:
+        interactive = review_import_interactive(root, run.name, actor="reviewer", now=now,
+                                                in_stream=stdin, out_stream=stdout)
+    check("accept-homes1-interactive-before-work", interactive.verdict == CANNOT_EVALUATE
+          and stdin.reads == 0 and stdout.getvalue() == "" and not checked.called)
+    # Removing only the early capture check validates this stale binding and returns FINDING instead.
+    stale = copy.deepcopy(ingest)
+    stale["binding"]["plan_digest"] = "sha256:" + "0" * 64
+    with patch.object(sys.modules[__name__], "_require_review_gate", wraps=_require_review_gate) as checked:
+        refused = capture(stale)
+    check("accept-homes1-stale-before-validation", refused.verdict == CANNOT_EVALUATE and not checked.called)
 
     # Legacy-refusal control (generation 1, the shipped SUPPORTED_HOMES): capture never writes, and the
     # durable home is ordinary content that neither the gate nor capture reads.
