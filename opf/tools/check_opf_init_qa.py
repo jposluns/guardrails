@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PR3a library QA regressions; also run by _opf_init_operation.py --self-test.
+"""PR3a/PR3b library QA regressions; also run by _opf_init_operation.py --self-test.
 
 The shipped opf init CLI remains unchanged. Coupled CLI activation belongs to PR7.
 """
@@ -52,7 +52,7 @@ class InitQA(unittest.TestCase):
 
     def ready(self):
         result = op.init_operation(self.root)
-        self.assertEqual(result.status, op.SOURCES_READY, result.primary_failure)
+        self.assertEqual(result.status, op.VIEWS_READY, result.primary_failure)
         return result
 
     def readopt(self, **high):
@@ -68,7 +68,7 @@ class InitQA(unittest.TestCase):
         op._git(["rm", "--", op.COUNTERS_RELPATH], self.root, self.env)
         op._git(["commit", "-q", "-m", "retire store"], self.root, self.env)
         result = op.init_operation(self.root, ancestral=seed)
-        self.assertEqual(result.status, op.SOURCES_READY, result.primary_failure)
+        self.assertEqual(result.status, op.VIEWS_READY, result.primary_failure)
         return result
 
     def assert_rerun(self, status, check=None):
@@ -81,7 +81,8 @@ class InitQA(unittest.TestCase):
         return result
 
     def test_library_journal_atomic_publication_and_rerun(self):
-        # Every source must pass through link with the COMPLETE recorded payload.
+        # Every source and view must pass through link with the COMPLETE planned payload (a view's
+        # is the renderer planner's output over the already-verified sources).
         linked = []
         real_link = os.link
 
@@ -89,13 +90,14 @@ class InitQA(unittest.TestCase):
             if op._STAGE_MARKER in str(src):
                 _, raw = op._read_plan(self.root)
                 plan = op.validate_init_plan(raw)
-                entry = next(s for s in plan["sets"]["S"] if s["staging"] == src)
+                entry = next(s for s in plan["sets"]["S"] + plan["sets"]["V"]
+                             if s["staging"] == src)
+                expected = op.plan_payloads(plan).get(entry["path"])
+                if expected is None:
+                    expected = op._expected_views(self.root)[entry["path"]]
                 fd = os.open(src, os.O_RDONLY, dir_fd=kw["src_dir_fd"])
                 try:
-                    self.assertEqual(
-                        os.read(fd, entry["size"] + 1),
-                        op.plan_payloads(plan)[entry["path"]],
-                    )
+                    self.assertEqual(os.read(fd, len(expected) + 1), expected)
                 finally:
                     os.close(fd)
                 self.assertFalse(
@@ -108,8 +110,10 @@ class InitQA(unittest.TestCase):
         with mock.patch.object(os, "link", side_effect=link):
             first = self.ready()
         _, raw = op._read_plan(self.root)
+        plan = op.validate_init_plan(raw)
         self.assertEqual(
-            sorted(linked), sorted(op.plan_payloads(op.validate_init_plan(raw)))
+            sorted(linked),
+            sorted(list(op.plan_payloads(plan)) + [v["path"] for v in plan["sets"]["V"]]),
         )
         self.assertEqual(op._snapshot_all(self.root)[1], before_index)
         before = op._snapshot_all(self.root)
@@ -143,7 +147,7 @@ class InitQA(unittest.TestCase):
         plan = op.validate_init_plan(raw)
         self.assertEqual(interrupted.operation_id, plan["operation_id"])
         result = op.init_operation(self.root, recover=True)
-        self.assertEqual(result.status, op.SOURCES_READY, result.primary_failure)
+        self.assertEqual(result.status, op.VIEWS_READY, result.primary_failure)
         self.assertEqual(result.operation_id, plan["operation_id"])
         self.assertEqual(result.plan_digest, plan["plan_digest"])
         self.assertEqual(op._read_plan(self.root), (ops, raw))
