@@ -2311,6 +2311,41 @@ def _check_staged_run(rd, homes=None):
     return results
 
 
+def _self_test_gate_generation_sites(expect):
+    """Every read of the generation in the staged-run gate is one of these statements. Ordinary grading never
+    consults it, so a new generation dependence (or an alias of one) fails here until it is deliberately added."""
+    import ast
+    import inspect
+    src = inspect.getsource(_check_staged_run)
+    lines = src.split("\n")
+    found = sorted((n.id, lines[n.lineno - 1].strip()) for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.Name) and n.id in ("gen", "homes", "gen_error"))
+    expected = sorted((
+        ('gen', 'fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None'),
+        ('gen', 'fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None'),
+        ('gen', 'for cid, (ok, detail) in _ingest_acceptance_checks(rd, gen).items():'),
+        ('gen', 'gen, gen_error = None, str(exc)'),
+        ('gen', 'gen, gen_error = _gate_homes(homes), ""'),
+        ('gen', 'if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":'),
+        ('gen', 'if gen is None:'),
+        ('gen', 'if gen is None:'),
+        ('gen', 'if gen is not None and ingest_is_run:'),
+        ('gen', 'if gen is not None and marker is None:'),
+        ('gen', 'if ingest_is_run and gen is None:'),
+        ('gen', 'ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, gen)'),
+        ('gen', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
+        ('gen', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
+        ('gen', 'record(cid, False, gen_error if gen is None and cid in generation_checks else str(exc))'),
+        ('gen_error', 'gen, gen_error = None, str(exc)'),
+        ('gen_error', 'gen, gen_error = _gate_homes(homes), ""'),
+        ('gen_error', 'record(cid, False, gen_error if gen is None and cid in generation_checks else str(exc))'),
+        ('gen_error', 'record(cid, False, gen_error)'),
+        ('gen_error', 'record(cid, False, gen_error)'),
+        ('gen_error', 'record(cid, False, gen_error)'),
+        ('homes', 'gen, gen_error = _gate_homes(homes), ""'),
+    ))
+    expect("gate-generation-read-sites", found == expected)
+
 def _self_test_gate_generation(expect):
     """Invalid generations fail every dependent id without suppressing ordinary grading."""
     import sys
@@ -2360,6 +2395,10 @@ def _self_test_gate_generation(expect):
         with patch.object(_opf_store, "SUPPORTED_HOMES", 2), \
                 patch.object(os, "open", side_effect=OSError("synthetic store unavailable")):
             baseline = _check_staged_run(rd, homes=1)
+            if fixture == "ordinary-marked-acceptance":
+                # The fixture really carries the findings the invalid cases must preserve.
+                expect("gate-generation-ordinary-marked-acceptance-baseline-findings", all(
+                    not baseline[cid][0] for cid in ("report-schema", "proposals-artifact", "acceptance-schema")))
             for label, bad in cases:
                 error = ("the store's homes generation was not supplied to this manifest-free gate"
                          if bad is None else
@@ -2418,6 +2457,7 @@ def _self_test():
             failures.append(label)
 
     _self_test_gate_generation(expect)
+    _self_test_gate_generation_sites(expect)
 
     NOW = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
