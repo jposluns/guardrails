@@ -1531,13 +1531,18 @@ _INGEST_ACCEPTANCE_CHECKS = ("ingest-acceptance-binding", "ingest-acceptance-com
 
 
 def _gate_homes(homes):
-    """The generation the gate evaluates under: an unsupplied generation is the legacy generation 1 only
-    while no later generation can be active (the rule _row_scope_error applies)."""
+    """The validated generation the gate evaluates under: an unsupplied generation is the legacy generation 1
+    only while no later generation can be active (the rule _row_scope_error applies). A supplied generation
+    other than the integer 1 or 2 (a bool, a str, a float, 3), or one above the tooling's supported
+    generation, raises: no applicability decision is taken on an unvalidated value."""
     import _opf_store
     if homes is None:
         if _opf_store.SUPPORTED_HOMES >= 2:
             raise _GateError("the store's homes generation was not supplied to this manifest-free gate")
         return 1
+    if type(homes) is not int or homes not in (1, 2) or homes > _opf_store.SUPPORTED_HOMES:
+        raise _GateError("the supplied homes generation {!r} is not 1 or 2, or is above the tooling's "
+                         "supported generation {}".format(homes, _opf_store.SUPPORTED_HOMES))
     return homes
 
 
@@ -1575,13 +1580,14 @@ def _ingest_acceptance_checks(rd, homes=None):
     ids = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
     ids += _INGEST_ACCEPTANCE_CHECKS
     try:
+        homes = _gate_homes(homes)
+        # Generation 1 has no durable home: `.working/imported` is ordinary content there, never probed.
+        if homes != imp.INGEST_HOMES_GENERATION:
+            return {cid: (True, "not applicable: homes generation 1 has no durable acceptance home")
+                    for cid in ids}
         if _INGEST_EVIDENCE_REGISTRY != ((imp.ACCEPTANCE_NAME, "VALIDATE",
                                         "ingest-acceptance-binding", "if-reviewed"),):
             raise _GateError("durable acceptance registry does not match its validator")
-        # Generation 1 has no durable home: `.working/imported` is ordinary content there, never probed.
-        if _gate_homes(homes) != imp.INGEST_HOMES_GENERATION:
-            return {cid: (True, "not applicable: homes generation 1 has no durable acceptance home")
-                    for cid in ids}
         fd = _ingest_store_fd(rd, homes)
         if fd is None:
             raise _GateError("durable acceptance cannot be located from a detached run; "
@@ -1676,12 +1682,20 @@ def _check_staged_run(rd, homes=None):
     ingest_load_failed = False
     ingest_load_detail = ""
     durable_unavailable = ""
+    # The generation, validated once: every applicability decision below uses only `gen`. An invalid
+    # generation, or an unsupplied one once a later generation can be active (gen None), fails closed.
+    try:
+        gen, gen_error = _gate_homes(homes), ""
+    except _GateError as exc:
+        gen, gen_error = None, str(exc)
     marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)
     if marker is None:
         try:
+            if gen is None:
+                raise _GateError(gen_error)
             # The durable home is control storage only in generation 2; in generation 1 it and the homes-2
             # staging names are ordinary content, never probed. A detached copy has no store to consult.
-            fd = _ingest_store_fd(rd, homes) if _gate_homes(homes) == imp.INGEST_HOMES_GENERATION else None
+            fd = _ingest_store_fd(rd, gen) if gen == imp.INGEST_HOMES_GENERATION else None
             if fd is not None:
                 try:
                     import _journal
@@ -1689,13 +1703,17 @@ def _check_staged_run(rd, homes=None):
                         marker = "durable import evidence"
                 finally:
                     os.close(fd)
-            if marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":
-                acc_marker = imp._strict_json(rd.read_bytes(imp.ACCEPTANCE_NAME))
-                if isinstance(acc_marker, dict) and ("ingest" in acc_marker
-                                                     or acc_marker.get("format") == imp.INGEST_ACCEPTANCE_FORMAT):
-                    marker = imp.ACCEPTANCE_NAME
         except Exception as exc:
             durable_unavailable = "durable acceptance cannot be located ({})".format(exc)
+    if marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":
+        # Decoded as main's ordinary reader decodes it; an unreadable or undecodable staged acceptance is no
+        # marker, and the ordinary acceptance grading below reports it as main does.
+        try:
+            acc_raw = rd.read_bytes(imp.ACCEPTANCE_NAME)
+        except _GateError:
+            acc_raw = None
+        if acc_raw is not None and imp._acceptance_marks_ingest(acc_raw):
+            marker = imp.ACCEPTANCE_NAME
     if marker is not None:
         ingest_is_run = True
         if rd.kind(imp.INGEST_REVIEW_NAME) is None:
@@ -2004,10 +2022,7 @@ def _check_staged_run(rd, homes=None):
     acc_kind = rd.kind(imp.ACCEPTANCE_NAME)
     # Durable acceptance exists only in generation 2. In generation 1 every run keeps main's staged
     # acceptance grading below; an unsupplied generation that cannot be graded fails the durable path closed.
-    try:
-        legacy_generation = _gate_homes(homes) != imp.INGEST_HOMES_GENERATION
-    except _GateError:
-        legacy_generation = False
+    legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION
     if ingest_is_run and not legacy_generation:
         for cid, (ok, detail) in _ingest_acceptance_checks(rd, homes).items():
             record(cid, ok, detail)
@@ -2021,7 +2036,7 @@ def _check_staged_run(rd, homes=None):
         acc = None
         acc_err = ""
         try:
-            acc = imp._strict_json(rd.read_bytes(imp.ACCEPTANCE_NAME))
+            acc = json.loads(rd.read_bytes(imp.ACCEPTANCE_NAME).decode("utf-8"))
         except (_GateError, ValueError, RecursionError) as exc:
             # RecursionError joins the tuple (R8-F1): deeply-nested JSON (a malicious staged acceptance.json,
             # even under the size cap) drives json.loads into unbounded recursion, which is neither an OSError
@@ -3220,6 +3235,50 @@ def _self_test():
         h1_res = check_staged_run(h1_run)
         expect("homes1-imported-file-ordinary", h1_rr.verdict == 0 and all(ok for ok, _d in h1_res.values())
                and h1_res["ingest-acceptance-binding"][1] == "not an ingest run")
+        import json
+        import unittest.mock
+        import _opf_store
+        # Flip: ordinary review dropping its derived generation at the gate call refuses this unchanged homes-1
+        # store once the tooling supports homes 2 (both ingest-acceptance checks unsupplied); main is CLEAN.
+        with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            h1_rr2 = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
+                                       decisions=accept_all_decisions(h1_run), now=NOW)
+            h1_res2 = check_staged_run(h1_run, homes=1)
+        expect("ordinary-review-homes2-tooling", h1_rr2.verdict == 0 and all(ok for ok, _d in h1_res2.values()))
+        # Flip: the strict ingest decoder (in the marker probe or the ordinary grading) fails this duplicate
+        # member that main's decoder accepts; main passes every check and re-reviews CLEAN.
+        h1_acc = h1_run / "acceptance.json"
+        dup_raw = h1_acc.read_bytes().rstrip()
+        h1_acc.write_bytes(dup_raw[:-1] + b', "run_id": ' + json.dumps(h1.run_id).encode("ascii") + b"}\n")
+        dup_res = check_staged_run(h1_run)
+        dup_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
+                                   decisions=accept_all_decisions(h1_run), now=NOW)
+        expect("ordinary-acceptance-main-decoder", dup_raw.endswith(b"}") and dup_rr.verdict == 0
+               and all(ok for ok, _d in dup_res.values()))
+        # Flip: raising every failing check through _require_gate_results loses main's located message.
+        h1_acc.write_bytes(b"[]\n")
+        bad_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
+                                   decisions=accept_all_decisions(h1_run), now=NOW)
+        expect("ordinary-review-located-gate-message", bad_rr.verdict == 2 and bad_rr.findings[0].startswith(
+            "staged run fails the import-operation gate; not reviewable until it is a coherent, promotion-ready "
+            "run (failing gate checks: acceptance-attribution, acceptance-binding"))
+        h1_acc.unlink()
+        # Flip: a _gate_homes that returns its input unvalidated admits each malformed generation.
+        with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            refused = []
+            for bad in (3, "2", True, 1.0, 0):
+                try:
+                    _gate_homes(bad)
+                    refused.append(False)
+                except _GateError:
+                    refused.append(True)
+            expect("gate-homes-validated", all(refused) and _gate_homes(2) == 2 and _gate_homes(1) == 1)
+        try:
+            _gate_homes(2)
+            above = False
+        except _GateError:
+            above = True
+        expect("gate-homes-above-supported", above)
         # Flip: raising for a detached copy (a store required for an ordinary run) fails both
         # ingest-acceptance checks here, in either generation; main passes every check (A-M1).
         import unittest.mock

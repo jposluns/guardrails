@@ -2318,17 +2318,27 @@ def _ingest_run_marker(store_root_fd, run_rel, homes):
     if (homes == INGEST_HOMES_GENERATION
             and _journal._lstat_contained(store_root_fd, _ingest_acceptance_home(run_id)) is not None):
         return "durable import evidence"
+    # A staged acceptance that is not a readable regular file, or does not decode, is no marker: the ordinary
+    # gate diagnoses it (acceptance-*) with main's verdict routing.
     st = _journal._lstat_contained(store_root_fd, run_rel + "/" + ACCEPTANCE_NAME)
-    if st is not None:
+    if st is None or not stat.S_ISREG(st.st_mode):
+        return None
+    try:
         raw, _st = _journal._read_contained(store_root_fd, run_rel + "/" + ACCEPTANCE_NAME)
-        try:
-            acc = _strict_json(raw)
-        except (ValueError, RecursionError):
-            # The ordinary gate diagnoses malformed acceptance before promotion. Preserve its verdict routing.
-            return None
-        if isinstance(acc, dict) and ("ingest" in acc or acc.get("format") == INGEST_ACCEPTANCE_FORMAT):
-            return ACCEPTANCE_NAME
-    return None
+    except _journal.JournalError:
+        return None
+    return ACCEPTANCE_NAME if _acceptance_marks_ingest(raw) else None
+
+
+def _acceptance_marks_ingest(raw):
+    """Whether staged acceptance bytes carry an ingest acceptance, decoded exactly as main's ordinary
+    acceptance reader decodes them (json.loads over UTF-8). Undecodable bytes are no marker; the ordinary
+    grading reports them. Strict decoding (_strict_json) is for ingest evidence only."""
+    try:
+        acc = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return False
+    return isinstance(acc, dict) and ("ingest" in acc or acc.get("format") == INGEST_ACCEPTANCE_FORMAT)
 
 
 def _write_ingest_review_bundle(product_root, run_rel, run_id, review_inputs):
@@ -3202,8 +3212,9 @@ def _strict_json(raw):
     return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
 
 
-def _require_gate_results(results, expected):
-    """A gate must return its exact registry, with strictly typed results."""
+def _require_gate_results(results, expected, require_pass=True):
+    """A gate must return its exact registry, with strictly typed results. A caller with its own located
+    failing-check message checks the shape only (require_pass=False)."""
     if (len(expected) != len(set(expected)) or not isinstance(results, dict)
             or set(results) != set(expected)):
         raise _cannot("import gate returned an incomplete or inconsistent check registry")
@@ -3213,7 +3224,7 @@ def _require_gate_results(results, expected):
                 and type(value[0]) is bool and type(value[1]) is str):
             raise _cannot("import gate returned a malformed result for " + cid)
     failed = [cid for cid in expected if not results[cid][0]]
-    if failed:
+    if failed and require_pass:
         raise _cannot("import gate failed: " + ", ".join(failed))
 
 
@@ -3546,6 +3557,9 @@ def _capture_ingest_review(resolution, run_id, actor, decisions, ingest, clock):
         rd.close()
     if not gate._strict_eq(snapshot["binding"], current["binding"]):
         raise _finding("review changed during capture; no decisions were rebound")
+    # Re-derive just before the write, as apply does: a manifest changed during capture writes nothing.
+    if _store_homes(resolution) != homes:
+        raise _cannot("the store manifest's homes generation changed during capture; nothing captured")
     _require_ingest_homes(homes)
     home = _ingest_acceptance_home(run_id)
     fd = _opf_store._open_store_root_fd(resolution.store_root, resolution.pointer_source != "default")
@@ -3747,7 +3761,8 @@ def review_import(product_root, run_id, *, actor, decisions, now, ingest=None, c
         except OSError as exc:
             raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
         try:
-            marker = _ingest_run_marker(store_root_fd, run_rel, _store_homes(resolution))
+            homes = _store_homes(resolution)
+            marker = _ingest_run_marker(store_root_fd, run_rel, homes)
             if marker is not None:
                 try:
                     return _capture_ingest_review(resolution, run_id, actor, decisions, ingest, clock)
@@ -3794,8 +3809,8 @@ def review_import(product_root, run_id, *, actor, decisions, now, ingest=None, c
         # KeyboardInterrupt/SystemExit stay uncaught.
         try:
             import check_opf_import   # lazy: avoids a module-top circular import (see _gather_review_context)
-            gate_results = check_opf_import.check_staged_run(run_dir_path)
-            _require_gate_results(gate_results, check_opf_import.EXPECTED_CHECKS)
+            gate_results = check_opf_import.check_staged_run(run_dir_path, homes=homes)
+            _require_gate_results(gate_results, check_opf_import.EXPECTED_CHECKS, require_pass=False)
             gate_findings = sorted(cid for cid, (ok, _detail) in gate_results.items() if not ok)
             if gate_findings:
                 raise _cannot("staged run fails the import-operation gate; not reviewable until it is a "
@@ -5939,10 +5954,8 @@ def _self_test_ingest_acceptance(check):
     changed = copy.deepcopy(envelope["ingest"])
     changed["binding"]["homes_generation"] = 3
     check("accept-diff-aid", _ingest_review_changes(acceptance["ingest"], changed)["diff"] != [])
-    # Flip: trusting a prior actor without the gate would reveal attribution after this injected failure.
+    # accept-explanation-invalid runs on the activated homes-2 fixture (_self_test_ingest_capture_homes2).
     resolution = _opf_store.Resolution(_opf_store.RESOLVED, store_root="/synthetic", product_root="/synthetic")
-    with patch.object(sys.modules[__name__], "_require_review_gate", side_effect=_cannot("invalid")):
-        check("accept-explanation-invalid", "Recorded by" not in _ingest_acceptance_explanation(resolution, rid))
     # The gate imports `_opf_import`; under a direct-script run this module is `__main__`, a distinct module
     # object. Flip: patching sys.modules[__name__] here leaves the gate's reader unmocked on descriptor 900,
     # so the direct-script run fails while the imported run passes.
@@ -5953,7 +5966,7 @@ def _self_test_ingest_acceptance(check):
     with patch.object(gate, "_ingest_store_fd", return_value=900), \
             patch.object(consumed, "_read_ingest_acceptance", return_value=acceptance), \
             patch.object(consumed, "_ingest_snapshot", return_value=snapshot), \
-            patch.object(os, "close"):
+            patch.object(_opf_store, "SUPPORTED_HOMES", 2), patch.object(os, "close"):
         checks = gate._ingest_acceptance_checks(DurableReader(), 2)
         check("accept-durable-gate", all(ok for ok, detail in checks.values())
               and checks["ingest-acceptance-binding"][1] == "review recorded; execution unavailable")
@@ -5965,9 +5978,15 @@ def _self_test_ingest_acceptance(check):
         checks = gate._ingest_acceptance_checks(DurableReader(), 1)
         check("accept-durable-legacy-not-probed", all(ok and detail.startswith("not applicable")
                                                       for ok, detail in checks.values()))
+        # Flip: validating the registry before the generation early exit fails generation 1 on a registry
+        # it never consults.
+        with patch.object(gate, "_INGEST_EVIDENCE_REGISTRY", ()):
+            checks = gate._ingest_acceptance_checks(DurableReader(), 1)
+        check("accept-durable-registry-legacy", all(ok and detail.startswith("not applicable")
+                                                    for ok, detail in checks.values()))
     # Flip: dropping the None refusal in _ingest_acceptance_checks reads from no descriptor and loses the
     # located refusal: a detached ingest run still refuses in homes 2.
-    with patch.object(gate, "_ingest_store_fd", return_value=None):
+    with patch.object(gate, "_ingest_store_fd", return_value=None), patch.object(_opf_store, "SUPPORTED_HOMES", 2):
         checks = gate._ingest_acceptance_checks(DurableReader(), 2)
         check("accept-durable-detached-refused", not any(ok for ok, detail in checks.values())
               and "detached run" in checks["ingest-acceptance-binding"][1])
@@ -5983,13 +6002,26 @@ def _self_test_ingest_acceptance(check):
         check("accept-durable-temp-refused", refused)
     run_rel = IMPORTS_REL + "/" + rid
     # Flip: probing the durable home in generation 1 routes an ordinary run to ingest capture (the None leg).
-    for name, homes, expected in ((_ingest_acceptance_home(rid), 2, "durable import evidence"),
-                                  (_ingest_acceptance_home(rid), 1, None),
-                                  (run_rel + "/" + ACCEPTANCE_NAME, 1, ACCEPTANCE_NAME)):
+    # Flip: reading a non-regular staged acceptance (the S_ISREG guard dropped) marks the directory leg, and
+    # propagating the contained-read JournalError (the unreadable leg) aborts where main's gate reports it.
+    regular = os.stat_result((stat.S_IFREG | 0o644,) + (0,) * 9)
+    directory = os.stat_result((stat.S_IFDIR,) + (0,) * 9)
+    unreadable = _journal.JournalError("injected unreadable acceptance")
+    for name, homes, expected, st, read in (
+            (_ingest_acceptance_home(rid), 2, "durable import evidence", regular, None),
+            (_ingest_acceptance_home(rid), 1, None, regular, None),
+            (run_rel + "/" + ACCEPTANCE_NAME, 1, ACCEPTANCE_NAME, regular, None),
+            (run_rel + "/" + ACCEPTANCE_NAME, 1, None, directory, None),
+            (run_rel + "/" + ACCEPTANCE_NAME, 1, None, regular, unreadable)):
         with patch.object(_journal, "_lstat_contained",
-                          side_effect=lambda fd, path: object() if path == name else None), \
-                patch.object(_journal, "_read_contained", return_value=(_emit_acceptance_bytes(acceptance), None)):
-            check("accept-only-marker", _ingest_run_marker(900, run_rel, homes) == expected)
+                          side_effect=lambda fd, path: st if path == name else None), \
+                patch.object(_journal, "_read_contained", return_value=(_emit_acceptance_bytes(acceptance), None),
+                             side_effect=read):
+            try:
+                found = _ingest_run_marker(900, run_rel, homes)
+            except _journal.JournalError:
+                found = "raised"
+            check("accept-only-marker", found == expected)
     # Intake and clock tests use explicit in-memory boundaries. They are not filesystem-writer evidence.
     class TTY(io.StringIO):
         def isatty(self):
@@ -6086,6 +6118,11 @@ def _self_test_ingest_capture_run(root, run, now, check):
     legacy = gate.check_staged_run(run)
     check("accept-legacy-home-not-probed", all(ok for ok, detail in legacy.values())
           and legacy["ingest-acceptance-binding"][1].startswith("not applicable"))
+    # Flip: the explanation's or the aid's generation guard dropped reads this ordinary file as a record.
+    check("accept-explanation-legacy-not-probed", _ingest_acceptance_explanation(
+        _resolve_store_for_review(root), run.name) == "No review has been recorded.")
+    check("accept-aid-legacy-not-probed", ingest_review_aid(root, run.name, previous_run=run.name)["comparison"]
+          == {"status": "cannot-evaluate", "detail": "homes generation 1 has no durable acceptance home"})
     (home / ACCEPTANCE_NAME).unlink()
     home.rmdir()
     with _self_test_homes2_active(root):
@@ -6188,6 +6225,33 @@ def _self_test_ingest_capture_homes2(root, run, now, check, stamp):
     check("accept-aid-homes-threaded", aid_ok)
     check("accept-explanation-homes-threaded", _ingest_acceptance_explanation(
         _resolve_store_for_review(root), run.name).startswith("Recorded by"))
+    # Flip: dropping _require_review_gate from the explanation attributes this valid record after the injected
+    # gate failure; the call above is the positive control.
+    with patch.object(sys.modules[__name__], "_require_review_gate", side_effect=_cannot("injected gate failure")):
+        explained = _ingest_acceptance_explanation(_resolve_store_for_review(root), run.name)
+    check("accept-explanation-invalid", explained.startswith("Review could not be validated")
+          and "injected gate failure" in explained)
+    # Flip: a review or apply marker probe given generation 1 instead of the derived 2 misses this durable
+    # record once the staged markers are gone, and routes the run down the ordinary path.
+    stripped = {name: (run / name).read_bytes() for name in _INGEST_RUN_MARKERS if (run / name).is_file()}
+    for name in stripped:
+        (run / name).unlink()
+    try:
+        reviewed = capture()
+        check("accept-review-marker-homes-threaded", reviewed.verdict == CANNOT_EVALUATE and bool(stripped)
+              and reviewed.findings[0].startswith("import gate failed") and acc_path.read_bytes() == saved)
+        applied = apply_import(root, run.name, now=now)
+        check("accept-apply-marker-homes-threaded", applied.verdict == CANNOT_EVALUATE
+              and "carries durable import evidence" in applied.findings[0])
+    finally:
+        for name, data in stripped.items():
+            (run / name).write_bytes(data)
+    # Flip: capture without the pre-write re-derivation writes a homes-2 record after the manifest changed.
+    derived = iter([2, 2])
+    with patch.object(sys.modules[__name__], "_store_homes", side_effect=lambda _r: next(derived, 1)):
+        changed = capture(actor="second")
+    check("accept-capture-homes-rederived", changed.verdict == CANNOT_EVALUATE
+          and "changed during capture" in changed.findings[0] and acc_path.read_bytes() == saved)
     # Flip: stale binding admission, gate omission, and a pre-rename overwrite each violate byte preservation.
     stale = copy.deepcopy(ingest)
     stale["binding"]["homes_generation"] = 1   # the activated fixture's derived generation is 2
@@ -6262,6 +6326,12 @@ def _self_test_ingest_capture_homes2(root, run, now, check, stamp):
     acc_path.write_bytes(b"null\n")
     check("accept-null-record-gate",
           gate.check_staged_run(run, homes=2).get("ingest-acceptance-binding", (True, ""))[0] is False)
+    # Flip: an unvalidated generation (3, "2", True, 1.0 each unequal to 2 or equal to 1) grades this ingest
+    # run as legacy and passes the malformed durable record "not applicable".
+    for bad in (3, "2", True, 1.0):
+        graded = gate.check_staged_run(run, homes=bad)
+        check("accept-gate-homes-invalid", not any(graded[cid][0] for cid in (
+            "acceptance-schema", "ingest-acceptance-binding", "ingest-acceptance-completeness")))
     check("accept-null-record-kept", capture().verdict == CANNOT_EVALUATE
           and acc_path.read_bytes() == b"null\n")
 
