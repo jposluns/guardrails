@@ -2312,16 +2312,20 @@ def _check_staged_run(rd, homes=None):
 
 
 def _self_test_gate_generation_sites(expect):
-    """Every read of the generation, or of a value derived from it (by assignment or under a generation-dependent
-    branch), in the staged-run gate is one of these statements. The pin guards ordinary edits: a new read of a listed
-    name, or a new statement assigning one, fails it until the statement is deliberately added, and a dynamic scope
-    or code lookup (locals(), vars(), globals(), eval, exec, compile, __import__) is refused outright. Every name bound
-    in the body of a branch whose condition reads the generation must be listed, so a new generation-derived name
-    fails here too (the loop-local exc, cid, ok and detail excepted). Names bound elsewhere under a derived condition
-    are left to the behavioural variants
-    (_self_test_gate_generation and _self_test_gate_generation_applied) cover those on their fixtures, by requiring
-    every generation-independent result to keep its generation-1 value under generation 2 and every invalid
-    generation."""
+    """Structural pins over the staged-run gate's source; each checks only what is stated here.
+    gate-generation-read-sites: every ast.Name node (any context) of the fourteen listed names sits on one of these
+    statements, so a new read or plain assignment of a listed name fails until the statement is deliberately added.
+    gate-generation-branch-bindings: in the body (never the else branch) of an if or while statement whose test
+    names gen, homes, gen_error or legacy_generation, every ast.Name with Store context and every except-handler
+    name is a listed name or the loop-local exc, cid, ok or detail. It does not see state carried by a method call,
+    an attribute or subscript store, an import alias, or an else branch, nor a reuse of one of the four exempt names.
+    gate-generation-no-dynamic-access: the gate names none of locals, vars, globals, eval, exec, compile, __import__.
+    These pins cannot enumerate every way to carry generation-derived state. The completeness guarantee is
+    behavioural: _self_test_gate_generation grades every staged-acceptance condition
+    (_self_test_gate_generation_acceptance_cases), and _self_test_gate_generation_applied every transaction condition
+    on a genuinely applied run (_self_test_gate_generation_transaction_cases), each corrupted to fail at generation 1,
+    and both require every generation-independent result to be identical under generation 2 and every invalid
+    generation, whatever mechanism carries a bypass."""
     import ast
     import inspect
     src = inspect.getsource(_check_staged_run)
@@ -2440,14 +2444,95 @@ def _self_test_gate_generation_cases():
             ("negative", -1), ("float", 2.0), ("one-float", 1.0), ("nan", float("nan")), ("unsupplied", None))
 
 
+def _self_test_gate_generation_acceptance_cases():
+    """Every staged-acceptance condition the gate grades on an ordinary run, as (fixture, the ids its one corruption
+    fails at generation 1, the (id, located detail) pairs naming that condition). "accepted" and
+    "accepted-model-proposal" are the clean controls; _self_test_gate_generation_accept applies each corruption."""
+    sch, bind, attr, comp = ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
+                             "acceptance-completeness")
+    every = (sch, bind, attr, comp)
+    unreadable = tuple((cid, "unreadable/unparseable") for cid in every)
+    unbound = ((bind, "do not bind the run"),)
+    echo = ((bind, "echoes an origin/proposed_state"),)
+    uncovered = ((comp, "a missing or unknown fragment"),)
+    unattributed = ((attr, "actor.declared is missing or empty"),)
+    uncorrelated = ((bind, "correlation malformed"), (comp, "correlation malformed"))
+    return (
+        ("accepted", (), ()),
+        ("accepted-model-proposal", (), ()),
+        # A present acceptance that cannot be graded fails all four.
+        ("accepted-not-regular", every, tuple((cid, "not a regular file") for cid in every)),
+        ("accepted-undecodable", every, unreadable),
+        ("accepted-unparseable", every, unreadable),
+        ("accepted-too-deep", every, unreadable),
+        ("accepted-not-object", every, tuple((cid, "not a JSON object") for cid in every)),
+        # acceptance-schema: each finding _opf_import._validate_acceptance returns.
+        ("accepted-unknown-key", (sch,), ((sch, "unknown top-level key"),)),
+        ("accepted-format", (sch,), ((sch, "format must be"),)),
+        ("accepted-run-id-grammar", (sch, bind), ((sch, "run_id is missing or not a valid run-id"),) + unbound),
+        ("accepted-plan-digest-shape", (sch, bind), ((sch, "plan_digest must be"),) + unbound),
+        ("accepted-inventory-digest-shape", (sch, bind), ((sch, "inventory_digest must be"),) + unbound),
+        ("accepted-actor-unknown-key", (sch,), ((sch, "actor carries unknown key"),)),
+        ("accepted-declared-control", (sch,), ((sch, "control character"),)),
+        ("accepted-context-not-object", (sch,), ((sch, "actor.context must be an object"),)),
+        ("accepted-context-field", (sch,), ((sch, "actor.context fields must be strings"),)),
+        ("accepted-reviewed-at-empty", (sch,), ((sch, "reviewed_at must be a non-empty"),)),
+        ("accepted-reviewed-at-shape", (sch,), ((sch, "reviewed_at is not a well-formed"),)),
+        ("accepted-reviewed-at-value", (sch,), ((sch, "reviewed_at is not a well-formed"),)),
+        ("accepted-signature", (sch,), ((sch, "signature is reserved"),)),
+        ("accepted-decisions-not-array", (sch, comp), ((sch, "decisions must be an array"),) + uncovered),
+        ("accepted-decision-unknown-key", (sch,), ((sch, "decision[0]: unknown key"),)),
+        ("accepted-decision-fragment-id-empty", (sch, comp),
+         ((sch, "fragment_id must be a non-empty string"),) + uncovered),
+        ("accepted-decision-verb", (sch,), ((sch, "decision must be 'accept' or 'reject'"),)),
+        ("accepted-decision-origin-vocab", (sch, bind), ((sch, "origin is not a mapping origin"),) + echo),
+        ("accepted-decision-state-vocab", (sch, bind), ((sch, "proposed_state is not a mapping state"),) + echo),
+        ("accepted-decision-note", (sch,), ((sch, "note must be a string"),)),
+        # acceptance-attribution.
+        ("accepted-actor-not-object", (sch, attr), ((sch, "actor must be an object"),) + unattributed),
+        ("accepted-declared-missing", (sch, attr), unattributed),
+        ("accepted-declared-not-string", (sch, attr), unattributed),
+        ("accepted-declared-blank", (sch, attr), unattributed),
+        # The inventory/mappings correlation that binding and completeness rest on.
+        ("accepted-mapping-span", ("mapping-totality", "lf-bijection", bind, comp), uncorrelated),
+        ("accepted-fragment-span", ("inventory-digest", "proposals-artifact", bind, comp), uncorrelated),
+        # acceptance-binding.
+        ("accepted-run-id", (bind,), unbound),
+        ("accepted-plan-digest", (bind,), unbound),
+        ("accepted-inventory-digest", (bind,), unbound),
+        ("accepted-decision-not-object", (sch, bind, comp),
+         ((bind, "a decision is not an object"), (comp, "a decision is not an object"))),
+        ("accepted-decision-fragment-id-type", (sch, bind, comp),
+         ((bind, "fragment_id is not a string"), (comp, "fragment_id is not a string"))),
+        ("accepted-decision-origin", (bind,), echo),
+        ("accepted-decision-state", (bind,), echo),
+        # acceptance-completeness.
+        ("accepted-duplicate", (comp,), ((comp, "a fragment carries more than one decision"),)),
+        ("accepted-missing", (comp,), uncovered),
+        ("accepted-unknown-fragment", (comp,), uncovered),
+        ("accepted-model-proposal-unaccepted", (comp,), ((comp, "lacks an explicit accept"),)),
+        # The report fields a staged acceptance's promotion rests on.
+        ("accepted-verdict-1", ("report-schema",), (("report-schema", "malformed"),)),
+        ("accepted-verdict-false", ("report-schema",), (("report-schema", "malformed"),)),
+        ("accepted-not-ready", ("report-schema",), (("report-schema", "malformed"),)),
+    )
+
+
 def _self_test_gate_generation_accept(rd, files, fixture):
-    """Stage a valid acceptance on the synthetic ordinary run `rd`, then apply the fixture's one corruption."""
+    """Stage a valid acceptance on the synthetic ordinary run `rd`, then apply the fixture's one corruption (a fixture
+    of _self_test_gate_generation_acceptance_cases). An edited mapping refreshes its report artifact digest, so
+    artifact-digest-integrity stays clean."""
     import _opf_import as imp
     import _opf_emit
     rep = rd.load_toml("report.toml")
-    rows = {(r["source_path"], tuple(r["span"])): r for r in rd.load_toml("mappings.toml")["mapping"]}
+    mappings = rd.load_toml("mappings.toml")
+    inventory = rd.load_toml("inventory.toml")
+    if fixture.startswith("accepted-model-proposal"):
+        # ignored is both a quarantine and a resting state, so lf-bijection stays coherent.
+        mappings["mapping"][0].update(origin=imp._MODEL_PROPOSAL_ORIGIN, state="ignored")
+    rows = {(r["source_path"], tuple(r["span"])): r for r in mappings["mapping"]}
     decisions = []
-    for fr in rd.load_toml("inventory.toml")["fragment"]:
+    for fr in inventory["fragment"]:
         row = rows[(fr["source_path"], tuple(fr["span"]))]
         decisions.append({"fragment_id": fr["fragment_id"], "decision": "accept", "origin": row["origin"],
                           "proposed_state": row["state"]})
@@ -2456,15 +2541,159 @@ def _self_test_gate_generation_accept(rd, files, fixture):
            "inventory_digest": rep["inventory_digest"], "reviewed_at": "2026-09-09T12:00:00Z",
            "actor": {"declared": "Gate Reviewer", "context": {"os_user": "", "git_identity": "", "hostname": ""}},
            "decisions": decisions}
-    if fixture == "accepted-run-id":
-        acc["run_id"] = rid[:-1] + ("1" if rid[-1] != "1" else "2")
+    d0, actor, stale = decisions[0], acc["actor"], "sha256:" + "0" * 64
+    edits = {
+        "accepted-model-proposal-unaccepted": lambda: d0.update(decision="reject"),
+        "accepted-unknown-key": lambda: acc.update(extra=True),
+        "accepted-format": lambda: acc.update(format="opf.import.not-acceptance/v1"),
+        "accepted-run-id-grammar": lambda: acc.update(run_id="not-a-run-id"),
+        "accepted-plan-digest-shape": lambda: acc.update(plan_digest="sha256:short"),
+        "accepted-inventory-digest-shape": lambda: acc.update(inventory_digest="sha256:short"),
+        "accepted-actor-unknown-key": lambda: actor.update(extra=""),
+        "accepted-declared-control": lambda: actor.update(declared="Gate\x07Reviewer"),
+        "accepted-context-not-object": lambda: actor.update(context="none"),
+        "accepted-context-field": lambda: actor["context"].update(hostname=7),
+        "accepted-reviewed-at-empty": lambda: acc.update(reviewed_at=""),
+        "accepted-reviewed-at-shape": lambda: acc.update(reviewed_at="2026-9-9T12:00:00Z"),
+        "accepted-reviewed-at-value": lambda: acc.update(reviewed_at="2026-13-40T12:00:00Z"),
+        "accepted-signature": lambda: acc.update(signature="unsigned"),
+        "accepted-decisions-not-array": lambda: acc.update(decisions={}),
+        "accepted-decision-unknown-key": lambda: d0.update(extra=""),
+        "accepted-decision-fragment-id-empty": lambda: d0.update(fragment_id=""),
+        "accepted-decision-verb": lambda: d0.update(decision="defer"),
+        "accepted-decision-origin-vocab": lambda: d0.update(origin="unknown-origin"),
+        "accepted-decision-state-vocab": lambda: d0.update(proposed_state="unknown-state"),
+        "accepted-decision-note": lambda: d0.update(note=7),
+        "accepted-actor-not-object": lambda: acc.update(actor="Gate Reviewer"),
+        "accepted-declared-missing": lambda: actor.pop("declared"),
+        "accepted-declared-not-string": lambda: actor.update(declared=7),
+        "accepted-declared-blank": lambda: actor.update(declared="   "),
+        "accepted-mapping-span": lambda: mappings["mapping"][0].update(span=[0, 1, 2]),
+        "accepted-fragment-span": lambda: inventory["fragment"][0].update(span=[0, 1, 2]),
+        "accepted-run-id": lambda: acc.update(run_id=rid[:-1] + ("1" if rid[-1] != "1" else "2")),
+        "accepted-plan-digest": lambda: acc.update(plan_digest=stale),
+        "accepted-inventory-digest": lambda: acc.update(inventory_digest=stale),
+        "accepted-decision-not-object": lambda: decisions.__setitem__(0, "accept"),
+        "accepted-decision-fragment-id-type": lambda: d0.update(fragment_id=7),
+        "accepted-decision-origin": lambda: d0.update(origin="human_revision"),
+        "accepted-decision-state": lambda: d0.update(proposed_state="mapped"),
+        "accepted-duplicate": lambda: decisions.append(dict(d0)),
+        "accepted-missing": lambda: decisions.clear(),
+        "accepted-unknown-fragment": lambda: decisions.append(dict(d0, fragment_id="LF-unknown")),
+        "accepted-verdict-1": lambda: rep.update(verdict=1),
+        "accepted-verdict-false": lambda: rep.update(verdict=False),
+        "accepted-not-ready": lambda: rep.update(promotion_ready=False),
+    }
+    if fixture in edits:
+        edits[fixture]()
     files[imp.ACCEPTANCE_NAME] = imp._emit_acceptance_bytes(acc)
     rd.tree[imp.ACCEPTANCE_NAME] = "file"
-    field = {"accepted-verdict-1": ("verdict", 1), "accepted-verdict-false": ("verdict", False),
-             "accepted-not-ready": ("promotion_ready", False)}.get(fixture)
-    if field is not None:
-        rep[field[0]] = field[1]
+    raw = {"accepted-undecodable": b"\xff\n", "accepted-unparseable": b"{\n", "accepted-too-deep": b"[" * 100000,
+           "accepted-not-object": b"[]\n"}
+    if fixture == "accepted-not-regular":
+        rd.tree[imp.ACCEPTANCE_NAME] = "other"
+    elif fixture in raw:
+        files[imp.ACCEPTANCE_NAME] = raw[fixture]
+    edited = {"accepted-mapping-span": "mappings.toml", "accepted-fragment-span": "inventory.toml"}.get(fixture)
+    if fixture.startswith("accepted-model-proposal"):
+        edited = "mappings.toml"
+    if edited is not None:
+        files[edited] = _opf_emit.emit(mappings if edited == "mappings.toml" else inventory).encode("utf-8")
+        for entry in rep["artifact"]:
+            if entry["path"] == edited:
+                entry["sha256"] = _sha256_hex(files[edited])
+    if edited is not None or fixture in ("accepted-verdict-1", "accepted-verdict-false", "accepted-not-ready"):
         files["report.toml"] = _opf_emit.emit(rep).encode("utf-8")
+
+
+def _self_test_gate_generation_transaction_cases():
+    """Every transaction condition the gate grades, as (label, corruption of a clone of a genuinely applied store,
+    transaction-schema ok, transaction-consistency ok, (id, located detail)). A corruption that must hold while the
+    run is graded returns that context manager. _self_test grades the complete and archive-absent runs separately."""
+    import json
+    import shutil
+    from unittest.mock import patch
+    import _journal
+    import _opf_import as imp
+    import _opf_emit
+
+    def record(run, store):
+        return store / imp.IMPORT_OPS_REL / run.name / imp.TRANSACTION_NAME
+
+    def journal(store):
+        return store / imp.IMPORT_JOURNAL_REL
+
+    def txn_dir(run, store):
+        return journal(store) / _load_toml(record(run, store))["txn_id"]
+
+    def edit(change):
+        def mutate(run, store):
+            txn = _load_toml(record(run, store))
+            change(txn)
+            record(run, store).write_text(_opf_emit.emit(txn), encoding="utf-8")
+        return mutate
+
+    def fifo(path):
+        path.unlink()
+        os.mkfifo(str(path))
+
+    def store_root_unopenable(run, store):
+        real_open = os.open
+
+        def refuse(path, *args, **kwargs):
+            if path == "../../..":
+                raise OSError("store root unavailable (injected)")
+            return real_open(path, *args, **kwargs)
+        return patch.object(os, "open", side_effect=refuse)
+
+    def rehash(run, store):
+        record(run, store).write_bytes(record(run, store).read_bytes() + b"\n")
+
+    def journal_not_regular(run, store):
+        shutil.rmtree(str(journal(store)))
+        os.mkfifo(str(journal(store)))
+
+    def journal_not_terminal(run, store):
+        # The genuine frames with the terminal COMPLETE dropped: an interrupted promotion.
+        fd = os.open(str(journal(store)), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            frames, _torn, _good = _journal.read_frames(fd, txn_dir(run, store).name)
+        finally:
+            os.close(fd)
+        (txn_dir(run, store) / "frames.log").write_bytes(b"".join(
+            _journal._frame(ft, json.dumps(obj, sort_keys=True, separators=(",", ":")).encode())
+            for ft, obj in frames if ft != _journal.F_COMPLETE))
+
+    schema, consistency = "transaction-schema", "transaction-consistency"
+    return (
+        ("store-root-unopenable", store_root_unopenable, False, False, (schema, "cannot open the store root")),
+        ("record-absent", lambda run, store: record(run, store).unlink(), True, True,
+         (schema, "no transaction record")),
+        ("record-not-regular", lambda run, store: fifo(record(run, store)), False, False,
+         (schema, "not a regular file")),
+        ("record-unparseable", lambda run, store: record(run, store).write_bytes(b"state =\n"), False, False,
+         (consistency, "unreadable/unparseable")),
+        ("record-schema", edit(lambda txn: txn.update(format="wrong/format/v9")), False, False,
+         (schema, "format is not")),
+        ("record-hash", rehash, True, False, (consistency, "do not hash")),
+        ("record-downgraded", edit(lambda txn: txn.update(state="published")), True, False,
+         (consistency, "is not 'complete'")),
+        ("restore-ref", edit(lambda txn: txn["restore_ref"].update(journal_rel="elsewhere")), True, False,
+         (consistency, "restore_ref does not name")),
+        ("txn-id", edit(lambda txn: (txn.update(txn_id="a/b"), txn["restore_ref"].update(txn_id="a/b"))), True,
+         False, (consistency, "is not a single journal transaction name")),
+        ("intent-plan-digest", edit(lambda txn: txn.update(plan_digest="sha256:" + "0" * 64)), True, False,
+         (consistency, "INTENT does not bind")),
+        ("journal-absent", lambda run, store: shutil.rmtree(str(journal(store))), True, False,
+         (consistency, "import journal is absent")),
+        ("journal-not-regular", journal_not_regular, True, False, (consistency, "cannot evaluate: import journal")),
+        ("journal-txn-absent", lambda run, store: shutil.rmtree(str(txn_dir(run, store))), True, False,
+         (consistency, "journal transaction")),
+        ("journal-not-terminal", journal_not_terminal, True, False, (consistency, "not terminal COMPLETE")),
+        ("archive-not-regular", lambda run, store: fifo(store / imp.IMPORT_ARCHIVE_REL / run.name
+                                                       / imp.ACCEPTANCE_NAME), True, False,
+         (consistency, "archived acceptance")),
+    )
 
 
 def _self_test_gate_generation_applied(expect, label, run_dir):
@@ -2487,9 +2716,13 @@ def _self_test_gate_generation_applied(expect, label, run_dir):
 
 def _self_test_gate_generation(expect):
     """Invalid generations fail every dependent id without suppressing ordinary grading, and generation 2 changes no
-    generation-independent id of an ordinary run. The ordinary fixtures include a valid staged acceptance and
-    single-field corruptions of it (another run's id, verdict 1, verdict false, promotion_ready false), so a
-    generation-dependent bypass of one of those fields fails the comparison, whatever name carries it."""
+    generation-independent id of an ordinary run. The ordinary fixtures include a valid staged acceptance and, for
+    every staged-acceptance condition the gate grades (_self_test_gate_generation_acceptance_cases: the read and
+    decode routing, each schema finding, attribution, the inventory/mappings correlation, each binding and
+    completeness condition including a duplicated decision, and the report fields the acceptance rests on), one
+    corruption that fails that condition at generation 1. Every generation-independent result must be identical under
+    generation 2 and every invalid generation, so a generation-dependent bypass of any graded condition fails here
+    whatever carries it (a name, a method call, an attribute or subscript store, an import alias, an else branch)."""
     import sys
     from unittest.mock import patch
     import _opf_import as imp
@@ -2501,9 +2734,9 @@ def _self_test_gate_generation(expect):
     staged_acceptance = ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
                          "acceptance-completeness")
     cases = _self_test_gate_generation_cases()
-    # A valid staged acceptance, and single-field corruptions of it, each mapped to the one check it fails.
-    accepted = {"accepted": None, "accepted-run-id": "acceptance-binding", "accepted-verdict-1": "report-schema",
-                "accepted-verdict-false": "report-schema", "accepted-not-ready": "report-schema"}
+    # A valid staged acceptance and one corruption per graded condition, each mapped to the ids it fails at
+    # generation 1 and the located details naming that condition.
+    accepted = {fixture: (fails, located) for fixture, fails, located in _self_test_gate_generation_acceptance_cases()}
     ordinary = ("ordinary", "ordinary-marked-acceptance") + tuple(accepted)
     for fixture in ordinary + ("ingest", "malformed-core"):
         rd, files = imp._memory_ingest_run()
@@ -2543,17 +2776,20 @@ def _self_test_gate_generation(expect):
                 patch.object(os, "open", side_effect=OSError("synthetic store unavailable")):
             baseline = _check_staged_run(rd, homes=1)
             if fixture in accepted:
-                # The valid acceptance grades clean; each corruption is a finding on its own check only.
-                expect("gate-generation-{}-baseline".format(fixture), all(
-                    ok is (cid != accepted[fixture]) for cid, (ok, _detail) in baseline.items()
-                    if cid not in ("transaction-schema", "transaction-consistency")))
+                # The controls grade clean; each corruption fails exactly its listed ids, for its located reason.
+                fails, located = accepted[fixture]
+                expect("gate-generation-{}-baseline".format(fixture),
+                       {cid for cid, (ok, _detail) in baseline.items() if not ok
+                        and cid not in ("transaction-schema", "transaction-consistency")} == set(fails)
+                       and all(needle in baseline[cid][1] for cid, needle in located))
             if fixture == "ordinary" or fixture in accepted:
                 # Generation 2 probes the durable home (unavailable here) and reads the staged acceptance bytes;
                 # an ordinary run keeps every generation-independent result.
                 current = _check_staged_run(rd, homes=2)
                 expect("gate-generation-{}-generation-2".format(fixture),
                        set(current) == set(EXPECTED_CHECKS) and all(
-                           current[cid] == value for cid, value in baseline.items() if cid not in dependent))
+                           current[cid] == value for cid, value in baseline.items() if cid not in dependent)
+                       and current["ingest-run-structure"] == (True, "not an ingest run"))
             if fixture == "ordinary-marked-acceptance":
                 # The fixture really carries the findings the invalid cases must preserve.
                 expect("gate-generation-ordinary-marked-acceptance-baseline-findings", all(
@@ -3091,6 +3327,18 @@ def _self_test():
         expect("gate-generation-applied-baselines", all(ok for ok, _d in g_gen1.values())
                and not g3_gen1["transaction-consistency"][0]
                and "archived acceptance.json is absent" in g3_gen1["transaction-consistency"][1])
+        # Every other transaction condition, each one corruption of a clone of the applied store, graded the same
+        # way: at generation 1 it is that condition's located result, with every other id clean.
+        for label, mutate, schema_ok, consistency_ok, (cid, needle) in _self_test_gate_generation_transaction_cases():
+            gt, gts = genuine_clone()
+            context = mutate(gt, gts)
+            with context if hasattr(context, "__enter__") else contextlib.nullcontext():
+                gt_gen1 = _self_test_gate_generation_applied(expect, label, gt)
+            expect("gate-generation-applied-{}-baseline".format(label),
+                   gt_gen1["transaction-schema"][0] is schema_ok
+                   and gt_gen1["transaction-consistency"][0] is consistency_ok and needle in gt_gen1[cid][1]
+                   and all(ok for c, (ok, _d) in gt_gen1.items()
+                           if c not in ("transaction-schema", "transaction-consistency")))
         # F1 on the genuine store: the producer's complete record downgraded (published / prepared, allocation
         # LF-999), the genuine terminal journal unchanged.
         for st in ("published", "prepared"):
