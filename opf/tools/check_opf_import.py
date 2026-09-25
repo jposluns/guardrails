@@ -1543,9 +1543,10 @@ def _gate_homes(homes):
 
 def _ingest_store_fd(rd, homes=None):
     """Bind the store to this opened run, through the shared generation-aware run-location constructor
-    (_opf_import._import_run_locations) and inode comparison. A detached copy without its store-relative
-    home cannot establish absence of durable acceptance; its durable checks refuse. Staged snapshot checks
-    still evaluate the supplied bytes.
+    (_opf_import._import_run_locations) and inode comparison. Returns None for a detached copy (no
+    store-relative home matches): it cannot establish absence of durable acceptance, so an ingest run's
+    durable checks refuse, while an ordinary run is classified from its own listing (A-M1). Staged snapshot
+    checks still evaluate the supplied bytes.
     """
     import _journal
     import _opf_import as imp
@@ -1566,7 +1567,7 @@ def _ingest_store_fd(rd, homes=None):
             os.close(fd)
             raise
         return fd
-    raise _GateError("durable acceptance cannot be located from a detached run; retain its store-relative home")
+    return None
 
 
 def _ingest_acceptance_checks(rd, homes=None):
@@ -1577,7 +1578,14 @@ def _ingest_acceptance_checks(rd, homes=None):
         if _INGEST_EVIDENCE_REGISTRY != ((imp.ACCEPTANCE_NAME, "VALIDATE",
                                         "ingest-acceptance-binding", "if-reviewed"),):
             raise _GateError("durable acceptance registry does not match its validator")
+        # Generation 1 has no durable home: `.working/imported` is ordinary content there, never probed.
+        if _gate_homes(homes) != imp.INGEST_HOMES_GENERATION:
+            return {cid: (True, "not applicable: homes generation 1 has no durable acceptance home")
+                    for cid in ids}
         fd = _ingest_store_fd(rd, homes)
+        if fd is None:
+            raise _GateError("durable acceptance cannot be located from a detached run; "
+                             "retain its store-relative home")
         try:
             acceptance = imp._read_ingest_acceptance(fd, rd.path.name)
         finally:
@@ -1671,13 +1679,16 @@ def _check_staged_run(rd, homes=None):
     marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)
     if marker is None:
         try:
-            fd = _ingest_store_fd(rd, homes)
-            try:
-                import _journal
-                if _journal._lstat_contained(fd, imp._ingest_acceptance_home(run_dir.name)) is not None:
-                    marker = "durable import evidence"
-            finally:
-                os.close(fd)
+            # The durable home is control storage only in generation 2; in generation 1 it and the homes-2
+            # staging names are ordinary content, never probed. A detached copy has no store to consult.
+            fd = _ingest_store_fd(rd, homes) if _gate_homes(homes) == imp.INGEST_HOMES_GENERATION else None
+            if fd is not None:
+                try:
+                    import _journal
+                    if _journal._lstat_contained(fd, imp._ingest_acceptance_home(run_dir.name)) is not None:
+                        marker = "durable import evidence"
+                finally:
+                    os.close(fd)
             if marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":
                 acc_marker = imp._strict_json(rd.read_bytes(imp.ACCEPTANCE_NAME))
                 if isinstance(acc_marker, dict) and ("ingest" in acc_marker
@@ -1991,7 +2002,13 @@ def _check_staged_run(rd, homes=None):
     # through the regular-file-validated reader); a symlink or any other non-regular entry is a FINDING
     # (fail-closed), never pass-as-absent. An unclassifiable entry already failed the listing closed.
     acc_kind = rd.kind(imp.ACCEPTANCE_NAME)
-    if ingest_is_run:
+    # Durable acceptance exists only in generation 2. In generation 1 every run keeps main's staged
+    # acceptance grading below; an unsupplied generation that cannot be graded fails the durable path closed.
+    try:
+        legacy_generation = _gate_homes(homes) != imp.INGEST_HOMES_GENERATION
+    except _GateError:
+        legacy_generation = False
+    if ingest_is_run and not legacy_generation:
         for cid, (ok, detail) in _ingest_acceptance_checks(rd, homes).items():
             record(cid, ok, detail)
     elif acc_kind is None:
@@ -2160,6 +2177,9 @@ def _check_staged_run(rd, homes=None):
     if not ingest_is_run:
         for cid in _INGEST_ACCEPTANCE_CHECKS:
             record(cid, not durable_unavailable, durable_unavailable or "not an ingest run")
+    elif legacy_generation:
+        for cid in _INGEST_ACCEPTANCE_CHECKS:
+            record(cid, True, "not applicable: homes generation 1 has no durable acceptance home")
 
     # --- Group C: the per-run transaction record (apply-promotion, PR-C) --------------------------------
     # The record lives OUTSIDE .working/ at the store-root `.aiqt/import/<run-id>/transaction.toml` (D2/D3:
@@ -3187,6 +3207,29 @@ def _self_test():
         expect("acceptance-dangling-symlink-all-finding",
                all(mdang[cid][0] is False for cid in ("acceptance-schema", "acceptance-binding",
                                                       "acceptance-attribution", "acceptance-completeness")))
+
+        # Generation 1 (item 3): `.working/imported` and the homes-2 staging names are ordinary content, never
+        # probed. Flip: probing the durable home in generation 1 (the marker or gate guard) meets this regular
+        # FILE as a non-directory control path: review refuses and both ingest-acceptance checks fail.
+        h1_root, h1_machine = build_store({"a.txt": "hello"})
+        h1 = imp.plan_import(h1_root, ["a.txt"], now=NOW, run_nonce="gate-homes1-imported")
+        h1_run = h1_machine.parent / "imports" / h1.run_id
+        (h1_machine.parent / "imported").write_text("ordinary user content\n", encoding="utf-8")
+        h1_rr = imp.review_import(h1_root, h1.run_id, actor="Gate Reviewer",
+                                  decisions=accept_all_decisions(h1_run), now=NOW)
+        h1_res = check_staged_run(h1_run)
+        expect("homes1-imported-file-ordinary", h1_rr.verdict == 0 and all(ok for ok, _d in h1_res.values())
+               and h1_res["ingest-acceptance-binding"][1] == "not an ingest run")
+        # Flip: raising for a detached copy (a store required for an ordinary run) fails both
+        # ingest-acceptance checks here, in either generation; main passes every check (A-M1).
+        import unittest.mock
+        import _opf_store
+        detached = copy_run(reviewed)
+        det1 = check_staged_run(detached)
+        with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+            det2 = check_staged_run(detached, homes=2)
+        expect("detached-ordinary-copy", all(ok for ok, _d in det1.values())
+               and all(ok for ok, _d in det2.values()))
 
         # acceptance-schema: a wrong `format` keeps every other field intact, so only the schema check fires.
         m = copy_run(reviewed)

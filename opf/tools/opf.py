@@ -2425,14 +2425,50 @@ def _import_decode_decisions(raw, run_id):
 
 
 def _import_read_decisions(path, run_id):
-    """Read a bounded batch envelope, rejecting duplicates and excessive nesting."""
-    import _opf_store
+    """Read the `--decisions` batch file (canonical JSON), fail-closed. Returns the decisions list. The file
+    is CALLER input (it may live outside the store); its envelope (surfaced for maintainer sign-off,
+    PD-OPF-IMPORT-VERB-APPLY-SEAMS) is `{"schema": 1, "run_id": ..., "decisions": [ {fragment_id, decision,
+    origin, proposed_state, note}, ... ]}`. `run_id` MUST equal the CLI `--review` operand
+    (explicit-binding-over-ambient-context: the file is bound to the exact run under review, never trusted
+    to name a different one). Each decision table's own shape is validated at the operation layer
+    (`review_import`), never here. A missing/unreadable/malformed file, a schema or run-id mismatch, or a
+    non-list `decisions` is a ValueError (cannot-evaluate exit 2). A schema-2 ingest envelope is
+    decoded by _import_decode_decisions: bounded, duplicate-key and non-finite refusing, closed."""
     try:
         with open(path, "rb") as fh:
-            raw = fh.read(_opf_store.MAX_STORE_READ_BYTES + 1)
-        return _import_decode_decisions(raw, run_id)
+            raw = fh.read()
     except (OSError, ValueError, RecursionError) as exc:
         raise ValueError("--decisions file unreadable or malformed ({}): {}".format(path, exc))
+    try:
+        doc = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        # A deeply-nested --decisions JSON raises RecursionError from json.loads (not fh.read); catch it at
+        # the reader so it fails closed with a LOCATED message (R8-F1 read-boundary parity with
+        # _import_read_set's tomllib.load guard), never only at _cmd_import's outer backstop.
+        raise ValueError("--decisions file is not valid JSON or is too deeply nested ({}): {}".format(
+            path, exc))
+    # Only a schema-2 ingest envelope takes the bounded, strict decoder; an ordinary schema-1 file keeps
+    # the unbounded read, lenient decode, and located messages below.
+    if isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 2:
+        try:
+            return _import_decode_decisions(raw, run_id)
+        except (ValueError, RecursionError) as exc:
+            raise ValueError("--decisions file unreadable or malformed ({}): {}".format(path, exc))
+    if not (isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 1):
+        raise ValueError("--decisions file must be a JSON object carrying \"schema\": 1 (an integer 1, not "
+                         "a bool or float)")
+    if doc.get("run_id") != run_id:
+        raise ValueError("--decisions file run_id {!r} does not match the --review run-id {!r}; the "
+                         "decisions file is bound to the exact run under review".format(
+                             doc.get("run_id"), run_id))
+    decisions = doc.get("decisions")
+    if not isinstance(decisions, list):
+        raise ValueError("--decisions file \"decisions\" must be an array")
+    extra = set(doc) - {"schema", "run_id", "decisions"}
+    if extra:
+        raise ValueError("--decisions file carries unknown key(s): {} (the envelope is a closed {{schema, "
+                         "run_id, decisions}})".format(", ".join(sorted(extra))))
+    return decisions
 
 
 def _cmd_import_review_aid(rest):

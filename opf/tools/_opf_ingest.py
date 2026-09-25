@@ -2475,7 +2475,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             try:
                 check("marker-recognizes-bundle-only",
                       _opf_import._ingest_run_marker(
-                          fd, "{}/{}".format(_opf_import.IMPORTS_REL, bogus))
+                          fd, "{}/{}".format(_opf_import.IMPORTS_REL, bogus), 1)
                       == _opf_import.INGEST_REVIEW_NAME)
             finally:
                 os.close(fd)
