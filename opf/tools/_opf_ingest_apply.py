@@ -565,6 +565,9 @@ def _apply_locked(cap, resolution, run_id, homes, now):
         live = _live_sources(root_fd, plan)
         _hook("after-preflight", root=resolution.store_root, plan=plan)
         machine_rel = resolution.machine_rel
+        # The inline readers below cannot enumerate a per-record store's ids: a non-inline layout refuses
+        # BEFORE any id is read or reserved, never a partial read that could mint a colliding id.
+        _opf_import._require_inline_layout(root_fd, machine_rel)
         roster = _opf_import._roster()
         vendors = _opf_import._registered_vendors(root_fd, machine_rel)
         live_ids = _opf_import._existing_id_set(root_fd, machine_rel, _opf_import._active_types(
@@ -592,7 +595,14 @@ def _apply_locked(cap, resolution, run_id, homes, now):
                                                      "ids stay consumed and a retry reuses them".format(exc)],
                                    promoted=False, outcome="aborted", restore_ref=ref)
             raise _RetainLock("publication failed and its rollback did not complete ({})".format(exc))
-        problems = _post_verify(root_fd, plan, live, run_rel)
+        # The transaction has COMMITTED: a verification read that cannot complete is "could not verify",
+        # never "aborted", so the committed promotion and its journal reference are still reported.
+        try:
+            problems = _post_verify(root_fd, plan, live, run_rel)
+        except (_journal.JournalError, OSError) as verify_exc:
+            return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but live verification could not "
+                                                 "complete ({}); inspect the retained journal".format(verify_exc)],
+                               promoted=True, outcome="promoted", restore_ref=ref)
         if problems:
             return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but live verification failed ({}); "
                                                  "inspect the retained journal".format("; ".join(problems))],
@@ -956,9 +966,97 @@ def _t_mint_move_toctou(base, check):
               and (root / ".working/toml/counters.toml").read_bytes() == counters)
 
 
+def _st_per_record(root):
+    """Declare the fixture store's layout `per-record` and plant a BI-1 record file under `backlog_item/`,
+    where the inline readers never look: the hidden-collision hazard a blind inline read would miss."""
+    manifest = root / ".working/toml/manifest.toml"
+    text = manifest.read_text(encoding="utf-8")
+    if text.count('layout = "inline"') != 1:
+        raise RuntimeError("fixture manifest does not declare exactly one inline layout")
+    manifest.write_text(text.replace('layout = "inline"', 'layout = "per-record"'), encoding="utf-8")
+    (root / ".working/toml/backlog_item").mkdir()
+    (root / ".working/toml/backlog_item/BI-1.toml").write_text(
+        'schema = 1\nid = "BI-1"\ntype = "backlog_item"\n', encoding="utf-8")
+
+
+def _t_per_record_refused(base, check):
+    """A per-record store refuses as CANNOT_EVALUATE before any id is read or reserved: counters, the
+    index, and the tree are byte-unchanged, nothing is reserved, and no evidence or receipt is written."""
+    root, rid, run = _st_build(base, "per-record")
+    _st_per_record(root)
+    machine = root / ".working/toml"
+    index = machine / "backlog_item.index.toml"
+    counters = (machine / "counters.toml").read_bytes()
+    index_before = index.read_bytes() if index.exists() else None
+    with _opf_import._self_test_homes2_active(root):
+        before = _st_tree(root)
+        result = apply_ingest(root, rid, now=_NOW)
+        unchanged = _unchanged(root, before, rid)
+    home = root / _opf_import._ingest_acceptance_home(rid)
+    # Flip: without the layout guard the inline id union misses the per-record BI-1, so apply mints a
+    # colliding BI-1 and publishes it.
+    check("per-record-refused", result.verdict == CANNOT_EVALUATE and result.promoted is False
+          and result.outcome == "aborted" and "storage layout" in " ".join(result.findings))
+    check("per-record-nothing-allocated-or-published", unchanged
+          and (machine / "counters.toml").read_bytes() == counters
+          and (index.read_bytes() if index.exists() else None) == index_before
+          and not (home / PROMOTION_NAME).exists() and not (home / REVIEW_DIRNAME).exists()
+          and not (root / _opf_store.evidence_inventory("import", rid)).exists() and run.is_dir())
+
+
+def _st_postverify_fault(apply, root, rid, run, point, error):
+    """Apply with a read fault injected into post-commit verification: `point` selects the removed-source
+    lstat ("source") or the staging-run lstat ("staging"), and the fault fires only once the journal
+    transaction has returned, so the promotion has genuinely committed. Returns (result, fired)."""
+    from unittest.mock import patch
+    targets = dict(source={"legacy/move.md", "legacy/mig.md"},
+                   staging={run.relative_to(root).as_posix()})[point]
+    committed, fired = [], []
+    real_txn = _opf_journal.run_attempt_transaction
+    real_lstat = _journal._lstat_contained
+
+    def txn(*args, **kwargs):
+        out = real_txn(*args, **kwargs)
+        committed.append(True)
+        return out
+
+    def lstat(root_fd, relpath):
+        if committed and relpath in targets:
+            fired.append(relpath)
+            raise error("injected post-commit verification fault at {}".format(relpath))
+        return real_lstat(root_fd, relpath)
+
+    with _opf_import._self_test_homes2_active(root):
+        with patch.object(_opf_journal, "run_attempt_transaction", txn), \
+                patch.object(_journal, "_lstat_contained", lstat):
+            result = apply(root, rid, now=_NOW)
+    return result, fired
+
+
+def _t_postverify_committed(base, check):
+    """A read fault in post-commit verification never reports a committed promotion as aborted: the result
+    is CANNOT_EVALUATE with promoted=True, outcome "promoted", and the committed transaction's ref. Each
+    fault point is driven with both exception classes the guard catches."""
+    for point in ("source", "staging"):
+        for error in (_journal.JournalError, OSError):
+            name = "postverify-{}-{}".format(point, error.__name__)
+            root, rid, run = _st_build(base, name)
+            result, fired = _st_postverify_fault(apply_ingest, root, rid, run, point, error)
+            home = root / _opf_import._ingest_acceptance_home(rid)
+            ref = dict(txn_id=_opf_journal.attempt_txn(KIND, rid, 1), journal_rel=_opf_store.journal_root(KIND))
+            check(name + "-fired-after-commit", len(fired) == 1
+                  and (root / ".archive/legacy/move.md").read_bytes() == b"moveme\n"
+                  and not (root / "legacy/move.md").exists() and (home / PROMOTION_NAME).is_file())
+            # Flip: without the post-commit guard the fault escapes to the aborted handler (promoted=False).
+            check(name + "-committed-not-aborted", result.verdict == CANNOT_EVALUATE
+                  and result.promoted is True and result.outcome == "promoted" and result.restore_ref == ref
+                  and "could not complete" in " ".join(result.findings))
+
+
 TESTS = (("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
          ("unreviewed-refused", _t_unreviewed_refused), ("traversal-refused", _t_traversal_refused),
-         ("mint-move-toctou", _t_mint_move_toctou))
+         ("mint-move-toctou", _t_mint_move_toctou), ("per-record-refused", _t_per_record_refused),
+         ("postverify-committed", _t_postverify_committed))
 
 
 def self_test(only=None):
@@ -1081,6 +1179,29 @@ def _d_journal_lock_required(module, base_dir):
                   "allocation/journal-lock-required")
 
 
+def _d_inline_required(module, base_dir):
+    """The inline-layout requirement in `_apply_locked`: a per-record store is refused before any id is
+    read or reserved. Reverting it lets the inline id union read the store blind, so apply mints a BI-1
+    that collides with the per-record BI-1 and promotes."""
+    root, rid, _run = module._st_build(base_dir, "per-record")
+    module._st_per_record(root)
+    with _opf_import._self_test_homes2_active(root):
+        result = module.apply_ingest(root, rid, now=module._NOW)
+    _revert_check(result.promoted is False and result.verdict == module.CANNOT_EVALUATE,
+                  "per-record/inline-required")
+
+
+def _d_postverify_committed(module, base_dir):
+    """The post-commit verification guard in `_apply_locked`: a read fault after the commit reports the
+    promotion as committed-but-unverified. Reverting the guard lets the fault escape to the aborted
+    handler, so a committed promotion reads promoted=False, outcome "aborted"."""
+    root, rid, run = module._st_build(base_dir, "postverify")
+    result, fired = module._st_postverify_fault(module.apply_ingest, root, rid, run, "source",
+                                                _journal.JournalError)
+    _revert_check(len(fired) == 1 and result.promoted is True and result.outcome == "promoted",
+                  "postverify/committed-not-aborted")
+
+
 # (identity, source-key, focused test, unique old, new). source-key selects which module's source is
 # mutated: "apply" is this file, "alloc" is _opf_allocation.py (a dependency guard, mutated at source the
 # same way the observer gate mutates its shared _opf_observe.py).
@@ -1090,6 +1211,11 @@ _DISCRIMINATORS = (
      "return _opf_store._home_file(path)", "return path"),
     ("allocation/journal-lock-required", "alloc", _d_journal_lock_required,
      "if not _opf_journal.writer_lock_held(cap, KIND):", "if False:"),
+    ("per-record/inline-required", "apply", _d_inline_required,
+     "_opf_import._require_inline_layout(root_fd, machine_rel)",
+     "pass  # reverted: _opf_import._require_inline_layout(root_fd, machine_rel)"),
+    ("postverify/committed-not-aborted", "apply", _d_postverify_committed,
+     "except (_journal.JournalError, OSError) as verify_exc:", "except () as verify_exc:"),
 )
 
 

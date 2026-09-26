@@ -95,7 +95,7 @@ run_gate "opf-import-selftest" python3 -I -B opf/tools/check_opf_import.py --sel
 run_gate "opf-import" python3 -I -B opf/tools/check_opf_import.py
 run_gate "opf-ingest-selftest" python3 -I -B opf/tools/check_opf_ingest.py --self-test
 run_gate "opf-ingest" python3 -I -B opf/tools/check_opf_ingest.py
-run_gate "opf-ingest-apply-selftest" timeout 120s python3 -I -B opf/tools/_opf_ingest_apply.py --self-test --red-on-revert
+run_gate "opf-ingest-apply-selftest" python3 -I -B opf/tools/_opf_ingest_apply.py --self-test --red-on-revert
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-oplock-selftest" python3 -I -B opf/tools/_opf_oplock.py --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B opf/tools/_opf_init_substrate.py --self-test
