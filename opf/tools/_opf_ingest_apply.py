@@ -82,12 +82,47 @@ def _sha(data):
 
 
 class _RetainLock(Exception):
-    """A publication attempt's outcome is indeterminate (left open, or its state unreadable): it may have
-    committed, so neither promoted nor aborted is claimed, and the journal lock is kept for recovery."""
+    """A publication attempt's outcome is indeterminate (left open, a COMPLETE frame whose durability is
+    unconfirmed, or its state unreadable): it may have committed, so neither promoted nor aborted is claimed,
+    and the journal lock is kept for recovery."""
 
     def __init__(self, message, ref):
         super().__init__(message)
         self.ref = ref
+
+
+def _safe_text(value):
+    """`str(value)` that never raises: a value whose __str__ raises, recurses, or returns a non-str yields a
+    placeholder naming its type, so no diagnostic built on the post-launch or cleanup path can itself fail
+    and select an outcome. The result is always an exact str."""
+    try:
+        return str.__str__(str(value))
+    except Exception:  # noqa: BLE001  a diagnostic never propagates
+        pass
+    try:
+        return "<unprintable {}>".format(str.__str__(type(value).__name__))
+    except Exception:  # noqa: BLE001
+        return "<unprintable>"
+
+
+def _surface(*parts):
+    """Write one diagnostic line to stderr, never raising: a closed or broken stderr is swallowed, so
+    surfacing a cleanup failure can never itself replace a formed result."""
+    try:
+        print("".join(_safe_text(p) for p in parts), file=sys.stderr)
+    except Exception:  # noqa: BLE001  the diagnostic channel failing never overturns a result
+        pass
+
+
+def _cleanup(what, step, *args):
+    """Run one final-cleanup step for its side effects only: it never raises and never selects an outcome.
+    Any Exception from the step or its own diagnostics, not only OSError, is surfaced non-fatally, so
+    cleanup cannot overwrite or downgrade a result already formed. A lock or descriptor it fails to release
+    is left for the next apply to refuse on."""
+    try:
+        step(*args)
+    except Exception as exc:  # noqa: BLE001  the cleanup guard: a cleanup failure never replaces a result
+        _surface("warning: ingest-apply cleanup (", what, ") failed: ", exc, "; the formed result stands")
 
 
 # --- the path boundary: reject, never normalize --------------------------------------------------------
@@ -554,35 +589,66 @@ def _require_colocated(product_root, resolution):
         raise _cannot("the store root is not the product root; refused")
 
 
+def _committed_result(ref, why):
+    """A CONFIRMED commit whose later step failed: the promotion stands, reported CANNOT_EVALUATE."""
+    return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but " + why + "; inspect the retained journal"],
+                       promoted=True, outcome="promoted", restore_ref=ref)
+
+
 def _post_launch_result(cap, run_id, attempt, ref, exc, returned):
     """The ONE outcome decision for any exception once the publication attempt is launched: durable journal
-    evidence decides, never where the exception arose or its class. The transaction call returns only after
-    COMPLETE is published, so `returned` is committed; otherwise the attempt state is re-read, and a re-read
-    that itself fails is indeterminate. Only an unopened attempt or a terminal rollback reads as aborted.
-    Residual: a BaseException outside Exception (an interrupt or exit) is not caught; it propagates with no
-    result formed, so it reports neither outcome."""
+    evidence decides, never where the exception arose or its class. Commitment is CONFIRMED only when the
+    transaction call returned, which it does only after the COMPLETE frame's log fsync succeeded. A COMPLETE
+    frame merely READABLE after a raise is not that confirmation: the journal writes the frame before its
+    fsync, so a failed fsync leaves a frame the page cache serves that the disk may not hold. That state, an
+    open attempt (which recovery may roll FORWARD), and an unreadable state are indeterminate, with the lock
+    kept so no later apply reads the unconfirmed frame as a completed no-op. Only an unopened attempt or a
+    terminal rollback reads as aborted (a readable ROLLBACK-COMPLETE follows a ROLLBACK-IN-PROGRESS whose own
+    publish returned, so its direction is durably backward). Every diagnostic goes through _safe_text, so no
+    formatting step raises. Residual (the shared journal contract): the journal's raise does not say WHICH
+    fsync failed, so a COMPLETE whose log fsync succeeded but whose closing directory fsync failed, durable
+    in fact, is reported indeterminate too. Residual: a BaseException outside Exception (an interrupt or
+    exit) is not caught; it propagates with no result formed, so it reports neither outcome."""
+    detail = _safe_text(exc)
     if returned:
-        return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but live verification could not "
-                                             "complete ({}); inspect the retained journal".format(exc)],
-                           promoted=True, outcome="promoted", restore_ref=ref)
+        return _committed_result(ref, "live verification could not complete (" + detail + ")")
     try:
         state = _opf_journal.attempt_states(cap, KIND, run_id).get(attempt, "nothing-opened")
     except Exception as read_exc:  # noqa: BLE001  an unreadable state is indeterminate, never "aborted"
-        state = "unreadable ({})".format(read_exc)
-    # COMPLETE is durable, so the attempt COMMITTED and only a later journal step (such as the closing
-    # directory fsync) failed: a committed promotion is never reported as aborted.
-    if state == "complete":
-        return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but the journal post-commit step did not "
-                                             "fully complete ({}); inspect the retained journal".format(exc)],
-                           promoted=True, outcome="promoted", restore_ref=ref)
+        state = "unreadable (" + _safe_text(read_exc) + ")"
     if state in ("nothing-opened", "rolled-back"):
-        return ApplyResult(CANNOT_EVALUATE, ["publication aborted and rolled back ({}); the reserved ids stay "
-                                             "consumed and a retry reuses them".format(exc)],
+        return ApplyResult(CANNOT_EVALUATE, ["publication aborted and rolled back (" + detail + "); the reserved "
+                                             "ids stay consumed and a retry reuses them"],
                            promoted=False, outcome="aborted", restore_ref=ref)
-    # An open attempt (INTENT without a terminal frame, which recovery may roll FORWARD) or an unreadable
-    # state: commit cannot be ruled out, so the outcome is indeterminate and the lock is kept for recovery.
-    raise _RetainLock("publication attempt {} reached no confirmed terminal state ({}; journal state {}); "
-                      "it may have committed".format(ref["txn_id"], exc, state), ref)
+    if state == "complete":
+        state = "complete but its durability is unconfirmed"
+    raise _RetainLock("publication attempt " + _safe_text(ref["txn_id"]) + " reached no confirmed terminal state ("
+                      + detail + "; journal state " + _safe_text(state) + "); it may have committed", ref)
+
+
+def _launched_attempt(cap, root_fd, run_id, attempt, ref, ops, plan, live, run_rel):
+    """The launched publication attempt owns its outcome end to end, TOTAL over Exception: from the launch
+    on, no exception, from the transaction, verification, the outcome helper itself, or any diagnostic, can
+    reach the generic abort handler in apply_ingest. It returns a formed result or raises _RetainLock."""
+    try:
+        # ONE guard: no exception, from the transaction, verification, or any later step, can report a
+        # committed (or possibly committed) promotion as aborted; _post_launch_result decides.
+        returned = False
+        try:
+            _opf_journal.run_attempt_transaction(cap, KIND, run_id, attempt, ops.ops,
+                                                 lambda op: ops.content[op["path"]])
+            returned = True
+            problems = _post_verify(root_fd, plan, live, run_rel)
+            if problems:
+                return _committed_result(ref, "live verification failed (" + "; ".join(problems) + ")")
+            return ApplyResult(CLEAN, [], promoted=True, outcome="promoted", restore_ref=ref)
+        except Exception as exc:  # noqa: BLE001  the post-launch guard: journal evidence decides the outcome
+            return _post_launch_result(cap, run_id, attempt, ref, exc, returned)
+    except _RetainLock:
+        raise
+    except Exception:  # noqa: BLE001  the outcome helper's own failure is indeterminate, never "aborted"
+        raise _RetainLock("publication attempt reached no confirmed outcome (the outcome determination itself "
+                          "failed); it may have committed", ref)
 
 
 def _apply_locked(cap, resolution, run_id, homes, now):
@@ -621,29 +687,16 @@ def _apply_locked(cap, resolution, run_id, homes, now):
                                reservation, acc_raw, binding, roster, vendors)
         _hook("before-publication", root=resolution.store_root, plan=plan)
         ref = dict(txn_id=_opf_journal.attempt_txn(KIND, run_id, attempt), journal_rel=_opf_store.journal_root(KIND))
-        # From the launch on, ONE guard: no exception, from the transaction, verification, or any later step,
-        # can report a committed (or possibly committed) promotion as aborted; _post_launch_result decides.
-        returned = False
-        try:
-            _opf_journal.run_attempt_transaction(cap, KIND, run_id, attempt, ops.ops,
-                                                 lambda op: ops.content[op["path"]])
-            returned = True
-            problems = _post_verify(root_fd, plan, live, run_rel)
-            if problems:
-                return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but live verification failed ({}); "
-                                                     "inspect the retained journal".format("; ".join(problems))],
-                                   promoted=True, outcome="promoted", restore_ref=ref)
-            return ApplyResult(CLEAN, [], promoted=True, outcome="promoted", restore_ref=ref)
-        except Exception as exc:  # noqa: BLE001  the post-launch guard: journal evidence decides the outcome
-            return _post_launch_result(cap, run_id, attempt, ref, exc, returned)
+        return _launched_attempt(cap, root_fd, run_id, attempt, ref, ops, plan, live, run_rel)
     finally:
-        _journal._close_fd_quietly(root_fd)
+        _cleanup("store root descriptor close", _journal._close_fd_quietly, root_fd)
 
 
 def apply_ingest(product_root, run_id, *, now=None):
     """Promote the reviewed, accepted staged ingest run `run_id`. Returns an ApplyResult; `promoted` and
     `outcome` are read from the result, never inferred from the verdict. An attempt whose commit can be
-    neither confirmed nor ruled out reports promoted None and outcome "indeterminate", never "aborted"."""
+    neither confirmed nor ruled out (including a readable COMPLETE whose durability is unconfirmed) reports
+    promoted None and outcome "indeterminate", never "aborted"; a cleanup failure never replaces a result."""
     try:
         _journal.require_containment()
         _opf_import._require_utc(now)
@@ -658,7 +711,7 @@ def apply_ingest(product_root, run_id, *, now=None):
     except _StageError as exc:
         return ApplyResult(exc.verdict, [exc.message], promoted=False, outcome="aborted")
     except (_journal.JournalError, _opf_oplock.OpLockError, OSError, ValueError) as exc:
-        return ApplyResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)], promoted=False, outcome="aborted")
+        return ApplyResult(CANNOT_EVALUATE, [_safe_text(exc) + "; fail-closed"], promoted=False, outcome="aborted")
     locked = retain = False
     try:
         _opf_journal.acquire_writer_lock(cap, KIND)
@@ -666,24 +719,19 @@ def apply_ingest(product_root, run_id, *, now=None):
         return _apply_locked(cap, resolution, run_id, homes, now)
     except _RetainLock as exc:
         retain = True
-        return ApplyResult(CANNOT_EVALUATE, ["{}; the journal lock is retained for recovery".format(exc)],
+        return ApplyResult(CANNOT_EVALUATE, [_safe_text(exc) + "; the journal lock is retained for recovery"],
                            promoted=None, outcome="indeterminate", restore_ref=exc.ref)
     except _StageError as exc:
         return ApplyResult(exc.verdict, [exc.message], promoted=False,
                            outcome="rejected" if exc.verdict == FINDING else "aborted")
     except (_journal.JournalError, _opf_oplock.OpLockError, OSError, RecursionError) as exc:
-        return ApplyResult(CANNOT_EVALUATE, ["{}; fail-closed".format(exc)], promoted=False, outcome="aborted")
+        return ApplyResult(CANNOT_EVALUATE, [_safe_text(exc) + "; fail-closed"], promoted=False, outcome="aborted")
     finally:
-        # A release failure never overturns a formed result; a lock left behind refuses the next apply.
+        # A release failure of ANY class never overturns a formed result (_cleanup); a lock left behind
+        # refuses the next apply.
         if locked and not retain:
-            try:
-                _opf_journal.release_writer_lock(cap, KIND)
-            except (_journal.JournalError, OSError):
-                pass
-        try:
-            _opf_oplock.release_operation(cap)
-        except (_opf_oplock.OpLockError, OSError):
-            pass
+            _cleanup("journal writer lock release", _opf_journal.release_writer_lock, cap, KIND)
+        _cleanup("operation capability release", _opf_oplock.release_operation, cap)
 
 
 # --- self-test (slice 1: happy path, retry monotonicity, core-guard discriminators) ------------------
@@ -1092,10 +1140,11 @@ def _st_attempt_states(root, rid):
         _opf_oplock.release_operation(cap)
 
 
-def _st_postcommit_fault(apply, root, rid, frame):
-    """Apply with a fault in publish's closing txn-directory fsync, armed only once the `frame` record
-    (INTENT or COMPLETE) is written and its log fsynced. The OSError wraps to a JournalError at the store
-    journal boundary; after COMPLETE the attempt has durably committed. Returns (result, fired, states)."""
+def _st_postcommit_fault(apply, root, rid, frame, target="dir"):
+    """Apply with a fault in one of publish's fsyncs, armed only once the `frame` record (INTENT or COMPLETE)
+    is written: `target` "dir" faults the closing txn-directory fsync (the log fsync succeeded), "log" faults
+    the frames.log fsync itself, so the frame is readable but its durability unconfirmed. The OSError wraps to
+    a JournalError at the store journal boundary. Returns (result, fired, states)."""
     from unittest.mock import patch
     marker = _journal.MAGIC + b" " + frame.encode() + b" "
     armed, fired = [], []
@@ -1108,9 +1157,10 @@ def _st_postcommit_fault(apply, root, rid, frame):
             armed.append(True)
 
     def fsync(fd):
-        if armed and not fired and stat.S_ISDIR(os.fstat(fd).st_mode):
+        mode = os.fstat(fd).st_mode
+        if armed and not fired and (stat.S_ISDIR(mode) if target == "dir" else stat.S_ISREG(mode)):
             fired.append(frame)
-            raise OSError("injected journal fsync fault after the {} frame".format(frame))
+            raise OSError("injected journal {} fsync fault after the {} frame".format(target, frame))
         return real_fsync(fd)
 
     with _opf_import._self_test_homes2_active(root):
@@ -1121,11 +1171,13 @@ def _st_postcommit_fault(apply, root, rid, frame):
 
 
 def _t_postcommit_journal_fault(base, check):
-    """A journal fault after the COMPLETE frame is durable never reports the committed promotion as
-    aborted: the attempt reads "complete" and the result is CANNOT_EVALUATE with promoted=True, outcome
-    "promoted", and the committed transaction's ref. A pre-commit failure still rolls back and reports
-    aborted, and the same fault after INTENT alone (an open attempt) is indeterminate, never aborted, with the
-    journal lock retained."""
+    """A journal fault in the closing directory fsync after the COMPLETE frame is written never reports the
+    promotion as aborted, nor as promoted: the transaction did not return, and although the attempt reads
+    "complete" the raise cannot say whether the frame's log fsync succeeded, so the result is CANNOT_EVALUATE
+    with promoted None, outcome "indeterminate", the attempt's ref, and the journal lock retained; a re-apply
+    then refuses on the held lock rather than reading the unconfirmed frame as a completed no-op. A
+    pre-commit failure still rolls back and reports aborted, and the same fault after INTENT alone (an open
+    attempt) is indeterminate, never aborted, with the journal lock retained."""
     from unittest.mock import patch
     root, rid, run = _st_build(base, "postcommit-complete")
     result, fired, states = _st_postcommit_fault(apply_ingest, root, rid, _journal.F_COMPLETE)
@@ -1134,13 +1186,15 @@ def _t_postcommit_journal_fault(base, check):
     check("postcommit-complete-fired-after-commit", fired == [_journal.F_COMPLETE] and states == {1: "complete"}
           and (root / ".archive/legacy/move.md").read_bytes() == b"moveme\n"
           and not (root / "legacy/move.md").exists() and (home / PROMOTION_NAME).is_file())
-    # Flip: without the complete-state branch the committed attempt is routed to _RetainLock (aborted).
-    check("postcommit-complete-not-aborted", result.verdict == CANNOT_EVALUATE and result.promoted is True
-          and result.outcome == "promoted" and result.restore_ref == ref
-          and "post-commit step" in " ".join(result.findings))
+    # Flip: without the post-launch guard the fault reaches the aborted handler; trusting the readable
+    # COMPLETE claims promoted=True for a frame whose durability the raise leaves unconfirmed.
+    check("postcommit-complete-indeterminate", result.verdict == CANNOT_EVALUATE and result.promoted is None
+          and result.outcome == "indeterminate" and result.restore_ref == ref
+          and "durability is unconfirmed" in " ".join(result.findings))
     with _opf_import._self_test_homes2_active(root):
         again = apply_ingest(root, rid, now=_NOW)
-    check("postcommit-complete-reapply-noop", again.verdict == CLEAN and again.outcome == "noop_already_complete")
+    check("postcommit-complete-reapply-refused", again.promoted is False and again.outcome == "aborted"
+          and "already held" in " ".join(again.findings))
     root, rid, run = _st_build(base, "postcommit-rollback")
     with _opf_import._self_test_homes2_active(root):
         # A failed poststate check raises before COMPLETE is published: the attempt rolls back.
@@ -1246,6 +1300,79 @@ def _st_recover(root, rid, attempt):
         _journal._close_fd_quietly(root_fd)
 
 
+class _Unprintable(Exception):
+    """An exception whose __str__ raises: any diagnostic that formats it without _safe_text fails."""
+
+    def __str__(self):
+        raise RecursionError("injected: this exception cannot be formatted")
+
+
+def _st_helper_fault(apply, root, rid, run):
+    """Apply with a committed publication's verification fault handed to an outcome helper that itself
+    raises a RecursionError, a class the generic abort handler catches. Returns (result, fired)."""
+    from unittest.mock import patch
+
+    def helper(*_args, **_kwargs):
+        raise RecursionError("injected failure inside the post-launch outcome helper")
+
+    with patch.object(sys.modules[__name__], "_post_launch_result", helper):
+        return _st_postverify_fault(apply, root, rid, run, "source", _journal.JournalError)
+
+
+class _BrokenStream:
+    """A stderr whose every write fails, as a closed stream's does."""
+
+    def write(self, _data):
+        raise ValueError("injected: I/O operation on a closed stderr")
+
+    def flush(self):
+        raise ValueError("injected: I/O operation on a closed stderr")
+
+
+def _st_cleanup_fault(apply, root, rid, step, error, broken_stderr=False):
+    """Apply a promotion that commits and verifies cleanly, with `error` raised by one final-cleanup step
+    AFTER its real side effect ran: "root-close" (the store root descriptor close in _apply_locked, armed
+    only once post-commit verification returned), "lock-release" (the journal writer lock), or "op-release"
+    (the operation capability). stderr is captured, or with `broken_stderr` fails on every write so the
+    cleanup diagnostic itself fails. An exception escaping `apply` is returned in place of the result.
+    Returns (result, fired, surfaced)."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+    fired, verified = [], []
+    module = sys.modules[__name__]
+    real_verify = module._post_verify
+    owner, attr, gate = dict(
+        (("root-close", (_journal, "_close_fd_quietly", lambda: bool(verified))),
+         ("lock-release", (_opf_journal, "release_writer_lock", lambda: True)),
+         ("op-release", (_opf_oplock, "release_operation", lambda: True))))[step]
+    real_step = getattr(owner, attr)
+
+    def verify(*args, **kwargs):
+        out = real_verify(*args, **kwargs)
+        verified.append(True)
+        return out
+
+    def faulty(*args, **kwargs):
+        out = real_step(*args, **kwargs)
+        if gate() and not fired:
+            fired.append(step)
+            raise error("injected fault in the {} cleanup".format(step))
+        return out
+
+    stream = _BrokenStream() if broken_stderr else io.StringIO()
+    with _opf_import._self_test_homes2_active(root):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(module, "_post_verify", verify))
+            stack.enter_context(patch.object(owner, attr, faulty))
+            stack.enter_context(patch.object(sys, "stderr", stream))
+            try:
+                result = apply(root, rid, now=_NOW)
+            except Exception as exc:  # noqa: BLE001  an escaped exception is the misreport under test
+                result = exc
+    return result, fired, "" if broken_stderr else stream.getvalue()
+
+
 def _t_postlaunch_indeterminate(base, check):
     """The post-launch guard is class-wide. A failing attempt-state re-read after a committed publication is
     indeterminate, never aborted: CANNOT_EVALUATE, promoted None (commit neither confirmed nor ruled out),
@@ -1293,12 +1420,68 @@ def _t_postlaunch_indeterminate(base, check):
           and result.promoted is True and result.outcome == "promoted")
 
 
+def _t_postlaunch_total(base, check):
+    """The launched attempt's outcome determination is TOTAL over Exception. An exception that cannot be
+    formatted, raised in post-commit verification, is still a committed promotion (promoted=True, a
+    placeholder in its finding); an outcome helper that itself raises is indeterminate, never aborted; a
+    failure of ANY class in a final-cleanup step, the root descriptor close, the journal writer lock release,
+    or the operation capability release, is surfaced and never replaces the formed promoted result, even
+    with stderr itself broken; and a COMPLETE frame whose own log fsync failed, readable but not confirmed
+    durable, is indeterminate with the lock and journal retained, never promoted, and a re-apply refuses
+    rather than reporting a completed no-op."""
+    root, rid, run = _st_build(base, "unprintable")
+    result, fired = _st_postverify_fault(apply_ingest, root, rid, run, "source", _Unprintable)
+    # Flip: formatting the exception without _safe_text raises out of the outcome helper, so the committed
+    # promotion is reported aborted (or indeterminate through the helper-failure guard).
+    check("unprintable-committed-not-aborted", len(fired) == 1 and result.verdict == CANNOT_EVALUATE
+          and result.promoted is True and result.outcome == "promoted"
+          and "<unprintable _Unprintable>" in " ".join(result.findings))
+    root, rid, run = _st_build(base, "helper-fault")
+    result, fired = _st_helper_fault(apply_ingest, root, rid, run)
+    ref = dict(txn_id=_opf_journal.attempt_txn(KIND, rid, 1), journal_rel=_opf_store.journal_root(KIND))
+    # Flip: without the helper-failure guard the RecursionError reaches the generic abort handler.
+    check("helper-fault-indeterminate", len(fired) == 1 and result.verdict == CANNOT_EVALUATE
+          and result.promoted is None and result.outcome == "indeterminate" and result.restore_ref == ref
+          and "outcome determination itself failed" in " ".join(result.findings))
+    for step in ("root-close", "lock-release", "op-release"):
+        root, rid, run = _st_build(base, "cleanup-" + step)
+        result, fired, surfaced = _st_cleanup_fault(apply_ingest, root, rid, step, RecursionError)
+        # Flip: a cleanup guard narrowed to OSError lets the RecursionError replace the formed result (an
+        # abort for the root close, an exception escaping apply_ingest for either release).
+        check("cleanup-{}-result-preserved".format(step), fired == [step]
+              and getattr(result, "verdict", None) == CLEAN and getattr(result, "promoted", None) is True
+              and getattr(result, "outcome", None) == "promoted" and "cleanup (" in surfaced)
+    root, rid, run = _st_build(base, "cleanup-diagnostic")
+    result, fired, _surfaced = _st_cleanup_fault(apply_ingest, root, rid, "root-close", RecursionError,
+                                                 broken_stderr=True)
+    # Flip: an unguarded diagnostic write lets the broken stderr's ValueError escape apply_ingest.
+    check("cleanup-diagnostic-result-preserved", fired == ["root-close"]
+          and getattr(result, "promoted", None) is True and getattr(result, "outcome", None) == "promoted")
+    root, rid, run = _st_build(base, "complete-unsynced")
+    result, fired, states = _st_postcommit_fault(apply_ingest, root, rid, _journal.F_COMPLETE, target="log")
+    ref = dict(txn_id=_opf_journal.attempt_txn(KIND, rid, 1), journal_rel=_opf_store.journal_root(KIND))
+    journal = root / _opf_store.journal_root(KIND)
+    txn = journal / _opf_journal.attempt_txn(KIND, rid, 1)
+    check("complete-unsynced-fired", fired == [_journal.F_COMPLETE] and states == {1: "complete"}
+          and (root / ".archive/legacy/move.md").read_bytes() == b"moveme\n" and not run.exists())
+    # Flip: trusting the readable COMPLETE frame reports promoted=True for a commit whose durability failed.
+    check("complete-unsynced-not-promoted", result.verdict == CANNOT_EVALUATE and result.promoted is None
+          and result.outcome == "indeterminate" and result.restore_ref == ref
+          and "durability is unconfirmed" in " ".join(result.findings)
+          and (journal / "lock").is_file() and (txn / "frames.log").is_file() and (txn / "preimages").is_dir())
+    with _opf_import._self_test_homes2_active(root):
+        again = apply_ingest(root, rid, now=_NOW)
+    # Flip: releasing the lock lets the re-apply read the unconfirmed frame as a verified completed no-op.
+    check("complete-unsynced-reapply-refused", again.promoted is False and again.outcome == "aborted"
+          and "already held" in " ".join(again.findings))
+
+
 TESTS = (("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
          ("unreviewed-refused", _t_unreviewed_refused), ("traversal-refused", _t_traversal_refused),
          ("mint-move-toctou", _t_mint_move_toctou), ("per-record-refused", _t_per_record_refused),
          ("postverify-committed", _t_postverify_committed),
          ("postcommit-journal-fault", _t_postcommit_journal_fault),
-         ("postlaunch-indeterminate", _t_postlaunch_indeterminate))
+         ("postlaunch-indeterminate", _t_postlaunch_indeterminate), ("postlaunch-total", _t_postlaunch_total))
 
 
 def self_test(only=None):
@@ -1436,7 +1619,9 @@ def _d_inline_required(module, base_dir):
 
 
 # Post-launch probes: each drives one sibling of the committed-reported-as-aborted class (or the genuine
-# rollback it must not absorb) through a candidate module and returns whether it is reported truthfully.
+# rollback it must not absorb) through a candidate module and returns whether it is reported truthfully. An
+# indeterminate probe also requires the journal-evidence finding, so the helper-failure guard's own
+# indeterminate result cannot mask a reverted inner guard.
 
 def _p_postverify_committed(module, base_dir):
     """A JournalError in post-commit verification is committed-but-unverified, never aborted."""
@@ -1454,11 +1639,12 @@ def _p_postverify_foreign(module, base_dir):
 
 
 def _p_postcommit_complete(module, base_dir):
-    """A journal fault after the COMPLETE frame is durable is a committed promotion."""
+    """A journal fault after the COMPLETE frame is written is indeterminate by journal evidence, never aborted
+    and never promoted (the raise cannot confirm the frame's durability)."""
     root, rid, _run = module._st_build(base_dir, "postcommit")
     result, fired, states = module._st_postcommit_fault(module.apply_ingest, root, rid, _journal.F_COMPLETE)
-    return (fired == [_journal.F_COMPLETE] and states == {1: "complete"} and result.promoted is True
-            and result.outcome == "promoted")
+    return (fired == [_journal.F_COMPLETE] and states == {1: "complete"} and result.promoted is None
+            and result.outcome == "indeterminate" and "durability is unconfirmed" in " ".join(result.findings))
 
 
 def _p_reread_indeterminate(module, base_dir):
@@ -1467,7 +1653,8 @@ def _p_reread_indeterminate(module, base_dir):
     wrapped, raised = module._st_reread_fault(module.apply_ingest, _journal.JournalError)
     result, fired, states = module._st_postcommit_fault(wrapped, root, rid, _journal.F_COMPLETE)
     return (fired == [_journal.F_COMPLETE] and len(raised) == 1 and states == {1: "complete"}
-            and result.promoted is None and result.outcome == "indeterminate")
+            and result.promoted is None and result.outcome == "indeterminate"
+            and "journal state unreadable" in " ".join(result.findings))
 
 
 def _p_complete_lost_indeterminate(module, base_dir):
@@ -1475,7 +1662,7 @@ def _p_complete_lost_indeterminate(module, base_dir):
     root, rid, _run = module._st_build(base_dir, "complete-lost")
     result, fired, states, _recovered = module._st_complete_lost(module.apply_ingest, root, rid)
     return (fired == [_journal.F_COMPLETE] and states == {1: "open"} and result.promoted is None
-            and result.outcome == "indeterminate")
+            and result.outcome == "indeterminate" and "journal state open" in " ".join(result.findings))
 
 
 def _p_foreign_txn_indeterminate(module, base_dir):
@@ -1484,7 +1671,8 @@ def _p_foreign_txn_indeterminate(module, base_dir):
     root, rid, _run = module._st_build(base_dir, "foreign-txn")
     result, states = module._st_foreign_txn_fault(module.apply_ingest, root, rid)
     return (states == {1: "open"} and getattr(result, "promoted", False) is None
-            and getattr(result, "outcome", None) == "indeterminate")
+            and getattr(result, "outcome", None) == "indeterminate"
+            and "journal state open" in " ".join(getattr(result, "findings", [])))
 
 
 def _p_precommit_rollback_aborted(module, base_dir):
@@ -1507,6 +1695,52 @@ def _p_returned_is_committed(module, base_dir):
     return len(fired) == 1 and not raised and result.promoted is True and result.outcome == "promoted"
 
 
+def _p_unprintable_committed(module, base_dir):
+    """An exception whose __str__ raises, in post-commit verification, is still a committed promotion."""
+    root, rid, run = module._st_build(base_dir, "unprintable")
+    result, fired = module._st_postverify_fault(module.apply_ingest, root, rid, run, "source",
+                                                module._Unprintable)
+    return len(fired) == 1 and result.promoted is True and result.outcome == "promoted"
+
+
+def _p_helper_fault_indeterminate(module, base_dir):
+    """An outcome helper that itself raises is indeterminate, never the generic abort."""
+    root, rid, run = module._st_build(base_dir, "helper-fault")
+    result, fired = module._st_helper_fault(module.apply_ingest, root, rid, run)
+    return len(fired) == 1 and result.promoted is None and result.outcome == "indeterminate"
+
+
+def _p_cleanup_preserved(step, broken_stderr=False):
+    """A probe that a RecursionError in the `step` cleanup (with stderr broken too, when asked) leaves the
+    formed promoted result standing."""
+    def probe(module, base_dir):
+        root, rid, _run = module._st_build(base_dir, "cleanup")
+        result, fired, _surfaced = module._st_cleanup_fault(module.apply_ingest, root, rid, step, RecursionError,
+                                                            broken_stderr)
+        return (fired == [step] and getattr(result, "promoted", None) is True
+                and getattr(result, "outcome", None) == "promoted")
+    return probe
+
+
+def _p_complete_unsynced(module, base_dir):
+    """A COMPLETE frame whose own log fsync failed is readable but unconfirmed: indeterminate, never promoted."""
+    root, rid, _run = module._st_build(base_dir, "unsynced")
+    result, fired, states = module._st_postcommit_fault(module.apply_ingest, root, rid, _journal.F_COMPLETE,
+                                                        target="log")
+    return (fired == [_journal.F_COMPLETE] and states == {1: "complete"} and result.promoted is None
+            and result.outcome == "indeterminate")
+
+
+def _p_complete_unsynced_reapply(module, base_dir):
+    """A re-apply after an unconfirmed COMPLETE refuses on the retained lock, never a completed no-op."""
+    root, rid, _run = module._st_build(base_dir, "unsynced-reapply")
+    _result, fired, _states = module._st_postcommit_fault(module.apply_ingest, root, rid, _journal.F_COMPLETE,
+                                                          target="log")
+    with _opf_import._self_test_homes2_active(root):
+        again = module.apply_ingest(root, rid, now=module._NOW)
+    return fired == [_journal.F_COMPLETE] and again.promoted is False and again.outcome == "aborted"
+
+
 def _probe_row(identity, probe, old, new):
     """A discriminator row over this file whose focused test asserts `probe` under `identity`."""
     def test(module, base_dir):
@@ -1514,13 +1748,23 @@ def _probe_row(identity, probe, old, new):
     return (identity, "apply", test, old, new)
 
 
-# The ONE post-launch guard in `_apply_locked`, and its reversal (the guard catches nothing).
+# The ONE post-launch guard in `_launched_attempt`, and its reversal (the guard catches nothing).
 _POST_LAUNCH_GUARD = "except Exception as exc:  # noqa: BLE001  the post-launch guard"
 _POST_LAUNCH_REVERTED = "except () as exc:  # reverted: the post-launch guard"
+# A readable COMPLETE is not a durable COMPLETE, and its reversal (the pre-fix trust in a readable frame).
+_UNCONFIRMED_GUARD = 'state = "complete but its durability is unconfirmed"'
+_UNCONFIRMED_REVERTED = ('return _committed_result(ref, "the journal post-commit step did not fully complete ("'
+                         ' + detail + ")")')
+# The ONE final-cleanup guard in `_cleanup`, and its reversal to the pre-fix OSError-only posture.
+_CLEANUP_GUARD = "except Exception as exc:  # noqa: BLE001  the cleanup guard"
+_CLEANUP_REVERTED = "except OSError as exc:  # reverted: the cleanup guard"
 
 # (identity, probe, unique old, new). The class width first: every sibling re-exposed by reverting the ONE
 # post-launch guard. Then each decision branch of `_post_launch_result` by its own mutation, including the
-# rollback branch, so the guard can neither absorb a genuine abort nor claim a commit it cannot confirm.
+# rollback branch, so the guard can neither absorb a genuine abort nor claim a commit it cannot confirm, and
+# the unconfirmed-COMPLETE branch with one probe per sibling (the result, and a re-apply's no-op). Then the
+# exception-total layers: _safe_text, the helper-failure guard, the cleanup guard with one probe per cleanup
+# step, and the cleanup diagnostic channel.
 _POST_LAUNCH = (
     ("postverify/committed-not-aborted", _p_postverify_committed, _POST_LAUNCH_GUARD, _POST_LAUNCH_REVERTED),
     ("postverify/foreign-class-not-aborted", _p_postverify_foreign, _POST_LAUNCH_GUARD, _POST_LAUNCH_REVERTED),
@@ -1530,7 +1774,6 @@ _POST_LAUNCH = (
      _POST_LAUNCH_REVERTED),
     ("postlaunch/foreign-txn-not-escaped", _p_foreign_txn_indeterminate, _POST_LAUNCH_GUARD,
      _POST_LAUNCH_REVERTED),
-    ("postcommit/complete-not-aborted", _p_postcommit_complete, 'if state == "complete":', "if False:"),
     ("postlaunch/reread-guarded", _p_reread_indeterminate, "except Exception as read_exc:",
      "except () as read_exc:"),
     ("postlaunch/rollback-still-aborted", _p_precommit_rollback_aborted,
@@ -1538,6 +1781,21 @@ _POST_LAUNCH = (
     ("postlaunch/indeterminate-not-aborted", _p_complete_lost_indeterminate,
      'promoted=None, outcome="indeterminate"', 'promoted=False, outcome="aborted"'),
     ("postlaunch/returned-is-committed", _p_returned_is_committed, "returned = True", "returned = False"),
+    ("postcommit/complete-unconfirmed-not-promoted", _p_complete_unsynced, _UNCONFIRMED_GUARD,
+     _UNCONFIRMED_REVERTED),
+    ("postcommit/complete-unconfirmed-reapply-refused", _p_complete_unsynced_reapply, _UNCONFIRMED_GUARD,
+     _UNCONFIRMED_REVERTED),
+    ("postlaunch/unprintable-not-aborted", _p_unprintable_committed, "def _safe_text(value):\n",
+     "def _safe_text(value):\n    return str(value)\n"),
+    ("postlaunch/helper-failure-not-aborted", _p_helper_fault_indeterminate,
+     "except Exception:  # noqa: BLE001  the outcome helper's own failure",
+     "except ():  # reverted: the outcome helper's own failure"),
+    ("cleanup/root-close-not-aborted", _p_cleanup_preserved("root-close"), _CLEANUP_GUARD, _CLEANUP_REVERTED),
+    ("cleanup/lock-release-not-escaped", _p_cleanup_preserved("lock-release"), _CLEANUP_GUARD, _CLEANUP_REVERTED),
+    ("cleanup/op-release-not-escaped", _p_cleanup_preserved("op-release"), _CLEANUP_GUARD, _CLEANUP_REVERTED),
+    ("cleanup/diagnostic-not-escaped", _p_cleanup_preserved("root-close", broken_stderr=True),
+     "except Exception:  # noqa: BLE001  the diagnostic channel",
+     "except ():  # reverted: the diagnostic channel"),
 )
 
 # (identity, source-key, focused test, unique old, new). source-key selects which module's source is
