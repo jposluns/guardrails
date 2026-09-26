@@ -676,7 +676,8 @@ def build_homes_plan(resolution, manifest_bytes, tree, *, now):
         _need(validation.status == store.VALID,
               resolution.machine_rel + "/" + store.MANIFEST_NAME,
               "manifest invalid: {}".format("; ".join(validation.findings)))
-        if store.homes_generation(manifest) == 2:
+        # Source classification follows the validated declaration, not writer activation.
+        if manifest["opf"].get("homes", 1) == 2:
             return None
         _tree_shape(tree)
         staged = _runs(tree, imp.IMPORTS_REL)
@@ -874,7 +875,8 @@ def plan_homes_migration(root):
         checked = store.validate_manifest(manifest)
         _need(checked.status == store.VALID, manifest_rel,
               "manifest changed or is invalid: " + "; ".join(checked.findings))
-        if store.homes_generation(manifest) == 2:
+        # Source classification follows the validated declaration, not writer activation.
+        if manifest["opf"].get("homes", 1) == 2:
             return "opf upgrade: already at homes 2; nothing to plan\n"
 
         first = _snapshot(fd)

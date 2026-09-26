@@ -13,6 +13,7 @@ import contextlib
 import datetime
 import hashlib
 import io
+import inspect
 import json
 import os
 import shutil
@@ -72,7 +73,7 @@ def framed(kind, obj):
             + sha(payload).encode("ascii") + b"\n" + payload + b"\n")
 
 
-def fixture_bytes():
+def fixture_bytes(*, invalid_acceptance=False):
     """Return the closed, independently assembled legacy file roster."""
     source = dict(path="legacy/original.md", sha256=sha(BODY), size=len(BODY), raw=BODY)
     plan = toml({
@@ -114,6 +115,10 @@ def fixture_bytes():
         "reviewed_at": "2026-01-02T03:04:05Z",
         "decisions": [],
     }, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+    if invalid_acceptance:
+        doc = json.loads(acceptance)
+        del doc["actor"]
+        acceptance = json.dumps(doc, sort_keys=True).encode("ascii") + b"\n"
     stage_files = dict(core)
     stage_files.update({
         "report.toml": report,
@@ -191,6 +196,118 @@ def fixture_bytes():
     files.update(archived)
     files.update(preimages)
     return files, rid, jr
+
+
+def evidence_fixtures():
+    """Malformed evidence with otherwise consistent outer bindings."""
+    files, rid, jr = fixture_bytes()
+    archive = imp.IMPORT_ARCHIVE_REL + "/" + rid
+    stage = imp.IMPORTS_REL + "/" + rid
+    frames_rel = jr + "/frames.log"
+    raw = files[frames_rel]
+    first_nl = raw.index(b"\n")
+    size = int(raw[:first_nl].split(b" ")[2])
+    intent = json.loads(raw[first_nl + 1:first_nl + 1 + size])
+    complete = {"txn": intent["txn"]}
+    moved_op = next(op for op in intent["ops"]
+                    if op["op"] == "remove" and op["path"] == "legacy/moved.md")
+    preimage = jr + "/preimages/" + moved_op["prestate"]["payload"]
+
+    invalid, _, _ = fixture_bytes(invalid_acceptance=True)
+    yield ("acceptance-invalid", invalid, "actor must be an object",
+           stage + "/acceptance.json", "acceptance")
+
+    absent = dict(files)
+    del absent[stage + "/acceptance.json"]
+    del absent[archive + "/acceptance.json"]
+    yield ("acceptance-absent", absent, "missing, or unbound durable archive member",
+           archive, None)
+
+    bad_digest = dict(files)
+    bad_digest[preimage] = b"X" + MOVED[1:]  # Same size; only the digest is wrong.
+    yield ("preimage-digest", bad_digest, "preimage digest or size mismatch",
+           preimage, "preimage")
+
+    bad_size = dict(files)
+    moved_op["prestate"]["size"] += 1  # Bytes and their digest remain correct.
+    bad_size[frames_rel] = framed("INTENT", intent) + framed("COMPLETE", complete)
+    moved_op["prestate"]["size"] -= 1
+    yield ("preimage-size", bad_size, "preimage digest or size mismatch",
+           preimage, "preimage")
+
+    bad_txn = dict(files)
+    bad_txn[frames_rel] = (framed("INTENT", intent)
+                          + framed("COMPLETE", {"txn": "another-transaction"}))
+    yield ("complete-transaction", bad_txn, "txn id disagrees", frames_rel, "terminal")
+
+    bad_checksum = dict(files)
+    terminal = framed("COMPLETE", complete)
+    header, payload = terminal.split(b"\n", 1)
+    parts = header.split(b" ")
+    parts[3] = b"0" * 64 if parts[3] != b"0" * 64 else b"1" * 64
+    bad_checksum[frames_rel] = framed("INTENT", intent) + b" ".join(parts) + b"\n" + payload
+    yield ("complete-checksum", bad_checksum, "journal frame checksum mismatch",
+           frames_rel, "checksum")
+
+
+def evidence_plan(root, files):
+    # Build the captured tree from fixture bytes, independently of _snapshot.
+    tree = {}
+    for rel, raw in files.items():
+        for home in (imp.IMPORTS_REL, imp.IMPORT_ARCHIVE_REL,
+                     imp.IMPORT_OPS_REL, ".archive"):
+            if rel.startswith(home + "/"):
+                tree[rel] = raw
+                parent = rel.rsplit("/", 1)[0]
+                while True:
+                    tree[parent] = None
+                    if parent == home:
+                        break
+                    parent = parent.rsplit("/", 1)[0]
+                break
+    resolution = store.resolve_store(
+        root, accept_tokens=(store.STANDARD_TOKEN, store.PRIOR_STANDARD_TOKEN))
+    return migrate.build_homes_plan(
+        resolution, files[".working/toml/manifest.toml"], tree, now=NOW)
+
+
+def assert_evidence_refused(root, files, needle, offending):
+    initial = snapshot(root)
+    result = cli(["upgrade", "--homes-plan", "--root", str(root)])
+    assert result[0] == 2 and result[1] == "", result
+    assert needle in result[2] and offending in result[2], result
+    try:
+        evidence_plan(root, files)
+    except migrate.MigrationPlanError as exc:
+        assert exc.path == offending and needle in exc.condition, str(exc)
+    else:
+        raise AssertionError("builder accepted malformed evidence")
+    assert snapshot(root) == initial
+
+
+def reverted_evidence_rule(rule):
+    # Delete the precise production rule in memory, retaining the surrounding
+    # planner. Exact anchors fail closed if production changes. This is a closed
+    # set of discriminators, not exhaustive mutation coverage of the planner.
+    anchors = {
+        "acceptance": ("_acceptance",
+                      '    _need(not findings, where,\n'
+                      '          "ownership unprovable: {}".format("; ".join(findings)))\n'),
+        "preimage": ("_journal_proof",
+                     '            _need(len(raw) == pre["size"] and _sha(raw) == pre["sha256"],\n'
+                     '                  rel + "/" + name, "preimage digest or size mismatch")\n'),
+        "terminal": ("_frames", '        _journal._validate_terminal_agreement(frames)\n'),
+        "checksum": ("_frames",
+                     '        _need(_sha(body) == digest, where, "journal frame checksum mismatch")\n'),
+    }
+    name, anchor = anchors[rule]
+    source = inspect.getsource(getattr(migrate, name))
+    assert source.count(anchor) == 1, (rule, "production mutation anchor changed")
+    indent = anchor[:len(anchor) - len(anchor.lstrip(" "))]
+    namespace = vars(migrate).copy()
+    exec(compile(source.replace(anchor, indent + "pass\n"),
+                 "<reverted-" + rule + ">", "exec"), namespace)
+    return patch.object(migrate, name, namespace[name])
 
 
 def materialize(root, files):
@@ -465,8 +582,8 @@ def self_test(red_on_revert=False):
                 b'spec_version = "2.0.0"\nhomes = 2')
             materialize(case, {".working/toml/manifest.toml": manifest})
             initial = snapshot(case)
-            with patch.object(store, "SUPPORTED_HOMES", 2):
-                result = cli(["upgrade", "--homes-plan", "--root", str(case)])
+            result = cli(["upgrade", "--homes-plan", "--root", str(case)])
+            assert evidence_plan(case, {".working/toml/manifest.toml": manifest}) is None
             assert result == (0, "opf upgrade: already at homes 2; nothing to plan\n", ""), result
             assert snapshot(case) == initial
         check("already-homes-two", already)
@@ -537,7 +654,41 @@ def self_test(red_on_revert=False):
             assert snapshot(empty) == {}
         check("other-read-only-verbs-do-not-enter-planner", other_read_only_verbs)
 
+        evidence_cases = list(evidence_fixtures())
+        for name, altered, needle, offending, rule in evidence_cases:
+            case = base / name
+            materialize(case, altered)
+            check(name, lambda case=case, altered=altered, needle=needle,
+                  offending=offending: assert_evidence_refused(
+                      case, altered, needle, offending))
+
         if red_on_revert:
+            def discriminate_evidence(name, altered, needle, offending, rule):
+                case = base / name
+                initial = snapshot(case)
+                assert_evidence_refused(case, altered, needle, offending)
+                with reverted_evidence_rule(rule):
+                    # Require actual acceptance, so an unrelated exception or
+                    # refusal cannot masquerade as a killed mutation.
+                    mutant = cli(["upgrade", "--homes-plan", "--root", str(case)])
+                    assert mutant[0] == 0 and mutant[2] == "", mutant
+                    assert imp.tomllib.loads(mutant[1])["format"] == migrate.PLAN_FORMAT
+                    assert evidence_plan(case, altered)["format"] == migrate.PLAN_FORMAT
+                    try:
+                        assert_evidence_refused(case, altered, needle, offending)
+                    except AssertionError:
+                        pass
+                    else:
+                        raise AssertionError(rule + " removal survived its discriminator")
+                assert_evidence_refused(case, altered, needle, offending)
+                assert snapshot(case) == initial
+
+            for evidence_case in evidence_cases:
+                if evidence_case[-1] is not None:
+                    check("red-on-revert-" + evidence_case[0],
+                          lambda evidence_case=evidence_case:
+                          discriminate_evidence(*evidence_case))
+
             def discriminate():
                 with patch.object(migrate, "_clock_now", return_value=NOW):
                     baseline = cli(args)
