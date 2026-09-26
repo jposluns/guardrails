@@ -146,6 +146,7 @@ continues to describe that legacy format. The homes-2 requirements in sections 4
     journals/<kind>/               # reserved recovery state, never a view or ordinary op target
       journal/                    # crash-durable frames
       runs/<run-id>/transaction.toml # gate-readable projections
+      allocations/<run-id>.toml    # irrevocable ID reservations (section 8.2)
 ```
 
 When the store has been relocated, the `.working/` tree lives at the store repository root exactly
