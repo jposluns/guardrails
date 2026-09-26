@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PR3a library QA regressions; also run by _opf_init_operation.py --self-test.
+"""PR3a/PR3b library QA regressions; also run by _opf_init_operation.py --self-test.
 
 The shipped opf init CLI remains unchanged. Coupled CLI activation belongs to PR7.
 """
@@ -52,7 +52,7 @@ class InitQA(unittest.TestCase):
 
     def ready(self):
         result = op.init_operation(self.root)
-        self.assertEqual(result.status, op.SOURCES_READY, result.primary_failure)
+        self.assertEqual(result.status, op.VIEWS_READY, result.primary_failure)
         return result
 
     def readopt(self, **high):
@@ -68,7 +68,7 @@ class InitQA(unittest.TestCase):
         op._git(["rm", "--", op.COUNTERS_RELPATH], self.root, self.env)
         op._git(["commit", "-q", "-m", "retire store"], self.root, self.env)
         result = op.init_operation(self.root, ancestral=seed)
-        self.assertEqual(result.status, op.SOURCES_READY, result.primary_failure)
+        self.assertEqual(result.status, op.VIEWS_READY, result.primary_failure)
         return result
 
     def assert_rerun(self, status, check=None):
@@ -81,7 +81,8 @@ class InitQA(unittest.TestCase):
         return result
 
     def test_library_journal_atomic_publication_and_rerun(self):
-        # Every source must pass through link with the COMPLETE recorded payload.
+        # Every source and view must pass through link with the COMPLETE planned payload (a view's
+        # is the renderer planner's output over the already-verified sources).
         linked = []
         real_link = os.link
 
@@ -89,13 +90,14 @@ class InitQA(unittest.TestCase):
             if op._STAGE_MARKER in str(src):
                 _, raw = op._read_plan(self.root)
                 plan = op.validate_init_plan(raw)
-                entry = next(s for s in plan["sets"]["S"] if s["staging"] == src)
+                entry = next(s for s in plan["sets"]["S"] + plan["sets"]["V"]
+                             if s["staging"] == src)
+                expected = op.plan_payloads(plan).get(entry["path"])
+                if expected is None:
+                    expected = op._expected_views(self.root)[entry["path"]]
                 fd = os.open(src, os.O_RDONLY, dir_fd=kw["src_dir_fd"])
                 try:
-                    self.assertEqual(
-                        os.read(fd, entry["size"] + 1),
-                        op.plan_payloads(plan)[entry["path"]],
-                    )
+                    self.assertEqual(os.read(fd, len(expected) + 1), expected)
                 finally:
                     os.close(fd)
                 self.assertFalse(
@@ -108,8 +110,10 @@ class InitQA(unittest.TestCase):
         with mock.patch.object(os, "link", side_effect=link):
             first = self.ready()
         _, raw = op._read_plan(self.root)
+        plan = op.validate_init_plan(raw)
         self.assertEqual(
-            sorted(linked), sorted(op.plan_payloads(op.validate_init_plan(raw)))
+            sorted(linked),
+            sorted(list(op.plan_payloads(plan)) + [v["path"] for v in plan["sets"]["V"]]),
         )
         self.assertEqual(op._snapshot_all(self.root)[1], before_index)
         before = op._snapshot_all(self.root)
@@ -143,10 +147,122 @@ class InitQA(unittest.TestCase):
         plan = op.validate_init_plan(raw)
         self.assertEqual(interrupted.operation_id, plan["operation_id"])
         result = op.init_operation(self.root, recover=True)
-        self.assertEqual(result.status, op.SOURCES_READY, result.primary_failure)
+        self.assertEqual(result.status, op.VIEWS_READY, result.primary_failure)
         self.assertEqual(result.operation_id, plan["operation_id"])
         self.assertEqual(result.plan_digest, plan["plan_digest"])
         self.assertEqual(op._read_plan(self.root), (ops, raw))
+
+    def test_preintent_directory_and_source_collisions_retry(self):
+        # Enumerate the other _run_group callers: ownership must not start at a refusal.
+        for group, collision in (("dirs", "destination"), ("sources", "destination"),
+                                 ("sources", "staging")):
+            root = op._plain_repo(os.path.join(self.base, group + "-" + collision), self.env)
+            real_publish = op._journal_publish
+
+            def interrupt(fd, txn, kind, obj):
+                if kind == op._journal.F_INTENT and txn.endswith("-" + group):
+                    raise op.InitOperationError("injected before intent", op.FAILED)
+                return real_publish(fd, txn, kind, obj)
+
+            with mock.patch.object(op, "_journal_publish", side_effect=interrupt):
+                result = op.init_operation(root)
+            self.assertEqual(result.status, op.FAILED, result.primary_failure)
+            ops, raw = op._read_plan(root)
+            plan = op.validate_init_plan(raw)
+            if group == "dirs":
+                target = Path(root, plan["permitted_directories"][0]["path"])
+                target.mkdir(mode=op.DIR_MODE)
+            else:
+                entry, data = op._source_files(plan)[0]
+                target = Path(root, entry["path"])
+                if collision == "staging":
+                    target = target.with_name(entry["staging"])
+                    data = b"foreign stage\n"
+                target.write_bytes(data)
+                target.chmod(op.SOURCE_MODE)
+            before = op._snapshot_all(root)
+            identity = target.stat()
+            journal = Path(root, ".git", op._opf_init_substrate.SUBSTRATE_DIRNAME,
+                           op._opf_init_substrate.JOURNALS_DIRNAME,
+                           op._txn_name(ops[0], group), "frames.log")
+            for attempt in (1, 2):
+                with self.subTest(group=group, collision=collision, attempt=attempt):
+                    result = op.init_operation(root)
+                    self.assertEqual(result.status, op.REFUSED, result.primary_failure)
+                    self.assertNotIn(group + "-intent", result.phases)
+                    self.assertEqual(journal.read_bytes(), b"")
+                    self.assertEqual(op._snapshot_all(root), before)
+                    self.assertEqual(op._read_plan(root), (ops, raw))
+                    current = target.stat()
+                    self.assertEqual((current.st_dev, current.st_ino),
+                                     (identity.st_dev, identity.st_ino))
+
+    def test_empty_tracked_destinations(self):
+        # README is tracked: an empty pathspec must not ask git for the whole index.
+        git = op._opf_observe._git_path()
+        self.assertEqual(op._tracked_destinations(git, self.root, ["README"]), ["README"])
+        with mock.patch.object(op._opf_observe, "_run_git",
+                               wraps=op._opf_observe._run_git) as read:
+            self.assertEqual(op._tracked_destinations(git, self.root, []), [])
+            read.assert_not_called()
+
+    def test_empty_view_roster_initializes(self):
+        # Exercise both callers with a real nonempty index, an empty manifest view set,
+        # and the real planner. Keep the pinned bootstrap roster consistent with that fixture.
+        before_index = op._snapshot_all(self.root)[1]
+        with mock.patch.object(op._opf_init, "_INITIAL_VIEW_NAMES", ()):
+            self.ready()
+            _, raw = op._read_plan(self.root)
+            self.assertEqual(op.validate_init_plan(raw)["sets"]["V"], [])
+            self.assertEqual(op._expected_views(self.root), {})
+            self.assert_rerun(op.ALREADY_INITIALIZED)
+        self.assertEqual(op._snapshot_all(self.root)[1], before_index)
+
+    def test_completed_rerun_after_view_identity_bump(self):
+        first = self.ready()
+        recorded = op._read_plan(self.root)
+        for attr in ("GENERATOR_NAME", "GENERATOR_VERSION", "TRANSFORM_VOCAB_VERSION",
+                     "PROJECTION_SCHEMA"):
+            old = getattr(op._opf_views, attr)
+            new = old + 1 if type(old) is int else old + "-changed"
+            with self.subTest(attr=attr), mock.patch.object(op._opf_views, attr, new):
+                result = self.assert_rerun(op.ALREADY_INITIALIZED)
+                self.assertEqual(result.operation_id, first.operation_id)
+                self.assertEqual(result.plan_digest, first.plan_digest)
+                self.assertEqual(op._read_plan(self.root), recorded)
+                # A completed-health exception must not relax the resume/render pin.
+                with self.assertRaisesRegex(op.InitOperationError, "versions"):
+                    op.validate_init_plan(recorded[1])
+                fd = op._opf_store._open_dir_nofollow(self.root)
+                try:
+                    plan = op._opf_init_substrate._strict_json_loads(recorded[1], "plan")
+                    with self.assertRaisesRegex(op.InitOperationError, "live view generator"):
+                        op.plan_init_views(self.root, fd, plan, op._opf_observe._git_path())
+                finally:
+                    os.close(fd)
+
+    def test_completed_plan_still_validates_recorded_versions(self):
+        _, raw = op._mk_plan()
+        for field, value in (("views_generator", None), ("views_generator", {}),
+                             ("generator", "other/1"), ("spec_version", "0.0.0"),
+                             ("provenance_format", "other/1")):
+            with self.subTest(field=field, value=value):
+                plan = op._opf_init_substrate._strict_json_loads(raw, "plan")
+                plan["versions"][field] = value
+                plan["plan_digest"] = op.compute_plan_digest(plan)
+                with self.assertRaisesRegex(op.InitOperationError, "versions"):
+                    op.validate_init_plan(op._opf_init_contract.canonical_json_bytes(plan),
+                                          completed=True)
+        for field, value in (("name", ""), ("version", 1), ("transform_vocab", None),
+                             ("projection_schema", True), ("projection_schema", 0),
+                             ("extra", "unrecognized")):
+            with self.subTest(field=field, value=value):
+                plan = op._opf_init_substrate._strict_json_loads(raw, "plan")
+                plan["versions"]["views_generator"][field] = value
+                plan["plan_digest"] = op.compute_plan_digest(plan)
+                with self.assertRaisesRegex(op.InitOperationError, "versions"):
+                    op.validate_init_plan(op._opf_init_contract.canonical_json_bytes(plan),
+                                          completed=True)
 
     def test_library_pinned_b6_seed(self):
         self.readopt(BI=7)
