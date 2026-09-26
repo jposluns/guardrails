@@ -182,6 +182,48 @@ class CodeSpanFenceTests(unittest.TestCase):
         text = "a\n```\nb\nc\n"
         self.assertEqual([line for _, line in iter_non_code_lines(text)], ["a"])
 
+    def test_zero_to_three_spaces_toggle(self):
+        for marker in ("```", "~~~"):
+            for spaces in range(4):
+                with self.subTest(marker=marker, spaces=spaces):
+                    fence = " " * spaces + marker
+                    indented_code = "    " + marker
+                    self.assertTrue(is_fence_line(fence))
+                    text = "\n".join((
+                        "before", fence, "hidden", indented_code,
+                        "still hidden", fence, "after",
+                    ))
+                    self.assertEqual(
+                        list(iter_non_code_lines(text)),
+                        [(1, "before"), (7, "after")],
+                    )
+
+    def test_four_or_more_columns_do_not_toggle(self):
+        for marker in ("```", "~~~"):
+            for prefix in ("    ", "     ", "        ",
+                           "\t", " \t", "  \t", "   \t"):
+                with self.subTest(marker=marker, prefix=prefix):
+                    line = prefix + marker
+                    self.assertFalse(is_fence_line(line))
+                    text = "\n".join(("before", line, "visible"))
+                    self.assertEqual(
+                        list(iter_non_code_lines(text)),
+                        [(1, "before"), (2, line), (3, "visible")],
+                    )
+
+    def test_unindented_fence_after_indented_code_opens(self):
+        for marker in ("```", "~~~"):
+            for prefix in ("    ", "\t"):
+                with self.subTest(marker=marker, prefix=prefix):
+                    line = prefix + marker
+                    text = "\n".join((
+                        line, "visible", marker, "hidden", marker, "after",
+                    ))
+                    self.assertEqual(
+                        list(iter_non_code_lines(text)),
+                        [(1, line), (2, "visible"), (6, "after")],
+                    )
+
 
 class DateTests(unittest.TestCase):
     def test_parse_iso_date_exact(self):
