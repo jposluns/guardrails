@@ -4,6 +4,8 @@
 The fixtures are in-memory object databases. Reversions load separate module
 instances and separate fixtures. No working tree, index, ref or substrate is
 created. Filesystem/operation fixture families remain separate PR4 obligations.
+The harness accepts source text without a reconciled repository review target;
+reversal reports identify the measured candidate content digest only.
 """
 import argparse
 import hashlib
@@ -12,7 +14,6 @@ import sys
 import types
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-REVIEWED_HEAD = "c76149af31a18c916aaea84a23986cc35f021a8d"
 ROOTS = (".opf.toml", ".opf.local.toml", ".working")
 
 
@@ -194,7 +195,7 @@ def invalid_limit(module, field, value, identity):
             module.CANNOT_EVALUATE, identity)
 
 
-def seed_membership(module):
+def seed_fixture(module):
     db = Objects(module)
     path = ".working/toml/counters.toml"
     a = db.commit({path: b"schema = 1\n[counters]\nWL = 1\n"})
@@ -206,6 +207,18 @@ def seed_membership(module):
         def __init__(self, git, root):
             pass
 
+        def run(self, args, budget):
+            # GitObjects.run returns stdout on success and raises on a nonzero
+            # cat-file -e outcome. Unexpected commands are fixture errors.
+            check(len(args) == 3 and args[:2] == ["cat-file", "-e"],
+                  "fixture-evidence-lookup")
+            budget.tick()
+            if any(oid == args[2] for _kind, oid in db.data):
+                return b""
+            raise module.ObservationError(
+                module.CANNOT_EVALUATE, "git cat-file",
+                "required evidence does not resolve: fixture object missing")
+
         def graft_snapshot(self, budget):
             return ("fixture", "absent")
 
@@ -213,10 +226,29 @@ def seed_membership(module):
             return db.read(kind, oid, budget)
 
     module.GitObjects = Adapter
+    return side, h
+
+
+def seed_membership(module):
+    side, h = seed_fixture(module)
     refuses(module, lambda: module.read_seed_basis(
         "/fixture", git="/fixture/git", pinned_head=h, evidence_commit=side,
         prefix="", object_format="sha1"), module.REFUSED, "seed-first-parent-membership")
 
+
+
+def absent_evidence(module):
+    _side, h = seed_fixture(module)
+    identity = "seed-absent-evidence"
+    try:
+        module.read_seed_basis(
+            "/fixture", git="/fixture/git", pinned_head=h, evidence_commit="0" * 40,
+            prefix="", object_format="sha1")
+    except module.ObservationError as exc:
+        check(exc.code == module.CANNOT_EVALUATE
+              and "does not resolve" in exc.detail, identity)
+    else:
+        raise AssertionError(identity)
 
 
 def scope_omission(module):
@@ -269,6 +301,8 @@ CASES = [
      "if self.clock() >= self.deadline:", "if False:"),
     ("seed-first-parent-membership", seed_membership,
      "if evidence_commit not in chain:", "if False:"),
+    ("seed-absent-evidence", absent_evidence,
+     'source.run(["cat-file", "-e", evidence_commit], budget)', "pass"),
 ]
 for field, value, identity in (
         ("commits", 0, "limits/commits-zero"),
@@ -307,7 +341,7 @@ def run(source, *, reversals=False):
             restored = load_candidate(source, "_pr4_restored_" + str(number))
             test(restored)
             print("RED-ON-REVERT", identity, "assertion=" + identity,
-                  "restored=PASS", "reviewed=" + REVIEWED_HEAD,
+                  "restored=PASS",
                   "candidate_sha256=" + digest)
     print("EXECUTED", ",".join(ids))
 
@@ -353,7 +387,7 @@ def shared_tests(module, capture_source, run_source, *, reversals):
                 raise RuntimeError("shared reversal survived: " + identity)
             capture_test(candidate(capture_source), identity, command, duration, cap)
             print("RED-ON-REVERT", identity, "assertion=" + identity,
-                  "restored=PASS", "reviewed=" + REVIEWED_HEAD,
+                  "restored=PASS",
                   "candidate_sha256=" + digest)
 
     def policy(text, identity, predicate):
@@ -390,7 +424,7 @@ def shared_tests(module, capture_source, run_source, *, reversals):
                 raise RuntimeError("policy reversal survived: " + identity)
             policy(run_source, identity, predicate)
             print("RED-ON-REVERT", identity, "assertion=" + identity,
-                  "restored=PASS", "reviewed=" + REVIEWED_HEAD,
+                  "restored=PASS",
                   "candidate_sha256=" + digest)
 
     policy(run_source, "policy/scrub-and-bind",
@@ -411,7 +445,7 @@ def shared_tests(module, capture_source, run_source, *, reversals):
             raise RuntimeError("scrub reversal survived")
         policy(run_source, "policy/scrub-and-bind", predicate)
         print("RED-ON-REVERT policy/scrub-and-bind assertion=policy/scrub-and-bind",
-              "restored=PASS", "reviewed=" + REVIEWED_HEAD,
+              "restored=PASS",
               "candidate_sha256=" + digest)
 
 
