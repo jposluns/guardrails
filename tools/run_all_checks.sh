@@ -70,6 +70,8 @@ run_gate "license-qual-selftest" python3 -I -B tools/check_license_qualification
 run_gate "license-qual" python3 -I -B tools/check_license_qualification.py
 run_gate "footer-selftest" python3 -I -B tools/check_footer.py --self-test
 run_gate "footer" python3 -I -B tools/check_footer.py
+# Repository-only assertion lives outside the shipped tooling.
+run_gate "newtab-repo-contract" python3 -I -B .github/check_newtab_contract.py
 run_gate "newtab-selftest" python3 -I -B tools/check_newtab.py --self-test
 run_gate "newtab" python3 -I -B tools/check_newtab.py
 run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --self-test

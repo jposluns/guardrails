@@ -112,6 +112,9 @@ jobs:
       - name: Footer coverage
         run: python3 -I -B tools/check_footer.py
 
+      - name: New-tab repository coverage contract
+        run: python3 -I -B .github/check_newtab_contract.py
+
       - name: New-tab external links self-test
         run: python3 -I -B tools/check_newtab.py --self-test
 
