@@ -113,7 +113,8 @@ def _scrubbed_env():
     return env
 
 
-def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S, allow_lazy_fetch=False, config_overrides=None):
+def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S, allow_lazy_fetch=False, config_overrides=None,
+             max_output_bytes=8 << 20):
     """Run `git --no-pager --no-replace-objects -c core.fsmonitor=false -C <store_root> <args>` under the
     scrubbed environment, bounded by a
     timeout. Returns a _GitOutcome: `completed` is True only when the process ran to completion (then `rc`,
@@ -150,7 +151,8 @@ def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S, allow_lazy_fetch=Fal
     nor pre-set a conflicting GIT_CONFIG_COUNT to defeat the neutralization: the count and pairs written here
     are the authoritative ones. An env override is command-level precedence, so (like `-c core.fsmonitor=false`
     above) it overrides repository AND worktree config."""
-    cmd = [git, "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(store_root)] + list(args)
+    cmd = [git, "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false",
+           "-c", "core.commitGraph=false", "-C", str(store_root)] + list(args)
     env = _scrubbed_env()
     if not allow_lazy_fetch:
         env["GIT_NO_LAZY_FETCH"] = "1"   # no promisor fetch on a missing object (a fetch can reach core.sshCommand)
@@ -162,15 +164,64 @@ def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S, allow_lazy_fetch=Fal
         for i, (key, value) in enumerate(config_overrides):
             env["GIT_CONFIG_KEY_{}".format(i)] = key
             env["GIT_CONFIG_VALUE_{}".format(i)] = value
+    return _capture_bounded(cmd, env, timeout, max_output_bytes)
+
+
+def _capture_bounded(cmd, env, timeout, max_output_bytes):
+    """Capture stdout AND stderr incrementally; cap and timeout never return partial success."""
+    import math
+    import selectors
+    import time
+    if (type(max_output_bytes) is not int or not 0 < max_output_bytes <= (64 << 20)
+            or type(timeout) not in (int, float) or not math.isfinite(timeout)
+            or not 0 < timeout <= 300):
+        return _GitOutcome(False, None, b"", "invalid bounded-read control")
+    deadline = time.monotonic() + timeout
+    proc = None
+    selector = selectors.DefaultSelector()
+    chunks = [bytearray(), bytearray()]
+    total = 0
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              env=env, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return _GitOutcome(False, None, b"", "git timed out after {}s".format(timeout))
-    except OSError as exc:
-        return _GitOutcome(False, None, b"", "could not launch git ({})".format(exc))
-    err = (proc.stderr or b"").decode("utf-8", "replace")
-    return _GitOutcome(True, proc.returncode, proc.stdout or b"", err)
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=env)
+        for i, stream in enumerate((proc.stdout, proc.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, i)
+        while selector.get_map():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("git read timed out")
+            ready = selector.select(left)
+            if not ready:
+                raise TimeoutError("git read timed out")
+            for key, _event in ready:
+                block = os.read(key.fileobj.fileno(), min(65536, max_output_bytes - total + 1))
+                if not block:
+                    selector.unregister(key.fileobj)
+                    continue
+                total += len(block)
+                if total > max_output_bytes:
+                    raise ValueError("git output exceeded streaming byte limit")
+                chunks[key.data].extend(block)
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("git read timed out")
+        rc = proc.wait(timeout=left)
+        return _GitOutcome(True, rc, bytes(chunks[0]), bytes(chunks[1]).decode("utf-8", "replace"))
+    except (OSError, ValueError, TimeoutError, subprocess.TimeoutExpired) as exc:
+        return _GitOutcome(False, None, b"", str(exc))
+    finally:
+        selector.close()
+        if proc is not None:
+            if proc.poll() is None:
+                proc.kill()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass  # No success is reported; an uninterruptible kernel wait is a platform residual.
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 # --- OPF-STATUS-FILTER-SUPPRESS: neutralize repo/worktree clean-process filters on a worktree-content probe -
