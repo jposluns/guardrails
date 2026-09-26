@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "51a6750b16af5eadde887fec6dc3a45cf05f98a2dec7a25001cc1a862d7ae238"
+tree-sha256 = "8a12325b0a0d24755331a682ab6e134816655481ddf9bb669cc7e0adc4bbc100"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 154236
-sha256 = "8de791ce09811771cfd7ef5acb5031aa4d6f38c94970676fef87f8b951d2642c"
+bytes = 154919
+sha256 = "d14ab660a86731c957a32b97d889674e9d40805cd0e7c64d47c265b5cd397e79"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -96,8 +96,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 14249
-sha256 = "45bb0a9d5e1654fee9b222ca226b9d76a81127fe63bf260e26bc5339bdbd25d6"
+bytes = 14664
+sha256 = "86c4c57ba610602f637a437d4ff7c2fd7b4cd2b38da21a494ea7fe953631070a"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -3076,8 +3076,8 @@ sha256 = "7f6b2539235b5eea9dc6a61636336ebbdeb7917d1e23f35a6663107ee519ab7b"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 76316
-sha256 = "0605ec12e1b70768e75e682165726d45f0274c8a85e21e565f63dab88674f087"
+bytes = 77441
+sha256 = "443f9b3546255f7e8235abcfe38af75f605de21a679213841f6081ee51850194"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -3161,8 +3161,8 @@ sha256 = "c56cc0b8082aea3d2c45f62b27a4270c3597601ecaf993bbfd52cab84efaa85a"
 
 [[sources]]
 path = "tools/check_newtab.py"
-bytes = 16090
-sha256 = "360ef09aa55c0eed4f8696669dc01d9bcf4f50d93293b4189f069fa383f67f28"
+bytes = 34082
+sha256 = "4b27ed148dfb02f5c85cf87731269da8eca46ab786bac23f87a5a7cfbe5dc8f4"
 
 [[sources]]
 path = "tools/check_no_dashes.py"
@@ -3436,8 +3436,8 @@ sha256 = "6c0a50feeee104f3993c696a97f6860722e0deaa4ce75e494864d8662f0759d3"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 16157
-sha256 = "ac299cb70375e31e0b757ca04c1bfff55b03e58f89d72bec3bee706fe3c7a75d"
+bytes = 16299
+sha256 = "bc46f5003b28ca3a3485f6451da07cd9ac021adbdd0fd95cba1c39df468eb076"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

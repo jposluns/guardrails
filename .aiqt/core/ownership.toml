@@ -32,6 +32,14 @@ reason = "CI currency workflow; tracked, not shipped. Exact literal, not a glob 
 path = ".github/workflows/quality.yml"
 reason = "CI quality workflow; tracked, not shipped. Exact literal, not a glob (F-235)."
 
+[[exclusion]]
+path = ".github/check_newtab_contract.py"
+reason = "Repository-local NEWTAB declaration-content assertion; tracked, not shipped."
+
+[[exclusion]]
+path = ".aiqt/newtab.toml"
+reason = "Repository-local NEWTAB coverage declaration; tracked, not shipped. Adopters own their roots, like .aiqt/derived-command-parameters.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
+
 # --- concern-1: manifest-self and the managed block ----------------------------------------------------
 
 [[release-class]]

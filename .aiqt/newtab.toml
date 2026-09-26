@@ -1,0 +1,2 @@
+# Required NEWTAB coverage for this repository.
+roots = ["site", "opf/site"]
