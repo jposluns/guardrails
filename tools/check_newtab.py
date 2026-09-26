@@ -208,6 +208,10 @@ def run(root):
     return worst
 
 
+# Synthetic declaration for portable self-tests, independent of repository config.
+_SELF_TEST_DECLARATION = b'roots = ["site", "opf/site"]\n'
+
+
 def _self_test():
     ext_ok = '<a href="https://github.com/x" target="_blank" rel="noopener noreferrer">gh</a>'
     cases = [
@@ -318,19 +322,15 @@ def _self_test():
     import contextlib
     import io
     import json
+    import subprocess
     import tempfile
     import tomllib
     from unittest.mock import patch
 
-    declaration_path = Path(__file__).resolve().parents[1] / ".aiqt/newtab.toml"
-    try:
-        declaration_bytes = declaration_path.read_bytes()
-        declared = tomllib.loads(declaration_bytes.decode("utf-8"))
-        if declared != {"roots": ["site", "opf/site"]}:
-            raise ValueError("expected exactly roots = ['site', 'opf/site']")
-    except (OSError, ValueError) as exc:
-        print("FAIL: checked-in NEWTAB declaration: {}".format(exc))
-        return 1
+    # Synthetic declaration bytes: the portable self-test never reads repository
+    # configuration. The live gate and review own this repository's root contract.
+    declaration_bytes = _SELF_TEST_DECLARATION
+    declared = tomllib.loads(declaration_bytes.decode("utf-8"))
 
     safe = "<p>safe</p>"
     unsafe = '<a href="https://newtab.invalid/x">unsafe</a>'
@@ -366,6 +366,56 @@ def _self_test():
             failures.append("{}: expected {} and {!r}, got {!r}: {}".format(
                 label, wanted, mention, got, diagnostic))
 
+    # Copy only the gate and its import dependencies, never repository config.
+    # runpy supplies a private recursion guard only to the child self-test; no
+    # inherited environment variable can suppress these adopter discriminators.
+    if not globals().get("_NEWTAB_SELFTEST_CHILD", False):
+        tools_dir = Path(__file__).resolve().parent
+        child_self_test = (
+            "import runpy, sys; script = sys.argv.pop(1); "
+            "runpy.run_path(script, run_name='__main__', "
+            "init_globals={'_NEWTAB_SELFTEST_CHILD': True})"
+        )
+        layouts = (
+            ("undeclared site-only", ("site",), None),
+            ("declared site-only", ("site",), b'roots = ["site"]\n'),
+            ("declared custom roots", ("docs/site", "manual/site"),
+             b'roots = ["docs/site", "manual/site"]\n'),
+        )
+        for label, roots, config in layouts:
+            pages = tuple(path + "/index.html" for path in roots)
+            with fixture(pages=pages, declaration=config) as r:
+                copied_tools = r / "tools"
+                copied_tools.mkdir()
+                for name in ("check_newtab.py", "_walk.py", "_gen_common.py"):
+                    (copied_tools / name).write_bytes((tools_dir / name).read_bytes())
+                unrelated_cwd = r / "unrelated"
+                unrelated_cwd.mkdir()
+                script = str(copied_tools / "check_newtab.py")
+                commands = (
+                    ("--self-test",
+                     [sys.executable, "-I", "-B", "-c", child_self_test,
+                      script, "--self-test"],
+                     ("PASS: check_newtab self-test",)),
+                    ("live", [sys.executable, "-I", "-B", script],
+                     tuple("PASS: every external {}/ link".format(path) for path in roots)),
+                )
+                for mode, command, expected_output in commands:
+                    try:
+                        result = subprocess.run(command, cwd=unrelated_cwd,
+                                                capture_output=True, text=True, timeout=30)
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        failures.append("copied-tools {} {}: {}".format(label, mode, exc))
+                        continue
+                    if (result.returncode != 0 or
+                            any(text not in result.stdout for text in expected_output)):
+                        failures.append("copied-tools {} {}: expected exit 0 and {}, "
+                                        "got {}: {}{}".format(
+                                            label, mode, expected_output, result.returncode,
+                                            result.stdout, result.stderr))
+                    else:
+                        print("PASS: copied-tools {} {}".format(label, mode))
+
     # Existing absent/page-less/safe/unsafe single-root expectations remain.
     with fixture(pages=()) as r:
         expect("absent single root", r, 2, "site", single="site")
@@ -386,7 +436,7 @@ def _self_test():
         expect("both present defaults", r, 0)
 
     with fixture(declaration=declaration_bytes) as r:
-        expect("checked-in declaration accepted", r, 0)
+        expect("synthetic declaration accepted", r, 0)
     for missing in declared["roots"]:
         pages = tuple(path + "/index.html" for path in declared["roots"] if path != missing)
         with fixture(pages=pages, declaration=declaration_bytes) as r:
@@ -410,6 +460,8 @@ def _self_test():
         (r / "docs/site").mkdir(parents=True)
         (r / "docs/site/bad.html").write_text(unsafe, encoding="utf-8")
         expect("override selects custom input", r, 1, "docs/site/bad.html")
+    # On Linux os.pathsep == ":", so this cannot distinguish os.pathsep from
+    # a hardcoded colon. A Windows CI leg would strengthen that discriminator.
     with fixture(pages=("custom/one/index.html", "custom/two/index.html"),
                  override=os.pathsep.join(("custom/one", "custom/two"))) as r:
         (r / "custom/two/index.html").write_text(unsafe, encoding="utf-8")
