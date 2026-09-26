@@ -82,7 +82,12 @@ def _sha(data):
 
 
 class _RetainLock(Exception):
-    """A publication attempt is left open (rollback incomplete); the journal lock is kept for recovery."""
+    """A publication attempt's outcome is indeterminate (left open, or its state unreadable): it may have
+    committed, so neither promoted nor aborted is claimed, and the journal lock is kept for recovery."""
+
+    def __init__(self, message, ref):
+        super().__init__(message)
+        self.ref = ref
 
 
 # --- the path boundary: reject, never normalize --------------------------------------------------------
@@ -549,6 +554,37 @@ def _require_colocated(product_root, resolution):
         raise _cannot("the store root is not the product root; refused")
 
 
+def _post_launch_result(cap, run_id, attempt, ref, exc, returned):
+    """The ONE outcome decision for any exception once the publication attempt is launched: durable journal
+    evidence decides, never where the exception arose or its class. The transaction call returns only after
+    COMPLETE is published, so `returned` is committed; otherwise the attempt state is re-read, and a re-read
+    that itself fails is indeterminate. Only an unopened attempt or a terminal rollback reads as aborted.
+    Residual: a BaseException outside Exception (an interrupt or exit) is not caught; it propagates with no
+    result formed, so it reports neither outcome."""
+    if returned:
+        return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but live verification could not "
+                                             "complete ({}); inspect the retained journal".format(exc)],
+                           promoted=True, outcome="promoted", restore_ref=ref)
+    try:
+        state = _opf_journal.attempt_states(cap, KIND, run_id).get(attempt, "nothing-opened")
+    except Exception as read_exc:  # noqa: BLE001  an unreadable state is indeterminate, never "aborted"
+        state = "unreadable ({})".format(read_exc)
+    # COMPLETE is durable, so the attempt COMMITTED and only a later journal step (such as the closing
+    # directory fsync) failed: a committed promotion is never reported as aborted.
+    if state == "complete":
+        return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but the journal post-commit step did not "
+                                             "fully complete ({}); inspect the retained journal".format(exc)],
+                           promoted=True, outcome="promoted", restore_ref=ref)
+    if state in ("nothing-opened", "rolled-back"):
+        return ApplyResult(CANNOT_EVALUATE, ["publication aborted and rolled back ({}); the reserved ids stay "
+                                             "consumed and a retry reuses them".format(exc)],
+                           promoted=False, outcome="aborted", restore_ref=ref)
+    # An open attempt (INTENT without a terminal frame, which recovery may roll FORWARD) or an unreadable
+    # state: commit cannot be ruled out, so the outcome is indeterminate and the lock is kept for recovery.
+    raise _RetainLock("publication attempt {} reached no confirmed terminal state ({}; journal state {}); "
+                      "it may have committed".format(ref["txn_id"], exc, state), ref)
+
+
 def _apply_locked(cap, resolution, run_id, homes, now):
     root_fd = _opf_store._open_root_fd(resolution.store_root)
     try:
@@ -585,43 +621,29 @@ def _apply_locked(cap, resolution, run_id, homes, now):
                                reservation, acc_raw, binding, roster, vendors)
         _hook("before-publication", root=resolution.store_root, plan=plan)
         ref = dict(txn_id=_opf_journal.attempt_txn(KIND, run_id, attempt), journal_rel=_opf_store.journal_root(KIND))
+        # From the launch on, ONE guard: no exception, from the transaction, verification, or any later step,
+        # can report a committed (or possibly committed) promotion as aborted; _post_launch_result decides.
+        returned = False
         try:
             _opf_journal.run_attempt_transaction(cap, KIND, run_id, attempt, ops.ops,
                                                  lambda op: ops.content[op["path"]])
-        except _journal.JournalError as exc:
-            state = _opf_journal.attempt_states(cap, KIND, run_id).get(attempt, "nothing-opened")
-            # COMPLETE is durable, so the attempt COMMITTED and only a later journal step (such as the
-            # closing directory fsync) failed: a committed promotion is never reported as aborted.
-            if state == "complete":
-                return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but the journal post-commit step "
-                                                     "did not fully complete ({}); inspect the retained "
-                                                     "journal".format(exc)],
-                                   promoted=True, outcome="promoted", restore_ref=ref)
-            if state in ("nothing-opened", "rolled-back"):
-                return ApplyResult(CANNOT_EVALUATE, ["publication aborted and rolled back ({}); the reserved "
-                                                     "ids stay consumed and a retry reuses them".format(exc)],
-                                   promoted=False, outcome="aborted", restore_ref=ref)
-            raise _RetainLock("publication failed and its rollback did not complete ({})".format(exc))
-        # The transaction has COMMITTED: a verification read that cannot complete is "could not verify",
-        # never "aborted", so the committed promotion and its journal reference are still reported.
-        try:
+            returned = True
             problems = _post_verify(root_fd, plan, live, run_rel)
-        except (_journal.JournalError, OSError) as verify_exc:
-            return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but live verification could not "
-                                                 "complete ({}); inspect the retained journal".format(verify_exc)],
-                               promoted=True, outcome="promoted", restore_ref=ref)
-        if problems:
-            return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but live verification failed ({}); "
-                                                 "inspect the retained journal".format("; ".join(problems))],
-                               promoted=True, outcome="promoted", restore_ref=ref)
-        return ApplyResult(CLEAN, [], promoted=True, outcome="promoted", restore_ref=ref)
+            if problems:
+                return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but live verification failed ({}); "
+                                                     "inspect the retained journal".format("; ".join(problems))],
+                                   promoted=True, outcome="promoted", restore_ref=ref)
+            return ApplyResult(CLEAN, [], promoted=True, outcome="promoted", restore_ref=ref)
+        except Exception as exc:  # noqa: BLE001  the post-launch guard: journal evidence decides the outcome
+            return _post_launch_result(cap, run_id, attempt, ref, exc, returned)
     finally:
         _journal._close_fd_quietly(root_fd)
 
 
 def apply_ingest(product_root, run_id, *, now=None):
     """Promote the reviewed, accepted staged ingest run `run_id`. Returns an ApplyResult; `promoted` and
-    `outcome` are read from the result, never inferred from the verdict."""
+    `outcome` are read from the result, never inferred from the verdict. An attempt whose commit can be
+    neither confirmed nor ruled out reports promoted None and outcome "indeterminate", never "aborted"."""
     try:
         _journal.require_containment()
         _opf_import._require_utc(now)
@@ -645,7 +667,7 @@ def apply_ingest(product_root, run_id, *, now=None):
     except _RetainLock as exc:
         retain = True
         return ApplyResult(CANNOT_EVALUATE, ["{}; the journal lock is retained for recovery".format(exc)],
-                           promoted=False, outcome="aborted")
+                           promoted=None, outcome="indeterminate", restore_ref=exc.ref)
     except _StageError as exc:
         return ApplyResult(exc.verdict, [exc.message], promoted=False,
                            outcome="rejected" if exc.verdict == FINDING else "aborted")
@@ -1043,9 +1065,10 @@ def _st_postverify_fault(apply, root, rid, run, point, error):
 def _t_postverify_committed(base, check):
     """A read fault in post-commit verification never reports a committed promotion as aborted: the result
     is CANNOT_EVALUATE with promoted=True, outcome "promoted", and the committed transaction's ref. Each
-    fault point is driven with both exception classes the guard catches."""
+    fault point is driven with a JournalError, an OSError, and a RecursionError: the class-wide post-launch
+    guard does not depend on the exception class."""
     for point in ("source", "staging"):
-        for error in (_journal.JournalError, OSError):
+        for error in (_journal.JournalError, OSError, RecursionError):
             name = "postverify-{}-{}".format(point, error.__name__)
             root, rid, run = _st_build(base, name)
             result, fired = _st_postverify_fault(apply_ingest, root, rid, run, point, error)
@@ -1101,7 +1124,8 @@ def _t_postcommit_journal_fault(base, check):
     """A journal fault after the COMPLETE frame is durable never reports the committed promotion as
     aborted: the attempt reads "complete" and the result is CANNOT_EVALUATE with promoted=True, outcome
     "promoted", and the committed transaction's ref. A pre-commit failure still rolls back and reports
-    aborted, and the same fault after INTENT alone (an open attempt) still retains the journal lock."""
+    aborted, and the same fault after INTENT alone (an open attempt) is indeterminate, never aborted, with the
+    journal lock retained."""
     from unittest.mock import patch
     root, rid, run = _st_build(base, "postcommit-complete")
     result, fired, states = _st_postcommit_fault(apply_ingest, root, rid, _journal.F_COMPLETE)
@@ -1129,16 +1153,152 @@ def _t_postcommit_journal_fault(base, check):
           and not (root / ".archive/legacy/move.md").exists() and run.is_dir())
     root, rid, run = _st_build(base, "postcommit-open")
     opened, fired, states = _st_postcommit_fault(apply_ingest, root, rid, _journal.F_INTENT)
+    ref = dict(txn_id=_opf_journal.attempt_txn(KIND, rid, 1), journal_rel=_opf_store.journal_root(KIND))
+    # Flip: reporting an open attempt as aborted claims a rollback that has not happened.
     check("postcommit-open-retains-lock", fired == [_journal.F_INTENT] and states == {1: "open"}
-          and opened.promoted is False and opened.outcome == "aborted"
+          and opened.verdict == CANNOT_EVALUATE and opened.promoted is None
+          and opened.outcome == "indeterminate" and opened.restore_ref == ref
           and "retained for recovery" in " ".join(opened.findings))
+
+
+def _st_reread_fault(apply, error):
+    """Wrap `apply` so every attempt-state read made once the publication attempt is launched raises
+    `error`; the classification ahead of the launch reads normally. Returns (wrapped, raised)."""
+    from unittest.mock import patch
+    raised = []
+
+    def wrapped(*args, **kwargs):
+        launched = []
+        real_txn = _opf_journal.run_attempt_transaction
+        real_states = _opf_journal.attempt_states
+
+        def txn(*a, **k):
+            launched.append(True)
+            return real_txn(*a, **k)
+
+        def states(*a, **k):
+            if launched:
+                raised.append(True)
+                raise error("injected attempt-state re-read fault")
+            return real_states(*a, **k)
+
+        with patch.object(_opf_journal, "run_attempt_transaction", txn), \
+                patch.object(_opf_journal, "attempt_states", states):
+            return apply(*args, **kwargs)
+    return wrapped, raised
+
+
+def _st_complete_lost(apply, root, rid):
+    """Apply with the COMPLETE frame's write refused before any byte of it reaches the log, after every op
+    applied and verified: the attempt reads "open" and recovery can roll it FORWARD, so its commit can be
+    neither confirmed nor ruled out. Recovery then runs inside the SAME homes-2 activation, whose exit
+    restores the manifest bytes the apply wrote. Returns (result, fired, states, recovered)."""
+    from unittest.mock import patch
+    marker = _journal.MAGIC + b" " + _journal.F_COMPLETE.encode() + b" "
+    fired = []
+    real_write_all = _journal._write_all
+
+    def write_all(fd, data):
+        if data.startswith(marker):
+            fired.append(_journal.F_COMPLETE)
+            raise OSError("injected fault writing the COMPLETE frame")
+        real_write_all(fd, data)
+
+    with _opf_import._self_test_homes2_active(root):
+        with patch.object(_journal, "_write_all", write_all):
+            result = apply(root, rid, now=_NOW)
+        states = _st_attempt_states(root, rid)
+        recovered = _st_recover(root, rid, 1)
+    return result, fired, states, recovered
+
+
+def _st_foreign_txn_fault(apply, root, rid):
+    """Apply with a ValueError, a class the journal's own rollback does not catch, raised by the post-apply
+    poststate check: every op applied, no terminal frame is written, and the attempt stays open. An
+    exception escaping `apply` is returned in place of the result. Returns (result, states)."""
+    from unittest.mock import patch
+
+    def poststate(_root_fd, _op):
+        raise ValueError("injected foreign exception in the post-apply poststate check")
+
+    with _opf_import._self_test_homes2_active(root):
+        with patch.object(_journal, "_poststate_verifies", poststate):
+            try:
+                result = apply(root, rid, now=_NOW)
+            except Exception as exc:  # noqa: BLE001  an escaped exception is the misreport under test
+                result = exc
+        states = _st_attempt_states(root, rid)
+    return result, states
+
+
+def _st_recover(root, rid, attempt):
+    """Run journal recovery over one attempt directly (the recovery verb is deferred to slice 2) and return
+    its verdict: "rolled-forward" shows every op of an open attempt applied and verified."""
+    root_fd = _opf_store._open_root_fd(root)
+    try:
+        jr_fd = _journal.open_journal_root_fd(root_fd, _opf_store.journal_root(KIND))
+        try:
+            txn_dir = Path(root) / _opf_store.journal_root(KIND) / _opf_journal.attempt_txn(KIND, rid, attempt)
+            return _journal.recover(jr_fd, txn_dir, root_fd)
+        finally:
+            _journal._close_fd_quietly(jr_fd)
+    finally:
+        _journal._close_fd_quietly(root_fd)
+
+
+def _t_postlaunch_indeterminate(base, check):
+    """The post-launch guard is class-wide. A failing attempt-state re-read after a committed publication is
+    indeterminate, never aborted: CANNOT_EVALUATE, promoted None (commit neither confirmed nor ruled out),
+    outcome "indeterminate", the attempt's ref, and the lock retained. An open attempt whose every op
+    applied (its COMPLETE frame never written, or a foreign exception past the journal's rollback) is
+    indeterminate too, never a false abort and never a false promotion. A transaction that RETURNED is
+    committed however a later step fails, even while the attempt state is unreadable."""
+    for error in (_journal.JournalError, OSError):
+        name = "reread-{}".format(error.__name__)
+        root, rid, run = _st_build(base, name)
+        wrapped, raised = _st_reread_fault(apply_ingest, error)
+        result, fired, states = _st_postcommit_fault(wrapped, root, rid, _journal.F_COMPLETE)
+        home = root / _opf_import._ingest_acceptance_home(rid)
+        ref = dict(txn_id=_opf_journal.attempt_txn(KIND, rid, 1), journal_rel=_opf_store.journal_root(KIND))
+        check(name + "-fired-after-commit", fired == [_journal.F_COMPLETE] and len(raised) == 1
+              and states == {1: "complete"} and (home / PROMOTION_NAME).is_file() and not run.exists())
+        # Flip: without the guarded re-read the read fault escapes to the aborted handler (promoted=False).
+        check(name + "-indeterminate-not-aborted", result.verdict == CANNOT_EVALUATE and result.promoted is None
+              and result.outcome == "indeterminate" and result.restore_ref == ref
+              and "retained for recovery" in " ".join(result.findings))
+    root, rid, run = _st_build(base, "complete-lost")
+    result, fired, states, recovered = _st_complete_lost(apply_ingest, root, rid)
+    ref = dict(txn_id=_opf_journal.attempt_txn(KIND, rid, 1), journal_rel=_opf_store.journal_root(KIND))
+    check("complete-lost-open-applied", fired == [_journal.F_COMPLETE] and states == {1: "open"}
+          and (root / ".archive/legacy/move.md").read_bytes() == b"moveme\n"
+          and not (root / "legacy/move.md").exists() and not run.exists())
+    # Flip: reporting this open attempt aborted denies a promotion recovery rolls forward; reporting it
+    # promoted claims a COMPLETE the journal does not hold.
+    check("complete-lost-indeterminate", result.verdict == CANNOT_EVALUATE and result.promoted is None
+          and result.outcome == "indeterminate" and result.restore_ref == ref
+          and "retained for recovery" in " ".join(result.findings))
+    check("complete-lost-recovery-rolls-forward", recovered == "rolled-forward")
+    root, rid, run = _st_build(base, "foreign-txn")
+    result, states = _st_foreign_txn_fault(apply_ingest, root, rid)
+    ref = dict(txn_id=_opf_journal.attempt_txn(KIND, rid, 1), journal_rel=_opf_store.journal_root(KIND))
+    # Flip: without the class-wide guard the foreign exception escapes apply_ingest with no result formed.
+    check("foreign-txn-indeterminate", states == {1: "open"} and getattr(result, "promoted", False) is None
+          and getattr(result, "outcome", None) == "indeterminate" and getattr(result, "restore_ref", None) == ref)
+    root, rid, run = _st_build(base, "returned-unreadable")
+    wrapped, raised = _st_reread_fault(apply_ingest, _journal.JournalError)
+    result, fired = _st_postverify_fault(wrapped, root, rid, run, "source", _journal.JournalError)
+    # Flip: without the returned-transaction evidence the unreadable state demotes a known commit to
+    # indeterminate.
+    check("returned-unreadable-promoted", len(fired) == 1 and not raised and result.verdict == CANNOT_EVALUATE
+          and result.promoted is True and result.outcome == "promoted")
 
 
 TESTS = (("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
          ("unreviewed-refused", _t_unreviewed_refused), ("traversal-refused", _t_traversal_refused),
          ("mint-move-toctou", _t_mint_move_toctou), ("per-record-refused", _t_per_record_refused),
          ("postverify-committed", _t_postverify_committed),
-         ("postcommit-journal-fault", _t_postcommit_journal_fault))
+         ("postcommit-journal-fault", _t_postcommit_journal_fault),
+         ("postlaunch-indeterminate", _t_postlaunch_indeterminate))
 
 
 def self_test(only=None):
@@ -1186,7 +1346,9 @@ def self_test(only=None):
 # reloads the pristine source and asserts the same check is restored to PASS. A reversal that survives, a
 # wrong assertion, or a non-unique mutation target is a harness failure, never a silent pass. This copies
 # the shape of check_opf_init_observe.py (the PR4a observer gate), including its mutation of a dependency's
-# source (there _opf_observe.py; here _opf_allocation.py) for a guard that lives outside this file.
+# source (there _opf_observe.py; here _opf_allocation.py) for a guard that lives outside this file. A
+# class-width guard is backed by several discriminators sharing its one mutation, one per sibling instance
+# of the class, so reverting it must re-expose EVERY sibling, not only the one first cited.
 
 # The banner above is the first occurrence of this text in the file and marks where the production region
 # ends; mutations are confined ahead of it (see _red_on_revert). The literal here is a second occurrence,
@@ -1273,26 +1435,110 @@ def _d_inline_required(module, base_dir):
                   "per-record/inline-required")
 
 
-def _d_postverify_committed(module, base_dir):
-    """The post-commit verification guard in `_apply_locked`: a read fault after the commit reports the
-    promotion as committed-but-unverified. Reverting the guard lets the fault escape to the aborted
-    handler, so a committed promotion reads promoted=False, outcome "aborted"."""
+# Post-launch probes: each drives one sibling of the committed-reported-as-aborted class (or the genuine
+# rollback it must not absorb) through a candidate module and returns whether it is reported truthfully.
+
+def _p_postverify_committed(module, base_dir):
+    """A JournalError in post-commit verification is committed-but-unverified, never aborted."""
     root, rid, run = module._st_build(base_dir, "postverify")
     result, fired = module._st_postverify_fault(module.apply_ingest, root, rid, run, "source",
                                                 _journal.JournalError)
-    _revert_check(len(fired) == 1 and result.promoted is True and result.outcome == "promoted",
-                  "postverify/committed-not-aborted")
+    return len(fired) == 1 and result.promoted is True and result.outcome == "promoted"
 
 
-def _d_postcommit_complete(module, base_dir):
-    """The committed-attempt branch in `_apply_locked`'s journal-error handler: a fault after the COMPLETE
-    frame is durable reports the promotion as committed. Reverting the branch routes the complete attempt
-    to _RetainLock, so a committed promotion reads promoted=False, outcome "aborted"."""
+def _p_postverify_foreign(module, base_dir):
+    """A verification exception outside (JournalError, OSError) is committed-but-unverified too."""
+    root, rid, run = module._st_build(base_dir, "postverify-foreign")
+    result, fired = module._st_postverify_fault(module.apply_ingest, root, rid, run, "source", RecursionError)
+    return len(fired) == 1 and result.promoted is True and result.outcome == "promoted"
+
+
+def _p_postcommit_complete(module, base_dir):
+    """A journal fault after the COMPLETE frame is durable is a committed promotion."""
     root, rid, _run = module._st_build(base_dir, "postcommit")
     result, fired, states = module._st_postcommit_fault(module.apply_ingest, root, rid, _journal.F_COMPLETE)
-    _revert_check(fired == [_journal.F_COMPLETE] and states == {1: "complete"} and result.promoted is True
-                  and result.outcome == "promoted", "postcommit/complete-not-aborted")
+    return (fired == [_journal.F_COMPLETE] and states == {1: "complete"} and result.promoted is True
+            and result.outcome == "promoted")
 
+
+def _p_reread_indeterminate(module, base_dir):
+    """A failing attempt-state re-read after a committed publication is indeterminate, never aborted."""
+    root, rid, _run = module._st_build(base_dir, "reread")
+    wrapped, raised = module._st_reread_fault(module.apply_ingest, _journal.JournalError)
+    result, fired, states = module._st_postcommit_fault(wrapped, root, rid, _journal.F_COMPLETE)
+    return (fired == [_journal.F_COMPLETE] and len(raised) == 1 and states == {1: "complete"}
+            and result.promoted is None and result.outcome == "indeterminate")
+
+
+def _p_complete_lost_indeterminate(module, base_dir):
+    """An open attempt whose COMPLETE frame never reached the log is indeterminate, never aborted."""
+    root, rid, _run = module._st_build(base_dir, "complete-lost")
+    result, fired, states, _recovered = module._st_complete_lost(module.apply_ingest, root, rid)
+    return (fired == [_journal.F_COMPLETE] and states == {1: "open"} and result.promoted is None
+            and result.outcome == "indeterminate")
+
+
+def _p_foreign_txn_indeterminate(module, base_dir):
+    """A foreign exception past the journal's rollback leaves an open attempt: indeterminate, never an
+    exception escaping apply_ingest with no result formed."""
+    root, rid, _run = module._st_build(base_dir, "foreign-txn")
+    result, states = module._st_foreign_txn_fault(module.apply_ingest, root, rid)
+    return (states == {1: "open"} and getattr(result, "promoted", False) is None
+            and getattr(result, "outcome", None) == "indeterminate")
+
+
+def _p_precommit_rollback_aborted(module, base_dir):
+    """A genuine pre-commit rollback is still aborted: the guard neither widens a rollback to indeterminate
+    nor launders it into a promotion."""
+    from unittest.mock import patch
+    root, rid, _run = module._st_build(base_dir, "rollback")
+    with _opf_import._self_test_homes2_active(root):
+        with patch.object(_journal, "_poststate_verifies", lambda _root_fd, _op: False):
+            result = module.apply_ingest(root, rid, now=module._NOW)
+        states = module._st_attempt_states(root, rid)
+    return states == {1: "rolled-back"} and result.promoted is False and result.outcome == "aborted"
+
+
+def _p_returned_is_committed(module, base_dir):
+    """A transaction that returned is committed when a later step fails, even while the state is unreadable."""
+    root, rid, run = module._st_build(base_dir, "returned")
+    wrapped, raised = module._st_reread_fault(module.apply_ingest, _journal.JournalError)
+    result, fired = module._st_postverify_fault(wrapped, root, rid, run, "source", _journal.JournalError)
+    return len(fired) == 1 and not raised and result.promoted is True and result.outcome == "promoted"
+
+
+def _probe_row(identity, probe, old, new):
+    """A discriminator row over this file whose focused test asserts `probe` under `identity`."""
+    def test(module, base_dir):
+        _revert_check(probe(module, base_dir), identity)
+    return (identity, "apply", test, old, new)
+
+
+# The ONE post-launch guard in `_apply_locked`, and its reversal (the guard catches nothing).
+_POST_LAUNCH_GUARD = "except Exception as exc:  # noqa: BLE001  the post-launch guard"
+_POST_LAUNCH_REVERTED = "except () as exc:  # reverted: the post-launch guard"
+
+# (identity, probe, unique old, new). The class width first: every sibling re-exposed by reverting the ONE
+# post-launch guard. Then each decision branch of `_post_launch_result` by its own mutation, including the
+# rollback branch, so the guard can neither absorb a genuine abort nor claim a commit it cannot confirm.
+_POST_LAUNCH = (
+    ("postverify/committed-not-aborted", _p_postverify_committed, _POST_LAUNCH_GUARD, _POST_LAUNCH_REVERTED),
+    ("postverify/foreign-class-not-aborted", _p_postverify_foreign, _POST_LAUNCH_GUARD, _POST_LAUNCH_REVERTED),
+    ("postlaunch/complete-fault-not-aborted", _p_postcommit_complete, _POST_LAUNCH_GUARD, _POST_LAUNCH_REVERTED),
+    ("postlaunch/reread-fault-not-aborted", _p_reread_indeterminate, _POST_LAUNCH_GUARD, _POST_LAUNCH_REVERTED),
+    ("postlaunch/complete-lost-not-aborted", _p_complete_lost_indeterminate, _POST_LAUNCH_GUARD,
+     _POST_LAUNCH_REVERTED),
+    ("postlaunch/foreign-txn-not-escaped", _p_foreign_txn_indeterminate, _POST_LAUNCH_GUARD,
+     _POST_LAUNCH_REVERTED),
+    ("postcommit/complete-not-aborted", _p_postcommit_complete, 'if state == "complete":', "if False:"),
+    ("postlaunch/reread-guarded", _p_reread_indeterminate, "except Exception as read_exc:",
+     "except () as read_exc:"),
+    ("postlaunch/rollback-still-aborted", _p_precommit_rollback_aborted,
+     'if state in ("nothing-opened", "rolled-back"):', "if False:"),
+    ("postlaunch/indeterminate-not-aborted", _p_complete_lost_indeterminate,
+     'promoted=None, outcome="indeterminate"', 'promoted=False, outcome="aborted"'),
+    ("postlaunch/returned-is-committed", _p_returned_is_committed, "returned = True", "returned = False"),
+)
 
 # (identity, source-key, focused test, unique old, new). source-key selects which module's source is
 # mutated: "apply" is this file, "alloc" is _opf_allocation.py (a dependency guard, mutated at source the
@@ -1306,11 +1552,7 @@ _DISCRIMINATORS = (
     ("per-record/inline-required", "apply", _d_inline_required,
      "_opf_import._require_inline_layout(root_fd, machine_rel)",
      "pass  # reverted: _opf_import._require_inline_layout(root_fd, machine_rel)"),
-    ("postverify/committed-not-aborted", "apply", _d_postverify_committed,
-     "except (_journal.JournalError, OSError) as verify_exc:", "except () as verify_exc:"),
-    ("postcommit/complete-not-aborted", "apply", _d_postcommit_complete,
-     'if state == "complete":', "if False:"),
-)
+) + tuple(_probe_row(*row) for row in _POST_LAUNCH)
 
 
 def _red_on_revert():

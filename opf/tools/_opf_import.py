@@ -397,7 +397,8 @@ class ApplyResult:
     """The inert result of an APPLY-PROMOTION attempt. Judged by its verdict. `promoted` is never inferred
     from the verdict alone (a caller reads this field); `outcome` distinguishes promoted / aborted / rejected
     / noop_already_complete, and `restore_ref` records the transaction id + journal location + observed HEAD
-    the verified restore rests on. See apply_import for the fail-closed ten-step promotion."""
+    the verified restore rests on. See apply_import for the fail-closed ten-step promotion. apply_ingest adds
+    indeterminate, with promoted None, for an attempt whose commit it can neither confirm nor rule out."""
     __slots__ = ("verdict", "findings", "promoted", "outcome", "restore_ref")
 
     def __init__(self, verdict, findings=None, promoted=False, outcome=None, restore_ref=None):
