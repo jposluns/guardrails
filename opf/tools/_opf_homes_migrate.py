@@ -774,7 +774,7 @@ def build_homes_plan(resolution, manifest_bytes, tree, *, now):
             _need(_children(tree, rel) == sorted(
                 (rel + "/sources", rel + "/" + imp.ACCEPTANCE_NAME)),
                 rel, "unknown durable archive directory")
-            for suffix in expected:
+            for suffix in sorted(expected):
                 member = rel + "/" + suffix
                 data = _bytes(tree, member)
                 wanted = (txn["acceptance_sha256"] if suffix == imp.ACCEPTANCE_NAME
