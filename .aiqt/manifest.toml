@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "cd621766ac42c8009f19eadf133b0801842494f2a519438d37994d26842081eb"
+tree-sha256 = "fee8f43da2943cf265a9f11656dca343aad87752c8d5edc6edafce7524e6fa1d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2556,8 +2556,8 @@ sha256 = "ab0eb20cbdbbf800784c78c7ecd5f70df5b0e17e7cd74812a46ab75d9cf891f1"
 
 [[sources]]
 path = "opf/tools/_opf_ingest_apply.py"
-bytes = 53463
-sha256 = "84c59cd8b6dd6977b23449a7f1fb49094783d8c9d9eff51b16418a90b0fe5296"
+bytes = 62391
+sha256 = "cc03f4ed308b64e4541d110b469fe1650e7cc13acc7b725db88eb0857a07b3d7"
 
 [[sources]]
 path = "opf/tools/_opf_init.py"
@@ -3436,8 +3436,8 @@ sha256 = "6c0a50feeee104f3993c696a97f6860722e0deaa4ce75e494864d8662f0759d3"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 16291
-sha256 = "824e6043346c1ce583e83b7433df8f349259108cd73e5be3880160cf4914bcc4"
+bytes = 16307
+sha256 = "57d9f88e3aa9df6e9637c0dbd208ba326cc156b7a8f940c028bdfa7b77c949e7"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

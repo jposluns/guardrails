@@ -998,12 +998,183 @@ def self_test(only=None):
     return 0
 
 
+# --- in-tree red-on-revert discrimination (mirrors the PR4 observer gate) ------------------------------
+#
+# The self-test above proves the guards accept a correct run; it cannot prove each guard is what refuses a
+# wrong one. Each discriminator reverts EXACTLY ONE guard by a unique source-text mutation, loads the
+# mutated module as a fresh candidate, and asserts the focused check the guard backs goes RED; it then
+# reloads the pristine source and asserts the same check is restored to PASS. A reversal that survives, a
+# wrong assertion, or a non-unique mutation target is a harness failure, never a silent pass. This copies
+# the shape of check_opf_init_observe.py (the PR4a observer gate), including its mutation of a dependency's
+# source (there _opf_observe.py; here _opf_allocation.py) for a guard that lives outside this file.
+
+# The banner above is the first occurrence of this text in the file and marks where the production region
+# ends; mutations are confined ahead of it (see _red_on_revert). The literal here is a second occurrence,
+# which the one-shot split never reaches.
+_REVERT_MARKER = "# --- in-tree red-on-revert discrimination (mirrors"
+
+
+def _load_revert_candidate(source, name, file_path):
+    """Compile `source` into a fresh module registered under `name`, injecting __file__ so the module's
+    own sys.path bootstrap runs. The caller pops it from sys.modules when the phase is done."""
+    import types
+    module = types.ModuleType(name)
+    module.__dict__["__file__"] = file_path
+    sys.modules[name] = module
+    try:
+        exec(compile(source, name, "exec"), module.__dict__)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+def _revert_check(cond, identity):
+    """A focused assertion whose failure names the discriminator identity, exactly as the mutant run
+    expects it (str(exc) == identity)."""
+    if not cond:
+        raise AssertionError(identity)
+
+
+def _d_reject_refused(module, base_dir):
+    """The durable-acceptance reject branch in `_require_acceptance`: a run a reviewer rejected is refused,
+    never promoted. Reverting `if rejected:` promotes it, flipping the outcome away from 'rejected'."""
+    root, rid, _run = module._st_build(base_dir, "reject", reject=True)
+    with _opf_import._self_test_homes2_active(root):
+        result = module.apply_ingest(root, rid, now=module._NOW)
+    _revert_check(result.promoted is False and result.outcome == "rejected", "acceptance/reject-refused")
+
+
+def _d_canonical_contained(module, base_dir):
+    """The canonical-path boundary in `_canonical`: a traversal spelling is refused as CANNOT_EVALUATE.
+    Reverting the `_home_file` validation to return the raw path lets the spelling through un-refused."""
+    try:
+        module._canonical("../escape.md", "probe source")
+    except module._StageError as exc:
+        _revert_check(exc.verdict == module.CANNOT_EVALUATE, "path/canonical-contained")
+        return
+    raise AssertionError("path/canonical-contained")
+
+
+def _d_journal_lock_required(module, base_dir):
+    """The journal-writer-lock requirement in `_opf_allocation.reserve_ingest_ids`: allocation refuses
+    when this process does not hold the ingest journal writer lock. Reverting the check lets a lock-less
+    caller through, so the lock-specific refusal no longer fires. The fixture is built with the real
+    module; only the allocation guard is the candidate. The assertion keys on the phrase only this guard
+    emits, so a different downstream AllocationError does not mask the reversal."""
+    fake = "imp-20260910T120000Z-0000000000000001"
+    root, _rid, _run = _st_build(base_dir, "alloc")
+    with _opf_import._self_test_homes2_active(root):
+        cap = _opf_oplock.acquire_operation(str(root), OPERATION)
+        try:
+            try:
+                module.reserve_ingest_ids(
+                    cap, fake,
+                    dict(run_id=fake, review_model_digest="x", bundle_digest="x", acceptance_digest="x"),
+                    [("k", "BI")], "stamp", set())
+                message = None
+            except module.AllocationError as exc:
+                message = str(exc)
+        finally:
+            _opf_oplock.release_operation(cap)
+    _revert_check(message is not None and "journal writer lock" in message,
+                  "allocation/journal-lock-required")
+
+
+# (identity, source-key, focused test, unique old, new). source-key selects which module's source is
+# mutated: "apply" is this file, "alloc" is _opf_allocation.py (a dependency guard, mutated at source the
+# same way the observer gate mutates its shared _opf_observe.py).
+_DISCRIMINATORS = (
+    ("acceptance/reject-refused", "apply", _d_reject_refused, "if rejected:", "if False:"),
+    ("path/canonical-contained", "apply", _d_canonical_contained,
+     "return _opf_store._home_file(path)", "return path"),
+    ("allocation/journal-lock-required", "alloc", _d_journal_lock_required,
+     "if not _opf_journal.writer_lock_held(cap, KIND):", "if False:"),
+)
+
+
+def _red_on_revert():
+    """Run the discriminators in a private temporary tree. Return 0 when every guard reverts to RED and
+    restores to PASS; raise on a survived reversal, a wrong assertion, or a non-unique mutation target."""
+    import shutil
+    import tempfile
+    here = Path(__file__).resolve().parent
+    sources = {"apply": here.joinpath("_opf_ingest_apply.py"), "alloc": here.joinpath("_opf_allocation.py")}
+    read = dict((key, path.read_text(encoding="utf-8")) for key, path in sources.items())
+    ids = [d[0] for d in _DISCRIMINATORS]
+    if len(ids) != len(set(ids)):
+        raise RuntimeError("duplicate declared discriminator identity")
+    base = Path(tempfile.mkdtemp(prefix="opf-ingest-apply-revert-")).resolve()
+    ran = []
+    try:
+        for number, (identity, key, test, old, new) in enumerate(_DISCRIMINATORS):
+            source = read[key]
+            file_path = str(sources[key])
+            digest = _sha(source.encode("utf-8"))
+            # The harness lives IN this file, so a mutation anchor also appears in its own docstrings and
+            # the _DISCRIMINATORS table below. Mutate only the production region ahead of this section, so
+            # uniqueness is judged against the guard, never the harness's description of it.
+            prefix = source.split(_REVERT_MARKER, 1)[0]
+            suffix = source[len(prefix):]
+            pristine = _load_revert_candidate(source, "_revert_pristine_{}".format(number), file_path)
+            try:
+                test(pristine, base / "p{}".format(number))
+            finally:
+                sys.modules.pop(pristine.__name__, None)
+            if prefix.count(old) != 1:
+                raise RuntimeError("mutation target is not unique in the production region: " + identity)
+            mutant = _load_revert_candidate(prefix.replace(old, new, 1) + suffix,
+                                            "_revert_mutant_{}".format(number), file_path)
+            try:
+                test(mutant, base / "m{}".format(number))
+            except AssertionError as exc:
+                if str(exc) != identity:
+                    raise RuntimeError("wrong assertion for " + identity) from exc
+            else:
+                raise RuntimeError("reversal survived: " + identity)
+            finally:
+                sys.modules.pop(mutant.__name__, None)
+            restored = _load_revert_candidate(source, "_revert_restored_{}".format(number), file_path)
+            try:
+                test(restored, base / "r{}".format(number))
+            finally:
+                sys.modules.pop(restored.__name__, None)
+            print("RED-ON-REVERT", identity, "assertion=" + identity, "restored=PASS",
+                  "candidate_sha256=" + digest)
+            ran.append(identity)
+    finally:
+        shutil.rmtree(str(base), ignore_errors=True)
+    print("OPF-INGEST-APPLY RED-ON-REVERT: {} discriminators ({})".format(len(ran), ", ".join(ran)))
+    return 0
+
+
+def _red_on_revert_main():
+    """Wrap `_red_on_revert` with the same fail-closed containment guard and exit contract as self_test:
+    0 pass, 1 a discrimination or harness failure (never a silent pass), 2 no containment."""
+    try:
+        _journal.require_containment()
+    except _journal.JournalError as exc:
+        print("OPF-INGEST-APPLY RED-ON-REVERT ERROR: {}; fail-closed".format(exc), file=sys.stderr)
+        return 2
+    try:
+        _red_on_revert()
+    except Exception as exc:  # noqa: BLE001  a discrimination or harness failure is never a silent pass
+        print("OPF-INGEST-APPLY RED-ON-REVERT FAILED: {!r}".format(exc), file=sys.stderr)
+        return 1
+    print("OPF-INGEST-APPLY RED-ON-REVERT PASSED")
+    return 0
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--self-test"]:
         return self_test()
-    print("_opf_ingest_apply: the ingest promotion coordinator; run with --self-test (no verb is wired "
-          "in this slice).", file=sys.stderr if args else sys.stdout)
+    if args == ["--self-test", "--red-on-revert"]:
+        rc = self_test()
+        return rc if rc != 0 else _red_on_revert_main()
+    print("_opf_ingest_apply: the ingest promotion coordinator; run with --self-test (add --red-on-revert "
+          "for the guard-discrimination harness; no verb is wired in this slice).",
+          file=sys.stderr if args else sys.stdout)
     return 2 if args else 0
 
 
