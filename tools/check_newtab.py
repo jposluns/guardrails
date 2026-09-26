@@ -213,6 +213,8 @@ _SELF_TEST_DECLARATION = b'roots = ["site", "opf/site"]\n'
 
 
 def _self_test():
+    from unittest.mock import patch
+
     ext_ok = '<a href="https://github.com/x" target="_blank" rel="noopener noreferrer">gh</a>'
     cases = [
         ("external ok", ext_ok, []),
@@ -281,13 +283,15 @@ def _self_test():
                   '<map><area href="https://evil.example/x"></map>',
                   ['p.html: external link \'https://evil.example/x\' is missing target="_blank"']))
     failures = []
-    for label, html, expected in cases:
-        got = sorted(page_findings("p.html", html))
-        if got != sorted(expected):
-            failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    # Page cases use the default site host, independent of the caller's environment.
+    with patch.dict(os.environ):
+        os.environ.pop("AIQT_SITE_HOST", None)
+        for label, html, expected in cases:
+            got = sorted(page_findings("p.html", html))
+            if got != sorted(expected):
+                failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
     # AIQT_SITE_HOST: is_external_url derives the site host at call time (default, and empty-value
     # fallback, aiqt.ai; lowercased). Behaviour is unchanged when the variable is unset or empty.
-    import os
     env_cases = [
         # (AIQT_SITE_HOST value or None=unset, href, expected is_external_url)
         (None, "https://aiqt.ai/x", False),                 # (a) unset -> default aiqt.ai internal
@@ -325,10 +329,9 @@ def _self_test():
     import subprocess
     import tempfile
     import tomllib
-    from unittest.mock import patch
 
     # Synthetic declaration bytes: the portable self-test never reads repository
-    # configuration. The live gate and review own this repository's root contract.
+    # configuration. Repository-local quality steps pin this repository's root contract.
     declaration_bytes = _SELF_TEST_DECLARATION
     declared = tomllib.loads(declaration_bytes.decode("utf-8"))
 
@@ -396,13 +399,18 @@ def _self_test():
                     ("--self-test",
                      [sys.executable, "-I", "-B", "-c", child_self_test,
                       script, "--self-test"],
-                     ("PASS: check_newtab self-test",)),
+                     ("PASS: check_newtab self-test",), {}),
+                    ("--self-test AIQT_SITE_HOST=example.test",
+                     [sys.executable, "-I", "-B", "-c", child_self_test,
+                      script, "--self-test"],
+                     ("PASS: check_newtab self-test",), {"AIQT_SITE_HOST": "example.test"}),
                     ("live", [sys.executable, "-I", "-B", script],
-                     tuple("PASS: every external {}/ link".format(path) for path in roots)),
+                     tuple("PASS: every external {}/ link".format(path) for path in roots), {}),
                 )
-                for mode, command, expected_output in commands:
+                for mode, command, expected_output, env_overrides in commands:
                     try:
                         result = subprocess.run(command, cwd=unrelated_cwd,
+                                                env=dict(os.environ, **env_overrides),
                                                 capture_output=True, text=True, timeout=30)
                     except (OSError, subprocess.SubprocessError) as exc:
                         failures.append("copied-tools {} {}: {}".format(label, mode, exc))

@@ -70,6 +70,9 @@ CI_SOURCE = ".github/workflows/quality.yml"
 # produces a visible divergence until this reviewed set is extended.
 RUNTIME_VALUE_FLAGS = frozenset({"--base", "--protected", "--head"})
 
+# One repository-local, non-shipped gate; no general .github executable allowance.
+REPO_GATE = ".github/check_newtab_contract.py"
+
 ALLOWLIST = (
     {
         "side": "ci-only",
@@ -186,7 +189,7 @@ JOB_PROPERTY_KEYS = frozenset({
 _TOOL_NONDELIM = r"[^\s'\"(),:=`;{}\[\]]"  # a char that is NOT a legitimate delimiter
 TOOL_RE = re.compile(
     r"(?:(?<!" + _TOOL_NONDELIM + r")|(?<=(?<!" + _TOOL_NONDELIM + r")\./))"
-    r"(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)\b"
+    r"(?:(?:opf/)?tools/[A-Za-z0-9_.-]+\.(?:py|sh)|" + re.escape(REPO_GATE) + r")\b"
 )
 PY_TARGET_RE = re.compile(r"^(?:opf/)?tools/[A-Za-z0-9_.-]+\.py$")
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -329,14 +332,14 @@ def normalize(tokens):
                 "dynamic-target",
                 "gate target must be a literal tools/*.py path",
             )
-        if (not PY_TARGET_RE.fullmatch(target)
+        if (target != REPO_GATE and not PY_TARGET_RE.fullmatch(target)
                 or ".." in target.split("/")):
             return Result(
                 False,
                 None,
                 "gate-target",
                 "unsupported gate target {!r}; expected a literal "
-                "tools/*.py path or gitleaks dir".format(target),
+                "tools/*.py path, {} or gitleaks dir".format(target, REPO_GATE),
             )
         canonical = [target]
 
@@ -1666,6 +1669,24 @@ def self_test():
         ),
         0,
     )
+
+    repo_command = "python3 -I -B " + REPO_GATE
+    case("01b repository gate matched",
+         evaluate(local_fixture(common + (repo_command,)),
+                  ci_fixture(common + (repo_command,)), ()), 0)
+    case("01c repository gate local-only",
+         evaluate(local_fixture(common + (repo_command,)), ci_fixture(common), ()),
+         1, ("local-only",), (REPO_GATE,), ())
+    case("01d repository gate ci-only",
+         evaluate(local_fixture(common), ci_fixture(common + (repo_command,)), ()),
+         1, ("ci-only",), (), (REPO_GATE,))
+    case("01e repository gate shadow scan",
+         evaluate(local_fixture(common, ("echo " + REPO_GATE,)), ci_fixture(common), ()),
+         2)
+    unknown = "python3 -I -B .github/unrecognized.py"
+    case("01f unknown repository executable refused",
+         evaluate(local_fixture(common + (unknown,)),
+                  ci_fixture(common + (unknown,)), ()), 2)
 
     fail_without_change = evaluate(
         local_fixture(common + (
