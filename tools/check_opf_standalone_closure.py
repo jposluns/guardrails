@@ -56,6 +56,7 @@ _SUBSET = [
     ("opf-init-substrate-selftest", "_opf_init_substrate.py", ["--self-test"]),
     ("opf-init-builders-selftest", "_opf_init.py", ["--self-test"]),
     ("opf-init-operation-selftest", "_opf_init_operation.py", ["--self-test"]),
+    ("opf-init-observe-selftest", "check_opf_init_observe.py", ["--self-test", "--red-on-revert"]),
     ("commonmark-headings-selftest", "selftest_commonmark_headings.py", []),
     ("commonmark-conformance", "selftest_commonmark_conformance.py", []),
 ]

@@ -129,6 +129,7 @@ import _opf_emit           # noqa: E402
 import _opf_init           # noqa: E402
 import _opf_init_contract  # noqa: E402
 import _opf_init_substrate  # noqa: E402
+import _opf_init_observe   # noqa: E402
 import _opf_observe        # noqa: E402
 import _opf_oplock         # noqa: E402
 import _opf_store          # noqa: E402
@@ -504,16 +505,19 @@ def _roster_namespaces():
 
 
 def read_ancestral_counter_seed(store_root, *, pinned_head, evidence_commit, prefix, object_format,
-                                git=None, max_first_parent=1000000):
+                                git=None, max_first_parent=10000):
     """Read and validate the PINNED ancestral counters seed (B6). Returns an AncestralSeed or raises
     InitOperationError.
 
+    The shared reader refuses a present or unreadable graft entry, suppresses commit-graph
+    reads, and bounds subprocess output while reading. It does not establish adoption qualification.
+
     Reads `<evidence_commit>:<prefix>/.working/toml/counters.toml` through the hardened, allowlist-
     scrubbed, no-replace-objects, no-lazy-fetch `_opf_observe._run_git` surface, then:
-      - resolves the evidence commit and the pinned head to full object ids (rev-parse --verify);
+      - verifies the exact object identities and types of the supplied full commit OIDs;
       - verifies the evidence lies on the pinned head's FIRST-PARENT line (decision 6: the newest
         qualifying copy is chosen on the first-parent main line, so a commit reachable only through a
-        merge's second parent is refused), enumerated by rev-list --first-parent, bounded; a shallow
+        merge's second parent is refused), using bounded raw-parent traversal; a shallow
         or truncated history that does not reach it cannot prove the ancestry and refuses;
       - resolves the counters blob's object id at that path and reads exactly that blob;
       - validates the TOML, schema, and namespace/value constraints (validate_counters), accepting
@@ -537,61 +541,24 @@ def read_ancestral_counter_seed(store_root, *, pinned_head, evidence_commit, pre
     if prefix != "" and _opf_init_contract._bad_relpath(prefix) is not None:
         raise InitOperationError("prefix is not a canonical below-root relative path")
     if type(max_first_parent) is not int or max_first_parent < 1:
-        raise InitOperationError("max_first_parent must be a positive integer")
+        raise InitOperationError("max_first_parent must be a positive integer", CANNOT_EVALUATE)
     git = git or _opf_observe._git_path()
     if git is None:
         raise InitOperationError("git binary not found; the ancestral counters seed cannot be read",
                                  CANNOT_EVALUATE)
 
-    def _rev_parse(spec):
-        outcome = _opf_observe._run_git(
-            git, store_root, ["rev-parse", "--verify", "--end-of-options", spec])
-        if not outcome.completed:
-            raise InitOperationError("git could not run to resolve {!r} ({})".format(
-                spec, outcome.err.strip()), CANNOT_EVALUATE)
-        if outcome.rc != 0:
-            raise InitOperationError("ancestral evidence {!r} does not resolve ({}); refusing rather "
-                                     "than falling back".format(spec, outcome.err.strip()))
-        return outcome.out.decode("utf-8", "strict").strip()
-
-    evidence_oid = _rev_parse("{}^{{commit}}".format(evidence_commit))
-    head_oid = _rev_parse("{}^{{commit}}".format(pinned_head))
-    if not _oid_ok(evidence_oid, object_format) or not _oid_ok(head_oid, object_format):
-        raise InitOperationError("git returned a malformed resolved object id; fail-closed")
-
-    walk = _opf_observe._run_git(
-        git, store_root, ["rev-list", "--first-parent", "--max-count={}".format(max_first_parent),
-                          head_oid])
-    if not walk.completed or walk.rc != 0:
-        raise InitOperationError("git could not enumerate the first-parent line of {} ({}); "
-                                 "fail-closed".format(head_oid, walk.err.strip()), CANNOT_EVALUATE)
-    line = walk.out.decode("ascii", "strict").split("\n")
-    if line[-1] != "":
-        raise InitOperationError("git returned an unterminated first-parent listing; fail-closed",
-                                 CANNOT_EVALUATE)
-    if evidence_oid not in line[:-1]:
-        raise InitOperationError("evidence commit {} is not on the first-parent line of the pinned "
-                                 "head {} (within {} commits); a second-parent, sibling, or "
-                                 "beyond-shallow-history commit cannot support the permanence "
-                                 "claim".format(evidence_oid, head_oid, max_first_parent))
-
-    counters_path = "{}/{}/counters.toml".format(
-        "{}/{}".format(prefix, _opf_store.WORKING_DIRNAME) if prefix
-        else _opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
-    blob_spec = "{}:{}".format(evidence_oid, counters_path)
-    blob_oid = _rev_parse(blob_spec)
-    if not _oid_ok(blob_oid, object_format):
-        raise InitOperationError("git returned a malformed counters blob object id; fail-closed")
-
-    read = _opf_observe._run_git(git, store_root, ["cat-file", "blob", blob_oid])
-    if not read.completed:
-        raise InitOperationError("git could not read the counters blob ({}); fail-closed".format(
-            read.err.strip()), CANNOT_EVALUATE)
-    if read.rc != 0:
-        raise InitOperationError("counters blob {} is unreadable ({}); refusing rather than falling "
-                                 "back".format(blob_oid, read.err.strip()))
-    blob = read.out
-    content_digest = "sha256:" + hashlib.sha256(blob).hexdigest()
+    try:
+        blob, pinned = _opf_init_observe.read_seed_basis(
+            store_root, git=git, pinned_head=pinned_head,
+            evidence_commit=evidence_commit, prefix=prefix,
+            object_format=object_format, max_first_parent=max_first_parent)
+    except _opf_init_observe.ObservationError as exc:
+        code = CANNOT_EVALUATE if exc.code == _opf_init_observe.CANNOT_EVALUATE else REFUSED
+        raise InitOperationError("{}: {}".format(exc.input_name, exc.detail), code) from exc
+    evidence_oid = pinned["commit"]
+    blob_oid = pinned["blob"]
+    counters_path = pinned["path"]
+    content_digest = pinned["content_digest"]
 
     try:
         parsed = tomllib.loads(blob.decode("utf-8", errors="strict"))

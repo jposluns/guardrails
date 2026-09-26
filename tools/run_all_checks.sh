@@ -101,6 +101,7 @@ run_gate "opf-oplock-selftest" python3 -I -B opf/tools/_opf_oplock.py --self-tes
 run_gate "opf-init-substrate-selftest" python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --self-test
 run_gate "opf-init-operation-selftest" python3 -I -B opf/tools/_opf_init_operation.py --self-test
+run_gate "opf-init-observe-selftest" python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
 run_gate "opf-standalone-closure" python3 -I -B tools/check_opf_standalone_closure.py
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
