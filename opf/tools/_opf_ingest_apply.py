@@ -91,6 +91,17 @@ class _RetainLock(Exception):
         self.ref = ref
 
 
+class _Launch:
+    """The launch boundary's evidence, held by apply_ingest OUTSIDE every fallible post-launch step: whether
+    the publication attempt was launched, the indeterminate result built BEFORE the launch (so reporting a
+    nested post-launch failure formats and constructs nothing), and the attempt's own result once formed.
+    Only a formed result is an established outcome; a launched attempt without one retains the lock."""
+    __slots__ = ("launched", "fallback", "result")
+
+    def __init__(self):
+        self.launched, self.fallback, self.result = False, None, None
+
+
 def _safe_text(value):
     """`str(value)` that never raises: a value whose __str__ raises, recurses, or returns a non-str yields a
     placeholder naming its type, so no diagnostic built on the post-launch or cleanup path can itself fail
@@ -117,12 +128,17 @@ def _surface(*parts):
 def _cleanup(what, step, *args):
     """Run one final-cleanup step for its side effects only: it never raises and never selects an outcome.
     Any Exception from the step or its own diagnostics, not only OSError, is surfaced non-fatally, so
-    cleanup cannot overwrite or downgrade a result already formed. A lock or descriptor it fails to release
-    is left for the next apply to refuse on."""
+    cleanup cannot overwrite or downgrade a result already formed. The call to _surface is guarded here
+    too: a failure AT the call (a RecursionError under stack pressure, raised before _surface's own guard
+    is entered) is one no callee can catch. A lock or descriptor it fails to release is left for the next
+    apply to refuse on."""
     try:
         step(*args)
     except Exception as exc:  # noqa: BLE001  the cleanup guard: a cleanup failure never replaces a result
-        _surface("warning: ingest-apply cleanup (", what, ") failed: ", exc, "; the formed result stands")
+        try:
+            _surface("warning: ingest-apply cleanup (", what, ") failed: ", exc, "; the formed result stands")
+        except Exception:  # noqa: BLE001  the cleanup diagnostic call itself failing never replaces a result
+            pass
 
 
 # --- the path boundary: reject, never normalize --------------------------------------------------------
@@ -595,6 +611,12 @@ def _committed_result(ref, why):
                        promoted=True, outcome="promoted", restore_ref=ref)
 
 
+def _indeterminate(message, ref):
+    """An attempt that may have committed: neither promoted nor aborted is claimed, and the lock is kept."""
+    return ApplyResult(CANNOT_EVALUATE, [message + "; the journal lock is retained for recovery"],
+                       promoted=None, outcome="indeterminate", restore_ref=ref)
+
+
 def _post_launch_result(cap, run_id, attempt, ref, exc, returned):
     """The ONE outcome decision for any exception once the publication attempt is launched: durable journal
     evidence decides, never where the exception arose or its class. Commitment is CONFIRMED only when the
@@ -607,8 +629,8 @@ def _post_launch_result(cap, run_id, attempt, ref, exc, returned):
     publish returned, so its direction is durably backward). Every diagnostic goes through _safe_text, so no
     formatting step raises. Residual (the shared journal contract): the journal's raise does not say WHICH
     fsync failed, so a COMPLETE whose log fsync succeeded but whose closing directory fsync failed, durable
-    in fact, is reported indeterminate too. Residual: a BaseException outside Exception (an interrupt or
-    exit) is not caught; it propagates with no result formed, so it reports neither outcome."""
+    in fact, is reported indeterminate too. A BaseException outside Exception (an interrupt or exit) is not
+    caught here; it propagates, and apply_ingest's launch boundary keeps the journal lock held for it."""
     detail = _safe_text(exc)
     if returned:
         return _committed_result(ref, "live verification could not complete (" + detail + ")")
@@ -629,7 +651,9 @@ def _post_launch_result(cap, run_id, attempt, ref, exc, returned):
 def _launched_attempt(cap, root_fd, run_id, attempt, ref, ops, plan, live, run_rel):
     """The launched publication attempt owns its outcome end to end, TOTAL over Exception: from the launch
     on, no exception, from the transaction, verification, the outcome helper itself, or any diagnostic, can
-    reach the generic abort handler in apply_ingest. It returns a formed result or raises _RetainLock."""
+    reach the generic abort handler in apply_ingest. It returns a formed result or raises _RetainLock; a
+    failure raising even that (constructing _RetainLock itself) is caught by apply_ingest's launch
+    boundary, which reports the prebuilt indeterminate result and never aborted."""
     try:
         # ONE guard: no exception, from the transaction, verification, or any later step, can report a
         # committed (or possibly committed) promotion as aborted; _post_launch_result decides.
@@ -651,7 +675,7 @@ def _launched_attempt(cap, root_fd, run_id, attempt, ref, ops, plan, live, run_r
                           "failed); it may have committed", ref)
 
 
-def _apply_locked(cap, resolution, run_id, homes, now):
+def _apply_locked(cap, resolution, run_id, homes, now, launch):
     root_fd = _opf_store._open_root_fd(resolution.store_root)
     try:
         states = _opf_journal.attempt_states(cap, KIND, run_id)
@@ -687,7 +711,13 @@ def _apply_locked(cap, resolution, run_id, homes, now):
                                reservation, acc_raw, binding, roster, vendors)
         _hook("before-publication", root=resolution.store_root, plan=plan)
         ref = dict(txn_id=_opf_journal.attempt_txn(KIND, run_id, attempt), journal_rel=_opf_store.journal_root(KIND))
-        return _launched_attempt(cap, root_fd, run_id, attempt, ref, ops, plan, live, run_rel)
+        # Built BEFORE the launch, so reporting a nested post-launch failure needs no fallible step.
+        launch.fallback = _indeterminate("publication attempt " + ref["txn_id"] + " reached no confirmed outcome "
+                                         "(its outcome could not be formed after launch); it may have committed",
+                                         ref)
+        launch.launched = True
+        launch.result = _launched_attempt(cap, root_fd, run_id, attempt, ref, ops, plan, live, run_rel)
+        return launch.result
     finally:
         _cleanup("store root descriptor close", _journal._close_fd_quietly, root_fd)
 
@@ -696,7 +726,13 @@ def apply_ingest(product_root, run_id, *, now=None):
     """Promote the reviewed, accepted staged ingest run `run_id`. Returns an ApplyResult; `promoted` and
     `outcome` are read from the result, never inferred from the verdict. An attempt whose commit can be
     neither confirmed nor ruled out (including a readable COMPLETE whose durability is unconfirmed) reports
-    promoted None and outcome "indeterminate", never "aborted"; a cleanup failure never replaces a result."""
+    promoted None and outcome "indeterminate", never "aborted"; a cleanup failure never replaces a result.
+    The launch boundary: the journal writer lock is released only on an ESTABLISHED outcome, a formed result
+    or a failure before the attempt launched, never as the fall-through of an escape. Once launched, an
+    Exception escaping every inner guard reports the attempt's formed result or the prebuilt indeterminate
+    one, never aborted, and a BaseException (an interrupt or exit) propagates with the lock RETAINED unless
+    the attempt's result was already formed, so a retry refuses rather than trusting an unconfirmed COMPLETE.
+    Only a genuine pre-commit rollback, read from the journal inside the attempt, reports aborted."""
     try:
         _journal.require_containment()
         _opf_import._require_utc(now)
@@ -712,24 +748,40 @@ def apply_ingest(product_root, run_id, *, now=None):
         return ApplyResult(exc.verdict, [exc.message], promoted=False, outcome="aborted")
     except (_journal.JournalError, _opf_oplock.OpLockError, OSError, ValueError) as exc:
         return ApplyResult(CANNOT_EVALUATE, [_safe_text(exc) + "; fail-closed"], promoted=False, outcome="aborted")
-    locked = retain = False
+    launch = _Launch()
+    locked = release = False
     try:
         _opf_journal.acquire_writer_lock(cap, KIND)
         locked = True
-        return _apply_locked(cap, resolution, run_id, homes, now)
+        result = _apply_locked(cap, resolution, run_id, homes, now, launch)
+        release = True
+        return result
     except _RetainLock as exc:
-        retain = True
-        return ApplyResult(CANNOT_EVALUATE, [_safe_text(exc) + "; the journal lock is retained for recovery"],
-                           promoted=None, outcome="indeterminate", restore_ref=exc.ref)
-    except _StageError as exc:
-        return ApplyResult(exc.verdict, [exc.message], promoted=False,
-                           outcome="rejected" if exc.verdict == FINDING else "aborted")
-    except (_journal.JournalError, _opf_oplock.OpLockError, OSError, RecursionError) as exc:
-        return ApplyResult(CANNOT_EVALUATE, [_safe_text(exc) + "; fail-closed"], promoted=False, outcome="aborted")
+        try:
+            return _indeterminate(_safe_text(exc), exc.ref)
+        except Exception:  # noqa: BLE001  forming the detailed result failed: the prebuilt one stands
+            return launch.fallback
+    except Exception as exc:  # noqa: BLE001  the launch boundary: a launched attempt is never reported aborted
+        if launch.launched:
+            release = launch.result is not None
+            return launch.result if release else launch.fallback
+        release = True
+        if isinstance(exc, _StageError):
+            return ApplyResult(exc.verdict, [exc.message], promoted=False,
+                               outcome="rejected" if exc.verdict == FINDING else "aborted")
+        if isinstance(exc, (_journal.JournalError, _opf_oplock.OpLockError, OSError, RecursionError)):
+            return ApplyResult(CANNOT_EVALUATE, [_safe_text(exc) + "; fail-closed"], promoted=False,
+                               outcome="aborted")
+        raise
+    except BaseException:
+        # An interrupt or exit propagates, never swallowed; once launched the lock stays held unless the
+        # attempt's own result was already formed.
+        release = not launch.launched or launch.result is not None
+        raise
     finally:
         # A release failure of ANY class never overturns a formed result (_cleanup); a lock left behind
         # refuses the next apply.
-        if locked and not retain:
+        if locked and release:
             _cleanup("journal writer lock release", _opf_journal.release_writer_lock, cap, KIND)
         _cleanup("operation capability release", _opf_oplock.release_operation, cap)
 
@@ -1319,6 +1371,93 @@ def _st_helper_fault(apply, root, rid, run):
         return _st_postverify_fault(apply, root, rid, run, "source", _journal.JournalError)
 
 
+def _st_nested_fault(apply, root, rid, run):
+    """Apply a publication that commits, then fail every layer that reports it: post-commit verification
+    faults, the outcome helper raises a RecursionError, constructing the _RetainLock that would report that
+    raises a RecursionError too, and the final operation-capability release fails AFTER its real release
+    with the cleanup diagnostic call itself raising (the stack-pressure RecursionError no callee guard can
+    catch). An exception escaping `apply` is returned in place of the result. Returns (result, fired,
+    states)."""
+    from unittest.mock import patch
+    module = sys.modules[__name__]
+    real_release = _opf_oplock.release_operation
+    fired = []
+
+    def helper(*_args, **_kwargs):
+        fired.append("helper")
+        raise RecursionError("injected failure inside the post-launch outcome helper")
+
+    def retain_init(_self, *_args, **_kwargs):
+        fired.append("retain")
+        raise RecursionError("injected failure constructing _RetainLock")
+
+    def surface(*_parts):
+        fired.append("surface")
+        raise RecursionError("injected failure calling the cleanup diagnostic")
+
+    def release(*args, **kwargs):
+        out = real_release(*args, **kwargs)
+        if "op-release" not in fired:
+            fired.append("op-release")
+            raise RecursionError("injected fault in the op-release cleanup")
+        return out
+
+    with patch.object(module, "_post_launch_result", helper), \
+            patch.object(module._RetainLock, "__init__", retain_init), \
+            patch.object(module, "_surface", surface), patch.object(_opf_oplock, "release_operation", release):
+        try:
+            result, _verify = _st_postverify_fault(apply, root, rid, run, "source", _journal.JournalError)
+        except Exception as exc:  # noqa: BLE001  an escaped exception is the misreport under test
+            result = exc
+    with _opf_import._self_test_homes2_active(root):
+        states = _st_attempt_states(root, rid)
+    return result, fired, states
+
+
+class _InterruptingStr(Exception):
+    """An exception whose __str__ raises KeyboardInterrupt: formatting it on the post-launch path interrupts."""
+
+    def __str__(self):
+        raise KeyboardInterrupt("injected: formatting this exception is interrupted")
+
+
+def _st_interrupt_fault(apply, root, rid, interrupt):
+    """Apply with `interrupt` raised by the frames.log fsync of the COMPLETE frame, so the frame is readable
+    (the attempt reads complete) but its log fsync never succeeded. KeyboardInterrupt and SystemExit escape
+    the transaction itself; _InterruptingStr reaches the post-launch guard and interrupts when its diagnostic
+    is formatted. The interrupt escaping `apply` is captured, then the run is re-applied at once. Returns
+    (escaped, fired, states, held, again): the escaped class (None when nothing escaped), whether the
+    journal writer lock was still held after the interrupt, and the re-apply's result."""
+    from unittest.mock import patch
+    marker = _journal.MAGIC + b" " + _journal.F_COMPLETE.encode() + b" "
+    armed, fired = [], []
+    real_write_all = _journal._write_all
+    real_fsync = os.fsync
+    escaped = None
+
+    def write_all(fd, data):
+        real_write_all(fd, data)
+        if data.startswith(marker):
+            armed.append(True)
+
+    def fsync(fd):
+        if armed and not fired and stat.S_ISREG(os.fstat(fd).st_mode):
+            fired.append(interrupt.__name__)
+            raise interrupt("injected {} at the COMPLETE frame's log fsync".format(interrupt.__name__))
+        return real_fsync(fd)
+
+    with _opf_import._self_test_homes2_active(root):
+        with patch.object(_journal, "_write_all", write_all), patch.object(_journal.os, "fsync", fsync):
+            try:
+                apply(root, rid, now=_NOW)
+            except (KeyboardInterrupt, SystemExit) as exc:
+                escaped = type(exc)
+        states = _st_attempt_states(root, rid)
+        held = (Path(root) / _opf_store.journal_root(KIND) / "lock").is_file()
+        again = apply(root, rid, now=_NOW)
+    return escaped, fired, states, held, again
+
+
 class _BrokenStream:
     """A stderr whose every write fails, as a closed stream's does."""
 
@@ -1476,12 +1615,49 @@ def _t_postlaunch_total(base, check):
           and "already held" in " ".join(again.findings))
 
 
+def _t_postlaunch_retain(base, check):
+    """A launched attempt is never reported aborted, and never releases the journal lock without an
+    established outcome, whatever escapes. A committed publication whose every reporting layer fails (the
+    outcome helper, the _RetainLock that would report that, and the final release's cleanup diagnostic call)
+    is the prebuilt indeterminate result with the lock retained, never aborted and never an escape. A
+    KeyboardInterrupt, a SystemExit, and an exception whose __str__ raises KeyboardInterrupt, each after a
+    COMPLETE frame whose log fsync never succeeded, propagate with the lock retained, so an immediate
+    re-apply refuses on it rather than reporting the unconfirmed frame as a completed no-op."""
+    root, rid, run = _st_build(base, "nested-fault")
+    result, fired, states = _st_nested_fault(apply_ingest, root, rid, run)
+    home = root / _opf_import._ingest_acceptance_home(rid)
+    ref = dict(txn_id=_opf_journal.attempt_txn(KIND, rid, 1), journal_rel=_opf_store.journal_root(KIND))
+    check("nested-fault-fired-after-commit", fired == ["helper", "retain", "op-release", "surface"]
+          and states == {1: "complete"} and (root / ".archive/legacy/move.md").read_bytes() == b"moveme\n"
+          and not (root / "legacy/move.md").exists() and (home / PROMOTION_NAME).is_file())
+    # Flip: without the launch boundary the _RetainLock construction failure reaches the generic abort
+    # handler (promoted=False, outcome aborted, lock released); without the guarded diagnostic call the
+    # op-release failure escapes apply_ingest with no result formed.
+    check("nested-fault-not-aborted", getattr(result, "verdict", None) == CANNOT_EVALUATE
+          and getattr(result, "promoted", False) is None and getattr(result, "outcome", None) == "indeterminate"
+          and getattr(result, "restore_ref", None) == ref
+          and "could not be formed after launch" in " ".join(getattr(result, "findings", []))
+          and (root / _opf_store.journal_root(KIND) / "lock").is_file())
+    for interrupt, escapes in ((KeyboardInterrupt, KeyboardInterrupt), (SystemExit, SystemExit),
+                               (_InterruptingStr, KeyboardInterrupt)):
+        name = "interrupt-" + interrupt.__name__
+        root, rid, run = _st_build(base, name)
+        escaped, fired, states, held, again = _st_interrupt_fault(apply_ingest, root, rid, interrupt)
+        check(name + "-propagated", escaped is escapes and fired == [interrupt.__name__]
+              and states == {1: "complete"} and not run.exists())
+        # Flip: releasing the lock as the interrupt's fall-through lets the re-apply read the unconfirmed
+        # COMPLETE as a verified completed no-op (promoted=True).
+        check(name + "-lock-retained", held and again.promoted is False and again.outcome == "aborted"
+              and "already held" in " ".join(again.findings))
+
+
 TESTS = (("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
          ("unreviewed-refused", _t_unreviewed_refused), ("traversal-refused", _t_traversal_refused),
          ("mint-move-toctou", _t_mint_move_toctou), ("per-record-refused", _t_per_record_refused),
          ("postverify-committed", _t_postverify_committed),
          ("postcommit-journal-fault", _t_postcommit_journal_fault),
-         ("postlaunch-indeterminate", _t_postlaunch_indeterminate), ("postlaunch-total", _t_postlaunch_total))
+         ("postlaunch-indeterminate", _t_postlaunch_indeterminate), ("postlaunch-total", _t_postlaunch_total),
+         ("postlaunch-retain", _t_postlaunch_retain))
 
 
 def self_test(only=None):
@@ -1707,18 +1883,53 @@ def _p_helper_fault_indeterminate(module, base_dir):
     """An outcome helper that itself raises is indeterminate, never the generic abort."""
     root, rid, run = module._st_build(base_dir, "helper-fault")
     result, fired = module._st_helper_fault(module.apply_ingest, root, rid, run)
-    return len(fired) == 1 and result.promoted is None and result.outcome == "indeterminate"
+    return (len(fired) == 1 and result.promoted is None and result.outcome == "indeterminate"
+            and "outcome determination itself failed" in " ".join(result.findings))
 
 
 def _p_cleanup_preserved(step, broken_stderr=False):
     """A probe that a RecursionError in the `step` cleanup (with stderr broken too, when asked) leaves the
-    formed promoted result standing."""
+    formed promoted result standing, surfaced by the cleanup guard itself (with stderr intact), so the launch
+    boundary's own return of the formed result cannot mask a reverted cleanup guard."""
     def probe(module, base_dir):
         root, rid, _run = module._st_build(base_dir, "cleanup")
-        result, fired, _surfaced = module._st_cleanup_fault(module.apply_ingest, root, rid, step, RecursionError,
-                                                            broken_stderr)
+        result, fired, surfaced = module._st_cleanup_fault(module.apply_ingest, root, rid, step, RecursionError,
+                                                           broken_stderr)
         return (fired == [step] and getattr(result, "promoted", None) is True
-                and getattr(result, "outcome", None) == "promoted")
+                and getattr(result, "outcome", None) == "promoted" and (broken_stderr or "cleanup (" in surfaced))
+    return probe
+
+
+def _p_surface_non_throwing(module, base_dir):
+    """_surface itself swallows a broken stderr (probed directly, so the guarded diagnostic call in _cleanup
+    cannot mask it), and a cleanup diagnostic over a broken stderr leaves the formed promoted result."""
+    from unittest.mock import patch
+    with patch.object(sys, "stderr", module._BrokenStream()):
+        try:
+            module._surface("probe: a diagnostic over a broken stderr")
+        except Exception:  # noqa: BLE001  an escaped diagnostic failure is the defect under test
+            return False
+    return _p_cleanup_preserved("root-close", broken_stderr=True)(module, base_dir)
+
+
+def _p_nested_not_aborted(module, base_dir):
+    """A committed publication whose outcome helper, _RetainLock construction, and cleanup diagnostic call
+    all fail is indeterminate with the lock retained, never aborted and never an escape."""
+    root, rid, run = module._st_build(base_dir, "nested")
+    result, fired, states = module._st_nested_fault(module.apply_ingest, root, rid, run)
+    return (fired == ["helper", "retain", "op-release", "surface"] and states == {1: "complete"}
+            and getattr(result, "promoted", False) is None and getattr(result, "outcome", None) == "indeterminate"
+            and (root / _opf_store.journal_root(KIND) / "lock").is_file())
+
+
+def _p_interrupt_retains(interrupt, escapes):
+    """A probe that `interrupt` after an unsynced COMPLETE propagates as `escapes` with the lock retained, so
+    an immediate re-apply refuses rather than reporting a completed no-op."""
+    def probe(module, base_dir):
+        root, rid, _run = module._st_build(base_dir, "interrupt")
+        escaped, fired, states, held, again = module._st_interrupt_fault(module.apply_ingest, root, rid, interrupt)
+        return (escaped is escapes and fired == [interrupt.__name__] and states == {1: "complete"} and held
+                and again.promoted is False and again.outcome == "aborted")
     return probe
 
 
@@ -1758,13 +1969,21 @@ _UNCONFIRMED_REVERTED = ('return _committed_result(ref, "the journal post-commit
 # The ONE final-cleanup guard in `_cleanup`, and its reversal to the pre-fix OSError-only posture.
 _CLEANUP_GUARD = "except Exception as exc:  # noqa: BLE001  the cleanup guard"
 _CLEANUP_REVERTED = "except OSError as exc:  # reverted: the cleanup guard"
+# The launch boundary in apply_ingest, and its reversal (a launched escape falls to the pre-launch abort).
+_LAUNCH_BOUNDARY = "        if launch.launched:\n"
+_LAUNCH_REVERTED = "        if False:  # reverted: the launch boundary\n"
+# The interrupt's lock retention, and its reversal (the pre-fix release as the fall-through of any escape).
+_INTERRUPT_RETAIN = "release = not launch.launched or launch.result is not None"
+_INTERRUPT_REVERTED = "release = True  # reverted: the interrupt retention"
 
 # (identity, probe, unique old, new). The class width first: every sibling re-exposed by reverting the ONE
 # post-launch guard. Then each decision branch of `_post_launch_result` by its own mutation, including the
 # rollback branch, so the guard can neither absorb a genuine abort nor claim a commit it cannot confirm, and
 # the unconfirmed-COMPLETE branch with one probe per sibling (the result, and a re-apply's no-op). Then the
 # exception-total layers: _safe_text, the helper-failure guard, the cleanup guard with one probe per cleanup
-# step, and the cleanup diagnostic channel.
+# step, and the cleanup diagnostic channel. Last the launch boundary: a nested failure that escapes even the
+# helper-failure guard (the launch-boundary reversal, and the guarded cleanup diagnostic call sharing its
+# probe), and the interrupt retention with one probe per BaseException sibling.
 _POST_LAUNCH = (
     ("postverify/committed-not-aborted", _p_postverify_committed, _POST_LAUNCH_GUARD, _POST_LAUNCH_REVERTED),
     ("postverify/foreign-class-not-aborted", _p_postverify_foreign, _POST_LAUNCH_GUARD, _POST_LAUNCH_REVERTED),
@@ -1793,9 +2012,19 @@ _POST_LAUNCH = (
     ("cleanup/root-close-not-aborted", _p_cleanup_preserved("root-close"), _CLEANUP_GUARD, _CLEANUP_REVERTED),
     ("cleanup/lock-release-not-escaped", _p_cleanup_preserved("lock-release"), _CLEANUP_GUARD, _CLEANUP_REVERTED),
     ("cleanup/op-release-not-escaped", _p_cleanup_preserved("op-release"), _CLEANUP_GUARD, _CLEANUP_REVERTED),
-    ("cleanup/diagnostic-not-escaped", _p_cleanup_preserved("root-close", broken_stderr=True),
+    ("cleanup/diagnostic-not-escaped", _p_surface_non_throwing,
      "except Exception:  # noqa: BLE001  the diagnostic channel",
      "except ():  # reverted: the diagnostic channel"),
+    ("postlaunch/nested-failure-not-aborted", _p_nested_not_aborted, _LAUNCH_BOUNDARY, _LAUNCH_REVERTED),
+    ("cleanup/diagnostic-call-not-escaped", _p_nested_not_aborted,
+     "except Exception:  # noqa: BLE001  the cleanup diagnostic call",
+     "except ():  # reverted: the cleanup diagnostic call"),
+    ("postlaunch/interrupt-retains-lock", _p_interrupt_retains(KeyboardInterrupt, KeyboardInterrupt),
+     _INTERRUPT_RETAIN, _INTERRUPT_REVERTED),
+    ("postlaunch/exit-retains-lock", _p_interrupt_retains(SystemExit, SystemExit), _INTERRUPT_RETAIN,
+     _INTERRUPT_REVERTED),
+    ("postlaunch/interrupting-format-retains-lock", _p_interrupt_retains(_InterruptingStr, KeyboardInterrupt),
+     _INTERRUPT_RETAIN, _INTERRUPT_REVERTED),
 )
 
 # (identity, source-key, focused test, unique old, new). source-key selects which module's source is

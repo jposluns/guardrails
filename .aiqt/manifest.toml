@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1cf2e2f60a19a6b5bfd65f2f6ecbb70076543a2eb40089368e6dec8e51dc66f5"
+tree-sha256 = "85521d36e98e80a22cd02233cc4919149b5e9cc635eccf7039894723aae7624b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 164463
-sha256 = "d5eb112c862de45affafe7aa0cd9c01871f6ebde11987bec6a599f4d97a19c5f"
+bytes = 166275
+sha256 = "fc13c5281714c62a0b5fbf7ef7f44af052dabe6365ff5db5b66cf188361220a2"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2556,8 +2556,8 @@ sha256 = "ab0eb20cbdbbf800784c78c7ecd5f70df5b0e17e7cd74812a46ab75d9cf891f1"
 
 [[sources]]
 path = "opf/tools/_opf_ingest_apply.py"
-bytes = 106961
-sha256 = "cf120ce0693174ff889445777bd379cc2a8ee11e9ecef3114149a1e346d57076"
+bytes = 121013
+sha256 = "98fbbae5a9d21a9cefd4060f114e9a914abd92ff2c8ffc27a58f8b8cd43a21d1"
 
 [[sources]]
 path = "opf/tools/_opf_init.py"
