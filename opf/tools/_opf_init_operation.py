@@ -57,7 +57,8 @@ PR3b, the initial views (the plan of record's PR3b scope, under the same rulings
     initial set, every view store-scope at its spec destination `.working/<name>`, so never the root
     VERSION), each with its mode, its source paths (members of S), and a plan-derived staging name.
     The plan's versions pin the view generator (name, version, transform vocabulary, projection
-    schema), so a changed generator refuses a recorded plan rather than rendering under it.
+    schema), so a changed generator refuses a partial operation rather than publishing views under
+    its recorded plan. Completed-adoption health permits a well-formed recorded view identity.
   - Payloads. After the source group has verified every source byte-exact to the plan and the
     intermediate `sources-ready` milestone is recorded (the source-state check, lease held),
     plan_init_views renders the views from the on-disk sources through _opf_views.plan_views, never
@@ -93,7 +94,15 @@ then on); the views are rendered after the sources are verified, so a same-uid w
 source in between is caught by the header correspondence check and the final re-render, not
 prevented; an operation recorded by the PR3a generator (opf.init.d2b-pr3a/1, never CLI-exposed) is
 refused as a changed generator, not migrated; the durability claim is fsync-based and verified only
-against process death, not power loss; everything the composed modules disclose applies unchanged.
+against process death, not power loss; rendered views intentionally share MAX_SOURCE_BYTES' 1 MiB
+per-file ceiling, so an aggregate view can refuse even when each source fits (this bootstrap layer
+does not promise arbitrary-size projections); completed-adoption health checks current sources,
+not current views: C-VIEW-DRIFT is excluded, so deleted, edited, or staged views alone do not prevent
+ALREADY-INITIALIZED, which neither repairs views nor certifies their currency; COMPLETE frames
+record poststates, not per-path creation outcomes, so a resumed COMPLETE group reports every path
+(directories, sources, and views) as deduplicated/verified-identical even if an earlier attempt
+created it; this is attempt-local verification, not cumulative creation accounting; everything the
+composed modules disclose applies unchanged.
 
 Run: python3 -I -B opf/tools/_opf_init_operation.py --self-test
 Exit: 0 self-test clean; 1 self-test failure; 2 refused precondition (no git binary or containment
@@ -193,7 +202,7 @@ PUBLICATION_BOUNDARIES = {"milestone": "VIEWS-READY", "views": "unstaged",
                           "index": "deferred-pr5", "commit": "never"}
 RECOVERY_POLICY = "resume-forward-preserve"
 ACCEPTANCE_NONE = {"present": False}
-MAX_SOURCE_BYTES = 1 << 20
+MAX_SOURCE_BYTES = 1 << 20  # Also the intentional per-view ceiling; see DISCLOSED RESIDUALS.
 _STAGE_MARKER = ".opf-init-stage-"
 
 # The closed, ordered milestone vocabulary (plan step 4). Each milestone is recorded AT MOST ONCE and
@@ -902,6 +911,8 @@ def inventory_digest(model):
 def _tracked_destinations(git, root, paths):
     """The planned destinations the git index already tracks (ls-files over literal pathspecs,
     beneath the explicit product root); an unanswerable index read is CANNOT-EVALUATE."""
+    if not paths:
+        return []  # No destinations: an empty git pathspec would select the entire index.
     out = _opf_observe._run_git(git, root, ["--literal-pathspecs", "ls-files", "--cached", "-z",
                                             "--"] + sorted(paths))
     if not out.completed or out.rc != 0:
@@ -973,8 +984,8 @@ def build_source_payloads(*, operation_id, binding, head, first_adoption, invent
 def views_generator():
     """The live view generator's identity, pinned in the plan's versions: the generator name and
     version its do-not-edit header carries, the closed transform vocabulary version, and the
-    projection schema. A plan recorded under another identity refuses (a changed generator is never
-    rendered under an old plan)."""
+    projection schema. Resume and publication require this live identity; completed-adoption
+    health accepts a well-formed recorded identity because it publishes no views."""
     return {"name": _opf_views.GENERATOR_NAME, "version": _opf_views.GENERATOR_VERSION,
             "transform_vocab": _opf_views.TRANSFORM_VOCAB_VERSION,
             "projection_schema": _opf_views.PROJECTION_SCHEMA}
@@ -1091,10 +1102,11 @@ def _plan_bad(detail):
     raise InitOperationError("plan invalid: {}".format(detail))
 
 
-def validate_init_plan(raw, *, expected_binding=None, expected_head=None):
+def validate_init_plan(raw, *, expected_binding=None, expected_head=None, completed=False):
     """DEEP validation of plan bytes beyond the substrate's scalar checks (an externally supplied plan
     is inert data, never a capability): the exact canonical serialization and bounds; the frozen top
-    keys; the pinned versions (a changed generator, view generator, or spec version refuses); the
+    keys; the pinned versions (completed health alone permits a well-formed historical view
+    identity; resume/render require the live pin, and the other version pins always apply); the
     Binding and HEAD (and, when given, equality with the live re-observation); the exact nested set
     schemas, the disjoint S/V/E/C sets, the exact source roster in the canonical effect order, the
     exact view roster derived from the plan's own manifest payload; each payload's
@@ -1112,7 +1124,18 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None):
     except _opf_init_substrate.InitSubstrateError as exc:
         _plan_bad(str(exc))
     op_id = plan["operation_id"]
-    if plan["versions"] != _pinned_versions():
+    expected_versions = _pinned_versions()
+    if completed:
+        versions = plan["versions"]
+        recorded = versions.get("views_generator") if type(versions) is dict else None
+        if type(recorded) is not dict or set(recorded) != set(expected_versions["views_generator"]) \
+                or any(type(recorded[k]) is not str or not recorded[k]
+                       for k in ("name", "version", "transform_vocab")) \
+                or type(recorded["projection_schema"]) is not int \
+                or recorded["projection_schema"] < 1:
+            _plan_bad("versions contain a malformed recorded view generator")
+        expected_versions["views_generator"] = recorded
+    if plan["versions"] != expected_versions:
         _plan_bad("versions are not this generator's pinned versions (init generator, spec version, "
                   "provenance format, and view generator)")
     reason = _opf_init_contract._bad_binding(plan["binding"])
@@ -1202,7 +1225,7 @@ def validate_init_plan(raw, *, expected_binding=None, expected_head=None):
     if plan["required_checks"] != list(REQUIRED_CHECKS):
         _plan_bad("required_checks is not this generator's roster")
     if plan["publication_boundaries"] != PUBLICATION_BOUNDARIES:
-        _plan_bad("publication_boundaries is not the SOURCES-READY boundary")
+        _plan_bad("publication_boundaries is not the VIEWS-READY boundary")
     if plan["recovery_policy"] != RECOVERY_POLICY:
         _plan_bad("recovery_policy must be {!r}".format(RECOVERY_POLICY))
     if plan["plan_digest"] != compute_plan_digest(plan):
@@ -1435,6 +1458,19 @@ def _fsync_dir_at(pfd, name, label):
         os.fsync(pfd)
     except OSError as exc:
         raise InitOperationError("cannot fsync {} and its parent ({})".format(label, exc), FAILED)
+
+
+def _preclassify_dirs(root_fd, plan):
+    """Before directory intent, every planned directory must be absent, including on retry."""
+    for d in plan["permitted_directories"]:
+        path = d["path"]
+        try:
+            present = _journal._lstat_contained(root_fd, path) is not None
+        except (_journal.JournalError, OSError) as exc:
+            raise InitOperationError("cannot observe {} ({})".format(path, exc), CANNOT_EVALUATE)
+        if present:
+            raise InitOperationError("{} appeared before this operation recorded its intent; "
+                                     "preserved and refused".format(path))
 
 
 def _apply_dirs(root_fd, plan, resuming):
@@ -1859,7 +1895,7 @@ def _health_check(root, root_fd, plan, binding):
     not equal today's HEAD. Current source validation permits legitimate later edits.
     """
     plan = validate_init_plan(_opf_init_contract.canonical_json_bytes(plan),
-                              expected_binding=binding)
+                              expected_binding=binding, completed=True)
     res = _opf_store.resolve_store(root)
     if res.status != _opf_store.RESOLVED or os.path.abspath(str(res.store_root)) != root \
             or res.machine_rel != _MACHINE_HOME:
@@ -1905,8 +1941,9 @@ def _health_check(root, root_fd, plan, binding):
             findings))
     if _lstat(root_fd, _opf_store.POINTER_REL, _opf_store.POINTER_REL) is None:
         raise InitOperationError("the completed adoption's store pointer is absent")
-    # This is a source milestone, not a whole-store/doctor verdict. Tracking,
-    # deliverables and across-time history are outside current-source health.
+    # This is current-source health for an adoption that already reached VIEWS-READY,
+    # not a new publication milestone or a whole-store/doctor verdict. Current views,
+    # tracking, deliverables and across-time history are outside current-source health.
     # Subtract from the authoritative roster so future checks fail closed by default.
     deferred = {"C-TRACKED", "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS",
                 "C-HISTORY-RESURRECTION"}
@@ -1980,14 +2017,15 @@ class _Run:
         self.phases.append(phase)
 
 
-def _run_group(run, group, effects, apply_fn, verify_fn):
+def _run_group(run, group, effects, apply_fn, verify_fn, *, pre_intent):
     """One journaled effect group (decision 3): the journal INTENT (the exact effects, derived from
     the immutable plan) is published durably BEFORE any effect and must equal the plan's on resume;
     the `<group>-intent` milestone follows; the effects are applied (idempotent create-or-dedupe)
     unless the journal is COMPLETE, in which case the disk is re-verified and a contradiction
     refuses; the fresh poststate is verified and the COMPLETE frame published; the
     `<group>-verified` milestone follows. A milestone the journal contradicts (an intent milestone
-    with no journaled intent) refuses."""
+    with no journaled intent) refuses. With no frames, the read-only pre_intent callback must pass
+    BEFORE publishing INTENT: a collision refusal must never authorize dedupe on the next retry."""
     writer = run.writer()
     txn = _txn_name(run.plan["operation_id"], group)
     intent = {"txn": txn, "operation_id": run.plan["operation_id"],
@@ -2005,6 +2043,7 @@ def _run_group(run, group, effects, apply_fn, verify_fn):
                 raise InitOperationError("milestone {}-intent is recorded but the journal holds no "
                                          "intent; contradictory evidence is preserved and "
                                          "refused".format(group), CANNOT_EVALUATE)
+            pre_intent()
             _journal_publish(jr_fd, txn, _journal.F_INTENT, intent)
         elif frames[0][1] != intent:
             raise InitOperationError("journal {} records an intent that is not this plan's; "
@@ -2110,7 +2149,9 @@ def apply_init_views(run, views):
     _run_group(run, "views", _file_effects(views),
                lambda resuming: _apply_files(run.root_fd, views, run.result.notes,
                                              require_absent=not resuming),
-               lambda: _verify_files(run.root_fd, views))
+               lambda: _verify_files(run.root_fd, views),
+               pre_intent=lambda: _preclassify_files(run.root_fd, views, run.result.notes,
+                                                      require_absent=True))
 
 
 def _select(run, binding):
@@ -2373,15 +2414,19 @@ def run_init_operation(product_root, *, ancestral=None, recover=False):
         result.plan_digest = run.plan["plan_digest"]
         _run_group(run, "dirs", _dir_effects(run.plan),
                    lambda resuming: _apply_dirs(run.root_fd, run.plan, resuming),
-                   lambda: _verify_dirs(run.root_fd, run.plan))
+                   lambda: _verify_dirs(run.root_fd, run.plan),
+                   pre_intent=lambda: _preclassify_dirs(run.root_fd, run.plan))
         try:
             run.cap = _opf_oplock.attach_init_lease(run.holder, run.plan["operation_id"])
         except _opf_oplock.OpLockError as exc:
             raise InitOperationError("cannot attach the mandatory lease ({})".format(exc), FAILED)
         sources = _source_files(run.plan)
         _run_group(run, "sources", _file_effects(sources),
-                   lambda resuming: _apply_files(run.root_fd, sources, result.notes),
-                   lambda: _verify_files(run.root_fd, sources))
+                   lambda resuming: _apply_files(run.root_fd, sources, result.notes,
+                                                 require_absent=not resuming),
+                   lambda: _verify_files(run.root_fd, sources),
+                   pre_intent=lambda: _preclassify_files(run.root_fd, sources, result.notes,
+                                                          require_absent=True))
         # The source group has just re-verified every source byte-exact (on resume too), so the
         # views always consume a verified source state; the source-state milestone is recorded once.
         if "sources-ready" not in run.phases:
@@ -3702,17 +3747,35 @@ def _view_tests(base, env, ok, signal):
            and "preserved" in res["primary_failure"]["detail"]
            and _view_state(root, views) == before, "{} {}".format(res, err[-400:]))
 
-    # V7 F14: before the views intent exists, even an EXACT-bytes view is a collision, refused and
-    # preserved; after the intent the same file is this operation's plan-authorized dedupe.
-    root = at_sources_ready("preintent")
+    # V7 F14: a pre-intent collision must refuse AGAIN on a plain retry. Neither an exact
+    # destination nor a foreign single-link staging file may acquire ownership from the refusal.
     first = views[0]
-    _write(os.path.join(root, first), _expected_views(root)[first])
-    os.chmod(os.path.join(root, first), 0o644)
-    before = _view_state(root, views)
-    rc, res, err = _child(root, env)
-    ok("V7-preintent-identical-refused", res and res["status"] == REFUSED
-       and "before this operation recorded its intent" in res["primary_failure"]["detail"]
-       and _view_state(root, views) == before, "{} {}".format(res, err[-400:]))
+    for collision in ("destination", "staging"):
+        root = at_sources_ready("preintent-" + collision)
+        ops, raw = _read_plan(root)
+        plan = json.loads(raw)
+        target = os.path.join(root, first) if collision == "destination" else os.path.join(
+            root, os.path.dirname(first), plan["sets"]["V"][0]["staging"])
+        data = _expected_views(root)[first] if collision == "destination" else b"foreign stage\n"
+        _write(target, data)
+        os.chmod(target, 0o644)
+        before = _view_state(root, views)
+        identity = os.lstat(target)
+        journal = os.path.join(root, ".git", _opf_init_substrate.SUBSTRATE_DIRNAME,
+                               _opf_init_substrate.JOURNALS_DIRNAME,
+                               _txn_name(ops[0], "views"), "frames.log")
+        for attempt in (1, 2):
+            rc, res, err = _child(root, env)
+            label = "V7-preintent-{}-attempt-{}".format(collision, attempt)
+            ok(label + "-refused", rc == 0 and res and res["status"] == REFUSED
+               and "before this operation recorded its intent" in res["primary_failure"]["detail"]
+               and _view_state(root, views) == before, "{} {}".format(res, err[-400:]))
+            ok(label + "-no-intent", _read_or_none(journal) == b""
+               and res and "views-intent" not in res["phases"] and _read_plan(root) == (ops, raw))
+            current = os.lstat(target) if os.path.lexists(target) else None
+            ok(label + "-preserved", current is not None and current.st_nlink == 1
+               and (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino)
+               and _read_or_none(target) == data)
     root = _plain_repo(os.path.join(base, "v-postintent"), env)
     rc, _res, _err = _child(root, env, kill="views-intent")
     _write(os.path.join(root, first), _expected_views(root)[first])
