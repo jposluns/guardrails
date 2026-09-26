@@ -156,6 +156,7 @@
 .aiqt/frozen.json text eol=lf
 .aiqt/gensrc.json text eol=lf
 .aiqt/manifest.toml text eol=lf
+.aiqt/newtab.toml text eol=lf
 .aiqt/record-sections.toml.example text eol=lf
 .aiqt/release/announce-snippet.txt text eol=lf
 .aiqt/release/root.txt text eol=lf

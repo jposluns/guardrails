@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "fb92a8355e21f88f93aeda2990fe71ccaa4501959865e18d7d5b3f340331cafc"
+tree-sha256 = "bf532cb37a3e731e2fba85ed2c049906c7abfffe33953540ccfbe54c5d78a42a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -96,8 +96,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 14249
-sha256 = "45bb0a9d5e1654fee9b222ca226b9d76a81127fe63bf260e26bc5339bdbd25d6"
+bytes = 14320
+sha256 = "eb6e2edc9bc44163ed24ec20f928cf9761cc21f82fae4374eeb2f63fb37b9bb4"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -783,6 +783,11 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 path = ".aiqt/gensrc.json"
 bytes = 9984
 sha256 = "a2adcf578e80a99d9bdb1d6c4b17d655b49b109ed530a14be8bea1aa1fa0e783"
+
+[[sources]]
+path = ".aiqt/newtab.toml"
+bytes = 77
+sha256 = "c523f79d800b2d84f717eb44eabe8efdbdd05fc989aae57ed60c6b9cdfa30e98"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2191,8 +2196,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 39782
-sha256 = "1ad837fcc8c3c61cdc8efbd770fb79afeec97c56418f4469a60df24ffe986378"
+bytes = 39812
+sha256 = "7128ac8028fafdfa2864c557b7fea1affff0c004b0a38332ce65365bc63038c5"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -3151,8 +3156,8 @@ sha256 = "c56cc0b8082aea3d2c45f62b27a4270c3597601ecaf993bbfd52cab84efaa85a"
 
 [[sources]]
 path = "tools/check_newtab.py"
-bytes = 16090
-sha256 = "360ef09aa55c0eed4f8696669dc01d9bcf4f50d93293b4189f069fa383f67f28"
+bytes = 30551
+sha256 = "398cf13184730eaf8d8179a0298abe10dcaa9b9dae729de32cb0706bdac60767"
 
 [[sources]]
 path = "tools/check_no_dashes.py"
