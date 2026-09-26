@@ -719,7 +719,17 @@ def _apply_locked(cap, resolution, run_id, homes, now, launch):
         launch.result = _launched_attempt(cap, root_fd, run_id, attempt, ref, ops, plan, live, run_rel)
         return launch.result
     finally:
-        _cleanup("store root descriptor close", _journal._close_fd_quietly, root_fd)
+        # Guarded at the CALL too, as _cleanup guards its own _surface call: a failure raised before _cleanup's
+        # guard is entered (a RecursionError under stack pressure) never replaces the selected outcome, a
+        # pre-launch one included (no launch boundary backs it), and its diagnostic is guarded as well.
+        try:
+            _cleanup("store root descriptor close", _journal._close_fd_quietly, root_fd)
+        except Exception:  # noqa: BLE001  the root-close cleanup call itself failing never replaces a result
+            try:
+                _surface("warning: ingest-apply could not enter the store root descriptor close; the selected "
+                         "outcome stands")
+            except Exception:  # noqa: BLE001  the root-close call's diagnostic failing never replaces a result
+                pass
 
 
 def apply_ingest(product_root, run_id, *, now=None):
@@ -780,10 +790,27 @@ def apply_ingest(product_root, run_id, *, now=None):
         raise
     finally:
         # A release failure of ANY class never overturns a formed result (_cleanup); a lock left behind
-        # refuses the next apply.
+        # refuses the next apply. Each call is guarded HERE too, as _cleanup guards its own _surface call: a
+        # failure raised before _cleanup's guard is entered (a RecursionError under stack pressure) never
+        # replaces the selected outcome, its diagnostic is guarded as well, and the next release is still
+        # attempted. The writer lock is still released only on an established outcome (`release`).
         if locked and release:
-            _cleanup("journal writer lock release", _opf_journal.release_writer_lock, cap, KIND)
-        _cleanup("operation capability release", _opf_oplock.release_operation, cap)
+            try:
+                _cleanup("journal writer lock release", _opf_journal.release_writer_lock, cap, KIND)
+            except Exception:  # noqa: BLE001  the writer-release cleanup call itself failing never replaces a result
+                try:
+                    _surface("warning: ingest-apply could not enter the journal writer lock release; the "
+                             "selected outcome stands")
+                except Exception:  # noqa: BLE001  the writer-release call's diagnostic failing never replaces one
+                    pass
+        try:
+            _cleanup("operation capability release", _opf_oplock.release_operation, cap)
+        except Exception:  # noqa: BLE001  the op-release cleanup call itself failing never replaces a result
+            try:
+                _surface("warning: ingest-apply could not enter the operation capability release; the selected "
+                         "outcome stands")
+            except Exception:  # noqa: BLE001  the op-release call's diagnostic failing never replaces a result
+                pass
 
 
 # --- self-test (slice 1: happy path, retry monotonicity, core-guard discriminators) ------------------
@@ -1512,6 +1539,63 @@ def _st_cleanup_fault(apply, root, rid, step, error, broken_stderr=False):
     return result, fired, "" if broken_stderr else stream.getvalue()
 
 
+# The final cleanup calls, each guarded at its call: (label, what, noop, later). `noop` drives the call on a
+# completed run's verified no-op, a pre-launch outcome no launch boundary backs; `later` is every cleanup
+# still entered after the call fails.
+_CLEANUP_CALLS = (("root-close", "store root descriptor close", True,
+                   ["journal writer lock release", "operation capability release"]),
+                  ("lock-release", "journal writer lock release", False, ["operation capability release"]),
+                  ("op-release", "operation capability release", False, []))
+
+
+def _st_cleanup_call_fault(apply, root, rid, what, noop=False, surface_fails=False):
+    """Apply with a RecursionError raised AT the call to the `what` final cleanup, before _cleanup's own guard
+    is entered (the stack-pressure failure no callee guard can catch); every other cleanup runs for real. With
+    `noop` the run is first promoted cleanly, so the faulted apply is the completed run's verified no-op; with
+    `surface_fails` the diagnostic call at that boundary raises a RecursionError too. stderr is captured. An
+    exception escaping `apply` is returned in place of the result, and what the faulted call never released is
+    released afterwards so no later vector inherits it. Returns (result, fired, entered, surfaced): `entered`
+    lists the cleanups entered after the fault, in order."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+    module = sys.modules[__name__]
+    real_cleanup = module._cleanup
+    fired, entered, leaked = [], [], []
+
+    def cleanup(step_what, step, *args):
+        if step_what == what and not fired:
+            fired.append(what)
+            leaked.append((step, args))
+            raise RecursionError("injected failure entering the {} cleanup".format(what))
+        if fired:
+            entered.append(step_what)
+        return real_cleanup(step_what, step, *args)
+
+    def surface(*_parts):
+        raise RecursionError("injected failure calling the cleanup-call diagnostic")
+
+    stream = io.StringIO()
+    with _opf_import._self_test_homes2_active(root):
+        if noop:
+            apply(root, rid, now=_NOW)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(module, "_cleanup", cleanup))
+            stack.enter_context(patch.object(sys, "stderr", stream))
+            if surface_fails:
+                stack.enter_context(patch.object(module, "_surface", surface))
+            try:
+                result = apply(root, rid, now=_NOW)
+            except Exception as exc:  # noqa: BLE001  an escaped exception is the misreport under test
+                result = exc
+        for step, args in leaked:
+            try:
+                step(*args)
+            except Exception:  # noqa: BLE001  fixture hygiene only; the observation above is already taken
+                pass
+    return result, fired, entered, stream.getvalue()
+
+
 def _t_postlaunch_indeterminate(base, check):
     """The post-launch guard is class-wide. A failing attempt-state re-read after a committed publication is
     indeterminate, never aborted: CANNOT_EVALUATE, promoted None (commit neither confirmed nor ruled out),
@@ -1565,9 +1649,10 @@ def _t_postlaunch_total(base, check):
     placeholder in its finding); an outcome helper that itself raises is indeterminate, never aborted; a
     failure of ANY class in a final-cleanup step, the root descriptor close, the journal writer lock release,
     or the operation capability release, is surfaced and never replaces the formed promoted result, even
-    with stderr itself broken; and a COMPLETE frame whose own log fsync failed, readable but not confirmed
-    durable, is indeterminate with the lock and journal retained, never promoted, and a re-apply refuses
-    rather than reporting a completed no-op."""
+    with stderr itself broken; a failure AT each final-cleanup call, before _cleanup is entered, never
+    replaces the selected outcome and every later cleanup is still entered; and a COMPLETE frame whose own log
+    fsync failed, readable but not confirmed durable, is indeterminate with the lock and journal retained,
+    never promoted, and a re-apply refuses rather than reporting a completed no-op."""
     root, rid, run = _st_build(base, "unprintable")
     result, fired = _st_postverify_fault(apply_ingest, root, rid, run, "source", _Unprintable)
     # Flip: formatting the exception without _safe_text raises out of the outcome helper, so the committed
@@ -1585,17 +1670,31 @@ def _t_postlaunch_total(base, check):
     for step in ("root-close", "lock-release", "op-release"):
         root, rid, run = _st_build(base, "cleanup-" + step)
         result, fired, surfaced = _st_cleanup_fault(apply_ingest, root, rid, step, RecursionError)
-        # Flip: a cleanup guard narrowed to OSError lets the RecursionError replace the formed result (an
-        # abort for the root close, an exception escaping apply_ingest for either release).
+        # Flip: a cleanup guard narrowed to OSError lets the RecursionError out of _cleanup; the guarded call
+        # (and, for the root close, the launch boundary) then keeps the result, so the step's own diagnostic
+        # is what goes missing. The isolated red-on-revert rows strip those layers to show the outcome.
         check("cleanup-{}-result-preserved".format(step), fired == [step]
               and getattr(result, "verdict", None) == CLEAN and getattr(result, "promoted", None) is True
               and getattr(result, "outcome", None) == "promoted" and "cleanup (" in surfaced)
     root, rid, run = _st_build(base, "cleanup-diagnostic")
     result, fired, _surfaced = _st_cleanup_fault(apply_ingest, root, rid, "root-close", RecursionError,
                                                  broken_stderr=True)
-    # Flip: an unguarded diagnostic write lets the broken stderr's ValueError escape apply_ingest.
+    # Flip: an unguarded diagnostic write lets the broken stderr's ValueError out of _surface, which the
+    # guarded diagnostic call in _cleanup then absorbs (so the red-on-revert row probes _surface directly).
     check("cleanup-diagnostic-result-preserved", fired == ["root-close"]
           and getattr(result, "promoted", None) is True and getattr(result, "outcome", None) == "promoted")
+    for label, what, noop, later in _CLEANUP_CALLS:
+        for surface_fails, name in ((False, "outcome-preserved"), (True, "diagnostic-failure-preserved")):
+            root, rid, run = _st_build(base, "cleanup-call-{}-{}".format(label, name))
+            result, fired, entered, surfaced = _st_cleanup_call_fault(apply_ingest, root, rid, what, noop,
+                                                                      surface_fails)
+            # Flip: an unguarded call (or, with its diagnostic call failing too, an unguarded diagnostic)
+            # lets the failure replace the selected outcome (an abort of the completed run's no-op for the
+            # root close, an exception escaping apply_ingest for either release) and skips every later release.
+            check("cleanup-call-{}-{}".format(label, name), fired == [what] and entered == later
+                  and getattr(result, "verdict", None) == CLEAN and getattr(result, "promoted", None) is True
+                  and getattr(result, "outcome", None) == ("noop_already_complete" if noop else "promoted")
+                  and (surface_fails or "could not enter the " + what in surfaced))
     root, rid, run = _st_build(base, "complete-unsynced")
     result, fired, states = _st_postcommit_fault(apply_ingest, root, rid, _journal.F_COMPLETE, target="log")
     ref = dict(txn_id=_opf_journal.attempt_txn(KIND, rid, 1), journal_rel=_opf_store.journal_root(KIND))
@@ -1631,8 +1730,8 @@ def _t_postlaunch_retain(base, check):
           and states == {1: "complete"} and (root / ".archive/legacy/move.md").read_bytes() == b"moveme\n"
           and not (root / "legacy/move.md").exists() and (home / PROMOTION_NAME).is_file())
     # Flip: without the launch boundary the _RetainLock construction failure reaches the generic abort
-    # handler (promoted=False, outcome aborted, lock released); without the guarded diagnostic call the
-    # op-release failure escapes apply_ingest with no result formed.
+    # handler (promoted=False, outcome aborted, lock released); without the guarded diagnostic call AND the
+    # guarded op-release call the op-release failure escapes apply_ingest with no result formed.
     check("nested-fault-not-aborted", getattr(result, "verdict", None) == CANNOT_EVALUATE
           and getattr(result, "promoted", False) is None and getattr(result, "outcome", None) == "indeterminate"
           and getattr(result, "restore_ref", None) == ref
@@ -1708,6 +1807,17 @@ def self_test(only=None):
 # source (there _opf_observe.py; here _opf_allocation.py) for a guard that lives outside this file. A
 # class-width guard is backed by several discriminators sharing its one mutation, one per sibling instance
 # of the class, so reverting it must re-expose EVERY sibling, not only the one first cited.
+#
+# Every row carries a declared class. A "safety" row's mutant returns a wrong result at the outcome boundary
+# (a false abort, a false promotion or completed no-op, a released lock, an escape or lost result, or a
+# confirmed commit or genuine rollback misreported as indeterminate), or, for a unit-level guard, breaks that
+# guard's own contract.
+# A "guard-execution" row's mutant still returns the right outcome, because an overlapping layer beneath the
+# reverted guard holds it; its RED shows only that the guard executed (its diagnostic, or the probe firing),
+# and a sibling "/isolated" row proves the safety property instead. An isolated row strips the named
+# overlapping layers in the CANDIDATE only (never in this file): its baseline, the stripped source, must PASS
+# with the guard alone, its mutant (the baseline plus the guard's reversal) must go RED, and the full pristine
+# source must still PASS.
 
 # The banner above is the first occurrence of this text in the file and marks where the production region
 # ends; mutations are confined ahead of it (see _red_on_revert). The literal here is a second occurrence,
@@ -1889,8 +1999,9 @@ def _p_helper_fault_indeterminate(module, base_dir):
 
 def _p_cleanup_preserved(step, broken_stderr=False):
     """A probe that a RecursionError in the `step` cleanup (with stderr broken too, when asked) leaves the
-    formed promoted result standing, surfaced by the cleanup guard itself (with stderr intact), so the launch
-    boundary's own return of the formed result cannot mask a reverted cleanup guard."""
+    formed promoted result standing, surfaced by the cleanup guard itself (with stderr intact). The guarded
+    cleanup call, and for the root close the launch boundary, keep the result when the cleanup guard is
+    reverted, so only that diagnostic tells them apart: a guard-execution probe (see _p_cleanup_outcome)."""
     def probe(module, base_dir):
         root, rid, _run = module._st_build(base_dir, "cleanup")
         result, fired, surfaced = module._st_cleanup_fault(module.apply_ingest, root, rid, step, RecursionError,
@@ -1952,11 +2063,93 @@ def _p_complete_unsynced_reapply(module, base_dir):
     return fired == [_journal.F_COMPLETE] and again.promoted is False and again.outcome == "aborted"
 
 
-def _probe_row(identity, probe, old, new):
-    """A discriminator row over this file whose focused test asserts `probe` under `identity`."""
+def _caught(apply):
+    """`apply` with an escaping Exception returned in place of the result: an escape is itself a misreport."""
+    def wrapped(*args, **kwargs):
+        try:
+            return apply(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001  an escaped exception is the misreport under test
+            return exc
+    return wrapped
+
+
+# Scenarios for the outcome-only probes: each drives one launched attempt and returns (result, root).
+
+def _s_complete_fault(module, base_dir):
+    root, rid, _run = module._st_build(base_dir, "postcommit")
+    return module._st_postcommit_fault(_caught(module.apply_ingest), root, rid, _journal.F_COMPLETE)[0], root
+
+
+def _s_reread_fault(module, base_dir):
+    root, rid, _run = module._st_build(base_dir, "reread")
+    wrapped, _raised = module._st_reread_fault(_caught(module.apply_ingest), _journal.JournalError)
+    return module._st_postcommit_fault(wrapped, root, rid, _journal.F_COMPLETE)[0], root
+
+
+def _s_complete_lost(module, base_dir):
+    root, rid, _run = module._st_build(base_dir, "complete-lost")
+    return module._st_complete_lost(_caught(module.apply_ingest), root, rid)[0], root
+
+
+def _s_foreign_txn(module, base_dir):
+    root, rid, _run = module._st_build(base_dir, "foreign-txn")
+    return module._st_foreign_txn_fault(module.apply_ingest, root, rid)[0], root
+
+
+def _s_helper_fault(module, base_dir):
+    root, rid, run = module._st_build(base_dir, "helper-fault")
+    return module._st_helper_fault(_caught(module.apply_ingest), root, rid, run)[0], root
+
+
+def _s_nested(module, base_dir):
+    root, rid, run = module._st_build(base_dir, "nested")
+    return module._st_nested_fault(module.apply_ingest, root, rid, run)[0], root
+
+
+def _p_retained(scenario):
+    """A safety probe at the outcome boundary ALONE: the launched attempt `scenario` drives is indeterminate
+    (promoted None) with the journal lock retained. No diagnostic text or probe firing is asserted, so it goes
+    RED only on a false abort, a false promotion, an escape with no result formed, or a released lock."""
+    def probe(module, base_dir):
+        result, root = scenario(module, base_dir)
+        return (getattr(result, "promoted", False) is None and getattr(result, "outcome", None) == "indeterminate"
+                and (root / _opf_store.journal_root(KIND) / "lock").is_file())
+    return probe
+
+
+def _p_cleanup_outcome(step):
+    """A safety probe that a RecursionError in the `step` cleanup leaves the formed promoted result standing,
+    asserting the outcome alone (no diagnostic text), so it goes RED only on an abort or an escape."""
+    def probe(module, base_dir):
+        root, rid, _run = module._st_build(base_dir, "cleanup")
+        result, fired, _surfaced = module._st_cleanup_fault(module.apply_ingest, root, rid, step, RecursionError)
+        return (fired == [step] and getattr(result, "promoted", None) is True
+                and getattr(result, "outcome", None) == "promoted")
+    return probe
+
+
+def _p_cleanup_call_guarded(label, surface_fails=False):
+    """A safety probe that a failure AT the `label` final-cleanup call, before _cleanup is entered (with the
+    diagnostic call at that boundary failing too, when asked), leaves the selected outcome standing (for the
+    root close, a completed run's verified no-op, which no launch boundary backs) and that every later cleanup
+    is still entered."""
+    def probe(module, base_dir):
+        _label, what, noop, later = dict((c[0], c) for c in module._CLEANUP_CALLS)[label]
+        root, rid, _run = module._st_build(base_dir, "cleanup-call")
+        result, fired, entered, _surfaced = module._st_cleanup_call_fault(module.apply_ingest, root, rid, what,
+                                                                          noop, surface_fails)
+        return (fired == [what] and entered == later and getattr(result, "verdict", None) == CLEAN
+                and getattr(result, "promoted", None) is True
+                and getattr(result, "outcome", None) == ("noop_already_complete" if noop else "promoted"))
+    return probe
+
+
+def _probe_row(identity, probe, old, new, strips=()):
+    """A discriminator row over this file whose focused test asserts `probe` under `identity`, over the
+    isolation baseline `strips` (names in _STRIPS) when given."""
     def test(module, base_dir):
         _revert_check(probe(module, base_dir), identity)
-    return (identity, "apply", test, old, new)
+    return (identity, "apply", test, old, new, tuple(strips))
 
 
 # The ONE post-launch guard in `_launched_attempt`, and its reversal (the guard catches nothing).
@@ -1975,15 +2168,55 @@ _LAUNCH_REVERTED = "        if False:  # reverted: the launch boundary\n"
 # The interrupt's lock retention, and its reversal (the pre-fix release as the fall-through of any escape).
 _INTERRUPT_RETAIN = "release = not launch.launched or launch.result is not None"
 _INTERRUPT_REVERTED = "release = True  # reverted: the interrupt retention"
+# The guarded attempt-state re-read, the outcome helper's own-failure guard, and the guarded cleanup
+# diagnostic call, each with its reversal (the guard catches nothing).
+_READ_GUARD, _READ_REVERTED = "except Exception as read_exc:", "except () as read_exc:"
+_HELPER_GUARD = "except Exception:  # noqa: BLE001  the outcome helper's own failure"
+_HELPER_REVERTED = "except ():  # reverted: the outcome helper's own failure"
+_DIAG_CALL_GUARD = "except Exception:  # noqa: BLE001  the cleanup diagnostic call"
+_DIAG_CALL_REVERTED = "except ():  # reverted: the cleanup diagnostic call"
+# The three final-cleanup CALL guards (a failure raised before _cleanup is entered), label -> guard text.
+_CALL_GUARDS = dict((label, "except Exception:  # noqa: BLE001  the {} cleanup call".format(site))
+                    for label, site in (("root-close", "root-close"), ("lock-release", "writer-release"),
+                                        ("op-release", "op-release")))
+
+
+# The guard on each call's own diagnostic, label -> guard text.
+_CALL_DIAG_GUARDS = dict((label, "except Exception:  # noqa: BLE001  the {} call's diagnostic".format(site))
+                         for label, site in (("root-close", "root-close"), ("lock-release", "writer-release"),
+                                             ("op-release", "op-release")))
+
+
+def _call_reverted(label, verb="reverted", guards=_CALL_GUARDS):
+    return guards[label].replace("except Exception:  # noqa: BLE001 ", "except ():  # " + verb + ":")
+
+
+# Isolation baselines: an overlapping layer beneath a guard, stripped in the candidate only, name -> (old,
+# new). A stripped layer is never a production change; the restored phase always runs the full source.
+_STRIPS = dict((("helper-guard", (_HELPER_GUARD, _HELPER_REVERTED.replace("reverted", "stripped"))),
+                ("launch-boundary", (_LAUNCH_BOUNDARY, _LAUNCH_REVERTED.replace("reverted", "stripped"))))
+               + tuple((label + "-call", (_CALL_GUARDS[label], _call_reverted(label, "stripped")))
+                       for label in _CALL_GUARDS))
+_LAUNCHED_LAYERS = ("helper-guard", "launch-boundary")
+# The rows whose mutant still returns the right outcome (an overlapping layer holds it): guard-execution
+# tests, each paired with an "/isolated" safety row. Every other row is a safety discriminator.
+_GUARD_EXECUTION = frozenset((
+    "postlaunch/complete-fault-not-aborted", "postlaunch/reread-fault-not-aborted",
+    "postlaunch/complete-lost-not-aborted", "postlaunch/foreign-txn-not-escaped", "postlaunch/reread-guarded",
+    "postlaunch/helper-failure-not-aborted", "cleanup/root-close-not-aborted", "cleanup/lock-release-not-escaped",
+    "cleanup/op-release-not-escaped", "cleanup/diagnostic-call-not-escaped"))
 
 # (identity, probe, unique old, new). The class width first: every sibling re-exposed by reverting the ONE
 # post-launch guard. Then each decision branch of `_post_launch_result` by its own mutation, including the
 # rollback branch, so the guard can neither absorb a genuine abort nor claim a commit it cannot confirm, and
 # the unconfirmed-COMPLETE branch with one probe per sibling (the result, and a re-apply's no-op). Then the
 # exception-total layers: _safe_text, the helper-failure guard, the cleanup guard with one probe per cleanup
-# step, and the cleanup diagnostic channel. Last the launch boundary: a nested failure that escapes even the
+# step, and the cleanup diagnostic channel. Then the launch boundary: a nested failure that escapes even the
 # helper-failure guard (the launch-boundary reversal, and the guarded cleanup diagnostic call sharing its
-# probe), and the interrupt retention with one probe per BaseException sibling.
+# probe), and the interrupt retention with one probe per BaseException sibling. Then the three final-cleanup
+# CALL guards and the guards on their own diagnostics, one probe per call. Last the "/isolated" safety rows,
+# one per guard-execution row, each over the isolation baseline naming the overlapping layers stripped (a
+# trailing tuple of _STRIPS names).
 _POST_LAUNCH = (
     ("postverify/committed-not-aborted", _p_postverify_committed, _POST_LAUNCH_GUARD, _POST_LAUNCH_REVERTED),
     ("postverify/foreign-class-not-aborted", _p_postverify_foreign, _POST_LAUNCH_GUARD, _POST_LAUNCH_REVERTED),
@@ -1993,8 +2226,7 @@ _POST_LAUNCH = (
      _POST_LAUNCH_REVERTED),
     ("postlaunch/foreign-txn-not-escaped", _p_foreign_txn_indeterminate, _POST_LAUNCH_GUARD,
      _POST_LAUNCH_REVERTED),
-    ("postlaunch/reread-guarded", _p_reread_indeterminate, "except Exception as read_exc:",
-     "except () as read_exc:"),
+    ("postlaunch/reread-guarded", _p_reread_indeterminate, _READ_GUARD, _READ_REVERTED),
     ("postlaunch/rollback-still-aborted", _p_precommit_rollback_aborted,
      'if state in ("nothing-opened", "rolled-back"):', "if False:"),
     ("postlaunch/indeterminate-not-aborted", _p_complete_lost_indeterminate,
@@ -2006,9 +2238,7 @@ _POST_LAUNCH = (
      _UNCONFIRMED_REVERTED),
     ("postlaunch/unprintable-not-aborted", _p_unprintable_committed, "def _safe_text(value):\n",
      "def _safe_text(value):\n    return str(value)\n"),
-    ("postlaunch/helper-failure-not-aborted", _p_helper_fault_indeterminate,
-     "except Exception:  # noqa: BLE001  the outcome helper's own failure",
-     "except ():  # reverted: the outcome helper's own failure"),
+    ("postlaunch/helper-failure-not-aborted", _p_helper_fault_indeterminate, _HELPER_GUARD, _HELPER_REVERTED),
     ("cleanup/root-close-not-aborted", _p_cleanup_preserved("root-close"), _CLEANUP_GUARD, _CLEANUP_REVERTED),
     ("cleanup/lock-release-not-escaped", _p_cleanup_preserved("lock-release"), _CLEANUP_GUARD, _CLEANUP_REVERTED),
     ("cleanup/op-release-not-escaped", _p_cleanup_preserved("op-release"), _CLEANUP_GUARD, _CLEANUP_REVERTED),
@@ -2016,15 +2246,45 @@ _POST_LAUNCH = (
      "except Exception:  # noqa: BLE001  the diagnostic channel",
      "except ():  # reverted: the diagnostic channel"),
     ("postlaunch/nested-failure-not-aborted", _p_nested_not_aborted, _LAUNCH_BOUNDARY, _LAUNCH_REVERTED),
-    ("cleanup/diagnostic-call-not-escaped", _p_nested_not_aborted,
-     "except Exception:  # noqa: BLE001  the cleanup diagnostic call",
-     "except ():  # reverted: the cleanup diagnostic call"),
+    ("cleanup/diagnostic-call-not-escaped", _p_nested_not_aborted, _DIAG_CALL_GUARD, _DIAG_CALL_REVERTED),
     ("postlaunch/interrupt-retains-lock", _p_interrupt_retains(KeyboardInterrupt, KeyboardInterrupt),
      _INTERRUPT_RETAIN, _INTERRUPT_REVERTED),
     ("postlaunch/exit-retains-lock", _p_interrupt_retains(SystemExit, SystemExit), _INTERRUPT_RETAIN,
      _INTERRUPT_REVERTED),
     ("postlaunch/interrupting-format-retains-lock", _p_interrupt_retains(_InterruptingStr, KeyboardInterrupt),
      _INTERRUPT_RETAIN, _INTERRUPT_REVERTED),
+    ("cleanup/root-close-call-not-aborted", _p_cleanup_call_guarded("root-close"), _CALL_GUARDS["root-close"],
+     _call_reverted("root-close")),
+    ("cleanup/writer-release-call-not-escaped", _p_cleanup_call_guarded("lock-release"),
+     _CALL_GUARDS["lock-release"], _call_reverted("lock-release")),
+    ("cleanup/op-release-call-not-escaped", _p_cleanup_call_guarded("op-release"), _CALL_GUARDS["op-release"],
+     _call_reverted("op-release")),
+    ("cleanup/root-close-call-diagnostic-not-aborted", _p_cleanup_call_guarded("root-close", True),
+     _CALL_DIAG_GUARDS["root-close"], _call_reverted("root-close", guards=_CALL_DIAG_GUARDS)),
+    ("cleanup/writer-release-call-diagnostic-not-escaped", _p_cleanup_call_guarded("lock-release", True),
+     _CALL_DIAG_GUARDS["lock-release"], _call_reverted("lock-release", guards=_CALL_DIAG_GUARDS)),
+    ("cleanup/op-release-call-diagnostic-not-escaped", _p_cleanup_call_guarded("op-release", True),
+     _CALL_DIAG_GUARDS["op-release"], _call_reverted("op-release", guards=_CALL_DIAG_GUARDS)),
+    ("postlaunch/complete-fault-not-aborted/isolated", _p_retained(_s_complete_fault), _POST_LAUNCH_GUARD,
+     _POST_LAUNCH_REVERTED, _LAUNCHED_LAYERS),
+    ("postlaunch/reread-fault-not-aborted/isolated", _p_retained(_s_reread_fault), _POST_LAUNCH_GUARD,
+     _POST_LAUNCH_REVERTED, _LAUNCHED_LAYERS),
+    ("postlaunch/complete-lost-not-aborted/isolated", _p_retained(_s_complete_lost), _POST_LAUNCH_GUARD,
+     _POST_LAUNCH_REVERTED, _LAUNCHED_LAYERS),
+    ("postlaunch/foreign-txn-not-escaped/isolated", _p_retained(_s_foreign_txn), _POST_LAUNCH_GUARD,
+     _POST_LAUNCH_REVERTED, _LAUNCHED_LAYERS),
+    ("postlaunch/reread-guarded/isolated", _p_retained(_s_reread_fault), _READ_GUARD, _READ_REVERTED,
+     _LAUNCHED_LAYERS),
+    ("postlaunch/helper-failure-not-aborted/isolated", _p_retained(_s_helper_fault), _HELPER_GUARD,
+     _HELPER_REVERTED, ("launch-boundary",)),
+    ("cleanup/root-close-not-aborted/isolated", _p_cleanup_outcome("root-close"), _CLEANUP_GUARD,
+     _CLEANUP_REVERTED, ("launch-boundary", "root-close-call")),
+    ("cleanup/lock-release-not-escaped/isolated", _p_cleanup_outcome("lock-release"), _CLEANUP_GUARD,
+     _CLEANUP_REVERTED, ("lock-release-call",)),
+    ("cleanup/op-release-not-escaped/isolated", _p_cleanup_outcome("op-release"), _CLEANUP_GUARD,
+     _CLEANUP_REVERTED, ("op-release-call",)),
+    ("cleanup/diagnostic-call-not-escaped/isolated", _p_retained(_s_nested), _DIAG_CALL_GUARD,
+     _DIAG_CALL_REVERTED, ("op-release-call",)),
 )
 
 # (identity, source-key, focused test, unique old, new). source-key selects which module's source is
@@ -2053,10 +2313,14 @@ def _red_on_revert():
     ids = [d[0] for d in _DISCRIMINATORS]
     if len(ids) != len(set(ids)):
         raise RuntimeError("duplicate declared discriminator identity")
+    if not _GUARD_EXECUTION <= set(ids) or any(i + "/isolated" not in ids for i in _GUARD_EXECUTION):
+        raise RuntimeError("a guard-execution row is undeclared or has no /isolated safety row")
     base = Path(tempfile.mkdtemp(prefix="opf-ingest-apply-revert-")).resolve()
-    ran = []
+    ran, classes = [], dict(safety=0, guard_execution=0)
     try:
-        for number, (identity, key, test, old, new) in enumerate(_DISCRIMINATORS):
+        for number, row in enumerate(_DISCRIMINATORS):
+            identity, key, test, old, new = row[:5]
+            strips = row[5] if len(row) > 5 else ()
             source = read[key]
             file_path = str(sources[key])
             digest = _sha(source.encode("utf-8"))
@@ -2065,7 +2329,14 @@ def _red_on_revert():
             # uniqueness is judged against the guard, never the harness's description of it.
             prefix = source.split(_REVERT_MARKER, 1)[0]
             suffix = source[len(prefix):]
-            pristine = _load_revert_candidate(source, "_revert_pristine_{}".format(number), file_path)
+            # An isolated row's baseline strips its named overlapping layers in the candidate only; any other
+            # row's baseline is the pristine source itself.
+            for strip in strips:
+                strip_old, strip_new = _STRIPS[strip]
+                if prefix.count(strip_old) != 1:
+                    raise RuntimeError("baseline strip target is not unique in the production region: " + identity)
+                prefix = prefix.replace(strip_old, strip_new, 1)
+            pristine = _load_revert_candidate(prefix + suffix, "_revert_pristine_{}".format(number), file_path)
             try:
                 test(pristine, base / "p{}".format(number))
             finally:
@@ -2088,12 +2359,16 @@ def _red_on_revert():
                 test(restored, base / "r{}".format(number))
             finally:
                 sys.modules.pop(restored.__name__, None)
-            print("RED-ON-REVERT", identity, "assertion=" + identity, "restored=PASS",
+            kind = "guard-execution" if identity in _GUARD_EXECUTION else "safety"
+            classes[kind.replace("-", "_")] += 1
+            print("RED-ON-REVERT", identity, "assertion=" + identity, "class=" + kind,
+                  "baseline=" + ("stripped:" + "+".join(strips) if strips else "pristine"), "restored=PASS",
                   "candidate_sha256=" + digest)
             ran.append(identity)
     finally:
         shutil.rmtree(str(base), ignore_errors=True)
-    print("OPF-INGEST-APPLY RED-ON-REVERT: {} discriminators ({})".format(len(ran), ", ".join(ran)))
+    print("OPF-INGEST-APPLY RED-ON-REVERT: {} discriminators, {} safety and {} guard-execution ({})".format(
+        len(ran), classes["safety"], classes["guard_execution"], ", ".join(ran)))
     return 0
 
 
