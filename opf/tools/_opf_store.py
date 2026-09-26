@@ -194,6 +194,8 @@ RESERVED_EXCLUDED_TYPES = {
 
 # Section shapes (closed keysets; see the ambiguity note in the module docstring).
 OPF_KEYS = frozenset({"standard", "spec_version", "layout", "posture", "import_status"})
+# Recognized-but-OPTIONAL [opf] keys: absent homes means legacy generation 1; required-ness waits for L4.
+OPF_OPTIONAL_KEYS = frozenset({"homes"})
 STORE_KEYS = frozenset({"sync_target"})
 PROFILE_KEYS = frozenset({"version", "base_compat", "posture_floor", "required_modules",
                           "extension_namespace"})
@@ -271,6 +273,14 @@ def txn_record(kind, run_id):
     run = _home_run(kind, run_id)
     kind, run_id = run.split("/")
     return "{}/{}/runs/{}/transaction.toml".format(JOURNALS_REL, kind, run_id)
+
+
+def allocation_record(kind, run_id):
+    """Store-root-relative permanent ID reservation of one run. It lives in the journal home, so
+    require_ordinary_target refuses it as a publication or rollback operand."""
+    run = _home_run(kind, run_id)
+    kind, run_id = run.split("/")
+    return "{}/{}/allocations/{}.toml".format(JOURNALS_REL, kind, run_id)
 
 
 def evidence_inventory(kind, run_id, phase=None):
@@ -1234,7 +1244,7 @@ def _check_enum(table, key, allowed, where, findings):
 
 def _validate_base(base, findings):
     """Validate the [opf] base table; returns the parsed spec_version tuple or None."""
-    extra = set(base) - OPF_KEYS
+    extra = set(base) - OPF_KEYS - OPF_OPTIONAL_KEYS
     if extra:
         findings.append("[opf] unknown key(s): {}".format(", ".join(_sorted_key_names(extra))))
     missing = [k for k in OPF_KEYS if k not in base]
@@ -1260,6 +1270,16 @@ def _validate_base(base, findings):
     _check_enum(base, "layout", LAYOUTS, "[opf]", findings)
     _check_enum(base, "posture", POSTURES, "[opf]", findings)
     _check_enum(base, "import_status", IMPORT_STATES, "[opf]", findings)
+    # `homes` is an OPTIONAL integer generation declaration (spec 4.2 / 9.2). When present it must be
+    # the integer 1 (legacy) or 2 (homes-2); a non-integer, a bool (an int subclass), or an out-of-range
+    # value is a fail-closed finding. Absence means generation 1 and is not a finding: the key becomes
+    # REQUIRED only when homes 2 activates (L4). This validates the DECLARATION; homes_generation()
+    # decides ACTIVATION and does not activate while SUPPORTED_HOMES == 1.
+    if "homes" in base:
+        homes = base["homes"]
+        if type(homes) is not int or homes not in (1, 2):
+            findings.append("[opf].homes {} is not an integer generation (1 or 2)".format(
+                _safe_display(homes)))
     return spec_tuple
 
 
@@ -1991,6 +2011,46 @@ def self_test():
               any("older than the" in f and "opf upgrade" in f for f in mv_old.findings))
         check("spec-version-current-ok",
               validate_manifest(_t.loads(manifest_text(spec_version=SUPPORTED_SPEC_VERSION))).status == VALID)
+
+        # 10h: [opf].homes is an optional, validated integer generation declaration.
+        # Recognition does not activate homes 2 or require a declaration in legacy manifests.
+        homes_manifest_text = manifest_text(spec_version=SUPPORTED_SPEC_VERSION)
+        homes_anchor = 'import_status = "none"'
+        check("homes-fixture-anchor", homes_manifest_text.count(homes_anchor) == 1)
+
+        m_homes_absent = _t.loads(homes_manifest_text)
+        mv_homes_absent = validate_manifest(m_homes_absent)
+        check("homes-absent-valid",
+              "homes" not in m_homes_absent["opf"]
+              and mv_homes_absent.status == VALID
+              and not any("homes" in f for f in mv_homes_absent.findings))
+        check("homes-absent-legacy-generation",
+              homes_generation(m_homes_absent) == 1)
+
+        for generation in (1, 2):
+            m_homes = _t.loads(homes_manifest_text.replace(
+                homes_anchor, homes_anchor + "\nhomes = {}".format(generation)))
+            mv_homes = validate_manifest(m_homes)
+            check("homes-{}-valid".format(generation),
+                  type(m_homes["opf"].get("homes")) is int
+                  and m_homes["opf"]["homes"] == generation
+                  and mv_homes.status == VALID
+                  and not any("unknown key" in f or "[opf].homes" in f
+                              for f in mv_homes.findings))
+
+        for label, rhs in (
+                ("zero", "0"),
+                ("three", "3"),
+                ("string", '"2"'),
+                ("bool", "true")):
+            # Parse first: these are valid TOML values whose declarations must fail validation.
+            m_homes_bad = _t.loads(homes_manifest_text.replace(
+                homes_anchor, homes_anchor + "\nhomes = " + rhs))
+            mv_homes_bad = validate_manifest(m_homes_bad)
+            check("homes-{}-invalid-named".format(label),
+                  mv_homes_bad.status == INVALID
+                  and any("[opf].homes" in f and "integer generation" in f
+                          for f in mv_homes_bad.findings))
 
         # 11: the base_compat range grammar (defined here).
         check("compat-match", _match_base_compat(">=1.0.0 <2.0.0", (1, 2, 3)) == (True, None))
