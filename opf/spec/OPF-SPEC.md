@@ -91,7 +91,7 @@ Two roots organize every path in this standard:
 
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
 The current reference tooling reserves these names and implements their homes-2 boundary checks. It still
-supports `1.1.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
+supports `1.2.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
 legacy paths until homes 2 is activated, which requires the homes migration (`opf upgrade`) to be
 available. The section 9 manifest example
 continues to describe that legacy format. The homes-2 requirements in sections 4.2, 9.2, 12,

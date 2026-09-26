@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e526d4679584ee9e3921c9232122e273ed0a8a7f0abf721f8c8341b08671b78d"
+tree-sha256 = "27ee989c8692b0a70f974faf37e7196bd347f58d9b28f9a5856f9bc32d43c62d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2477,7 +2477,7 @@ sha256 = "573ac6cad9a676efed6bc35cf92914cde0907ca62e6960c78783e90fe505281e"
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
 bytes = 103942
-sha256 = "5c9963bf930021cb4478ae2578bcb932470474275ddb4658f6fd4f6a3e0c5290"
+sha256 = "db8c72595d93cb70181b9ca46e8901f5711c24223528089e08acfb710f66761d"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
