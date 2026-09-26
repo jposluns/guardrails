@@ -273,6 +273,14 @@ def txn_record(kind, run_id):
     return "{}/{}/runs/{}/transaction.toml".format(JOURNALS_REL, kind, run_id)
 
 
+def allocation_record(kind, run_id):
+    """Store-root-relative permanent ID reservation of one run. It lives in the journal home, so
+    require_ordinary_target refuses it as a publication or rollback operand."""
+    run = _home_run(kind, run_id)
+    kind, run_id = run.split("/")
+    return "{}/{}/allocations/{}.toml".format(JOURNALS_REL, kind, run_id)
+
+
 def evidence_inventory(kind, run_id, phase=None):
     """Store-root-relative inventory of one evidence bundle. A later phase adds its own
     inventory-<phase>.toml beside the first; an inventory is never rewritten."""
