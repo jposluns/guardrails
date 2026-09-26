@@ -2023,6 +2023,22 @@ def _p_surface_non_throwing(module, base_dir):
     return _p_cleanup_preserved("root-close", broken_stderr=True)(module, base_dir)
 
 
+def _p_surface_outcome(module, base_dir):
+    """A broken stderr during real promotion cleanup preserves the promoted result and releases the
+    journal writer lock. Assert only the outcome and lock state, never diagnostic text or probe firing."""
+    root, rid, _run = module._st_build(base_dir, "surface-outcome")
+    result, _fired, _surfaced = module._st_cleanup_fault(
+        module.apply_ingest, root, rid, "root-close", RecursionError, broken_stderr=True)
+    try:
+        (root / _opf_store.journal_root(KIND) / "lock").lstat()
+    except FileNotFoundError:
+        lock_released = True
+    else:
+        lock_released = False
+    return (getattr(result, "promoted", None) is True
+            and getattr(result, "outcome", None) == "promoted" and lock_released)
+
+
 def _p_nested_not_aborted(module, base_dir):
     """A committed publication whose outcome helper, _RetainLock construction, and cleanup diagnostic call
     all fail is indeterminate with the lock retained, never aborted and never an escape."""
@@ -2194,7 +2210,9 @@ def _call_reverted(label, verb="reverted", guards=_CALL_GUARDS):
 # Isolation baselines: an overlapping layer beneath a guard, stripped in the candidate only, name -> (old,
 # new). A stripped layer is never a production change; the restored phase always runs the full source.
 _STRIPS = dict((("helper-guard", (_HELPER_GUARD, _HELPER_REVERTED.replace("reverted", "stripped"))),
-                ("launch-boundary", (_LAUNCH_BOUNDARY, _LAUNCH_REVERTED.replace("reverted", "stripped"))))
+                ("launch-boundary", (_LAUNCH_BOUNDARY, _LAUNCH_REVERTED.replace("reverted", "stripped"))),
+                ("cleanup-diagnostic-call",
+                 (_DIAG_CALL_GUARD, _DIAG_CALL_REVERTED.replace("reverted", "stripped"))))
                + tuple((label + "-call", (_CALL_GUARDS[label], _call_reverted(label, "stripped")))
                        for label in _CALL_GUARDS))
 _LAUNCHED_LAYERS = ("helper-guard", "launch-boundary")
@@ -2204,7 +2222,8 @@ _GUARD_EXECUTION = frozenset((
     "postlaunch/complete-fault-not-aborted", "postlaunch/reread-fault-not-aborted",
     "postlaunch/complete-lost-not-aborted", "postlaunch/foreign-txn-not-escaped", "postlaunch/reread-guarded",
     "postlaunch/helper-failure-not-aborted", "cleanup/root-close-not-aborted", "cleanup/lock-release-not-escaped",
-    "cleanup/op-release-not-escaped", "cleanup/diagnostic-call-not-escaped"))
+    "cleanup/op-release-not-escaped", "cleanup/diagnostic-call-not-escaped",
+    "cleanup/diagnostic-not-escaped"))
 
 # (identity, probe, unique old, new). The class width first: every sibling re-exposed by reverting the ONE
 # post-launch guard. Then each decision branch of `_post_launch_result` by its own mutation, including the
@@ -2285,6 +2304,10 @@ _POST_LAUNCH = (
      _CLEANUP_REVERTED, ("op-release-call",)),
     ("cleanup/diagnostic-call-not-escaped/isolated", _p_retained(_s_nested), _DIAG_CALL_GUARD,
      _DIAG_CALL_REVERTED, ("op-release-call",)),
+    ("cleanup/diagnostic-not-escaped/isolated", _p_surface_outcome,
+     "except Exception:  # noqa: BLE001  the diagnostic channel",
+     "except ():  # reverted: the diagnostic channel",
+     ("cleanup-diagnostic-call", "root-close-call", "launch-boundary")),
 )
 
 # (identity, source-key, focused test, unique old, new). source-key selects which module's source is
