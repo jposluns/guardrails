@@ -590,6 +590,13 @@ def _apply_locked(cap, resolution, run_id, homes, now):
                                                  lambda op: ops.content[op["path"]])
         except _journal.JournalError as exc:
             state = _opf_journal.attempt_states(cap, KIND, run_id).get(attempt, "nothing-opened")
+            # COMPLETE is durable, so the attempt COMMITTED and only a later journal step (such as the
+            # closing directory fsync) failed: a committed promotion is never reported as aborted.
+            if state == "complete":
+                return ApplyResult(CANNOT_EVALUATE, ["the promotion committed but the journal post-commit step "
+                                                     "did not fully complete ({}); inspect the retained "
+                                                     "journal".format(exc)],
+                                   promoted=True, outcome="promoted", restore_ref=ref)
             if state in ("nothing-opened", "rolled-back"):
                 return ApplyResult(CANNOT_EVALUATE, ["publication aborted and rolled back ({}); the reserved "
                                                      "ids stay consumed and a retry reuses them".format(exc)],
@@ -1053,10 +1060,85 @@ def _t_postverify_committed(base, check):
                   and "could not complete" in " ".join(result.findings))
 
 
+def _st_attempt_states(root, rid):
+    """The run's recorded attempt states, read back under a fresh capability (homes 2 active)."""
+    cap = _opf_oplock.acquire_operation(str(root), OPERATION)
+    try:
+        return _opf_journal.attempt_states(cap, KIND, rid)
+    finally:
+        _opf_oplock.release_operation(cap)
+
+
+def _st_postcommit_fault(apply, root, rid, frame):
+    """Apply with a fault in publish's closing txn-directory fsync, armed only once the `frame` record
+    (INTENT or COMPLETE) is written and its log fsynced. The OSError wraps to a JournalError at the store
+    journal boundary; after COMPLETE the attempt has durably committed. Returns (result, fired, states)."""
+    from unittest.mock import patch
+    marker = _journal.MAGIC + b" " + frame.encode() + b" "
+    armed, fired = [], []
+    real_write_all = _journal._write_all
+    real_fsync = os.fsync
+
+    def write_all(fd, data):
+        real_write_all(fd, data)
+        if data.startswith(marker):
+            armed.append(True)
+
+    def fsync(fd):
+        if armed and not fired and stat.S_ISDIR(os.fstat(fd).st_mode):
+            fired.append(frame)
+            raise OSError("injected journal fsync fault after the {} frame".format(frame))
+        return real_fsync(fd)
+
+    with _opf_import._self_test_homes2_active(root):
+        with patch.object(_journal, "_write_all", write_all), patch.object(_journal.os, "fsync", fsync):
+            result = apply(root, rid, now=_NOW)
+        states = _st_attempt_states(root, rid)
+    return result, fired, states
+
+
+def _t_postcommit_journal_fault(base, check):
+    """A journal fault after the COMPLETE frame is durable never reports the committed promotion as
+    aborted: the attempt reads "complete" and the result is CANNOT_EVALUATE with promoted=True, outcome
+    "promoted", and the committed transaction's ref. A pre-commit failure still rolls back and reports
+    aborted, and the same fault after INTENT alone (an open attempt) still retains the journal lock."""
+    from unittest.mock import patch
+    root, rid, run = _st_build(base, "postcommit-complete")
+    result, fired, states = _st_postcommit_fault(apply_ingest, root, rid, _journal.F_COMPLETE)
+    home = root / _opf_import._ingest_acceptance_home(rid)
+    ref = dict(txn_id=_opf_journal.attempt_txn(KIND, rid, 1), journal_rel=_opf_store.journal_root(KIND))
+    check("postcommit-complete-fired-after-commit", fired == [_journal.F_COMPLETE] and states == {1: "complete"}
+          and (root / ".archive/legacy/move.md").read_bytes() == b"moveme\n"
+          and not (root / "legacy/move.md").exists() and (home / PROMOTION_NAME).is_file())
+    # Flip: without the complete-state branch the committed attempt is routed to _RetainLock (aborted).
+    check("postcommit-complete-not-aborted", result.verdict == CANNOT_EVALUATE and result.promoted is True
+          and result.outcome == "promoted" and result.restore_ref == ref
+          and "post-commit step" in " ".join(result.findings))
+    with _opf_import._self_test_homes2_active(root):
+        again = apply_ingest(root, rid, now=_NOW)
+    check("postcommit-complete-reapply-noop", again.verdict == CLEAN and again.outcome == "noop_already_complete")
+    root, rid, run = _st_build(base, "postcommit-rollback")
+    with _opf_import._self_test_homes2_active(root):
+        # A failed poststate check raises before COMPLETE is published: the attempt rolls back.
+        with patch.object(_journal, "_poststate_verifies", lambda _root_fd, _op: False):
+            rolled = apply_ingest(root, rid, now=_NOW)
+        states = _st_attempt_states(root, rid)
+    check("postcommit-precommit-rollback-aborted", rolled.verdict == CANNOT_EVALUATE
+          and rolled.promoted is False and rolled.outcome == "aborted" and states == {1: "rolled-back"}
+          and (root / "legacy/move.md").read_bytes() == b"moveme\n"
+          and not (root / ".archive/legacy/move.md").exists() and run.is_dir())
+    root, rid, run = _st_build(base, "postcommit-open")
+    opened, fired, states = _st_postcommit_fault(apply_ingest, root, rid, _journal.F_INTENT)
+    check("postcommit-open-retains-lock", fired == [_journal.F_INTENT] and states == {1: "open"}
+          and opened.promoted is False and opened.outcome == "aborted"
+          and "retained for recovery" in " ".join(opened.findings))
+
+
 TESTS = (("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
          ("unreviewed-refused", _t_unreviewed_refused), ("traversal-refused", _t_traversal_refused),
          ("mint-move-toctou", _t_mint_move_toctou), ("per-record-refused", _t_per_record_refused),
-         ("postverify-committed", _t_postverify_committed))
+         ("postverify-committed", _t_postverify_committed),
+         ("postcommit-journal-fault", _t_postcommit_journal_fault))
 
 
 def self_test(only=None):
@@ -1202,6 +1284,16 @@ def _d_postverify_committed(module, base_dir):
                   "postverify/committed-not-aborted")
 
 
+def _d_postcommit_complete(module, base_dir):
+    """The committed-attempt branch in `_apply_locked`'s journal-error handler: a fault after the COMPLETE
+    frame is durable reports the promotion as committed. Reverting the branch routes the complete attempt
+    to _RetainLock, so a committed promotion reads promoted=False, outcome "aborted"."""
+    root, rid, _run = module._st_build(base_dir, "postcommit")
+    result, fired, states = module._st_postcommit_fault(module.apply_ingest, root, rid, _journal.F_COMPLETE)
+    _revert_check(fired == [_journal.F_COMPLETE] and states == {1: "complete"} and result.promoted is True
+                  and result.outcome == "promoted", "postcommit/complete-not-aborted")
+
+
 # (identity, source-key, focused test, unique old, new). source-key selects which module's source is
 # mutated: "apply" is this file, "alloc" is _opf_allocation.py (a dependency guard, mutated at source the
 # same way the observer gate mutates its shared _opf_observe.py).
@@ -1216,6 +1308,8 @@ _DISCRIMINATORS = (
      "pass  # reverted: _opf_import._require_inline_layout(root_fd, machine_rel)"),
     ("postverify/committed-not-aborted", "apply", _d_postverify_committed,
      "except (_journal.JournalError, OSError) as verify_exc:", "except () as verify_exc:"),
+    ("postcommit/complete-not-aborted", "apply", _d_postcommit_complete,
+     'if state == "complete":', "if False:"),
 )
 
 
