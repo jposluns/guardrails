@@ -1031,6 +1031,32 @@ def _suite():
                   "Commit your store changes" in out14 and "restore --staged" not in out14)
             check("U14 owner edit intact and tree unchanged", _snapshot(s14) == before14)
 
+            # An existing index collision candidate is checked even though creation leaves it alone.
+            collision_store = base / "dirty-existing-index"
+            collision_store.mkdir()
+            collision_mach = build_store(
+                collision_store, manifest=_man_gov(), counters=_cnt_gov(),
+                extra_files={idx("maintainer_action"): _FIX_INDEX,
+                             idx("maintainer_decision"): _FIX_INDEX})
+            collision_path = collision_mach / idx("maintainer_decision")
+            collision_path.write_text(_FIX_INDEX + "\n", encoding="utf-8")
+            collision_rel = collision_path.relative_to(collision_store).as_posix()
+            collision_before = _snapshot(collision_store)
+            collision_index = git_call(collision_store, ["ls-files", "--stage", "-z"])
+            collision_head = git_call(collision_store, ["rev-parse", "HEAD"])
+            collision_rc, collision_out = upgrade(collision_store)
+            check("dirty existing index collision candidate refuses and is named",
+                  collision_rc == EXIT_ERROR and collision_rel in collision_out
+                  and "Commit your store changes (or move them aside)" in collision_out
+                  and "restore --staged" not in collision_out)
+            check("dirty refusal describes the planned destinations and collision scope",
+                  "planned schema and render destinations and index collision candidates "
+                  "(store and product roots)" in collision_out)
+            check("dirty collision refusal preserves owner bytes, index and HEAD",
+                  _snapshot(collision_store) == collision_before
+                  and git_call(collision_store, ["ls-files", "--stage", "-z"]) == collision_index
+                  and git_call(collision_store, ["rev-parse", "HEAD"]) == collision_head)
+
             # U14b) An ignored pre-existing render target is owner work, not a clean destination.
             # FLIP: removing --ignored=matching from the probe must fail the refusal/advice/unchanged
             # assertions below. Moving the file aside is the supported route back to a clean upgrade.
@@ -2009,6 +2035,10 @@ def _suite():
                   any(line.startswith("opf upgrade: refused: view render after the schema delta failed")
                       and "uncommitted change is left for review" in line
                       for line in out28.splitlines()))
+            check("post-lease exception prints planned-scope recovery commands",
+                  "recover it scoped to the paths this run planned" in out28
+                  and "restore --staged --worktree -- .working/toml/counters.toml "
+                  ".working/toml/manifest.toml" in out28)
             check("U28/FIX1 the render failure (not the lease error) governs the refusal line",
                   "view render after the schema delta failed" in out28)
             check("U28/FIX1 the lease-replaced note is ALSO surfaced (not displaced)",

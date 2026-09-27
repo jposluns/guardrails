@@ -2124,7 +2124,8 @@ def _upgrade_check_clean(res, write_scope):
                 "store read dirty in the racy-clean window. Settle the worktree (commit, or check out so the "
                 "index and worktree agree for the filtered path) before upgrading." if filtered else "")
         raise _UpgradeError(
-            "the store working tree is not clean over the paths this upgrade writes: {} dirty path(s), "
+            "the working tree is not clean over this upgrade's planned schema and render destinations "
+            "and index collision candidates (store and product roots): {} dirty path(s), "
             "showing {}: {}. Commit your store changes (or move them aside), then re-run opf upgrade; the "
             "uncommitted work is yours and the upgrade never restores or discards it.{}".format(
                 len(shown), len(head), ", ".join(head), note))
