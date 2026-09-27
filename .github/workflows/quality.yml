@@ -235,13 +235,14 @@ jobs:
       - name: Release cut
         env:
           EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
             python3 -I -B tools/check_release_cut.py
           else
-            # Push checkouts need not have origin/HEAD; check the last first-parent transition.
-            python3 -I -B tools/check_release_cut.py --protected "origin/${GITHUB_REF_NAME}"
+            # Check every first-parent transition in the pushed range.
+            python3 -I -B tools/check_release_cut.py --protected "origin/${GITHUB_REF_NAME}" --base "$PUSH_BEFORE"
           fi
 
       - name: Version monotonicity self-test

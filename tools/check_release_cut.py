@@ -15,12 +15,21 @@ This reusable pack author tool is opt-in for adopters of this changelog schema.
 For pull_request events or when GITHUB_BASE_REF is set, require a merge HEAD
 whose raw first parent equals the resolved origin/GITHUB_BASE_REF tip, and use
 that parent as the comparison base. Missing or mismatched bindings fail closed.
-Other runs use local ancestry against --protected (a full ref or origin/BRANCH)
-or origin/HEAD's target when omitted. At the protected tip, compare the last
-first-parent transition. Explicit refs must resolve and cannot be origin/HEAD;
-PR runs derive their target from GITHUB_BASE_REF and reject --protected.
-Full event-payload/push-range binding and remote freshness beyond the checked-out
-merge remain outside coverage. Execution-report emission and registration in
+In GitHub Actions, only pull_request and push are supported. Push requires
+--protected (a full ref or origin/BRANCH) and --base (the event's full before OID),
+with HEAD equal to the target. Every raw first-parent transition in base..HEAD
+is checked separately, including its declaration. A zero before is accepted only
+for a proven root HEAD; new branches with pre-existing history are refused.
+Local runs use ancestry against --protected or origin/HEAD's target when omitted.
+A merge base equal to HEAD with a different target is refused. Local tip checks
+require HEAD also to equal origin/HEAD's resolved tip, then compare the last
+first-parent transition; candidate-branch self-selection cannot supply that tip.
+Explicit refs must resolve and cannot be origin/HEAD; PR runs reject overrides.
+A non-PR --base enables the same first-parent range check locally. Empty ranges,
+non-first-parent bases and malformed or missing history fail closed.
+Full event-payload authentication, protected-ref authority beyond the local tip
+check, and remote freshness remain outside coverage. Without --base, local tip
+checks cover only the last transition; other local/PR checks compare endpoints. Execution-report emission and registration in
 tools/selftest_checks.toml are deferred; wrapper coverage is not claimed.
 Endpoint comparison cannot see transient changes inside a squash or prove
 atomicity of its intermediate commits. Other version
@@ -32,7 +41,7 @@ stored, so a transforming checkout filter can cause refusal. Submodules at
 either input path are refused, not traversed. Snapshots are sampled separately,
 not transactionally; concurrent writers must be excluded by the caller.
 
-Usage: python3 -I -B tools/check_release_cut.py [--root DIR] [--protected REF]
+Usage: python3 -I -B tools/check_release_cut.py [--root DIR] [--protected REF] [--base OID]
        python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
 """
 import argparse
@@ -331,7 +340,28 @@ def working_blob(root, path):
         os.close(directory)
 
 
-def context(root, protected=None):
+def first_parent_range(root, head, before):
+    """Bind a nonempty range to raw commit parents, never graph-limited traversal."""
+    before = oid(before.encode(), "--base")
+    require(len(before) == len(head), "--base object format differs from HEAD")
+    if before == "0" * len(head):
+        require(not commit_header(root, head)[1],
+                "zero --base requires a proven root HEAD")
+        return [(None, head)]
+    require(resolve(root, before) == before, "--base must name a commit object")
+    require(before != head, "--base must precede HEAD")
+    transitions = []
+    current = head
+    while current != before:
+        _, parents = commit_header(root, current)
+        require(bool(parents), "--base is not on HEAD's first-parent chain")
+        parent = parents[0]
+        transitions.append((parent, current))
+        current = parent
+    return list(reversed(transitions))
+
+
+def context(root, protected=None, before=None):
     root = Path(one_line(git(root, "rev-parse", "--show-toplevel"), "repository root"))
     require(root.is_absolute(), "repository root must be absolute")
     require(git(root, "rev-parse", "--is-shallow-repository") == b"false\n",
@@ -347,7 +377,15 @@ def context(root, protected=None):
     else:
         raise CannotEvaluate("grafts file present; ancestry cannot be trusted")
     base_ref = os.environ.get("GITHUB_BASE_REF", "")
-    ci_context = os.environ.get("GITHUB_EVENT_NAME") == "pull_request" or bool(base_ref)
+    event = os.environ.get("GITHUB_EVENT_NAME", "")
+    actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    if actions:
+        require(event in ("pull_request", "push"), "unsupported GitHub Actions event: " + event)
+        if event == "push":
+            require(protected is not None and before is not None,
+                    "push requires explicit --protected and --base")
+    ci_context = event == "pull_request" or bool(base_ref)
+    require(not ci_context or before is None, "PR comparison rejects --base")
     require(not ci_context or bool(base_ref), "PR comparison requires GITHUB_BASE_REF")
     if protected is not None:
         require(not ci_context, "PR comparison derives its target from GITHUB_BASE_REF")
@@ -377,6 +415,7 @@ def context(root, protected=None):
         for value in line.split(b" "):
             oid(value, "ancestry")
     head_tree, parents = commit_header(root, head)
+    transitions = []
     if ci_context:
         require(len(parents) >= 2, "PR comparison requires a merge HEAD")
         require(parents[0] == target,
@@ -386,27 +425,42 @@ def context(root, protected=None):
         bases = git(root, "merge-base", "--all", head, target).splitlines()
         require(len(bases) == 1, "expected exactly one merge base")
         base = oid(bases[0], "merge base")
-        if head == target:
-            # At the protected tip, checking HEAD against itself would conceal a cut.
+        require(base != head or head == target,
+                "HEAD is behind the target; no honest comparison base")
+        if actions and event == "push":
+            require(head == target, "push HEAD does not match --protected target")
+        if before is not None:
+            transitions = first_parent_range(root, head, before)
+            base = transitions[0][0]
+        elif head == target:
+            # A caller-selected candidate ref cannot establish the local protected tip.
+            require(resolve(root, "refs/remotes/origin/HEAD") == head,
+                    "local tip comparison requires the origin/HEAD tip")
             base = parents[0] if parents else None
     base_tree = commit_header(root, base)[0] if base is not None else None
     return root, {
         "head": head, "protected_ref": protected, "target": target,
         "base": base, "head_tree": head_tree, "base_tree": base_tree,
+        "transitions": transitions,
     }
 
 
-def local_report(root, protected=None):
-    # context binds PR checkouts to their raw first parent; other runs use local ancestry.
-    root, binding = context(root, protected)
-    base = ((None, None) if binding["base_tree"] is None else
-            tuple(tree_blob(root, binding["base_tree"], path) for path in PATHS))
+def local_report(root, protected=None, before=None):
+    root, binding = context(root, protected, before)
+    comparisons = []
+    snapshot_base = binding["base_tree"]
+    for parent, revision in binding["transitions"]:
+        snapshot_base = commit_header(root, parent)[0] if parent is not None else None
+        comparisons.append(("commit:" + revision, snapshot_base, commit_header(root, revision)[0]))
     results = []
     names = ("HEAD", "index", "working")
-    for name in names:
+    comparisons.extend((name, snapshot_base, binding["head_tree"]) for name in names)
+    for name, base_tree, head_tree in comparisons:
         try:
-            if name == "HEAD":
-                candidate = tuple(tree_blob(root, binding["head_tree"], path) for path in PATHS)
+            base = ((None, None) if base_tree is None else
+                    tuple(tree_blob(root, base_tree, path) for path in PATHS))
+            if name == "HEAD" or name.startswith("commit:"):
+                candidate = tuple(tree_blob(root, head_tree, path) for path in PATHS)
             elif name == "index":
                 candidate = index_snapshot(root)
             else:
@@ -564,6 +618,21 @@ def test_cases():
     for name in ("push-bare", "push-empty-ref", "push-invalid-ref", "push-missing-ref",
                  "push-origin-head", "push-origin-head-full", "ci-explicit-protected"):
         add(name, 2, tweak=name)
+    for name in ("descendant-branch", "descendant-tag", "candidate-self"):
+        add(name, 2, after=cut, tweak=name)
+    for name in ("event-dispatch", "event-merge-group", "event-missing"):
+        add(name, 2, tweak=name)
+    add("push-noop-undeclared", 1, after=cut, tweak="push-noop")
+    add("push-noop-declared", 0, after=cut, new=declaration, tweak="push-noop")
+    add("push-two-cuts", 0, after=cut, new=declaration, tweak="push-two-cuts")
+    add("push-repaired", 1, after=cut, tweak="push-repaired")
+    add("push-root", 0, before=None, new=fixture_declaration(None, following="1.0.0"),
+        tweak="push-root")
+    for name in ("push-no-base", "push-base-empty", "push-base-short", "push-base-missing",
+                 "push-base-zero", "push-base-self", "push-base-second-parent",
+                 "push-base-unrelated", "push-base-tag-object", "push-base-wrong-format",
+                 "push-target-mismatch", "push-base-broken-history", "ci-explicit-base"):
+        add(name, 2, tweak=name)
     add("protected-tip", 1, after=cut, tweak="protected")
     add("staged-hidden", 1, tweak="staged")
     return cases
@@ -622,7 +691,7 @@ def fixture_repo(parent, name, case, env):
     command("init", "-q", "-b", "main", "--template=")
     (root / "seed.txt").write_text("fixture\n", encoding="utf-8")
     (root / ".aiqt").mkdir()
-    if tweak == "root":
+    if tweak in ("root", "push-root"):
         write(after, new)
         head = commit("initialized")
         command("update-ref", "refs/remotes/origin/main", head)
@@ -669,8 +738,36 @@ def fixture_repo(parent, name, case, env):
         (root / CHANGELOG).write_bytes(fixture_changelog(["1.0.0", "1.1.0"]))
         command("add", "--", CHANGELOG)
         (root / CHANGELOG).write_bytes(after)
+    elif tweak in ("descendant-branch", "descendant-tag", "candidate-self"):
+        if tweak == "candidate-self":
+            commit("no-op after undeclared append")
+        else:
+            future = command("commit-tree", tree, "-p", head, payload=b"descendant\n")
+            ref = "refs/tags/attacker" if tweak == "descendant-tag" else "refs/heads/attacker"
+            command("update-ref", ref, future)
     elif tweak == "protected" or (tweak and tweak.startswith("push-")):
-        command("update-ref", "refs/remotes/origin/main", head)
+        if tweak == "push-noop":
+            head = commit("no-op after cut")
+        elif tweak == "push-two-cuts":
+            write(fixture_changelog(["1.0.0", "1.1.0", "1.2.0"]),
+                  fixture_declaration(after, previous="1.1.0", following="1.2.0"))
+            head = commit("second declared cut")
+        elif tweak == "push-repaired":
+            write(before, old)
+            head = commit("revert undeclared cut")
+        elif tweak in ("push-base-second-parent", "push-base-unrelated"):
+            other = command("commit-tree", tree, payload=b"other root\n")
+            command("update-ref", "refs/heads/before", other)
+            if tweak == "push-base-second-parent":
+                head = command("commit-tree", tree, "-p", head, "-p", other,
+                               payload=b"merge\n")
+                command("update-ref", "HEAD", head)
+        elif tweak == "push-base-tag-object":
+            command("tag", "-a", "before", base, "-m", "annotated before")
+        elif tweak == "push-base-broken-history":
+            (root / ".git" / "objects" / base[:2] / base[2:]).unlink()
+        if tweak != "push-target-mismatch":
+            command("update-ref", "refs/remotes/origin/main", head)
         if tweak != "protected" and tweak not in ("push-origin-head", "push-origin-head-full"):
             command("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
     elif tweak == "missing-head":
@@ -748,7 +845,8 @@ def observe(script, root, tweak, env):
         env.update({"CI": "true", "GITHUB_ACTIONS": "true",
                     "GITHUB_EVENT_NAME": "pull_request"})
         if tweak in ("ci-base-ref", "ci-merge", "ci-nonmerge",
-                     "ci-stale-tracking", "ci-fresh-tracking", "ci-explicit-protected"):
+                     "ci-stale-tracking", "ci-fresh-tracking", "ci-explicit-protected",
+                     "ci-explicit-base"):
             env["GITHUB_BASE_REF"] = "main"
         elif tweak == "ci-missing-base-ref":
             env["GITHUB_BASE_REF"] = "missing"
@@ -773,8 +871,41 @@ def observe(script, root, tweak, env):
                 "push-origin-head-full": "refs/remotes/origin/HEAD",
             }.get(tweak, "origin/" + env["GITHUB_REF_NAME"])
             args += ["--protected", protected]
+        if tweak != "push-no-base":
+            # refs/heads/main retains the pre-push commit even after tracking refs move.
+            before = one_line(git(root, "rev-parse", "refs/heads/main"), "fixture before")
+            if tweak in ("push-root", "push-base-zero"):
+                before = "0" * len(before)
+            elif tweak == "push-base-empty":
+                before = ""
+            elif tweak == "push-base-short":
+                before = before[:12]
+            elif tweak == "push-base-missing":
+                before = "f" * len(before)
+            elif tweak == "push-base-self":
+                before = resolve(root, "HEAD")
+            elif tweak in ("push-base-second-parent", "push-base-unrelated"):
+                before = resolve(root, "refs/heads/before")
+            elif tweak == "push-base-tag-object":
+                before = one_line(git(root, "rev-parse", "refs/tags/before"), "tag object")
+            elif tweak == "push-base-wrong-format":
+                before = "0" * (64 if len(before) == 40 else 40)
+            args += ["--base", before]
     if tweak == "ci-explicit-protected":
         args += ["--protected", "origin/main"]
+    if tweak == "ci-explicit-base":
+        args += ["--base", resolve(root, "refs/heads/main")]
+    if tweak in ("descendant-branch", "descendant-tag", "candidate-self"):
+        args += ["--protected", {
+            "descendant-branch": "refs/heads/attacker",
+            "descendant-tag": "refs/tags/attacker",
+            "candidate-self": "refs/heads/feature",
+        }[tweak]]
+    if tweak and tweak.startswith("event-"):
+        env.update({"GITHUB_ACTIONS": "true", "GITHUB_BASE_REF": "", "GITHUB_EVENT_NAME": {
+            "event-dispatch": "workflow_dispatch", "event-merge-group": "merge_group",
+            "event-missing": "",
+        }[tweak]})
     result = subprocess.run(args, capture_output=True, env=env, timeout=TIMEOUT)
     require(result.returncode in (0, 1, 2) and not result.stderr,
             "self-test child crashed: " + result.stderr.decode("utf-8", "replace"))
@@ -825,10 +956,17 @@ def self_test(red_on_revert):
                 _, parents = commit_header(root, binding["head"])
                 check(case_id + "-first-parent",
                       binding["head"] == binding["target"] and binding["base"] == parents[0])
+            if case_id in ("push-noop-undeclared", "push-noop-declared", "push-two-cuts",
+                           "push-repaired", "push-root"):
+                transitions = report["context"]["transitions"]
+                rows = [row for row in report["snapshots"] if row["snapshot"].startswith("commit:")]
+                check(case_id + "-range", len(transitions) == (1 if case_id == "push-root" else 2)
+                      and [row["snapshot"] for row in rows]
+                      == ["commit:" + revision for _, revision in transitions])
             if case_id == "push-protected":
                 bare = observe(script, root, "push-bare", env)
                 check("push-protected-without-argument",
-                      bare["code"] == 2 and "refs/remotes/origin/HEAD" in bare["detail"])
+                      bare["code"] == 2 and "push requires explicit" in bare["detail"])
             if case_id in ("push-origin-head", "push-origin-head-full"):
                 check(case_id + "-ambiguous", "not origin/HEAD" in report["detail"])
             if case_id == "ci-explicit-protected":
@@ -866,8 +1004,16 @@ def self_test(red_on_revert):
                  "ci-stale-tracking", 0),
                 ("first-parent-tip", "require(parents[0] == target,",
                  "require(True,", "ci-stale-tracking", 1),
-                ("explicit-protected", "root, binding = context(root, protected)",
-                 "root, binding = context(root)", "push-protected", 2),
+                ("explicit-protected", "root, binding = context(root, protected, before)",
+                 "root, binding = context(root, None, before)", "push-protected", 2),
+                ("descendant-target", "require(base != head or head == target,",
+                 "require(True,", "descendant-branch", 0),
+                ("candidate-self", 'require(resolve(root, "refs/remotes/origin/HEAD") == head,',
+                 "require(True,", "candidate-self", 0),
+                ("push-range", 'for parent, revision in binding["transitions"]:',
+                 'for parent, revision in binding["transitions"][-1:]:', "push-noop-undeclared", 0),
+                ("ci-event", 'require(event in ("pull_request", "push"),',
+                 "require(True,", "event-dispatch", 0),
             )
             parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:
@@ -899,6 +1045,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--protected", help="full ref or origin/BRANCH (non-PR runs only)")
+    parser.add_argument("--base", help="full before commit OID for a non-PR first-parent range")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--red-on-revert", action="store_true")
     args = parser.parse_args(argv)
@@ -907,7 +1054,7 @@ def main(argv=None):
     try:
         if args.self_test:
             return self_test(args.red_on_revert)
-        report = local_report(args.root, args.protected)
+        report = local_report(args.root, args.protected, args.base)
     except OracleFailure as exc:
         print("FAIL self-test assertion " + exc.case_id, file=sys.stderr)
         return 1
