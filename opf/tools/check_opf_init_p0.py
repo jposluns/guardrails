@@ -316,26 +316,78 @@ def runner_check(expected, text=None):
         raise RuntimeError(identity + "/cannot-evaluate/bash")
     bash = os.path.abspath(bash)
 
+    def logical_lines(body):
+        # Remove escaped newlines before word splitting, except in single
+        # quotes. Keep physical spelling for the one-line canonical grammar.
+        raw = line = ""
+        quote = None
+        for physical in body.splitlines(keepends=True):
+            if not raw and physical.lstrip().startswith("#"):
+                continue
+            raw += physical
+            continued = False
+            i = 0
+            while i < len(physical):
+                char = physical[i]
+                if char == "\\" and quote != "'":
+                    pair = physical[i:i + 2]
+                    if pair == "\\\n":
+                        continued = True
+                        break
+                    line += pair
+                    i += len(pair)
+                    continue
+                if char in ("'", '"'):
+                    if quote is None:
+                        quote = char
+                    elif quote == char:
+                        quote = None
+                line += char
+                i += 1
+            if continued:
+                continue
+            yield raw.rstrip("\n"), line.rstrip("\n")
+            raw = line = ""
+            quote = None
+        if raw:
+            yield raw, line
+
     def registrations(body):
         # Deliberately bounded grammar: quoted gate name, python3, literal
         # arguments or double-quoted $here paths, on one unindented line.
-        # This is not a Bash parser: every line spelling the run_gate token
-        # must be canonical, except the exact definition line below. This
-        # refuses prefixes, groups and function wrappers on those lines.
-        # Invocations that never spell the token (variables, eval of
-        # computed text, aliases) are invisible to this static check.
+        # Classify logical lines by raw text or quote-removed words, but
+        # require physical spelling to be canonical (except the definition).
+        # Full-line comments are ignored. Token-bearing echo/heredoc data
+        # is refused as cannot-evaluate/grammar, not treated as dispatch.
+        # Literal variables and aliases spelling the token are refused too.
+        # This is not a Bash parser. Computed text (built-string eval,
+        # indirection) and anything outside this runner file remain invisible.
+        # ANSI-C quotes and source/dot words are refused conservatively,
+        # even when they may be data.
         calls = []
-        for line in body.splitlines():
-            if not re.search(r"\brun_gate\b", line) or line == "run_gate() {":
+        for raw, line in logical_lines(body):
+            if line.lstrip().startswith("#"):
                 continue
+            if "$'" in line:
+                raise RuntimeError(identity + "/cannot-evaluate/grammar")
             try:
                 words = shlex.split(line)
+                lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+                lexer.whitespace_split = True
+                lexer.commenters = ""
+                shell_words = list(lexer)
             except ValueError as exc:
                 raise RuntimeError(identity + "/cannot-evaluate/grammar") from exc
+            if any(word in ("source", ".") for word in shell_words):
+                raise RuntimeError(identity + "/cannot-evaluate/grammar")
+            if "run_gate" not in line and not any("run_gate" in word for word in words):
+                continue
+            if raw == line == "run_gate() {":
+                continue
             if not re.fullmatch(
                     r'run_gate "[A-Za-z0-9_-]+" +python3'
                     r'(?: +(?:[A-Za-z0-9_./=-]+|"\$here/[A-Za-z0-9_./-]+"))+ *',
-                    line):
+                    raw):
                 raise RuntimeError(identity + "/cannot-evaluate/grammar")
             calls.append([word.replace("$here/", str(here) + "/") for word in words[3:]])
         return calls
@@ -472,6 +524,12 @@ def runner_red_checks(expected):
         ("trailing-comment", sibling[0].rstrip("\n") + " # comment\n"),
         ("non-python3", sibling[0].replace("python3", "sh", 1)),
         ("continuation", sibling[0].replace("python3 ", "python3 \\\n", 1)),
+        ("backslash-escape", sibling[0].replace("run_gate", r"r\un_gate", 1)),
+        ("empty-quote-split", sibling[0].replace("run_gate", 'run""_gate', 1)),
+        ("continuation-split", sibling[0].replace("run_gate", "run_\\\ngate", 1)),
+        ("ansi-c", sibling[0].replace("run_gate", r"$'run\x5fgate'", 1)),
+        ("source-line", "source /dev/null\n" + sibling[0]),
+        ("dot-source-line", ":; . /dev/null\n" + sibling[0]),
         ("unclosed-quote", sibling[0].rstrip("\n") + ' "\n'),
     )
     for label, line in grammar_cases:
@@ -489,11 +547,21 @@ def runner_red_checks(expected):
         red(label + "-candidate", lambda: runner_check(expected, changed), RuntimeError,
             identity + "/cannot-evaluate/grammar")
 
+    # Bash ignores this whole comment, including its trailing backslash.
+    changed = source + "  # run_gate $'ignored' source . \\\n"
+    with patch.object(Path, "read_text", return_value=changed):
+        runner_check(expected)
+    print("PASS " + identity + "/full-line-comment")
+    runner_check(expected, changed)
+    print("PASS " + identity + "/full-line-comment-candidate")
+
     # Remove every execute bit, including for root. Permit only the probe:
     # a reverted interception guard must never launch the real runner.
     original_chmod = Path.chmod
     original_popen = subprocess.Popen
     launches = 0
+    probe_body = ("type -P dirname >/dev/null && test -x /bin/sh && "
+                  "type -P python3")
 
     def non_executable(path, mode, *args, **kwargs):
         if path.name == "python3":
@@ -503,13 +571,30 @@ def runner_red_checks(expected):
     def probe_only(*args, **kwargs):
         nonlocal launches
         launches += 1
-        if launches > 1:
+        command = args[0] if args else kwargs.get("args", ())
+        if (launches > 1 or len(command) != 6 or command[3] != "-c"
+                or command[4] != probe_body):
             raise AssertionError(identity + "/interception/unexpected-launch")
         return original_popen(*args, **kwargs)
 
     with patch.object(Path, "chmod", non_executable), \
             patch("subprocess.Popen", side_effect=probe_only):
         red("non-executable-fixture", lambda: runner_check(expected), RuntimeError,
+            identity + "/cannot-evaluate/interception")
+        if launches != 1:
+            raise AssertionError(identity + "/interception/launch-count")
+
+    # Remove dirname from the probe's PATH while retaining the fixture.
+    # The exact-body/launch-count guard also prevents a bypassed probe from
+    # reaching a real runner when this interception check is reverted.
+    launches = 0
+
+    def without_dirname(*args, **kwargs):
+        kwargs["env"] = dict(kwargs["env"], PATH=kwargs["cwd"])
+        return probe_only(*args, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=without_dirname):
+        red("missing-dirname", lambda: runner_check(expected), RuntimeError,
             identity + "/cannot-evaluate/interception")
         if launches != 1:
             raise AssertionError(identity + "/interception/launch-count")
