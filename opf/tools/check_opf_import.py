@@ -139,11 +139,14 @@ write access to the run dir) are gate-blind: the gate guards the review-to-promo
 authenticity (the reserved signature seam is the upgrade path). Likewise the Group C journal bind proves the
 record is the one its journal INTENT recorded, not that the journal itself is authentic: a principal with
 write access to the store can author a self-consistent INTENT + record pair. A passing gate proves nothing
-about those. A genuinely detached run (no registered home physically holds it, and it is named by an
+about those. A genuinely detached generation-1 run (no registered home physically holds it, and it is named by an
 absolute, symlink-free path) still reads transaction controls from the three-up parent, without binding
 that parent to a store: absent controls there can pass, and controls there can affect the verdict. This
 compatibility residual does not apply to a registered staging shape graded under a generation that does
-not admit it; that is refused.
+not admit it; that is refused. Generation 2 requires a registered store binding. Its typed transaction
+projections and single-transaction journals explicitly refuse until their semantics are supported.
+Publication-attempt journals and ID reservations remain owned by the ingest coordinator; this gate
+does not validate their state or establish their absence.
 
 This repository is not an OPFiles adopter (it has no store to import into), so even though the `opf
 import` verb is now wired (OPF-IMPORT-VERB, opf.py `_cmd_import`) there is no staged import run to check
@@ -1863,12 +1866,35 @@ def _ingest_store_fd(rd, homes=None):
     return _registered_run_store_fd(rd, _gate_homes(homes))
 
 
+def _typed_transaction_problem(store_fd, run_name):
+    """Refuse unsupported typed projections/single-transaction journals, not merely homes=2.
+
+    The shared constructors define both import/ingest homes regardless of the run's staging kind.
+    Absence is measured beneath the bound store descriptor, no-follow on every component. Even an
+    empty projection or an unfinished single-transaction journal is evidence requiring typed semantics.
+    Ingest publication attempts (<run>.aNNNN) and reservations have their own coordinator/validators;
+    this probe neither grades them nor mistakes an empty journal root or a lock for a transaction.
+    """
+    import _journal
+    import _opf_store
+    for kind in ("import", "ingest"):
+        try:
+            projection = _opf_store.txn_record(kind, run_name)
+            journal = _opf_store.journal_root(kind) + "/" + run_name
+            if (_read_store_control(store_fd, projection) is not None
+                    or _journal._lstat_contained(store_fd, journal) is not None):
+                return "cannot evaluate: typed transaction evidence is not supported ({})".format(kind)
+        except (_GateError, _journal.JournalError, OSError, ValueError, TypeError) as exc:
+            return "cannot evaluate: typed transaction evidence cannot be classified ({})".format(exc)
+    return ""
+
+
 def _staged_run_store_fd(rd, homes):
     """The store root holding the opened run, for the per-run transaction checks. The supplied homes is the
     gate's already-validated generation, never None: the run is located through the generation-aware
     run homes and descriptor-bound identity durable acceptance uses (_ingest_store_fd), so a homes-2 staging
     run (.working/staging/<kind>/<run-id>) reads its store four levels up, whatever path spells it. A run
-    that a home registered in another generation holds refuses; only a detached copy that no generation's
+    that a home registered in another generation holds refuses; only a generation-1 detached copy that no generation's
     run home holds by identity keeps the legacy three-up parent, which is bound to no store (disclosed
     residual). M2: classification walks only the run's own physical ancestry and probes registered
     locations speculatively beneath the supplied route, beneath a relative spelling's starting directory's
@@ -1887,6 +1913,8 @@ def _staged_run_store_fd(rd, homes):
             if other is not None:
                 os.close(other)
                 raise _GateError("run path is registered outside homes generation {}".format(homes))
+        if homes == 2:
+            raise _GateError("no registered store binding for homes generation 2")
         fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)
     return fd
 
@@ -2619,6 +2647,12 @@ def _check_staged_run(rd, homes=None):
                         if bind:
                             tc_problems.append(bind)
                     record("transaction-consistency", not tc_problems, "; ".join(tc_problems))
+            if gen == 2:
+                typed_problem = _typed_transaction_problem(store_fd, run_name)
+                if typed_problem:
+                    for cid in _TRANSACTION_CHECKS:
+                        ok, detail = results[cid]
+                        record(cid, False, typed_problem + ("; " + detail if not ok and detail else ""))
         finally:
             if jfd is not None:
                 os.close(jfd)
@@ -2635,7 +2669,7 @@ def _check_staged_run(rd, homes=None):
 
 def _self_test_gate_generation_sites(expect):
     """Structural pins over the staged-run gate's source; each checks only what is stated here.
-    gate-generation-read-sites: every ast.Name node (any context) of the fourteen listed names sits on one of these
+    gate-generation-read-sites: every ast.Name node (any context) of the fifteen listed names sits on one of these
     statements, so a new read or plain assignment of a listed name fails until the statement is deliberately added.
     gate-generation-branch-bindings: in the body (never the else branch) of an if or while statement whose test
     names gen, homes, gen_error or legacy_generation, every ast.Name with Store context and every except-handler
@@ -2672,7 +2706,7 @@ def _self_test_gate_generation_sites(expect):
     tree = ast.parse(src)
     names = ("gen", "homes", "gen_error", "legacy_generation", "fd", "ing_results", "marker", "ingest_is_run",
              "durable_unavailable", "ingest_bundle", "ingest_load_failed", "ingest_load_detail", "acc_raw",
-             "results")
+             "results", "typed_problem")
     found = sorted((n.id, lines[n.lineno - 1].strip()) for n in ast.walk(tree)
                    if isinstance(n, ast.Name) and n.id in names)
     expected = sorted((
@@ -2694,6 +2728,7 @@ def _self_test_gate_generation_sites(expect):
         ('gen', 'gen, gen_error = None, str(exc)'),
         ('gen', 'gen, gen_error = _gate_homes(homes), ""'),
         ('gen', 'if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":'),
+        ('gen', 'if gen == 2:'),
         ('gen', 'if gen is None:'),
         ('gen', 'if gen is None:'),
         ('gen', 'if gen is None:'),
@@ -2750,11 +2785,15 @@ def _self_test_gate_generation_sites(expect):
         ('marker', 'marker = "durable import evidence"'),
         ('marker', 'marker = imp.ACCEPTANCE_NAME'),
         ('marker', 'marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)'),
+        ('results', 'ok, detail = results[cid]'),
         ('results', 'if cid not in results:'),
         ('results', 'results = {}'),
         ('results', 'results[cid] = (bool(ok), detail)'),
         ('results', 'return results'),
         ('results', 'return results'),
+        ('typed_problem', 'typed_problem = _typed_transaction_problem(store_fd, run_name)'),
+        ('typed_problem', 'if typed_problem:'),
+        ('typed_problem', 'record(cid, False, typed_problem + ("; " + detail if not ok and detail else ""))'),
     ))
     expect("gate-generation-read-sites", found == expected)
     # A name bound in the body of a branch that tests the generation itself is generation-derived: it must be listed.
@@ -3137,8 +3176,8 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
     the staged acceptance ids route by generation, and generation 2 keeps
     every result except the two ingest-acceptance ids, which grade the durable home, and the staged acceptance ids,
     which must then report that grading (a completeness id the completeness result, every other the binding
-    result). Transaction checks require a valid generation but keep their results at both generations
-    in the legacy home. Each legacy fixture is also graded at both depth-4 homes against its generation-2
+    result). Transaction checks keep their results at both generations in a registered legacy home
+    without typed transaction evidence; detached generation-2 copies refuse the missing binding. Each legacy fixture is also graded at both depth-4 homes against its generation-2
     results. Appends (label, generation-1
     results, generation-2 results, credit) to `swept` and returns the generation-1 results; `credit` is the (id,
     located detail) pairs the fixture claims, which count only as _self_test_gate_generation_coverage allows."""
@@ -3151,6 +3190,17 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
     with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
         baseline = check_staged_run(run_dir, homes=1)
         expected_second = dict(baseline)
+        # A detached copy retains legacy transaction grading only at generation 1.
+        # Core-read failures return before transaction grading and keep their prerequisite error.
+        if not all(value == baseline["staged-run-structure"] for value in baseline.values()):
+            rd = _RunDir(run_dir)
+            try:
+                if rd.home_binding == {}:
+                    detail = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                              "(no registered store binding for homes generation 2)")
+                    expected_second.update((cid, (False, detail)) for cid in _TRANSACTION_CHECKS)
+            finally:
+                rd.close()
         try:
             imp._import_run_locations(Path(run_dir).name, 2)
         except ValueError as exc:
@@ -4664,7 +4714,10 @@ def _self_test():
             detached.parent.mkdir(parents=True)
             os.rename(str(elsewhere / kind / alias_run.name), str(detached))
             expect("txn-alias-detached-" + kind, all(
-                graded_as(detached, None, homes)[cid] == (True, "no transaction record (run not yet applied)")
+                graded_as(detached, None, homes)[cid] == (
+                    (True, "no transaction record (run not yet applied)") if homes == 1 else
+                    (False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                     "(no registered store binding for homes generation 2)"))
                 for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
 
         # Round 3 (B1, codex P1 and P2): every case at both staging kinds and both generations, in its own
@@ -4725,7 +4778,10 @@ def _self_test():
                 shutil.copytree(str(run), str(detached))
                 (detached.parents[2] / ".working").write_bytes(b"unrelated\n")
                 expect("txn-detached-unrelated-working-file-" + kind, all(
-                    graded_in(root, detached, homes)[cid] == (True, "no transaction record (run not yet applied)")
+                    graded_in(root, detached, homes)[cid] == (
+                        (True, "no transaction record (run not yet applied)") if homes == 1 else
+                        (False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                         "(no registered store binding for homes generation 2)"))
                     for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
                 # Flip (codex P1 #2): a run renamed to a sibling at the transaction lookup, an empty directory at
                 # its former name, re-classifies as detached; its own bound entry no longer naming it refuses.
@@ -4819,7 +4875,7 @@ def _self_test():
             above = True
         expect("gate-homes-above-supported", above)
         # Flip: raising for a detached copy (a store required for an ordinary run) fails both
-        # ingest-acceptance checks here, in either generation; a detached ordinary run passes every check.
+        # ingest-acceptance checks here, in either generation. Only generation 1 may pass its transaction checks.
         import unittest.mock
         import _opf_store
         detached = base / "detached" / reviewed.name
@@ -4828,7 +4884,10 @@ def _self_test():
         with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
             det2 = check_staged_run(detached, homes=2)
         expect("detached-ordinary-copy", all(ok for ok, _d in det1.values())
-               and all(ok for ok, _d in det2.values()))
+               and all(det2[cid] == (
+                   False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                   "(no registered store binding for homes generation 2)")
+                   if cid in _TRANSACTION_CHECKS else det2[cid][0] for cid in EXPECTED_CHECKS))
 
         # acceptance-schema: a wrong `format` keeps every other field intact, so only the schema check fires.
         m = copy_run(reviewed)

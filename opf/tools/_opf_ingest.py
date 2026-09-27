@@ -2299,20 +2299,30 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
         import check_opf_import as _chk
         from unittest.mock import patch
 
-        def swept_gate(run_dir, label):
+        def swept_gate(run_dir, label, detached=False):
             """The gate's generation-1 result for `run_dir`, after grading it at generation 2 as well (the tooling
             supporting it): every generation-independent result must be identical, ordinary and ingest alike, so a
             generation-2-only bypass of any check the fixture fails fails the flip that grades it. On an ingest run
             the two ingest-acceptance ids grade the durable home at generation 2 and the staged acceptance ids then
             report that grading (a completeness id the completeness result, every other the binding result); every
             other id, and every id of an ordinary run, is compared. The generation-dependent scope rows are graded
-            apart below."""
+            apart below. Detached fixtures require the homes-2 transaction binding refusal separately."""
             first = _chk.check_staged_run(run_dir)
             with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
                 second = _chk.check_staged_run(run_dir, homes=2)
             staged = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
             ingest = first["ingest-run-structure"] != (True, "not an ingest run")
             varies = _chk._INGEST_ACCEPTANCE_CHECKS + staged if ingest else ()
+            if detached:
+                # This fixture has no store binding: homes 2 cannot grade its transactions.
+                # Keep every other equality and the legacy transaction positive intact.
+                varies += _chk._TRANSACTION_CHECKS
+                check(label + "-detached-transactions", all(
+                    first[cid] == (True, "no transaction record (run not yet applied)")
+                    and second[cid] == (
+                        False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                        "(no registered store binding for homes generation 2)")
+                    for cid in _chk._TRANSACTION_CHECKS))
             check(label + "-generation-2", set(second) == set(first) == set(_chk.EXPECTED_CHECKS)
                   and all(second[cid] == first[cid] for cid in first if cid not in varies)
                   and (not ingest or all(second[cid] == second[_chk._INGEST_ACCEPTANCE_CHECKS[
@@ -3384,10 +3394,10 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 detached = root / "pr4b-detached" / "elsewhere" / "review" / run.name
                 shutil.copytree(str(run), str(detached))
                 try:
-                    _det_clean = swept_gate(str(detached), "pr4b-sweep-02")
+                    _det_clean = swept_gate(str(detached), "pr4b-sweep-02", detached=True)
                     (detached / "candidates_draft.toml").unlink()
                     (detached / "rogue.txt").write_text("x\n", encoding="utf-8")
-                    _det_bad = swept_gate(str(detached), "pr4b-sweep-03")
+                    _det_bad = swept_gate(str(detached), "pr4b-sweep-03", detached=True)
                     check("pr4b-disc-am1-detached-run",
                           all(_det_clean[cid][0] for cid in _pr4b_ids)
                           and _det_bad["ingest-run-structure"][1] != "not an ingest run"

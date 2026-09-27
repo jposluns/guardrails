@@ -158,6 +158,188 @@ def _staged_generation_self_test(check):
             ingest, [], None, 1) == "cannot evaluate: generation policy sentinel")
 
 
+def _staged_root_self_test(check):
+    """Exercise physical root binding independently of transaction support."""
+    import os
+    import shutil
+    from unittest.mock import patch
+    import check_opf_import as gate
+    import _opf_import as imp
+
+    def grade(run, generation=2):
+        with patch.object(store, "SUPPORTED_HOMES", 2):
+            return gate.check_staged_run(run, homes=generation)
+
+    def bound(run, root):
+        with patch.object(store, "SUPPORTED_HOMES", 2):
+            rd = gate._RunDir(run)
+            try:
+                fd = gate._staged_run_store_fd(rd, 2)
+                try:
+                    actual, expected = os.fstat(fd), os.stat(root)
+                    return (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
+                finally:
+                    os.close(fd)
+            finally:
+                rd.close()
+
+    def refused(result, needle):
+        return all(not result[cid][0] and needle in result[cid][1]
+                   for cid in gate._TRANSACTION_CHECKS)
+
+    with tempfile.TemporaryDirectory(prefix="opf-staged-root-") as tmp:
+        base = Path(tmp).resolve()
+        for kind in ("import", "ingest"):
+            root = base / kind
+            machine = root / ".working" / "custom"
+            machine.mkdir(parents=True)
+            (machine / "manifest.toml").write_text('[opf]\nstandard = "opf"\n', encoding="utf-8")
+            run = gate._self_test_gate_generation_disk(
+                root, "accepted" if kind == "import" else None, location=kind)
+            check("staged-root-homes2-" + kind, lambda: bound(run, root))
+            resolution = store.resolve_store(root)
+            check("staged-root-custom-machine-" + kind, lambda:
+                  resolution.status == store.RESOLVED and resolution.machine_dir == "custom"
+                  and bound(run, resolution.store_root))
+            product = base / (kind + "-product")
+            product.mkdir()
+            (product / store.POINTER_REL).write_text(
+                '[store]\ntarget = "dir:{}"\n'.format(root), encoding="utf-8")
+            resolution = store.resolve_store(product)
+            check("staged-root-pointer-" + kind, lambda:
+                  resolution.status == store.RESOLVED and resolution.store_root == root
+                  and bound(run, resolution.store_root))
+            check("staged-root-generation-mismatch-" + kind, lambda:
+                  refused(grade(run, 1), "registered outside homes generation 1"))
+            record = root / imp._txn_record_rel(run.name)
+            record.parent.mkdir(parents=True)
+            record.write_bytes(b"state =\n")
+            # The depth-three decoy is absent; diagnose the actual root's corruption.
+            check("staged-root-wrong-level-decoy-" + kind, lambda:
+                  not grade(run)["transaction-schema"][0]
+                  and "unreadable/unparseable" in grade(run)["transaction-schema"][1])
+            record.unlink()
+            clean = grade(run)
+            check("staged-root-no-transaction-" + kind, lambda:
+                  all(clean[cid] == (True, "no transaction record (run not yet applied)")
+                      for cid in gate._TRANSACTION_CHECKS))
+            # A typed projection/journal is not interchangeable with durable review acceptance.
+            # Probe both namespaces even when the staging kind differs; empty bytes still count.
+            for txn_kind in ("import", "ingest"):
+                typed = root / store.txn_record(txn_kind, run.name)
+                typed.parent.mkdir(parents=True)
+                typed_decoy = root / ".working" / store.txn_record(txn_kind, run.name)
+                typed_decoy.parent.mkdir(parents=True)
+                typed_decoy.write_bytes(b"state =\n")
+                check("staged-root-typed-ignore-decoy-{}-{}".format(txn_kind, kind), lambda:
+                      grade(run) == clean)
+                projection = imp._emit_bytes(dict(
+                    format="opf.journal.transaction/v1", kind=txn_kind, run_id=run.name,
+                    state="complete", operation_id="synthetic-operation",
+                    journal_rel=store.journal_root(txn_kind)), "typed projection")
+                for label, payload in (("empty", b""), ("malformed", b"state =\n"),
+                                       ("projection", projection)):
+                    typed.write_bytes(payload)
+                    observed = grade(run)
+                    check("staged-root-typed-{}-{}-{}".format(label, txn_kind, kind), lambda:
+                          refused(observed, "typed transaction evidence is not supported")
+                          and all(observed[cid] == clean[cid] for cid in gate.EXPECTED_CHECKS
+                                  if cid not in gate._TRANSACTION_CHECKS))
+                    typed.unlink()
+                typed.symlink_to(root / "absent-typed-target")
+                check("staged-root-typed-symlink-{}-{}".format(txn_kind, kind), lambda:
+                      refused(grade(run), "typed transaction evidence cannot be classified"))
+                typed.unlink()
+                os.mkfifo(typed)
+                check("staged-root-typed-fifo-{}-{}".format(txn_kind, kind), lambda:
+                      refused(grade(run), "typed transaction evidence cannot be classified"))
+                typed.unlink()
+                parent = typed.parent
+                moved_typed = parent.with_name(parent.name + "-saved")
+                parent.rename(moved_typed)
+                parent.symlink_to(moved_typed, target_is_directory=True)
+                check("staged-root-typed-parent-{}-{}".format(txn_kind, kind), lambda:
+                      refused(grade(run), "typed transaction evidence cannot be classified"))
+                parent.unlink()
+                moved_typed.rename(parent)
+                journal = root / store.journal_root(txn_kind)
+                journal.mkdir(parents=True)
+                (journal / "lock").write_bytes(b"writer lock")
+                check("staged-root-typed-empty-journal-{}-{}".format(txn_kind, kind), lambda:
+                      grade(run) == clean)
+                single = journal / run.name
+                single.mkdir()
+                check("staged-root-typed-journal-{}-{}".format(txn_kind, kind), lambda:
+                      refused(grade(run), "typed transaction evidence is not supported"))
+                single.rmdir()
+                # Unreadable typed controls must not collapse into the absent positive above.
+                real_read = gate._read_store_control
+                def denied_typed(fd, rel):
+                    if rel == store.txn_record(txn_kind, run.name):
+                        raise gate._GateError("typed control denied")
+                    return real_read(fd, rel)
+                with patch.object(gate, "_read_store_control", side_effect=denied_typed):
+                    check("staged-root-typed-unreadable-{}-{}".format(txn_kind, kind), lambda:
+                          refused(grade(run), "typed control denied"))
+            typed.write_bytes(b"state =\n")
+            record.write_bytes(b"state =\n")
+            check("staged-root-typed-retains-legacy-corruption-" + kind, lambda:
+                  refused(grade(run), "typed transaction evidence is not supported")
+                  and "unreadable/unparseable" in grade(run)["transaction-schema"][1])
+            typed.unlink()
+            record.unlink()
+            decoy = root / ".working" / imp._txn_record_rel(run.name)
+            decoy.parent.mkdir(parents=True)
+            decoy.write_bytes(b"state =\n")
+            check("staged-root-ignore-decoy-" + kind, lambda:
+                  grade(run) == clean)
+            os.mkfifo(record)
+            check("staged-root-fifo-" + kind, lambda:
+                  "not a regular file" in grade(run)["transaction-schema"][1])
+            record.unlink()
+            original = record.parent
+            moved = root / "moved-control"
+            original.rename(moved)
+            original.symlink_to(moved, target_is_directory=True)
+            check("staged-root-symlink-control-" + kind, lambda:
+                  not grade(run)["transaction-schema"][0]
+                  and "no-follow" in grade(run)["transaction-schema"][1])
+            original.unlink()
+            moved.rename(original)
+            # Kernel-boundary fault injection also exercises refusal when run as root.
+            real_open = os.open
+            def denied(path, flags, *args, **kwargs):
+                if path == "..":
+                    raise PermissionError("ancestor denied")
+                return real_open(path, flags, *args, **kwargs)
+            with patch.object(gate.os, "open", side_effect=denied):
+                check("staged-root-unreadable-ancestor-" + kind, lambda:
+                      refused(grade(run), "ancestor denied"))
+            detached = base / (kind + "-detached") / "a" / "b" / run.name
+            shutil.copytree(run, detached)
+            check("staged-root-detached-legacy-" + kind, lambda:
+                  all(grade(detached, 1)[cid] == (True, "no transaction record (run not yet applied)")
+                      for cid in gate._TRANSACTION_CHECKS))
+            check("staged-root-detached-homes2-" + kind, lambda:
+                  refused(grade(detached), "no registered store binding for homes generation 2"))
+            misplaced = root / ".working" / "staging" / "preview" / run.name
+            misplaced.parent.mkdir(parents=True)
+            run.rename(misplaced)
+            try:
+                check("staged-root-kind-mismatch-" + kind, lambda:
+                      refused(grade(misplaced), "no registered store binding for homes generation 2"))
+            finally:
+                misplaced.rename(run)
+            claimant = base / (kind + "-claimant")
+            claimed = claimant / store.stage_run(kind, run.name)
+            claimed.parent.mkdir(parents=True)
+            claimed.symlink_to(run, target_is_directory=True)
+            route = claimant / "route"
+            route.symlink_to(root, target_is_directory=True)
+            check("staged-root-ambiguous-" + kind, lambda:
+                  refused(grade(route / run.relative_to(root)), "ambiguous second store claim"))
+
+
 def boundary_self_test():
     """Exercise the read-only boundaries with explicit in-memory filesystem observations."""
     import contextlib
@@ -1081,6 +1263,7 @@ def self_test():
     suffix = "-20260917T120000Z-0123456789abcdef"
     prefixes = {"import": "imp", "ingest": "imp", "adoption": "adopt", "layout": "layout", "preview": "preview"}
     _staged_generation_self_test(check)
+    _staged_root_self_test(check)
     check("control-boundaries", lambda: boundary_self_test() == 0)
     check("kinds", lambda: store.STAGING_KINDS == tuple(prefixes))
     check("homes", lambda: store.STORE_TREE_CONTROL_DIRS == ("imported", "archive", "staging", "journals"))

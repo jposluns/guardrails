@@ -2053,6 +2053,8 @@ _ST_TXN = ("transaction-schema", "transaction-consistency")
 # R1's exact fail-closed diagnostic, shared by the symlink-route and unheld-relative fixtures.
 _ST_HOME_REFUSED = "name a run not held by a store by an absolute, symlink-free path"
 _ST_DETACHED = (True, "no transaction record (run not yet applied)")
+_ST_NO_BINDING = (False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                   "(no registered store binding for homes generation 2)")
 
 
 def _st_staged(base_dir, name, kind, corrupt=True):
@@ -2392,7 +2394,7 @@ def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, de
                             if not held or links or second or spelling.startswith("/"):
                                 raise RuntimeError("held earlier-chdir residual fixture is not isolated")
                         expected = ("refused" if second else "registered") if held else (
-                            "refused" if links or not spelling.startswith("/") else "detached")
+                            "refused" if homes == 2 or links or not spelling.startswith("/") else "detached")
                         reads = []
                         read_control = module._read_store_control
 
@@ -2540,7 +2542,8 @@ def _d_home_unheld_relative(kind):
                 relative = _st_graded(module, root, physical.name, homes, cwd)
                 absolute = _st_graded(module, root, physical, homes, cwd)
                 outcomes.append(all(relative[cid] == (False, _st_located(_ST_HOME_REFUSED))
-                                    and absolute[cid] == _ST_DETACHED for cid in _ST_TXN))
+                                    and absolute[cid] == (_ST_DETACHED if homes == 1 else _ST_NO_BINDING)
+                                    for cid in _ST_TXN))
         _revert_check(all(outcomes), "gate/home-unheld-relative/" + kind)
     return test
 
@@ -2583,7 +2586,12 @@ def _d_home_search_only(kind, homes, case):
                 unreachable = module.check_staged_run(run, homes=homes)
         finally:
             restricted.chmod(mode)
-        _revert_check(restricted_result == clean and all(clean[cid][0] for cid in _ST_TXN)
+        # The pristine homes-2 detached case refuses binding; its isolated O_PATH baseline
+        # removes only that overlapping refusal. Both must preserve search-only traversal.
+        clean_expected = all(clean[cid][0] for cid in _ST_TXN) or (
+            homes == 2 and case == "detached"
+            and all(clean[cid] == _ST_NO_BINDING for cid in _ST_TXN))
+        _revert_check(restricted_result == clean and clean_expected
                       and all(not unreachable[cid][0] for cid in _ST_TXN),
                       "gate/home-search-only/{}/{}/homes-{}".format(case, kind, homes))
     return test
@@ -3146,6 +3154,11 @@ _STRIPS = dict((("helper-guard", (_HELPER_GUARD, _HELPER_REVERTED.replace("rever
                  (_DIAG_CALL_GUARD, _DIAG_CALL_REVERTED.replace("reverted", "stripped"))))
                + tuple((label + "-call", (_CALL_GUARDS[label], _call_reverted(label, "stripped")))
                        for label in _CALL_GUARDS))
+# Keep the O_PATH and R1 discriminators observable beneath the detached homes-2 refusal.
+# Full-source refusal is independently required by the unstripped home-property matrix.
+_STRIPS["detached-homes2-binding"] = (
+    '        if homes == 2:\n            raise _GateError("no registered store binding for homes generation 2")\n',
+    "        pass  # stripped: detached homes-2 binding refusal\n")
 _LAUNCHED_LAYERS = ("helper-guard", "launch-boundary")
 # Rows whose mutant changes no declared asserted Boolean outcome claim only guard execution, even if
 # other checks flip. Each has an "/isolated" safety row; safety requires a flip inside _REVERT_ASSERTED.
@@ -3300,12 +3313,14 @@ _DISCRIMINATORS = tuple(
 _DISCRIMINATORS += tuple(
     ("gate/home-relative/{}/{}/homes-{}".format(case, kind, homes), "gate",
      _d_home_relative(kind, homes, case),
-     '        if not held and (expanded or not rd.spelling.startswith("/")):\n', "        if False:  # reverted R1\n")
+     '        if not held and (expanded or not rd.spelling.startswith("/")):\n', "        if False:  # reverted R1\n",
+     ("detached-homes2-binding",) if homes == 2 else ())
     for kind in ("import", "ingest") for homes in (1, 2)
     for case in ("staging", "staging-entry", "legacy", "legacy-entry")) + tuple(
     ("gate/home-search-only/{}/{}/homes-{}".format(case, kind, homes), "gate",
      _d_home_search_only(kind, homes, case),
-     'getattr(os, "O_PATH", os.O_RDONLY)', "os.O_RDONLY")
+     'getattr(os, "O_PATH", os.O_RDONLY)', "os.O_RDONLY",
+     ("detached-homes2-binding",) if homes == 2 and case == "detached" else ())
     for kind in ("import", "ingest") for homes in (1, 2)
     for case in ("detached", "canonical", "physical")) + tuple(
     ("gate/home-external-symlink/{}/homes-{}".format(kind, homes), "gate",
