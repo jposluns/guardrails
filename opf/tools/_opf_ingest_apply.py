@@ -2124,6 +2124,152 @@ def _d_home_symlink_route(kind):
     return test
 
 
+
+def _d_home_relative(kind, homes, case):
+    """A relative route starting below the store still sees a traversed symlink in a registered home."""
+    def test(module, base_dir):
+        root, rid, staged = _st_staged(base_dir, "relative-" + kind, kind)
+        if case.startswith("legacy"):
+            run = root / _opf_import._import_run_locations(rid, 1)[0]
+            staged.rename(run)
+        else:
+            run = staged
+        if case.endswith("entry"):
+            link = run
+            elsewhere = base_dir / "elsewhere" / rid
+            elsewhere.parent.mkdir()
+            spelling, cwd = rid + "/", run.parent
+        else:
+            link = run.parent if case.startswith("legacy") else root / _opf_store.STAGING_REL
+            elsewhere = base_dir / "elsewhere"
+            spelling, cwd = str(run.relative_to(root / ".working")), root / ".working"
+        link.rename(elsewhere)
+        link.symlink_to(elsewhere)
+        rel = str(run.relative_to(root))
+        error = _st_located("run path reaches the registered home {!r} through a symlink its descriptor "
+                            "ancestry does not hold".format(rel))
+        absolute = _st_graded(module, root, str(run) + "/", homes)
+        relative = _st_graded(module, root, spelling, homes, cwd)
+        _revert_check(all(result[cid] == (False, error) for result in (absolute, relative)
+                          for cid in _ST_TXN),
+                      "gate/home-relative/{}/{}/homes-{}".format(case, kind, homes))
+    return test
+
+
+def _d_home_search_only(kind, homes, case):
+    """Real 0311 permissions, restored even on failure; never accept an ineffective chmod fixture."""
+    def test(module, base_dir):
+        import shutil
+        import stat
+        from unittest.mock import patch
+        root, rid, staged = _st_staged(base_dir, "search-" + kind, kind, corrupt=False)
+        if homes == 1 and case != "detached":
+            run = root / _opf_import._import_run_locations(rid, 1)[0]
+            staged.rename(run)
+        else:
+            run = staged
+        if case == "detached":
+            run = base_dir / "copy" / "a" / "b" / rid
+            run.parent.mkdir(parents=True)
+            shutil.copytree(staged, run)
+            restricted = run.parent
+        elif case == "physical":
+            restricted = run.parent
+        else:
+            restricted = root.parent
+        clean = _st_graded(module, root, run, homes)
+        mode = stat.S_IMODE(restricted.stat().st_mode)
+        restricted.chmod(0o311)
+        try:
+            try:
+                fd = os.open(str(restricted), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            except PermissionError:
+                pass
+            else:
+                os.close(fd)
+                raise RuntimeError("search-only fixture still permits directory reads")
+            restricted_result = _st_graded(module, root, run, homes)
+            restricted.chmod(0)
+            with patch.object(_opf_store, "SUPPORTED_HOMES", homes):
+                unreachable = module.check_staged_run(run, homes=homes)
+        finally:
+            restricted.chmod(mode)
+        _revert_check(restricted_result == clean and all(clean[cid][0] for cid in _ST_TXN)
+                      and all(not unreachable[cid][0] for cid in _ST_TXN),
+                      "gate/home-search-only/{}/{}/homes-{}".format(case, kind, homes))
+    return test
+
+
+def _d_home_external_symlink(kind, homes):
+    """An untraversed alternate home cannot change either spelling's established physical binding."""
+    def test(module, base_dir):
+        root, rid, run = _st_staged(base_dir, "external-" + kind, kind, corrupt=False)
+        if homes == 1:
+            legacy = root / _opf_import._import_run_locations(rid, 1)[0]
+            run.rename(legacy)
+            run = legacy
+        clean = _st_graded(module, root, run, homes)
+        link = base_dir / _opf_import._import_run_locations(rid, 1)[0]
+        link.parent.mkdir(parents=True)
+        link.symlink_to(run)
+        absolute = _st_graded(module, root, run, homes)
+        relative = _st_graded(module, root, rid, homes, run.parent)
+        through_link = _st_graded(module, root, str(link) + "/", homes)
+        _revert_check(absolute == relative == clean and all(clean[cid][0] for cid in _ST_TXN)
+                      and all(not through_link[cid][0] for cid in _ST_TXN),
+                      "gate/home-external-symlink/{}/homes-{}".format(kind, homes))
+    return test
+
+
+def _d_home_cwd_bound(kind, homes):
+    """Reclassification of a relative spelling uses the same starting descriptor after ambient chdir."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, run = _st_staged(base_dir, "cwd-" + kind, kind)
+        clean = _st_graded(module, root, rid, homes, run.parent)
+        classify, calls = module._classify_run_homes, []
+
+        def shifted(rd):
+            calls.append(True)
+            if len(calls) == 2:
+                os.chdir(str(base_dir))
+            return classify(rd)
+
+        with patch.object(module, "_classify_run_homes", shifted):
+            shifted_result = _st_graded(module, root, rid, homes, run.parent)
+        _revert_check(len(calls) > 1 and shifted_result == clean,
+                      "gate/home-cwd-bound/{}/homes-{}".format(kind, homes))
+    return test
+
+
+def _d_home_restore(kind, homes):
+    """A component restored after initial detached classification refuses at the next classification."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, run = _st_staged(base_dir, "restore-" + kind, kind)
+        component = root / _opf_store.STAGING_REL
+        moved = component.with_name("renamed-staging")
+        classify, calls = module._classify_run_homes, []
+
+        def renamed(rd):
+            calls.append(True)
+            if len(calls) == 1:
+                component.rename(moved)
+                try:
+                    return classify(rd)
+                finally:
+                    moved.rename(component)
+            return classify(rd)
+
+        error = _st_located("the run's registered home changed during grading (the run or a store component "
+                            "was renamed or replaced); fail-closed, never re-read as detached")
+        with patch.object(module, "_classify_run_homes", renamed):
+            result = _st_graded(module, root, rid, homes, run.parent)
+        _revert_check(len(calls) > 1 and all(result[cid] == (False, error) for cid in _ST_TXN),
+                      "gate/home-restore/{}/homes-{}".format(kind, homes))
+    return test
+
+
 def _d_home_speculative(kind):
     """An unrelated <store>/.working/.working file changes no result of a canonical staged run. Making a
     speculative candidate's unresolvable probe fatal refuses the run on that obstruction."""
@@ -2636,7 +2782,8 @@ _DISCRIMINATORS = tuple(
      "            _bind_run_name(self.fd, self.name)\n", "            pass  # reverted: _bind_run_name\n")
     for kind in ("import", "ingest")) + tuple(
     ("gate/home-symlink-route/" + kind, "gate", _d_home_symlink_route(kind),
-     "        _spelled_route(rd, visit)\n", "        pass  # reverted: _spelled_route(rd, visit)\n")
+     '        traversed = _spelled_route(rd, visit, max(len(rel.split("/")) for rel in rels) - 1)\n',
+     "        traversed = set()\n")
     for kind in ("import", "ingest")) + tuple(
     ("gate/home-speculative/" + kind, "gate", _d_home_speculative(kind),
      "                except (OSError, ValueError):\n                    continue\n",
@@ -2661,6 +2808,28 @@ _DISCRIMINATORS = tuple(
      "_opf_import._require_inline_layout(root_fd, machine_rel)",
      "pass  # reverted: _opf_import._require_inline_layout(root_fd, machine_rel)"),
 ) + tuple(_probe_row(*row) for row in _POST_LAUNCH)
+
+
+# Round-4 class width: each case/kind/generation owns an assertion and a one-control reversal.
+_DISCRIMINATORS += tuple(
+    ("gate/home-relative/{}/{}/homes-{}".format(case, kind, homes), "gate",
+     _d_home_relative(kind, homes, case), "for _ in range(ancestor_depth):", "for _ in range(0):")
+    for kind in ("import", "ingest") for homes in (1, 2)
+    for case in ("staging", "staging-entry", "legacy", "legacy-entry")) + tuple(
+    ("gate/home-search-only/{}/{}/homes-{}".format(case, kind, homes), "gate",
+     _d_home_search_only(kind, homes, case),
+     'getattr(os, "O_PATH", os.O_RDONLY)', "os.O_RDONLY")
+    for kind in ("import", "ingest") for homes in (1, 2)
+    for case in ("detached", "canonical", "physical")) + tuple(
+    ("gate/home-external-symlink/{}/homes-{}".format(kind, homes), "gate",
+     _d_home_external_symlink(kind, homes), "if edge in traversed:", "if True:")
+    for kind in ("import", "ingest") for homes in (1, 2)) + tuple(
+    ("gate/home-cwd-bound/{}/homes-{}".format(kind, homes), "gate",
+     _d_home_cwd_bound(kind, homes), "else os.dup(rd.cwd_fd)", 'else os.open(".", flags)')
+    for kind in ("import", "ingest") for homes in (1, 2)) + tuple(
+    ("gate/home-restore/{}/homes-{}".format(kind, homes), "gate",
+     _d_home_restore(kind, homes), "        bound = _retained_homes(rd, fresh)\n", "        bound = fresh\n")
+    for kind in ("import", "ingest") for homes in (1, 2))
 
 
 def _red_on_revert():

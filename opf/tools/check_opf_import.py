@@ -443,6 +443,11 @@ def _journal_binds_record(jfd, txn, txn_bytes, run_id, txn_rel):
     return ""
 
 
+# Traversal and identity need search permission, not directory-read permission. The run listing and
+# retained store root still use readable descriptors. Platforms without O_PATH retain the stricter fallback.
+_DIR_ID_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
 def _bind_run_name(fd, name):
     """B1: bind the run's identity name to its descriptor. Every store-relative location and record path is
     built from the supplied path's final component, which is the opened directory's own entry only when the
@@ -457,7 +462,7 @@ def _bind_run_name(fd, name):
                          "by its own entry name".format(name))
     try:
         run = os.fstat(fd)
-        parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        parent = os.open("..", _DIR_ID_FLAGS, dir_fd=fd)
     except (OSError, ValueError) as exc:
         raise _GateError("cannot open the staged run dir's parent no-follow to bind its name ({})".format(exc))
     try:
@@ -499,9 +504,15 @@ class _RunDir:
         self.name = self.path.name
         self.home_binding = None
         self.home_error = None
+        self.cwd_fd = None
         try:
-            self.fd = os.open(self.spelling, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            if not self.path.is_absolute():
+                self.cwd_fd = os.open(".", _DIR_ID_FLAGS)
+            self.fd = os.open(self.spelling, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                              dir_fd=self.cwd_fd)
         except (OSError, ValueError) as exc:
+            if self.cwd_fd is not None:
+                os.close(self.cwd_fd)
             raise _GateError("cannot open the staged run dir no-follow ({})".format(exc))
         try:
             _bind_run_name(self.fd, self.name)
@@ -520,7 +531,12 @@ class _RunDir:
                 os.close(fd)
         finally:
             self.home_binding = None
-            os.close(self.fd)
+            try:
+                os.close(self.fd)
+            finally:
+                if self.cwd_fd is not None:
+                    os.close(self.cwd_fd)
+                    self.cwd_fd = None
 
     def kind(self, rel):
         """The classified kind of a run-relative entry ("file" / "dir" / "other"), or None when absent."""
@@ -1631,7 +1647,7 @@ def _physical_home(rd, rel):
     try:
         for depth, comp in enumerate(reversed(rel.split("/"))):
             below = _fd_identity(cur)
-            parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
+            parent = os.open("..", _DIR_ID_FLAGS, dir_fd=cur)
             os.close(cur)
             cur = parent
             try:
@@ -1644,8 +1660,8 @@ def _physical_home(rd, rel):
                                      "or replaced during grading); fail-closed, never classified as "
                                      "detached".format(comp))
                 return None
-        found, cur = cur, None
-        return found
+        # Only the established store root needs a readable descriptor for downstream consumers.
+        return os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
     finally:
         if cur is not None:
             os.close(cur)
@@ -1655,7 +1671,7 @@ def _physical_home(rd, rel):
 _ROUTE_SYMLINK_LIMIT = 40
 
 
-def _spelled_route(rd, visit):
+def _spelled_route(rd, visit, ancestor_depth):
     """Re-resolve the SUPPLIED spelling (rd.spelling, the exact string _RunDir opened) in user space,
     descriptor-bound, calling visit(dir_fd) at every directory its resolution passes through, including each
     directory a followed symlink sits in. Each component is classified no-follow beneath the current
@@ -1663,16 +1679,33 @@ def _spelled_route(rd, visit):
     the kernel takes it, and a symlink is expanded in place (an absolute target restarts at "/"), at most
     _ROUTE_SYMLINK_LIMIT times. The resolution must end at the opened run by (st_dev, st_ino). A component that
     no longer resolves, a non-directory, too many links, or a different final directory is a _GateError: the
-    spelling changed since the run was opened, so its provenance cannot be established."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    spelling changed since the run was opened, so its provenance cannot be established. For a relative
+    spelling, also visit the retained starting directory's physical ancestors up to ancestor_depth: the
+    starting directory may be below a store root whose registered home the remaining route traverses.
+    Return the symlink edges actually traversed, keyed by (parent identity, entry name)."""
+    flags = _DIR_ID_FLAGS
     pending = rd.spelling.split("/")
     expanded = 0
+    traversed = set()
     try:
-        cur = os.open("/" if rd.spelling.startswith("/") else ".", flags)
+        cur = os.open("/", flags) if rd.spelling.startswith("/") else os.dup(rd.cwd_fd)
     except OSError as exc:
         raise _GateError("cannot open the supplied run path's starting directory ({})".format(exc))
     try:
         visit(cur)
+        if not rd.spelling.startswith("/"):
+            ancestor = os.dup(cur)
+            try:
+                for _ in range(ancestor_depth):
+                    parent = os.open("..", flags, dir_fd=ancestor)
+                    same = _fd_identity(parent) == _fd_identity(ancestor)
+                    os.close(ancestor)
+                    ancestor = parent
+                    visit(ancestor)
+                    if same:
+                        break
+            finally:
+                os.close(ancestor)
         while pending:
             comp = pending.pop(0)
             if comp in ("", "."):
@@ -1680,6 +1713,7 @@ def _spelled_route(rd, visit):
             if comp != "..":
                 st = os.stat(comp, dir_fd=cur, follow_symlinks=False)
                 if stat.S_ISLNK(st.st_mode):
+                    traversed.add((_fd_identity(cur), comp))
                     expanded += 1
                     if expanded > _ROUTE_SYMLINK_LIMIT:
                         raise _GateError("the supplied run path follows more than {} symbolic links".format(
@@ -1699,6 +1733,7 @@ def _spelled_route(rd, visit):
         if _fd_identity(cur) != _fd_identity(rd.fd):
             raise _GateError("the supplied run path no longer resolves to the opened run directory (changed "
                              "during grading); its home provenance cannot be established")
+        return traversed
     except (OSError, ValueError) as exc:
         raise _GateError("the supplied run path's route cannot be re-resolved no-follow ({}); its home "
                          "provenance cannot be established".format(exc))
@@ -1712,10 +1747,12 @@ def _classify_run_homes(rd):
     (_opf_import._import_run_locations) registers, that PHYSICALLY holds the run (_physical_home). Provenance is
     descriptor-bound, never read from the spelling's suffix: the supplied spelling's own route is re-resolved
     (_spelled_route) and, at every directory it passes through, each location is resolved as a string-path
-    consumer resolves it (following symlinks). A directory whose location reaches the opened run by identity
-    without being the physical store root holding that location puts a symlink on the home route, which
-    refuses (a _GateError) whatever the spelling: canonical, dotdot, "/.", trailing "/", relative, or through
-    an ancestor symlink. That string-path probe is SPECULATIVE (a directory the spelling merely passes through
+    consumer resolves it (following symlinks). For relative spellings, the starting directory's physical
+    ancestors are visited too, to the maximum registered depth minus one. A candidate location reaching the
+    run without being its physical home refuses only if one of that location's symlink edges was actually
+    traversed by the supplied route. An unrelated alternate symlink does not override a physical binding.
+    This covers canonical, dotdot, "/.", trailing "/", relative and ancestor-symlink spellings.
+    That string-path probe is SPECULATIVE (a directory the spelling merely passes through
     may carry anything beneath it), so a probe that cannot resolve (absent, ENOTDIR, EACCES, ELOOP) is no
     match and never fatal; only the run's own established route (_bind_run_name, _physical_home, the
     spelling's own resolution) fails closed. A symlink on the route to the store ROOT, above every registered
@@ -1735,6 +1772,8 @@ def _classify_run_homes(rd):
                 held[rel] = fd
         roots = {rel: _fd_identity(fd) for rel, fd in held.items()}
 
+        suspect = {}
+
         def visit(dfd):
             for rel in rels:
                 try:
@@ -1742,10 +1781,22 @@ def _classify_run_homes(rd):
                 except (OSError, ValueError):
                     continue
                 if (st.st_dev, st.st_ino) == run and roots.get(rel) != _fd_identity(dfd):
-                    raise _GateError("run path reaches the registered home {!r} through a symlink its "
-                                     "descriptor ancestry does not hold".format(rel))
+                    parts = rel.split("/")
+                    for index, comp in enumerate(parts):
+                        try:
+                            entry = os.stat("/".join(parts[:index + 1]), dir_fd=dfd, follow_symlinks=False)
+                            parent = os.stat("/".join(parts[:index]) or ".", dir_fd=dfd)
+                        except (OSError, ValueError):
+                            # This is still a speculative route, not an indispensable ancestry input.
+                            continue
+                        if stat.S_ISLNK(entry.st_mode):
+                            suspect[((parent.st_dev, parent.st_ino), comp)] = rel
 
-        _spelled_route(rd, visit)
+        traversed = _spelled_route(rd, visit, max(len(rel.split("/")) for rel in rels) - 1)
+        for edge, rel in suspect.items():
+            if edge in traversed:
+                raise _GateError("run path reaches the registered home {!r} through a symlink its "
+                                 "descriptor ancestry does not hold".format(rel))
     except BaseException:
         for fd in held.values():
             os.close(fd)
@@ -1773,17 +1824,17 @@ def _registered_run_store_fd(rd, generation):
     never downgrades a registered run to the detached fallback, and no check reads a store other than the one
     the run was classified under. A retained classification failure is re-raised at every call.
     Residuals (disclose-guard-residuals):
-    - M1, concurrent rename: the classification is a sequence of descriptor-relative steps, not one atomic
-      observation. A store component renamed while the FIRST classification runs, and restored before any
-      re-classification, can classify a registered run by the renamed ancestry (detached). A rename that
-      persists through the whole grading leaves the run physically detached: a spelling through the renamed
-      component then fails to resolve (refused), while a physical or relative spelling classifies it detached,
-      its physical state. Every window after the first classification is closed by the retained binding, and
-      no read is re-resolved from a path.
-    - A registered home that is itself a symlink, graded by a spelling that never passes through the symlink
-      (the run's physical path, or a relative path from a working directory already inside the symlink's
-      target), is physically outside every store: no descriptor the gate holds records the symlink, so the
-      run is classified detached (the detached-fallback residual of _staged_run_store_fd).
+    - M1, concurrent rename: classification is a sequence of descriptor-relative steps, not an atomic
+      ancestry snapshot. A store component renamed before the first classification and restored only after
+      the last store lookup can grade a registered run detached through a physical or relative spelling, so
+      its store-root transaction record goes unread. Restoration before re-classification instead refuses
+      on the retained binding. A spelling through the missing component refuses when it cannot resolve.
+      Path-based ancestry cannot close the remaining window without an atomic snapshot.
+    - A symlinked registered home reached by a physical spelling, or from a starting directory already inside
+      its target, can grade detached when the supplied route never traverses the home symlink and no physical
+      registered home holds the run. Descriptors do not record that untraversed symlink. Relative spellings
+      starting below the store root but traversing the home symlink are checked by the starting-ancestor
+      probe; they are not this residual. Speculative links outside the supplied route are not provenance.
     - A mount that re-roots the run's ancestry (a bind mount) is classified by the mounted ancestry, which is
       the only ancestry its descriptor has."""
     import _opf_import as imp
@@ -1819,11 +1870,12 @@ def _staged_run_store_fd(rd, homes):
     that a home registered in another generation holds refuses; only a detached copy that no generation's
     run home holds by identity keeps the legacy three-up parent, which is bound to no store (disclosed
     residual). M2: classification walks only the run's own physical ancestry and probes registered
-    locations speculatively beneath the directories the supplied spelling passes through, so an unrelated
-    obstruction (a `.working` that is a file, a symlink, or unreadable, beside or above the run) never refuses
-    a detached copy. A detached copy IS refused when its own ancestry, up to the deepest registered location
-    (four levels), cannot be opened or classified, or when its spelling cannot be re-resolved: provenance that
-    cannot be established is never classified as detached."""
+    locations speculatively beneath the supplied route and, for a relative spelling, its starting directory's
+    physical ancestors (maximum registered depth minus one). An unrelated speculative obstruction never
+    refuses a detached copy. Required ancestry and route traversal use search-only identity handles where
+    O_PATH is available; the run listing and store root still require readable descriptors. A genuinely
+    unreachable required ancestor, or a spelling that cannot be re-resolved, refuses: provenance that cannot
+    be established is never classified as detached. Without O_PATH the read-permission fallback is stricter."""
     fd = _ingest_store_fd(rd, homes)
     if fd is None:
         # Enumerate the constructor's registered generations, including inactive ones: using
