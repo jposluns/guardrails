@@ -90,8 +90,9 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.7-4.9"/></svg></span>
         <h3>Verifier-diversity floor</h3>
-        <p>A behavioural rule the AIQT profile adds: verify a change across two model families, three for a
-          critical one. It is a discipline adopters follow, not machinery OPFiles runs for you.</p>
+        <p>A reference-suite policy the AIQT profile declares as
+          <code>verification_floor = "triple-family"</code>: verify a change with three model families.
+          Base tools ignore it; it is a discipline adopters follow, not machinery OPFiles runs for you.</p>
       </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4c-2 0-3 1-3 3v2c0 1-1 2-2 2 1 0 2 1 2 2v2c0 2 1 3 3 3"/><path d="M16 4c2 0 3 1 3 3v2c0 1 1 2 2 2-1 0-2 1-2 2v2c0 2-1 3-3 3"/></svg></span>
@@ -131,8 +132,8 @@
       by default an AIQT adopter is an OPFiles adopter. If you arrived from
       <a href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">aiqt.ai</a>, the store and
       release model described across this site is the same one the pack works.</p>
-    <p>The assistant-driven adoption flow also migrates your existing operational files
-      into the store; reviewed manual import runs through <code>opf import --apply</code>.</p>
+    <p>On the assistant-driven adoption path, include existing operational files in the reviewed
+      import plan; apply accepted manual imports through <code>opf import --apply</code>.</p>
   </div>
 </section>
 
@@ -142,14 +143,12 @@
     <h2>One repository, two entry points</h2>
     <p>A single repository, <code>github.com/jposluns/guardrails</code>, holds both. Its root is AIQT,
       which includes OPFiles, and standalone OPFiles lives at the <code>opf</code> path within it.
-      aiqt.ai maps to the repository root and opfiles.ai maps to the opf path, so the two sites are two
-      views of one source, not two products maintained apart.</p>
-    <p>Adopting OPFiles is what lets the guardrails run on structured records: the TOML carries the
-      input each process declares, which reduces ambiguity and the likelihood of errors, omissions,
-      and hallucinations, and can reduce the inference and token spend that go into reconstructing
-      context; net savings depend on the workflow and should be measured. Adopting AIQT brings the
-      OPFiles store by default; an adopter can instead take just the guardrail rules without the
-      OPFiles store, but that rules-only path misses these capabilities.</p>
+      This site documents the OPFiles subtree; the AIQT site documents the suite.</p>
+    <p>OPFiles provides structured TOML inputs for record-aware checks. The intended benefits include
+      less ambiguity, fewer errors and omissions, and less context reconstruction. This page supplies no
+      observed evaluation of those effects or of hallucination rates or token savings; measure them in
+      your workflow. The AIQT adoption path includes OPFiles by default. Taking only the guardrail
+      rules does not create an OPFiles store or run its record checks.</p>
   </div>
 </section>
 
