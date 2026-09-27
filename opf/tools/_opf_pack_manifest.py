@@ -343,7 +343,7 @@ def _case_passes(case):
     )
 
 
-def _runner_check(expected, text=None, *, fail_own=False):
+def _runner_check(expected, text=None, *, fail_own=0):
     """Prove exact dispatch using the real shell text, as the P0 suite does.
 
     Intercepted Python gates are stubbed. Only this parser's vector leg runs,
@@ -362,6 +362,8 @@ def _runner_check(expected, text=None, *, fail_own=False):
     # Refuse an escaped fixture invocation before any shell can launch.
     if "manifest_log" in os.environ:
         raise RuntimeError(identity + "/cannot-evaluate/recursion")
+    if type(fail_own) is not int or fail_own not in (0, 1, 2, 7):
+        raise ValueError(identity + "/invalid-failure-code")
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
     source = runner.read_text(encoding="utf-8") if text is None else text
@@ -372,8 +374,9 @@ def _runner_check(expected, text=None, *, fail_own=False):
 
     # This self-test asserts that the runner dispatches THIS suite exactly
     # once with its exact argv (RED duplicate-own-call and wrong-own-argv,
-    # using the runtime argv log), and propagates its exit (RED
-    # own-suite-failure, discriminated by RED swallowed-own-failure).
+    # using the runtime argv log), and propagates exits 1, 2 and 7 (RED
+    # own-suite-failure variants, discriminated by swallowed-own-failure
+    # and tolerate-1/tolerate-2). Other nonzero statuses are not injected.
     # It does not assert that other registered suites are dispatched:
     # sibling dispatch completeness is outside this check; a runner-level
     # dispatch audit would be a separate control.
@@ -389,16 +392,18 @@ def _runner_check(expected, text=None, *, fail_own=False):
 printf '%s\0' "$#" "$@" >> "$manifest_log" || exit 2
 if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
     && [ "$3" = "$manifest_test" ] && [ "$4" = "--self-test" ]; then
-  if [ "${manifest_fail_own:-}" = "1" ]; then
+  if [ "$manifest_fail_own" -ne 0 ]; then
     "$manifest_python" -I -B "$manifest_test" --self-test --vectors-only || exit "$?"
-    exit 7
+    exit "$manifest_fail_own"
   fi
   exec "$manifest_python" -I -B "$manifest_test" --self-test --vectors-only
 fi
 case " $* " in *_opf_pack_manifest.py*) exit 2;; esac
 exit 0
 '''
-    # No inherited BASH_ENV, exported functions, Python or Git controls.
+    # Preserve ordinary caller variables (including CI) so conditional
+    # dispatch is exercised. Remove execution controls, then pin configuration
+    # and fixture variables to scratch; this is not an environment sandbox.
     with tempfile.TemporaryDirectory(prefix="opf-pack-registration-") as tmp:
         os.chmod(tmp, 0o700)
         if os.pathsep in tmp:
@@ -409,14 +414,19 @@ exit 0
         log = Path(tmp) / "argv.log"
         log.write_bytes(b"")
         log.chmod(0o600)
-        env = {"PATH": tmp + os.pathsep + os.defpath, "TMPDIR": tmp,
-               "HOME": tmp, "XDG_CONFIG_HOME": tmp, "XDG_CACHE_HOME": tmp,
-               "XDG_DATA_HOME": tmp, "XDG_STATE_HOME": tmp, "LC_ALL": "C",
-               "PYTHONDONTWRITEBYTECODE": "1", "manifest_log": str(log),
-               "manifest_python": sys.executable,
-               "manifest_test": str(here / "_opf_pack_manifest.py")}
-        if fail_own:
-            env["manifest_fail_own"] = "1"
+        env = {name: value for name, value in os.environ.items()
+               if name not in ("BASH_ENV", "ENV")
+               and not name.startswith(("GIT_", "BASH_FUNC_", "PYTHON", "LD_"))}
+        env.update({name: tmp for name in env if name.startswith("XDG_")})
+        env.update({"PATH": tmp + os.pathsep + os.defpath, "TMPDIR": tmp,
+                    "HOME": tmp, "XDG_CONFIG_HOME": tmp, "XDG_CACHE_HOME": tmp,
+                    "XDG_DATA_HOME": tmp, "XDG_STATE_HOME": tmp,
+                    "XDG_CONFIG_DIRS": tmp, "XDG_DATA_DIRS": tmp,
+                    "XDG_RUNTIME_DIR": tmp, "LC_ALL": "C",
+                    "PYTHONDONTWRITEBYTECODE": "1", "manifest_log": str(log),
+                    "manifest_python": sys.executable,
+                    "manifest_test": str(here / "_opf_pack_manifest.py"),
+                    "manifest_fail_own": str(fail_own)})
 
         def run_shell(body):
             with subprocess.Popen(
@@ -443,7 +453,8 @@ exit 0
 
         # Probe with exactly the runner's cwd, flags and environment. A noexec
         # fixture or unusable PATH must never fall through to the real gates.
-        # Also require the runner utility and the fixture interpreter.
+        # Requires dirname on this PATH and executable /bin/sh; absence
+        # fails closed as cannot-evaluate/interception, never a clean skip.
         probe = run_shell("type -P dirname >/dev/null && test -x /bin/sh && "
                           "type -P python3")
         if probe.returncode != 0 or probe.stdout != str(executable) + "\n":
@@ -456,7 +467,10 @@ exit 0
         except OSError as exc:
             raise RuntimeError(identity + "/cannot-evaluate/argv-log") from exc
 
-    # NUL-framed records begin with argc; only THIS suite's calls are asserted.
+    # NUL-framed records begin with argc. Any argument containing THIS
+    # basename counts as an own-call attempt, even embedded -c source; require
+    # one exact argv. Incidental mentions are conservatively attempts too.
+    # Dynamically constructed names without that substring are not classified.
     # Diagnose malformed own calls before their exit or missing output.
     # Absent calls retain the existing return-code/pass-lines identities.
     fields = argv_log.split(b"\0")
@@ -476,7 +490,7 @@ exit 0
             raise AssertionError(identity + "/own-argv")
         argv = tuple(fields[offset:offset + argc])
         offset += argc
-        if any(arg.rsplit(b"/", 1)[-1] == basename for arg in argv):
+        if any(basename in arg for arg in argv):
             own.append(argv)
     own_argv = tuple(os.fsencode(arg) for arg in (
         "-I", "-B", env["manifest_test"], "--self-test"))
@@ -524,17 +538,27 @@ def _runner_red_checks(expected):
             raise AssertionError(identity + "/" + label + "/not-red")
         print("RED {} -> {}".format(label, wanted))
 
+    # Set CI in the caller, not in the constructed runner environment.
+    with patch.dict(os.environ, {"CI": "true"}):
+        red("ci-conditional-skip", lambda: _runner_check(
+            expected, source.replace(
+                anchor, anchor + '  case "${CI:-}:$name" in '
+                '?*:opf-pack-manifest-selftest) return 0;; esac\n', 1)),
+            AssertionError, identity + "/pass-lines")
+
     # Exit from the dispatcher before the runner can report success.
     red("return-code", lambda: _runner_check(
         expected, source.replace(anchor, anchor + "  exit 1\n", 1)),
         AssertionError, identity + "/return-code")
 
     # Run the real vector leg, then fail THIS suite inside the fixture.
-    def own_failure(text):
-        red("own-suite-failure", lambda: _runner_check(
-            expected, text, fail_own=True), AssertionError, identity + "/return-code")
+    def own_failure(text, status=7):
+        label = "own-suite-failure" if status == 7 else "own-suite-failure-" + str(status)
+        red(label, lambda: _runner_check(
+            expected, text, fail_own=status), AssertionError, identity + "/return-code")
 
-    own_failure(source)
+    for status in (1, 2, 7):
+        own_failure(source, status)
     propagation = '  if "$@"; then :; else failed=1; fi'
     if source.count(propagation) != 1:
         raise AssertionError(identity + "/red-fixture")
@@ -544,10 +568,23 @@ def _runner_red_checks(expected):
         source.replace(propagation, '  "$@" || true', 1)),
         AssertionError, identity + "/own-suite-failure/not-red")
 
+    # Selective wrappers must defeat the corresponding failure RED.
+    for status in (1, 2):
+        wrapper = ('tolerate_own() { "$@"; local rc=$?; if [ "$rc" -eq '
+                   + str(status) + ' ]; then return 0; fi; return "$rc"; }\n')
+        mutant = wrapper + source.replace(
+            anchor, anchor + '  set -- tolerate_own "$@"\n', 1)
+        red("tolerate-" + str(status),
+            lambda: own_failure(mutant, status), AssertionError,
+            identity + "/own-suite-failure-" + str(status) + "/not-red")
+
     # Suppressed output cannot hide additional or re-argued own-suite calls.
     for label, command in (
         ("duplicate-own-call", '  "$@" >/dev/null 2>&1'),
         ("wrong-own-argv", '  "$@" --unexpected >/dev/null 2>&1 || true'),
+        ("embedded-own-call", '  python3 -I -B -c "import runpy; '
+         "runpy.run_path('$here/_opf_pack_manifest.py', run_name='__main__')"
+         '" --self-test >/dev/null 2>&1 || true'),
     ):
         red(label, lambda command=command: _runner_check(
             expected, source.replace(propagation, propagation + "\n" + command, 1)),
