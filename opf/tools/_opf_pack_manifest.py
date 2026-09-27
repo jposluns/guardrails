@@ -461,10 +461,11 @@ def _runner_check(expected, text=None, *, fail_own=0):
     # nested sessions outside timeout killpg containment. Not a process sandbox.
     # Intercepted siblings return 0; their failure propagation is outside
     # this check too.
-    # The runner and fixed mutations exercised here dispatch the executable
-    # fixtures or the declared interpreter and suite inputs; they contain no
-    # service client or outside-state operation. This bounded code review,
-    # not PATH interception alone, is the basis for omitting isolation.
+    # The runner, its fixtures, this harness, and the fixed mutations exercised
+    # here each launch only the executable fixtures or the declared interpreter
+    # by absolute path on declared suite inputs; they contain no service client
+    # or outside-state operation. This bounded code review, not PATH interception
+    # alone, is the basis for omitting isolation.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$manifest_log" || exit 2
 if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
