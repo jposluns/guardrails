@@ -228,7 +228,7 @@
   <div class="wrap">
     <p class="eyebrow">What is in the box</p>
     <h2>Every record type, every gated file, counted from the specification.</h2>
-    <p class="lead">Twelve baseline record types, thirteen generated views, and seven command verbs, each count taken from the specification rather than asserted.</p>
+    <p class="lead">Twelve baseline record types, thirteen generated views, and eight command verbs, each count taken from the specification rather than asserted.</p>
     <div class="benefits">
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 20.5 8 12 12.5 3.5 8z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/><path d="m3.5 16.5 8.5 4.5 8.5-4.5"/></svg></span>
@@ -242,8 +242,8 @@
       </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9.5 3 2.5-3 2.5"/><path d="M12.5 15H17"/></svg></span>
-        <h3>7 command verbs</h3>
-        <p>init, render, doctor, upgrade, import, migrate, sync.</p>
+        <h3>8 command verbs</h3>
+        <p>init, import, doctor, render, migrate, sync, upgrade, absorb.</p>
       </div>
     </div>
   </div>
@@ -262,10 +262,11 @@
       <span class="chip ok"><code>opf doctor</code></span>
       <span class="chip ok"><code>opf upgrade</code></span>
       <span class="chip ok"><code>opf import</code></span>
-      <span class="chip ok"><code>opf migrate</code></span>
-      <span class="chip ok"><code>opf sync</code></span>
+      <span class="chip ok"><code>opf absorb</code></span>
+      <span class="chip"><code>opf migrate</code> (planned)</span>
+      <span class="chip"><code>opf sync</code> (planned)</span>
     </p>
-    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>upgrade</code> migrates a store in place, and <code>import</code> brings legacy files in.</p>
+    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>upgrade</code> migrates a store in place, <code>import</code> brings legacy files in, and <code>absorb</code> drafts changelog entries for human curation. <code>migrate</code> and <code>sync</code> are specified but not yet implemented in the reference CLI.</p>
   </div>
 </section>
 

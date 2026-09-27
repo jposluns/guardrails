@@ -86,7 +86,7 @@
         <div class="codecard-bar">.working/toml/manifest.toml</div>
         <div class="codebody"><span class="tok-tbl">[opf]</span>
   <span class="tok-key">standard</span> = <span class="tok-str">"opf"</span>
-  <span class="tok-key">spec_version</span> = <span class="tok-str">"1.1.0"</span>
+  <span class="tok-key">spec_version</span> = <span class="tok-str">"1.2.0"</span>
   <span class="tok-key">layout</span> = <span class="tok-str">"inline"</span>
   <span class="tok-key">posture</span> = <span class="tok-str">"required"</span>
   <span class="tok-key">import_status</span> = <span class="tok-str">"none"</span>
@@ -127,7 +127,7 @@
         however, what declares every other pair, because the <code>[views.*]</code> map is the registry
         the renderer and the drift gate read. It is created by <code>opf init</code>, validated before a
         byte is written; updated by <code>opf upgrade</code> (a canonical model regeneration for the
-        1.0.0 to 1.1.0 schema migration, never a textual edit), by the adopter's own reviewed edit to
+        1.0.0 or 1.1.0 to 1.2.0 schema migration, never a textual edit), by the adopter's own reviewed edit to
         enable a module, register a vendor, or record an unmanaged path, and by <code>opf migrate</code>
         re-pointing the recorded sync target. It is read by every verb at store
         resolution, by <code>opf render</code> for the view map, and by <code>opf doctor</code> for

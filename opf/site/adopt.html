@@ -114,10 +114,10 @@
       <code>doctor</code> reports as a finding (exit 1) makes <code>render --write</code> exit 2, declining
       to write over an unsound source rather than exiting 1. Where a command is aimed at a directory that
       has not adopted OPFiles, the
-      applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>) report NOT
-      APPLICABLE and exit 0. The seven commands, documented one by one below, are <code>init</code>,
+      applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>,
+      <code>absorb</code>) report NOT APPLICABLE and exit 0. The eight commands, documented one by one below, are <code>init</code>,
       <code>render</code>, <code>doctor</code>, <code>import</code>, <code>upgrade</code>,
-      <code>migrate</code>, and <code>sync</code>.</p>
+      <code>migrate</code>, <code>sync</code>, and <code>absorb</code>.</p>
 
     <h3 id="cmd-init"><code>opf init</code></h3>
     <p><b style="color:var(--ink)">Purpose.</b> Create a fresh, validated store and its committed
@@ -194,8 +194,10 @@
     <p class="refchips"><code>opf import --scan --set sources.toml</code> <code>opf import --plan --set sources.toml</code> <code>opf import --review R --actor "you" --decisions d.toml</code> <code>opf import --apply R</code></p>
 
     <h3 id="cmd-upgrade"><code>opf upgrade</code></h3>
-    <p><b style="color:var(--ink)">Purpose.</b> Apply the in-place base-schema upgrade (from spec 1.0.0
-      to 1.1.0), staged for your own review and merge.</p>
+    <p><b style="color:var(--ink)">Purpose.</b> Apply the in-place base-schema upgrade from spec 1.0.0
+      or 1.1.0 to 1.2.0, staged for your own review and merge.</p>
+    <p>A 1.1.0 store needs only the <code>spec_version</code> bump; a 1.0.0 store also receives the
+      earlier schema delta. Neither path creates bootstrap provenance for an existing store.</p>
     <p><b style="color:var(--ink)">How it works.</b> The upgrade is additive and idempotent. It resolves
       the store and refuses fail-closed on a store above the tooling's spec version, on a hand-edited or
       comment-bearing manifest or counters, on a held lease, or on a store that is unclean over the paths
@@ -212,7 +214,22 @@
       recorded, store-subtree-scoped recovery against the committed HEAD, not a no-op.</p>
     <p class="refchips"><code>opf upgrade</code> <code>opf upgrade --root .</code></p>
 
+    <h3 id="cmd-absorb"><code>opf absorb</code></h3>
+    <p><b style="color:var(--ink)">Purpose.</b> Draft a candidate changelog entry for human curation,
+      or compute the freeze digest of an already-curated entry, without writing files.</p>
+    <p><b style="color:var(--ink)">How it works.</b> <code>--covers</code> selects
+      <code>unreleased</code> (the default), a released version, or a contiguous version range.
+      A per-release draft draws on its worklog span; a range rollup draws on the existing per-release
+      changelog entries. <code>--freeze-digest</code> computes the selected curated entry's digest.
+      Both modes validate the ledger inputs and coverage token before producing output.</p>
+    <p><b style="color:var(--ink)">Result.</b> Draft text or a digest on stdout, diagnostics on stderr,
+      and no store changes. Exit 0 means success or not applicable; exit 2 means cannot-evaluate.
+      Drafts still require human curation and the reviewed publication flow.</p>
+    <p class="refchips"><code>opf absorb</code> <code>opf absorb --covers 1.2.3</code> <code>opf absorb --covers 1.2.3 --freeze-digest</code></p>
+
     <h3 id="cmd-migrate"><code>opf migrate</code></h3>
+    <p><b style="color:var(--ink)">Status.</b> Planned; the reference CLI currently exits 2
+      (not yet implemented). The following describes the standard's intended operation.</p>
     <p><b style="color:var(--ink)">Purpose.</b> Relocate the whole tracked store to a target location,
       its git history and worklog preserved, as one recorded, verified operation.</p>
     <p><b style="color:var(--ink)">How it works.</b> It runs under the store consistency contract and the
@@ -234,6 +251,8 @@
     <p class="refchips"><code>opf migrate --store dir:../product-ops-store</code> <code>opf migrate --store github:acme/product-ops</code></p>
 
     <h3 id="cmd-sync"><code>opf sync</code></h3>
+    <p><b style="color:var(--ink)">Status.</b> Planned; the reference CLI currently exits 2
+      (not yet implemented). The following describes the standard's intended operation.</p>
     <p><b style="color:var(--ink)">Purpose.</b> Reconcile the store with its sync target, the surfaced
       pull-and-push step of the store consistency contract.</p>
     <p><b style="color:var(--ink)">How it works.</b> The consistency contract holds the store
@@ -301,7 +320,7 @@
       <div class="codecard-bar">.working/toml/manifest.toml</div>
       <div class="codebody"><span class="tok-tbl">[opf]</span>
 <span class="tok-key">standard</span> = <span class="tok-str">"opf"</span>          # discovery token; exact value required
-<span class="tok-key">spec_version</span> = <span class="tok-str">"1.1.0"</span>    # the base spec version this store conforms to
+<span class="tok-key">spec_version</span> = <span class="tok-str">"1.2.0"</span>    # the base spec version this store conforms to
 <span class="tok-key">layout</span> = <span class="tok-str">"inline"</span>         # "inline" or "per-record"
 <span class="tok-key">posture</span> = <span class="tok-str">"warn"</span>          # "off", "warn", or "required" (section 11)
 <span class="tok-key">import_status</span> = <span class="tok-str">"none"</span>    # "none", "partial", or "complete"</div>

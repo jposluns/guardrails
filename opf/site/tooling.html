@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reference tooling | OPFiles</title>
-<meta name="description" content="The OPFiles reference commands for creating, validating, rendering, importing, relocating, and synchronizing an operational store.">
+<meta name="description" content="The eight OPFiles verbs: init, import, doctor, render, migrate, sync, upgrade, and absorb. Migration and synchronization are planned in the reference CLI.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Reference tooling | OPFiles">
-<meta property="og:description" content="The OPFiles reference commands for creating, validating, rendering, importing, relocating, and synchronizing an operational store.">
+<meta property="og:description" content="The eight OPFiles verbs: init, import, doctor, render, migrate, sync, upgrade, and absorb. Migration and synchronization are planned in the reference CLI.">
 <meta name="twitter:card" content="summary">
 </head>
 <body>
@@ -50,7 +50,7 @@
 <div class="wrap pagehead">
   <p class="eyebrow">Reference tooling</p>
   <h1>Reference tooling</h1>
-  <p class="lead">OPFiles names a standard command vocabulary; the reference suite implements that vocabulary: seven commands to create, render, validate, upgrade, import, relocate, and synchronize a store.</p>
+  <p class="lead">OPFiles names eight command verbs: <code>init</code>, <code>import</code>, <code>doctor</code>, <code>render</code>, <code>migrate</code>, <code>sync</code>, <code>upgrade</code>, and <code>absorb</code>. The reference CLI implements six; <code>migrate</code> and <code>sync</code> are planned and currently exit 2 (not yet implemented).</p>
 </div>
 
 <section>
@@ -91,12 +91,16 @@
         <p>Scans, plans, captures attributed reviews of legacy content, and promotes a reviewed import with <code>--apply</code>.</p>      </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h13"/><path d="m11 7 5 5-5 5"/><path d="M20 5v14"/></svg></span>
+        <h3><code>opf absorb</code></h3>
+        <p>Drafts changelog entries for human curation or computes a curated entry's freeze digest; outputs to stdout without writing files.</p>      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h13"/><path d="m11 7 5 5-5 5"/><path d="M20 5v14"/></svg></span>
         <h3><code>opf migrate</code></h3>
-        <p>Relocates the whole store, git history and worklog preserved, to any location a target can name.</p>      </div>
+        <p>Planned: relocate the whole store, preserving git history and worklog. Not yet implemented in the reference CLI (exit 2).</p>      </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 9a7.5 7.5 0 0 1 12.8-2.3"/><path d="M17 4v3h-3"/><path d="M19.5 15a7.5 7.5 0 0 1-12.8 2.3"/><path d="M7 20v-3h3"/></svg></span>
         <h3><code>opf sync</code></h3>
-        <p>The surfaced pull and push step of the store consistency contract.</p>      </div>
+        <p>Planned: the surfaced pull and push step of the store consistency contract. Not yet implemented in the reference CLI (exit 2).</p>      </div>
     </div>
   </div>
 </section>
