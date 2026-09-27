@@ -3,7 +3,7 @@
 
 Public contract:
     gather_release(request, policy) -> (observation, notes)
-    self_test() -> 0 / 1 / 2 (local fixtures require openssl and bash)
+    self_test() -> 0 / 1 / 2 (local fixtures require openssl, git and bash)
 
 request is a plain dict with exactly:
     product_root: absolute, lexically contained POSIX directory path
@@ -39,7 +39,10 @@ framing without extensions or trailers. Connection closure must follow the
 complete body; an extra byte or unclean TLS EOF refuses.
 
 Supported archive dialect is a single gzip member containing POSIX USTAR.
-PAX, GNU extensions, sparse archives, alternate numeric encodings, and other
+One optional leading PAX global header is accepted only when its sole record
+is the canonical git-archive comment naming request["commit"]. It supplies no
+path or extraction metadata. Every other PAX/GNU extension, sparse archive,
+alternate numeric encoding, and other
 dialects refuse. USTAR members are validated before materialization; only
 regular files and directories are accepted. Exactly one wrapper is removed.
 All materialized files have mode 0600 and directories mode 0700. Original
@@ -49,8 +52,13 @@ Quarantine creation uses atomic mkdir, which is the directory equivalent of
 exclusive creation; O_EXCL is used for every file creation. Existing run or
 quarantine directories are never reused. Files are opened descriptor-relative
 with no-follow and nonblocking flags and reread with inode/stamp checks.
-Failed attempts can leave private, incomplete quarantine directories. They
-carry no returned locator or success marker. Cleanup is a separate operation.
+Refused or cancelled attempts remove their exclusively created run directory,
+including quarantine, using descriptor-relative, symlink-resistant cleanup.
+Cleanup failure refuses with a named cleanup note and no capability or sealed
+success record; private residue or held descriptors can remain after OS failure.
+Scaffolding (.working/adopt) may remain. Callers must never reconstruct a
+capability from request_id. Process death and same-privilege interference are
+outside cleanup's guarantee.
 
 R1: bootstrap code/policy, the Python runtime, OS, resolver, and system CA store
 are trusted. Compromise of those components defeats these guarantees.
@@ -81,6 +89,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import socket
 import ssl
 import stat
@@ -566,9 +575,11 @@ def _fetch(url, cap, parent, context):
         return _response(_Wire(secured, request_deadline), cap)
 
 
-def _open_directory(parent, name, fresh=False):
+def _open_directory(parent, name, fresh=False, created=None):
     try:
         os.mkdir(name, 0o700, dir_fd=parent)
+        if created is not None:
+            created()
     except FileExistsError:
         if fresh:
             raise ObserveError(CANNOT_EVALUATE, "quarantine",
@@ -594,8 +605,40 @@ def _open_directory(parent, name, fresh=False):
         raise
 
 
+class _QuarantineOwner:
+    """Retain the parent descriptor until the final observation is settled."""
+
+    def __init__(self, parent, name):
+        _require(shutil.rmtree.avoids_symlink_attacks,
+                 CANNOT_EVALUATE, "cleanup", "safe cleanup unavailable")
+        self.parent = os.dup(parent)
+        self.name = name
+        self.owned = False
+
+    def created(self):
+        self.owned = True
+
+    def remove(self):
+        if self.owned:
+            shutil.rmtree(self.name, dir_fd=self.parent)
+            self.owned = False
+
+    def finish(self, keep):
+        try:
+            if not keep:
+                self.remove()
+        finally:
+            try:
+                os.close(self.parent)
+            except BaseException:
+                # Even descriptor teardown can invalidate a successful gather.
+                # If the descriptor is no longer usable, report the residue.
+                self.remove()
+                raise
+
+
 @contextlib.contextmanager
-def _quarantine(root, request_id):
+def _quarantine(root, request_id, owners):
     store._journal.require_containment()
     with contextlib.ExitStack() as stack:
         def hold(fd):
@@ -605,7 +648,11 @@ def _quarantine(root, request_id):
         root_fd = hold(store._open_dir_nofollow(root))
         working = hold(_open_directory(root_fd, ".working"))
         adopt = hold(_open_directory(working, "adopt"))
-        run = hold(_open_directory(adopt, request_id, fresh=True))
+        owner = _QuarantineOwner(adopt, request_id)
+        owners.append(owner)
+        run = hold(_open_directory(
+            adopt, request_id, fresh=True, created=owner.created,
+        ))
         quarantine = hold(_open_directory(run, "quarantine", fresh=True))
         path = root + "/.working/adopt/" + request_id + "/quarantine"
         for entry in list(sys.path) + os.environ.get("PATH", "").split(os.pathsep):
@@ -709,12 +756,15 @@ def _tar_text(field):
         raise ObserveError(CANNOT_EVALUATE, "archive", "unparseable member name")
 
 
-def _archive_member_policy(info):
+def _archive_member_policy(info, global_header=False):
     known_special = (tarfile.LNKTYPE, tarfile.SYMTYPE, tarfile.CHRTYPE,
                      tarfile.BLKTYPE, tarfile.FIFOTYPE)
     _require(info.type not in known_special,
              INVALID, "archive", "link or special member")
-    _require(info.type in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE),
+    allowed = (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE)
+    if global_header:
+        allowed += (tarfile.XGLTYPE,)
+    _require(info.type in allowed,
              CANNOT_EVALUATE, "archive", "unsupported tar member dialect")
     _require(
         not info.linkname and info.devmajor == 0 and info.devminor == 0
@@ -734,7 +784,7 @@ def _member_path(name, directory):
     return name
 
 
-def _unpack(parent, archive, deadline):
+def _unpack(parent, archive, deadline, commit=None):
     raw = _inflate(archive, deadline)
     _require(len(raw) % 512 == 0, CANNOT_EVALUATE, "archive",
              "truncated tar block")
@@ -794,7 +844,25 @@ def _unpack(parent, archive, deadline):
         _require(not any(header[500:]), INVALID, "archive",
                  "conflicting USTAR reserved metadata")
         info = tarfile.TarInfo.frombuf(header, "utf-8", "strict")
-        _archive_member_policy(info)
+        global_header = info.type == tarfile.XGLTYPE
+        _archive_member_policy(info, global_header=global_header)
+        # Validate all string fields even on the inert global header.
+        for field in (header[:100], header[157:257], header[265:297],
+                      header[297:329], header[345:500]):
+            _tar_text(field)
+        if global_header:
+            expected = (b"52 comment=" + commit.encode("ascii") + b"\n"
+                        if type(commit) is str and _COMMIT.fullmatch(commit)
+                        else None)
+            _require(
+                offset == 512 and expected is not None
+                and info.size == len(expected)
+                and raw[offset:offset + 512] == expected.ljust(512, b"\0"),
+                CANNOT_EVALUATE, "archive",
+                "global header is not the sole leading pinned git comment",
+            )
+            offset += 512
+            continue
         directory = info.type == tarfile.DIRTYPE
         leaf = _tar_text(header[:100])
         prefix = _tar_text(header[345:500])
@@ -878,14 +946,16 @@ def _unpack(parent, archive, deadline):
         os.close(members_fd)
 
 
-def _work(request, policy, observation, notes, deadline):
+def _work(request, policy, observation, notes, deadline, owners):
     request, policy = _validate(request, policy)
     observation["release_identity"] = {
         "version": request["version"], "commit": request["commit"],
     }
     with _environment():
         context = _client_context()
-        with _quarantine(request["product_root"], observation["request_id"]) as (qfd, path):
+        with _quarantine(
+            request["product_root"], observation["request_id"], owners,
+        ) as (qfd, path):
             archive = None
             anchors = []
             destinations = [
@@ -920,7 +990,7 @@ def _work(request, policy, observation, notes, deadline):
             reread = _read_archive(qfd, deadline)
             _require(reread == archive, CANNOT_EVALUATE, "quarantine",
                      "archive reread differs from response")
-            members = _unpack(qfd, reread, deadline)
+            members = _unpack(qfd, reread, deadline, request["commit"])
             deadline.left()
         # Publish the locator only after descriptor teardown succeeded.
         observation["quarantine"] = path
@@ -943,6 +1013,28 @@ def gather_release(request, policy):
     """Return inert evidence and structured omission notes; never a trust verdict."""
     observation = {}
     notes = []
+    owners = []
+    try:
+        _gather_release(request, policy, observation, notes, owners)
+    finally:
+        keep = observation.get("status") == VALID and "record" in observation
+        for owner in owners:
+            try:
+                owner.finish(keep)
+            except BaseException as exc:
+                observation.pop("quarantine", None)
+                observation.pop("members", None)
+                observation.pop("record", None)
+                observation["status"] = CANNOT_EVALUATE
+                _note(notes, CANNOT_EVALUATE, "cleanup",
+                      "quarantine cleanup or descriptor close failed; "
+                      "private residue may remain: " + type(exc).__name__)
+                if not isinstance(exc, Exception):
+                    raise
+    return observation, notes
+
+
+def _gather_release(request, policy, observation, notes, owners):
     try:
         observation.update({
             "format": OBSERVATION_FORMAT,
@@ -953,7 +1045,7 @@ def gather_release(request, policy):
             "captured_monotonic_ns": _capture_instant(),
         })
         deadline = _Deadline(GATHER_SECONDS)
-        _work(request, policy, observation, notes, deadline)
+        _work(request, policy, observation, notes, deadline, owners)
     except ObserveError as exc:
         _note(notes, exc.status, exc.phase, exc.detail)
     except Exception as exc:
@@ -979,7 +1071,6 @@ def gather_release(request, policy):
         observation["status"] = CANNOT_EVALUATE
         _note(notes, CANNOT_EVALUATE, "record",
               "observation could not be sealed: " + type(exc).__name__)
-    return observation, notes
 
 
 def _guard_self_test():
@@ -1194,7 +1285,7 @@ def self_test(vectors_only=False):
     fixture address. There is no production localhost, alternate-CA, timeout,
     verification-disable, or transport-injection option.
 
-    The write-deny harness covers Python open/write/mkdir entry points and
+    The write-deny harness covers Python open/write/mkdir/unlink/rmdir entry points and
     process-launch entry points. It is not an OS sandbox for arbitrary native
     extension syscalls. The production environment scrub prevents SSL key-log
     output; R1 and R7 remain the native-runtime boundaries.
@@ -1204,6 +1295,9 @@ def self_test(vectors_only=False):
     import gzip
     import io
     import json
+    import inspect
+    import signal
+    import textwrap
     import subprocess
     import tempfile
     import shutil
@@ -1216,6 +1310,7 @@ def self_test(vectors_only=False):
     original_context = ssl.create_default_context
     original_fetch = _fetch
     original_tls = _tls
+    original_remove = _QuarantineOwner.remove
     public_ip = "93.184.216.34"
     commit = "a" * 40
     release_url = "https://codeload.github.com/jposluns/guardrails/tar.gz/" + commit
@@ -1241,6 +1336,78 @@ def self_test(vectors_only=False):
 
     root_row = ("wrap/", tarfile.DIRTYPE, b"")
     baseline_archive = archive([root_row, ("wrap/data", tarfile.REGTYPE, b"data")])
+
+    def source_mutant(function, old, new):
+        source = textwrap.dedent(inspect.getsource(function))
+        if source.count(old) != 1:
+            raise AssertionError("mutation must select exactly one source site")
+        namespace = {}
+        exec(compile(source.replace(old, new, 1), __file__, "exec"),
+             module.__dict__, namespace)
+        return namespace[function.__name__]
+
+    class WatchdogExpired(BaseException):
+        pass
+
+    @contextlib.contextmanager
+    def watchdog():
+        # Independent of every production deadline and timeout. Refuse to
+        # replace another caller's active timer.
+        if signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
+            raise RuntimeError("fixture watchdog timer already in use")
+        previous = signal.getsignal(signal.SIGALRM)
+
+        def expired(signum, frame):
+            raise WatchdogExpired()
+
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, 3.0)
+        try:
+            yield
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+
+    def git_archive_fixture(base):
+        executable = shutil.which("git", path=os.defpath)
+        if executable is None:
+            raise RuntimeError("git archive fixture builder unavailable")
+        repo = base / "git-fixture"
+        home = base / "git-home"
+        template = base / "git-template"
+        for directory in (repo, home, template):
+            directory.mkdir(mode=0o700)
+        # No ambient GIT_* value, HOME, XDG config, template or hooks survives.
+        env = {
+            "PATH": os.defpath, "HOME": str(home),
+            "XDG_CONFIG_HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_AUTHOR_NAME": "Archive fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Archive fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+        }
+
+        def git(*args, data=None):
+            return subprocess.run(
+                [os.path.abspath(executable), "-C", str(repo),
+                 "-c", "core.attributesFile=" + os.devnull, *args],
+                input=data, cwd=repo, env=env, check=True, timeout=15,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ).stdout
+
+        git("init", "--object-format=sha1", "--template=" + str(template))
+        blob = git("hash-object", "-w", "--stdin", data=b"data").strip().decode("ascii")
+        git("update-index", "--add", "--cacheinfo", "100644," + blob + ",data")
+        tree = git("write-tree").strip().decode("ascii")
+        revision = git("commit-tree", tree, data=b"archive fixture\n").strip().decode("ascii")
+        if _COMMIT.fullmatch(revision) is None:
+            raise AssertionError("fixture did not produce a SHA-1 commit")
+        raw = git("archive", "--format=tar", "--prefix=wrap/", revision)
+        if (raw[156:157] != tarfile.XGLTYPE
+                or raw[512:564] != b"52 comment=" + revision.encode("ascii") + b"\n"):
+            raise AssertionError("git archive did not produce its pinned comment")
+        return revision, gzip.compress(raw, mtime=0)
 
     def reply(body, extra=b"", status=b"200 OK", chunked=False):
         if chunked:
@@ -1352,6 +1519,8 @@ def self_test(vectors_only=False):
         actual_open = os.open
         actual_write = os.write
         actual_mkdir = os.mkdir
+        actual_unlink = os.unlink
+        actual_rmdir = os.rmdir
         builtin_open = builtins.open
         io_open = io.open
 
@@ -1402,6 +1571,16 @@ def self_test(vectors_only=False):
                 refuse("mkdir outside permitted scaffolding")
             return actual_mkdir(path, mode, dir_fd=dir_fd)
 
+        def guarded_unlink(path, *, dir_fd=None):
+            if not allowed(absolute(path, dir_fd)):
+                refuse("unlink outside quarantine")
+            return actual_unlink(path, dir_fd=dir_fd)
+
+        def guarded_rmdir(path, *, dir_fd=None):
+            if not allowed(absolute(path, dir_fd), scaffolding=True):
+                refuse("rmdir outside permitted scaffolding")
+            return actual_rmdir(path, dir_fd=dir_fd)
+
         def file_open(original):
             def call(file, mode="r", *args, **kwargs):
                 if any(flag in mode for flag in "wax+") and not allowed(absolute(file)):
@@ -1417,7 +1596,9 @@ def self_test(vectors_only=False):
         # original's actual membership; an unsupported platform still refuses.
         supports_dir_fd = set(os.supports_dir_fd)
         for original, wrapper in ((actual_open, guarded_open),
-                                  (actual_mkdir, guarded_mkdir)):
+                                  (actual_mkdir, guarded_mkdir),
+                                  (actual_unlink, guarded_unlink),
+                                  (actual_rmdir, guarded_rmdir)):
             if original in os.supports_dir_fd:
                 supports_dir_fd.add(wrapper)
 
@@ -1425,6 +1606,8 @@ def self_test(vectors_only=False):
             stack.enter_context(mock.patch.object(os, "open", guarded_open))
             stack.enter_context(mock.patch.object(os, "write", guarded_write))
             stack.enter_context(mock.patch.object(os, "mkdir", guarded_mkdir))
+            stack.enter_context(mock.patch.object(os, "unlink", guarded_unlink))
+            stack.enter_context(mock.patch.object(os, "rmdir", guarded_rmdir))
             stack.enter_context(mock.patch.object(os, "supports_dir_fd", supports_dir_fd))
             stack.enter_context(mock.patch.object(builtins, "open", file_open(builtin_open)))
             stack.enter_context(mock.patch.object(io, "open", file_open(io_open)))
@@ -1474,7 +1657,7 @@ def self_test(vectors_only=False):
                            status=b"302 Found"), redirect=True)
     for label, address in (
         ("loopback", "127.0.0.1"),
-        ("private", "10.0.0.1"),
+        ("private", "10.0.0.1"),  # leak-allow: synthetic private-address refusal
         ("metadata", "169.254.169.254"),
         ("mapped", "::ffff:93.184.216.34"),
         ("platform-address", "168.63.129.16"),
@@ -1490,32 +1673,33 @@ def self_test(vectors_only=False):
                           b"Transfer-Encoding: chunked\r\n\r\nabc"),
         ("duplicate-length", b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n"
                              b"Content-Length: 3\r\n\r\nabc"),
-        ("missing-framing", b"HTTP/1.1 200 OK\r\n\r\nabc"),
+        ("missing-framing", b"HTTP/1.1 200 OK\r\n\r\n3\r\nabc\r\n0\r\n\r\n"),
         ("truncated-chunk", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
                             b"9\r\nabc"),
         ("extra-body", b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabcd"),
         ("content-encoding", reply(b"abc", b"Content-Encoding: gzip\r\n")),
     ):
-        add("TG-11/" + label, CANNOT_EVALUATE, "fetch", response=response)
+        add("TG-11/" + label, CANNOT_EVALUATE, label, response=response,
+            absent="anchors")
     add("TG-11/oversize-declared", CANNOT_EVALUATE, "anchor-cap",
-        anchor_cap=64, response=reply(b"x" * 65))
+        anchor_cap=64, response=reply(b"x" * 65), absent="anchors")
     add("TG-11/oversize-undeclared", CANNOT_EVALUATE, "anchor-cap",
-        anchor_cap=64, response=reply(b"x" * 65, chunked=True))
-    # The baseline must fit the cap so the bypass mutant reaches VALID rather
-    # than the quarantine reread bound; the response is one byte over it.
+        anchor_cap=64, response=reply(b"x" * 65, chunked=True), absent="anchors")
+    # A cap mutant still uses the real transport. Absence of archive evidence
+    # distinguishes streamed refusal from the later quarantine reread bound.
     add("TG-11/oversize-compressed", CANNOT_EVALUATE, "archive-cap",
         archive_cap=len(baseline_archive) + 64,
-        archive=baseline_archive + b"x" * 65)
-    add("TG-11/slow-drip", CANNOT_EVALUATE, "fetch",
-        mode="slow", response=reply(b"x" * 200), timed=True)
-    add("TG-11/read-inactivity", CANNOT_EVALUATE, "fetch",
-        mode="stall", timed=True)
-    add("TG-11/stalled-resolver", CANNOT_EVALUATE, "fetch",
-        stalled_resolver=True, timed=True)
-    add("TG-11/connect-timeout", CANNOT_EVALUATE, "fetch",
-        connect_stall=True, timed=True)
-    add("TG-11/tls-timeout", CANNOT_EVALUATE, "fetch",
-        mode="tls-stall", timed=True)
+        archive=baseline_archive + b"x" * 65, absent="archive")
+    add("TG-11/slow-drip", CANNOT_EVALUATE, "request-deadline",
+        mode="slow", response=reply(b"x" * 200), fetch_bound=0.80)
+    add("TG-11/read-inactivity", CANNOT_EVALUATE, "inactivity",
+        mode="stall", fetch_bound=0.35)
+    add("TG-11/stalled-resolver", CANNOT_EVALUATE, "resolver-deadline",
+        stalled_resolver=True, fetch_bound=0.35)
+    add("TG-11/connect-timeout", CANNOT_EVALUATE, "connect-deadline",
+        connect_stall=True, fetch_bound=0.35)
+    add("TG-11/tls-timeout", CANNOT_EVALUATE, "tls-deadline",
+        mode="tls-stall", fetch_bound=0.35)
     add("TG-12/observer-backstop", CANNOT_EVALUATE, "backstop", exception=True)
     add("TG-12/public-wrapper-backstop", CANNOT_EVALUATE, "wrapper",
         wrapper_exception=True)
@@ -1544,6 +1728,47 @@ def self_test(vectors_only=False):
         add("TG-13/" + label, INVALID, "archive", archive=archive(rows))
     add("TG-13/unsupported-dialect", CANNOT_EVALUATE, "archive",
         archive=archive([("wrap/pax", tarfile.XHDTYPE, b"")]))
+    def pax_record(value):
+        length = len(value) + 3
+        while True:
+            record = str(length).encode("ascii") + b" " + value + b"\n"
+            if len(record) == length:
+                return record
+            length = len(record)
+
+    comment = pax_record(b"comment=" + commit.encode("ascii"))
+    global_row = ("pax_global_header", tarfile.XGLTYPE, comment)
+    member = ("wrap/data", tarfile.REGTYPE, b"data")
+    for label, rows in (
+        ("wrong-commit", [("pax_global_header", tarfile.XGLTYPE,
+                          pax_record(b"comment=" + b"b" * 40)), root_row, member]),
+        ("other-record", [("pax_global_header", tarfile.XGLTYPE,
+                          pax_record(b"uid=0")), root_row, member]),
+        ("extra-record", [("pax_global_header", tarfile.XGLTYPE,
+                          comment + pax_record(b"uid=0")), root_row, member]),
+        ("duplicate-record", [("pax_global_header", tarfile.XGLTYPE,
+                              comment + comment), root_row, member]),
+        ("malformed-record", [("pax_global_header", tarfile.XGLTYPE,
+                              comment.replace(b"52 ", b"51 ", 1)), root_row, member]),
+        ("late-global", [root_row, global_row, member]),
+        ("second-global", [global_row, global_row, root_row, member]),
+    ):
+        add("TG-13/git-" + label, CANNOT_EVALUATE, "git-comment",
+            archive=archive(rows))
+    for label, kind in (("gnu-longname", tarfile.GNUTYPE_LONGNAME),
+                        ("gnu-longlink", tarfile.GNUTYPE_LONGLINK),
+                        ("gnu-sparse", tarfile.GNUTYPE_SPARSE)):
+        add("TG-13/" + label, CANNOT_EVALUATE, "archive",
+            archive=archive([("wrap/extension", kind, b"")]))
+    add("A1/refusal-cleanup", CANNOT_EVALUATE, "cleanup",
+        response=b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort")
+    add("A1/archive-cleanup", INVALID, "cleanup",
+        archive=archive([root_row, ("wrap/../escape", tarfile.REGTYPE, b"x")]))
+    add("A1/seal-cleanup", CANNOT_EVALUATE, "cleanup", seal_exception=True)
+    add("A1/late-cleanup", CANNOT_EVALUATE, "cleanup", late_exception=True)
+    add("A1/cleanup-failure", CANNOT_EVALUATE, "cleanup-failure",
+        archive=archive([root_row, ("wrap/../escape", tarfile.REGTYPE, b"x")]),
+        cleanup_failure=True)
     add("TG-13/absent-containment", CANNOT_EVALUATE, "containment",
         containment=False)
 
@@ -1578,11 +1803,13 @@ def self_test(vectors_only=False):
         product.mkdir(mode=0o700)
         (product / "product-marker").write_bytes(b"unchanged\n")
         before = snapshot(product)
-        request = {"product_root": str(product), "version": "1.0.0", "commit": commit}
+        case_commit = config.get("commit", commit)
+        request = {"product_root": str(product), "version": "1.0.0", "commit": case_commit}
         policy = {
             "format": POLICY_FORMAT,
             "repository": "https://github.com/jposluns/guardrails",
-            "release_url": config.get("release_url", release_url),
+            "release_url": config.get("release_url",
+                                      release_url.rsplit("/", 1)[0] + "/" + case_commit),
             "anchors": [config.get("anchor_url", ANCHOR_URL)],
         }
         archive_body = config.get("archive", baseline_archive)
@@ -1595,6 +1822,7 @@ def self_test(vectors_only=False):
         connect_calls = []
         fetch_calls = []
         fetch_durations = []
+        short_takes = []
         environments = []
         resolver_sockets = None
         backlog = None
@@ -1637,10 +1865,6 @@ def self_test(vectors_only=False):
             finally:
                 fetch_durations.append(time.monotonic() - started)
 
-        def bypass_fetch(url, cap, deadline, context):
-            fetch_calls.append(url)
-            return baseline_archive if url == release_url else baseline_anchor
-
         def no_containment():
             raise OSError("synthetic missing containment primitive")
 
@@ -1660,23 +1884,35 @@ def self_test(vectors_only=False):
 
         original_unpack = _unpack
 
-        def execute_mutant(parent, body, deadline):
+        def execute_mutant(parent, body, deadline, pinned_commit):
             os.system("true")
-            return original_unpack(parent, body, deadline)
+            return original_unpack(parent, body, deadline, pinned_commit)
 
-        def write_mutant(parent, body, deadline):
+        def write_mutant(parent, body, deadline, pinned_commit):
             fd = os.open(str(product / "product-marker"), os.O_WRONLY | os.O_TRUNC)
             os.close(fd)
-            return original_unpack(parent, body, deadline)
+            return original_unpack(parent, body, deadline, pinned_commit)
 
-        def candidate_mutant(parent, body, deadline):
+        def candidate_mutant(parent, body, deadline, pinned_commit):
             fetch_calls.append("https://candidate.invalid/anchor")
-            return original_unpack(parent, body, deadline)
+            return original_unpack(parent, body, deadline, pinned_commit)
+
+        def fail_cleanup(owner):
+            raise OSError("synthetic cleanup failure")
+
+        def fail_seal(*args):
+            raise OSError("synthetic seal failure")
+
+        original_work = _work
+
+        def late_failure(*args):
+            original_work(*args)
+            raise OSError("synthetic failure after quarantine teardown")
 
         try:
             if config.get("stalled_resolver"):
                 resolver_sockets = socket.socketpair()
-                resolver_sockets[0].settimeout(2.0)
+                resolver_sockets[0].settimeout(1.0)
             if config.get("connect_stall"):
                 backlog = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 backlog.bind(("127.0.0.1", 0))
@@ -1740,6 +1976,12 @@ def self_test(vectors_only=False):
                         "CURL_CA_BUNDLE": str(home / "absent-ca"),
                         "GIT_TRACE": str(home / "must-not-write"),
                     }))
+                if config.get("seal_exception"):
+                    patch(module, "_seal_observation", fail_seal)
+                if config.get("late_exception"):
+                    patch(module, "_work", late_failure)
+                if config.get("cleanup_failure"):
+                    patch(_QuarantineOwner, "remove", fail_cleanup)
                 call = gather_release
                 if config.get("public_wrapper") or config.get("wrapper_exception"):
                     call = schema.gather_release
@@ -1762,12 +2004,78 @@ def self_test(vectors_only=False):
                         patch(module, "_check_peer", lambda sock, selected: None)
                     elif mutation == "environment":
                         patch(module, "_environment", contextlib.nullcontext)
-                    elif mutation == "fetch":
-                        patch(module, "_fetch", bypass_fetch)
-                    elif mutation == "anchor-cap":
-                        patch(module, "MAX_ANCHOR_BYTES", 64 * 1024)
-                    elif mutation == "archive-cap":
-                        patch(module, "_fetch", bypass_fetch)
+                    elif mutation in ("anchor-cap", "archive-cap"):
+                        old = ('("archive", policy["release_url"], MAX_ARCHIVE_BYTES)'
+                               if mutation == "archive-cap" else
+                               '("anchor", url, MAX_ANCHOR_BYTES)')
+                        patch(module, "_work", source_mutant(
+                            _work, old, old[:-1] + " * 1000)",
+                        ))
+                    elif mutation in ("request-deadline", "connect-deadline"):
+                        old, new = (
+                            ("_Deadline(REQUEST_SECONDS, parent)", "parent")
+                            if mutation == "request-deadline" else
+                            ("_Deadline(CONNECT_SECONDS, request_deadline)",
+                             "request_deadline")
+                        )
+                        fetch_mutant = source_mutant(original_fetch, old, new)
+
+                        def mutated_fetch(url, cap, deadline, context):
+                            fetch_calls.append(url)
+                            started = time.monotonic()
+                            try:
+                                return fetch_mutant(url, cap, deadline, context)
+                            finally:
+                                fetch_durations.append(time.monotonic() - started)
+                        patch(module, "_fetch", mutated_fetch)
+                    elif mutation == "inactivity":
+                        patch(_Wire, "_receive", source_mutant(
+                            _Wire._receive, "self.deadline.left(INACTIVITY_SECONDS)",
+                            "self.deadline.left()",
+                        ))
+                    elif mutation == "resolver-deadline":
+                        patch(module, "_resolve", source_mutant(
+                            _resolve, "result.get(timeout=deadline.left())", "result.get()",
+                        ))
+                    elif mutation == "tls-deadline":
+                        patch(module, "_tls", source_mutant(
+                            original_tls, "wrapped.settimeout(deadline.left())",
+                            "wrapped.settimeout(None)",
+                        ))
+                    elif mutation in ("truncated-body", "truncated-chunk"):
+                        patch(_Wire, "take", source_mutant(
+                            _Wire.take, "eof and not self.buffer", "True",
+                        ))
+                    elif mutation in ("wrong-framing", "duplicate-length",
+                                      "missing-framing", "extra-body"):
+                        old = {
+                            "wrong-framing": "not (length is not None and transfer is not None)",
+                            "duplicate-length": "key not in headers",
+                            "missing-framing": 'transfer is not None and transfer.lower() == "chunked"',
+                            "extra-body": 'wire.take(1, eof=True) == b""',
+                        }[mutation]
+                        patch(module, "_response", source_mutant(_response, old, "True"))
+                    elif mutation == "content-encoding":
+                        patch(module, "_header_policy", source_mutant(
+                            _header_policy,
+                            'headers.get("content-encoding", "identity").lower() == "identity"',
+                            "True",
+                        ))
+                    elif mutation == "git-comment":
+                        original_require = _require
+
+                        def skip_comment(condition, status, phase, detail):
+                            if detail != "global header is not the sole leading pinned git comment":
+                                original_require(condition, status, phase, detail)
+                        patch(module, "_require", skip_comment)
+                    elif mutation == "reject-git-comment":
+                        policy_check = _archive_member_policy
+                        patch(module, "_archive_member_policy",
+                              lambda info, global_header=False: policy_check(info))
+                    elif mutation == "cleanup":
+                        patch(_QuarantineOwner, "remove", lambda owner: None)
+                    elif mutation == "cleanup-failure":
+                        patch(_QuarantineOwner, "remove", original_remove)
                     elif mutation == "backstop":
                         call = unprotected_gather
                     elif mutation == "wrapper":
@@ -1775,7 +2083,7 @@ def self_test(vectors_only=False):
                     elif mutation == "cancellation":
                         call = swallowed_cancellation
                     elif mutation == "archive":
-                        patch(module, "_unpack", lambda parent, body, deadline: [])
+                        patch(module, "_unpack", lambda parent, body, deadline, commit=None: [])
                     elif mutation == "containment":
                         patch(store._journal, "require_containment", lambda: None)
                     elif mutation == "limit":
@@ -1790,12 +2098,26 @@ def self_test(vectors_only=False):
                     else:
                         raise AssertionError("unregistered mutation")
 
+                # Observe the return contract, not the diagnostic wording:
+                # disabling the truncation guard must not hide behind a later
+                # chunk-terminator refusal.
+                original_take = _Wire.take
+
+                def tracked_take(wire, size, eof=False):
+                    result = original_take(wire, size, eof=eof)
+                    if len(result) != size and not (eof and result == b""):
+                        short_takes.append((size, len(result)))
+                    return result
+                patch(_Wire, "take", tracked_take)
                 environment_before = dict(os.environ)
                 started = time.monotonic()
                 with deny_effects(product, violations):
                     try:
-                        observation, notes = call(copy.deepcopy(request), copy.deepcopy(policy))
+                        with watchdog():
+                            observation, notes = call(copy.deepcopy(request), copy.deepcopy(policy))
                         status = observation["status"]
+                    except WatchdogExpired:
+                        status = "WATCHDOG"
                     except KeyboardInterrupt:
                         status = "CANCELLED"
                     except Exception:
@@ -1806,6 +2128,7 @@ def self_test(vectors_only=False):
             passed = (
                 status == expected
                 and not violations
+                and not short_takes
                 and snapshot(product) == before
                 and sys.path == path_before
                 and environment_restored
@@ -1821,6 +2144,19 @@ def self_test(vectors_only=False):
                     and bool(notes)
                     and all(row["status"] in (INVALID, CANNOT_EVALUATE) for row in notes)
                 )
+            if status in (INVALID, CANNOT_EVALUATE, "CANCELLED"):
+                try:
+                    residue = list((product / ".working" / "adopt").iterdir())
+                except FileNotFoundError:
+                    residue = []
+                if config.get("cleanup_failure"):
+                    passed = (passed and bool(residue)
+                              and "record" not in observation
+                              and any(row["phase"] == "cleanup" for row in notes))
+                else:
+                    passed = passed and not residue
+            if config.get("absent"):
+                passed = passed and config["absent"] not in (observation or {})
             if status == VALID:
                 passed = passed and (
                     type(observation) is dict
@@ -1849,9 +2185,10 @@ def self_test(vectors_only=False):
                     and b"cookie:" not in request.lower()
                     for request in server.requests
                 )
-            if config.get("timed"):
+            if "fetch_bound" in config:
                 passed = (passed and elapsed < 1.20 and bool(fetch_durations)
-                          and all(duration < 0.80 for duration in fetch_durations))
+                          and all(duration < config["fetch_bound"]
+                                  for duration in fetch_durations))
             if identifier.startswith("TG-05/"):
                 passed = passed and fetch_calls == [release_url, ANCHOR_URL]
             return passed, status, elapsed
@@ -1900,6 +2237,10 @@ def self_test(vectors_only=False):
                 context.load_cert_chain(str(cert), str(key))
                 contexts.append(context)
 
+            git_commit, git_archive = git_archive_fixture(base)
+            add("positive/git-archive", VALID, "reject-git-comment",
+                commit=git_commit, archive=git_archive)
+
             # Establish an actual positive TLS/quarantine fixture before negatives.
             positive = ("positive/local-tls-quarantine", VALID, "archive", {})
             passed, status, elapsed = run_case(base, contexts, positive, False)
@@ -1926,6 +2267,7 @@ def self_test(vectors_only=False):
                     "expected": case[1],
                     "observed": status,
                     "mutant_observed": mutant_status,
+                    "mutant_test_status": VALID if mutant_passed else INVALID,
                     "mutation_detected": not mutant_passed,
                     "test_status": VALID if passed and not mutant_passed else INVALID,
                     "elapsed_seconds": elapsed,
