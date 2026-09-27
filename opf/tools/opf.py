@@ -1929,6 +1929,9 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
                             "filter configuration is unreadable ({}), so a read-only status probe cannot run "
                             "without risking filter execution; refusing the destructive rewrite "
                             "(fail-closed)".format(exc))
+    # Disable configured and default global exclude files consistently with check-ignore.
+    # Keep working-tree .gitignore and .git/info/exclude; existing ignored content still refuses.
+    neutralizing = list(neutralizing) + [("core.excludesFile", os.devnull)]
     args = (["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
              "--ignored=matching", "--no-renames", "--"] + list(pathspecs))
     out = _opf_observe._run_git(git, root, args, config_overrides=neutralizing)
@@ -1962,9 +1965,13 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
     if flags.out and not flags.out.endswith(b"\x00"):
         raise _UpgradeError("malformed upgrade destination index flags (fail-closed)")
     for record in flags.out.split(b"\x00")[:-1]:
-        if len(record) < 3 or record[1:2] != b" " or record[:1] not in (b"H", b"S", b"h", b"s"):
+        if len(record) < 3 or record[1:2] != b" " or record[:1] not in (b"H", b"S", b"h", b"s", b"M", b"m"):
             raise _UpgradeError("malformed upgrade destination index flags (fail-closed)")
         path = _upgrade_status_path(record[2:], b"")
+        if record[:1] in (b"M", b"m"):
+            raise _UpgradeError(
+                "upgrade destination {!r} is unmerged; resolve the conflict before retrying "
+                "(fail-closed)".format(os.fsdecode(path)))
         if record[:1] != b"H":
             raise _UpgradeError(
                 "upgrade destination {!r} has skip-worktree or assume-unchanged set; "
@@ -1992,10 +1999,12 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
 def _upgrade_check_ignored(root, relpaths):
     """Conservatively refuse absent destinations ignored under the scrubbed configuration.
     Status cannot observe an absent entry. Keep config/filter neutralization and literal NUL-framed
-    transport. This probe omits global/system configuration and indexed ignore fallback (--no-index);
-    it is NOT a prediction of ordinary git add. The explicit, path-scoped add -f advice bypasses those
-    additional ignore rules. Any diagnostic from this probe refuses before mutation. Configuration
-    or filesystem changes after observation remain outside the single-writer contract.
+    transport. Reads working-tree .gitignore files and .git/info/exclude. Global/system configuration
+    is scrubbed; core.excludesFile is overridden with os.devnull, disabling configured exclude files
+    (including repository/worktree settings) AND Git's default HOME/XDG global ignore file. --no-index
+    omits indexed ignore fallback. This is NOT a prediction of ordinary git add: the explicit,
+    path-scoped add -f advice bypasses the omitted rules. Any diagnostic refuses before mutation.
+    Configuration or filesystem changes after observation remain outside the single-writer contract.
     """
     if not relpaths:
         return
@@ -2006,6 +2015,7 @@ def _upgrade_check_ignored(root, relpaths):
         neutralizing = _opf_observe._filter_neutralizing_config(git, root)
     except RuntimeError as exc:
         raise _UpgradeError("cannot check ignored planned destinations: {} (fail-closed)".format(exc)) from exc
+    neutralizing = list(neutralizing) + [("core.excludesFile", os.devnull)]
     # check-ignore rejects --literal-pathspecs. Its stdin entries are literal filenames;
     # "./" also prevents a leading ":" from being parsed as pathspec magic.
     paths = {b"./" + os.fsencode(p) for p in relpaths}
@@ -2021,8 +2031,10 @@ def _upgrade_check_ignored(root, relpaths):
     if (out.rc != 0 or matches[-1] != b"" or len(matches) < 2
             or any(p not in paths for p in matches[:-1])):
         raise _UpgradeError("git check-ignore returned a malformed or inconsistent payload (fail-closed)")
-    raise _UpgradeError("ignored planned destinations under {!r}: {}. Correct the ignore rules before "
-                        "re-running opf upgrade so the planned files can be staged; nothing was written.".format(
+    raise _UpgradeError("ignored planned destinations under {!r}: {}. These paths match working-tree "
+                        ".gitignore or .git/info/exclude rules; this conservative check refuses even "
+                        "though force-add could stage them. Adjust those rules before re-running "
+                        "opf upgrade; nothing was written.".format(
                             str(root), ", ".join(repr(os.fsdecode(p[2:])) for p in matches[:-1])))
 
 
@@ -2429,6 +2441,7 @@ def _upgrade_run(root):
                       "cleanly (rc={}); exit 2.".format(rc), file=sys.stderr)
                 print(_upgrade_recovery_text(recovery_store_root, recovery_product_root, created_relpaths,
                                              product_targets, write_scope["store"]), file=sys.stderr)
+                recovery = None  # Already printed, even if the finally's lease release fails.
                 return EXIT_MALFORMED
 
             result = _upgrade_doctor(root)
@@ -2438,6 +2451,7 @@ def _upgrade_run(root):
                           root), file=sys.stderr)
                 print(_upgrade_recovery_text(recovery_store_root, recovery_product_root, created_relpaths,
                                              product_targets, write_scope["store"]), file=sys.stderr)
+                recovery = None  # Already printed, even if the finally's lease release fails.
                 _doctor_report(result)
                 return EXIT_MALFORMED
 
@@ -2468,7 +2482,9 @@ def _upgrade_run(root):
             print("opf upgrade: review the staged changes, then stage and commit the planned destinations "
                   "(never `add -A`, which would sweep in unrelated work). The commands use -f for "
                   "these named destinations because the safety probes neutralize global/system config "
-                  "and do not read indexed ignore rules:")
+                  "and core.excludesFile (including default HOME/XDG global ignores). They read "
+                  "working-tree .gitignore files and .git/info/exclude; the absent-path probe does "
+                  "not read indexed ignore rules:")
             print("  git -C {} --literal-pathspecs add -f -- {}".format(
                 shlex.quote(str(recovery_store_root)),
                 " ".join(shlex.quote(p) for p in write_scope["store"])))

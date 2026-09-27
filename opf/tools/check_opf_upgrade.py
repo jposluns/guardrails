@@ -511,6 +511,21 @@ def _round4_tests(opf, check):
                 check("R4 index flag {!r}".format(tag),
                       refuses(lambda: opf._upgrade_probe_dirty("git", "/fixture", [target], None))
                       == (tag != b"H"))
+        for tag in (b"M", b"m"):
+            def unmerged(_git, _root, args, **kwargs):
+                raw = ((tag + b" " + os.fsencode(target) + b"\x00") * 3
+                       if "ls-files" in args else
+                       b"UU " + os.fsencode(target) + b"\x00" if "status" in args else b"\n")
+                return outcome(True, 0, raw, "")
+            with patch.object(obs, "_run_git", side_effect=unmerged):
+                try:
+                    opf._upgrade_probe_dirty("git", "/fixture", [target], None)
+                except opf._UpgradeError as exc:
+                    check("R5 unmerged {!r} names the conflict".format(tag),
+                          target in str(exc) and "is unmerged; resolve the conflict" in str(exc)
+                          and "malformed" not in str(exc))
+                else:
+                    check("R5 unmerged {!r} refuses".format(tag), False)
         for bad in (b"H", b"H path", b"\x00", b"? path\x00"):
             def bad_flags(_git, _root, args, **kwargs):
                 return outcome(True, 0, bad if "ls-files" in args else b"", "")
@@ -1128,9 +1143,25 @@ def _suite():
             check("U14b declared unmanaged ignored content upgrades to doctor-VALID",
                   urc == EXIT_OK and "doctor-VALID" in uout)
             check("U14b unmanaged bytes survive", cache.read_bytes() == b"unmanaged output\n")
+            import shlex
+
+            def scoped_staging(text):
+                commands = [shlex.split(line) for line in text.splitlines()
+                            if line.startswith("  git -C ") and " add " in line]
+                return bool(commands) and all(
+                    "--" in command and not any(
+                        p in (".working", ".working/cache") or p.endswith("/lease.toml")
+                        for p in command[command.index("--") + 1:])
+                    for command in commands)
+
             check("U14b staging uses individual destinations, excludes cache and lease",
-                  "--literal-pathspecs add -- .working\n" not in uout
-                  and ".working/cache" not in uout and "lease.toml" not in uout)
+                  scoped_staging(uout))
+            for force in ("", "-f "):
+                broad = "  git -C {} --literal-pathspecs add {}-- .working\n".format(
+                    shlex.quote(str(su)), force)
+                check("U14b FLIP broad add {}fails scoped staging assertion".format(force),
+                      not scoped_staging(uout + broad))
+            check("U14b missing staging advice fails scoped staging assertion", not scoped_staging(""))
 
             # A collapsed ignored ancestor must not hide a write destination, and a directory at a
             # destination is a collision, even when Git reports it with a trailing slash.
@@ -1251,7 +1282,7 @@ def _suite():
 
             # R4: execute the printed command under ignore configuration that the probes omit.
             import shlex
-            for ignored_by in ("global", "system", "indexed"):
+            for ignored_by in ("global", "system", "default", "xdg", "repository", "indexed"):
                 sf = base / ("r4-force-" + ignored_by)
                 sf.mkdir()
                 build_store(sf)
@@ -1263,12 +1294,24 @@ def _suite():
                     git_call(sf, ["commit", "-m", "indexed ignore fixture"])
                     git_call(sf, ["update-index", "--skip-worktree", "--", ".gitignore"])
                     (sf / ".gitignore").unlink()
+                elif ignored_by in ("default", "xdg"):
+                    ignore_home = base / ("r5-home-" + ignored_by)
+                    ignore_home.mkdir()
+                    real_env["HOME"] = str(ignore_home)
+                    config_home = ignore_home / ".config" if ignored_by == "default" else base / "r5-xdg"
+                    if ignored_by == "xdg":
+                        real_env["XDG_CONFIG_HOME"] = str(config_home)
+                    (config_home / "git").mkdir(parents=True)
+                    (config_home / "git/ignore").write_text(rule, encoding="utf-8")
                 else:
                     excludes = base / ("r4-" + ignored_by + "-excludes")
                     excludes.write_text(rule, encoding="utf-8")
                     config = base / ("r4-" + ignored_by + "-config")
                     config.write_text('[core]\nexcludesFile = "{}"\n'.format(excludes), encoding="utf-8")
-                    real_env["GIT_CONFIG_" + ignored_by.upper()] = str(config)
+                    if ignored_by == "repository":
+                        git_call(sf, ["config", "core.excludesFile", str(excludes)])
+                    else:
+                        real_env["GIT_CONFIG_" + ignored_by.upper()] = str(config)
                     if ignored_by == "system":
                         real_env.pop("GIT_CONFIG_NOSYSTEM", None)
                 frc, fout = _run_opf(["upgrade", "--root", str(sf)], real_env)
@@ -1786,6 +1829,30 @@ def _suite():
                   "reached doctor-VALID before lease release" in out25
                   and "Confirm no opf run is live" in out25
                   and "restore --staged" not in out25 and "rm -- " not in out25)
+
+            # R5: a nonzero render/doctor result plus a release failure prints recovery ONCE.
+            for failure in ("render", "doctor"):
+                sf = base / ("r5-recovery-once-" + failure)
+                sf.mkdir()
+                build_store(sf)
+                injection = (
+                    "def release(*args):\n"
+                    "    raise opf._UpgradeError('synthetic release failure')\n"
+                    "opf._upgrade_release_lease = release\n")
+                if failure == "render":
+                    injection += "opf._opf_views.render = lambda *a, **k: 2\n"
+                else:
+                    injection += (
+                        "from types import SimpleNamespace\n"
+                        "opf._upgrade_doctor = lambda *a: SimpleNamespace(status='INVALID')\n"
+                        "opf._doctor_report = lambda *a: None\n")
+                rrc, rout = flipped_upgrade(sf, injection)
+                check("R5 {} plus release failure emits recovery once".format(failure),
+                      rrc == EXIT_ERROR and "synthetic release failure" in rout
+                      and rout.count("Confirm no opf run is live (spec 5.7)") == 1
+                      and "restore --staged" in rout
+                      and (sf / ".working/toml/lease.toml").is_file()
+                      and '"event": "upgraded"' not in rout)
 
             # U25b) FIX1 release never-seize (class-width): the RELEASE path (not only the acquisition path)
             # is ownership-verified. Acquire a lease, capture the payload, then have a peer REPLACE the lease
