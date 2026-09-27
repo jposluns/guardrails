@@ -61,7 +61,7 @@ VECTOR ROSTER (U1-U28, P1):
   U17b post-manifest exception: planned restore/rm advice and F2 candidates, with suppression flips.
   U18 postcondition unit vectors: call opf._upgrade_postcondition directly with hand-mutated new models; each
       mutation refuses and the genuine planner output passes (the check that fails without the m1 fix). Also
-      the R6 porcelain-grammar refusal vectors: opf._upgrade_parse_porcelain refuses a lone NUL, a non-NUL-
+      the R6 porcelain-grammar refusal vectors: _opf_write_guard.parse_porcelain refuses a lone NUL, a non-NUL-
       terminated payload, and a mis-framed record (never a clean-empty result), and excludes a nested-store
       lease after the prefix strip; PLUS the R6 fail-open vectors (a MALFORMED status -- ZZ, a blank pair, a
       rename R, a copy C -- for the lease path refuses rather than being silently dropped by the exclusion,
@@ -72,7 +72,7 @@ VECTOR ROSTER (U1-U28, P1):
       per-char, for the lease AND a non-lease path, while a positive sweep of every emittable pair (all 17
       ordinary pairs including ' A' intent-to-add and 'D ', plus ??, !! and the 7 unmerged) still parses; fails
       under the old per-char check or a cartesian superset); and the
-      R1b leading-space prefix test (_upgrade_probe_dirty keeps a " leading/"-prefixed lease excluded; fails
+      R1b leading-space prefix test (_opf_write_guard.probe_dirty keeps a " leading/"-prefixed lease excluded; fails
       under the old .strip()).
   U19 R1 recovery-text root-binding: opf._upgrade_recovery_text called directly with DISTINCT store/product
       roots; planned-path restore + created-file removal name the store root, the product target the product
@@ -87,14 +87,14 @@ VECTOR ROSTER (U1-U28, P1):
   U23 R3 FIFO lease: a FIFO at lease.toml refuses PROMPTLY (bounded, no blocking hang) naming a present non-
       regular lease; the FIFO is untouched.
   U24 R4 never-seize on a mid-acquisition failure: with journal._write_all monkeypatched to fail after the
-      O_EXCL create, _upgrade_acquire_lease (called direct) LEAVES the lease as a reconcilable leftover rather
-      than an ownership-blind by-name unlink -- surfacing a reconcilable _UpgradeError -- and when the write
+      O_EXCL create, _opf_write_guard.acquire_lease (called direct) LEAVES the lease as a reconcilable leftover
+      rather than an ownership-blind by-name unlink -- surfacing a reconcilable WriteGuardError -- and when the write
       first REPLACES the lease with a peer holder's bytes, that replacement is NOT removed (the never-seize
       guarantee; the old by-name unlink deleted the replacement).
-  U25 R5 release-before-success: with _upgrade_release_lease monkeypatched to fail, a valid store exits 2 and
+  U25 R5 release-before-success: with _opf_write_guard.release_lease monkeypatched to fail, a valid store exits 2 and
       emits NO success line (success is never reported over a still-held / failed-to-release lease). U25b
-      (FIX1 release never-seize, class-width): _upgrade_acquire_lease returns the on-disk payload; after a
-      peer REPLACES the lease with its own well-formed bytes, _upgrade_release_lease refuses (never-seize) and
+      (FIX1 release never-seize, class-width): _opf_write_guard.acquire_lease returns the on-disk payload; after a
+      peer REPLACES the lease with its own well-formed bytes, _opf_write_guard.release_lease refuses (never-seize) and
       LEAVES the replacement, yet an ordinary release of this run's OWN lease still removes it (fails under the
       old ownership-blind unlink, which deleted the peer's lease).
   U26 R8 non-boolean module: the planner precondition refuses a non-boolean value on ANY module (governance,
@@ -472,10 +472,12 @@ def _round4_tests(opf, check):
     outcome = obs._GitOutcome
     target = ".working/CONTRIBUTIONS.md"
 
+    guard = opf._opf_write_guard
+
     def refuses(call):
         try:
             call()
-        except opf._UpgradeError:
+        except guard.WriteGuardError:
             return True
         return False
 
@@ -486,10 +488,10 @@ def _round4_tests(opf, check):
             for rc, payload in ((1, b""), (0, b"./.working/CONTRIBUTIONS.md\x00")):
                 with patch.object(obs, "_run_git", return_value=outcome(True, rc, payload, warning)):
                     check("R4 ignore diagnostic refuses: {} rc={}".format(source, rc),
-                          refuses(lambda: opf._upgrade_check_ignored("/fixture", [target])))
+                          refuses(lambda: guard.check_ignored("/fixture", [target], "upgrade")))
         with patch.object(obs, "_run_git", return_value=outcome(True, 1, b"", "")):
             check("R4 quiet non-match passes",
-                  not refuses(lambda: opf._upgrade_check_ignored("/fixture", [target])))
+                  not refuses(lambda: guard.check_ignored("/fixture", [target], "upgrade")))
 
         for where in ("matching", "expanded"):
             def status(_git, _root, args, **kwargs):
@@ -503,7 +505,7 @@ def _round4_tests(opf, check):
                 return outcome(True, 0, raw, err)
             with patch.object(obs, "_run_git", side_effect=status):
                 check("R4 {} status diagnostic refuses".format(where),
-                      refuses(lambda: opf._upgrade_probe_dirty("git", "/fixture", [target], None)))
+                      refuses(lambda: guard.probe_dirty("git", "/fixture", [target], None, "upgrade")))
 
         for tag in (b"H", b"S", b"h", b"s"):
             def index_flags(_git, _root, args, **kwargs):
@@ -511,7 +513,7 @@ def _round4_tests(opf, check):
                 return outcome(True, 0, raw, "")
             with patch.object(obs, "_run_git", side_effect=index_flags):
                 check("R4 index flag {!r}".format(tag),
-                      refuses(lambda: opf._upgrade_probe_dirty("git", "/fixture", [target], None))
+                      refuses(lambda: guard.probe_dirty("git", "/fixture", [target], None, "upgrade"))
                       == (tag != b"H"))
         for tag in (b"M", b"m"):
             def unmerged(_git, _root, args, **kwargs):
@@ -521,8 +523,8 @@ def _round4_tests(opf, check):
                 return outcome(True, 0, raw, "")
             with patch.object(obs, "_run_git", side_effect=unmerged):
                 try:
-                    opf._upgrade_probe_dirty("git", "/fixture", [target], None)
-                except opf._UpgradeError as exc:
+                    guard.probe_dirty("git", "/fixture", [target], None, "upgrade")
+                except guard.WriteGuardError as exc:
                     check("R5 unmerged {!r} names the conflict".format(tag),
                           target in str(exc) and "is unmerged; resolve the conflict" in str(exc)
                           and "malformed" not in str(exc))
@@ -533,7 +535,7 @@ def _round4_tests(opf, check):
                 return outcome(True, 0, bad if "ls-files" in args else b"", "")
             with patch.object(obs, "_run_git", side_effect=bad_flags):
                 check("R4 malformed index flags {!r} refuse".format(bad),
-                      refuses(lambda: opf._upgrade_probe_dirty("git", "/fixture", [target], None)))
+                      refuses(lambda: guard.probe_dirty("git", "/fixture", [target], None, "upgrade")))
 
     res = SimpleNamespace(store_root=Path("/fixture"), product_root=None, machine_rel=".working/toml")
     for views in (5, [{"a": 1}]):
@@ -545,16 +547,16 @@ def _round4_tests(opf, check):
     lease = ".working/toml/lease.toml"
     for pair in (b" M", b"M ", b" D"):
         try:
-            opf._upgrade_parse_porcelain(pair + b" " + os.fsencode(lease) + b"/child\x00",
-                                        b"", lease, [lease])
-        except opf._UpgradeError as exc:
+            guard.parse_porcelain(pair + b" " + os.fsencode(lease) + b"/child\x00",
+                                  b"", lease, [lease], "upgrade")
+        except guard.WriteGuardError as exc:
             check("R4 tracked lease descendant {!r}".format(pair), "TRACKED" in str(exc))
         else:
             check("R4 tracked lease descendant {!r}".format(pair), False)
     for pair in (b"??", b"!!"):
         check("R4 held lease descendant {!r}".format(pair),
-              opf._upgrade_parse_porcelain(pair + b" " + os.fsencode(lease) + b"/child\x00",
-                                          b"", lease, [lease]) == [])
+              guard.parse_porcelain(pair + b" " + os.fsencode(lease) + b"/child\x00",
+                                    b"", lease, [lease], "upgrade") == [])
 
 
 def _suite():
@@ -668,7 +670,8 @@ def _suite():
         def flipped_upgrade(store, flip):
             """Run a controlled regression in an isolated child; the normal fixture is unchanged on refusal."""
             script = (
-                "import os, sys\nsys.path.insert(0, {!r})\nimport opf\nopf._bootstrap()\n".format(
+                "import os, sys\nsys.path.insert(0, {!r})\nimport opf\nopf._bootstrap()\n"
+                "guard = opf._opf_write_guard\n".format(
                     str(Path(__file__).resolve().parent))
                 + flip + "\nsys.exit(opf._cmd_upgrade(['--root', sys.argv[1]]))\n")
             proc = subprocess.run(
@@ -678,12 +681,12 @@ def _suite():
             return proc.returncode, proc.stdout + proc.stderr
 
         no_ignored_filter = (
-            "original = opf._upgrade_parse_porcelain\n"
-            "def parse(raw, prefix, lease, specs):\n"
+            "original = guard.parse_porcelain\n"
+            "def parse(raw, prefix, lease, specs, verb):\n"
             "    extra = [os.fsdecode(r[3:]).removeprefix(os.fsdecode(prefix)).rstrip('/')\n"
             "             for r in raw.split(b'\\x00') if r.startswith(b'!! ')]\n"
-            "    return original(raw, prefix, lease, list(specs) + extra)\n"
-            "opf._upgrade_parse_porcelain = parse\n")
+            "    return original(raw, prefix, lease, list(specs) + extra, verb)\n"
+            "guard.parse_porcelain = parse\n")
         whole_store_scope = (
             "original = opf._upgrade_write_scope\n"
             "def scope(*args):\n"
@@ -975,9 +978,9 @@ def _suite():
                   and "confirmed NO opf run is live" in out12b
                   and "Commit your changes" not in out12b)
             flip12b, text12b = flipped_upgrade(s12b,
-                "original = opf._upgrade_parse_porcelain\n"
-                "opf._upgrade_parse_porcelain = lambda raw, prefix, lease, specs: "
-                "original(raw, prefix, None, specs)\n")
+                "original = guard.parse_porcelain\n"
+                "guard.parse_porcelain = lambda raw, prefix, lease, specs, verb: "
+                "original(raw, prefix, None, specs, verb)\n")
             check("U12b FLIP excluding no lease restores the incorrect dirty-store remedy",
                   flip12b == EXIT_ERROR and "Commit your changes" in text12b)
             check("U12b both refusals preserve lease and tree", _snapshot(s12b) == before12b)
@@ -1000,9 +1003,9 @@ def _suite():
                       rc == EXIT_ERROR and "The lease is never seized (spec 5.7)" in out
                       and "Commit your changes" not in out)
                 frc, fout = flipped_upgrade(sc,
-                    "original = opf._upgrade_parse_porcelain\n"
-                    "opf._upgrade_parse_porcelain = lambda raw, prefix, lease, specs: "
-                    "original(raw, prefix, None, specs)\n")
+                    "original = guard.parse_porcelain\n"
+                    "guard.parse_porcelain = lambda raw, prefix, lease, specs, verb: "
+                    "original(raw, prefix, None, specs, verb)\n")
                 check("U12c FLIP directory lease gets dirt advice ({})".format(ignored_lease),
                       frc == EXIT_ERROR and "Commit your changes" in fout)
                 check("U12c lease directory and bytes preserved ({})".format(ignored_lease),
@@ -1139,9 +1142,9 @@ def _suite():
                     check("U14b .working.bak fixture exercises Git's prefix-sibling record",
                           b"!! .working.bak/\x00" in raw)
                     check("U14b .working.bak component filter excludes the real Git record",
-                          opf._upgrade_parse_porcelain(raw, "", None, [".working"]) == [])
+                          opf._opf_write_guard.parse_porcelain(raw, "", None, [".working"], "upgrade") == [])
                     check("U14b .working.bak FLIP admitting the sibling surfaces it as dirt",
-                          opf._upgrade_parse_porcelain(raw, "", None, [".working", sibling])
+                          opf._opf_write_guard.parse_porcelain(raw, "", None, [".working", sibling], "upgrade")
                           == [sibling + "/"])
                 else:
                     flipped_rc, flipped_out = flipped_upgrade(sc, no_ignored_filter)
@@ -1222,7 +1225,7 @@ def _suite():
                 "def old_status_path(pbytes, prefix):\n"
                 "    prefix_b = os.fsencode(prefix).decode('utf-8', 'replace').encode('utf-8')\n"
                 "    return pbytes[len(prefix_b):] if prefix_b and pbytes.startswith(prefix_b) else pbytes\n"
-                "opf._upgrade_status_path = old_status_path\n")
+                "guard.status_path = old_status_path\n")
             for case, target_rel in (
                     ("manifest", ".working/toml/manifest.toml"),
                     ("counters", ".working/toml/counters.toml"),
@@ -1302,7 +1305,7 @@ def _suite():
                 check("U14d {} ignore rule refuses before mutation".format(label),
                       irc == EXIT_ERROR and "ignored planned destinations" in iout and ignored_rel in iout
                       and _snapshot(si) == before)
-                frc, fout = flipped_upgrade(si, "opf._upgrade_check_ignored = lambda *args: None\n")
+                frc, fout = flipped_upgrade(si, "guard.check_ignored = lambda *args: None\n")
                 check("U14d {} FLIP removing check reaches manifest mutation".format(label),
                       _snapshot(si) != before and "ignored planned destinations" not in fout)
                 if label != "product":
@@ -1527,8 +1530,8 @@ def _suite():
             # vectors.) A lone NUL that a naive split would read as clean must refuse.
             def _grammar_ok(raw, prefix="", lease=None):
                 try:
-                    return opf._upgrade_parse_porcelain(raw, prefix, lease, [".working"]), None
-                except opf._UpgradeError as exc:
+                    return opf._opf_write_guard.parse_porcelain(raw, prefix, lease, [".working"], "upgrade"), None
+                except opf._opf_write_guard.WriteGuardError as exc:
                     return None, str(exc)
             _clean, _ = _grammar_ok(b"")
             check("U18/R6 empty payload is clean (no dirt)", _clean == [])
@@ -1625,11 +1628,11 @@ def _suite():
             byte_prefix = b"nested-\xff/"
             byte_path = b".working/\xfe"
             check("U18 byte path scope preserves filesystem bytes",
-                  opf._upgrade_parse_porcelain(b"!! " + byte_prefix + byte_path + b"\x00",
-                      byte_prefix, None, [os.fsdecode(byte_path)]) == [os.fsdecode(byte_path)])
+                  opf._opf_write_guard.parse_porcelain(b"!! " + byte_prefix + byte_path + b"\x00",
+                      byte_prefix, None, [os.fsdecode(byte_path)], "upgrade") == [os.fsdecode(byte_path)])
             check("U18 byte prefix lease exclusion",
-                  opf._upgrade_parse_porcelain(b"!! " + byte_prefix + b".working/toml/lease.toml\x00",
-                      byte_prefix, ".working/toml/lease.toml", [".working"]) == [])
+                  opf._opf_write_guard.parse_porcelain(b"!! " + byte_prefix + b".working/toml/lease.toml\x00",
+                      byte_prefix, ".working/toml/lease.toml", [".working"], "upgrade") == [])
             for bad_path in (b"elsewhere/file", b"sub/", b"sub//file", b"sub/../file",
                              b"sub/./file", b"/sub/file"):
                 parsed, error = _grammar_ok(b"!! " + bad_path + b"\x00", prefix="sub/")
@@ -1638,7 +1641,7 @@ def _suite():
 
             # R1b: the show-prefix normalization must strip ONLY the trailing newline, never LEADING
             # whitespace, so a store dir whose name begins with a space keeps its prefix and its lease is
-            # correctly excluded. Drive _upgrade_probe_dirty with a stubbed git that reports a " leading/\n"
+            # correctly excluded. Drive _opf_write_guard.probe_dirty with a stubbed git that reports a " leading/\n"
             # prefix and an UNTRACKED ("??") lease record under it (the legitimate held-lease exclusion; a
             # tracked lease record is refused, not excluded). With the .strip() bug the leading space is lost,
             # the prefix no longer matches, and the lease surfaces as (spurious) dirt.
@@ -1656,8 +1659,8 @@ def _suite():
                         return _GO(True, 0, b"", b"")   # no filters configured: empty (NUL-free) --list output
                     return _GO(True, 0, b"??  leading/.working/toml/lease.toml\x00", b"")
                 _obs_r1b._run_git = _fake_run_git
-                _r1b_dirty = opf._upgrade_probe_dirty("git", base, [".working"],
-                                                      ".working/toml/lease.toml")
+                _r1b_dirty = opf._opf_write_guard.probe_dirty("git", base, [".working"],
+                                                              ".working/toml/lease.toml", "upgrade")
             finally:
                 _obs_r1b._run_git = _orig_run_git
             check("U18/R1b leading-space store prefix keeps the lease excluded (rstrip newline only)",
@@ -1781,7 +1784,7 @@ def _suite():
             # U24) R4 never-seize: a mid-acquisition failure (the payload write fails AFTER the O_EXCL create)
             # must NOT perform an ownership-blind by-name unlink. It LEAVES the lease as a reconcilable
             # leftover (leave-and-reconcile, spec 5.7). Monkeypatch journal._write_all to fail, call
-            # _upgrade_acquire_lease directly, and assert it raises a reconcilable _UpgradeError AND leaves the
+            # _opf_write_guard.acquire_lease directly, and assert it raises a reconcilable WriteGuardError AND leaves the
             # lease in place. (a) ordinary failure.
             mrel24 = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
             s24a = base / "u24a-leave-and-reconcile"
@@ -1794,14 +1797,14 @@ def _suite():
                 _opf_store._journal._write_all = lambda *a, **k: (_ for _ in ()).throw(
                     OSError("synthetic payload-write failure"))
                 try:
-                    opf._upgrade_acquire_lease(fd24a, mrel24)
+                    opf._opf_write_guard.acquire_lease(fd24a, mrel24, "upgrade")
                 except BaseException as _e24:
                     _r4_exc = _e24
             finally:
                 _opf_store._journal._write_all = _orig_wa
                 os.close(fd24a)
-            check("U24 ordinary mid-acquisition failure raises a reconcilable _UpgradeError",
-                  isinstance(_r4_exc, opf._UpgradeError) and "never seized" in str(_r4_exc))
+            check("U24 ordinary mid-acquisition failure raises a reconcilable WriteGuardError",
+                  isinstance(_r4_exc, opf._opf_write_guard.WriteGuardError) and "never seized" in str(_r4_exc))
             check("U24 ordinary failure LEAVES the lease in place (leftover, never a racy unlink)",
                   (mach24a / _opf_check.LEASE_NAME).is_file())
             # (b) never-seize under an external replacement: the write REPLACES the lease with a peer holder's
@@ -1824,7 +1827,7 @@ def _suite():
             try:
                 _opf_store._journal._write_all = _replace_then_fail
                 try:
-                    opf._upgrade_acquire_lease(fd24b, mrel24)
+                    opf._opf_write_guard.acquire_lease(fd24b, mrel24, "upgrade")
                 except BaseException:
                     _ns_raised = True
             finally:
@@ -1835,7 +1838,7 @@ def _suite():
                   (mach24b / _opf_check.LEASE_NAME).is_file()
                   and (mach24b / _opf_check.LEASE_NAME).read_bytes() == _peer24)
 
-            # U25) R5: the lease is released BEFORE success is reported. Monkeypatch _upgrade_release_lease to
+            # U25) R5: the lease is released BEFORE success is reported. Monkeypatch _opf_write_guard.release_lease to
             # fail; a valid store must exit 2 with NO success line emitted (without the fix, success prints
             # first and only then does the finally's release fail). Driven in-process (like U18).
             import contextlib as _ctx
@@ -1843,16 +1846,16 @@ def _suite():
             s25 = base / "u25-release-first"
             s25.mkdir()
             build_store(s25)
-            _orig_rel = opf._upgrade_release_lease
+            _orig_rel = opf._opf_write_guard.release_lease
             try:
-                opf._upgrade_release_lease = lambda *a, **k: (_ for _ in ()).throw(
+                opf._opf_write_guard.release_lease = lambda *a, **k: (_ for _ in ()).throw(
                     opf._UpgradeError("synthetic release failure"))
                 _buf25 = _io.StringIO()
                 with _ctx.redirect_stdout(_buf25), _ctx.redirect_stderr(_buf25):
                     rc25 = opf._cmd_upgrade(["--root", str(s25)])
                 out25 = _buf25.getvalue()
             finally:
-                opf._upgrade_release_lease = _orig_rel
+                opf._opf_write_guard.release_lease = _orig_rel
             check("U25 a release failure surfaces exit 2", rc25 == EXIT_ERROR)
             check("U25 no success is reported when release fails (released-before-success)",
                   "uncommitted, NOT staged or committed" not in out25 and '"event": "upgraded"' not in out25)
@@ -1870,7 +1873,7 @@ def _suite():
                 injection = (
                     "def release(*args):\n"
                     "    raise opf._UpgradeError('synthetic release failure')\n"
-                    "opf._upgrade_release_lease = release\n")
+                    "guard.release_lease = release\n")
                 if failure == "render":
                     injection += "opf._opf_views.render = lambda *a, **k: 2\n"
                 else:
@@ -1890,14 +1893,14 @@ def _suite():
             # is ownership-verified. Acquire a lease, capture the payload, then have a peer REPLACE the lease
             # with its own well-formed bytes; releasing MUST NOT unlink the peer's replacement (the old
             # ownership-blind os.unlink deleted it -- a spec-5.7 never-seize violation). It raises a
-            # reconcilable _UpgradeError and LEAVES the replacement in place, and a valid ordinary release of
+            # reconcilable WriteGuardError and LEAVES the replacement in place, and a valid ordinary release of
             # this run's OWN lease still removes it. Driven directly (like U24).
             s25b = base / "u25b-release-never-seize"
             s25b.mkdir()
             mach25b = build_store(s25b)
             _lp25 = mach25b / _opf_check.LEASE_NAME
             fd25b = _opf_store._open_dir_nofollow(str(s25b.resolve()))
-            _pay25 = opf._upgrade_acquire_lease(fd25b, mrel24)
+            _pay25 = opf._opf_write_guard.acquire_lease(fd25b, mrel24, "upgrade")
             check("U25b acquire returns the exact on-disk lease payload (ownership token)",
                   _pay25 == _lp25.read_bytes())
             _peer25 = (b'acquired_at = "2026-03-03T00:00:00Z"\nholder = "peer-runner"\n'
@@ -1906,8 +1909,8 @@ def _suite():
             _lp25.write_bytes(_peer25)              # peer replaces our lease with its own well-formed lease
             _seize_raised = False
             try:
-                opf._upgrade_release_lease(fd25b, mrel24, _pay25)
-            except opf._UpgradeError as _e25:
+                opf._opf_write_guard.release_lease(fd25b, mrel24, _pay25, "upgrade")
+            except opf._opf_write_guard.WriteGuardError as _e25:
                 _seize_raised = ("never seized" in str(_e25) or "NEVER seized" in str(_e25)) \
                     and "peer-runner" in str(_e25)
             check("U25b release of a REPLACED lease raises never-seize (no false success)", _seize_raised)
@@ -1919,7 +1922,7 @@ def _suite():
             if _lp25.exists():
                 _lp25.unlink()
             _lp25.write_bytes(_pay25)               # restore this run's own lease
-            opf._upgrade_release_lease(fd25b, mrel24, _pay25)
+            opf._opf_write_guard.release_lease(fd25b, mrel24, _pay25, "upgrade")
             os.close(fd25b)
             check("U25b ordinary release removes this run's OWN lease", not _lp25.exists())
 
@@ -2004,7 +2007,7 @@ def _suite():
             # U28) FIX1 compound-failure surfaces BOTH: a mid-run failure (the view render RAISES after the
             # manifest+counters mutation) is already propagating with its own "uncommitted change is left for
             # review" recovery advice WHEN the finally's lease release ALSO fails (a peer replaced the lease
-            # -> the release's never-seize _UpgradeError). The release error must NOT displace the propagating
+            # -> the release's never-seize WriteGuardError). The release error must NOT displace the propagating
             # render failure: _cmd_upgrade surfaces BOTH on stderr (the render recovery advice AND the
             # lease-replaced note), exits 2, and LEAVES the peer lease (never seized). Driven in-process (U25).
             import contextlib as _ctx28
@@ -2058,12 +2061,12 @@ def _suite():
             mach29 = build_store(s29)
             _lp29 = mach29 / _opf_check.LEASE_NAME
             fd29 = _opf_store._open_dir_nofollow(str(s29.resolve()))
-            _pay29 = opf._upgrade_acquire_lease(fd29, mrel24)
+            _pay29 = opf._opf_write_guard.acquire_lease(fd29, mrel24, "upgrade")
             _absent_msg = None
             _lp29.unlink()                          # ABSENT: removed, not replaced
             try:
-                opf._upgrade_release_lease(fd29, mrel24, _pay29)
-            except opf._UpgradeError as _e29a:
+                opf._opf_write_guard.release_lease(fd29, mrel24, _pay29, "upgrade")
+            except opf._opf_write_guard.WriteGuardError as _e29a:
                 _absent_msg = str(_e29a)
             check("U29/FIX3 absent lease release refuses (fail-closed, no false success)",
                   _absent_msg is not None)
@@ -2073,8 +2076,8 @@ def _suite():
             _lp29.write_bytes(_peer24)              # REPLACED: present-but-different payload
             _replaced_msg = None
             try:
-                opf._upgrade_release_lease(fd29, mrel24, _pay29)
-            except opf._UpgradeError as _e29b:
+                opf._opf_write_guard.release_lease(fd29, mrel24, _pay29, "upgrade")
+            except opf._opf_write_guard.WriteGuardError as _e29b:
                 _replaced_msg = str(_e29b)
             check("U29/FIX3 replaced lease release refuses (fail-closed)", _replaced_msg is not None)
             check("U29/FIX3 replaced case names REPLACEMENT and the holder, not absence",
@@ -2082,10 +2085,10 @@ def _suite():
                   and "peer-runner" in _replaced_msg and "absent at release" not in _replaced_msg.lower())
             os.close(fd29)
 
-            # FIX2) the TOCTOU disclosure on _upgrade_unlink_owned_lease now also discloses the false-success
+            # FIX2) the TOCTOU disclosure on _opf_write_guard.unlink_owned_lease now also discloses the false-success
             # (exit-0 "released") over a swapped peer lease, not only the errant unlink, and names the
             # release-only-when-no-run-is-live reachability condition. Assert the extended clause is present.
-            _fix2_doc = (opf._upgrade_unlink_owned_lease.__doc__ or "").lower()
+            _fix2_doc = (opf._opf_write_guard.unlink_owned_lease.__doc__ or "").lower()
             check("FIX2 TOCTOU disclosure covers the false-success residual",
                   "reports exit-0 success" in _fix2_doc and 'false "released"' in _fix2_doc
                   and "release-only-when-no-run-is-live" in _fix2_doc)
@@ -2225,7 +2228,8 @@ def _suite():
             _mach_rel_flt = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
             _lease_flt = "{}/{}".format(_mach_rel_flt, _opf_check.LEASE_NAME)
             _FUTURE = (4102444800, 4102444800)   # 2100-01-01: a fixed future mtime, host-clock-independent
-            _probe = opf._upgrade_probe_dirty
+            def _probe(git, root, specs, lease):
+                return opf._opf_write_guard.probe_dirty(git, root, specs, lease, "upgrade")
             _status_args = ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
                             "--no-renames", "--", _opf_store.WORKING_DIRNAME]
 
@@ -2306,7 +2310,7 @@ def _suite():
             # status FAIL ("clean filter failed") and mask the verdict, so the fix also emits
             # `filter.<name>.required=false`. FIX: the probe reads CLEAN (no exec, no error). FLIP: a
             # neutralizer that empties clean/process but OMITS required=false makes the probe fail-closed
-            # (_UpgradeError), proving the required=false component is load-bearing (teeth).
+            # (WriteGuardError), proving the required=false component is load-bearing (teeth).
             sD = _flt_store("u28d-required", "pwn", "clean", "pwn", required=True)
             _reset(sD)
             dD = _probe(_git_flt, str(sD), [_opf_store.WORKING_DIRNAME], _lease_flt)
@@ -2319,7 +2323,7 @@ def _suite():
                 _obs_flt._filter_neutralizing_config = (
                     lambda *a, **k: [("filter.pwn.clean", ""), ("filter.pwn.process", "")])
                 _probe(_git_flt, str(sD), [_opf_store.WORKING_DIRNAME], _lease_flt)
-            except opf._UpgradeError:
+            except opf._opf_write_guard.WriteGuardError:
                 _raised_d = True
             finally:
                 _obs_flt._filter_neutralizing_config = _orig_neut
@@ -2392,7 +2396,7 @@ def _suite():
                   dG == [])
 
             # (h) FAIL-CLOSED enumeration: a corrupt .git/config makes `config --list` fail; the helper
-            # RAISES and the probe turns that into a fail-closed _UpgradeError, never a silent clean pass.
+            # RAISES and the probe turns that into a fail-closed WriteGuardError, never a silent clean pass.
             sH = _flt_store("u28h-corrupt", "pwn", "clean", "pwn")
             (sH / ".git" / "config").write_text("[this is not valid\n = = =\n", encoding="utf-8")
             _raised_h = False
@@ -2404,9 +2408,9 @@ def _suite():
             _probe_raised_h = False
             try:
                 _probe(_git_flt, str(sH), [_opf_store.WORKING_DIRNAME], _lease_flt)
-            except opf._UpgradeError:
+            except opf._opf_write_guard.WriteGuardError:
                 _probe_raised_h = True
-            check("U28h probe refuses fail-closed (_UpgradeError) when the enumeration cannot run",
+            check("U28h probe refuses fail-closed (WriteGuardError) when the enumeration cannot run",
                   _probe_raised_h)
 
             # (i) helper config-pair unit vector: only clean/process keys are neutralized (a smudge-only driver
@@ -2424,14 +2428,14 @@ def _suite():
             check("U28i helper does not neutralize a smudge-only driver (not exec-able on status)",
                   not any(k.startswith("filter.lfs.") for k, _v in _cfg))
 
-            # (j) BOTH _upgrade_check_clean call sites are covered: the fix lives inside _upgrade_probe_dirty,
-            # which _upgrade_check_clean calls for the store root AND, when the product render target has a
+            # (j) BOTH check_clean call sites are covered: the fix lives inside _opf_write_guard.probe_dirty,
+            # which check_clean calls for the store root AND, when the product render target has a
             # different root, for the product root. Prove the neutralization holds when the probe is bound to
             # a SEPARATE product-root repo (the second call site's binding) with its own planted filter.
             sJ = _flt_store("u28j-product-root", "ppwn", "clean", "ppwn")
             _reset(sJ)
             _probe(_git_flt, str(sJ), [_opf_store.WORKING_DIRNAME], None)
-            check("U28j the fix holds for a product-root binding (second _upgrade_check_clean call site)",
+            check("U28j the fix holds for a product-root binding (second check_clean call site)",
                   not (sJ / "SENTINEL").exists())
 
             # (k) SECURITY (F-OPF-STATUSFILTER-EQ-BYPASS): a driver whose SUBSECTION NAME contains `=`

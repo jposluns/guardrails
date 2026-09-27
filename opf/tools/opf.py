@@ -47,6 +47,9 @@ message rather than reporting NOT APPLICABLE (divergence D7).
 `CHANGELOG.md` when none exists, without git writes or rendering.
 `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
 prints a changelog draft or freeze digest without writing files.
+`record` HAS landed (spec 8.8): `opf record create` and `opf record worklog-append` author one record or
+worklog entry through one journaled publication, then render and require doctor VALID, leaving the change
+uncommitted; `opf record transition` and `opf record done-with-receipt` fail closed as not yet implemented.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -88,7 +91,7 @@ def _bootstrap():
     that could not be brought in."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_importers, _opf_observe, _opf_absorb
-    global _opf_ingest
+    global _opf_ingest, _opf_write_guard, _opf_record
     try:
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
         import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
@@ -103,6 +106,8 @@ def _bootstrap():
         import _opf_ingest      # MIG-PR3: root-ingest detect + the disposition planner (plan_ingest)
         import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
+        import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
+        import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
         return EXIT_MALFORMED
@@ -1670,7 +1675,7 @@ def _cmd_upgrade(rest):
             print(text, end="")
             return EXIT_OK
         return _upgrade_run(root)
-    except _UpgradeError as exc:
+    except (_UpgradeError, _opf_write_guard.WriteGuardError) as exc:
         print("opf upgrade: refused: {}; exit 2".format(exc), file=sys.stderr)
         return EXIT_MALFORMED
     except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false success
@@ -1695,6 +1700,8 @@ def _upgrade_doctor(root):
 _UPGRADE_NO_WHOLE_TREE = ("Never run a whole-tree restore (git restore . / git reset --hard): it would "
                           "destroy unrelated uncommitted work. Scope every recovery to the affected "
                           "store and product paths.")
+# The planned scope the shared cleanliness gate names in its dirty-tree refusal (_opf_write_guard.check_clean).
+_UPGRADE_CLEAN_SCOPE = "schema and render destinations and index collision candidates"
 
 
 def _upgrade_partial_recovery_text(res, manifest_model):
@@ -1760,558 +1767,18 @@ def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_r
 def _upgrade_write_scope(machine_rel, manifest_model, counters_changed, index_types):
     """Plan the destinations of the schema delta and the subsequent declared-view render.
     Index candidates are included for collision checks even when create-only will leave them alone.
-    Use the POST-delta manifest: it includes newly introduced views. Unmanaged content is not selected;
-    a declaration colliding with a managed destination refuses before mutation, rather than licensing
-    an overwrite. The lease is checked separately and is never a restore/staging target."""
-    store = {"{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)}
+    Use the POST-delta manifest: it includes newly introduced views. The shared planner
+    (_opf_write_guard.plan_write_scope) adds every declared render destination and refuses a declaration
+    colliding with a managed destination before mutation, rather than licensing an overwrite. The lease
+    is checked separately and is never a restore/staging target."""
+    store = ["{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)]
     if counters_changed:
-        store.add("{}/{}".format(machine_rel, _opf_check.COUNTERS_NAME))
+        store.append("{}/{}".format(machine_rel, _opf_check.COUNTERS_NAME))
     indexes = tuple("{}/{}{}".format(machine_rel, t, _opf_check.INDEX_SUFFIX) for t in index_types)
-    store.update(indexes)
-    product = set()
-    for name in (manifest_model.get("views") or {}):
-        try:
-            _opf_views._resolve_view(name)
-        except _opf_views.ViewsError as exc:
-            raise _UpgradeError("cannot plan upgrade render destinations: {}".format(exc)) from exc
-        scope, relpath = _opf_views._spec_destination(name)
-        (product if scope == "product" else store).add(relpath)
-    findings = []
-    _opf_store._validate_unmanaged(manifest_model.get("unmanaged"), findings)
-    classification = _opf_check.classify_containment(manifest_model, machine_rel)
-    findings += classification.malformed + classification.colliding
-    if findings:
-        raise _UpgradeError("cannot plan upgrade writes: {}".format("; ".join(findings)))
-    return {"store": tuple(sorted(store)), "product": tuple(sorted(product)), "indexes": indexes}
-
-
-# The EXACT set of valid `git status --porcelain=v1 -z --untracked-files=all --ignored=matching --no-renames` XY status PAIRS,
-# enumerated precisely from the git-status(1) "Short Format" table for the installed git (git 2.53.0 in this
-# env; the table is stable across modern git) and EMPIRICALLY cross-checked by driving real index/worktree
-# states and observing the emitted XY. Validating the whole PAIR (not each char independently) closes the
-# fail-open where an IMPOSSIBLE pair whose two chars each sit in a per-char set passes a char check and, for
-# the lease path, matches the exclusion and is SILENTLY DROPPED -- the M3 cleanliness guard then reads dirt
-# as clean. This is the EXACT man-page enumeration, NOT the {space,M,T,A,D} cartesian, which is a strict
-# SUPERSET that would admit impossible ordinary pairs: git emits X=D ONLY with a space Y, and Y=A ONLY with a
-# space X, so DM DT DA (and MA TA) are unemittable and MUST be refused, not silently accepted as dirt.
-# Composition:
-#   - "??" untracked and "!!" ignored (--untracked-files=all --ignored=matching are passed).
-#   - ORDINARY (non-unmerged) changed entries, per the first table section with rename R and copy C EXCLUDED
-#     (--no-renames guarantees git emits neither) and U reserved to the unmerged tier. For each index letter X
-#     the EXACT set of worktree letters Y git can pair it with, straight off the man-page rows:
-#         X=' ' (index clean):        Y in {A, M, T, D}   (' A' intent-to-add is VALID and accepted)
-#         X in {M, T, A}:             Y in {' ', M, T, D}  (staged change, worktree clean/modified/typechg/del)
-#         X='D' (deleted from index): Y in {' '}           (a deleted-in-index path pairs ONLY with space)
-#   - the seven UNMERGED pairs, verbatim from git-status(1): DD AU UD UA DU AA UU.
-# In-scope ignored/untracked destinations are dirt; the exact lease is handled by O_EXCL instead.
-# The per-X worktree sets are enumerated here, not the whole valid
-# set hardcoded flat, so each line stays auditable against the man-page table. Bytes throughout (2-byte keys).
-_PORCELAIN_ORDINARY_YSET = {
-    0x20:     b"AMTD",   # X=' ': worktree added(intent-to-add)/modified/type-changed/deleted
-    ord("M"): b" MTD",   # X='M' (updated in index): worktree unmodified/modified/type-changed/deleted
-    ord("T"): b" MTD",   # X='T' (type changed in index): worktree unmodified/modified/type-changed/deleted
-    ord("A"): b" MTD",   # X='A' (added to index): worktree unmodified/modified/type-changed/deleted
-    ord("D"): b" ",      # X='D' (deleted from index): worktree unmodified only
-}
-_PORCELAIN_UNMERGED_PAIRS = (b"DD", b"AU", b"UD", b"UA", b"DU", b"AA", b"UU")
-_PORCELAIN_VALID_PAIRS = frozenset(
-    [b"??", b"!!"]
-    + [bytes((x, y)) for x, ys in _PORCELAIN_ORDINARY_YSET.items() for y in ys]
-    + list(_PORCELAIN_UNMERGED_PAIRS))
-
-
-def _upgrade_status_path(pbytes, prefix):
-    """Normalize a repository-relative status path without losing filesystem bytes.
-
-    A path that cannot be normalized is refusing dirt, never an out-of-scope ignored record.
-    The same normalization serves scope filtering and collapsed-ancestor expansion.
-    """
-    prefix_b = os.fsencode(prefix)
-    if prefix_b:
-        if not prefix_b.endswith(b"/") or not pbytes.startswith(prefix_b):
-            raise _UpgradeError("git status returned a path outside the reported repository prefix; "
-                                "the store cleanliness cannot be verified (fail-closed)")
-        pbytes = pbytes[len(prefix_b):]
-    # Git emits normalized relative paths; only directory records may have a final slash.
-    if any(part in (b"", b".", b"..") for part in pbytes.removesuffix(b"/").split(b"/")):
-        raise _UpgradeError("git status returned a path that cannot be normalized; "
-                            "the store cleanliness cannot be verified (fail-closed)")
-    return pbytes
-
-
-def _upgrade_parse_porcelain(raw, prefix, lease_excl, pathspecs):
-    """Parse a `git status --porcelain=v1 -z --untracked-files=all --ignored=matching --no-renames` payload into the list of
-    dirty paths, each normalized `root`-relative (the `prefix`, the store's repo-root-relative path with a
-    trailing '/', is stripped from every repository-root-relative porcelain path) and EXCLUDING `lease_excl`
-    (only its untracked/ignored record). Ignored paths must be within a component-bounded pathspec;
-    malformed records and other statuses are never filtered out. Factored PURE so the refusal is unit-
-    testable. The -z grammar is VALIDATED (guard-input-soundness): a non-empty payload is a run of
-    NUL-TERMINATED records, each `XY<space>PATH` (two status chars, a space, then >=1 path byte); --no-renames
-    means there is no second NUL-separated origin-path field. A payload that is not NUL-terminated, that
-    carries a record shorter than `XY PATH` or lacking the status/space framing, or whose XY status is
-    outside the porcelain v1 vocabulary (a bogus pair, a blank pair, or a rename/copy the --no-renames probe
-    cannot emit), is MALFORMED and refuses fail-closed -- never a clean empty result on an unparseable
-    payload (e.g. a lone NUL, which a naive split would read as clean), and never a silent lease-exclusion
-    drop of a malformed-status record (check-fails-closed-on-unreadable)."""
-    if not raw:
-        return []
-    parts = raw.split(b"\x00")
-    if parts[-1] != b"":
-        raise _UpgradeError("git status returned a porcelain payload that is not NUL-terminated; the store "
-                            "cleanliness cannot be verified (fail-closed)")
-    lease_b = os.fsencode(lease_excl) if lease_excl is not None else None
-    specs_b = [os.fsencode(p) for p in pathspecs]
-    dirty = []
-    for rec in parts[:-1]:
-        # porcelain v1 -z: two status chars, a space, then the path bytes (verbatim under -z, no quoting).
-        if len(rec) < 4 or rec[2:3] != b" ":
-            raise _UpgradeError("git status returned a malformed porcelain record ({!r}); the store "
-                                "cleanliness cannot be verified (fail-closed)".format(rec[:16]))
-        # Validate the whole XY status PAIR against the enumerated valid-pair set BEFORE the lease exclusion
-        # below (guard-input-soundness): a per-CHAR check accepts an IMPOSSIBLE pair (UT, ZZ, a blank pair, a
-        # rename R, a copy C) whose chars each sit in a per-char set, and for the lease path that bogus record
-        # would match the exclusion and be SILENTLY DROPPED -- a fail-open in the M3 cleanliness guard. The
-        # pair is validated whole against _PORCELAIN_VALID_PAIRS (?? and !! plus the EXACT man-page ordinary
-        # enumeration, plus the seven unmerged pairs; rename, copy, an impossible ordinary pair such as DM
-        # or MA, and any U in a non-unmerged position all excluded).
-        # Anything outside that set is MALFORMED -> fail-closed, never a drop.
-        if rec[:2] not in _PORCELAIN_VALID_PAIRS:
-            raise _UpgradeError("git status returned a porcelain record with an out-of-vocabulary "
-                                "status pair ({!r}); the store cleanliness cannot be verified "
-                                "(fail-closed)".format(rec[:16]))
-        pbytes = _upgrade_status_path(rec[3:], prefix)
-        if (lease_b is not None and rec[:2] in (b"??", b"!!")
-                and (pbytes == lease_b or pbytes.startswith(lease_b + b"/"))):
-            # A directory at lease.toml is also present-is-held. Leave it to step 4's never-seize refusal.
-            continue
-        if lease_b is not None and (pbytes == lease_b or pbytes.startswith(lease_b + b"/")):
-            # An untracked or ignored lease is the legitimate held-lease case
-            # that step 4 handles as its never-seize refusal, so it is EXCLUDED here. Any OTHER (tracked)
-            # status on the lease path -- " D", "D ", " M", "MM", ... -- means the lease is COMMITTED or
-            # otherwise version-controlled, which VIOLATES spec 5.7 (a lease is present only while held): the
-            # store is anomalous. That is REFUSED fail-closed and NAMED DISTINCTLY here, never silently
-            # excluded. A silent drop of a " D" (a committed lease deleted in the worktree) would let step 4's
-            # O_EXCL acquire succeed on the now-absent file and sweep the tracked lease's DELETION into the
-            # upgrade's uncommitted change set (outside the spec-9.2 delta). Recovery and staging advice
-            # therefore also exclude the lease; no restore may resurrect one from HEAD.
-            raise _UpgradeError(
-                "the single-writer lease {!r} is TRACKED in git (porcelain status {!r}, neither "
-                "untracked '??' nor ignored '!!'); a committed or otherwise version-controlled lease violates spec 5.7 (a lease is "
-                "present only while held) and leaves the store in an anomalous state. Reconcile the store "
-                "(remove the lease from version control) before re-running opf upgrade (fail-closed)".format(
-                    lease_excl, rec[:2].decode("ascii", "replace")))
-        # --ignored=matching can report prefix siblings even with literal pathspecs. Drop ONLY
-        # well-formed ignored records outside the component-bounded scope; other statuses stay fail-closed.
-        if rec[:2] == b"!!" and not any(
-                pbytes == p or pbytes == p + b"/" or pbytes.startswith(p + b"/") for p in specs_b):
-            continue
-        dirty.append(os.fsdecode(pbytes))
-    return dirty
-
-
-def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
-    """Run a hardened `git status --porcelain=v1 -z --untracked-files=all --ignored=matching --no-renames` over `pathspecs`
-    beneath `root`, returning the list of dirty paths, each normalized to `root`-relative (excluding
-    `lease_excl`, a byte-literal store-relative path, when given). The porcelain paths are REPOSITORY-root-
-    relative, so the store's path within the repository (git rev-parse --show-prefix) is stripped, which is
-    what lets `lease_excl` be excluded even when the store root lies BELOW the git repository root (a NESTED
-    store, where the un-normalized compare missed and drew the step-3 dirty-store refusal in place of step
-    4's held-lease message). Reuses _opf_observe's scrubbed-env, --no-replace-objects, -C-bound, timeout-
-    bounded boundary (G6). Fail-closed: a non-completed probe, a not-a-repository, a nonzero exit, an
-    undeterminable store prefix, or a malformed payload refuses; never a clean pass on an unreadable probe
-    (check-fails-closed-on-unreadable, SECA-verified-restore-path).
-
-    This is the ONE caller that COMPARES WORKTREE CONTENT against the index (the operation that makes git run
-    a repo/worktree-configured clean/process filter), so it passes _filter_neutralizing_config to _run_git as
-    config_overrides: git EXECUTES such a filter's external command during this read-only observation, an
-    exec-on-observe vector of the executable-config-trust-gate class (SECI-config-is-executable-trust-gate,
-    OPF-STATUS-FILTER-SUPPRESS) that OPF-FSMON-SUPPRESS closed for core.fsmonitor and GIT_NO_LAZY_FETCH closed
-    for the lazy-fetch->core.sshCommand vector. The overrides are injected as SEPARATE GIT_CONFIG_KEY/VALUE
-    env strings (never `-c key=value` argv, whose first-`=` split a subsection name containing `=` would
-    exploit to leave the real driver executable, F-OPF-STATUSFILTER-EQ-BYPASS). Both _upgrade_check_clean call
-    sites (store and product_root) inherit the neutralization through this single narrow call. Any FUTURE
-    worktree-content observation (a non-`--cached` diff, diff-files, ls-files -m, update-index --refresh, a
-    status elsewhere) must pass _filter_neutralizing_config the same way; the other observe verbs read no
-    worktree content and do not.
-
-    RESIDUAL (disclose-guard-residuals, F-OPF-STATUSFILTER-LFS-FALSEPOS): neutralizing an EXTERNAL NORMALIZING
-    clean/process filter (the git-lfs shape, index=cleaned/pointer blob, worktree=smudged body, required=true)
-    stops git reproducing the cleaned blob, so in the racy-clean mtime window (normal post-add/checkout/clone
-    state) status re-hashes the raw worktree bytes, which differ from the index blob, and a genuinely-CLEAN
-    store reads DIRTY. This is inherent to driver neutralization and is FAIL-CLOSED (it over-refuses the
-    upgrade; never a false-clean, never a filter exec). _upgrade_check_clean surfaces it with operator-clear
-    guidance to settle the worktree first."""
-    try:
-        neutralizing = _opf_observe._filter_neutralizing_config(git, root)
-    except RuntimeError as exc:
-        # The enumeration that proves which clean/process filters git could exec on the status is a guard; an
-        # unreadable enumeration is a cannot-evaluate, so the probe refuses rather than run a status that might
-        # execute a repo-planted filter (guard-input-soundness, check-fails-closed-on-unreadable).
-        raise _UpgradeError("could not verify the store is clean before the upgrade: its git clean/process "
-                            "filter configuration is unreadable ({}), so a read-only status probe cannot run "
-                            "without risking filter execution; refusing the destructive rewrite "
-                            "(fail-closed)".format(exc))
-    # Disable configured and default global exclude files consistently with check-ignore.
-    # Keep working-tree .gitignore and .git/info/exclude; existing ignored content still refuses.
-    neutralizing = list(neutralizing) + [("core.excludesFile", os.devnull)]
-    args = (["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
-             "--ignored=matching", "--no-renames", "--"] + list(pathspecs))
-    out = _opf_observe._run_git(git, root, args, config_overrides=neutralizing)
-    if not out.completed:
-        raise _UpgradeError("could not verify the store is clean before the upgrade ({}); refusing the "
-                            "destructive rewrite (fail-closed)".format(out.err.strip()))
-    if out.rc != 0 or out.err:
-        if _opf_observe._is_no_repo(out):
-            raise _UpgradeError("the store at {!r} is not a git repository, so HEAD is not a verified "
-                                "restore path for the in-place rewrite (spec 5.1); refusing "
-                                "(fail-closed)".format(str(root)))
-        raise _UpgradeError("git could not verify the store is clean (rc {}); refusing the destructive "
-                            "rewrite (fail-closed)".format(out.rc))
-    pfx = _opf_observe._run_git(git, root, ["rev-parse", "--show-prefix"])
-    if not pfx.completed or pfx.rc != 0 or pfx.err:
-        raise _UpgradeError("could not determine the store's path within its git repository; without it a "
-                            "nested store's clean probe cannot be trusted, so the rewrite is refused "
-                            "(fail-closed)")
-    # Strip ONLY the trailing newline git appends, NEVER leading whitespace: a store dir whose name begins
-    # with a space (" leading/") would lose that space under .strip(), breaking the prefix match and the
-    # lease exclusion. "" at the repo toplevel, else "<dir>/" (trailing /).
-    # Keep git path bytes intact through prefix stripping, scope and ancestor matching.
-    prefix = pfx.out.removesuffix(b"\n")
-    # status omits owner edits hidden by these index flags. Refuse even if the flagged
-    # entry happens to be clean: this observation cannot establish its worktree state.
-    flags = _opf_observe._run_git(
-        git, root, ["--literal-pathspecs", "ls-files", "--cached", "-v", "-z", "--"] + list(pathspecs),
-        config_overrides=neutralizing)
-    if not flags.completed or flags.rc != 0 or flags.err:
-        raise _UpgradeError("cannot inspect upgrade destination index flags (fail-closed)")
-    if flags.out and not flags.out.endswith(b"\x00"):
-        raise _UpgradeError("malformed upgrade destination index flags (fail-closed)")
-    for record in flags.out.split(b"\x00")[:-1]:
-        if len(record) < 3 or record[1:2] != b" " or record[:1] not in (b"H", b"S", b"h", b"s", b"M", b"m"):
-            raise _UpgradeError("malformed upgrade destination index flags (fail-closed)")
-        path = _upgrade_status_path(record[2:], b"")
-        if record[:1] in (b"M", b"m"):
-            raise _UpgradeError(
-                "upgrade destination {!r} is unmerged; resolve the conflict before retrying "
-                "(fail-closed)".format(os.fsdecode(path)))
-        if record[:1] != b"H":
-            raise _UpgradeError(
-                "upgrade destination {!r} has skip-worktree or assume-unchanged set; "
-                "clear the flags and reconcile owner edits before retrying (fail-closed)".format(
-                    os.fsdecode(path)))
-    dirty = _upgrade_parse_porcelain(out.out, prefix, lease_excl, pathspecs)
-    # Matching mode collapses ignored ancestors (e.g. !! .working/ for a selected view). Expand
-    # those with traditional mode over the SAME destinations, never by adding the ancestor to scope.
-    # The first parse validates the entire payload before any record is used here.
-    ancestors = []
-    for rec in out.out.split(b"\x00")[:-1]:
-        p = _upgrade_status_path(rec[3:], prefix)
-        if rec[:2] == b"!!" and p.endswith(b"/"):
-            ancestors.append(p)
-    if any(os.fsencode(spec).startswith(p) for spec in pathspecs for p in ancestors):
-        expanded_args = ["--ignored=traditional" if a == "--ignored=matching" else a for a in args]
-        expanded = _opf_observe._run_git(git, root, expanded_args, config_overrides=neutralizing)
-        if not expanded.completed or expanded.rc != 0 or expanded.err:
-            raise _UpgradeError("could not expand ignored ancestor records within the upgrade scope "
-                                "(fail-closed)")
-        dirty += _upgrade_parse_porcelain(expanded.out, prefix, lease_excl, pathspecs)
-    return dirty
-
-
-def _upgrade_check_ignored(root, relpaths):
-    """Conservatively refuse absent destinations ignored under the scrubbed configuration.
-    Status cannot observe an absent entry. Keep config/filter neutralization and literal NUL-framed
-    transport. Reads working-tree .gitignore files and .git/info/exclude. Global/system configuration
-    is scrubbed; core.excludesFile is overridden with os.devnull, disabling configured exclude files
-    (including repository/worktree settings) AND Git's default HOME/XDG global ignore file. --no-index
-    omits indexed ignore fallback. This is NOT a prediction of ordinary git add: the explicit,
-    path-scoped add -f advice bypasses the omitted rules. Any diagnostic refuses before mutation.
-    Configuration or filesystem changes after observation remain outside the single-writer contract.
-    """
-    if not relpaths:
-        return
-    git = _opf_observe._git_path()
-    if git is None:
-        raise _UpgradeError("cannot locate git to check ignored planned destinations (fail-closed)")
-    try:
-        neutralizing = _opf_observe._filter_neutralizing_config(git, root)
-    except RuntimeError as exc:
-        raise _UpgradeError("cannot check ignored planned destinations: {} (fail-closed)".format(exc)) from exc
-    neutralizing = list(neutralizing) + [("core.excludesFile", os.devnull)]
-    # check-ignore rejects --literal-pathspecs. Its stdin entries are literal filenames;
-    # "./" also prevents a leading ":" from being parsed as pathspec magic.
-    paths = {b"./" + os.fsencode(p) for p in relpaths}
-    out = _opf_observe._run_git(
-        git, root, ["check-ignore", "--no-index", "-z", "--stdin"],
-        config_overrides=neutralizing, input_bytes=b"".join(p + b"\x00" for p in sorted(paths)))
-    if not out.completed or out.rc not in (0, 1) or out.err:
-        raise _UpgradeError("cannot check ignored planned destinations at {!r}: {} (rc {}; fail-closed)".format(
-            str(root), out.err.strip(), out.rc))
-    if out.rc == 1 and not out.out:
-        return
-    matches = out.out.split(b"\x00")
-    if (out.rc != 0 or matches[-1] != b"" or len(matches) < 2
-            or any(p not in paths for p in matches[:-1])):
-        raise _UpgradeError("git check-ignore returned a malformed or inconsistent payload (fail-closed)")
-    raise _UpgradeError("ignored planned destinations under {!r}: {}. These paths match working-tree "
-                        ".gitignore or .git/info/exclude rules; this conservative check refuses even "
-                        "though force-add could stage them. Adjust those rules before re-running "
-                        "opf upgrade; nothing was written.".format(
-                            str(root), ", ".join(repr(os.fsdecode(p[2:])) for p in matches[:-1])))
-
-
-def _upgrade_check_clean(res, write_scope):
-    """STEP 3 (M3): check the planned schema/render destinations and index collision candidates,
-    plus the lease, immediately before mutation. Tracked dirt and untracked/ignored destination content
-    refuse: HEAD must preserve pre-existing content. Exact untracked "??" and ignored "!!" leases are
-    excluded for step 4's O_EXCL never-seize refusal; tracked lease dirt refuses distinctly (spec 5.7).
-    This follows read-only triage/plan and precedes lease acquisition and the first write. Refuses
-    fail-closed (exit 2) on dirt, naming up to 10 paths plus the total and advising commit or move aside,
-    never a restore of the owner's work.
-
-    Literal pathspecs alone do not bound --ignored=matching: the parser filters ignored prefix siblings,
-    and the probe expands collapsed ignored ancestors within the same scope. Declared unmanaged paths
-    and other unrelated store content are outside this gate and outside recovery/staging advice.
-
-    Residual over-approximation: every declared render destination is checked even if its bytes would
-    remain unchanged, as is each create-only index candidate even if already present. Descendants of
-    a destination occupied by a directory also refuse as collisions. Ignored content at these paths
-    must be moved aside before retrying; no whole-.working cleanliness requirement remains. Random
-    temporary names use O_EXCL and cannot overwrite pre-existing entries; an interrupted run can leave
-    its own temporary files, which require identification before manual removal.
-
-    Residual (F-OPF-STATUSFILTER-LFS-FALSEPOS, disclose-guard-residuals): a store with an EXTERNAL NORMALIZING
-    clean/process filter (the git-lfs shape) can read DIRTY here even when genuinely clean, because the probe
-    neutralizes filter execution (so no repo-planted filter runs on this read-only observation) and the
-    racy-clean window then re-hashes raw worktree bytes against the cleaned index blob. This is a fail-closed
-    over-refusal (never a false-clean, never a filter exec); the refusal message adds operator-clear guidance
-    to settle the worktree when the store carries such a filter."""
-    git = _opf_observe._git_path()
-    if git is None:
-        raise _UpgradeError("cannot locate git to verify the store is clean before the upgrade; without a "
-                            "verified restore path the destructive rewrite is refused (spec 5.1, fail-closed)")
-    store_root = res.store_root
-    product_root = res.product_root if res.product_root is not None else store_root
-    lease_excl = "{}/{}".format(res.machine_rel, _opf_check.LEASE_NAME)
-    store_specs = list(write_scope["store"]) + [lease_excl]
-    product_specs = []
-    same_root = os.path.abspath(str(product_root)) == os.path.abspath(str(store_root))
-    for relpath in write_scope["product"]:
-        (store_specs if same_root else product_specs).append(relpath)
-
-    dirty = _upgrade_probe_dirty(git, store_root, store_specs, lease_excl)
-    if product_specs:
-        dirty += _upgrade_probe_dirty(git, product_root, product_specs, None)
-    if dirty:
-        shown = sorted(set(dirty))
-        head = shown[:10]
-        # A store with a configured external NORMALIZING clean/process filter (the git-lfs shape) can read
-        # DIRTY here even when genuinely clean: the probe neutralizes filter EXECUTION (fail-closed, so no
-        # repo-planted filter runs on this read-only observation), so the cleaned index blob cannot be
-        # reproduced and the racy-clean window re-hashes raw worktree bytes as a mismatch
-        # (F-OPF-STATUSFILTER-LFS-FALSEPOS). It is a fail-closed over-refusal, never a false-clean. When the
-        # store carries such a filter, guide the operator to settle the worktree rather than leaving a bare
-        # "dirty". The presence probe is on the error path only; a RuntimeError there (a config that turned
-        # unreadable since the probe) resolves to the generic message, never a crash.
-        def _has_clean_process_filter(rt):
-            try:
-                return bool(_opf_observe._filter_neutralizing_config(git, rt))
-            except RuntimeError:
-                return False
-        filtered = _has_clean_process_filter(store_root) or (
-            bool(product_specs) and _has_clean_process_filter(product_root))
-        note = (" This store has a configured clean/process filter (git-lfs-shape): the upgrade probe "
-                "neutralizes filter execution for safety, so a normalizing filter can make a genuinely-clean "
-                "store read dirty in the racy-clean window. Settle the worktree (commit, or check out so the "
-                "index and worktree agree for the filtered path) before upgrading." if filtered else "")
-        raise _UpgradeError(
-            "the working tree is not clean over this upgrade's planned schema and render destinations "
-            "and index collision candidates (store and product roots): {} dirty path(s), "
-            "showing {}: {}. Commit your changes (or move them aside), then re-run opf upgrade; the "
-            "uncommitted work is yours and the upgrade never restores or discards it.{}".format(
-                len(shown), len(head), ", ".join(head), note))
-
-
-def _upgrade_lease_held_message(pfd, name, lease_rel):
-    """Compose the EEXIST held-lease refusal, best-effort naming the existing holder/operation/acquired_at.
-    A present-but-unreadable or malformed payload STILL refuses (present-is-held, matching C-LEASE); the
-    lease is never seized or overwritten (spec 5.7). Names the manual reconciliation remedy the tool never
-    performs itself."""
-    import tomllib
-    detail = "a present lease with an unreadable payload"
-    try:
-        # O_NONBLOCK so a FIFO (or other special file) planted at lease.toml cannot BLOCK the open (an
-        # O_RDONLY open of a writer-less FIFO would hang indefinitely); fstat the opened fd and, for any
-        # NON-REGULAR file, refuse WITHOUT reading (presence is refusal, matching C-LEASE; never block).
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                detail = "a present non-regular lease (held)"
-            else:
-                raw = os.read(fd, 65536)
-                data = tomllib.loads(raw.decode("utf-8"))
-                if isinstance(data, dict):
-                    detail = "held by {!r} (operation {!r}, acquired_at {!r})".format(
-                        data.get("holder"), data.get("operation"), data.get("acquired_at"))
-        finally:
-            os.close(fd)
-    except Exception:  # noqa: BLE001  a present-but-unreadable lease still refuses (present is held)
-        pass
-    return ("another opf run holds the single-writer lease {}: {}. The lease is never seized (spec 5.7). "
-            "If you have confirmed NO opf run is live, release the leftover lease as your own reconciliation "
-            "step (the tool never removes a foreign lease), then re-run opf upgrade.".format(lease_rel, detail))
-
-
-def _upgrade_lease_holder():
-    """The holder identity THIS run stamps on the lease it creates: "opf-upgrade:<host>:<pid>". Single-
-    sourced so the acquire WRITE and the release OWNERSHIP-CHECK reason about the same identity (the release
-    proves ownership by a full-payload byte compare, which subsumes this holder, and names a foreign holder
-    only in its diagnostic)."""
-    import socket
-    return "opf-upgrade:{}:{}".format(socket.gethostname(), os.getpid())
-
-
-def _upgrade_acquire_lease(root_fd, machine_rel):
-    """STEP 4 (M4): claim the single-writer lease ATOMICALLY (atomic-claim-from-pool). The claim IS the
-    create: open machine_rel/lease.toml O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW beneath the parent fd (the
-    _upgrade_replace idiom), so there is no check-then-create gap and EEXIST IS the held-lease refusal. The
-    closed payload (schema/holder/operation/acquired_at read from the clock, G5) satisfies C-LEASE exactly,
-    so the mid-run doctor stays VALID with the lease held (containment-clean, spec 5.7/11). RETURNS the exact
-    payload bytes written, so the ownership-verified release can prove the lease it removes is still THIS
-    run's own (never-seize, spec 5.7)."""
-    import datetime
-    journal = _opf_store._journal
-    lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
-    payload = _opf_emit.emit_checked({
-        "schema": _opf_schema.SUPPORTED_SCHEMA,
-        "holder": _upgrade_lease_holder(),
-        "operation": "upgrade",
-        "acquired_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }).encode("utf-8")
-    pfd, name = journal._open_parent(root_fd, lease_rel)
-    try:
-        try:
-            fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
-        except FileExistsError:
-            raise _UpgradeError(_upgrade_lease_held_message(pfd, name, lease_rel))
-        try:
-            try:
-                journal._write_all(fd, payload)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.fsync(pfd)
-        except BaseException as exc:
-            # Any failure AFTER the O_EXCL create but BEFORE successful acquisition (a failed payload write,
-            # fsync, or the durability fsync of the parent) LEAVES the lease in place: it is a leftover from
-            # THIS failed upgrade, released through operator reconciliation exactly like a lease from a dead
-            # run (spec 5.7), never removed here. A by-name unlink would be OWNERSHIP-BLIND: if a peer replaced
-            # the lease in the failure window (A-create / B-replace / A-fail), the unlink would delete the
-            # REPLACEMENT holder's lease, a never-seize violation (spec 5.7). This code never removes a lease
-            # it cannot prove is still the one it created, so it leaves-and-reconciles rather than racing an
-            # unlink. A KeyboardInterrupt/SystemExit propagates untouched (the lease is still left); an
-            # ordinary failure is surfaced as a reconcilable _UpgradeError so the operator gets clear advice.
-            if isinstance(exc, _UpgradeError) or not isinstance(exc, Exception):
-                raise
-            raise _UpgradeError(
-                "upgrade lease acquisition failed after the lease {} was created ({}); the lease is LEFT in "
-                "place as a leftover from this failed upgrade and is never seized (spec 5.7). If you have "
-                "confirmed NO opf run is live, release the leftover lease as your own reconciliation step "
-                "(the tool never removes it), then re-run opf upgrade.".format(lease_rel, exc)) from exc
-    finally:
-        os.close(pfd)
-    return payload
-
-
-def _upgrade_read_lease_payload(pfd, name):
-    """Read the lease at (pfd, name) SAFELY for an ownership compare, reusing the round-2 R3 pattern:
-    O_RDONLY|O_NOFOLLOW|O_NONBLOCK (a planted FIFO or other special file cannot BLOCK the open), then fstat
-    the opened fd and, for any NON-REGULAR file, return None WITHOUT reading. Returns the file's raw bytes,
-    or None when it is absent, non-regular, or unreadable. Bounded read (never trusts the on-disk size)."""
-    try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        return os.read(fd, 65536)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
-
-
-def _upgrade_lease_holder_of(raw):
-    """Best-effort holder identity from raw lease bytes, for a DIAGNOSTIC message only (never raises, never
-    load-bearing: the ownership decision is the full-payload byte compare in _upgrade_unlink_owned_lease)."""
-    if raw is None:
-        return "absent or a non-regular entry"
-    import tomllib
-    try:
-        data = tomllib.loads(raw.decode("utf-8"))
-        if isinstance(data, dict) and data.get("holder") is not None:
-            return "holder {!r}".format(data.get("holder"))
-    except Exception:  # noqa: BLE001  diagnostic only; an unreadable replacement still refuses above
-        pass
-    return "an unreadable or malformed replacement lease"
-
-
-def _upgrade_unlink_owned_lease(pfd, name, lease_rel, expected_payload):
-    """The SINGLE ownership-verified lease-removal site (class-width never-seize, spec 5.7, OPF-SPEC.md:376
-    "never seized from a live holder"). Unlink the lease at (pfd, name) ONLY when the file still there is
-    byte-for-byte the exact lease THIS run created (`expected_payload`, the bytes _upgrade_acquire_lease
-    returned; a full-payload proof that subsumes a holder-only compare). If it does NOT match -- a peer
-    replaced the lease in the interval -- it is NEVER unlinked (never-seize) and the replacement is LEFT in
-    place for operator reconciliation, surfaced as a fail-closed _UpgradeError naming the replacement's
-    holder where legible. A failed unlink is likewise SURFACED, never swallowed (no-concealed-failure). No
-    lease this run cannot prove is its own is ever removed here.
-
-    DISCLOSED RESIDUAL (disclose-guard-residuals): a tiny TOCTOU window remains between the ownership read and
-    the unlink -- a swap in exactly that window could still unlink a replacement, and because that unlink then
-    succeeds the run also reports exit-0 SUCCESS (a false "released") over the deleted peer lease rather than
-    the never-seize refusal. This is inherent to unlink-by-name (there is no unlink-this-exact-inode primitive
-    available here) and cannot be eliminated, only disclosed; it is reachable ONLY when an operator or peer
-    violates the documented release-only-when-no-run-is-live reconciliation (spec 5.7). It is vastly smaller
-    than the prior ownership-blind unlink and never-seizes under any non-adversarial-mid-window sequence."""
-    on_disk = _upgrade_read_lease_payload(pfd, name)
-    if on_disk != expected_payload:
-        # FIX3: distinguish a genuine ABSENCE (the lease was deleted, not replaced) from a REPLACEMENT (a
-        # present-but-different payload). Both stay fail-closed / never-seize; only the operator-facing
-        # wording differs. _upgrade_read_lease_payload returns None for absent, non-regular, or unreadable.
-        if on_disk is None:
-            detail = ("the lease is ABSENT at release (already removed, or present as a non-regular entry); "
-                      "this run's own lease is gone")
-        else:
-            detail = ("the lease was REPLACED by another holder ({}) before release; this run's own lease "
-                      "is gone".format(_upgrade_lease_holder_of(on_disk)))
-        raise _UpgradeError(
-            "the upgrade lease {} could not be released as this run's own: {}. It is NEVER seized (spec 5.7) "
-            "and is LEFT in place for operator reconciliation, so no lease is removed here "
-            "(fail-closed).".format(lease_rel, detail))
-    try:
-        os.unlink(name, dir_fd=pfd)
-    except OSError as exc:
-        raise _UpgradeError("could not release the upgrade lease {} ({}); surfaced, never swallowed "
-                            "(fail-closed)".format(lease_rel, exc))
-
-
-def _upgrade_release_lease(root_fd, machine_rel, expected_payload):
-    """Release the lease created by _upgrade_acquire_lease: OWNERSHIP-VERIFIED unlink of machine_rel/
-    lease.toml no-follow via the parent fd, then fsync the parent. The removal routes through the SINGLE
-    ownership-verified site (_upgrade_unlink_owned_lease): the lease is removed ONLY when it is still THIS
-    run's own (`expected_payload`), never seized from a peer that replaced it (spec 5.7); a replaced lease is
-    LEFT and surfaced (exit 2). A failed unlink is SURFACED (exit 2), never swallowed (no-concealed-failure).
-    A killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
-    through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers."""
-    journal = _opf_store._journal
-    lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
-    pfd, name = journal._open_parent(root_fd, lease_rel)
-    try:
-        _upgrade_unlink_owned_lease(pfd, name, lease_rel, expected_payload)
-        os.fsync(pfd)
-    finally:
-        os.close(pfd)
+    store.extend(indexes)
+    scope = _opf_write_guard.plan_write_scope(machine_rel, manifest_model, store, "upgrade")
+    scope["indexes"] = indexes
+    return scope
 
 
 def _upgrade_run(root):
@@ -2404,7 +1871,7 @@ def _upgrade_run(root):
         write_scope = _upgrade_write_scope(
             machine_rel, new_manifest, new_counters_bytes != counters_bytes,
             () if minor else _UPGRADE_NEW_TYPES)
-        _upgrade_check_clean(res, write_scope)
+        _opf_write_guard.check_clean(res, write_scope, "upgrade", _UPGRADE_CLEAN_SCOPE)
         product_targets = write_scope["product"]
         created_relpaths = []
         for relpath in write_scope["store"]:
@@ -2428,13 +1895,13 @@ def _upgrade_run(root):
                 os.lstat(os.path.join(str(recovery_product_root), relpath))
             except FileNotFoundError:
                 absent_product_targets.append(relpath)
-        _upgrade_check_ignored(recovery_store_root, created_relpaths)
-        _upgrade_check_ignored(recovery_product_root, absent_product_targets)
+        _opf_write_guard.check_ignored(recovery_store_root, created_relpaths, "upgrade")
+        _opf_write_guard.check_ignored(recovery_product_root, absent_product_targets, "upgrade")
         # STEP 4 (M4): claim the single-writer lease atomically, then hold it across mutation, render, and
         # the final doctor; release it in the finally covering every exit after acquisition, EXCEPT the
         # success path releases FIRST (R5) so no success is reported over a still-held / failed-to-release
         # lease. `released` records that the success path already released, so the finally does not re-release.
-        lease_payload = _upgrade_acquire_lease(root_fd, machine_rel)
+        lease_payload = _opf_write_guard.acquire_lease(root_fd, machine_rel, "upgrade")
         recovery = (recovery_store_root, recovery_product_root, created_relpaths,
                     product_targets, write_scope["store"])
         released = False
@@ -2490,7 +1957,7 @@ def _upgrade_run(root):
             # automatic rollback advice is unsafe and is not required to make this payload valid.
             recovery = None
             try:
-                _upgrade_release_lease(root_fd, machine_rel, lease_payload)
+                _opf_write_guard.release_lease(root_fd, machine_rel, lease_payload, "upgrade")
             except BaseException:
                 print("opf upgrade: the store reached doctor-VALID before lease release, but release "
                       "failed. Confirm no opf run is live (spec 5.7) and reconcile the lease before "
@@ -2528,7 +1995,7 @@ def _upgrade_run(root):
                 # R5/FIX1: release the lease on every non-success exit. When a mid-run failure is ALREADY
                 # propagating (a render/doctor escape after the manifest+counters were rewritten, which
                 # carries its own "uncommitted change is left for review" recovery advice) and the release then
-                # ALSO fails (its lease-replaced never-seize _UpgradeError), the release error must NOT
+                # ALSO fails (its lease-replaced never-seize WriteGuardError), the release error must NOT
                 # DISPLACE that original exception: the operator still needs the mid-run recovery advice, so
                 # the lease-replaced note is surfaced ALONGSIDE it, never in place of it (exit 2 preserved,
                 # peer lease left, never seized). A propagating KeyboardInterrupt/SystemExit is likewise not
@@ -2537,10 +2004,10 @@ def _upgrade_run(root):
                 if pending is None:
                     # A `return` (or normal fall-through) is passing through with no in-flight exception: a
                     # release failure legitimately becomes the surfaced outcome (exit 2), exactly as before.
-                    _upgrade_release_lease(root_fd, machine_rel, lease_payload)
+                    _opf_write_guard.release_lease(root_fd, machine_rel, lease_payload, "upgrade")
                 else:
                     try:
-                        _upgrade_release_lease(root_fd, machine_rel, lease_payload)
+                        _opf_write_guard.release_lease(root_fd, machine_rel, lease_payload, "upgrade")
                     except (KeyboardInterrupt, SystemExit):
                         raise
                     except Exception as rel_exc:  # noqa: BLE001  surfaced, never displaces the original
@@ -3045,8 +2512,24 @@ def _cmd_import(rest):
         return EXIT_MALFORMED
 
 
+def _cmd_record(rest):
+    """`opf record <subcommand> ...` (spec 8.8): the record-authoring verb. `create` and `worklog-append`
+    run the shared journaled operation sequence in _opf_record (byte-reproduction precondition, one id claim
+    through the allocation seam, allowed-delta postcondition, cleanliness gate and lease, one journaled
+    publication, render, final doctor VALID, lease release before the report); `transition` and
+    `done-with-receipt` are recognized and fail closed as not yet implemented. Exit 0 recorded (left
+    uncommitted), exit 2 every refusal or cannot-evaluate; exit 1 is not used. Unlike the applicability-probe
+    siblings a NOT-ADOPTED root is a cannot-evaluate (a requested operation, like import)."""
+    try:
+        return _opf_record.cli(rest)
+    except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false success
+        print("opf record: cannot evaluate: unexpected error ({!r}); failing closed to exit 2".format(exc),
+              file=sys.stderr)
+        return EXIT_MALFORMED
+
+
 def _cli_self_test():
-    """Guard the dispatcher's render, doctor, import, and source-only init routes.
+    """Guard the dispatcher's render, doctor, import, record, and source-only init routes.
     Render/doctor cases below judge return codes; init also checks payload validation, refusal reasons,
     and preservation through check_opf_init._suite(main). Each case captures stdout and stderr.
     Cases: an unknown verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`,
@@ -3091,7 +2574,7 @@ def _cli_self_test():
         expect([], EXIT_MALFORMED)
         expect(["frobnicate"], EXIT_MALFORMED)
         for verb in KNOWN_VERBS:
-            if verb not in ("init", "import", "render", "doctor", "upgrade", "absorb"):
+            if verb not in ("init", "import", "render", "doctor", "upgrade", "absorb", "record"):
                 expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
         expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
         expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
@@ -3139,6 +2622,18 @@ def _cli_self_test():
         expect(["import", "--apply", "not-a-run-id"], EXIT_MALFORMED)   # bad run-id grammar
         expect(["import", "--bogus", "--scan", "--set", "s.toml"], EXIT_MALFORMED)  # unknown arg
         expect(["import", "--root"], EXIT_MALFORMED)             # --root needs a value
+
+        # record verb ROUTING (OPF-RECORD), judged on exit code only. These grammar cases fail closed in the
+        # parser BEFORE any store resolution, so they need no store on disk; the recorded 0 / refusal 2
+        # discrimination over real stores rides check_opf_record.py --self-test.
+        expect(["record"], EXIT_MALFORMED)                       # bare: a subcommand is required
+        expect(["record", "frobnicate"], EXIT_MALFORMED)         # unknown subcommand
+        expect(["record", "transition", "BI-1", "done"], EXIT_MALFORMED)   # recognized, not yet implemented
+        expect(["record", "done-with-receipt", "BI-1"], EXIT_MALFORMED)    # recognized, not yet implemented
+        expect(["record", "create"], EXIT_MALFORMED)             # missing --type/--title/--actor
+        expect(["record", "create", "--root"], EXIT_MALFORMED)   # --root needs a value
+        expect(["record", "worklog-append", "--kind", "added", "--summary", "s", "--actor", "importer"],
+               EXIT_MALFORMED)                                   # an importer never authors through record
 
         def _fixture_leg():
             """Build the on-disk fixtures and drive render --check over them. Assertion outcomes are recorded
@@ -3556,6 +3051,7 @@ def _self_tests():
     ("opf-importers", _opf_importers.self_test),
     ("opf-observe", _opf_observe.self_test),
     ("opf-absorb", _opf_absorb.self_test),
+    ("opf-record", _opf_record.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-watchdog-hostile-ambient", _watchdog_hostile_ambient_self_test),
@@ -3567,7 +3063,7 @@ def _self_tests():
 )
 
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
-KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb")
+KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb", "record")
 
 
 # Helper self-tests that pin sys.set_int_max_str_digits(4300) inside a fixture and MUST restore the ambient
@@ -3655,6 +3151,8 @@ def main(argv=None):
         return _cmd_import(rest)
     if verb == "absorb":
         return _cmd_absorb(rest)
+    if verb == "record":
+        return _cmd_record(rest)
     if verb in KNOWN_VERBS:
         # A recognized verb whose unit has not landed: fail closed (exit 2), never a silent success, so
         # a stub is never mistaken for a completed operation.
