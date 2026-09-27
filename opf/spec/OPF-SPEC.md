@@ -1029,9 +1029,10 @@ Unproven legacy `.archive/` entries remain in place with a standing finding unti
 
 A base-schema version bump ships a tested, in-place store-schema upgrade (`opf upgrade`). The upgrade
 is idempotent. A purely schema-level bump is additive, using atomic replacement of existing files,
-create-only writes for new index files, and sequential writes with recovery scope held in memory,
-not a durable transaction journal. A homes-generation bump additionally relocates OPF control areas
-as a versioned, journaled, fail-closed relocation.
+create-only writes for new index files, and regeneration of declared views through exclusively
+created temporary files followed by atomic rename. These writes are sequential, with recovery scope
+held in memory, not a durable transaction journal. A homes-generation bump additionally relocates
+OPF control areas as a versioned, journaled, fail-closed relocation.
 Every destination is digest-verified before its source is removed. Both kinds of upgrade run under
 the store consistency contract and the single-writer lease (section 5.7).
 It fails closed on an unresolvable store, a declared `spec_version` ABOVE the tooling,

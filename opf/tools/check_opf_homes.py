@@ -3,8 +3,8 @@
 
 Checks documented topology against the constructor authority. Text checks protect the planned
 contract, not runtime conformance to homes 2. No store is mutated or required to install a block.
-Residual: wording checks require pinned text to be present; they do not detect added contradictory
-claims that leave the pins intact.
+Residual: wording checks require pinned text to be present; except for the self-test
+reconstruction of section 9.2, they do not detect added contradictory claims that leave the pins intact.
 """
 import re
 import sys
@@ -38,8 +38,10 @@ _CONTRACT = {
         'A base-schema version bump ships a tested, in-place store-schema upgrade (opf upgrade).',
         'The upgrade is idempotent.',
         'A purely schema-level bump is additive, using atomic replacement of existing files, '
-        'create-only writes for new index files, and sequential writes with recovery scope held '
-        'in memory, not a durable transaction journal.',
+        'create-only writes for new index files, and regeneration of declared views through '
+        'exclusively created temporary files followed by atomic rename.',
+        'These writes are sequential, with recovery scope held in memory, not a durable '
+        'transaction journal.',
         'A homes-generation bump additionally relocates OPF control areas as a versioned, '
         'journaled, fail-closed relocation.',
         'Every destination is digest-verified before its source is removed.',
@@ -1266,6 +1268,16 @@ def self_test():
 
     check("spec-control-9.2-undeleted", lambda:
           contract_findings(replace_body(normalized)) == [])
+    def pins_cover_section():
+        return " ".join(_CONTRACT["9.2"]) == normalized
+
+    check("spec-control-9.2-pin-coverage", pins_cover_section)
+    # Mutate the registry itself: per-pin deletion tests cannot notice a dropped pin.
+    from unittest.mock import patch
+    with patch.dict(_CONTRACT, {"9.2": tuple(
+            pin for pin in _CONTRACT["9.2"]
+            if pin != "Every destination is digest-verified before its source is removed.")}):
+        check("spec-flip-9.2-dropped-pin", lambda: not pins_cover_section())
     for fragment in _CONTRACT["9.2"]:
         mutated = replace_body(normalized.replace(fragment, "", 1))
         check("spec-flip-9.2-" + fragment, lambda f=fragment, m=mutated:

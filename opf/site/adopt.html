@@ -236,8 +236,9 @@
       newer-than-supported store or an older store failing the migration preconditions above, stops
       before writing the schema delta. A failure after the additive rewrite begins exits 2 and
       leaves changes already made in place. If view generation fails, the final doctor check does
-      not report VALID, or an unexpected error occurs after the lease is taken and before doctor
-      reports VALID, upgrade prints recovery commands using the committed HEAD, limited to the
+      not report VALID, or the run stops with any other error or interruption (including a safety
+      refusal) after the lease is taken and before doctor reports VALID, upgrade prints recovery
+      commands using the committed HEAD, limited to the
       planned store and product paths. Once doctor reports VALID, no recovery commands are printed;
       if the lease then fails to release, upgrade prints advice to confirm no OPF run is active and
       resolve the leftover lease before taking further action.</p>
