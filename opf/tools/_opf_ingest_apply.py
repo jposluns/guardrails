@@ -2046,11 +2046,8 @@ def _d_staging_alias(kind):
 
 _ST_TXN = ("transaction-schema", "transaction-consistency")
 
-# The gate's physical-holding refusal (check_opf_import._classify_run_homes), formatted with the
-# registered location that reaches the run.
-_ST_HOME_REFUSED = ("run path reaches the registered home {!r} through a symlink; that home does not "
-                    "physically hold the run, so its store-root record would go unread (refused, never "
-                    "classified as detached)")
+# R1's exact fail-closed diagnostic, shared by the symlink-route fixtures.
+_ST_HOME_REFUSED = "a run not held by a store must be named by a symlink-free path"
 _ST_DETACHED = (True, "no transaction record (run not yet applied)")
 
 
@@ -2120,7 +2117,7 @@ def _d_home_symlink_route(kind):
         elsewhere = base_dir / ("symlink-route-elsewhere-" + kind)
         staging.rename(elsewhere)
         staging.symlink_to(elsewhere)
-        error = _st_located(_ST_HOME_REFUSED.format(_opf_store.stage_run(kind, rid)))
+        error = _st_located(_ST_HOME_REFUSED)
         outcomes = []
         for spelling in (staged, staged / ".." / rid, str(staged) + "/.", str(staged) + "/", link / rid):
             for homes in (1, 2):
@@ -2132,10 +2129,7 @@ def _d_home_symlink_route(kind):
 
 
 def _d_home_relative(kind, homes, case):
-    """A relative dotdot route from ANY starting depth below the store still sees a traversed symlink in a
-    registered home: the per-edge ancestor walk reaches the store root from the traversed edge's parent, so
-    a starting directory deeper than the starting-ancestor probe (four or more levels below the root, the
-    round-5 N1/F1 class) cannot grade the run detached."""
+    """R1 refuses a relative symlink-bearing unheld route from every generated starting depth."""
     def test(module, base_dir):
         root, rid, staged = _st_staged(base_dir, "relative-" + kind, kind)
         if case.startswith("legacy"):
@@ -2157,7 +2151,7 @@ def _d_home_relative(kind, homes, case):
         link.rename(elsewhere)
         link.symlink_to(elsewhere)
         rel = str(run.relative_to(root))
-        error = _st_located(_ST_HOME_REFUSED.format(rel))
+        error = _st_located(_ST_HOME_REFUSED)
         absolute = _st_graded(module, root, str(run) + "/", homes)
         relative = _st_graded(module, root, spelling, homes, cwd)
         _revert_check(all(result[cid] == (False, error) for result in (absolute, relative)
@@ -2166,90 +2160,117 @@ def _d_home_relative(kind, homes, case):
     return test
 
 
-def _st_route_symlinks(cwd, spelling):
-    """How many symlink expansions a string-space resolution of `spelling` from `cwd` performs, the
-    self-test's oracle for whether a generated route traverses a symlink. Sound here because every fixture
-    link carries an absolute target onto a physical path and nothing mutates the tree during enumeration."""
+def _st_route_facts(cwd, spelling, depth):
+    """Fixture oracle in string space, independent of the gate's descriptor walk and claim probes.
+    Fixture links have absolute physical targets; procfs may use relative targets. Claimants come from
+    fixture construction, never from the classifier. Include starting/per-edge physical ancestors."""
     parts = spelling.split("/")
     cur = "/" if spelling.startswith("/") else str(cwd)
-    links = 0
+    links, visited = 0, {cur}
+
+    def ancestors(path):
+        for _ in range(depth):
+            path = os.path.dirname(path.rstrip("/")) or "/"
+            visited.add(path)
+
+    if not spelling.startswith("/"):
+        ancestors(cur)
     while parts:
         comp = parts.pop(0)
         if comp in ("", "."):
             continue
         if comp == "..":
             cur = os.path.dirname(cur.rstrip("/")) or "/"
+            visited.add(cur)
             continue
         step = cur.rstrip("/") + "/" + comp
         if os.path.islink(step):
+            ancestors(cur)
             links += 1
+            if links > 40:
+                raise RuntimeError("fixture route loops")
             target = os.readlink(step)
             parts[:0] = target.split("/")
             if target.startswith("/"):
                 cur = "/"
-            continue
-        cur = step
-    return links
+        else:
+            cur = step
+        visited.add(cur)
+    return links, visited
 
 
-def _st_home_verdict(result):
-    """Collapse a grading to the property's verdict classes. A cannot-evaluate on the transaction checks is
-    "refused"; the exact no-record detail is "detached"; a read (corrupt) store-root record is
-    "registered". Anything else is surfaced verbatim, never folded into a class."""
+def _st_home_verdict(result, reads, root, rid):
+    """Registered requires the exact corrupt transaction bytes read at the physical store identity.
+    An arbitrary schema failure is not evidence that the store-root record was read."""
     schema = result["transaction-schema"]
     if schema[1].startswith("cannot evaluate:"):
         return "refused"
     if schema == _ST_DETACHED:
         return "detached"
-    if schema[0] is False:
+    st = root.stat()
+    txn = str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME)
+    if schema[0] is False and ((st.st_dev, st.st_ino), txn, b"state =\n") in reads:
         return "registered"
     return "unexpected:" + repr(schema)
 
 
-# The enumerative fixture topologies; the run is physically held by the store in _ST_HOME_HELD placements.
+# This registry defines the generated matrix. Holder/claimant facts come from construction below.
 _ST_HOME_PLACEMENTS = ("none", "staging", "legacy", "entry", "ancestor-alias", "in-store-alias",
-                       "external-link", "shared-ancestor", "detached")
-_ST_HOME_HELD = ("none", "ancestor-alias", "external-link", "shared-ancestor")
+                       "external-link", "shared-ancestor", "detached", "chained", "nested-shared",
+                       "external-root-out", "external-target", "proc-fd", "detached-alias",
+                       "same-root-alias")
+_ST_HOME_HELD = ("none", "ancestor-alias", "external-link", "shared-ancestor", "nested-shared",
+                "same-root-alias")
 
 
 def _st_home_topology(base_dir, kind, placement):
-    """One placement's fixture. Returns (root, canonical run path, physical run path, [alias spellings],
-    [inside-target cwds]). Held placements put the run at the legacy home (registered under both
-    generations); symlink placements re-home a component, the run entry, or an alias onto a physical
-    target elsewhere."""
+    """Return root, canonical, physical, aliases, inside cwds, physical holder, second-claim roots.
+    The caller owns proc-fd lifetime; the proc spelling is added after construction."""
     import shutil
     name = "prop-{}-{}".format(placement, kind)
     root, rid, staged = _st_staged(base_dir, name, kind)
     legacy = root / _opf_import._import_run_locations(rid, 1)[0]
-    aliases, inside = [], []
-    if placement in _ST_HOME_HELD:
+    aliases, inside, claimants = [], [], []
+    held = placement in _ST_HOME_HELD
+    if held:
         staged.rename(legacy)
         canonical = physical = legacy
         if placement == "ancestor-alias":
             link = base_dir / (name + "-link")
             link.symlink_to(root)
             aliases.append(str(link / legacy.relative_to(root)))
+        if placement == "same-root-alias":
+            staged.symlink_to(legacy)
+            aliases.append(str(staged) + "/")
         if placement == "external-link":
-            link = base_dir / (name + "-x") / _opf_import._import_run_locations(rid, 1)[0]
+            claimant = base_dir / (name + "-x")
+            link = claimant / _opf_import._import_run_locations(rid, 1)[0]
             link.parent.mkdir(parents=True)
             link.symlink_to(legacy)
+            claimants.append(claimant)
             aliases.extend([str(link), str(link) + "/"])
-        if placement == "shared-ancestor":
+        if placement in ("shared-ancestor", "nested-shared"):
             ancestor = base_dir / (name + "-A")
-            ancestor.mkdir()
-            root.rename(ancestor / "S")
-            root = ancestor / "S"
+            (ancestor / "imports").mkdir(parents=True)
+            destination = ancestor / ("imports/S" if placement == "nested-shared" else "S")
+            root.rename(destination)
+            root = destination
             canonical = physical = root / _opf_import._import_run_locations(rid, 1)[0]
-            (ancestor / "imports").mkdir()
             (ancestor / "imports" / rid).symlink_to(canonical)
             shared = base_dir / (name + "-C")
             shared.mkdir()
             (shared / ".working").symlink_to(ancestor)
-            aliases.append(str(shared / ".working" / "S" / canonical.relative_to(root)))
-    elif placement == "detached":
+            claimants.append(shared)
+            aliases.append(str(shared / ".working" / root.relative_to(ancestor)
+                               / canonical.relative_to(root)))
+    elif placement in ("detached", "detached-alias"):
         canonical = physical = base_dir / (name + "-copy") / "a" / "b" / rid
         canonical.parent.mkdir(parents=True)
         shutil.copytree(str(staged), str(canonical))
+        if placement == "detached-alias":
+            link = base_dir / (name + "-tmp")
+            link.symlink_to(canonical.parent)
+            aliases.append(str(link / rid))
     elif placement == "entry":
         elsewhere = base_dir / (name + "-elsewhere") / rid
         elsewhere.parent.mkdir()
@@ -2271,61 +2292,88 @@ def _st_home_topology(base_dir, kind, placement):
         if placement == "in-store-alias":
             (root / ".working" / "alt").symlink_to(elsewhere)
             aliases.append(str(root / ".working" / "alt" / canonical.relative_to(component)))
-    return root, canonical, physical, aliases, inside
+        if placement == "chained":
+            target = base_dir / (name + "-Z")
+            physical.parent.rename(target)
+            (elsewhere / kind).symlink_to(target)
+            physical = target / rid
+            deep = elsewhere / "d1" / "d2" / "d3" / "d4"
+            deep.mkdir(parents=True)
+            inside[:] = [deep, target]
+            # From deep, this traverses only the second registered-component link (codex F1).
+            aliases.append(str(elsewhere / kind / rid))
+        if placement == "external-root-out":
+            link = base_dir / (name + "-LR")
+            link.symlink_to(root)
+            aliases.append(str(link) + "/../" + str(physical.relative_to(root.parent)))
+        if placement == "external-target":
+            link = base_dir / (name + "-L")
+            link.symlink_to(physical.parent)
+            aliases.append(str(link / rid))
+    return root, canonical, physical, aliases, inside, held, claimants
 
 
 def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, deep_only=False):
-    """Enumerate every generated (placement, homes generation, cwd, spelling) combination and grade each,
-    returning (case count, mismatches). The property: every spelling's verdict equals the canonical
-    spelling's, with exactly two structural exceptions the classifier discloses: (a) a spelling whose
-    route traverses no symlink, while no store physically holds the run, grades detached (the disclosed
-    physical-spelling / inside-target residual), and (b) a spelling that threads an alternate registered
-    location's own resolution to a physically held run is refused (fail-closed, the round-4 F3 posture). A
-    store that physically holds the run, or that reaches it through a symlink the route traverses, NEVER
-    grades detached; a genuinely detached copy (no store anywhere) always does."""
+    """Every matrix cell is independently classified from symlink traversal, holder, and second claim.
+    No canonical-verdict equivalence substitutes for the structural expectation. Count each mismatching
+    cell once. Proc magic links keep their descriptor live for the entire placement."""
+    from unittest.mock import patch
     mismatches, count = [], 0
     for placement in placements:
-        root, canonical, physical, aliases, inside = _st_home_topology(base_dir, kind, placement)
-        held = placement in _ST_HOME_HELD
-        if placement != "detached":
-            depth = root / ".working" / "w2" / "w3" / "w4" / "w5" / "w6"
-            depth.mkdir(parents=True)
-            cwds = [base_dir, root] + [Path(*depth.parts[:len(root.parts) + n]) for n in range(1, 7)]
+        root, canonical, physical, aliases, inside, held, claimants = _st_home_topology(
+            base_dir, kind, placement)
+        rid = physical.name
+        depth = max(len(rel.split("/")) for gen in (1, 2)
+                    for rel in _opf_import._import_run_locations(rid, gen)) - 1
+        if placement not in ("detached", "detached-alias"):
+            deep = root / ".working" / "w2" / "w3" / "w4" / "w5" / "w6"
+            deep.mkdir(parents=True)
+            cwds = [base_dir, root] + [Path(*deep.parts[:len(root.parts) + n]) for n in range(1, 7)]
         else:
             cwds = [base_dir, canonical.parents[1], canonical.parent]
         cwds += inside
         if deep_only:
             cwds = [cwd for cwd in cwds if len(cwd.parts) - len(root.parts) >= 4]
-        for homes in (1, 2):
-            expected_canonical = None
-            for cwd in cwds:
-                spellings = [("canonical", str(canonical)), ("canonical-slash", str(canonical) + "/"),
-                             ("canonical-dot", str(canonical) + "/."),
-                             ("relative", os.path.relpath(str(canonical), str(cwd)))]
-                physical_rel = os.path.relpath(str(physical), str(cwd))
-                if physical_rel != spellings[-1][1]:
-                    spellings.append(("relative-physical", physical_rel))
-                spellings += [("alias-{}".format(i), a) for i, a in enumerate(aliases)]
-                for label, spelling in spellings:
-                    links = _st_route_symlinks(cwd, spelling)
-                    if placement == "detached":
-                        expected = "detached"
-                    elif held:
-                        threads = placement == "external-link" and label.startswith("alias")
-                        expected = "refused" if threads else "registered"
-                    else:
-                        expected = "refused" if links else "detached"
-                    got = _st_home_verdict(_st_graded(module, root, spelling, homes, cwd))
-                    count += 1
-                    case = "{}/{}/homes-{}/{}/{}".format(placement, kind, homes, cwd, label)
-                    if got != expected:
-                        mismatches.append("{}: expected {}, got {}".format(case, expected, got))
-                    if label == "canonical" and cwd is cwds[0]:
-                        expected_canonical = got
-                    elif got != expected_canonical and expected != "detached" and not (
-                            held and expected == "refused"):
-                        mismatches.append("{}: verdict {} differs from canonical {}".format(
-                            case, got, expected_canonical))
+        proc_fd = None
+        try:
+            if placement == "proc-fd":
+                proc_fd = os.open(str(physical.parent), os.O_RDONLY | os.O_DIRECTORY)
+                aliases.append("/proc/self/fd/{}/{}".format(proc_fd, rid))
+            for homes in (1, 2):
+                for cwd in cwds:
+                    spellings = [("canonical", str(canonical)), ("canonical-slash", str(canonical) + "/"),
+                                 ("canonical-dot", str(canonical) + "/."),
+                                 ("relative", os.path.relpath(str(canonical), str(cwd)))]
+                    physical_rel = os.path.relpath(str(physical), str(cwd))
+                    if physical_rel != spellings[-1][1]:
+                        spellings.append(("relative-physical", physical_rel))
+                    spellings += [("alias-{}".format(i), a) for i, a in enumerate(aliases)]
+                    if placement == "chained":
+                        spellings.append(("relative-chain", os.path.relpath(aliases[0], str(cwd))))
+                    for label, spelling in spellings:
+                        links, visited = _st_route_facts(cwd, spelling, depth)
+                        second = any(str(claimant) in visited for claimant in claimants)
+                        expected = ("refused" if second else "registered") if held else (
+                            "refused" if links else "detached")
+                        reads = []
+                        read_control = module._read_store_control
+
+                        def read(fd, rel):
+                            body = read_control(fd, rel)
+                            st = os.fstat(fd)
+                            reads.append(((st.st_dev, st.st_ino), rel, body))
+                            return body
+
+                        with patch.object(module, "_read_store_control", read):
+                            result = _st_graded(module, root, spelling, homes, cwd)
+                        got = _st_home_verdict(result, reads, root, rid)
+                        count += 1
+                        case = "{}/{}/homes-{}/{}/{}".format(placement, kind, homes, cwd, label)
+                        if got != expected:
+                            mismatches.append("{}: expected {}, got {}".format(case, expected, got))
+        finally:
+            if proc_fd is not None:
+                os.close(proc_fd)
     return count, mismatches
 
 
@@ -2343,55 +2391,62 @@ def _t_home_property(base, check):
     print("OPF-INGEST-APPLY HOME-PROPERTY: {} generated cases".format(total))
 
 
-# Round-5: the enumerative property runs in the plain self-test, over the full generated matrix.
+# The enumerative property runs in the plain self-test over the full declared matrix.
 TESTS += (("home-property", _t_home_property),)
 
 
-def _d_home_property_ancestors(kind):
-    """The per-edge ancestor walk, discriminated by the enumerative property restricted to starting
-    directories four or more levels below the store root (past the starting-ancestor probe). Dropping the
-    per-edge visits grades those relative routes detached while the canonical spelling refuses."""
+def _d_home_claim_ancestors(kind, starting=False):
+    """R2 needs both ancestor probes: the foreign claim is reached only by the selected probe."""
     def test(module, base_dir):
-        count, mismatches = _st_home_property(module, base_dir, kind,
-                                              placements=("staging", "legacy", "entry"), deep_only=True)
-        _revert_check(count and not mismatches, "gate/home-property-ancestors/" + kind)
+        root, rid, staged = _st_staged(base_dir, "claim-" + kind, kind)
+        run = root / _opf_import._import_run_locations(rid, 1)[0]
+        staged.rename(run)
+        foreign = base_dir / "foreign"
+        working = foreign / ".working"
+        deep = working / "d1" / "d2" / "d3" / "d4"
+        deep.mkdir(parents=True)
+        (working / "imports").symlink_to(run.parent)
+        link = deep / "L" if starting else working / "alt"
+        link.symlink_to(run.parent)
+        cwd = working if starting else deep
+        spelling = ("d1/d2/d3/d4/L/" if starting else "../../../../alt/") + rid
+        outcomes = []
+        for homes in (1, 2):
+            clean = _st_graded(module, root, run, homes)
+            result = _st_graded(module, root, spelling, homes, cwd)
+            outcomes.append(not clean["transaction-schema"][0]
+                            and not clean["transaction-schema"][1].startswith("cannot evaluate:")
+                            and all(not result[cid][0] and "ambiguous second store claim" in result[cid][1]
+                                    for cid in _ST_TXN))
+        identity = "gate/home-start-ancestors/" if starting else "gate/home-property-ancestors/"
+        _revert_check(all(outcomes), identity + kind)
     return test
 
 
+def _d_home_property_ancestors(kind):
+    return _d_home_claim_ancestors(kind)
+
+
+def _d_home_start_ancestors(kind):
+    return _d_home_claim_ancestors(kind, starting=True)
+
+
 def _d_home_property_holding(kind):
-    """The physical-holding refusal, discriminated by the enumerative property over the alias and holding
-    placements. Reverting it to a lexical traversed-edge intersection grades the in-store alias of a
-    symlinked home detached (the round-5 N2 regression) while the holding controls still pass."""
+    """The old seen-set restriction misses a second claim through the shared-ancestor alias."""
     def test(module, base_dir):
         count, mismatches = _st_home_property(
             module, base_dir, kind,
-            placements=("none", "in-store-alias", "external-link", "shared-ancestor"))
+            placements=("none", "same-root-alias", "shared-ancestor", "nested-shared"))
         _revert_check(count and not mismatches, "gate/home-property-holding/" + kind)
     return test
 
 
-def _d_home_start_ancestors(kind):
-    """The starting-ancestor probe still guards the shape the per-edge walk cannot see: a starting
-    directory within probe depth of a symlinked-home store while the route reaches the run only through an
-    unrelated deep link whose parent's physical ancestors never meet the store root."""
+def _d_home_rule(kind, rule):
     def test(module, base_dir):
-        root, rid, staged = _st_staged(base_dir, "start-" + kind, kind)
-        staging = root / _opf_store.STAGING_REL
-        elsewhere = base_dir / ("start-elsewhere-" + kind)
-        staging.rename(elsewhere)
-        staging.symlink_to(elsewhere)
-        deep = root / ".working" / "d1" / "d2" / "d3" / "d4"
-        deep.mkdir(parents=True)
-        (deep / "L").symlink_to(elsewhere)
-        error = _st_located(_ST_HOME_REFUSED.format(_opf_store.stage_run(kind, rid)))
-        outcomes = []
-        for homes in (1, 2):
-            canonical = _st_graded(module, root, staged, homes)
-            linked = _st_graded(module, root, "d1/d2/d3/d4/L/{}/{}".format(kind, rid), homes,
-                                root / ".working")
-            outcomes.append(all(result[cid] == (False, error) for result in (canonical, linked)
-                                for cid in _ST_TXN))
-        _revert_check(all(outcomes), "gate/home-start-ancestors/" + kind)
+        placements = (("chained", "external-root-out", "external-target", "proc-fd", "detached-alias")
+                      if rule == "unheld-link" else ("shared-ancestor", "nested-shared"))
+        count, mismatches = _st_home_property(module, base_dir, kind, placements=placements)
+        _revert_check(count and not mismatches, "gate/home-" + rule + "/" + kind)
     return test
 
 
@@ -2440,7 +2495,7 @@ def _d_home_search_only(kind, homes, case):
 
 
 def _d_home_external_symlink(kind, homes):
-    """An untraversed alternate home cannot change either spelling's established physical binding."""
+    """A visited second claimant refuses even without threading its registered location (literal R2)."""
     def test(module, base_dir):
         root, rid, run = _st_staged(base_dir, "external-" + kind, kind, corrupt=False)
         if homes == 1:
@@ -2454,8 +2509,13 @@ def _d_home_external_symlink(kind, homes):
         absolute = _st_graded(module, root, run, homes)
         relative = _st_graded(module, root, rid, homes, run.parent)
         through_link = _st_graded(module, root, str(link) + "/", homes)
-        _revert_check(absolute == relative == clean and all(clean[cid][0] for cid in _ST_TXN)
-                      and all(not through_link[cid][0] for cid in _ST_TXN),
+        depth = max(len(rel.split("/")) for gen in (1, 2)
+                    for rel in _opf_import._import_run_locations(rid, gen)) - 1
+        relative_claimed = len(run.parent.relative_to(base_dir).parts) <= depth
+        _revert_check(all(clean[cid][0] for cid in _ST_TXN)
+                      and all(not result[cid][0] for result in (absolute, through_link) for cid in _ST_TXN)
+                      and (all(not relative[cid][0] for cid in _ST_TXN) if relative_claimed
+                           else relative == clean),
                       "gate/home-external-symlink/{}/homes-{}".format(kind, homes))
     return test
 
@@ -3049,12 +3109,11 @@ _DISCRIMINATORS = tuple(
 ) + tuple(_probe_row(*row) for row in _POST_LAUNCH)
 
 
-# Round-4 class width: each case/kind/generation owns an assertion and a one-control reversal.
+# Round-4 cases remain; R1 now guards unheld relative paths independently of ancestor visits.
 _DISCRIMINATORS += tuple(
     ("gate/home-relative/{}/{}/homes-{}".format(case, kind, homes), "gate",
      _d_home_relative(kind, homes, case),
-     "                    visit_ancestors(cur, expanded)\n",
-     "                    pass  # reverted: per-edge ancestor visits\n")
+     "        if not held and expanded:\n", "        if False:  # reverted R1\n")
     for kind in ("import", "ingest") for homes in (1, 2)
     for case in ("staging", "staging-entry", "legacy", "legacy-entry")) + tuple(
     ("gate/home-search-only/{}/{}/homes-{}".format(case, kind, homes), "gate",
@@ -3064,8 +3123,7 @@ _DISCRIMINATORS += tuple(
     for case in ("detached", "canonical", "physical")) + tuple(
     ("gate/home-external-symlink/{}/homes-{}".format(kind, homes), "gate",
      _d_home_external_symlink(kind, homes),
-     "            if edges < expanded and (not held or all(step in seen for step in route)):\n",
-     "            if False:\n")
+     "        if held and reached:\n", "        if False:  # reverted R2\n")
     for kind in ("import", "ingest") for homes in (1, 2)) + tuple(
     ("gate/home-cwd-bound/{}/homes-{}".format(kind, homes), "gate",
      _d_home_cwd_bound(kind, homes), "else os.dup(rd.cwd_fd)", 'else os.open(".", flags)')
@@ -3075,22 +3133,48 @@ _DISCRIMINATORS += tuple(
     for kind in ("import", "ingest") for homes in (1, 2))
 
 
-# Round-5 class width: the enumerative property is the evidence, and each of its two closing controls (the
-# per-edge ancestor walk, the physical-holding refusal) has a reversal that turns the property RED at its
-# own assertion; the starting-ancestor probe keeps its own discriminating shape.
+# Reintroduce the exact round-5 unordered threading condition. Under literal R2 its defect is that it
+# can suppress a real second claim; F2 already has a second claim and refuses under either policy.
+_ST_SEEN_SET_REVERTED = '''        seen, old_reached = set(), []
+
+        def old_visit(dfd, edges):
+            seen.add(_fd_identity(dfd))
+            if _fd_identity(dfd) in roots:
+                return
+            for rel in rels:
+                route = []
+                try:
+                    parts = rel.split("/")
+                    for index in range(1, len(parts) + 1):
+                        st = os.stat("/".join(parts[:index]), dir_fd=dfd)
+                        route.append((st.st_dev, st.st_ino))
+                except (OSError, ValueError):
+                    continue
+                if route[-1] == run:
+                    old_reached.append((edges, tuple(route[:-1])))
+
+        _old_edges, old_total = _spelled_route(rd, old_visit, max(len(r.split("/")) for r in rels) - 1)
+        if held and any(e < old_total and all(step in seen for step in route)
+                        for e, route in old_reached):
+'''
+
+# Ancestor visits now discriminate held runs with second claims, not R1's unheld paths.
 _DISCRIMINATORS += tuple(
     ("gate/home-property-ancestors/" + kind, "gate", _d_home_property_ancestors(kind),
      "                    visit_ancestors(cur, expanded)\n",
      "                    pass  # reverted: per-edge ancestor visits\n")
     for kind in ("import", "ingest")) + tuple(
     ("gate/home-property-holding/" + kind, "gate", _d_home_property_holding(kind),
-     "            if edges < expanded and (not held or all(step in seen for step in route)):\n",
-     '            if edges < expanded and any(comp in rel.split("/") for _own, comp in traversed):\n')
+     "        if held and reached:\n", _ST_SEEN_SET_REVERTED)
     for kind in ("import", "ingest")) + tuple(
     ("gate/home-start-ancestors/" + kind, "gate", _d_home_start_ancestors(kind),
      "\n            visit_ancestors(cur, expanded)\n",
      "\n            pass  # reverted: starting-ancestor visits\n")
-    for kind in ("import", "ingest"))
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-" + rule + "/" + kind, "gate", _d_home_rule(kind, rule),
+     "        if not held and expanded:\n" if rule == "unheld-link" else "        if held and reached:\n",
+     "        if False:  # reverted fail-closed rule\n")
+    for kind in ("import", "ingest") for rule in ("unheld-link", "second-claim"))
 
 
 def _red_on_revert():

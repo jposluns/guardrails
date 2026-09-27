@@ -102,8 +102,8 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
                            archived (`.aiqt/import-archive/<run-id>/acceptance.json`) once state >= published.
                            Both store-root control paths are read beneath a store-root descriptor opened from
                            the run-dir descriptor using the validated generation's run homes and inode binding
-                           (only a path matching no registered home in any generation retains the legacy
-                           three-up fallback, bound to no store). A registered shape outside the supplied
+                           (only a symlink-free spelling of a run no registered home physically holds retains
+                           the legacy three-up fallback, bound to no store). A registered shape outside the supplied
                            generation is cannot-evaluate, including homes-1 grading of depth-four staging.
                            An invalid generation, or one unsupplied once homes 2 is supported, fails closed.
                            No-follow on EVERY component (_read_store_control): a
@@ -1681,18 +1681,11 @@ def _spelled_route(rd, visit, ancestor_depth):
     "/"), at most _ROUTE_SYMLINK_LIMIT times. The resolution must end at the opened run by (st_dev, st_ino).
     A component that no longer resolves, a non-directory, too many links, or a different final directory is
     a _GateError: the spelling changed since the run was opened, so its provenance cannot be established.
-    For a relative spelling, the retained starting directory's physical ancestors are visited up to
-    ancestor_depth: the starting directory may be below a store root whose registered home the remaining
-    route traverses. For EVERY traversed symlink edge, the physical ancestors of the directory holding the
-    edge are visited the same way, before the edge counts as expanded, so the edge is at-or-after each of
-    those visits. That per-edge walk reaches the store root of any registered home component the route
-    traverses, whatever the starting directory's depth: the shared location constructor
-    (_opf_import._import_run_locations) registers `.working/imports/<run-id>` (generation 1, three
-    components) and `.working/staging/<kind>/<run-id>` (generation 2, four components), so the directory
-    holding a registered location's deepest possible symlink component sits at most ancestor_depth (the
-    maximum registered depth minus one) levels below its store root, and that root is always among the
-    walked ancestors of the traversed edge's parent. Both ancestor walks are the run's own route ancestry
-    and fail closed: an ancestor that cannot be opened is a _GateError, never a silently narrower probe.
+    For a relative spelling, visit the retained starting directory's physical ancestors up to
+    ancestor_depth. Also visit the physical ancestors of every traversed symlink's parent. These visits
+    detect additional claims for physically held runs; they do NOT prove provenance or threading of a
+    registered location. An earlier symlink can put a later component outside the claiming root's physical
+    ancestry. Both ancestor walks fail closed on an unreadable ancestor.
     Return (the symlink edges actually traversed, keyed by (parent identity, entry name), and the total
     expansion count)."""
     flags = _DIR_ID_FLAGS
@@ -1759,29 +1752,17 @@ def _spelled_route(rd, visit, ancestor_depth):
 
 
 def _classify_run_homes(rd):
-    """Classify the opened run's store binding: {registered location: store-root descriptor} (the caller
-    closes them) for every location, of every generation the shared constructor
-    (_opf_import._import_run_locations) registers, that PHYSICALLY holds the run (_physical_home).
-    Provenance is descriptor-bound, never read from the spelling's suffix: the supplied spelling's own route
-    is re-resolved (_spelled_route) and, at every directory it passes through, at a relative spelling's
-    starting-directory physical ancestors, and at every traversed symlink edge's parent's physical
-    ancestors, each location is resolved as a string-path consumer resolves it (following symlinks).
-    Refusal is keyed to PHYSICAL HOLDING, never to the lexical identity of traversed edges. While NO
-    physical home holds the run, a visited directory that reaches the run through a registered location
-    refuses whenever the supplied route traversed any symlink edge at or after that visit: a store that
-    reaches the run only through symlinks (its home's own component, an in-store alias, or any other
-    linked route) is refused, never classified as detached. While a physical home DOES hold the run, the
-    physical binding is overridden only by demonstration: a directory that reaches the run through a
-    registered location, with no physical home of the run rooted at that directory, refuses only when the
-    route also visited every directory that location's own resolution passes through (it threaded that
-    location), so an ancestor alias, a shared-ancestor alias, or an alternate link whose resolution the
-    route did not thread never refuses a physically held run. This covers canonical, dotdot, "/.", trailing
-    "/", relative (from any starting depth) and ancestor-symlink spellings.
-    That string-path probe is SPECULATIVE (a directory the spelling merely passes through
-    may carry anything beneath it), so a probe that cannot resolve (absent, ENOTDIR, EACCES, ELOOP) is no
-    match and never fatal; only the run's own established route (_bind_run_name, _physical_home, the
-    spelling's own resolution, both ancestor walks) fails closed. A symlink on the route to the store ROOT,
-    above every registered component, is not on the home route and binds the physical store."""
+    """R1: an unheld run is detached only through a symlink-free supplied route. Any traversed symlink,
+    including a procfs fd magic link, makes an unheld route CANNOT-EVALUATE, without inferring provenance.
+    R2: a physically held run binds to its physical store unless another visited directory reaches it
+    through a registered location of a different root. That second claim is ambiguous even when the
+    spelling did not traverse the claimant's registered location. Visits include relative-start and
+    per-edge physical ancestors, bounded by the maximum registered location depth minus one.
+    A same-root alternate location is not a second claimant. An unresolvable speculative registered
+    location is no match; an error resolving the supplied route itself always fails closed.
+    Relative routes start at the retained cwd descriptor: historical links used to enter that cwd are
+    not part of the supplied spelling and cannot be recovered from the descriptor.
+    Return {registered location: physical store-root descriptor}; the caller closes the descriptors."""
     import _opf_import as imp
     run = _fd_identity(rd.fd)
     rels = []
@@ -1797,34 +1778,25 @@ def _classify_run_homes(rd):
                 held[rel] = fd
         roots = {_fd_identity(fd) for fd in held.values()}
 
-        seen = set()
         reached = []
 
         def visit(dfd, edges):
-            me = _fd_identity(dfd)
-            seen.add(me)
-            if me in roots:
-                # A store root that physically holds the run: its own record is the one read, so an
-                # additional symlinked location beneath the same root never refuses it.
+            if not held or _fd_identity(dfd) in roots:
                 return
             for rel in rels:
-                parts = rel.split("/")
-                route = []
                 try:
-                    for index in range(1, len(parts) + 1):
-                        st = os.stat("/".join(parts[:index]), dir_fd=dfd)
-                        route.append((st.st_dev, st.st_ino))
+                    st = os.stat(rel, dir_fd=dfd)
                 except (OSError, ValueError):
                     continue
-                if route[-1] == run:
-                    reached.append((edges, rel, tuple(route[:-1])))
+                if (st.st_dev, st.st_ino) == run:
+                    reached.append(rel)
 
         traversed, expanded = _spelled_route(rd, visit, max(len(rel.split("/")) for rel in rels) - 1)
-        for edges, rel, route in reached:
-            if edges < expanded and (not held or all(step in seen for step in route)):
-                raise _GateError("run path reaches the registered home {!r} through a symlink; that home "
-                                 "does not physically hold the run, so its store-root record would go "
-                                 "unread (refused, never classified as detached)".format(rel))
+        if not held and expanded:
+            raise _GateError("a run not held by a store must be named by a symlink-free path")
+        if held and reached:
+            raise _GateError("run has an ambiguous second store claim through registered location {!r}; "
+                             "a different visited root reaches the physically held run".format(reached[0]))
     except BaseException:
         for fd in held.values():
             os.close(fd)
@@ -1858,17 +1830,12 @@ def _registered_run_store_fd(rd, generation):
       its store-root transaction record goes unread. Restoration before re-classification instead refuses
       on the retained binding. A spelling through the missing component refuses when it cannot resolve.
       Path-based ancestry cannot close the remaining window without an atomic snapshot.
-    - A symlinked registered home can still grade detached when no physical registered home holds the run
-      AND the supplied route neither traverses any symlink nor visits any directory that reaches the run
-      through a registered location: a purely physical spelling of the run's real ancestry, or a starting
-      directory already inside the home symlink's target with a spelling that stays physical. Descriptors
-      do not record an untraversed symlink, and the ancestor walks reach only the physical ancestors of
-      the starting directory and of each traversed edge's parent (to the maximum registered depth minus
-      one), so a route whose traversed links all sit deeper than that below every such directory, and
-      which never otherwise visits one, is this same residual. A route that traverses a registered home's
-      own symlink component, from ANY starting depth, or an in-store alias resolving into the same
-      directories, is checked by the per-edge ancestor walk and the physical-holding rule; those are not
-      this residual. Speculative links outside the supplied route are not provenance.
+    - Detached only for symlink-free spellings of unheld runs. An untraversed registered-home symlink
+      cannot be discovered from a physical spelling or a cwd descriptor already inside its target.
+      Over-refusal cost: a detached copy spelled via a symlinked path such as a symlinked /tmp is refused.
+      A relative spelling starts from its retained physical cwd; links used by an earlier chdir are not
+      observable unless included in the supplied path. Callers needing that history must supply the
+      absolute logical spelling (including the cwd's symlink components).
     - A mount that re-roots the run's ancestry (a bind mount) is classified by the mounted ancestry, which is
       the only ancestry its descriptor has."""
     import _opf_import as imp
@@ -4666,10 +4633,8 @@ def _self_test():
             staging = alias_root / imp._opf_store.STAGING_REL
             os.rename(str(staging), str(elsewhere))
             os.symlink(str(elsewhere), str(staging))
-            spelled = ("cannot evaluate: cannot open the store root beneath the run dir no-follow (run path reaches "
-                       "the registered home {!r} through a symlink; that home does not physically hold the run, "
-                       "so its store-root record would go unread (refused, never classified as "
-                       "detached))".format(imp._opf_store.stage_run(kind, alias_run.name)))
+            spelled = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                       "(a run not held by a store must be named by a symlink-free path)")
             expect("txn-alias-symlinked-staging-cannot-" + kind, all(
                 graded_as(alias_run, None, homes)[cid] == (False, spelled)
                 for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
