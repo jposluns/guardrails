@@ -361,6 +361,21 @@ understand why it failed before considering any override. A security floor, a de
 floor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only
 through the maintainer's explicit, recorded authorization.
 
+Replacing or removing a control, a gate, a check, a hook, a validator, or another guard, is a set operation,
+so a replacement is treated as a reduction until its coverage is shown. Before such a change is dispatched
+for review or integrated, the threats or cases the outgoing control covered are enumerated from its own
+code, its tests, its specification, and its disclosed residual, never from a recollection of its purpose.
+Each enumerated case is then accounted for in one of three states: covered, shown by a reference to the
+replacement code that handles it and a case exercised against the replacement and observed to be caught;
+unreachable, shown by the change that removes the capability the case depends on and an observed attempt
+confirming the path is unavailable; or disclosed as no longer covered. A case disclosed as no longer covered
+is a reduction, and it lands only through the maintainer's explicit, recorded authorization. A case left in
+none of the three states is a silent reduction, and the change is not dispatched while one remains. The
+enumeration and its accounting are recorded with the change, so a verifier reproduces them rather than
+re-deriving the covered set. Where a case is covered by a surviving sibling control rather than by the
+replacement, that coverage is cited on the same evidence, and the lost overlap is weighed under the
+defence-in-depth-default rule rather than assumed free.
+
 A gate verdict is trusted only when it is read from the gate's own unmasked termination status, or from
 a structured terminal result bound to the exact revision under gate; a downstream pipeline's status, a
 truncated delivery, a textual success token, or a result for a different revision is not that verdict. A
@@ -548,6 +563,20 @@ indistinguishable from the suite's green alone. Before that green is trusted for
 the check executed, by observing it run or by a deliberate flip that shows it failing without the change, and
 prefer a runner that reports the count or identity of the checks it actually ran over a hand-maintained
 assertion that they are all present.
+
+A check that asserts an absence, that a finding is not raised, an error is not thrown, or an action is not
+taken, is held to a stricter form of that confirmation. Observing such a check run is not evidence that it
+guards the change, because an absence assertion passes both when the feature under test suppresses the
+outcome and when the input never reaches the path that would produce it. The check discriminates only when
+its input is one the feature under test changes, so that removing the feature makes the asserted outcome
+appear. Each such check is paired with a deliberate flip that removes or disables the feature, and it is
+observed to fail under that flip before its pass is trusted. A flip that yields only a build failure, an
+execution error, or an unrelated outcome establishes no discrimination; the flip counts only when the
+asserted outcome itself appears. Where the feature can be disabled within the suite, the pairing is kept as a
+durable companion case that asserts the outcome does appear without the feature, so a later change that stops
+the input reaching that path fails the suite rather than passing silently. This attaches to an absence check
+relied on as the check a change carries, not to an incidental negative assertion inside a check whose
+discrimination already rests on a positive assertion.
 
 ## Preserve compatibility or provide a migration path
 
