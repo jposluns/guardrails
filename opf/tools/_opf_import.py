@@ -910,9 +910,22 @@ def _worklog_ids(store_root_fd, machine_rel, roster=None, registered_vendors=fro
     to CANNOT-EVALUATE rather than being wrongly accepted."""
     import _opf_worklog
     try:
-        manifest = _read_toml(store_root_fd, machine_rel + "/" + _opf_store.MANIFEST_NAME)
+        manifest = _opf_worklog.read_manifest_at(store_root_fd, machine_rel)
         rel = _opf_worklog.source_relpath(machine_rel, manifest)
         data = _opf_worklog.load_worklog_at(store_root_fd, machine_rel, required=False)
+    except _opf_worklog.ManifestShapeError as exc:
+        if exc.missing:
+            raise _cannot("{}: the store manifest is absent; the storage layout cannot be determined "
+                          "(spec 9)".format(exc.relpath))
+        if exc.not_table:
+            # TOML cannot produce this shape. Retain the public manifest gate's
+            # refusal rather than the old private layout helper's AttributeError.
+            raise _cannot("store manifest is not VALID ({}: {})".format(
+                _opf_store.CANNOT_EVALUATE, exc))
+        raise _cannot("{}: storage layout None is unsupported; U7's inline active-store readers stage only "
+                      "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
+                      "partial inline read that would miss per-record ids or admit a phantom target)".format(
+                          exc.relpath))
     except _opf_store.StoreError as exc:
         raise _cannot(str(exc))
     except _journal.JournalError as exc:

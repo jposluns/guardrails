@@ -39,6 +39,34 @@ class ManifestReadError(WorklogError):
         self.relpath = relpath
 
 
+class ManifestShapeError(WorklogError):
+    """Absent or unidentifiable manifest; callers retain their legacy wording.
+
+    This is not a generation-1 selection. No worklog source may be inspected
+    after this exception. The default text matches load_manifest's findings.
+    """
+
+    def __init__(self, relpath, manifest):
+        self.relpath = relpath
+        self.missing = manifest is None
+        self.not_table = manifest is not None and not isinstance(manifest, dict)
+        message = (relpath + " vanished after discovery" if self.missing else
+                   "; ".join(_opf_store.validate_manifest(manifest).findings))
+        super().__init__(message)
+
+
+def read_manifest_at(root_fd, machine_rel):
+    """Read the generation authority once, refusing intake failure before routing."""
+    relpath = machine_rel + "/" + _opf_store.MANIFEST_NAME
+    try:
+        manifest = _opf_store._read_toml_contained(root_fd, relpath)
+    except _opf_store.StoreError as exc:
+        raise ManifestReadError(relpath, exc) from exc
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("opf"), dict):
+        raise ManifestShapeError(relpath, manifest)
+    return manifest
+
+
 def _valid_wl_ref(value):
     """Return (positive number, suffix or None), or None. WL-only extension."""
     if not isinstance(value, str):
@@ -139,13 +167,7 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
     This callback cannot change source selection or permit a generation-2 conflict.
     """
     try:
-        manifest_rel = machine_rel + "/" + _opf_store.MANIFEST_NAME
-        try:
-            manifest = _opf_store._read_toml_contained(root_fd, manifest_rel)
-        except _opf_store.StoreError as exc:
-            # The contained reader already names the failed manifest. Preserve
-            # that diagnostic; failure never licenses a legacy-source fallback.
-            raise ManifestReadError(manifest_rel, exc) from exc
+        manifest = read_manifest_at(root_fd, machine_rel)
         gen = generation(manifest)
         rel = source_relpath(machine_rel, manifest)
         other = machine_rel + "/" + (LEGACY_NAME if gen == 2 else DIRECTORY_NAME)

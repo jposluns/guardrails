@@ -240,6 +240,21 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, 
         got = _opf_worklog.load_worklog_at(
             store_root_fd, relpath.rsplit("/", 1)[0], required=False, with_raw=True,
             read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict)
+    except _opf_worklog.ManifestShapeError as exc:
+        raise ViewsError(str(exc) if exc.missing else "manifest is not valid: {}".format(exc))
+    except _opf_worklog.ManifestReadError as exc:
+        # U4's legacy manifest reader used a different non-regular-file label
+        # and exposed the parser's recursion message without U1's extra context.
+        message = str(exc)
+        exotic = (exc.relpath + " is present but is not a regular file "
+                  "(an exotic entry; fail-closed, never opened)")
+        if message == exotic:
+            message = (exc.relpath + " is present but is not a regular file "
+                       "(a FIFO, device, socket, or directory; fail-closed, never opened)")
+        cause = exc.__cause__
+        if isinstance(getattr(cause, "__context__", None), RecursionError):
+            message = "cannot parse {} ({})".format(exc.relpath, cause.__context__)
+        raise ViewsError(message) from exc
     except _opf_worklog.WorklogError as exc:
         raise ViewsError(str(exc))
     if got is None:

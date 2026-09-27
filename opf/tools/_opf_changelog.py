@@ -472,6 +472,12 @@ def _load_inputs(resolution, product_root):
             worklog_data = _opf_worklog.load_worklog_at(store_fd, resolution.machine_rel, required=False)
             manifest_data = _opf_store._read_toml_contained(
                 store_fd, resolution.machine_rel + "/" + _opf_store.MANIFEST_NAME)
+        except _opf_worklog.ManifestShapeError as exc:
+            message = ("manifest.toml is absent from the resolved store (a required "
+                       "input; fail-closed, spec 9)" if exc.missing else
+                       "manifest.toml does not validate against the manifest "
+                       "schema: {} (fail-closed, spec 4.5/9)".format(exc))
+            return None, None, None, frozenset(), message
         except (_opf_store.StoreError, OSError) as exc:
             # A StoreError (unreadable/unparseable) OR a raw OSError (e.g. a PermissionError from the
             # contained lstat inside _read_toml_contained) is the fail-closed cannot-evaluate (spec 3/7.1;

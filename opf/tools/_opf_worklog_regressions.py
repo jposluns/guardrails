@@ -195,6 +195,170 @@ def _manifest_read_regressions(check):
                   and attempted == [manifest_rel])
 
 
+def _manifest_intake_regressions(check):
+    """The post-resolution intake class, not just the last reported sibling.
+
+    Oracle: 32fcfbc2dba710eab3d03e53ad77fa754461fe50, _opf_store.py
+    _read_toml_contained/load_manifest/validate_manifest; _opf_views.py
+    _read_raw_and_parsed/plan_views; _opf_import.py _require_inline_layout;
+    _opf_changelog.py _load_inputs; _opf_check.py _validate_opened_store.
+    The old worklog-only helpers did not read a manifest: loader uses the
+    store manifest oracle. Non-table parser results are defensive seam tests.
+    Views had no single-link or 1-MiB store cap: those cases deliberately keep
+    U1's fail-closed refusal, NOT a claim of baseline diagnostic parity.
+    Primitive faults model the reader's branches; this is not a filesystem
+    race/hardlink enforcement test. Production parsing and translation run,
+    except for defensive non-table and deterministic parser-limit seams.
+    """
+    import _opf_init
+
+    p = "m/manifest.toml"
+    identify = "[opf].standard is absent or is not 'opf' (not identifiably a opf store)"
+    exotic = p + " is present but is not a regular file (an exotic entry; fail-closed, never opened)"
+    # Each row is (mode, fault boundary, injected value, literal U1 diagnostic).
+    cases = [
+        ("absent", "stat", None, None),
+        ("stat-permission", "stat", PermissionError("fixture stat denied"),
+         "cannot stat m/manifest.toml (fixture stat denied)"),
+        ("stat-journal", "stat", _journal.JournalError("fixture parent refused"),
+         "cannot stat m/manifest.toml (fixture parent refused)"),
+        ("unreadable", "read", PermissionError("fixture unreadable"),
+         "cannot read m/manifest.toml (fixture unreadable)"),
+        ("read-oserror", "read", OSError("fixture I/O error"),
+         "cannot read m/manifest.toml (fixture I/O error)"),
+        ("read-journal", "read", _journal.JournalError("fixture contained read refused"),
+         "cannot read m/manifest.toml (fixture contained read refused)"),
+        ("vanished-after-stat", "read",
+         _journal.JournalError("cannot read contained file 'm/manifest.toml' (fixture vanished)"),
+         "cannot read m/manifest.toml (cannot read contained file 'm/manifest.toml' (fixture vanished))"),
+        ("parent-symlink", "stat",
+         _journal.JournalError("cannot open contained directory component 'm' of 'm/manifest.toml' (fixture symlink)"),
+         "cannot stat m/manifest.toml (cannot open contained directory component 'm' of 'm/manifest.toml' (fixture symlink))"),
+        ("raced-symlink", "read",
+         _journal.JournalError("cannot read contained file 'm/manifest.toml' (fixture symlink)"),
+         "cannot read m/manifest.toml (cannot read contained file 'm/manifest.toml' (fixture symlink))"),
+        ("raced-special", "read",
+         _journal.JournalError("contained path 'm/manifest.toml' is not a regular file"),
+         "cannot read m/manifest.toml (contained path 'm/manifest.toml' is not a regular file)"),
+        ("hardlink", "read",
+         _journal.JournalError("contained control file 'm/manifest.toml' has 2 hard links; refusing to read a "
+                              "multiply-linked control file (a hardlink to an out-of-tree victim, never "
+                              "our singly-linked control file)"),
+         "cannot read m/manifest.toml (contained control file 'm/manifest.toml' has 2 hard links; refusing to read a "
+         "multiply-linked control file (a hardlink to an out-of-tree victim, never our singly-linked control file))"),
+        ("oversized", "size", 1048577,
+         "m/manifest.toml is 1048577 bytes, over the 1048576-byte store-read cap (fail-closed)"),
+        ("raced-store-cap", "read", b"#" + b" " * 1048576,
+         "m/manifest.toml read 1048577 bytes, over the 1048576-byte store-read cap "
+         "(a raced swap or growth past the pre-open size; fail-closed)"),
+        ("stream-cap", "read",
+         _journal.JournalError("contained file exceeds the 16777216-byte read cap (fail-closed)"),
+         "cannot read m/manifest.toml (contained file exceeds the 16777216-byte read cap (fail-closed))"),
+        ("malformed", "read", b"not TOML [",
+         "cannot parse m/manifest.toml (Expected '=' after a key in a key/value pair (at line 1, column 5))"),
+        ("non-utf8", "read", b"\xff",
+         "cannot parse m/manifest.toml ('utf-8' codec can't decode byte 0xff in position 0: invalid start byte)"),
+        ("parse-value", "parse", ValueError("fixture integer limit"),
+         "cannot parse m/manifest.toml (fixture integer limit)"),
+        ("parse-recursion", "parse", RecursionError("fixture nesting limit"),
+         "cannot parse m/manifest.toml (input nesting is too deep; present but unparseable): fixture nesting limit"),
+        ("top-level-type", "parse", [], "manifest is not a table"),
+        ("opf-absent", "read", b"schema = 1\n", identify),
+        ("opf-not-table", "read", b"opf = 1\n", identify),
+    ]
+    for mode, bits in (("symlink", stat.S_IFLNK), ("fifo", stat.S_IFIFO),
+                       ("socket", stat.S_IFSOCK), ("directory", stat.S_IFDIR),
+                       ("block-device", stat.S_IFBLK), ("char-device", stat.S_IFCHR)):
+        cases.append((mode, "stat", SimpleNamespace(st_mode=bits, st_size=0), exotic))
+
+    for mode, phase, value, message in cases:
+        expected = dict.fromkeys(("loader", "views", "import", "changelog", "absorb"), message)
+        expected["doctor"] = ["cannot read {}: {}".format(p, message)]
+        if mode == "absent":
+            expected.update(
+                loader=p + " vanished after discovery",
+                views=p + " vanished after discovery",
+                import_=p + ": the store manifest is absent; the storage layout cannot be determined (spec 9)",
+                changelog="manifest.toml is absent from the resolved store (a required input; fail-closed, spec 9)",
+                doctor=[p + " is absent (the store manifest is required; spec 4.5)"])
+            expected["import"] = expected.pop("import_")
+            expected["absorb"] = expected["changelog"]
+        elif mode in ("top-level-type", "opf-absent", "opf-not-table"):
+            expected["views"] = "manifest is not valid: " + message
+            expected["changelog"] = ("manifest.toml does not validate against the manifest schema: "
+                                     + message + " (fail-closed, spec 4.5/9)")
+            expected["absorb"] = expected["changelog"]
+            expected["doctor"] = [p + ": " + message]
+            expected["import"] = (
+                "store manifest is not VALID (CANNOT-EVALUATE: manifest is not a table)"
+                if mode == "top-level-type" else
+                "m/manifest.toml: storage layout None is unsupported; U7's inline active-store readers stage only "
+                "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
+                "partial inline read that would miss per-record ids or admit a phantom target)")
+        elif message == exotic:
+            expected["views"] = (p + " is present but is not a regular file "
+                                 "(a FIFO, device, socket, or directory; fail-closed, never opened)")
+        elif mode == "parse-recursion":
+            expected["views"] = "cannot parse m/manifest.toml (fixture nesting limit)"
+
+        for caller, baseline in expected.items():
+            label = "F1-manifest-{}-{}".format(mode, caller)
+            with _Fixture() as fx:
+                fx.files[p] = _opf_init.build_manifest().encode("utf-8")
+                observed = _opf_store._read_toml_contained(fx.fd, p)
+                check(label + "-validated",
+                      fx.res.status == _opf_store.RESOLVED
+                      and _opf_store.validate_manifest(observed).status == _opf_store.VALID
+                      and wl.generation(observed) == 1 and "worklog" not in observed["opf"])
+                armed, attempted = False, []
+                original_load = wl.load_worklog_at
+                original_parse = _opf_store.tomllib.loads
+
+                def result(item):
+                    if isinstance(item, Exception):
+                        raise item
+                    return item
+
+                def probe(fd, rel):
+                    path = fx.path(fd, rel)
+                    if armed:
+                        attempted.append(path)
+                    return armed and path == p
+
+                def lstat(fd, rel):
+                    if probe(fd, rel):
+                        if phase == "stat":
+                            return result(value)
+                        if phase == "size":
+                            return SimpleNamespace(st_mode=stat.S_IFREG, st_size=value)
+                    return fx.lstat(fd, rel)
+
+                def read(fd, rel, **kwargs):
+                    if probe(fd, rel) and phase == "read":
+                        return result(value), fx.lstat(fd, rel)
+                    return fx.read(fd, rel, **kwargs)
+
+                def parse(raw, **kwargs):
+                    if armed and phase == "parse" and raw == fx.files[p].decode("utf-8"):
+                        return result(value)
+                    return original_parse(raw, **kwargs)
+
+                def load_after_resolution(*args, **kwargs):
+                    nonlocal armed
+                    armed = True
+                    return original_load(*args, **kwargs)
+
+                readers = _readers(fx)
+                readers["doctor"] = lambda: _doctor(fx)
+                with patch.object(_journal, "_lstat_contained", side_effect=lstat), \
+                        patch.object(_journal, "_read_contained", side_effect=read), \
+                        patch.object(_opf_store.tomllib, "loads", side_effect=parse), \
+                        patch.object(wl, "load_worklog_at", side_effect=load_after_resolution) as intake:
+                    actual = readers[caller]()
+                check(label, actual == baseline and intake.call_count == 1
+                      and bool(attempted) and set(attempted) == {p})
+
+
 def _upgrade_preflight_regressions(check, fence):
     """Exercise both upgrade origins through the CLI, with real git/store bytes.
 
@@ -366,6 +530,7 @@ def self_test():
                 check("F1-optional-loader-missing", wl.load_worklog_at(fx.fd, M, required=False) is None)
 
     _manifest_read_regressions(check)
+    _manifest_intake_regressions(check)
 
     archive_parse = ("cannot parse m/archive/2026/worklog.toml "
                      "(Expected '=' after a key in a key/value pair (at line 1, column 5))")
