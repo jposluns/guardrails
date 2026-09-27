@@ -3367,26 +3367,53 @@ _REVERT_UNIT_BOUNDARIES = {
 }
 
 
-# Declared outcome sets, independent of observed flips. None means every invocation of that named
-# gate check; apply contracts name the zero-based call ordinal as well as its outcome. A returned bit
-# covers an escaping call that cannot provide result fields. The fixture's oracle and call alignment
-# still need review: this guard cannot establish that an author chose the right asserted contract.
+# Declared outcome sets, independent of observed flips: (call ordinal, check id, expected baseline bit).
+# Each gate row names a protected call, never a clean setup/control call. None/wildcard ordinals are
+# forbidden. One representative protected call suffices; this does not prove every fixture assertion
+# discriminates. The fixture's oracle, representative selection and call alignment still need review.
 _REVERT_ASSERTED = {
-    identity: tuple((None, cid) for cid in _ST_TXN)
-    for identity, key, *_rest in _DISCRIMINATORS if key == "gate"
+    "gate/transaction-generation-required": tuple((0, cid, False) for cid in _ST_TXN),
+    "path/canonical-contained": ((0, "refused", True),),
+    "allocation/journal-lock-required": ((0, "refused", True),),
 }
-_REVERT_ASSERTED.update({identity: ((None, "refused"),) for identity in _REVERT_UNIT_BOUNDARIES})
+for _kind in ("import", "ingest"):
+    for _case, _call, _expected, _checks in (
+        ("staged-run-store-depth", 0, False, ("transaction-schema",)),
+        ("staging-generation-mismatch", 0, False, _ST_TXN),
+        ("staging-alias", 0, False, _ST_TXN),  # legacy alias refusal
+        ("run-name-bound", 0, False, ("staged-run-structure",)),
+        ("home-symlink-route", 0, False, _ST_TXN),
+        ("home-speculative", 3, True, _ST_TXN),  # obstructed homes-2, after clean calls
+        ("home-rename-at-lookup", 0, False, _ST_TXN),
+        ("home-retained", 0, False, _ST_TXN),
+        ("home-property-ancestors", 1, False, _ST_TXN),  # claimed spelling after clean
+        # none: 64 calls; same-root-alias: 80; shared-ancestor's first alias: offset 4.
+        ("home-property-holding", 148, False, _ST_TXN),
+        ("home-start-ancestors", 1, False, _ST_TXN),
+        ("home-unheld-link", 0, False, _ST_TXN),  # chained canonical route
+        ("home-second-claim", 4, False, _ST_TXN),  # shared-ancestor's first alias
+        ("home-unheld-relative", 0, False, _ST_TXN),
+    ):
+        _REVERT_ASSERTED["gate/" + _case + "/" + _kind] = tuple(
+            (_call, cid, _expected) for cid in _checks)
+    # _RunDir setup makes physical-home calls 0..2; call 3 is the direct mismatch probe.
+    _REVERT_ASSERTED["gate/home-rename-at-lookup/" + _kind + "/isolated"] = ((3, "refused", True),)
+    for _rule in ("property-holding", "second-claim"):
+        _REVERT_ASSERTED["gate/home-" + _rule + "/" + _kind + "/isolated"] = tuple(
+            (1, cid, False) for cid in _ST_TXN)
+    for _homes in (1, 2):
+        for _case in ("staging", "staging-entry", "legacy", "legacy-entry"):
+            _REVERT_ASSERTED["gate/home-relative/{}/{}/homes-{}".format(_case, _kind, _homes)] = tuple(
+                (1, cid, False) for cid in _ST_TXN)  # relative refused spelling
+        for _case in ("detached", "canonical", "physical"):
+            _REVERT_ASSERTED["gate/home-search-only/{}/{}/homes-{}".format(_case, _kind, _homes)] = tuple(
+                (1, cid, True) for cid in _ST_TXN)  # restricted call, not clean control
+        for _case, _expected in (("external-symlink", False), ("cwd-bound", True), ("restore", False)):
+            _REVERT_ASSERTED["gate/home-{}/{}/homes-{}".format(_case, _kind, _homes)] = tuple(
+                (1, cid, _expected) for cid in _ST_TXN)
 _REVERT_ASSERTED.update({
-    "gate/run-name-bound/" + kind: ((None, "staged-run-structure"),)
-    for kind in ("import", "ingest")
-})
-_REVERT_ASSERTED.update({
-    "gate/staged-run-store-depth/" + kind: ((None, "transaction-schema"),)
-    for kind in ("import", "ingest")
-})
-_REVERT_ASSERTED.update({
-    "acceptance/reject-refused": ((0, "promoted=False"), (0, "outcome=rejected")),
-    "per-record/inline-required": ((0, "promoted=False"), (0, "verdict=" + str(CANNOT_EVALUATE))),
+    "acceptance/reject-refused": ((0, "promoted=False", True), (0, "outcome=rejected", True)),
+    "per-record/inline-required": ((0, "promoted=False", True), (0, "verdict=" + str(CANNOT_EVALUATE), True)),
 })
 # Each listed apply row asserts this outcome on this call; incidental flips on setup or earlier
 # interrupted calls cannot stand in for the re-apply/no-op contract.
@@ -3412,7 +3439,7 @@ for _call, _outcome, _identities in (
         "cleanup/root-close-call-not-aborted", "cleanup/root-close-call-diagnostic-not-aborted")),
 ):
     for _identity in _identities:
-        _REVERT_ASSERTED[_identity] = ((_call, "returned"), (_call, "outcome=" + _outcome))
+        _REVERT_ASSERTED[_identity] = ((_call, "returned", True), (_call, "outcome=" + _outcome, True))
         if _identity in _GUARD_EXECUTION:
             _REVERT_ASSERTED[_identity + "/isolated"] = _REVERT_ASSERTED[_identity]
 
@@ -3466,28 +3493,32 @@ def _revert_trace(module, key, identity, trace):
 
 
 def _revert_boolean_witness(identity, baseline, mutant, safety, asserted):
-    """Require a flip inside the declared outcome set; missing calls/checks are not flips."""
+    """Require the declared call and flip direction; missing calls/checks are not flips."""
     if (not isinstance(asserted, tuple) or not asserted
-            or any(not isinstance(item, tuple) or len(item) != 2
-                   or not (item[0] is None or type(item[0]) is int and item[0] >= 0)
-                   or not isinstance(item[1], str) or not item[1] for item in asserted)
-            or len(set(asserted)) != len(asserted)):
+            or any(not isinstance(item, tuple) or len(item) != 3
+                   or type(item[0]) is not int or item[0] < 0
+                   or not isinstance(item[1], str) or not item[1]
+                   or type(item[2]) is not bool for item in asserted)
+            or len({item[:2] for item in asserted}) != len(asserted)):
         raise RuntimeError("malformed asserted outcome set: " + identity)
     for trace in (baseline, mutant):
         if any(type(bit) is not bool for call in trace for bit in call.values()):
             raise RuntimeError("non-Boolean outcome evidence: " + identity)
-    if any(not any((ordinal is None or ordinal == index) and cid in call
-                   for index, call in enumerate(baseline)) for ordinal, cid in asserted):
-        raise RuntimeError("unobserved asserted outcome: " + identity)
+    if any(not any(ordinal == index and call.get(cid) is expected
+                   for index, call in enumerate(baseline)) for ordinal, cid, expected in asserted):
+        raise RuntimeError("unobserved asserted baseline outcome: " + identity)
     changed = [(index, cid, before[cid], after[cid])
                for index, (before, after) in enumerate(zip(baseline, mutant))
                for cid in sorted(before.keys() & after.keys()) if before[cid] is not after[cid]]
     flips = ["{}:{}:{}->{}".format(*item) for item in changed]
-    witnesses = [flip for flip, (index, cid, _before, _after) in zip(flips, changed)
-                 if (index, cid) in asserted or (None, cid) in asserted]
+    witnesses = [flip for flip, (index, cid, before, _after) in zip(flips, changed)
+                 if (index, cid, before) in asserted]
     if safety and not witnesses:
         raise RuntimeError("safety row has no asserted Boolean outcome flip: {}; all_flips={}".format(
             identity, ",".join(flips) or "none"))
+    if not safety and witnesses:
+        raise RuntimeError("guard-execution row has an asserted Boolean outcome flip; reclassify as safety: "
+                           + identity)
     return flips, witnesses
 
 
@@ -3495,7 +3526,7 @@ def _t_revert_boolean_guard(_base, check):
     """Negative controls use the same observer and refusing gate as the real mutation harness."""
     from types import SimpleNamespace
     traces = []
-    asserted = ((0, "check"),)
+    asserted = ((0, "check", False),)
     for ok, unrelated, detail in ((False, False, "guard diagnostic"),
                                   (False, False, "different diagnostic"),
                                   (True, False, "different diagnostic"),
@@ -3509,12 +3540,22 @@ def _t_revert_boolean_guard(_base, check):
         traces.append(trace)
     check("Boolean-flip-control", bool(_revert_boolean_witness(
         "control", traces[0], traces[2], True, asserted)[1]))
-    for label, mutant in (("diagnostic-only", traces[1]), ("incidental-only", traces[3]),
-                          ("wrong-call", traces[0] + traces[2]), ("missing", []),
-                          ("missing-check", [{}]), ("non-Boolean", [{"check": 0}])):
+    for label, baseline, mutant, safety, declaration in (
+        ("diagnostic-only", traces[0], traces[1], True, asserted),
+        ("incidental-only", traces[0], traces[3], True, asserted),
+        ("extra-call", traces[0], traces[0] + traces[2], True, asserted),
+        ("wrong-call", traces[0] + traces[0], traces[0] + traces[2], True, asserted),
+        ("clean-control-only", traces[2] + traces[0], traces[0] + traces[0],
+         True, ((1, "check", False),)),
+        ("wrong-direction", traces[2], traces[0], True, asserted),
+        ("guard-execution-flip", traces[0], traces[2], False, asserted),
+        ("missing", traces[0], [], True, asserted),
+        ("missing-check", traces[0], [{}], True, asserted),
+        ("non-Boolean", traces[0], [{"check": 0}], True, asserted),
+    ):
         refused = False
         try:
-            _revert_boolean_witness("control", traces[0], mutant, True, asserted)
+            _revert_boolean_witness("control", baseline, mutant, safety, declaration)
         except RuntimeError as exc:
             refused = True
             if label == "incidental-only":
@@ -3523,12 +3564,22 @@ def _t_revert_boolean_guard(_base, check):
         check("Boolean-refuses-" + label, refused)
     check("Boolean-guard-execution", not _revert_boolean_witness(
         "control", traces[0], traces[1], False, asserted)[1])
-    for declaration in ((), ((0, "absent"),), ((1, "check"),), ((True, "check"),)):
+    for declaration, reason in (
+        ((), "malformed"),
+        (((0, "absent", False),), "unobserved"),
+        (((1, "check", False),), "unobserved"),
+        (((None, "check", False),), "malformed"),
+        (((True, "check", False),), "malformed"),
+        (((-1, "check", False),), "malformed"),
+        (((0, "check"),), "malformed"),
+        (((0, "check", 0),), "malformed"),
+        (((0, "check", False), (0, "check", True)), "malformed"),
+    ):
         refused = False
         try:
             _revert_boolean_witness("control", traces[0], traces[2], True, declaration)
-        except RuntimeError:
-            refused = True
+        except RuntimeError as exc:
+            refused = str(exc).startswith(reason + " asserted")
         check("Boolean-refuses-declaration-" + repr(declaration), refused)
     for bad in ({}, {"check": (0, "diagnostic")}, {"check": False}):
         module = SimpleNamespace(EXPECTED_CHECKS=("check",), check_staged_run=lambda: bad)
@@ -3540,14 +3591,47 @@ def _t_revert_boolean_guard(_base, check):
             refused = True
         check("Boolean-refuses-malformed-" + repr(bad), refused)
 
+    # Exercise apply's real projection, including an escape that supplies only the returned bit.
+    apply_traces = []
+    for outcome in ("rejected", "promoted", "escape"):
+        def apply():
+            if outcome == "escape":
+                raise RuntimeError("control escape")
+            return SimpleNamespace(promoted=outcome == "promoted",
+                                   verdict=FINDING if outcome == "rejected" else CLEAN, outcome=outcome)
+
+        module = SimpleNamespace(apply_ingest=apply)
+        trace = []
+        with _revert_trace(module, "apply", "control", trace):
+            try:
+                module.apply_ingest()
+            except RuntimeError as exc:
+                if outcome != "escape" or str(exc) != "control escape":
+                    raise
+        apply_traces.append(trace)
+    check("Boolean-apply-projection", apply_traces[0] == [{
+        "returned": True, "promoted=True": False, "promoted=False": True, "promoted=None": False,
+        "verdict=" + str(CLEAN): False, "verdict=" + str(FINDING): True,
+        "verdict=" + str(CANNOT_EVALUATE): False,
+        "outcome=promoted": False, "outcome=aborted": False, "outcome=rejected": True,
+        "outcome=indeterminate": False, "outcome=noop_already_complete": False,
+    }])
+    check("Boolean-apply-witness", _revert_boolean_witness(
+        "control", apply_traces[0], apply_traces[1], True, ((0, "outcome=rejected", True),))[1]
+        == ["0:outcome=rejected:True->False"])
+    check("Boolean-apply-escape-projection", apply_traces[2] == [{"returned": False}])
+    check("Boolean-apply-escape-witness", _revert_boolean_witness(
+        "control", apply_traces[0], apply_traces[2], True, ((0, "returned", True),))[1]
+        == ["0:returned:True->False"])
+
 
 TESTS += (("revert-boolean-guard", _t_revert_boolean_guard),)
 
 
 def _red_on_revert():
     """Run the discriminators in a private temporary tree. Return 0 when every guard reverts to RED and
-    restores to PASS; refuse a safety row without an asserted Boolean flip, a survived reversal, a wrong assertion,
-    or a non-unique mutation target."""
+    restores to PASS; refuse a safety row without an asserted Boolean flip, a guard-execution row with one,
+    a survived reversal, a wrong assertion, or a non-unique mutation target."""
     import shutil
     import tempfile
     here = Path(__file__).resolve().parent
@@ -3627,7 +3711,7 @@ def _red_on_revert():
             print("RED-ON-REVERT", identity, "assertion=" + identity, "class=" + kind,
                   "baseline=" + ("stripped:" + "+".join(strips) if strips else "pristine"), "restored=PASS",
                   "boolean_flip=" + ("yes" if flips else "no"),
-                  "asserted=" + ",".join("{}:{}".format("*" if i is None else i, cid) for i, cid in asserted),
+                  "asserted=" + ",".join("{}:{}:{}".format(i, cid, expected) for i, cid, expected in asserted),
                   "boolean_flips=" + (",".join(flips) or "none"),
                   "boolean_witness=" + (",".join(witnesses) or "none"), "candidate_sha256=" + digest)
             ran.append(identity)
