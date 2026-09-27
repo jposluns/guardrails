@@ -604,72 +604,322 @@ def _fixture_wait(pid, flags):
         raise ChildStatusUnavailable("cannot collect fixture status: " + str(exc)) from exc
 
 
-def _run_fixture_process(argv, *, timeout=120, cwd=None, env=None):
-    """Capture bytes and a raw wait status without subprocess wait/poll/communicate.
+def _fixture_signal(pid, signum, pidfd=None, *, group=True):
+    """The sole numeric signal boundary. ECHILD never licenses a signal.
 
-    Temporary files avoid pipe backpressure while the parent waits. No caller signal
-    state is borrowed. Timeout cleanup uses WNOWAIT before signalling; as in run_bounded,
-    a concurrent reaper between that probe and kill remains outside the cleanup contract.
-    This is a trusted self-test harness, not a hostile-code sandbox.
+    pidfds pin individual targets. Group signals need an unreaped leader and
+    WNOWAIT; concurrent foreign waiters remain outside this trusted test contract.
     """
+    import os
+    import signal
+
+    def owned():
+        try:
+            os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return False
+        return True
+
+    if not owned():
+        return False
+    if group and os.getpgid(pid) == pid:
+        try:
+            os.killpg(pid, signum)
+        except ProcessLookupError:
+            pass
+    if not owned():  # a hook/foreign reaper may have run during killpg
+        return False
+    try:
+        if pidfd is not None:
+            signal.pidfd_send_signal(pidfd, signum)
+        else:
+            os.kill(pid, signum)
+    except ProcessLookupError:
+        pass
+    return True
+
+
+def _fixture_pidfd(pid):
+    import errno
+    import os
+    import signal
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        return None
+    try:
+        return os.pidfd_open(pid)
+    except OSError as exc:
+        if exc.errno in (errno.ENOSYS, errno.EINVAL, errno.ESRCH):
+            return None
+        raise
+
+
+def _fixture_subreaper():
+    """Refuse before launching a subject without Linux subreaper support."""
+    import ctypes
+    import sys
+    if sys.platform != "linux":
+        raise ChildStatusUnavailable("fixture trees require Linux child subreaping")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
+    value = ctypes.c_int()
+    if libc.prctl(37, ctypes.byref(value), 0, 0, 0) != 0 or value.value != 1:
+        raise ChildStatusUnavailable("cannot confirm child subreaping")
+
+
+def _fixture_drain(subject, subject_fd=None):
+    """Dedicated single-threaded subreaper: every child belongs to this fixture.
+
+    Kill groups BEFORE reaping leaders, then collect adopted descendants, including
+    nested guardians and descendants in other sessions. Only kernel ECHILD proves
+    completion. /proc read failures refuse; an empty snapshot is not completion.
+    SIGKILL/reap requires kernel progress. Subjects attacking their guardian are
+    outside this trusted harness's contract.
+    """
+    import os
+    import signal
+    from pathlib import Path
+    status = None
+    children = Path("/proc/self/task/{}/children".format(os.getpid()))
+    while True:
+        try:
+            os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return status
+        pids = [int(token) for token in children.read_text(encoding="ascii").split()]
+        if not pids:
+            raise ChildStatusUnavailable("child census disagrees with waitid")
+        for pid in pids:
+            fd = subject_fd if pid == subject else _fixture_pidfd(pid)
+            try:
+                if not _fixture_signal(pid, signal.SIGKILL, fd):
+                    raise ChildStatusUnavailable("lost descendant ownership")
+                waited, raw = os.waitpid(pid, 0)
+                if waited != pid:
+                    raise ChildStatusUnavailable("unexpected descendant wait PID")
+                if pid == subject:
+                    status = raw
+            finally:
+                if fd is not None and fd != subject_fd:
+                    os.close(fd)
+
+
+class _FixtureProcess:
+    """Shared fork/exec tree owner. No caller signal state is borrowed.
+
+    The caller owns a guardian; the guardian alone launches/owns the subject tree.
+    READY/GO separates startup (no subject exists, so killing the guardian is safe)
+    from supervision (control-channel EOF requests tree cleanup). The guardian
+    records status only AFTER tree cleanup reaches ECHILD. Its subreaper flag is
+    private; the caller's SIGCHLD, masks, timers and subreaper flag stay untouched.
+    Parent-side fork callbacks and uninterruptible kernel waits remain unbounded.
+    """
+    def __init__(self, deadline):
+        import socket
+        import tempfile
+        self.deadline = deadline
+        self.pid = self.pidfd = self.status = None
+        self.armed = self.collected = self.timed_out = False
+        self.control, self.peer = socket.socketpair()
+        try:
+            self.report = tempfile.TemporaryFile()
+        except BaseException:
+            self.control.close()
+            self.peer.close()
+            raise
+
+    def start(self):
+        try:
+            return self._start()
+        except BaseException:
+            self.close()
+            raise
+
+    def _start(self):
+        import json
+        import os
+        import select
+        import signal
+        import sys
+        import time
+        if sys.platform != "linux" or not all(
+                hasattr(os, name) for name in ("fork", "waitid", "WNOWAIT", "P_ALL")):
+            raise ChildStatusUnavailable("Linux fork/waitid/subreaping required")
+        if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+            raise ChildStatusUnavailable("unowned SIGCHLD disposition")
+        pid = os.fork()
+        if pid == 0:
+            self.control.close()
+            subject = subject_fd = None
+            try:
+                os.setpgid(0, 0)
+                _fixture_subreaper()
+                os.write(self.peer.fileno(), b"R")
+                if os.read(self.peer.fileno(), 1) != b"G":
+                    os._exit(0)  # cancelled before GO: no subject exists
+                subject = os.fork()
+                if subject == 0:
+                    self.peer.close()
+                    self.report.close()
+                    os.setpgid(0, 0)
+                    return 0
+                os.setpgid(subject, subject)
+                subject_fd = _fixture_pidfd(subject)
+                self.peer.setblocking(False)
+                timed_out = False
+                while True:
+                    ended = os.waitid(os.P_PID, subject, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    if ended is not None:
+                        break
+                    if time.monotonic() >= self.deadline:
+                        timed_out = True
+                        break
+                    try:
+                        if not os.read(self.peer.fileno(), 1):
+                            break
+                        raise ChildStatusUnavailable("unexpected guardian control byte")
+                    except BlockingIOError:
+                        pass
+                    time.sleep(0.005)
+                status = _fixture_drain(subject, subject_fd)
+                subject = None
+                if subject_fd is not None:
+                    os.close(subject_fd)
+                    subject_fd = None
+                if status is None:
+                    raise ChildStatusUnavailable("subject status unavailable")
+                self.report.write(json.dumps([status, timed_out]).encode("ascii"))
+                self.report.flush()
+                os._exit(0)
+            except BaseException:
+                try:
+                    if subject is not None:
+                        _fixture_drain(subject, subject_fd)
+                finally:
+                    if subject_fd is not None:
+                        os.close(subject_fd)
+                    os._exit(125)
+        self.pid = pid
+        self.peer.close()
+        self.pidfd = _fixture_pidfd(pid)
+        os.setpgid(pid, pid)
+        self.control.setblocking(False)
+        poller = select.poll()
+        poller.register(self.control, select.POLLIN | select.POLLHUP | select.POLLERR)
+        while time.monotonic() < self.deadline:
+            if poller.poll(5):
+                if os.read(self.control.fileno(), 1) != b"R":
+                    raise ChildStatusUnavailable("guardian failed before READY")
+                if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+                    raise ChildStatusUnavailable("SIGCHLD changed during launch")
+                self.armed = True
+                os.write(self.control.fileno(), b"G")
+                return pid
+        self.timed_out = True
+        raise TimeoutError("fixture startup deadline")
+
+    def poll(self):
+        import os
+        if self.collected:
+            return self.status
+        waited, raw = _fixture_wait(self.pid, os.WNOHANG)
+        if waited == 0:
+            return None
+        if waited != self.pid:
+            raise ChildStatusUnavailable("unexpected guardian wait PID")
+        self.collected = True
+        self._read_report(raw)
+        return self.status
+
+    def _read_report(self, raw):
+        import json
+        import os
+        if not os.WIFEXITED(raw) or os.WEXITSTATUS(raw) != 0:
+            raise ChildStatusUnavailable("fixture guardian failed")
+        self.report.seek(0)
+        try:
+            result = json.loads(self.report.read())
+        except (ValueError, UnicodeError) as exc:
+            raise ChildStatusUnavailable("missing tree-cleanup receipt") from exc
+        if (not isinstance(result, list) or len(result) != 2
+                or type(result[0]) is not int or type(result[1]) is not bool):
+            raise ChildStatusUnavailable("malformed tree-cleanup receipt")
+        self.status, self.timed_out = result
+
+    def close(self):
+        import os
+        import signal
+        self.control.close()  # cancellation addresses this guardian, never a stale PID
+        self.peer.close()
+        try:
+            if self.pid is not None and not self.collected:
+                if not self.armed:
+                    _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                try:
+                    waited, raw = os.waitpid(self.pid, 0)
+                except ChildProcessError as exc:
+                    self.collected = True
+                    raise ChildStatusUnavailable("guardian ownership lost") from exc
+                self.collected = True
+                if waited != self.pid:
+                    raise ChildStatusUnavailable("unexpected guardian cleanup PID")
+                if self.armed:
+                    self._read_report(raw)
+        finally:
+            if self.pidfd is not None:
+                os.close(self.pidfd)
+                self.pidfd = None
+            self.report.close()
+
+
+def _run_fixture_process(argv, *, timeout=120, cwd=None, env=None):
+    """Capture output and raw subject status through the shared tree owner."""
+    import math
     import os
     import signal
     import subprocess
     import tempfile
     import time
-    import math
     if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
-        raise ChildStatusUnavailable("cannot collect fixture status: unowned SIGCHLD disposition")
+        raise ChildStatusUnavailable("unowned SIGCHLD disposition")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise ValueError("fixture timeout must be finite and positive")
     timeout = float(timeout)
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("fixture timeout must be finite and positive")
-    if not all(hasattr(os, n) for n in ("waitid", "WNOWAIT", "P_PID")):
-        raise ChildStatusUnavailable("fixture supervision requires waitid/WNOWAIT")
-
-    class RawChild(subprocess.Popen):
-        # Only this collector reaps. No destructor poll or deferred implicit reap.
-        def __del__(self):
-            pass
-
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        deadline = time.monotonic() + timeout
-        child = RawChild(argv, stdout=out, stderr=err, cwd=cwd, env=env)
+        child = _FixtureProcess(time.monotonic() + timeout)
         try:
-            while True:
-                pid, status = _fixture_wait(child.pid, os.WNOHANG)
-                if pid == child.pid:
-                    child.returncode = os.waitstatus_to_exitcode(status)
-                    break
-                if pid != 0:
-                    raise ChildStatusUnavailable("unexpected fixture wait PID")
-                if time.monotonic() >= deadline:
+            if child.start() == 0:
+                try:
+                    os.dup2(out.fileno(), 1)
+                    os.dup2(err.fileno(), 2)
+                    if cwd is not None:
+                        os.chdir(cwd)
+                    os.execvpe(argv[0], argv, os.environ if env is None else env)
+                except BaseException:
+                    import traceback
+                    traceback.print_exc()
+                    os._exit(127)
+            while child.poll() is None:
+                if time.monotonic() >= child.deadline:
                     raise subprocess.TimeoutExpired(argv, timeout)
                 time.sleep(0.005)
-        except ChildStatusUnavailable:
-            raise                              # ownership unknown: issue no signal
-        except BaseException:
-            # Timeout/cancellation must not abandon a still-owned fixture.
-            try:
-                os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                os.kill(child.pid, signal.SIGKILL)
-            except OSError as exc:
-                raise ChildStatusUnavailable("cannot clean up fixture: " + str(exc)) from exc
-            pid, status = _fixture_wait(child.pid, 0)
-            if pid != child.pid:
-                raise ChildStatusUnavailable("unexpected fixture cleanup PID")
-            child.returncode = os.waitstatus_to_exitcode(status)
-            raise
+            if child.timed_out:
+                raise subprocess.TimeoutExpired(argv, timeout)
+        except TimeoutError as exc:
+            raise subprocess.TimeoutExpired(argv, timeout) from exc
+        finally:
+            child.close()
         out.seek(0)
         err.seek(0)
-        return subprocess.CompletedProcess(argv, child.returncode, out.read(), err.read())
+        return subprocess.CompletedProcess(argv, os.waitstatus_to_exitcode(child.status),
+                                           out.read(), err.read())
 
 
 def _fixture_main(nonce, fixture_id, argv, expected, process_fixture):
     """Emit only after the requested fixture and its expected-outcome assertion finish."""
     import json
-    import runpy
     import sys
     if process_fixture:
         # Crash subjects and Git setup cannot emit Python completion records.
@@ -681,16 +931,14 @@ def _fixture_main(nonce, fixture_id, argv, expected, process_fixture):
     else:
         if argv[:3] != [sys.executable, "-I", "-B"] or len(argv) < 4:
             raise ValueError("fixture requires an explicit isolated Python command")
-        try:
-            if argv[3] == "-c":
-                sys.argv = ["-c", *argv[5:]]
-                exec(compile(argv[4], "<opf-fixture>", "exec"), {"__name__": "__main__"})
-            else:
-                sys.argv = argv[3:]
-                runpy.run_path(argv[3], run_name="__main__")
-            rc = 0
-        except SystemExit as exc:
-            rc = 0 if exc.code is None else exc.code
+        if argv[3] != "-c" or len(argv) < 5:
+            raise ValueError("assertion fixtures require a returning Python body")
+        sys.argv = ["-c", *argv[5:]]
+        namespace = {"__name__": "__opf_fixture__"}
+        body = "def _opf_fixture():\n" + "".join(
+            "    " + line + "\n" for line in argv[4].splitlines())
+        exec(compile(body, "<opf-fixture>", "exec"), namespace)
+        rc = namespace["_opf_fixture"]()  # SystemExit (even zero) is a failure
     if type(rc) is not int or rc != expected:
         raise AssertionError("fixture {!r}: expected exit {}, observed {!r}".format(
             fixture_id, expected, rc))
@@ -704,6 +952,8 @@ def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture
                      stdout=None, stderr=None, check=False):
     """Success requires a fresh (nonce, fixture) completion record AND observed exit zero.
 
+    Assertion bodies must return an integer; SystemExit never attests completion.
+    process_fixture=True is the explicit raw CLI/crash path.
     expected_returncode describes the subject, not the supervisor: an expected CLI
     refusal or deliberate crash is asserted inside the fixture, whose own exit must be
     zero. Returned stdout excludes the protocol trailer. Missing/mismatched records are
@@ -743,32 +993,16 @@ def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture
 
 
 def _fixture_child_reaped(pid):
-    """Check the cleanup fixture's assertion, releasing ownership on any returned PID.
-
-    False records a failed reap assertion even when this probe reaped the leaked child.
-    Unexpected wait errors cannot establish that assertion and propagate cannot-evaluate.
-    Live-child cleanup shares run_bounded's competing-reaper probe-to-signal residual.
-    """
+    """Assert collection without signalling; the owning tree helper handles cleanup."""
     import os
-    import signal
     try:
         waited, _ = os.waitpid(pid, os.WNOHANG)
     except ChildProcessError:
         return True
     except OSError as exc:
         raise ChildStatusUnavailable("cannot evaluate fixture reap: " + str(exc)) from exc
-    if waited == pid:
-        return False
-    if waited != 0:
+    if waited not in (0, pid):
         raise ChildStatusUnavailable("unexpected cleanup fixture PID")
-    try:
-        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-        os.kill(pid, signal.SIGKILL)
-        waited, _ = os.waitpid(pid, 0)
-    except OSError as exc:
-        raise ChildStatusUnavailable("cannot clean up fixture: " + str(exc)) from exc
-    if waited != pid:
-        raise ChildStatusUnavailable("unexpected cleanup reap PID")
     return False
 
 
@@ -798,14 +1032,9 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     reaps the child, returning TIMEOUT even if bytes were buffered. Exceptions also kill and reap an owned child;
     neither path relies on the child reaching its timer setup. Both pipe fds close on fork failure.
 
-    Residual: synchronous callbacks in the PARENT's fork path and uninterruptible kernel waits cannot
-    be preempted by this polling deadline. Reaping after SIGKILL relies on kernel progress. Descendants
-    that escape the child's process group are outside group cleanup; this is a self-test helper, not
-    a hostile-process sandbox. SIGCHLD must remain SIG_DFL and no other thread or callback may
-    reap this helper's child; inherited reapers are refused without changing caller state. A
-    non-reaping ownership probe precedes cleanup, and ECHILD means LOST OWNERSHIP, never permission
-    to signal a recycled PID. Arbitrary concurrent wait calls or native disposition changes are
-    outside this self-test contract (a probe cannot close their check-to-signal race)."""
+    Tree ownership, cancellation and portability limits are those of _FixtureProcess.
+    A guardian owns every descendant; the caller never signals a captured subject PID.
+    """
     import os
     import signal
     import select
@@ -854,15 +1083,23 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         rfd, wfd = os.pipe()
     except OSError as exc:
         return "SETUP-ERROR:" + type(exc).__name__
+    child = None
     try:
-        pid = os.fork()
-    except BaseException as exc:                         # even cancellation must release both fds
+        child = _FixtureProcess(deadline)
+        pid = child.start()
+    except BaseException as exc:
         try:
-            os.close(rfd)
+            if child is not None:
+                child.close()
         finally:
-            os.close(wfd)
+            try:
+                os.close(rfd)
+            finally:
+                os.close(wfd)
         if not isinstance(exc, Exception):
             raise
+        if isinstance(exc, TimeoutError):
+            return "TIMEOUT"
         return "SETUP-ERROR:" + type(exc).__name__
     if pid == 0:                                         # child: bounded, writes one short token, never returns
         os.close(rfd)
@@ -898,14 +1135,9 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     data = b""
     wstatus = None
     timed_out = False
-    owned = True
+    ownership_lost = False
     try:
-        # Keep close inside the cleanup scope, including the close-then-raise fault case.
         os.close(wfd)
-        try:
-            os.setpgid(pid, pid)
-        except ProcessLookupError:
-            pass                                        # child already exited; collect its status below
         os.set_blocking(rfd, False)
         poller = select.poll()
         poller.register(rfd, select.POLLIN | select.POLLHUP | select.POLLERR)
@@ -916,10 +1148,9 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
                 timed_out = True
                 break
             if eof:
-                # EOF does not prove exit: a child can close its pipe then stall during teardown.
-                _wpid, status = os.waitpid(pid, os.WNOHANG)
-                if _wpid == pid:
-                    wstatus = status
+                wstatus = child.poll()
+                if wstatus is not None:
+                    timed_out = child.timed_out
                     break
             ready = poller.poll(max(1, math.ceil(min(remaining, 0.01) * 1000)))
             if ready:
@@ -931,41 +1162,20 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
                     eof = True
                     poller.unregister(rfd)
                 else:
-                    data = (data + chunk)[:200]          # the short-token contract also bounds collection
-    except ChildProcessError:
-        owned = False                                   # ECHILD: never signal this numeric identity again
+                    data = (data + chunk)[:200]
+    except ChildStatusUnavailable:
+        ownership_lost = True
     finally:
         try:
             os.close(rfd)
         finally:
-            if wstatus is None and owned:
-                # WNOWAIT verifies parentage without releasing the PID before group cleanup.
-                # Also refuse if a callback changed the disposition during supervision.
-                owned = signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
-                if owned:
-                    try:
-                        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                    except ChildProcessError:
-                        owned = False
-            if wstatus is None and owned:
-                # Keep the child unreaped until group cleanup, so its PID cannot be recycled first.
-                # Kill the PID too: an exception may precede either side's setpgid.
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                finally:
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    finally:
-                        try:
-                            _wpid, wstatus = os.waitpid(pid, 0)  # only blocking wait, AFTER SIGKILL
-                        except ChildProcessError:
-                            owned = False
-    if not owned:
+            try:
+                child.close()
+            except ChildStatusUnavailable:
+                ownership_lost = True
+    if ownership_lost:
         return "SETUP-ERROR:ChildOwnershipLost"
+    wstatus = child.status
     return "TIMEOUT" if timed_out else _bounded_child_result(data, wstatus)
 
 
@@ -1272,26 +1482,16 @@ def self_test():
     import resource as _res6
     import time as _time6
 
-    def _reap_bounded(pid, timeout_s=5.0):
-        """Reap `pid`, but BOUNDED so a wedged fixture child can never hang the whole self-test runner
-        (codex round-8 finding 3(c)): poll waitpid(WNOHANG) until the child is reaped or the deadline
-        passes; on timeout SIGKILL it and reap for real, returning that terminal status. A correctly-behaving
-        fixture child (it self-signals SIGALRM under SIG_DFL with SIGALRM UNBLOCKED) dies at once, so the
-        poll returns immediately; the bound exists only so a build/ambient that ever left the child parked
-        surfaces as a reported failure (a non-SIGALRM status) instead of an unbounded parent waitpid."""
-        deadline = _time6.monotonic() + timeout_s
-        while True:
-            wpid, wstatus = _os6.waitpid(pid, _os6.WNOHANG)
-            if wpid == pid:
-                return wstatus
-            if _time6.monotonic() >= deadline:
-                try:
-                    _os6.kill(pid, _sig6.SIGKILL)
-                except OSError:
-                    pass
-                _wpid, wstatus = _os6.waitpid(pid, 0)      # blocking reap AFTER SIGKILL: bounded (the kill lands)
-                return wstatus
-            _time6.sleep(0.005)
+    def _reap_bounded(child):
+        """Observe a real subject status; the shared helper owns timeout and cleanup."""
+        try:
+            while child.poll() is None:
+                if _time6.monotonic() >= child.deadline:
+                    break
+                _time6.sleep(0.005)
+        finally:
+            child.close()
+        return child.status
     # (4) an UNBOUNDED or INVALID control must yield a distinct SETUP-ERROR sentinel WITHOUT running the
     # thunk: timeout_s <= 0 disarms the timer (setitimer(0,0)) and mem_bytes == RLIM_INFINITY / <= 0
     # installs no address-space cap, yet pre-fix the thunk still ran and its result ("RAN") was returned as
@@ -1331,7 +1531,8 @@ def self_test():
         if hasattr(_sig6, "pthread_sigmask"):
             _blocked_prev = _sig6.pthread_sigmask(_sig6.SIG_BLOCK, {_sig6.SIGALRM})
         try:
-            _pid5 = _os6.fork()
+            _case5 = _FixtureProcess(_time6.monotonic() + 5)
+            _pid5 = _case5.start()
             if _pid5 == 0:
                 # child (its OWN process): reset SIGALRM to SIG_DFL AND UNBLOCK it in THIS child's mask before
                 # self-signalling. An INHERITED blocked SIGALRM (the ambient this fixture deliberately sets,
@@ -1345,12 +1546,12 @@ def self_test():
                     _sig6.signal(_sig6.SIGALRM, _sig6.SIG_DFL)
                     if hasattr(_sig6, "pthread_sigmask"):
                         _sig6.pthread_sigmask(_sig6.SIG_UNBLOCK, {_sig6.SIGALRM})
-                    _os6.kill(_os6.getpid(), _sig6.SIGALRM)
+                    _sig6.raise_signal(_sig6.SIGALRM)
                     _sig6.pause()
                 except BaseException:                      # noqa: BLE001 (child boundary: never unwind into the parent)
                     pass
                 _os6._exit(0)                              # unreachable under SIG_DFL+unblocked; a clean exit otherwise
-            _wst5 = _reap_bounded(_pid5)
+            _wst5 = _reap_bounded(_case5)
         finally:
             if _blocked_prev is not None:
                 _sig6.pthread_sigmask(_sig6.SIG_SETMASK, _blocked_prev)  # restore the ambient mask
@@ -1363,10 +1564,11 @@ def self_test():
                             "token instead of TIMEOUT (termination status not inspected first)")
         # regression: a child that exited NORMALLY with bytes returns those bytes (the fix does not swallow
         # a legitimate result).
-        _pid5b = _os6.fork()
+        _case5b = _FixtureProcess(_time6.monotonic() + 5)
+        _pid5b = _case5b.start()
         if _pid5b == 0:
             _os6._exit(0)
-        _, _wst5b = _os6.waitpid(_pid5b, 0)
+        _wst5b = _reap_bounded(_case5b)
         if _bounded_child_result(b"TOKEN", _wst5b) != "TOKEN":
             failures.append("run_bounded/status-first-normal: a normal-exit child with bytes did not "
                             "return its token")
@@ -1376,10 +1578,11 @@ def self_test():
         # normal exit is an abnormal death. Build a real exit-7 wait-status and pair it with a leftover token;
         # post-fix _bounded_child_result requires WIFEXITED+status 0 and returns CHILD-DIED, pre-fix (only the
         # signal case was checked) it returned the buffered token.
-        _pid7 = _os6.fork()
+        _case7 = _FixtureProcess(_time6.monotonic() + 5)
+        _pid7 = _case7.start()
         if _pid7 == 0:
             _os6._exit(7)
-        _, _wst7 = _os6.waitpid(_pid7, 0)
+        _wst7 = _reap_bounded(_case7)
         if not (_os6.WIFEXITED(_wst7) and _os6.WEXITSTATUS(_wst7) == 7):
             failures.append("run_bounded/nonzero-exit-setup: the fixture child did not exit 7")
         elif _bounded_child_result(b"TOKEN", _wst7) != "CHILD-DIED":

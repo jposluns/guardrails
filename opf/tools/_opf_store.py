@@ -2122,6 +2122,7 @@ def self_test():
         # resolved store root for the parent to compare. This exercises os.path.abspath's cwd anchoring (the
         # MAJOR 2 relative-root path) exactly as before, but with no mutation of this process's cwd.
         from _opf_emit import run_status_owned
+        import subprocess
         import json
         # test-hermeticity: launch the child ISOLATED (-I ignores PYTHON* env like PYTHONHOME/PYTHONPATH and
         # user site; -B suppresses __pycache__ writes into the tools dir), so a hostile ambient PYTHONHOME the
@@ -2133,16 +2134,22 @@ def self_test():
             "sys.path.insert(0, sys.argv[1])\n"
             "import _opf_store as S\n"
             "r = S.resolve_store(sys.argv[2])\n"
-            "sys.stdout.write(json.dumps([r.status, None if r.store_root is None else str(r.store_root)]))\n")
-        _child = run_status_owned(
-            [sys.executable, "-I", "-B", "-c", _child_src,
-             str(Path(__file__).resolve().parent), rel_prod.name],
-            fixture_id="relative-root-resolves", cwd=str(base), capture_output=True, text=True)
-        _rel_status, _rel_store = (json.loads(_child.stdout)
-                                   if _child.returncode == 0 and _child.stdout else (None, None))
-        check("relative-root-resolves", _rel_status == RESOLVED)
-        check("relative-root-matches-abs",
-              _rel_store is not None and _rel_store == str(abs_res.store_root))
+            "sys.stdout.write(json.dumps([r.status, None if r.store_root is None else str(r.store_root)]))\n"
+            "return 0\n")
+        try:
+            _child = run_status_owned(
+                [sys.executable, "-I", "-B", "-c", _child_src,
+                 str(Path(__file__).resolve().parent), rel_prod.name],
+                fixture_id="relative-root-resolves", cwd=str(base), capture_output=True, text=True)
+            _rel_status, _rel_store = (json.loads(_child.stdout)
+                                       if _child.returncode == 0 and _child.stdout else (None, None))
+            check("relative-root-resolves", _rel_status == RESOLVED)
+            check("relative-root-matches-abs",
+                  _rel_store is not None and _rel_store == str(abs_res.store_root))
+        except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+            print("relative-root-resolves", str(exc))
+            check("relative-root-resolves", False)
+            check("relative-root-matches-abs", False)
 
         # ITEM C (ambient-cwd crash): a RELATIVE product root reaches os.path.abspath, whose os.getcwd()
         # raises when the process cwd is deleted or unreadable. resolve_store must MAP that to

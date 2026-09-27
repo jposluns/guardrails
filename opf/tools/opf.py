@@ -161,7 +161,7 @@ def _watchdog_timer_case(label, mode):
     signal.setitimer(which, value, interval)
     if mode == "pending":
         signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
-        os.kill(os.getpid(), signal.SIGALRM)
+        signal.raise_signal(signal.SIGALRM)
     before = signal.getitimer(which)
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
     pending = signal.sigpending()
@@ -226,8 +226,8 @@ def _watchdog_isolation_self_test():
     failed = False
     for label, mode in cases:
         code = ("import sys; sys.path.insert(0, " + repr(str(Path(__file__).resolve().parent))
-                + "); import opf; sys.exit(opf._watchdog_timer_case("
-                + repr(label) + ", " + repr(mode) + "))")
+                + "); import opf; return opf._watchdog_timer_case("
+                + repr(label) + ", " + repr(mode) + ")")
         try:
             result = run_status_owned([sys.executable, "-I", "-B", "-c", code],
                                     fixture_id="timer/" + label + "/" + mode,
@@ -252,40 +252,20 @@ def _watchdog_isolation_self_test():
 def _watchdog_deadline_case(mode):
     """Private subprocess: at-fork hooks cannot be unregistered, so never install them in the runner."""
     import signal
-    import threading
     import time
     from unittest.mock import patch
     import _opf_emit
 
     real_fork, real_pipe = os.fork, os.pipe
     started_r, started_w = real_pipe()
-    child, pipe, rescuers, rescued = [], [], [], []
-    finished = threading.Event()
-
-    def kill_child(pid):
-        try:
-            os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        finally:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-    def rescue(pid):
-        # Independent of run_bounded: a removed parent deadline must FAIL, not hang this test.
-        if not finished.wait(3):
-            rescued.append(pid)
-            kill_child(pid)
+    # The enclosing run_status_owned deadline rescues a regressed run_bounded.
+    # It owns the full tree, so this fixture never races it with another signal.
+    child, pipe = [], []
 
     def fork():
         pid = real_fork()
         if pid:
             child.append(pid)
-            worker = threading.Thread(target=rescue, args=(pid,))
-            rescuers.append(worker)
-            worker.start()                              # start only AFTER fork, in the parent
         return pid
 
     def capture_pipe():
@@ -317,48 +297,23 @@ def _watchdog_deadline_case(mode):
 
     if mode in ("delayed-start", "stuck-start"):
         os.register_at_fork(after_in_child=startup)
-    result, elapsed, reaped, gone = None, None, False, False
-    owned = True
+    result, elapsed, reaped = None, None, False
     try:
         start = time.monotonic()
         with patch.object(os, "fork", fork), patch.object(os, "pipe", capture_pipe):
             result = _opf_emit.run_bounded(thunk, timeout_s=0.25)
         elapsed = time.monotonic() - start
-        finished.set()
-        for worker in rescuers:
-            worker.join()
-        # Assert reaping before emergency cleanup can conceal a leak. Only ECHILD proves reaping.
-        try:
-            waited, _ = os.waitpid(child[0], os.WNOHANG)
-            if waited == child[0]:
-                owned = False                         # fixture reaped a leak: FAIL, no later signal
-        except ChildProcessError:
-            reaped = True
-            owned = False
-        try:
-            os.kill(child[0], 0)
-        except ProcessLookupError:
-            gone = True
-        except PermissionError:
-            pass                                      # recycled PID; liveness is diagnostic only
+        # The helper owns cleanup. A diagnostic never sends another signal.
+        reaped = _opf_emit._fixture_child_reaped(child[0])
         os.set_blocking(started_r, False)
         reached = os.read(started_r, 200) == b"started"
-        ok = (result == "TIMEOUT" and elapsed < 1.5 and not rescued
+        ok = (result == "TIMEOUT" and elapsed < 1.5
               and reached and reaped)
     finally:
-        finished.set()
-        for worker in rescuers:
-            worker.join()
-        if child and owned:
-            kill_child(child[0])
-            try:
-                os.waitpid(child[0], 0)
-            except ChildProcessError:
-                pass
         os.close(started_r)
         os.close(started_w)
     print("opf watchdog deadline:", mode, "PASS" if ok else "FAIL",
-          result, elapsed, "rescued", bool(rescued), "reaped", reaped, "gone", gone)
+          result, elapsed, "reaped", reaped)
     return EXIT_OK if ok else EXIT_FINDING
 
 
@@ -412,6 +367,9 @@ def _watchdog_safety_case(mode):
                 raise
             return False
         return True
+
+    if mode == "lost-cleanup":
+        return _watchdog_completion_case("no-signal-echild")
 
     if mode == "liveness-permission":
         real_kill = os.kill
@@ -481,7 +439,13 @@ def _watchdog_safety_case(mode):
             ok = result == "SETUP-ERROR:RuntimeError" and len(pipes) == 2 and closed()
         elif mode == "poll-error":
             import select
-            with patch.object(select, "poll", side_effect=RuntimeError("poll setup")):
+            real_poll, calls = select.poll, []
+            def poll_fault():
+                calls.append(None)
+                if len(calls) == 2:  # collection, after guardian startup
+                    raise RuntimeError("poll setup")
+                return real_poll()
+            with patch.object(select, "poll", poll_fault):
                 try:
                     _opf_emit.run_bounded(lambda: "OK")
                 except RuntimeError:
@@ -562,9 +526,9 @@ def _watchdog_completion_case(mode):
     from unittest.mock import patch
     import _opf_emit as emit
 
-    command = [sys.executable, "-I", "-B", "-c", "pass"]
+    command = [sys.executable, "-I", "-B", "-c", "return 0"]
 
-    def launch(code="pass", **kwargs):
+    def launch(code="return 0", **kwargs):
         return emit.run_status_owned([*command[:4], code],
                                      fixture_id="completion/" + mode, timeout=10, **kwargs)
 
@@ -579,7 +543,7 @@ def _watchdog_completion_case(mode):
         events = []
 
         def ignore(event, args):
-            if event == "subprocess.Popen":
+            if event == "os.fork":
                 events.append(event)
                 signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
@@ -588,7 +552,7 @@ def _watchdog_completion_case(mode):
         assert events and signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN
     elif mode == "reaper":
         real_wait = emit._fixture_wait
-        for code, expected in (("pass", 0), ("import os; os._exit(37)", 37)):
+        for code in ("return 0", "import os; os._exit(37)"):
             stolen = []
 
             def compete(pid, flags):
@@ -601,7 +565,7 @@ def _watchdog_completion_case(mode):
 
             with patch.object(emit, "_fixture_wait", compete):
                 refuses(emit.ChildStatusUnavailable, lambda: launch(code))
-            assert len(stolen) == 1 and os.waitstatus_to_exitcode(stolen[0][1]) == expected
+            assert len(stolen) == 1 and os.waitstatus_to_exitcode(stolen[0][1]) == 0
             assert signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
     elif mode in ("nonce", "fixture-id", "status"):
         real_run = emit._run_fixture_process
@@ -630,7 +594,7 @@ def _watchdog_completion_case(mode):
             Path(directory, "sitecustomize.py").write_text(
                 "import os\nprint('EARLY', flush=True)\nos._exit(0)\n", encoding="utf-8")
             env = dict(os.environ, PYTHONPATH=directory)
-            result = launch("print('RAN')", env=env)
+            result = launch("print('RAN'); return 0", env=env)
             assert result.stdout == b"RAN\n"
 
             def unisolated(argv, **kwargs):
@@ -641,6 +605,63 @@ def _watchdog_completion_case(mode):
             with patch.object(emit, "_run_fixture_process", unisolated):
                 refuses(emit.FixtureIncomplete, lambda: launch(env=env))
         refuses(emit.FixtureIncomplete, lambda: launch("import os; os._exit(0)"))
+    elif mode == "premature-exit":
+        launch("return 0")  # normal-return control
+        for code in ("raise SystemExit()", "raise SystemExit(0)",
+                     "raise RuntimeError('before postconditions')"):
+            refuses(emit.FixtureIncomplete, lambda: launch(code))
+        # CLI exit-status subjects have an explicit, separately supervised path.
+        launch("raise SystemExit(2)", process_fixture=True, expected_returncode=2)
+    elif mode in ("nested-timeout", "nested-cancel"):
+        import time
+        with tempfile.TemporaryDirectory(prefix="opf-tree-") as directory:
+            markers = [Path(directory, name) for name in ("subject", "descendant")]
+            # Deliberate fork/session escape is a tree-cleanup stimulus, not a verdict.
+            subject = ("import os, time; from pathlib import Path; "
+                       "pid = os.fork(); "
+                       "os.setsid() if pid == 0 else None; "
+                       "Path(" + repr(directory) + ", "
+                       "'descendant' if pid == 0 else 'subject').write_text(str(os.getpid())); "
+                       "time.sleep(60)")
+            real_wait = emit._fixture_wait
+            observed = []
+
+            def observe(pid, flags):
+                if all(path.exists() for path in markers) and not observed:
+                    observed.extend(int(path.read_text()) for path in markers)
+                    if mode == "nested-cancel":
+                        raise RuntimeError("cancel with nested subject running")
+                return real_wait(pid, flags)
+
+            with patch.object(emit, "_fixture_wait", observe):
+                refuses(subprocess.TimeoutExpired if mode == "nested-timeout" else RuntimeError,
+                        lambda: emit.run_status_owned(
+                            [*command[:4], subject], fixture_id="tree/" + mode,
+                            process_fixture=True, timeout=2))
+            assert len(observed) == 2, "nested subject never started"
+            for pid in observed:
+                assert not Path("/proc", str(pid)).exists(), "descendant survived/unreaped"
+    elif mode == "no-signal-echild":
+        import time
+        child = emit._FixtureProcess(time.monotonic() + 5)
+        pid = child.start()
+        if pid == 0:
+            os._exit(0)  # raw zombie stimulus for the ownership boundary
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        # Positive control: an owned leader permits signalling.
+        with patch.object(os, "kill") as kill:
+            assert emit._fixture_signal(pid, signal.SIGKILL, group=False)
+            assert kill.called
+        os.waitpid(pid, 0)
+        child.collected = True  # deliberate external collection of the guardian
+        child.close()
+        # Negative control covers numeric, group AND pidfd paths after real ECHILD.
+        with patch.object(os, "getpgid", return_value=pid), \
+                patch.object(os, "kill") as kill, patch.object(os, "killpg") as killpg, \
+                patch.object(signal, "pidfd_send_signal") as pidfd_signal:
+            assert emit._fixture_signal(pid, signal.SIGKILL) is False
+            assert emit._fixture_signal(pid, signal.SIGKILL, 123) is False
+            assert not kill.called and not killpg.called and not pidfd_signal.called
     elif mode == "cleanup-cancel":
         real_wait = emit._fixture_wait
         seen = []
@@ -658,17 +679,18 @@ def _watchdog_completion_case(mode):
             waited, _ = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError:
             waited = None
-        if waited == 0:                         # clean up a regressed collector
-            os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
         assert waited is None, "cancelled collector abandoned its fixture"
     elif mode == "cleanup-reaped":
-        pid = os.fork()
+        import time
+        child = emit._FixtureProcess(time.monotonic() + 5)
+        pid = child.start()
         if pid == 0:
             os._exit(0)                       # deliberate zombie stimulus, not a test verdict
         os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
         with patch.object(os, "kill") as kill:
             assert emit._fixture_child_reaped(pid) is False
+        child.collected = True  # the assertion above deliberately consumed its status
+        child.close()
         assert not kill.called, "cleanup signalled a PID after its probe reaped it"
         assert emit._fixture_child_reaped(pid) is True
         with patch.object(os, "waitpid", side_effect=OSError(5, "fixture EIO")), \
@@ -694,28 +716,29 @@ def _watchdog_regression_self_test():
         return EXIT_FINDING
     prefix = ("import sys; sys.path.insert(0, " + repr(str(Path(__file__).resolve().parent))
               + "); import opf; ")
-    cases = [(mode, prefix + "sys.exit(opf._watchdog_deadline_case(" + repr(mode) + "))", 10)
+    cases = [(mode, prefix + "return opf._watchdog_deadline_case(" + repr(mode) + ")", 10)
              for mode in ("delayed-start", "stuck-start", "pipe-stall", "exit-stall")]
-    cases.extend((mode, prefix + "sys.exit(opf._watchdog_safety_case(" + repr(mode) + "))", 15)
+    cases.extend((mode, prefix + "return opf._watchdog_safety_case(" + repr(mode) + ")", 15)
                  for mode in ("ignored-chld", "reaper-chld", "lost-reap", "lost-cleanup",
                               "high-fd", "huge-timeout", "fork-error", "poll-error", "missing-reap",
                               "liveness-permission"))
     cases.extend((label + "-" + disposition,
-                  prefix + "sys.exit(opf._watchdog_launcher_case("
-                  + repr(label) + ", " + repr(disposition) + "))", 30)
+                  prefix + "return opf._watchdog_launcher_case("
+                  + repr(label) + ", " + repr(disposition) + ")", 30)
                  for label in ("isolation", "regression", "shared")
                  for disposition in ("ignored", "handler"))
     cases.extend(("completion-" + mode,
-                  prefix + "sys.exit(opf._watchdog_completion_case(" + repr(mode) + "))", 40)
+                  prefix + "return opf._watchdog_completion_case(" + repr(mode) + ")", 40)
                  for mode in ("audit-ignore", "reaper", "nonce", "fixture-id", "status",
-                              "early-exit", "cleanup-reaped", "cleanup-cancel"))
+                              "early-exit", "cleanup-reaped", "cleanup-cancel", "premature-exit",
+                              "nested-timeout", "nested-cancel", "no-signal-echild"))
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix
                   + "import signal; signal.signal(signal.SIGALRM, signal.SIG_IGN); "
                   + "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}); "
                   + "rc = opf._bootstrap(); "
-                  + "sys.exit(rc if rc else dict(opf._self_tests())['opf-watchdog-isolation']())",
+                  + "return rc if rc else dict(opf._self_tests())['opf-watchdog-isolation']()",
                   25 * 180 + 30))                       # the isolation matrix's full budget plus launch margin
     failed = False
     for label, code, timeout in cases:

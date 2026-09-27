@@ -970,6 +970,7 @@ def _upgrade_preflight_regressions(check, fence):
     import _opf_emit
     import _opf_init
     import check_opf_upgrade as fixtures
+    import subprocess
     import opf
 
     if opf._bootstrap() != 0:
@@ -1049,10 +1050,15 @@ def _upgrade_preflight_regressions(check, fence):
                     (machine / (name + ".index.toml")).write_text(fixtures._FIX_INDEX, encoding="utf-8")
                 (root / _opf_store.POINTER_REL).write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
                 (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
-                git_call(root, "init")
-                git_call(root, "--literal-pathspecs", "add", "--", ".working",
-                         _opf_store.POINTER_REL, "CHANGELOG.md")
-                git_call(root, "commit", "-m", "seed upgrade regression")
+                try:
+                    git_call(root, "init")
+                    git_call(root, "--literal-pathspecs", "add", "--", ".working",
+                             _opf_store.POINTER_REL, "CHANGELOG.md")
+                    git_call(root, "commit", "-m", "seed upgrade regression")
+                except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+                    print(label + "-git-setup", str(exc))
+                    check(label + "-git-setup", False)
+                    continue
                 before, index_before = snapshot(root)
                 if unsupported:
                     with patch.dict(os.environ, env, clear=True), \
@@ -1062,11 +1068,16 @@ def _upgrade_preflight_regressions(check, fence):
                             contextlib.redirect_stderr(io.StringIO()):
                         message = _error(lambda: opf._upgrade_run(str(root)))
                     check(label + "-before-lease", message == fence and lease.call_count == 0)
-                proc = _opf_emit.run_status_owned(
-                    [sys.executable, "-I", "-B", str(cli), "upgrade", "--root", str(root)],
-                    fixture_id=label + ("/future" if unsupported else "/legacy"),
-                    expected_returncode=2 if unsupported else 0,
-                    env=env, cwd=base, capture_output=True, text=True, timeout=120)
+                try:
+                    proc = _opf_emit.run_status_owned(
+                        [sys.executable, "-I", "-B", str(cli), "upgrade", "--root", str(root)],
+                        fixture_id=label + ("/future" if unsupported else "/legacy"),
+                        expected_returncode=2 if unsupported else 0, process_fixture=True,
+                        env=env, cwd=base, capture_output=True, text=True, timeout=120)
+                except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+                    print(label + "-cli", str(exc))
+                    check(label + "-cli", False)
+                    continue
                 after, index_after = snapshot(root)
                 if unsupported:
                     check(label + "-refuses-generation", proc.returncode == 0
