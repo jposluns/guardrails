@@ -394,7 +394,10 @@ def shared_tests(module, capture_source, run_source, *, reversals):
         m = candidate(capture_source)
         exec(compile(text, "<policy-candidate>", "exec"), m.__dict__)
         calls = []
-        m._capture_bounded = lambda cmd, env, timeout, cap: calls.append((cmd, env))
+        def capture(cmd, env, timeout, cap, input_bytes=None):
+            check(input_bytes is None, "policy/cat-file-has-no-stdin")
+            calls.append((cmd, env))
+        m._capture_bounded = capture
         with patch.dict(os.environ, {"GIT_TRACE": "/forbidden/trace",
                                     "GIT_DIR": "/forbidden/repository",
                                     "GIT_CONFIG_COUNT": "1",

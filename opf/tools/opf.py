@@ -1689,7 +1689,7 @@ def _upgrade_partial_recovery_text(res, manifest_model):
             product_root = res.product_root if res.product_root is not None else res.store_root
             candidates += "\nCandidate product destinations under {} (inspect only): {}.".format(
                 shlex.quote(str(product_root)), " ".join(shlex.quote(p) for p in scope["product"]))
-    except _UpgradeError as exc:
+    except Exception as exc:  # Candidate advice must not hide the doctor findings.
         candidates = "Cannot derive candidate destinations from the current manifest: {}.".format(exc)
     return ("Inspect the store subtree (git -C {r} --literal-pathspecs status --ignored=matching "
             "--untracked-files=all -- {w}). Identify the earlier run's planned destinations and reconcile "
@@ -1718,7 +1718,7 @@ def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_r
     tracked = " ".join(shlex.quote(p) for p in sorted(set(store_relpaths) - set(created_relpaths)))
     lines = ["opf upgrade: the staged change is left for review; recover it scoped to the paths this run "
              "planned (tracked content was clean against HEAD; untracked and ignored content was refused). "
-             "Inspect first for intervening owner edits:"]
+             "Confirm no opf run is live (spec 5.7), then inspect for intervening owner edits:"]
     if tracked:
         lines.append("  restore tracked store paths: git -C {} --literal-pathspecs restore --staged "
                      "--worktree -- {}".format(r, tracked))
@@ -1862,7 +1862,7 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl, pathspecs):
                 and (pbytes == lease_b or pbytes.startswith(lease_b + b"/"))):
             # A directory at lease.toml is also present-is-held. Leave it to step 4's never-seize refusal.
             continue
-        if lease_b is not None and pbytes == lease_b:
+        if lease_b is not None and (pbytes == lease_b or pbytes.startswith(lease_b + b"/")):
             # An untracked or ignored lease is the legitimate held-lease case
             # that step 4 handles as its never-seize refusal, so it is EXCLUDED here. Any OTHER (tracked)
             # status on the lease path -- " D", "D ", " M", "MM", ... -- means the lease is COMMITTED or
@@ -1935,7 +1935,7 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
     if not out.completed:
         raise _UpgradeError("could not verify the store is clean before the upgrade ({}); refusing the "
                             "destructive rewrite (fail-closed)".format(out.err.strip()))
-    if out.rc != 0:
+    if out.rc != 0 or out.err:
         if _opf_observe._is_no_repo(out):
             raise _UpgradeError("the store at {!r} is not a git repository, so HEAD is not a verified "
                                 "restore path for the in-place rewrite (spec 5.1); refusing "
@@ -1943,7 +1943,7 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
         raise _UpgradeError("git could not verify the store is clean (rc {}); refusing the destructive "
                             "rewrite (fail-closed)".format(out.rc))
     pfx = _opf_observe._run_git(git, root, ["rev-parse", "--show-prefix"])
-    if not pfx.completed or pfx.rc != 0:
+    if not pfx.completed or pfx.rc != 0 or pfx.err:
         raise _UpgradeError("could not determine the store's path within its git repository; without it a "
                             "nested store's clean probe cannot be trusted, so the rewrite is refused "
                             "(fail-closed)")
@@ -1952,6 +1952,24 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
     # lease exclusion. "" at the repo toplevel, else "<dir>/" (trailing /).
     # Keep git path bytes intact through prefix stripping, scope and ancestor matching.
     prefix = pfx.out.removesuffix(b"\n")
+    # status omits owner edits hidden by these index flags. Refuse even if the flagged
+    # entry happens to be clean: this observation cannot establish its worktree state.
+    flags = _opf_observe._run_git(
+        git, root, ["--literal-pathspecs", "ls-files", "--cached", "-v", "-z", "--"] + list(pathspecs),
+        config_overrides=neutralizing)
+    if not flags.completed or flags.rc != 0 or flags.err:
+        raise _UpgradeError("cannot inspect upgrade destination index flags (fail-closed)")
+    if flags.out and not flags.out.endswith(b"\x00"):
+        raise _UpgradeError("malformed upgrade destination index flags (fail-closed)")
+    for record in flags.out.split(b"\x00")[:-1]:
+        if len(record) < 3 or record[1:2] != b" " or record[:1] not in (b"H", b"S", b"h", b"s"):
+            raise _UpgradeError("malformed upgrade destination index flags (fail-closed)")
+        path = _upgrade_status_path(record[2:], b"")
+        if record[:1] != b"H":
+            raise _UpgradeError(
+                "upgrade destination {!r} has skip-worktree or assume-unchanged set; "
+                "clear the flags and reconcile owner edits before retrying (fail-closed)".format(
+                    os.fsdecode(path)))
     dirty = _upgrade_parse_porcelain(out.out, prefix, lease_excl, pathspecs)
     # Matching mode collapses ignored ancestors (e.g. !! .working/ for a selected view). Expand
     # those with traditional mode over the SAME destinations, never by adding the ancestor to scope.
@@ -1964,7 +1982,7 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
     if any(os.fsencode(spec).startswith(p) for spec in pathspecs for p in ancestors):
         expanded_args = ["--ignored=traditional" if a == "--ignored=matching" else a for a in args]
         expanded = _opf_observe._run_git(git, root, expanded_args, config_overrides=neutralizing)
-        if not expanded.completed or expanded.rc != 0:
+        if not expanded.completed or expanded.rc != 0 or expanded.err:
             raise _UpgradeError("could not expand ignored ancestor records within the upgrade scope "
                                 "(fail-closed)")
         dirty += _upgrade_parse_porcelain(expanded.out, prefix, lease_excl, pathspecs)
@@ -1972,10 +1990,12 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
 
 
 def _upgrade_check_ignored(root, relpaths):
-    """Refuse absent planned destinations that the advised git add would skip.
-    Status cannot observe an absent entry. Probe literal, NUL-framed paths with the same scrubbed
-    configuration and filter neutralization as the cleanliness check. This observes current ignore
-    rules only; changing them after this probe remains outside the single-writer contract.
+    """Conservatively refuse absent destinations ignored under the scrubbed configuration.
+    Status cannot observe an absent entry. Keep config/filter neutralization and literal NUL-framed
+    transport. This probe omits global/system configuration and indexed ignore fallback (--no-index);
+    it is NOT a prediction of ordinary git add. The explicit, path-scoped add -f advice bypasses those
+    additional ignore rules. Any diagnostic from this probe refuses before mutation. Configuration
+    or filesystem changes after observation remain outside the single-writer contract.
     """
     if not relpaths:
         return
@@ -1992,7 +2012,7 @@ def _upgrade_check_ignored(root, relpaths):
     out = _opf_observe._run_git(
         git, root, ["check-ignore", "--no-index", "-z", "--stdin"],
         config_overrides=neutralizing, input_bytes=b"".join(p + b"\x00" for p in sorted(paths)))
-    if not out.completed or out.rc not in (0, 1):
+    if not out.completed or out.rc not in (0, 1) or out.err:
         raise _UpgradeError("cannot check ignored planned destinations at {!r}: {} (rc {}; fail-closed)".format(
             str(root), out.err.strip(), out.rc))
     if out.rc == 1 and not out.out:
@@ -2426,7 +2446,16 @@ def _upgrade_run(root):
             # `released` is set FIRST so the finally never double-releases (a failed release legitimately
             # leaves the lease as a spec-conformant leftover for operator reconciliation).
             released = True
-            _upgrade_release_lease(root_fd, machine_rel, lease_payload)
+            # Doctor has validated the payload. A failed release can mean another holder is live;
+            # automatic rollback advice is unsafe and is not required to make this payload valid.
+            recovery = None
+            try:
+                _upgrade_release_lease(root_fd, machine_rel, lease_payload)
+            except BaseException:
+                print("opf upgrade: the store reached doctor-VALID before lease release, but release "
+                      "failed. Confirm no opf run is live (spec 5.7) and reconcile the lease before "
+                      "any further action; no restore/removal commands are offered.", file=sys.stderr)
+                raise
             print("opf upgrade: store schema upgraded {} -> {} and doctor-VALID (staged, NOT committed)."
                   .format(origin_version, _UPGRADE_TO))
             print(json.dumps({
@@ -2437,12 +2466,14 @@ def _upgrade_run(root):
                     "widened" if origin["decisions_declared"] else "not-declared")},
                 sort_keys=True))
             print("opf upgrade: review the staged changes, then stage and commit the planned destinations "
-                  "(never `add -A`, which would sweep in unrelated work):")
-            print("  git -C {} --literal-pathspecs add -- {}".format(
+                  "(never `add -A`, which would sweep in unrelated work). The commands use -f for "
+                  "these named destinations because the safety probes neutralize global/system config "
+                  "and do not read indexed ignore rules:")
+            print("  git -C {} --literal-pathspecs add -f -- {}".format(
                 shlex.quote(str(recovery_store_root)),
                 " ".join(shlex.quote(p) for p in write_scope["store"])))
             for _pt in product_targets:
-                print("  git -C {} --literal-pathspecs add -- {}".format(
+                print("  git -C {} --literal-pathspecs add -f -- {}".format(
                     shlex.quote(str(recovery_product_root)), shlex.quote(_pt)))
             print("opf upgrade: exit 0 means the store is valid at {}; committing is the adopter's own "
                   "step.".format(_UPGRADE_TO))

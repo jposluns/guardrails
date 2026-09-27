@@ -461,6 +461,85 @@ def _snapshot(root):
     return result
 
 
+def _round4_tests(opf, check):
+    """Fault-injected Git observations; no permissions-based skip or clean-on-error path."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    obs = opf._opf_observe
+    outcome = obs._GitOutcome
+    target = ".working/CONTRIBUTIONS.md"
+
+    def refuses(call):
+        try:
+            call()
+        except opf._UpgradeError:
+            return True
+        return False
+
+    with patch.object(obs, "_git_path", return_value="git"), \
+            patch.object(obs, "_filter_neutralizing_config", return_value=[]):
+        for source in (".gitignore", ".git/info/exclude", "core.excludesFile"):
+            warning = "warning: unable to access '{}': Permission denied\n".format(source)
+            for rc, payload in ((1, b""), (0, b"./.working/CONTRIBUTIONS.md\x00")):
+                with patch.object(obs, "_run_git", return_value=outcome(True, rc, payload, warning)):
+                    check("R4 ignore diagnostic refuses: {} rc={}".format(source, rc),
+                          refuses(lambda: opf._upgrade_check_ignored("/fixture", [target])))
+        with patch.object(obs, "_run_git", return_value=outcome(True, 1, b"", "")):
+            check("R4 quiet non-match passes",
+                  not refuses(lambda: opf._upgrade_check_ignored("/fixture", [target])))
+
+        for where in ("matching", "expanded"):
+            def status(_git, _root, args, **kwargs):
+                if "rev-parse" in args:
+                    return outcome(True, 0, b"\n", "")
+                if "ls-files" in args:
+                    return outcome(True, 0, b"", "")
+                expanded = "--ignored=traditional" in args
+                err = "warning: cannot read ignore input\n" if expanded == (where == "expanded") else ""
+                raw = b"" if expanded else b"!! .working/\x00"
+                return outcome(True, 0, raw, err)
+            with patch.object(obs, "_run_git", side_effect=status):
+                check("R4 {} status diagnostic refuses".format(where),
+                      refuses(lambda: opf._upgrade_probe_dirty("git", "/fixture", [target], None)))
+
+        for tag in (b"H", b"S", b"h", b"s"):
+            def index_flags(_git, _root, args, **kwargs):
+                raw = tag + b" " + os.fsencode(target) + b"\x00" if "ls-files" in args else b""
+                return outcome(True, 0, raw, "")
+            with patch.object(obs, "_run_git", side_effect=index_flags):
+                check("R4 index flag {!r}".format(tag),
+                      refuses(lambda: opf._upgrade_probe_dirty("git", "/fixture", [target], None))
+                      == (tag != b"H"))
+        for bad in (b"H", b"H path", b"\x00", b"? path\x00"):
+            def bad_flags(_git, _root, args, **kwargs):
+                return outcome(True, 0, bad if "ls-files" in args else b"", "")
+            with patch.object(obs, "_run_git", side_effect=bad_flags):
+                check("R4 malformed index flags {!r} refuse".format(bad),
+                      refuses(lambda: opf._upgrade_probe_dirty("git", "/fixture", [target], None)))
+
+    res = SimpleNamespace(store_root=Path("/fixture"), product_root=None, machine_rel=".working/toml")
+    for views in (5, [{"a": 1}]):
+        text = opf._upgrade_partial_recovery_text(res, {"views": views})
+        check("R4 malformed views {!r} retain recovery guidance".format(views),
+              "Cannot derive candidate destinations" in text and "inspect only" not in text
+              and "Never run a whole-tree restore" in text)
+
+    lease = ".working/toml/lease.toml"
+    for pair in (b" M", b"M ", b" D"):
+        try:
+            opf._upgrade_parse_porcelain(pair + b" " + os.fsencode(lease) + b"/child\x00",
+                                        b"", lease, [lease])
+        except opf._UpgradeError as exc:
+            check("R4 tracked lease descendant {!r}".format(pair), "TRACKED" in str(exc))
+        else:
+            check("R4 tracked lease descendant {!r}".format(pair), False)
+    for pair in (b"??", b"!!"):
+        check("R4 held lease descendant {!r}".format(pair),
+              opf._upgrade_parse_porcelain(pair + b" " + os.fsencode(lease) + b"/child\x00",
+                                          b"", lease, [lease]) == [])
+
+
 def _suite():
     """Build byte-pinned 1.0.0 fixtures and drive `opf upgrade` over them, asserting the spec-9.2 contract."""
     try:
@@ -478,6 +557,8 @@ def _suite():
             checked.append(label)
             if not condition:
                 failures.append(label)
+
+        _round4_tests(opf, check)
 
         # --- fixture canonicity (the upgrade's own precondition), extended to every frozen / derived fixture:
         # each manifest and counters literal must round-trip through the canonical emitter, so an emitter
@@ -1165,8 +1246,70 @@ def _suite():
                 check("U14d {} FLIP removing check reaches manifest mutation".format(label),
                       _snapshot(si) != before and "ignored planned destinations" not in fout)
                 if label != "product":
-                    check("U14d {} FLIP reproduces doctor-VALID unstageable success".format(label),
+                    check("U14d {} FLIP bypasses conservative ignore refusal and reaches doctor-VALID".format(label),
                           frc == EXIT_OK and "doctor-VALID" in fout)
+
+            # R4: execute the printed command under ignore configuration that the probes omit.
+            import shlex
+            for ignored_by in ("global", "system", "indexed"):
+                sf = base / ("r4-force-" + ignored_by)
+                sf.mkdir()
+                build_store(sf)
+                rule = "/.working/CONTRIBUTIONS.md\n"
+                real_env = dict(env_holder["env"])
+                if ignored_by == "indexed":
+                    (sf / ".gitignore").write_text(rule, encoding="utf-8")
+                    git_call(sf, ["add", "--", ".gitignore"])
+                    git_call(sf, ["commit", "-m", "indexed ignore fixture"])
+                    git_call(sf, ["update-index", "--skip-worktree", "--", ".gitignore"])
+                    (sf / ".gitignore").unlink()
+                else:
+                    excludes = base / ("r4-" + ignored_by + "-excludes")
+                    excludes.write_text(rule, encoding="utf-8")
+                    config = base / ("r4-" + ignored_by + "-config")
+                    config.write_text('[core]\nexcludesFile = "{}"\n'.format(excludes), encoding="utf-8")
+                    real_env["GIT_CONFIG_" + ignored_by.upper()] = str(config)
+                    if ignored_by == "system":
+                        real_env.pop("GIT_CONFIG_NOSYSTEM", None)
+                frc, fout = _run_opf(["upgrade", "--root", str(sf)], real_env)
+                check("R4 {} reaches doctor-VALID with force advice".format(ignored_by),
+                      frc == EXIT_OK and "doctor-VALID" in fout)
+                commands = [shlex.split(line) for line in fout.splitlines() if line.startswith("  git -C ")
+                            and " add " in line]
+                check("R4 {} emits a scoped force command".format(ignored_by),
+                      len(commands) == 1 and commands[0][1:4] == ["-C", str(sf), "--literal-pathspecs"]
+                      and commands[0][4:7] == ["add", "-f", "--"]
+                      and ".working/CONTRIBUTIONS.md" in commands[0]
+                      and ".working" not in commands[0] and "-A" not in commands[0])
+                for command in commands:
+                    # Flip only the advice: ordinary add must reproduce the reported ignore failure.
+                    ordinary = subprocess.run([a for a in command if a != "-f"], env=real_env,
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                    check("R4 {} FLIP ordinary add refuses".format(ignored_by),
+                          ordinary.returncode != 0 and b"ignored" in ordinary.stderr)
+                    forced = subprocess.run(command, env=real_env, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, timeout=30)
+                    check("R4 {} printed add -f stages the view".format(ignored_by),
+                          forced.returncode == 0
+                          and ".working/CONTRIBUTIONS.md" in
+                          git_call(sf, ["ls-files", "--", ".working/CONTRIBUTIONS.md"]).splitlines())
+
+            for flag in ("skip-worktree", "assume-unchanged"):
+                sf = base / ("r4-hidden-" + flag)
+                sf.mkdir()
+                build_store(sf)
+                rel = ".working/DECISIONS.md"
+                (sf / rel).write_bytes(b"tracked view\n")
+                git_call(sf, ["add", "--", rel])
+                git_call(sf, ["commit", "-m", "tracked view fixture"])
+                git_call(sf, ["update-index", "--" + flag, "--", rel])
+                (sf / rel).write_bytes(b"owner edit hidden from status\n")
+                before = _snapshot(sf)
+                index_before = (sf / ".git/index").read_bytes()
+                frc, fout = upgrade(sf)
+                check("R4 {} refuses without changing tree or index".format(flag),
+                      frc == EXIT_ERROR and "skip-worktree or assume-unchanged" in fout
+                      and _snapshot(sf) == before and (sf / ".git/index").read_bytes() == index_before)
 
             # U15) [types.contribution] pre-declared: an impossible 1.0.0 shape.
             s15 = base / "u15-contribution-predeclared"
@@ -1429,7 +1572,9 @@ def _suite():
             _orig_run_git = _obs_r1b._run_git
             try:
                 def _fake_run_git(_git, _root, args, timeout=None, allow_lazy_fetch=False,
-                                  config_overrides=None):
+                                  config_overrides=None, max_output_bytes=8 << 20, input_bytes=None):
+                    if "ls-files" in args:
+                        return _GO(True, 0, b"", "")
                     if "rev-parse" in args:
                         return _GO(True, 0, b" leading/\n", b"")
                     if "config" in args:
@@ -1636,6 +1781,11 @@ def _suite():
             check("U25 a release failure surfaces exit 2", rc25 == EXIT_ERROR)
             check("U25 no success is reported when release fails (released-before-success)",
                   "staged, NOT committed" not in out25 and '"event": "upgraded"' not in out25)
+
+            check("U25 doctor-VALID release failure offers reconciliation without rollback commands",
+                  "reached doctor-VALID before lease release" in out25
+                  and "Confirm no opf run is live" in out25
+                  and "restore --staged" not in out25 and "rm -- " not in out25)
 
             # U25b) FIX1 release never-seize (class-width): the RELEASE path (not only the acquisition path)
             # is ownership-verified. Acquire a lease, capture the payload, then have a peer REPLACE the lease
