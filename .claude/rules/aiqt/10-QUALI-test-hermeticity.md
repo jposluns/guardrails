@@ -40,10 +40,10 @@ the invocations it receives, and checks that invocation evidence against the inv
 expects. The harness initializes executable lookup and configuration from controlled inputs. Where the
 external executable being substituted, or its service, could reach live credentials, remote services,
 or state outside the fixture by any route present in the code under test or introduced by the
-verification's own mutations, as determined by review of that code, including absolute paths, a replaced
-search path, or clients that bypass the executable, the harness enforces isolation: it removes access to
-live credentials and remote services, confines writes to its fixture, and limits reads to declared inputs,
-among them the code under test. Only where every such route, not only the declared invocation routes, is
+verification's own mutations, including absolute paths, a replaced search path, or clients that bypass
+the executable, the harness enforces isolation: it removes access to live credentials and remote services,
+confines writes to its fixture, and limits reads to declared inputs, among them the code under test.
+Only where every such route, not only the declared invocation routes, is
 confined to declared inputs and fixture state do executable fixtures and checked invocation evidence
 suffice without enforced isolation. Placing a fixture first on the executable
 search path does not intercept absolute-path calls, calls using a replaced search path, or clients
