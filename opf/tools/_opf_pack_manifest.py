@@ -352,39 +352,62 @@ def _runner_check(expected, text=None):
     """
     import ast
     import os
+    import shlex
     import subprocess
     import tempfile
 
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
-    source = runner.read_text(encoding="utf-8") if text is None else text
-    prefix = r'''
-python3() {
-  if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
-      && [ "$3" = "$manifest_test" ] && [ "$4" = "--self-test" ]; then
-    "$manifest_python" -I -B "$manifest_test" --self-test --vectors-only
-  else
-    case " $* " in *_opf_pack_manifest.py*) return 2;; esac
-    return 0
-  fi
-}
-manifest_python="$1"
-manifest_test="$2"
+    registered = runner.read_text(encoding="utf-8")
+    source = registered if text is None else text
+    # Compare with the unmodified, single-line registrations, including when
+    # the candidate text deliberately removes this suite's registration.
+    calls = []
+    for line in registered.splitlines():
+        if line.startswith("run_gate "):
+            words = shlex.split(line)
+            if len(words) < 4 or words[2] != "python3":
+                raise AssertionError("runner/pack-manifest-registration")
+            calls.append([word.replace("$here/", str(here) + "/") for word in words[3:]])
+    if not calls:
+        raise AssertionError("runner/pack-manifest-registration")
+    wanted = b"".join(os.fsencode(word) + b"\0"
+                      for args in calls for word in [str(len(args)), *args])
+    # Bash dispatches through PATH to an executable /bin/sh fixture; child
+    # shells inherit PATH too. Absolute paths or replaced PATH bypass it, but
+    # then the exact invocation log cannot match. This is not a process sandbox.
+    fixture = r'''#!/bin/sh
+printf '%s\0' "$#" "$@" >> "$manifest_log" || exit 2
+if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
+    && [ "$3" = "$manifest_test" ] && [ "$4" = "--self-test" ]; then
+  exec "$manifest_python" -I -B "$manifest_test" --self-test --vectors-only
+fi
+case " $* " in *_opf_pack_manifest.py*) exit 2;; esac
+exit 0
 '''
     # No inherited BASH_ENV, exported functions, Python or Git controls.
     with tempfile.TemporaryDirectory(prefix="opf-pack-registration-") as tmp:
+        executable = Path(tmp) / "python3"
+        executable.write_text(fixture, encoding="utf-8")
+        executable.chmod(0o700)
+        log = Path(tmp) / "argv.log"
+        log.write_bytes(b"")
         proc = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-c", prefix + source,
-             str(runner), sys.executable, str(here / "_opf_pack_manifest.py")],
-            cwd=tmp, env={"PATH": os.defpath, "TMPDIR": tmp,
-                          "PYTHONDONTWRITEBYTECODE": "1"},
+            ["bash", "--noprofile", "--norc", "-c", source, str(runner)],
+            cwd=tmp, env={"PATH": tmp + os.pathsep + os.defpath, "TMPDIR": tmp,
+                          "HOME": tmp, "XDG_CONFIG_HOME": tmp, "XDG_CACHE_HOME": tmp,
+                          "XDG_DATA_HOME": tmp, "XDG_STATE_HOME": tmp, "LC_ALL": "C",
+                          "PYTHONDONTWRITEBYTECODE": "1", "manifest_log": str(log),
+                          "manifest_python": sys.executable,
+                          "manifest_test": str(here / "_opf_pack_manifest.py")},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, timeout=30,
         )
+        recorded = log.read_bytes()
     reports = [ast.literal_eval(line[len("PACK-MANIFEST "):])
                for line in proc.stdout.splitlines()
                if line.startswith("PACK-MANIFEST ")]
-    if proc.returncode != 0 or reports != [
+    if proc.returncode != 0 or recorded != wanted or reports != [
             {"executed": expected, "failures": []}]:
         raise AssertionError("runner/pack-manifest-registration")
 
@@ -408,6 +431,19 @@ def _runner_registration_test(expected):
     else:
         raise AssertionError("runner/pack-manifest-registration-not-red")
     print("RED runner-registration -> runner/pack-manifest-registration")
+    # A sibling suite's omitted registration is caught by the argv log.
+    sibling = [line for line in source.splitlines(keepends=True)
+               if line.startswith('run_gate "opf-homes-selftest"')]
+    if len(sibling) != 1:
+        raise AssertionError("runner/pack-manifest-unique-sibling-registration")
+    try:
+        _runner_check(expected, source.replace(sibling[0], "", 1))
+    except AssertionError as exc:
+        if str(exc) != "runner/pack-manifest-registration":
+            raise
+    else:
+        raise AssertionError("runner/pack-manifest-sibling-registration-not-red")
+    print("RED sibling-registration -> runner/pack-manifest-registration")
 
 
 def self_test(vectors_only=False):

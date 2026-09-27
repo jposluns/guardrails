@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P0 contract vectors and source reversions. No store, Git or scratch effects.
+"""P0 contract vectors and source reversions; runner fixtures use private scratch.
 
 The D2a fixture retains the landed source-only builders' bytes in memory before
 any P0 guard is exercised. Reversions receive those same intact fixtures.
@@ -299,30 +299,60 @@ def red_on_revert(source, f):
 
 
 def runner_check(expected, text=None):
+    import os
+    import shlex
+    import tempfile
+
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
-    source = runner.read_text(encoding="utf-8") if text is None else text
-    # Run the real dispatcher text, preserving its branches/exit behaviour. Intercept
-    # other gate commands and reduce only this suite to its non-recursive vector leg.
-    prefix = r'''
-python3() {
-  if [ "$#" -eq 5 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
-      && [ "$3" = "$p0_test" ] && [ "$4" = "--self-test" ] \
-      && [ "$5" = "--red-on-revert" ]; then
-    "$p0_python" -I -B "$p0_test" --self-test --vectors-only
-  else
-    case " $* " in *check_opf_init_p0.py*) return 2;; esac
-    return 0
-  fi
-}
-p0_python="$1"
-p0_test="$2"
+    registered = runner.read_text(encoding="utf-8")
+    source = registered if text is None else text
+    # Expected argv comes from the unmodified, single-line registrations, never
+    # from the candidate text used by the registration-removal test.
+    calls = []
+    for line in registered.splitlines():
+        if line.startswith("run_gate "):
+            words = shlex.split(line)
+            check(len(words) >= 4 and words[2] == "python3",
+                  "runner/declared-test-executes")
+            calls.append([word.replace("$here/", str(here) + "/") for word in words[3:]])
+    check(bool(calls), "runner/declared-test-executes")
+    wanted = b"".join(os.fsencode(word) + b"\0"
+                      for args in calls for word in [str(len(args)), *args])
+    # Bash dispatches through PATH to an executable /bin/sh fixture; child
+    # shells inherit PATH too. Absolute paths or replaced PATH bypass it, but
+    # then the exact invocation log cannot match. This is not a process sandbox.
+    fixture = r'''#!/bin/sh
+printf '%s\0' "$#" "$@" >> "$p0_log" || exit 2
+if [ "$#" -eq 5 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
+    && [ "$3" = "$p0_test" ] && [ "$4" = "--self-test" ] \
+    && [ "$5" = "--red-on-revert" ]; then
+  exec "$p0_python" -I -B "$p0_test" --self-test --vectors-only
+fi
+case " $* " in *check_opf_init_p0.py*) exit 2;; esac
+exit 0
 '''
-    proc = subprocess.run(
-        ["bash", "-c", prefix + source, str(runner), sys.executable, str(here / Path(__file__).name)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+    # An allowlisted environment drops Git controls, BASH_ENV, exported
+    # functions and inherited Python settings; configuration lives in scratch.
+    with tempfile.TemporaryDirectory(prefix="opf-p0-registration-") as tmp:
+        executable = Path(tmp) / "python3"
+        executable.write_text(fixture, encoding="utf-8")
+        executable.chmod(0o700)
+        log = Path(tmp) / "argv.log"
+        log.write_bytes(b"")
+        proc = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", source, str(runner)],
+            cwd=tmp, env={"PATH": tmp + os.pathsep + os.defpath, "TMPDIR": tmp,
+                          "HOME": tmp, "XDG_CONFIG_HOME": tmp, "XDG_CACHE_HOME": tmp,
+                          "XDG_DATA_HOME": tmp, "XDG_STATE_HOME": tmp, "LC_ALL": "C",
+                          "PYTHONDONTWRITEBYTECODE": "1", "p0_log": str(log),
+                          "p0_python": sys.executable,
+                          "p0_test": str(here / Path(__file__).name)},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+        recorded = log.read_bytes()
     reached = tuple(line[5:] for line in proc.stdout.splitlines() if line.startswith("PASS "))
-    check(proc.returncode == 0 and reached == expected, "runner/declared-test-executes")
+    check(proc.returncode == 0 and reached == expected and recorded == wanted,
+          "runner/declared-test-executes")
 
 
 def main():
@@ -352,6 +382,17 @@ def main():
                 else:
                     raise AssertionError("runner/registration-not-red")
                 print("RED runner-registration -> runner/declared-test-executes")
+                # A sibling suite's omitted registration is caught by the argv log.
+                sibling = [line for line in text.splitlines(keepends=True)
+                           if line.startswith('run_gate "opf-homes-selftest"')]
+                check(len(sibling) == 1, "runner/unique-sibling-registration")
+                try:
+                    runner_check(ids, text.replace(sibling[0], ""))
+                except AssertionError as exc:
+                    check(str(exc) == "runner/declared-test-executes", "runner/wrong-red")
+                else:
+                    raise AssertionError("runner/sibling-registration-not-red")
+                print("RED sibling-registration -> runner/declared-test-executes")
         return 0
     except AssertionError as exc:
         print("SELF-TEST FAIL " + str(exc), file=sys.stderr)
