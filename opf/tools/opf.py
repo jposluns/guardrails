@@ -1675,18 +1675,30 @@ _UPGRADE_NO_WHOLE_TREE = ("Never run a whole-tree restore (git restore . / git r
                           "store and product paths.")
 
 
-def _upgrade_partial_recovery_text(store_root):
+def _upgrade_partial_recovery_text(res, manifest_model):
     """A previous interrupted run has no trustworthy write plan in this process. Inspect under the
     resolved store root, but do not prescribe a subtree restore: it could discard unmanaged owner work."""
     import shlex
-    r = shlex.quote(str(store_root))
+    r = shlex.quote(str(res.store_root))
     w = shlex.quote(_opf_store.WORKING_DIRNAME)
+    try:
+        scope = _upgrade_write_scope(res.machine_rel, manifest_model, True, _UPGRADE_NEW_TYPES)
+        candidates = "Candidate store destinations under {} (current manifest; inspect only): {}.".format(
+            r, " ".join(shlex.quote(p) for p in scope["store"]))
+        if scope["product"]:
+            product_root = res.product_root if res.product_root is not None else res.store_root
+            candidates += "\nCandidate product destinations under {} (inspect only): {}.".format(
+                shlex.quote(str(product_root)), " ".join(shlex.quote(p) for p in scope["product"]))
+    except _UpgradeError as exc:
+        candidates = "Cannot derive candidate destinations from the current manifest: {}.".format(exc)
     return ("Inspect the store subtree (git -C {r} --literal-pathspecs status --ignored=matching "
             "--untracked-files=all -- {w}). Identify the earlier run's planned destinations and reconcile "
             "intervening owner edits before restoring individual tracked paths or removing files proven "
             "upgrade-created. Exclude unmanaged paths and the lease; reconcile a leftover lease only after "
             "confirming no run is live (spec 5.7). Reconcile product targets separately, then re-run. "
-            "{no}".format(r=r, w=w, no=_UPGRADE_NO_WHOLE_TREE))
+            "{no}\n{candidates} These candidates do not prove the earlier write scope or which files were "
+            "created; reconcile them against the earlier run and owner edits before recovery.".format(
+                r=r, w=w, no=_UPGRADE_NO_WHOLE_TREE, candidates=candidates))
 
 
 def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_relpaths, store_relpaths):
@@ -1846,6 +1858,10 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl, pathspecs):
                                 "status pair ({!r}); the store cleanliness cannot be verified "
                                 "(fail-closed)".format(rec[:16]))
         pbytes = _upgrade_status_path(rec[3:], prefix)
+        if (lease_b is not None and rec[:2] in (b"??", b"!!")
+                and (pbytes == lease_b or pbytes.startswith(lease_b + b"/"))):
+            # A directory at lease.toml is also present-is-held. Leave it to step 4's never-seize refusal.
+            continue
         if lease_b is not None and pbytes == lease_b:
             # An untracked or ignored lease is the legitimate held-lease case
             # that step 4 handles as its never-seize refusal, so it is EXCLUDED here. Any OTHER (tracked)
@@ -1856,8 +1872,6 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl, pathspecs):
             # O_EXCL acquire succeed on the now-absent file and sweep the tracked lease's DELETION into the
             # upgrade's staged change set (outside the spec-9.2 delta). Recovery and staging advice
             # therefore also exclude the lease; no restore may resurrect one from HEAD.
-            if rec[:2] in (b"??", b"!!"):
-                continue
             raise _UpgradeError(
                 "the single-writer lease {!r} is TRACKED in git (porcelain status {!r}, neither "
                 "untracked '??' nor ignored '!!'); a committed or otherwise version-controlled lease violates spec 5.7 (a lease is "
@@ -1955,6 +1969,41 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
                                 "(fail-closed)")
         dirty += _upgrade_parse_porcelain(expanded.out, prefix, lease_excl, pathspecs)
     return dirty
+
+
+def _upgrade_check_ignored(root, relpaths):
+    """Refuse absent planned destinations that the advised git add would skip.
+    Status cannot observe an absent entry. Probe literal, NUL-framed paths with the same scrubbed
+    configuration and filter neutralization as the cleanliness check. This observes current ignore
+    rules only; changing them after this probe remains outside the single-writer contract.
+    """
+    if not relpaths:
+        return
+    git = _opf_observe._git_path()
+    if git is None:
+        raise _UpgradeError("cannot locate git to check ignored planned destinations (fail-closed)")
+    try:
+        neutralizing = _opf_observe._filter_neutralizing_config(git, root)
+    except RuntimeError as exc:
+        raise _UpgradeError("cannot check ignored planned destinations: {} (fail-closed)".format(exc)) from exc
+    # check-ignore rejects --literal-pathspecs. Its stdin entries are literal filenames;
+    # "./" also prevents a leading ":" from being parsed as pathspec magic.
+    paths = {b"./" + os.fsencode(p) for p in relpaths}
+    out = _opf_observe._run_git(
+        git, root, ["check-ignore", "--no-index", "-z", "--stdin"],
+        config_overrides=neutralizing, input_bytes=b"".join(p + b"\x00" for p in sorted(paths)))
+    if not out.completed or out.rc not in (0, 1):
+        raise _UpgradeError("cannot check ignored planned destinations at {!r}: {} (rc {}; fail-closed)".format(
+            str(root), out.err.strip(), out.rc))
+    if out.rc == 1 and not out.out:
+        return
+    matches = out.out.split(b"\x00")
+    if (out.rc != 0 or matches[-1] != b"" or len(matches) < 2
+            or any(p not in paths for p in matches[:-1])):
+        raise _UpgradeError("git check-ignore returned a malformed or inconsistent payload (fail-closed)")
+    raise _UpgradeError("ignored planned destinations under {!r}: {}. Correct the ignore rules before "
+                        "re-running opf upgrade so the planned files can be staged; nothing was written.".format(
+                            str(root), ", ".join(repr(os.fsdecode(p[2:])) for p in matches[:-1])))
 
 
 def _upgrade_check_clean(res, write_scope):
@@ -2234,6 +2283,7 @@ def _upgrade_run(root):
     manifest_rel = "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)
     counters_rel = "{}/{}".format(machine_rel, _opf_check.COUNTERS_NAME)
     root_fd = _opf_store._open_dir_nofollow(res.store_root)
+    recovery = None
     try:
         manifest_bytes = _upgrade_read_bytes(root_fd, manifest_rel, control=True)
         counters_bytes = _upgrade_read_bytes(root_fd, counters_rel)
@@ -2265,7 +2315,7 @@ def _upgrade_run(root):
             print("opf upgrade: store declares spec_version {} but is NOT doctor-VALID: a partial or "
                   "interrupted migration is never reported complete (fail-closed, spec 9.2). {} Run "
                   "`opf doctor --root {}` for the findings, exit 2.".format(
-                      _UPGRADE_TO, _upgrade_partial_recovery_text(res.store_root), root), file=sys.stderr)
+                      _UPGRADE_TO, _upgrade_partial_recovery_text(res, manifest_model), root), file=sys.stderr)
             _doctor_report(result)
             return EXIT_MALFORMED
         try:
@@ -2314,11 +2364,21 @@ def _upgrade_run(root):
         # scope targets under the PRODUCT root; the two differ for a RELOCATED store.
         recovery_store_root = res.store_root
         recovery_product_root = res.product_root if res.product_root is not None else res.store_root
+        absent_product_targets = []
+        for relpath in product_targets:
+            try:
+                os.lstat(os.path.join(str(recovery_product_root), relpath))
+            except FileNotFoundError:
+                absent_product_targets.append(relpath)
+        _upgrade_check_ignored(recovery_store_root, created_relpaths)
+        _upgrade_check_ignored(recovery_product_root, absent_product_targets)
         # STEP 4 (M4): claim the single-writer lease atomically, then hold it across mutation, render, and
         # the final doctor; release it in the finally covering every exit after acquisition, EXCEPT the
         # success path releases FIRST (R5) so no success is reported over a still-held / failed-to-release
         # lease. `released` records that the success path already released, so the finally does not re-release.
         lease_payload = _upgrade_acquire_lease(root_fd, machine_rel)
+        recovery = (recovery_store_root, recovery_product_root, created_relpaths,
+                    product_targets, write_scope["store"])
         released = False
         try:
             # Apply: rewrite manifest + counters (canonical bytes), create the missing empty indexes. The
@@ -2413,6 +2473,12 @@ def _upgrade_run(root):
                               "still governs (exit 2).".format(rel_exc), file=sys.stderr)
                         # returning from the except lets `pending` resume propagating (the finally completes
                         # without raising a new exception), so _cmd_upgrade surfaces the original refusal.
+    except BaseException:
+        # Cover every escape after acquisition, including writes, render/doctor and lease release.
+        # Preserve the original exception and the existing never-seize release handling.
+        if recovery is not None:
+            print(_upgrade_recovery_text(*recovery), file=sys.stderr)
+        raise
     finally:
         os.close(root_fd)
 

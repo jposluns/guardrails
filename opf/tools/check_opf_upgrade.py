@@ -43,6 +43,7 @@ VECTOR ROSTER (U1-U25, P1):
   U12 baseline plus an untracked well-formed foreign lease.toml: exit 2, the refusal names the holder, the
       lease is NOT deleted, the tree is unchanged.
   U12b ignored lease: held-lease never-seize refusal, unchanged bytes; exclusion flip restores dirt advice.
+  U12c ignored/untracked lease directories: never-seize refusal; exclusion flip restores dirt advice.
   U13 baseline plus a malformed lease.toml: exit 2 (present is held, never absent); not deleted; unchanged.
   U14 baseline plus an uncommitted counters.toml edit: exit 2 BEFORE any mutation; the refusal names the
       dirty path and advises commit-your-changes, never a whole-tree restore; the owner edit intact.
@@ -50,11 +51,14 @@ VECTOR ROSTER (U1-U25, P1):
       siblings and declared unmanaged content permit doctor-VALID upgrades. Companion flips restore
       the erroneous refusals. Collapsed ignored ancestors still expose occupied destinations.
   U14c non-UTF-8 nested prefixes: ignored manifest, counters, render target and collapsed ancestor
-      refuse with unchanged files/index/HEAD; restoring lossy prefix normalization allows mutation.
+      refuse with unchanged files/index/HEAD; the lossy-prefix flip loses dirt advice (the absent-path
+      guard still refuses an ignored ancestor).
+  U14d absent ignored view/index/product destinations: refuse before mutation; probe-removal flips mutate.
   U15 [types.contribution] pre-declared: exit 2 naming contribution as an impossible 1.0.0 shape; unchanged.
   U16 governance=false plus [types.maintainer_decision]: exit 2 naming the module inconsistency; unchanged.
   U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.1.0 triage refusals (with the scoped
       recovery text).
+  U17b post-manifest exception: planned restore/rm advice and F2 candidates, with suppression flips.
   U18 postcondition unit vectors: call opf._upgrade_postcondition directly with hand-mutated new models; each
       mutation refuses and the genuine planner output passes (the check that fails without the m1 fix). Also
       the R6 porcelain-grammar refusal vectors: opf._upgrade_parse_porcelain refuses a lone NUL, a non-NUL-
@@ -879,6 +883,32 @@ def _suite():
                   flip12b == EXIT_ERROR and "Commit your store changes" in text12b)
             check("U12b both refusals preserve lease and tree", _snapshot(s12b) == before12b)
 
+            # U12c) Non-regular leases are held too, including collapsed ignored directories.
+            for ignored_lease in (False, True):
+                sc = base / ("u12c-lease-directory-" + str(ignored_lease))
+                sc.mkdir()
+                mc = build_store(sc)
+                lease = mc / _opf_check.LEASE_NAME
+                lease.mkdir()
+                (lease / "owner").write_bytes(b"held by another run\n")
+                rel = lease.relative_to(sc).as_posix()
+                if ignored_lease:
+                    (sc / ".git/info").mkdir()
+                    (sc / ".git/info/exclude").write_text("/" + rel + "/\n", encoding="utf-8")
+                before = _snapshot(sc)
+                rc, out = upgrade(sc)
+                check("U12c directory lease gets never-seize refusal ({})".format(ignored_lease),
+                      rc == EXIT_ERROR and "The lease is never seized (spec 5.7)" in out
+                      and "Commit your store changes" not in out)
+                frc, fout = flipped_upgrade(sc,
+                    "original = opf._upgrade_parse_porcelain\n"
+                    "opf._upgrade_parse_porcelain = lambda raw, prefix, lease, specs: "
+                    "original(raw, prefix, None, specs)\n")
+                check("U12c FLIP directory lease gets dirt advice ({})".format(ignored_lease),
+                      frc == EXIT_ERROR and "Commit your store changes" in fout)
+                check("U12c lease directory and bytes preserved ({})".format(ignored_lease),
+                      lease.is_dir() and _snapshot(sc) == before)
+
             # U13) baseline plus a MALFORMED lease.toml (present is held, never absent).
             s13 = base / "u13-lease-malformed"
             s13.mkdir()
@@ -933,7 +963,11 @@ def _suite():
             saved14b = base / "u14b-owner-notes"
             ignored_path.rename(saved14b)
             rc14c, out14c = upgrade(s14b)
-            check("U14b moving ignored owner work aside permits upgrade", rc14c == EXIT_OK)
+            check("U14b absent destination still refuses its ignore rule",
+                  rc14c == EXIT_ERROR and "ignored planned destinations" in out14c)
+            (s14b / ".git/info/exclude").write_text("/outside-build/\n", encoding="utf-8")
+            rc14c, out14c = upgrade(s14b)
+            check("U14b moving owner work and correcting its ignore rule permits upgrade", rc14c == EXIT_OK)
             check("U14b saved owner bytes survive",
                   saved14b.read_bytes() == before14b[ignored_rel])
             check("U14b ignored content outside the written scope is untouched",
@@ -1089,10 +1123,50 @@ def _suite():
                       _snapshot(repo) == before and (repo / ".git/index").read_bytes() == before_index
                       and git_call(repo, ["rev-parse", "HEAD"]) == before_head)
                 flipped_rc, flipped_out = flipped_upgrade(nested, lossy_prefix)
-                check("U14c {} FLIP loses pre-mutation refusal and changes manifest".format(case),
-                      flipped_rc in (EXIT_OK, EXIT_ERROR) and "Commit your store changes" not in flipped_out
-                      and (nested / ".working/toml/manifest.toml").read_bytes()
-                          != before[os.fsdecode(prefix) + ".working/toml/manifest.toml"])
+                if case == "ancestor":
+                    check("U14c ancestor FLIP loses dirt advice but the absent-path guard still refuses",
+                          flipped_rc == EXIT_ERROR and "Commit your store changes" not in flipped_out
+                          and "ignored planned destinations" in flipped_out and _snapshot(repo) == before)
+                else:
+                    check("U14c {} FLIP loses pre-mutation refusal and changes manifest".format(case),
+                          flipped_rc in (EXIT_OK, EXIT_ERROR) and "Commit your store changes" not in flipped_out
+                          and (nested / ".working/toml/manifest.toml").read_bytes()
+                              != before[os.fsdecode(prefix) + ".working/toml/manifest.toml"])
+
+            # The stdin transport must drain output while feeding more than a pipe buffer.
+            transport = opf._opf_observe._capture_bounded(
+                [sys.executable, "-I", "-B", "-c",
+                 "import sys; sys.stdout.buffer.write(b'o' * 131072); sys.stdout.buffer.flush(); "
+                 "sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+                opf._opf_observe._scrubbed_env(), 10, 524288, input_bytes=b"i" * 131072)
+            check("U14d bounded stdin transport drains output without deadlock",
+                  transport.completed and transport.rc == 0
+                  and transport.out == b"o" * 131072 + b"i" * 131072)
+
+            # U14d) Absent destinations need an ignore-rule probe: status has no entry to report.
+            for label, ignored_rel in (("view", ".working/CONTRIBUTIONS.md"),
+                                       ("index", ".working/toml/contribution.index.toml"),
+                                       ("product", "VERSION")):
+                si = base / ("u14d-absent-" + label)
+                si.mkdir()
+                model = tomllib.loads(_FIX_MANIFEST)
+                if label == "product":
+                    model["views"]["VERSION"] = {
+                        "kind": "deterministic", "sources": ["version"], "target": "VERSION"}
+                build_store(si, manifest=_opf_emit.emit_checked(model))
+                (si / ".git/info").mkdir()
+                (si / ".git/info/exclude").write_text("/" + ignored_rel + "\n", encoding="utf-8")
+                before = _snapshot(si)
+                irc, iout = upgrade(si)
+                check("U14d {} ignore rule refuses before mutation".format(label),
+                      irc == EXIT_ERROR and "ignored planned destinations" in iout and ignored_rel in iout
+                      and _snapshot(si) == before)
+                frc, fout = flipped_upgrade(si, "opf._upgrade_check_ignored = lambda *args: None\n")
+                check("U14d {} FLIP removing check reaches manifest mutation".format(label),
+                      _snapshot(si) != before and "ignored planned destinations" not in fout)
+                if label != "product":
+                    check("U14d {} FLIP reproduces doctor-VALID unstageable success".format(label),
+                          frc == EXIT_OK and "doctor-VALID" in fout)
 
             # U15) [types.contribution] pre-declared: an impossible 1.0.0 shape.
             s15 = base / "u15-contribution-predeclared"
@@ -1153,6 +1227,51 @@ def _suite():
                   "Never run a whole-tree restore" in out17d)
             drc17d, dout17d = doctor(s1)
             check("U17 partial 1.1.0 store doctor is not VALID (exit 2)", drc17d == EXIT_ERROR)
+
+            # U17b) Exceptions immediately after manifest replacement retain the entire planned scope.
+            for suppress_recovery in (False, True):
+                se = base / ("u17b-exception-" + str(suppress_recovery))
+                se.mkdir()
+                me = build_store(se)
+                injection = (
+                    "original = opf._upgrade_replace\n"
+                    "def replace(fd, rel, data):\n"
+                    "    original(fd, rel, data)\n"
+                    "    if rel.endswith('/manifest.toml'):\n"
+                    "        raise OSError('injected after manifest write')\n"
+                    "opf._upgrade_replace = replace\n")
+                if suppress_recovery:
+                    injection += "opf._upgrade_recovery_text = lambda *args: ''\n"
+                erc, eout = flipped_upgrade(se, injection)
+                check("U17b injected exception actually follows the manifest write",
+                      erc == EXIT_ERROR and "injected after manifest write" in eout
+                      and man_of(me)["opf"]["spec_version"] == opf._UPGRADE_TO)
+                import shlex
+                restore = "git -C {} --literal-pathspecs restore --staged --worktree -- ".format(
+                    shlex.quote(str(se))) + ".working/toml/counters.toml .working/toml/manifest.toml"
+                removal = next((line for line in eout.splitlines() if ": rm -- " in line), "")
+                has_plan = (restore in eout and str(se / ".working/CONTRIBUTIONS.md") in removal
+                            and str(me / idx("contribution")) in removal)
+                check("U17b {}planned restore/rm list".format("FLIP suppresses " if suppress_recovery else "prints "),
+                      has_plan == (not suppress_recovery))
+                check("U17b owned lease released after exception", not (me / _opf_check.LEASE_NAME).exists())
+                rrc, rout = upgrade(se)
+                check("U17b F2 derives candidates from the current manifest",
+                      rrc == EXIT_ERROR and "Candidate store destinations" in rout
+                      and ".working/CONTRIBUTIONS.md" in rout
+                      and ".working/toml/contribution.index.toml" in rout
+                      and "restore --staged" not in rout)
+                frc, fout = flipped_upgrade(se,
+                    "original = opf._upgrade_write_scope\n"
+                    "def scope(*args):\n"
+                    "    plan = original(*args)\n"
+                    "    plan['store'] = ()\n"
+                    "    return plan\n"
+                    "opf._upgrade_write_scope = scope\n")
+                candidate_lines = [line for line in fout.splitlines() if "Candidate store destinations" in line]
+                check("U17b FLIP removing derived candidates removes the path list",
+                      frc == EXIT_ERROR and bool(candidate_lines)
+                      and all("CONTRIBUTIONS.md" not in line for line in candidate_lines))
 
             # U18) postcondition unit vectors: call opf._upgrade_postcondition directly (the m1 check).
             old_m = tomllib.loads(_FIX_MANIFEST)
