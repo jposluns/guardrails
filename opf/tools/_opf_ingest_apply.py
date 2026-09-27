@@ -2046,8 +2046,8 @@ def _d_staging_alias(kind):
 
 _ST_TXN = ("transaction-schema", "transaction-consistency")
 
-# R1's exact fail-closed diagnostic, shared by the symlink-route fixtures.
-_ST_HOME_REFUSED = "a run not held by a store must be named by a symlink-free path"
+# R1's exact fail-closed diagnostic, shared by the symlink-route and unheld-relative fixtures.
+_ST_HOME_REFUSED = "name a run not held by a store by an absolute, symlink-free path"
 _ST_DETACHED = (True, "no transaction record (run not yet applied)")
 
 
@@ -2165,7 +2165,7 @@ def _st_route_facts(cwd, spelling, depth):
     Fixture links have absolute physical targets; procfs may use relative targets. Claimants come from
     fixture construction, never from the classifier. Include starting/per-edge physical ancestors."""
     parts = spelling.split("/")
-    cur = "/" if spelling.startswith("/") else str(cwd)
+    cur = "/" if spelling.startswith("/") else os.path.realpath(cwd)
     links, visited = 0, {cur}
 
     def ancestors(path):
@@ -2218,7 +2218,7 @@ def _st_home_verdict(result, reads, root, rid):
 _ST_HOME_PLACEMENTS = ("none", "staging", "legacy", "entry", "ancestor-alias", "in-store-alias",
                        "external-link", "shared-ancestor", "detached", "chained", "nested-shared",
                        "external-root-out", "external-target", "proc-fd", "detached-alias",
-                       "same-root-alias")
+                       "same-root-alias", "cwd-alias", "detached-relative", "detached-absolute")
 _ST_HOME_HELD = ("none", "ancestor-alias", "external-link", "shared-ancestor", "nested-shared",
                 "same-root-alias")
 
@@ -2263,7 +2263,7 @@ def _st_home_topology(base_dir, kind, placement):
             claimants.append(shared)
             aliases.append(str(shared / ".working" / root.relative_to(ancestor)
                                / canonical.relative_to(root)))
-    elif placement in ("detached", "detached-alias"):
+    elif placement in ("detached", "detached-alias", "detached-relative", "detached-absolute"):
         canonical = physical = base_dir / (name + "-copy") / "a" / "b" / rid
         canonical.parent.mkdir(parents=True)
         shutil.copytree(str(staged), str(canonical))
@@ -2289,6 +2289,11 @@ def _st_home_topology(base_dir, kind, placement):
         canonical = staged
         physical = elsewhere / canonical.relative_to(component)
         inside.append(physical.parent)
+        if placement == "cwd-alias":
+            # The chdir traverses a link; the supplied run name records none of that history.
+            link = base_dir / (name + "-cwd")
+            link.symlink_to(physical.parent)
+            inside[:] = [link]
         if placement == "in-store-alias":
             (root / ".working" / "alt").symlink_to(elsewhere)
             aliases.append(str(root / ".working" / "alt" / canonical.relative_to(component)))
@@ -2314,7 +2319,7 @@ def _st_home_topology(base_dir, kind, placement):
 
 
 def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, deep_only=False):
-    """Every matrix cell is independently classified from symlink traversal, holder, and second claim.
+    """Every matrix cell is independently classified from absolute spelling, links, holder, and second claim.
     No canonical-verdict equivalence substitutes for the structural expectation. Count each mismatching
     cell once. Proc magic links keep their descriptor live for the entire placement."""
     from unittest.mock import patch
@@ -2325,13 +2330,18 @@ def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, de
         rid = physical.name
         depth = max(len(rel.split("/")) for gen in (1, 2)
                     for rel in _opf_import._import_run_locations(rid, gen)) - 1
-        if placement not in ("detached", "detached-alias"):
+        if placement == "cwd-alias":
+            cwds = inside
+        elif placement in ("detached-relative", "detached-absolute"):
+            cwds = [canonical.parent]
+        elif placement not in ("detached", "detached-alias"):
             deep = root / ".working" / "w2" / "w3" / "w4" / "w5" / "w6"
             deep.mkdir(parents=True)
             cwds = [base_dir, root] + [Path(*deep.parts[:len(root.parts) + n]) for n in range(1, 7)]
         else:
             cwds = [base_dir, canonical.parents[1], canonical.parent]
-        cwds += inside
+        if placement != "cwd-alias":
+            cwds += inside
         if deep_only:
             cwds = [cwd for cwd in cwds if len(cwd.parts) - len(root.parts) >= 4]
         proc_fd = None
@@ -2350,11 +2360,15 @@ def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, de
                     spellings += [("alias-{}".format(i), a) for i, a in enumerate(aliases)]
                     if placement == "chained":
                         spellings.append(("relative-chain", os.path.relpath(aliases[0], str(cwd))))
+                    if placement in ("cwd-alias", "detached-relative", "detached-absolute"):
+                        spelling = str(physical) if placement == "detached-absolute" else rid
+                        spellings = [("bare", spelling), ("slash", spelling + "/"),
+                                     ("dot", spelling + "/.")]
                     for label, spelling in spellings:
                         links, visited = _st_route_facts(cwd, spelling, depth)
                         second = any(str(claimant) in visited for claimant in claimants)
                         expected = ("refused" if second else "registered") if held else (
-                            "refused" if links else "detached")
+                            "refused" if links or not spelling.startswith("/") else "detached")
                         reads = []
                         read_control = module._read_store_control
 
@@ -2450,6 +2464,23 @@ def _d_home_rule(kind, rule):
     return test
 
 
+def _d_home_unheld_relative(kind):
+    """Earlier chdir links and genuinely detached relative names both refuse; absolute twins still grade."""
+    def test(module, base_dir):
+        outcomes = []
+        for placement in ("cwd-alias", "detached-relative", "detached-absolute"):
+            root, _canonical, physical, _aliases, inside, _held, _claims = _st_home_topology(
+                base_dir, kind, placement)
+            cwd = inside[0] if placement == "cwd-alias" else physical.parent
+            for homes in (1, 2):
+                relative = _st_graded(module, root, physical.name, homes, cwd)
+                absolute = _st_graded(module, root, physical, homes, cwd)
+                outcomes.append(all(relative[cid] == (False, _st_located(_ST_HOME_REFUSED))
+                                    and absolute[cid] == _ST_DETACHED for cid in _ST_TXN))
+        _revert_check(all(outcomes), "gate/home-unheld-relative/" + kind)
+    return test
+
+
 def _d_home_search_only(kind, homes, case):
     """Real 0311 permissions, restored even on failure; never accept an ineffective chmod fixture."""
     def test(module, base_dir):
@@ -2541,6 +2572,20 @@ def _d_home_cwd_bound(kind, homes):
     return test
 
 
+def _st_route_while_renamed(module, component, moved):
+    """Resolve the absolute spelling during a brief restoration, then leave the ancestry renamed.
+    This non-atomic schedule isolates retained binding from R1's refusal of unheld relative names."""
+    route = module._spelled_route
+
+    def restored(rd, visit, depth):
+        moved.rename(component)
+        try:
+            return route(rd, visit, depth)
+        finally:
+            component.rename(moved)
+    return restored
+
+
 def _d_home_restore(kind, homes):
     """A component restored after initial detached classification refuses at the next classification."""
     def test(module, base_dir):
@@ -2562,8 +2607,17 @@ def _d_home_restore(kind, homes):
 
         error = _st_located("the run's registered home changed during grading (the run or a store component "
                             "was renamed or replaced); fail-closed, never re-read as detached")
-        with patch.object(module, "_classify_run_homes", renamed):
-            result = _st_graded(module, root, rid, homes, run.parent)
+        route = module._spelled_route
+
+        # Construct the wrapper before patching, so it retains the real route resolver.
+        restoring_route = _st_route_while_renamed(module, component, moved)
+
+        def first_route(rd, visit, depth):
+            return restoring_route(rd, visit, depth) if len(calls) == 1 else route(rd, visit, depth)
+
+        with patch.object(module, "_classify_run_homes", renamed), \
+                patch.object(module, "_spelled_route", first_route):
+            result = _st_graded(module, root, run, homes)
         _revert_check(len(calls) > 1 and all(result[cid] == (False, error) for cid in _ST_TXN),
                       "gate/home-restore/{}/homes-{}".format(kind, homes))
     return test
@@ -2619,9 +2673,9 @@ def _d_home_rename_at_lookup(kind):
 
 
 def _d_home_retained(kind):
-    """A store component renamed at the transaction lookup leaves a relative spelling resolvable and the run
-    physically unregistered; the binding retained from the first classification refuses the change. Serving
-    the fresh classification instead downgrades the run to the detached fallback, missing the corrupt record."""
+    """A store component renamed at lookup, briefly restored for absolute-route resolution, leaves the run
+    physically unregistered at each ancestry probe. Retained binding refuses; serving only the fresh
+    classification instead downgrades to detached, missing the corrupt record."""
     def test(module, base_dir):
         from unittest.mock import patch
         root, rid, staged = _st_staged(base_dir, "retained-" + kind, kind)
@@ -2635,8 +2689,15 @@ def _d_home_retained(kind):
             return real_store_fd(rd, homes)
         outcomes = []
         for homes in (1, 2):
-            with patch.object(module, "_staged_run_store_fd", side_effect=moving):
-                result = _st_graded(module, root, Path(rid), homes, cwd=staged.parent)
+            route = _st_route_while_renamed(module, staging, staging.parent / "moved")
+            # The first classification precedes the move; subsequent route resolutions see a brief restore.
+            def resolving(rd, visit, depth):
+                return route(rd, visit, depth) if (staging.parent / "moved").exists() else real_route(rd, visit, depth)
+
+            real_route = module._spelled_route
+            with patch.object(module, "_staged_run_store_fd", side_effect=moving), \
+                    patch.object(module, "_spelled_route", resolving):
+                result = _st_graded(module, root, staged, homes)
             (staging.parent / "moved").rename(staging)
             outcomes.append(all(result[cid] == (False, error) for cid in _ST_TXN))
         _revert_check(all(outcomes), "gate/home-retained/" + kind)
@@ -3113,7 +3174,7 @@ _DISCRIMINATORS = tuple(
 _DISCRIMINATORS += tuple(
     ("gate/home-relative/{}/{}/homes-{}".format(case, kind, homes), "gate",
      _d_home_relative(kind, homes, case),
-     "        if not held and expanded:\n", "        if False:  # reverted R1\n")
+     '        if not held and (expanded or not rd.spelling.startswith("/")):\n', "        if False:  # reverted R1\n")
     for kind in ("import", "ingest") for homes in (1, 2)
     for case in ("staging", "staging-entry", "legacy", "legacy-entry")) + tuple(
     ("gate/home-search-only/{}/{}/homes-{}".format(case, kind, homes), "gate",
@@ -3172,9 +3233,13 @@ _DISCRIMINATORS += tuple(
      "\n            pass  # reverted: starting-ancestor visits\n")
     for kind in ("import", "ingest")) + tuple(
     ("gate/home-" + rule + "/" + kind, "gate", _d_home_rule(kind, rule),
-     "        if not held and expanded:\n" if rule == "unheld-link" else "        if held and reached:\n",
+     '        if not held and (expanded or not rd.spelling.startswith("/")):\n' if rule == "unheld-link" else "        if held and reached:\n",
      "        if False:  # reverted fail-closed rule\n")
-    for kind in ("import", "ingest") for rule in ("unheld-link", "second-claim"))
+    for kind in ("import", "ingest") for rule in ("unheld-link", "second-claim")) + tuple(
+    ("gate/home-unheld-relative/" + kind, "gate", _d_home_unheld_relative(kind),
+     '        if not held and (expanded or not rd.spelling.startswith("/")):\n',
+     "        if not held and expanded:\n")
+    for kind in ("import", "ingest"))
 
 
 def _red_on_revert():

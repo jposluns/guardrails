@@ -102,7 +102,7 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
                            archived (`.aiqt/import-archive/<run-id>/acceptance.json`) once state >= published.
                            Both store-root control paths are read beneath a store-root descriptor opened from
                            the run-dir descriptor using the validated generation's run homes and inode binding
-                           (only a symlink-free spelling of a run no registered home physically holds retains
+                           (only an absolute, symlink-free spelling of a run no registered home physically holds retains
                            the legacy three-up fallback, bound to no store). A registered shape outside the supplied
                            generation is cannot-evaluate, including homes-1 grading of depth-four staging.
                            An invalid generation, or one unsupplied once homes 2 is supported, fails closed.
@@ -1752,16 +1752,18 @@ def _spelled_route(rd, visit, ancestor_depth):
 
 
 def _classify_run_homes(rd):
-    """R1: an unheld run is detached only through a symlink-free supplied route. Any traversed symlink,
-    including a procfs fd magic link, makes an unheld route CANNOT-EVALUATE, without inferring provenance.
+    """R1: an unheld run is detached only through an absolute, symlink-free supplied route from /.
+    A relative spelling or any traversed symlink, including a procfs fd magic link, makes an unheld route
+    CANNOT-EVALUATE, without inferring provenance.
     R2: a physically held run binds to its physical store unless another visited directory reaches it
     through a registered location of a different root. That second claim is ambiguous even when the
     spelling did not traverse the claimant's registered location. Visits include relative-start and
     per-edge physical ancestors, bounded by the maximum registered location depth minus one.
     A same-root alternate location is not a second claimant. An unresolvable speculative registered
     location is no match; an error resolving the supplied route itself always fails closed.
-    Relative routes start at the retained cwd descriptor: historical links used to enter that cwd are
-    not part of the supplied spelling and cannot be recovered from the descriptor.
+    Relative routes start at the retained cwd descriptor: historical links used to enter that cwd cannot
+    be recovered, so an unheld relative spelling refuses even when the supplied route traverses no link.
+    Physically held runs still bind through relative spellings under R2.
     Return {registered location: physical store-root descriptor}; the caller closes the descriptors."""
     import _opf_import as imp
     run = _fd_identity(rd.fd)
@@ -1792,8 +1794,8 @@ def _classify_run_homes(rd):
                     reached.append(rel)
 
         traversed, expanded = _spelled_route(rd, visit, max(len(rel.split("/")) for rel in rels) - 1)
-        if not held and expanded:
-            raise _GateError("a run not held by a store must be named by a symlink-free path")
+        if not held and (expanded or not rd.spelling.startswith("/")):
+            raise _GateError("name a run not held by a store by an absolute, symlink-free path")
         if held and reached:
             raise _GateError("run has an ambiguous second store claim through registered location {!r}; "
                              "a different visited root reaches the physically held run".format(reached[0]))
@@ -1826,16 +1828,16 @@ def _registered_run_store_fd(rd, generation):
     Residuals (disclose-guard-residuals):
     - M1, concurrent rename: classification is a sequence of descriptor-relative steps, not an atomic
       ancestry snapshot. A store component renamed before the first classification and restored only after
-      the last store lookup can grade a registered run detached through a physical or relative spelling, so
+      the last store lookup can grade a registered run detached through an absolute, symlink-free spelling, so
       its store-root transaction record goes unread. Restoration before re-classification instead refuses
       on the retained binding. A spelling through the missing component refuses when it cannot resolve.
       Path-based ancestry cannot close the remaining window without an atomic snapshot.
-    - Detached only for symlink-free spellings of unheld runs. An untraversed registered-home symlink
-      cannot be discovered from a physical spelling or a cwd descriptor already inside its target.
-      Over-refusal cost: a detached copy spelled via a symlinked path such as a symlinked /tmp is refused.
-      A relative spelling starts from its retained physical cwd; links used by an earlier chdir are not
-      observable unless included in the supplied path. Callers needing that history must supply the
-      absolute logical spelling (including the cwd's symlink components).
+    - Detached only for absolute, symlink-free spellings of unheld runs, checked component by component
+      from /. An untraversed registered-home symlink cannot be discovered from a physical spelling.
+      The historical symlinked-cwd residual is closed by refusing every unheld relative spelling.
+      Over-refusal cost: even a genuinely detached copy named relatively is refused, as is a detached
+      copy spelled via a symlinked path such as a symlinked /tmp. Name it by an absolute, symlink-free
+      path instead. Relative spellings of physically held runs still bind to their physical store.
     - A mount that re-roots the run's ancestry (a bind mount) is classified by the mounted ancestry, which is
       the only ancestry its descriptor has."""
     import _opf_import as imp
@@ -4634,7 +4636,7 @@ def _self_test():
             os.rename(str(staging), str(elsewhere))
             os.symlink(str(elsewhere), str(staging))
             spelled = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
-                       "(a run not held by a store must be named by a symlink-free path)")
+                       "(name a run not held by a store by an absolute, symlink-free path)")
             expect("txn-alias-symlinked-staging-cannot-" + kind, all(
                 graded_as(alias_run, None, homes)[cid] == (False, spelled)
                 for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
@@ -4745,11 +4747,10 @@ def _self_test():
                     os.rename(str(run.parent / "moved"), str(run))
                     outcomes.append(all(result[cid] == (False, renamed) for cid in _TRANSACTION_CHECKS))
                 expect("txn-rename-before-classification-" + kind, all(outcomes))
-                # Flip (codex P1 #2, retained binding): a store component renamed at the lookup leaves a relative
-                # spelling resolvable and the run physically unregistered; the retained binding refuses the change.
+                # A store component renamed at lookup leaves the relative spelling resolvable but unheld.
+                # R1 now refuses it before the retained-binding comparison (a tightening).
                 staging = root / imp._opf_store.STAGING_REL
-                changed = located("the run's registered home changed during grading (the run or a store component "
-                                  "was renamed or replaced); fail-closed, never re-read as detached")
+                changed = located("name a run not held by a store by an absolute, symlink-free path")
 
                 def moving(rd, homes, staging=staging):
                     os.rename(str(staging), str(staging.parent / "moved"))
