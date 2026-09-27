@@ -70,8 +70,6 @@ import datetime
 import math
 import re
 import sys
-import threading
-import weakref
 from pathlib import Path
 
 try:
@@ -670,20 +668,92 @@ def _fixture_subreaper():
         raise ChildStatusUnavailable("cannot confirm child subreaping")
 
 
-def _fixture_setpgid(subject):
-    """An exec'd child may already have established the required group."""
-    import errno
-    import os
+def _fixture_pdeathsig():
+    """Arm PR_SET_PDEATHSIG(SIGKILL) in the subject: partial extra coverage for the
+    documented wedged-guardian residual (a guardian killed while wedged can no longer
+    drain its tree; the kernel then kills the subject when its parent dies). Descendants
+    the subject forks do NOT inherit the flag, and where prctl is unavailable this fails
+    closed to that documented residual: the drain/census stays the authoritative cleanup."""
+    import ctypes
+    import signal
     try:
-        os.setpgid(subject, subject)
-    except OSError as exc:
-        if exc.errno != errno.EACCES:
-            raise
-        # WNOWAIT retains the child identity, including an exited zombie. ECHILD
-        # refuses; a matching numeric process group alone is not ownership.
-        os.waitid(os.P_PID, subject, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-        if os.getpgid(subject) != subject:
-            raise
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(1, int(signal.SIGKILL), 0, 0, 0)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+
+
+def _fixture_close_all_except(keep):
+    """First act of a new guardian: close EVERY inherited descriptor not in {0,1,2} | keep.
+    The /proc/self/fd scan is exact (the layer already requires Linux; os.close_range is
+    absent from this interpreter build); os.closerange over the gaps is the fallback when
+    the scan is unavailable. There is no parent-side registry to publish to or go stale:
+    an undeclared caller descriptor is closed here unconditionally, so a subject using one
+    fails loudly (EBADF), never a sometimes-working leak, and a sibling call's endpoints
+    (constructed or still under construction) never survive into an unrelated guardian."""
+    import os
+    kept = {0, 1, 2}
+    kept.update(int(fd) for fd in keep)
+    try:
+        fds = sorted(int(name) for name in os.listdir("/proc/self/fd"))
+    except (OSError, ValueError):
+        fds = None
+    if fds is not None:
+        for fd in fds:
+            if fd not in kept:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        return
+    import resource
+    bound = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    if bound == resource.RLIM_INFINITY or bound > (1 << 20):
+        bound = 1 << 20
+    previous = 2
+    for fd in sorted(kept):
+        if fd > previous + 1:
+            os.closerange(previous + 1, fd)
+        previous = max(previous, fd)
+    os.closerange(previous + 1, bound)
+
+
+def _fixture_send_subject(peer, subject, subject_fd):
+    """Deliver the subject receipt on the control socket: no subject exists without a
+    delivered receipt of it. The one-byte-plus-cmsg send on an empty socketpair cannot
+    block, and the receipt stays buffered for the caller even if the guardian is later
+    SIGKILLed. The guardian treats a send failure as fatal (recorded, subject drained,
+    exit 125). Without a pidfd only the pid is sent and escalation stays guardian-only:
+    a bare pid cannot exclude the reaped-before-freeze recycling window."""
+    import socket
+    payload = str(subject).encode("ascii")
+    if subject_fd is not None:
+        socket.send_fds(peer, [payload], [subject_fd])
+    else:
+        peer.send(payload)
+
+
+def _fixture_escalate_subject(subject, subject_fd):
+    """Kill a receipt-identified subject during escalation: liveness-probe the pidfd,
+    then the whole group, then the pinned pidfd target. Safe only after the guardian
+    (the sole process able to reap the subject) is frozen, so the subject's pid/pgid
+    cannot be recycled for the rest of the sequence."""
+    import os
+    import signal
+    try:
+        signal.pidfd_send_signal(subject_fd, 0)
+    except (ProcessLookupError, OSError):
+        return  # already gone (init reaped the orphan): nothing to address
+    try:
+        os.killpg(subject, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # A pre-setsid subject is not yet a leader and has run no user code, so
+        # there is nothing in a group to miss; the pidfd kill below still lands.
+        pass
+    try:
+        signal.pidfd_send_signal(subject_fd, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
 
 
 def _fixture_children():
@@ -766,68 +836,70 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
         time.sleep(0.005)
 
 
-# Serialize socket registration with guardian forks. CLOEXEC alone cannot release
-# endpoints inherited by guardians, which never exec. Only this helper's forks
-# participate; arbitrary external forks and foreign reapers remain out of contract.
-_fixture_socket_lock = threading.Lock()
-_fixture_sockets = weakref.WeakSet()
-
-# Every descriptor a fixture call holds (control/peer sockets, its receipt, and the
-# caller-declared keep_fds such as run_bounded's pipe), keyed by the owning call. A
-# new guardian closes EVERY registered descriptor that is not in its own allowlist
-# of fds to KEEP, so sibling pipes and receipts (not only sockets) never survive
-# into an unrelated guardian. Registration and the sweep snapshot share the fork
-# lock; a caller drops a number (release_fd) BEFORE closing it, so a stale entry
-# can only leak a descriptor briefly, never mark a reused number for closure.
-_fixture_owned_fds = weakref.WeakKeyDictionary()
-
-
-def _fixture_close_sockets(*endpoints):
-    # socket.close() invalidates fileno() before releasing the kernel descriptor.
-    # Keep that whole window atomic with registration and guardian fork.
-    with _fixture_socket_lock:
-        for endpoint in endpoints:
-            endpoint.close()
-
-
 class _FixtureProcess:
     """Shared fork/exec tree owner. No caller signal state is borrowed.
 
     The caller owns a guardian; the guardian alone launches/owns the subject tree.
-    READY/GO separates startup (no subject exists, so killing the guardian is safe)
-    from supervision (control-channel EOF requests tree cleanup). The guardian
-    records status only AFTER tree cleanup reaches ECHILD. Its subreaper flag is
-    private; the caller's SIGCHLD, masks, timers and subreaper flag stay untouched.
+    The subject is a CALLABLE given at construction and runs only in the subject
+    process: start() is parent-only and never returns in a child, so subject-side
+    control flow can never fall into caller cleanup. READY/GO separates startup
+    (no subject exists, so killing the guardian is safe) from supervision
+    (control-channel EOF requests tree cleanup). The guardian records status only
+    AFTER tree cleanup reaches ECHILD. Its subreaper flag is private; the caller's
+    SIGCHLD, masks, timers and subreaper flag stay untouched.
+
+    Descriptor contract (allowlist, no registry): the guardian's first act is to
+    close every inherited descriptor except stdio, its own control peer and
+    receipt, and the caller-declared keep_fds, so the guardian and its subject see
+    ONLY stdio plus declared descriptors. An undeclared caller fd is a loud
+    deterministic refusal (EBADF in the subject), never a sometimes-working leak,
+    and a sibling call's endpoints -- constructed or still under construction --
+    can never survive into an unrelated guardian.
+
+    Launch ownership: start() forks on a private launcher thread. CPython raises
+    asynchronous signal exceptions (e.g. a real SIGINT's KeyboardInterrupt) only
+    in the MAIN thread, so no bytecode boundary on that thread can lose the fork
+    result; a cancellation delivered at ANY caller-side point still lets close()
+    -- which joins the launcher (bounded) before deciding -- reap the guardian to
+    ECHILD.
+
+    Escalation: immediately after forking the subject the guardian delivers a
+    (pid, pidfd) receipt on the control socket -- no subject exists without a
+    delivered receipt -- and close() collects it before closing that socket. A
+    guardian that cannot be collected within the bounded cleanup budget is frozen
+    (SIGSTOP via its pidfd, so the subject's pid/pgid cannot be recycled), then
+    the receipt-identified subject's group and pidfd are SIGKILLed, then the
+    guardian itself, and the subject's disappearance is proven on its pidfd or
+    refused loudly. Documented residual: descendants that leave the subject's
+    group/session survive a WEDGED-guardian escalation (only the subreaper census
+    can find them; the honest-guardian drain still covers them). The subject arms
+    PR_SET_PDEATHSIG(SIGKILL) as partial extra coverage, failing closed to that
+    residual where unavailable. Hosts without pidfd degrade escalation to
+    guardian-only with the same residual.
+
     Parent-side fork callbacks and uninterruptible kernel waits remain unbounded.
     """
-    def __init__(self, deadline, keep_fds=()):
+    def __init__(self, deadline, keep_fds=(), subject=None):
         import socket
         import tempfile
         self.deadline = deadline
         self.pid = self.pidfd = self.status = None
+        self.subject_pid = self.subject_pidfd = None
         self.armed = self.collected = self.timed_out = False
-        # keep_fds: this call's own descriptors that its guardian and subject
-        # still need (e.g. run_bounded's pipe); registered sibling-visible below.
+        # keep_fds: descriptors the guardian and its subject still need (e.g.
+        # run_bounded's pipe). Everything else inherited is closed in the guardian.
         self.keep_fds = tuple(keep_fds)
-        with _fixture_socket_lock:
-            self.control, self.peer = socket.socketpair()  # non-inheritable across exec
-            _fixture_sockets.update((self.control, self.peer))
+        self.subject = subject
+        self._launcher = None
+        self._launched = None
+        self._launch_error = None
+        self.control, self.peer = socket.socketpair()  # non-inheritable across exec
         try:
             self.report = tempfile.TemporaryFile()
         except BaseException:
-            _fixture_close_sockets(self.control, self.peer)
+            self.control.close()
+            self.peer.close()
             raise
-        with _fixture_socket_lock:
-            _fixture_owned_fds[self] = {self.control.fileno(), self.peer.fileno(),
-                                        self.report.fileno(), *self.keep_fds}
-
-    def release_fd(self, fd):
-        """The caller is about to close `fd` itself: drop the registration FIRST,
-        so a reused number can never be swept out of a later sibling guardian."""
-        with _fixture_socket_lock:
-            owned = _fixture_owned_fds.get(self)
-            if owned is not None:
-                owned.discard(fd)
 
     def start(self):
         try:
@@ -836,154 +908,50 @@ class _FixtureProcess:
             self.close()
             raise
 
+    def _launch(self):
+        """Launcher-thread body: fork, then record ownership. Runs only on the private
+        launcher thread, where CPython never raises asynchronous signal exceptions, so
+        no bytecode boundary here can lose the fork result between the fork and its
+        store -- by interpreter construction, not by statement packing."""
+        import os
+        try:
+            pid = os.fork()
+            if pid == 0:
+                self._guardian()  # never returns: every guardian path ends in os._exit
+            self.pid = pid
+            self.pidfd = _fixture_pidfd(pid)
+        except BaseException as exc:  # parent-side only; surfaced by _start
+            self._launch_error = exc
+        finally:
+            self._launched.set()
+
     def _start(self):
-        import json
         import os
         import select
         import signal
         import sys
+        import threading
         import time
         if sys.platform != "linux" or not all(
                 hasattr(os, name) for name in ("fork", "waitid", "WNOWAIT", "P_ALL")):
             raise ChildStatusUnavailable("Linux fork/waitid/subreaping required")
         if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
             raise ChildStatusUnavailable("unowned SIGCHLD disposition")
-        with _fixture_socket_lock:
-            sweep = sorted({fd for owned in _fixture_owned_fds.values() for fd in owned})
-            # The fork result is recorded in cleanup-visible ownership state on
-            # the fork statement itself, before any other statement can raise,
-            # so a cancellation delivered between fork and the next line still
-            # lets close() reap the guardian (the child's self.pid copy of 0 is
-            # inert: a guardian never consults it and never calls close()).
-            self.pid = pid = os.fork()
-        if pid == 0:
-            subject = subject_fd = cleanup_deadline = None
-            stage = "startup"
-            try:
-                # Close every descriptor a sibling call holds (pipes and
-                # receipts, not only sockets) by an allowlist of fds to KEEP:
-                # this call's peer, its receipt, and its caller-declared
-                # keep_fds. EOF on a sibling's pipe therefore keeps its meaning,
-                # and nothing this guardian's tree does can pin a sibling's
-                # descriptors open.
-                keep = {self.peer.fileno(), self.report.fileno(), *self.keep_fds}
-                for fd in sweep:
-                    if fd not in keep:
-                        try:
-                            os.close(fd)
-                        except OSError:
-                            pass
-                os.setpgid(0, 0)
-                _fixture_subreaper()
-                os.write(self.peer.fileno(), b"R")
-                if os.read(self.peer.fileno(), 1) != b"G":
-                    os._exit(0)  # cancelled before GO: no subject exists
-                subject = os.fork()
-                if subject == 0:
-                    try:
-                        _fixture_close_sockets(self.peer)
-                        self.report.close()
-                        os.setpgid(0, 0)
-                        return 0
-                    except BaseException:
-                        # This is the subject, not the guardian: its report is
-                        # already closed. Preserve the bootstrap cause on fd 2.
-                        import traceback
-                        try:
-                            with os.fdopen(os.dup(2), "w") as diagnostic:
-                                traceback.print_exc(file=diagnostic)
-                        finally:
-                            os._exit(125)
-                stage = "subject-group"
-                _fixture_setpgid(subject)
-                subject_fd = _fixture_pidfd(subject)
-                self.peer.setblocking(False)
-                timed_out = False
-                stage = "supervision"
-                while True:
-                    ended = os.waitid(os.P_PID, subject, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                    # Deadline expiry is authoritative BEFORE accepting
-                    # completion: the clock is sampled AFTER waitid, so only a
-                    # pre-expiry sample proves the exit preceded the deadline.
-                    # An exit first observed after expiry is recorded as a
-                    # timeout, whatever order the processes were scheduled in.
-                    # Cleanup below keeps its own separate budget.
-                    if time.monotonic() >= self.deadline:
-                        timed_out = True
-                        break
-                    if ended is not None:
-                        break
-                    try:
-                        if not os.read(self.peer.fileno(), 1):
-                            break
-                        raise ChildStatusUnavailable("unexpected guardian control byte")
-                    except BlockingIOError:
-                        pass
-                    time.sleep(0.005)
-                stage = "drain"
-                cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
-                status = _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
-                subject = None
-                if subject_fd is not None:
-                    os.close(subject_fd)
-                    subject_fd = None
-                if status is None:
-                    raise ChildStatusUnavailable("subject status unavailable")
-                stage = "receipt"
-                self.report.write(json.dumps([status, timed_out]).encode("ascii"))
-                self.report.flush()
-                os._exit(0)
-            except BaseException as exc:
-                def detail(error):
-                    try:
-                        message = str(error)[:512]
-                    except BaseException:
-                        message = "<exception message unavailable>"
-                    try:
-                        number = getattr(error, "errno", None)
-                    except BaseException:
-                        number = None
-                    return {"type": type(error).__name__[:128],
-                            "errno": number if type(number) is int else None, "message": message}
-
-                failure = {"stage": stage, "error": detail(exc), "cleanup": "pending"}
-
-                def record_failure():
-                    try:
-                        self.report.seek(0)
-                        self.report.truncate()
-                        self.report.write(json.dumps(failure).encode("ascii"))
-                        self.report.flush()
-                    except BaseException:
-                        # A broken report channel cannot certify anything. The
-                        # caller still reports the raw nonzero guardian status.
-                        pass
-
-                record_failure()  # preserve the cause even if cleanup cannot finish
-                try:
-                    if subject is not None:
-                        if cleanup_deadline is None:
-                            cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
-                        _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
-                    failure["cleanup"] = "ECHILD" if subject is not None else "no subject"
-                except BaseException as cleanup_exc:
-                    failure["cleanup"] = detail(cleanup_exc)
-                finally:
-                    record_failure()
-                    try:
-                        if subject_fd is not None:
-                            os.close(subject_fd)
-                    finally:
-                        os._exit(125)
-        self.release_fd(self.peer.fileno())
-        _fixture_close_sockets(self.peer)
-        self.pidfd = _fixture_pidfd(pid)
-        if self.pidfd is not None:
-            with _fixture_socket_lock:
-                owned = _fixture_owned_fds.get(self)
-                if owned is not None:
-                    owned.add(self.pidfd)
-        os.setpgid(pid, pid)
+        if not callable(self.subject):
+            raise ChildStatusUnavailable("fixture subject must be a callable")
+        self._launched = threading.Event()
+        self._launcher = threading.Thread(
+            target=self._launch, name="opf-fixture-launcher", daemon=True)
+        self._launcher.start()
+        # Bounded wait: a fork wedged in the kernel or an at-fork hook is a
+        # cannot-evaluate; close() joins the launcher again before deciding.
+        if not self._launched.wait(max(self.deadline - time.monotonic(),
+                                       _FIXTURE_CLEANUP_GRACE)):
+            raise TimeoutError("fixture launch deadline")
+        if self._launch_error is not None:
+            raise self._launch_error
+        pid = self.pid
+        self.peer.close()
         self.control.setblocking(False)
         poller = select.poll()
         poller.register(self.control, select.POLLIN | select.POLLHUP | select.POLLERR)
@@ -1003,6 +971,130 @@ class _FixtureProcess:
                 return pid
         self.timed_out = True
         raise TimeoutError("fixture startup deadline")
+
+    def _guardian(self):
+        """Guardian process body (the forked child's only thread); never returns."""
+        import gc
+        import json
+        import os
+        import time
+        subject = subject_fd = cleanup_deadline = None
+        stage = "startup"
+        try:
+            # The forked heap is the caller's: a collection here could run
+            # caller-object finalizers whose fd closes would hit numbers this
+            # guardian legitimately reuses after the sweep below. Keep collection
+            # off for the guardian's short life.
+            gc.disable()
+            # The whole descriptor contract, applied unconditionally: only stdio,
+            # this call's peer + receipt, and the caller-declared keep_fds survive
+            # into the guardian and its subject.
+            _fixture_close_all_except(
+                set((self.peer.fileno(), self.report.fileno(), *self.keep_fds)))
+            os.setpgid(0, 0)  # no group signal can ever address the caller's group
+            _fixture_subreaper()
+            os.write(self.peer.fileno(), b"R")
+            if os.read(self.peer.fileno(), 1) != b"G":
+                os._exit(0)  # cancelled before GO: no subject exists
+            subject = os.fork()
+            if subject == 0:
+                try:
+                    self.peer.close()
+                    self.report.close()
+                    _fixture_pdeathsig()
+                    os.setsid()  # before any subject code, and before any exec
+                    self.subject()
+                    os._exit(0)
+                except BaseException:
+                    # This is the subject, not the guardian: its report is
+                    # already closed. Preserve the bootstrap cause on fd 2.
+                    import traceback
+                    try:
+                        with os.fdopen(os.dup(2), "w") as diagnostic:
+                            traceback.print_exc(file=diagnostic)
+                    finally:
+                        os._exit(125)
+            stage = "subject-receipt"
+            subject_fd = _fixture_pidfd(subject)
+            _fixture_send_subject(self.peer, subject, subject_fd)
+            self.peer.setblocking(False)
+            timed_out = False
+            stage = "supervision"
+            while True:
+                ended = os.waitid(os.P_PID, subject, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                # Deadline expiry is authoritative BEFORE accepting
+                # completion: the clock is sampled AFTER waitid, so only a
+                # pre-expiry sample proves the exit preceded the deadline.
+                # An exit first observed after expiry is recorded as a
+                # timeout, whatever order the processes were scheduled in.
+                # Cleanup below keeps its own separate budget.
+                if time.monotonic() >= self.deadline:
+                    timed_out = True
+                    break
+                if ended is not None:
+                    break
+                try:
+                    if not os.read(self.peer.fileno(), 1):
+                        break
+                    raise ChildStatusUnavailable("unexpected guardian control byte")
+                except BlockingIOError:
+                    pass
+                time.sleep(0.005)
+            stage = "drain"
+            cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
+            status = _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
+            subject = None
+            if subject_fd is not None:
+                os.close(subject_fd)
+                subject_fd = None
+            if status is None:
+                raise ChildStatusUnavailable("subject status unavailable")
+            stage = "receipt"
+            self.report.write(json.dumps([status, timed_out]).encode("ascii"))
+            self.report.flush()
+            os._exit(0)
+        except BaseException as exc:
+            def detail(error):
+                try:
+                    message = str(error)[:512]
+                except BaseException:
+                    message = "<exception message unavailable>"
+                try:
+                    number = getattr(error, "errno", None)
+                except BaseException:
+                    number = None
+                return {"type": type(error).__name__[:128],
+                        "errno": number if type(number) is int else None, "message": message}
+
+            failure = {"stage": stage, "error": detail(exc), "cleanup": "pending"}
+
+            def record_failure():
+                try:
+                    self.report.seek(0)
+                    self.report.truncate()
+                    self.report.write(json.dumps(failure).encode("ascii"))
+                    self.report.flush()
+                except BaseException:
+                    # A broken report channel cannot certify anything. The
+                    # caller still reports the raw nonzero guardian status.
+                    pass
+
+            record_failure()  # preserve the cause even if cleanup cannot finish
+            try:
+                if subject is not None:
+                    if cleanup_deadline is None:
+                        cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
+                    _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
+                failure["cleanup"] = "ECHILD" if subject is not None else "no subject"
+            except BaseException as cleanup_exc:
+                failure["cleanup"] = detail(cleanup_exc)
+            finally:
+                record_failure()
+                try:
+                    if subject_fd is not None:
+                        os.close(subject_fd)
+                finally:
+                    os._exit(125)
 
     def poll(self):
         import os
@@ -1038,24 +1130,72 @@ class _FixtureProcess:
             raise ChildStatusUnavailable("malformed tree-cleanup receipt; " + termination)
         self.status, self.timed_out = result
 
+    def _recv_subject(self):
+        """Collect the buffered subject receipt, if any. It must be read BEFORE the
+        control socket is closed: closing that socket is what requests tree cleanup,
+        and the receipt stays buffered in it even after the guardian's death."""
+        import os
+        import select
+        import socket
+        if not self.armed or self.subject_pid is not None:
+            return
+        try:
+            if select.select([self.control], [], [], 0.5)[0]:
+                msg, fds, _flags, _addr = socket.recv_fds(self.control, 32, 1)
+                if msg:
+                    self.subject_pid = int(msg)
+                if fds:
+                    self.subject_pidfd = fds[0]
+                    for extra in fds[1:]:
+                        os.close(extra)
+        except (OSError, ValueError):
+            pass
+
+    def _escalate(self):
+        """Freeze first, then kill: SIGSTOP the guardian via its pidfd (the only
+        process able to reap the subject, so the subject's pid/pgid cannot be
+        recycled for the rest of the sequence), SIGKILL the receipt-identified
+        subject's group and pidfd, then SIGKILL the guardian itself; the caller's
+        bounded reap loop collects it and close() then proves the subject's exit."""
+        import signal
+        if self.pidfd is not None:
+            try:
+                signal.pidfd_send_signal(self.pidfd, signal.SIGSTOP)
+            except (ProcessLookupError, OSError):
+                pass  # already exited: the reap loop collects it
+        if self.subject_pidfd is not None:
+            _fixture_escalate_subject(self.subject_pid, self.subject_pidfd)
+        _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+
     def close(self):
         import os
+        import select
         import signal
         import time
-        # Cancellation addresses this guardian, never a stale PID.
-        with _fixture_socket_lock:
-            _fixture_owned_fds.pop(self, None)
-        _fixture_close_sockets(self.control, self.peer)
         try:
+            # The launcher owns the fork result: join it (bounded) before deciding,
+            # so cancellation at ANY caller-side point still reaps to ECHILD.
+            if self._launcher is not None:
+                self._launcher.join(2 * _FIXTURE_CLEANUP_GRACE)
+                if self._launcher.is_alive():
+                    raise ChildStatusUnavailable(
+                        "fixture launch did not complete: guardian ownership unknown")
+                self._launcher = None
+            # Read the buffered subject receipt BEFORE closing the control socket;
+            # closing it is what requests tree cleanup (EOF), and cancellation
+            # addresses this guardian and its receipt, never a stale PID.
+            self._recv_subject()
+            self.control.close()
+            self.peer.close()
             if self.pid is not None and not self.collected:
                 if not self.armed:
                     _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
                 # A cancelled call no longer needs the subject's execution time:
                 # wait within a bounded cleanup budget (twice the grace, so an
                 # honest guardian's own grace-bounded drain fits), then escalate
-                # with a group SIGKILL rather than blocking for the remaining
-                # execution budget. An escalated collection is recorded on the
-                # cannot-evaluate channel below; it is never read as success.
+                # rather than blocking for the remaining execution budget. An
+                # escalated collection is recorded on the cannot-evaluate channel
+                # below; it is never read as success.
                 escalated = False
                 deadline = time.monotonic() + 2 * _FIXTURE_CLEANUP_GRACE
                 while True:
@@ -1071,25 +1211,37 @@ class _FixtureProcess:
                             raise ChildStatusUnavailable(
                                 "guardian cleanup deadline: not collected after escalation")
                         escalated = True
-                        _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                        self._escalate()
                         deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
                     time.sleep(0.005)
                 self.collected = True
                 if waited != self.pid:
                     raise ChildStatusUnavailable("unexpected guardian cleanup PID")
+                if escalated and self.subject_pidfd is not None:
+                    # A pidfd polls readable on exit even for a non-child (init
+                    # reaps the orphan): prove the subject disappeared, or refuse
+                    # loudly, never silence.
+                    poller = select.poll()
+                    poller.register(self.subject_pidfd, select.POLLIN)
+                    if not poller.poll(int(_FIXTURE_CLEANUP_GRACE * 1000)):
+                        raise ChildStatusUnavailable(
+                            "escalation could not confirm subject exit: pid {} may "
+                            "survive".format(self.subject_pid))
                 if self.armed:
                     try:
                         self._read_report(raw)
                     except ChildStatusUnavailable as exc:
                         if escalated:
                             raise ChildStatusUnavailable(
-                                str(exc) + "; after bounded-close escalation "
-                                "(group SIGKILL to the guardian)") from exc
+                                str(exc) + "; after bounded-close escalation (guardian "
+                                "frozen, subject tree killed, guardian SIGKILL)") from exc
                         raise
         finally:
-            if self.pidfd is not None:
-                os.close(self.pidfd)
-                self.pidfd = None
+            for name in ("pidfd", "subject_pidfd"):
+                fd = getattr(self, name)
+                if fd is not None:
+                    os.close(fd)
+                    setattr(self, name, None)
             self.report.close()
 
 
@@ -1109,20 +1261,26 @@ def _run_fixture_process(argv, *, timeout=120, cwd=None, env=None):
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("fixture timeout must be finite and positive")
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        def exec_subject():
+            # Subject process only (start() is parent-only): rewire stdio onto the
+            # kept capture files, then the argv program replaces this image.
+            # setsid and PR_SET_PDEATHSIG already happened in the subject wrapper.
+            try:
+                os.dup2(out.fileno(), 1)
+                os.dup2(err.fileno(), 2)
+                if cwd is not None:
+                    os.chdir(cwd)
+                os.execvpe(argv[0], argv, os.environ if env is None else env)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(127)
+
         child = _FixtureProcess(time.monotonic() + timeout,
-                                keep_fds=(out.fileno(), err.fileno()))
+                                keep_fds=(out.fileno(), err.fileno()),
+                                subject=exec_subject)
         try:
-            if child.start() == 0:
-                try:
-                    os.dup2(out.fileno(), 1)
-                    os.dup2(err.fileno(), 2)
-                    if cwd is not None:
-                        os.chdir(cwd)
-                    os.execvpe(argv[0], argv, os.environ if env is None else env)
-                except BaseException:
-                    import traceback
-                    traceback.print_exc()
-                    os._exit(127)
+            child.start()
             while True:
                 status = child.poll()
                 # Deadline expiry is authoritative BEFORE accepting completion:
@@ -1243,7 +1401,7 @@ def _bounded_setup_error(exc):
     return "SETUP-ERROR:" + type(exc).__name__ + ":" + str(exc)[:8192]
 
 
-def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
+def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
     """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS and return that
     str, or a sentinel: 'TIMEOUT' (wall-clock bound tripped), 'OOM' (address-space bound tripped),
     'CHILD-DIED', 'ERROR:<Type>' (the thunk raised), or 'SETUP-ERROR:<Type>[:detail]' (the child could NOT install
@@ -1259,6 +1417,12 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     Test-harness only: OPF self-tests, including the FIFO refusal probes, share this
     implementation. Timer setup happens only in the child; the parent's timers,
     handlers, masks and pending signals are never borrowed. Production validators fork nothing.
+
+    Descriptor contract (fd allowlist): the thunk sees ONLY stdio, this call's result pipe and the
+    caller-declared keep_fds -- the guardian closes every other inherited descriptor before the thunk
+    can run. A thunk relying on an undeclared caller descriptor fails loudly and deterministically
+    (typically ERROR:OSError from EBADF), never a sometimes-working leak; keep_fds is the sanctioned
+    path for a pre-opened descriptor the thunk needs (see _FixtureProcess).
 
     Hardening: (fork-less) a host without os.fork returns SETUP-ERROR WITHOUT running the thunk, never the
     thunk's own result run unbounded. (child) the child resets SIGALRM to SIG_DFL AND UNBLOCKS it in its
@@ -1320,30 +1484,9 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         rfd, wfd = os.pipe()
     except OSError as exc:
         return _bounded_setup_error(exc)
-    child = None
-    try:
-        child = _FixtureProcess(deadline, keep_fds=(rfd, wfd))
-        pid = child.start()
-    except BaseException as exc:
-        try:
-            if child is not None:
-                child.close()
-        finally:
-            try:
-                os.close(rfd)
-            finally:
-                os.close(wfd)
-        if not isinstance(exc, Exception):
-            raise
-        if isinstance(exc, TimeoutError):
-            return "TIMEOUT"
-        return _bounded_setup_error(exc)
-    if pid == 0:                                         # child: bounded, writes one short token, never returns
+    def bounded_subject():                               # subject: bounded, writes one short token, never returns
         os.close(rfd)
         try:
-            # Both sides establish the group: the parent can do so even when an after_in_child
-            # callback stalls before this code. The child also does so before the thunk can fork.
-            os.setpgid(0, 0)
             # Keep the child timer as an independent bound, with a deliverable disposition and mask.
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             if hasattr(signal, "pthread_sigmask"):
@@ -1368,13 +1511,32 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         except OSError:
             pass
         os._exit(0)
+
+    child = None
+    try:
+        child = _FixtureProcess(deadline, keep_fds=(rfd, wfd, *keep_fds),
+                                subject=bounded_subject)
+        child.start()
+    except BaseException as exc:
+        try:
+            if child is not None:
+                child.close()
+        finally:
+            try:
+                os.close(rfd)
+            finally:
+                os.close(wfd)
+        if not isinstance(exc, Exception):
+            raise
+        if isinstance(exc, TimeoutError):
+            return "TIMEOUT"
+        return _bounded_setup_error(exc)
     # parent: never borrow a timer, handler, signal mask or pending notification.
     data = b""
     wstatus = None
     timed_out = False
     failures = []
     try:
-        child.release_fd(wfd)
         os.close(wfd)
         os.set_blocking(rfd, False)
         poller = select.poll()
@@ -1418,7 +1580,6 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         failures.append(_bounded_setup_error(exc))
     finally:
         try:
-            child.release_fd(rfd)
             os.close(rfd)
         finally:
             try:
@@ -1777,15 +1938,15 @@ def self_test():
         # self-test's caller (which may have a live timer or pending SIGALRM).
         def _blocked_status_case():
             _sig6.pthread_sigmask(_sig6.SIG_BLOCK, {_sig6.SIGALRM})
-            _case5 = _FixtureProcess(_time6.monotonic() + 5)
-            if _case5.start() == 0:
-                try:
-                    _sig6.signal(_sig6.SIGALRM, _sig6.SIG_DFL)
-                    _sig6.pthread_sigmask(_sig6.SIG_UNBLOCK, {_sig6.SIGALRM})
-                    _sig6.raise_signal(_sig6.SIGALRM)
-                    _sig6.pause()
-                finally:
-                    _os6._exit(0)
+
+            def _alarm_subject():
+                _sig6.signal(_sig6.SIGALRM, _sig6.SIG_DFL)
+                _sig6.pthread_sigmask(_sig6.SIG_UNBLOCK, {_sig6.SIGALRM})
+                _sig6.raise_signal(_sig6.SIGALRM)
+                _sig6.pause()
+
+            _case5 = _FixtureProcess(_time6.monotonic() + 5, subject=_alarm_subject)
+            _case5.start()
             _wst5 = _reap_bounded(_case5)
             if not (_os6.WIFSIGNALED(_wst5) and _os6.WTERMSIG(_wst5) == _sig6.SIGALRM):
                 return "NOT-SIGALRM"
@@ -1795,10 +1956,8 @@ def self_test():
             failures.append("run_bounded/status-first: blocked-mask child did not report SIGALRM")
         # regression: a child that exited NORMALLY with bytes returns those bytes (the fix does not swallow
         # a legitimate result).
-        _case5b = _FixtureProcess(_time6.monotonic() + 5)
-        _pid5b = _case5b.start()
-        if _pid5b == 0:
-            _os6._exit(0)
+        _case5b = _FixtureProcess(_time6.monotonic() + 5, subject=lambda: None)
+        _case5b.start()
         _wst5b = _reap_bounded(_case5b)
         if _bounded_child_result(b"TOKEN", _wst5b) != "TOKEN":
             failures.append("run_bounded/status-first-normal: a normal-exit child with bytes did not "
@@ -1809,10 +1968,8 @@ def self_test():
         # normal exit is an abnormal death. Build a real exit-7 wait-status and pair it with a leftover token;
         # post-fix _bounded_child_result requires WIFEXITED+status 0 and returns CHILD-DIED, pre-fix (only the
         # signal case was checked) it returned the buffered token.
-        _case7 = _FixtureProcess(_time6.monotonic() + 5)
-        _pid7 = _case7.start()
-        if _pid7 == 0:
-            _os6._exit(7)
+        _case7 = _FixtureProcess(_time6.monotonic() + 5, subject=lambda: _os6._exit(7))
+        _case7.start()
         _wst7 = _reap_bounded(_case7)
         if not (_os6.WIFEXITED(_wst7) and _os6.WEXITSTATUS(_wst7) == 7):
             failures.append("run_bounded/nonzero-exit-setup: the fixture child did not exit 7")

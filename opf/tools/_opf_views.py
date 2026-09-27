@@ -2251,7 +2251,8 @@ def self_test():
             return "ACCEPTED"
 
         try:
-            fifo_result = run_bounded(_fifo_probe, timeout_s=5)
+            # The probe reads through the pre-opened dirfd: DECLARE it (fd allowlist).
+            fifo_result = run_bounded(_fifo_probe, timeout_s=5, keep_fds=(_ffd,))
         finally:
             _journal._read_contained = _orig_rc
             os.close(_ffd)

@@ -2258,15 +2258,18 @@ def self_test():
         # so a hang is a check FAILURE, never a silent slow pass (self-test-discrimination).
         from _opf_emit import run_bounded
 
-        def _refused_no_hang(thunk):
-            """Run the refusal probe in a child; never borrow caller signal state."""
+        def _refused_no_hang(thunk, keep_fds=()):
+            """Run the refusal probe in a child; never borrow caller signal state. A
+            pre-opened descriptor the probe relies on must be DECLARED via keep_fds
+            (the run_bounded fd allowlist: subjects see only stdio plus declared
+            descriptors), so an undeclared dirfd is a loud EBADF, never a leak."""
             def probe():
                 try:
                     thunk()
                 except _journal.JournalError:
                     return "REFUSED"
                 return "ACCEPTED"
-            return run_bounded(probe, timeout_s=2) == "REFUSED"
+            return run_bounded(probe, timeout_s=2, keep_fds=keep_fds) == "REFUSED"
 
         # M2: _read_contained does not hang on a writer-less FIFO (the raced regular-file->FIFO swap); it
         # returns a fail-closed JournalError at once. The non-OSError marker makes a blocking regression a
@@ -2277,7 +2280,7 @@ def self_test():
         _rfd = os.open(str(_fd_dir), os.O_RDONLY | os.O_DIRECTORY)
         try:
             check("m2-fifo-no-hang-refused",
-                  _refused_no_hang(lambda: _journal._read_contained(_rfd, "f")))
+                  _refused_no_hang(lambda: _journal._read_contained(_rfd, "f"), keep_fds=(_rfd,)))
         finally:
             os.close(_rfd)
 
@@ -2289,7 +2292,7 @@ def self_test():
         _rf_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             check("new2-read-frames-fifo-no-hang",
-                  _refused_no_hang(lambda: _journal.read_frames(_rf_jr, _rf_dir)))
+                  _refused_no_hang(lambda: _journal.read_frames(_rf_jr, _rf_dir), keep_fds=(_rf_jr,)))
         finally:
             os.close(_rf_jr)
         _rl_dir = base / "n2-read-lock-owner"; _rl_dir.mkdir()
@@ -2299,7 +2302,8 @@ def self_test():
         os.mkfifo(str(_ra_dir / "f"))
         _rafd = os.open(str(_ra_dir), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            check("new2-read-at-fifo-no-hang", _refused_no_hang(lambda: _journal._read_at(_rafd, "f", "f")))
+            check("new2-read-at-fifo-no-hang",
+                  _refused_no_hang(lambda: _journal._read_at(_rafd, "f", "f"), keep_fds=(_rafd,)))
         finally:
             os.close(_rafd)
 
