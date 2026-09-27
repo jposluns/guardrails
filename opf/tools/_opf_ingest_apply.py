@@ -930,6 +930,18 @@ def _st_staged_apply(gate, base, kind, case):
     if not (restored and len(seen) == 1 and seen[0][:2] == (staged, 2)):
         return False
     results = seen[0][2]
+    if case == "clean" and kind == "import":
+        # The fixture is ingest content: the other registered kind binds the same store
+        # but must refuse promotion before reserving ids or changing live content.
+        return (result.verdict == CANNOT_EVALUATE and result.promoted is False
+                and result.outcome == "aborted" and staged.is_dir()
+                and _st_counters(root) == before and _st_reservation(root, rid) is None
+                and set(results) == set(gate.EXPECTED_CHECKS)
+                and results["staged-run-structure"] == (
+                    False, "staging kind does not match ingest run content")
+                and all(results[cid][0] for cid in gate.EXPECTED_CHECKS if cid != "staged-run-structure")
+                and any("import gate failed:" in finding and "staged-run-structure" in finding
+                        for finding in result.findings))
     if case == "clean":
         home = root / _opf_import._ingest_acceptance_home(rid)
         return (result.verdict == CLEAN and result.promoted is True and result.outcome == "promoted"
@@ -2053,7 +2065,7 @@ _ST_TXN = ("transaction-schema", "transaction-consistency")
 # R1's exact fail-closed diagnostic, shared by the symlink-route and unheld-relative fixtures.
 _ST_HOME_REFUSED = "name a run not held by a store by an absolute, symlink-free path"
 _ST_DETACHED = (True, "no transaction record (run not yet applied)")
-_ST_NO_BINDING = (False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+_ST_NO_BINDING = (False, "cannot evaluate: store binding refused "
                    "(no registered store binding for homes generation 2)")
 
 
@@ -3157,7 +3169,7 @@ _STRIPS = dict((("helper-guard", (_HELPER_GUARD, _HELPER_REVERTED.replace("rever
 # Keep the O_PATH and R1 discriminators observable beneath the detached homes-2 refusal.
 # Full-source refusal is independently required by the unstripped home-property matrix.
 _STRIPS["detached-homes2-binding"] = (
-    '        if homes == 2:\n            raise _GateError("no registered store binding for homes generation 2")\n',
+    '        if homes == 2:\n            raise _BindingRefusal("no registered store binding for homes generation 2")\n',
     "        pass  # stripped: detached homes-2 binding refusal\n")
 _LAUNCHED_LAYERS = ("helper-guard", "launch-boundary")
 # Rows whose mutant changes no declared asserted Boolean outcome claim only guard execution, even if

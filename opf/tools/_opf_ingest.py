@@ -2320,7 +2320,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 check(label + "-detached-transactions", all(
                     first[cid] == (True, "no transaction record (run not yet applied)")
                     and second[cid] == (
-                        False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                        False, "cannot evaluate: store binding refused "
                         "(no registered store binding for homes generation 2)")
                     for cid in _chk._TRANSACTION_CHECKS))
             check(label + "-generation-2", set(second) == set(first) == set(_chk.EXPECTED_CHECKS)

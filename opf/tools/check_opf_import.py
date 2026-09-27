@@ -204,6 +204,10 @@ class _GateError(Exception):
     caller as EXIT_ERROR."""
 
 
+class _BindingRefusal(_GateError):
+    """A run has no eligible store binding; no store-open failure is implied."""
+
+
 def _parse_toml_bytes(data, where):
     """Parse TOML bytes already read through a regular-file-validated open, fail-closed to _GateError."""
     import tomllib
@@ -1914,7 +1918,7 @@ def _staged_run_store_fd(rd, homes):
                 os.close(other)
                 raise _GateError("run path is registered outside homes generation {}".format(homes))
         if homes == 2:
-            raise _GateError("no registered store binding for homes generation 2")
+            raise _BindingRefusal("no registered store binding for homes generation 2")
         fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)
     return fd
 
@@ -2579,6 +2583,17 @@ def _check_staged_run(rd, homes=None):
     else:
         try:
             store_fd = _staged_run_store_fd(rd, gen)
+            if gen == 2:
+                # Ancestry establishes the store, not the run kind. Reuse the content
+                # classification above; the legacy home remains valid for either kind.
+                kind = "ingest" if ingest_is_run else "import"
+                other = "import" if ingest_is_run else "ingest"
+                if imp._opf_store.stage_run(other, run_dir.name) in rd.home_binding:
+                    record("staged-run-structure", False,
+                           "staging kind does not match {} run content".format(kind))
+        except _BindingRefusal as exc:
+            for cid in _TRANSACTION_CHECKS:
+                record(cid, False, "cannot evaluate: store binding refused ({})".format(exc))
         except Exception as exc:  # noqa: BLE001 - fail-closed, as the acceptance locator above
             for cid in _TRANSACTION_CHECKS:
                 record(cid, False, "cannot evaluate: cannot open the store root beneath the run dir "
@@ -2612,6 +2627,12 @@ def _check_staged_run(rd, homes=None):
                 record("transaction-consistency", False, "; ".join(
                     ["cannot evaluate: transaction record unreadable ({})".format(txn_err)] + ctl_problems))
             elif txn_bytes is None:
+                # This pass describes only the legacy transaction record. At generation 2,
+                # the probe below excludes <run>.aNNNN publication-attempt journals: an open,
+                # rolled-back or malformed attempt can coexist with this exact pass detail.
+                # It proves neither "not applied" nor absence of an outstanding attempt.
+                # _opf_ingest_apply._apply_locked owns attempt classification and refuses
+                # open attempts before invoking this gate; standalone callers get no such check.
                 record("transaction-schema", True, "no transaction record (run not yet applied)")
                 record("transaction-consistency", not ctl_problems,
                        "; ".join(ctl_problems) or "no transaction record (run not yet applied)")
@@ -2706,7 +2727,7 @@ def _self_test_gate_generation_sites(expect):
     tree = ast.parse(src)
     names = ("gen", "homes", "gen_error", "legacy_generation", "fd", "ing_results", "marker", "ingest_is_run",
              "durable_unavailable", "ingest_bundle", "ingest_load_failed", "ingest_load_detail", "acc_raw",
-             "results", "typed_problem")
+             "results", "typed_problem", "kind", "other")
     found = sorted((n.id, lines[n.lineno - 1].strip()) for n in ast.walk(tree)
                    if isinstance(n, ast.Name) and n.id in names)
     expected = sorted((
@@ -2728,6 +2749,7 @@ def _self_test_gate_generation_sites(expect):
         ('gen', 'gen, gen_error = None, str(exc)'),
         ('gen', 'gen, gen_error = _gate_homes(homes), ""'),
         ('gen', 'if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":'),
+        ('gen', 'if gen == 2:'),
         ('gen', 'if gen == 2:'),
         ('gen', 'if gen is None:'),
         ('gen', 'if gen is None:'),
@@ -2764,6 +2786,12 @@ def _self_test_gate_generation_sites(expect):
         ('ingest_is_run', 'if pa_ok and not ingest_is_run:'),
         ('ingest_is_run', 'ingest_is_run = False'),
         ('ingest_is_run', 'ingest_is_run = marker is not None'),
+        ('ingest_is_run', 'kind = "ingest" if ingest_is_run else "import"'),
+        ('ingest_is_run', 'other = "import" if ingest_is_run else "ingest"'),
+        ('kind', 'kind = "ingest" if ingest_is_run else "import"'),
+        ('kind', '"staging kind does not match {} run content".format(kind))'),
+        ('other', 'other = "import" if ingest_is_run else "ingest"'),
+        ('other', 'if imp._opf_store.stage_run(other, run_dir.name) in rd.home_binding:'),
         ('ingest_load_detail', 'ingest_load_detail = ""'),
         ('ingest_load_detail', 'ingest_load_detail = "ingest-review bundle present but malformed ({})".format(exc.message)'),
         ('ingest_load_detail', 'ingest_load_detail = "ingest-review bundle present but unreadable ({})".format(exc)'),
@@ -3177,8 +3205,9 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
     every result except the two ingest-acceptance ids, which grade the durable home, and the staged acceptance ids,
     which must then report that grading (a completeness id the completeness result, every other the binding
     result). Transaction checks keep their results at both generations in a registered legacy home
-    without typed transaction evidence; detached generation-2 copies refuse the missing binding. Each legacy fixture is also graded at both depth-4 homes against its generation-2
-    results. Appends (label, generation-1
+    without typed transaction evidence; detached generation-2 copies refuse the missing binding. Each legacy
+    fixture is also graded at both depth-4 homes: cross-kind placement additionally fails staged-run-structure
+    once the run can be parsed and bound; the other results keep their generation-2 values. Appends (label, generation-1
     results, generation-2 results, credit) to `swept` and returns the generation-1 results; `credit` is the (id,
     located detail) pairs the fixture claims, which count only as _self_test_gate_generation_coverage allows."""
     from unittest.mock import patch
@@ -3196,7 +3225,7 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
             rd = _RunDir(run_dir)
             try:
                 if rd.home_binding == {}:
-                    detail = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                    detail = ("cannot evaluate: store binding refused "
                               "(no registered store binding for homes generation 2)")
                     expected_second.update((cid, (False, detail)) for cid in _TRANSACTION_CHECKS)
             finally:
@@ -3241,7 +3270,17 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
                 run.rename(staged_run)
                 try:
                     current = check_staged_run(staged_run, homes=2)
-                    expect("gate-generation-staging-{}-{}".format(label, kind), current == second)
+                    expected_staging = dict(second)
+                    content_kind = ("import" if second["ingest-run-structure"] == (True, "not an ingest run")
+                                    else "ingest")
+                    # Core-read and invalid-name failures precede the bound kind check.
+                    if (imp._RUN_ID_RE.fullmatch(run.name) and kind != content_kind
+                            and not second["transaction-schema"][1].startswith(
+                                "cannot evaluate: cannot open the store root")
+                            and not all(value == second["staged-run-structure"] for value in second.values())):
+                        expected_staging["staged-run-structure"] = (
+                            False, "staging kind does not match {} run content".format(content_kind))
+                    expect("gate-generation-staging-{}-{}".format(label, kind), current == expected_staging)
                 finally:
                     staged_run.rename(run)
     if swept is not None:
@@ -4644,7 +4683,10 @@ def _self_test():
                 txn_clean = check_staged_run(txn_run, homes=2)
                 expect("txn-homes2-staging-clean-" + kind,
                        set(txn_clean) == set(EXPECTED_CHECKS)
-                       and all(txn_clean[cid][0] for cid in EXPECTED_CHECKS))
+                       and txn_clean["staged-run-structure"] == (
+                           (True, "") if kind == "import" else
+                           (False, "staging kind does not match import run content"))
+                       and all(txn_clean[cid][0] for cid in EXPECTED_CHECKS if cid != "staged-run-structure"))
             decoy.write_bytes(b"state =\n")
             legacy = check_staged_run(txn_run, homes=1)
             expect("txn-homes1-staging-decoy-cannot-" + kind,
@@ -4716,7 +4758,7 @@ def _self_test():
             expect("txn-alias-detached-" + kind, all(
                 graded_as(detached, None, homes)[cid] == (
                     (True, "no transaction record (run not yet applied)") if homes == 1 else
-                    (False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                    (False, "cannot evaluate: store binding refused "
                      "(no registered store binding for homes generation 2)"))
                 for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
 
@@ -4771,7 +4813,11 @@ def _self_test():
                 (root / ".working" / ".working").write_bytes(b"unrelated\n")
                 clean, legacy = graded_in(root, run, 2), graded_in(root, run, 1)
                 expect("txn-unrelated-working-file-" + kind,
-                       set(clean) == set(EXPECTED_CHECKS) and all(ok for ok, _d in clean.values())
+                       set(clean) == set(EXPECTED_CHECKS)
+                       and clean["staged-run-structure"] == (
+                           (True, "") if kind == "import" else
+                           (False, "staging kind does not match import run content"))
+                       and all(clean[cid][0] for cid in EXPECTED_CHECKS if cid != "staged-run-structure")
                        and all(legacy[cid] == (False, mismatch) for cid in _TRANSACTION_CHECKS))
                 # M2: the same obstruction three levels above a detached copy never refuses it either.
                 detached = base / "detached-obstructed-{}".format(kind) / "a" / "b" / run.name
@@ -4780,7 +4826,7 @@ def _self_test():
                 expect("txn-detached-unrelated-working-file-" + kind, all(
                     graded_in(root, detached, homes)[cid] == (
                         (True, "no transaction record (run not yet applied)") if homes == 1 else
-                        (False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                        (False, "cannot evaluate: store binding refused "
                          "(no registered store binding for homes generation 2)"))
                     for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
                 # Flip (codex P1 #2): a run renamed to a sibling at the transaction lookup, an empty directory at
@@ -4885,7 +4931,7 @@ def _self_test():
             det2 = check_staged_run(detached, homes=2)
         expect("detached-ordinary-copy", all(ok for ok, _d in det1.values())
                and all(det2[cid] == (
-                   False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                   False, "cannot evaluate: store binding refused "
                    "(no registered store binding for homes generation 2)")
                    if cid in _TRANSACTION_CHECKS else det2[cid][0] for cid in EXPECTED_CHECKS))
 

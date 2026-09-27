@@ -159,7 +159,11 @@ def _staged_generation_self_test(check):
 
 
 def _staged_root_self_test(check):
-    """Exercise physical root binding independently of transaction support."""
+    """Exercise physical root binding independently of transaction support.
+
+    Root depth, custom-machine, pointer and decoy cases are controls: they already pass on
+    the predecessor. The detached homes-2 binding case discriminates the new refusal.
+    """
     import os
     import shutil
     from unittest.mock import patch
@@ -180,6 +184,19 @@ def _staged_root_self_test(check):
                     return (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
                 finally:
                     os.close(fd)
+            finally:
+                rd.close()
+
+    def binding_refused(run):
+        with patch.object(store, "SUPPORTED_HOMES", 2):
+            rd = gate._RunDir(run)
+            try:
+                try:
+                    fd = gate._staged_run_store_fd(rd, 2)
+                except gate._GateError as exc:
+                    return str(exc) == "no registered store binding for homes generation 2"
+                os.close(fd)
+                return False
             finally:
                 rd.close()
 
@@ -223,6 +240,30 @@ def _staged_root_self_test(check):
             check("staged-root-no-transaction-" + kind, lambda:
                   all(clean[cid] == (True, "no transaction record (run not yet applied)")
                       for cid in gate._TRANSACTION_CHECKS))
+            # Attempts belong to the coordinator, including open and rolled-back journals.
+            # These real frames pin the standalone gate's deliberately narrower transaction scope.
+            if kind == "ingest":
+                import _journal
+                import _opf_journal
+                journal = root / store.journal_root(kind)
+                journal.mkdir(parents=True)
+                attempt = journal / _opf_journal.attempt_txn(kind, run.name, 1)
+                attempt.mkdir()
+                jfd = store._open_root_fd(journal)
+                try:
+                    _journal.publish(jfd, attempt, _journal.F_INTENT, dict(
+                        txn=attempt.name, header=dict(kind=kind, run_id=run.name, attempt=1,
+                                                     operation_id="synthetic-operation"), ops=[]))
+                    for state in ("open", "rolled-back"):
+                        if state == "rolled-back":
+                            for frame in (_journal.F_RIP, _journal.F_RC):
+                                _journal.publish(jfd, attempt, frame, {"txn": attempt.name})
+                        check("staged-root-attempt-" + state, lambda:
+                              _journal.classify_state(jfd, attempt) == state
+                              and grade(run) == clean)
+                finally:
+                    os.close(jfd)
+                shutil.rmtree(attempt)
             # A typed projection/journal is not interchangeable with durable review acceptance.
             # Probe both namespaces even when the staging kind differs; empty bytes still count.
             for txn_kind in ("import", "ingest"):
@@ -263,7 +304,7 @@ def _staged_root_self_test(check):
                 parent.unlink()
                 moved_typed.rename(parent)
                 journal = root / store.journal_root(txn_kind)
-                journal.mkdir(parents=True)
+                journal.mkdir(parents=True, exist_ok=True)
                 (journal / "lock").write_bytes(b"writer lock")
                 check("staged-root-typed-empty-journal-{}-{}".format(txn_kind, kind), lambda:
                       grade(run) == clean)
@@ -306,22 +347,48 @@ def _staged_root_self_test(check):
                   and "no-follow" in grade(run)["transaction-schema"][1])
             original.unlink()
             moved.rename(original)
-            # Kernel-boundary fault injection also exercises refusal when run as root.
-            real_open = os.open
+            # Deny only the physical store ascent, after _bind_run_name has succeeded.
+            # The run remains readable and its staged-data checks must still grade.
+            real_open, real_home = os.open, gate._physical_home
+            denied_steps = []
             def denied(path, flags, *args, **kwargs):
                 if path == "..":
+                    denied_steps.append(path)
                     raise PermissionError("ancestor denied")
                 return real_open(path, flags, *args, **kwargs)
-            with patch.object(gate.os, "open", side_effect=denied):
-                check("staged-root-unreadable-ancestor-" + kind, lambda:
-                      refused(grade(run), "ancestor denied"))
+            def denied_home(rd, rel):
+                with patch.object(gate.os, "open", side_effect=denied):
+                    return real_home(rd, rel)
+            with patch.object(gate, "_physical_home", side_effect=denied_home):
+                observed = grade(run)
+            check("staged-root-unreadable-ancestor-" + kind, lambda:
+                  bool(denied_steps) and refused(observed, "ancestor denied")
+                  and observed["staged-run-structure"] == clean["staged-run-structure"]
+                  and observed["report-schema"] == clean["report-schema"]
+                  and observed["artifact-digest-integrity"] == clean["artifact-digest-integrity"])
+            check("staged-root-readable-ancestor-" + kind, lambda: grade(run) == clean)
             detached = base / (kind + "-detached") / "a" / "b" / run.name
             shutil.copytree(run, detached)
             check("staged-root-detached-legacy-" + kind, lambda:
                   all(grade(detached, 1)[cid] == (True, "no transaction record (run not yet applied)")
                       for cid in gate._TRANSACTION_CHECKS))
+            check("staged-root-detached-binding-discriminator-" + kind, lambda:
+                  binding_refused(detached))
             check("staged-root-detached-homes2-" + kind, lambda:
                   refused(grade(detached), "no registered store binding for homes generation 2"))
+            other_kind = "ingest" if kind == "import" else "import"
+            crossed = root / store.stage_run(other_kind, run.name)
+            crossed.parent.mkdir(parents=True)
+            run.rename(crossed)
+            try:
+                observed = grade(crossed)
+                check("staged-root-cross-kind-" + kind, lambda:
+                      observed["staged-run-structure"] == (
+                          False, "staging kind does not match {} run content".format(kind))
+                      and observed["report-schema"] == clean["report-schema"])
+            finally:
+                crossed.rename(run)
+            check("staged-root-matching-kind-" + kind, lambda: grade(run) == clean)
             misplaced = root / ".working" / "staging" / "preview" / run.name
             misplaced.parent.mkdir(parents=True)
             run.rename(misplaced)
