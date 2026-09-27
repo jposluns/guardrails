@@ -1610,8 +1610,9 @@ def _cmd_upgrade(rest):
     RENDERS the declared views, and requires a full doctor VALID before offering the uncommitted change. It is
     ORIGIN-AWARE: a governance- or decision_support-enabled 1.0.0 store, and a store that omits the
     optional decision_support key or the DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4).
-    Before ANY write it enforces two fail-closed preconditions: STORE-PATH CLEANLINESS, including ignored
-    files, over planned destinations and collisions (HEAD preserves pre-existing tracked content,
+    Before ANY write it enforces two fail-closed preconditions:
+    PLANNED-DESTINATION CLEANLINESS (store and product roots), including ignored files, over planned
+    destinations and collisions (HEAD preserves pre-existing tracked content,
     SECA-verified-restore-path), with an untracked or ignored lease handled separately, and a
     SINGLE-WRITER LEASE it claims atomically and holds across the mutation, render, and final doctor (spec
     5.7). It NEVER commits: the adopter reviews and merges. A store already at {to} returns without those
@@ -2126,7 +2127,7 @@ def _upgrade_check_clean(res, write_scope):
         raise _UpgradeError(
             "the working tree is not clean over this upgrade's planned schema and render destinations "
             "and index collision candidates (store and product roots): {} dirty path(s), "
-            "showing {}: {}. Commit your store changes (or move them aside), then re-run opf upgrade; the "
+            "showing {}: {}. Commit your changes (or move them aside), then re-run opf upgrade; the "
             "uncommitted work is yours and the upgrade never restores or discards it.{}".format(
                 len(shown), len(head), ", ".join(head), note))
 

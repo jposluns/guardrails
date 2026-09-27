@@ -971,13 +971,13 @@ def _suite():
                   rc12b == EXIT_ERROR and "peer-runner" in out12b
                   and "The lease is never seized (spec 5.7)" in out12b
                   and "confirmed NO opf run is live" in out12b
-                  and "Commit your store changes" not in out12b)
+                  and "Commit your changes" not in out12b)
             flip12b, text12b = flipped_upgrade(s12b,
                 "original = opf._upgrade_parse_porcelain\n"
                 "opf._upgrade_parse_porcelain = lambda raw, prefix, lease, specs: "
                 "original(raw, prefix, None, specs)\n")
             check("U12b FLIP excluding no lease restores the incorrect dirty-store remedy",
-                  flip12b == EXIT_ERROR and "Commit your store changes" in text12b)
+                  flip12b == EXIT_ERROR and "Commit your changes" in text12b)
             check("U12b both refusals preserve lease and tree", _snapshot(s12b) == before12b)
 
             # U12c) Non-regular leases are held too, including collapsed ignored directories.
@@ -996,13 +996,13 @@ def _suite():
                 rc, out = upgrade(sc)
                 check("U12c directory lease gets never-seize refusal ({})".format(ignored_lease),
                       rc == EXIT_ERROR and "The lease is never seized (spec 5.7)" in out
-                      and "Commit your store changes" not in out)
+                      and "Commit your changes" not in out)
                 frc, fout = flipped_upgrade(sc,
                     "original = opf._upgrade_parse_porcelain\n"
                     "opf._upgrade_parse_porcelain = lambda raw, prefix, lease, specs: "
                     "original(raw, prefix, None, specs)\n")
                 check("U12c FLIP directory lease gets dirt advice ({})".format(ignored_lease),
-                      frc == EXIT_ERROR and "Commit your store changes" in fout)
+                      frc == EXIT_ERROR and "Commit your changes" in fout)
                 check("U12c lease directory and bytes preserved ({})".format(ignored_lease),
                       lease.is_dir() and _snapshot(sc) == before)
 
@@ -1028,7 +1028,7 @@ def _suite():
             check("U14 dirty store refuses BEFORE mutation (exit 2)", rc14 == EXIT_ERROR)
             check("U14 refusal names the dirty path", "counters.toml" in out14 and "clean" in out14)
             check("U14 advises commit-your-changes and offers no restore command (the dirt is the owner's)",
-                  "Commit your store changes" in out14 and "restore --staged" not in out14)
+                  "Commit your changes" in out14 and "restore --staged" not in out14)
             check("U14 owner edit intact and tree unchanged", _snapshot(s14) == before14)
 
             # An existing index collision candidate is checked even though creation leaves it alone.
@@ -1047,7 +1047,7 @@ def _suite():
             collision_rc, collision_out = upgrade(collision_store)
             check("dirty existing index collision candidate refuses and is named",
                   collision_rc == EXIT_ERROR and collision_rel in collision_out
-                  and "Commit your store changes (or move them aside)" in collision_out
+                  and "Commit your changes (or move them aside)" in collision_out
                   and "restore --staged" not in collision_out)
             check("dirty refusal describes the planned destinations and collision scope",
                   "planned schema and render destinations and index collision candidates "
@@ -1079,7 +1079,7 @@ def _suite():
             rc14b, out14b = upgrade(s14b)
             check("U14b ignored written path refuses BEFORE mutation (exit 2)", rc14b == EXIT_ERROR)
             check("U14b ignored path gets the ordinary dirty-store remedy",
-                  ignored_rel in out14b and "Commit your store changes (or move them aside)" in out14b
+                  ignored_rel in out14b and "Commit your changes (or move them aside)" in out14b
                   and "restore --staged" not in out14b)
             check("U14b ignored owner bytes and tree unchanged", _snapshot(s14b) == before14b)
             check("U14b index unchanged", git_call(s14b, ["ls-files", "--stage", "-z"]) == index14b)
@@ -1145,7 +1145,7 @@ def _suite():
                     flipped_rc, flipped_out = flipped_upgrade(sc, no_ignored_filter)
                     check("U14b {} FLIP removing ignored filtering refuses".format(sibling),
                           flipped_rc == EXIT_ERROR and sibling in flipped_out
-                          and "Commit your store changes" in flipped_out)
+                          and "Commit your changes" in flipped_out)
                 src, sout = upgrade(sc)
                 check("U14b {} upgrades to doctor-VALID".format(sibling),
                       src == EXIT_OK and "doctor-VALID" in sout)
@@ -1165,7 +1165,7 @@ def _suite():
             flipped_rc, flipped_out = flipped_upgrade(su, whole_store_scope)
             check("U14b unmanaged FLIP whole-subtree scope refuses the ignored cache",
                   flipped_rc == EXIT_ERROR and ".working/cache/" in flipped_out
-                  and "Commit your store changes" in flipped_out)
+                  and "Commit your changes" in flipped_out)
             urc, uout = upgrade(su)
             check("U14b declared unmanaged ignored content upgrades to doctor-VALID",
                   urc == EXIT_OK and "doctor-VALID" in uout)
@@ -1209,7 +1209,7 @@ def _suite():
                 before_collision = _snapshot(sa)
                 arc, aout = upgrade(sa)
                 check("U14b {} refuses before mutation".format(collision),
-                      arc == EXIT_ERROR and ignored_rel in aout and "Commit your store changes" in aout)
+                      arc == EXIT_ERROR and ignored_rel in aout and "Commit your changes" in aout)
                 check("U14b {} preserves owner content and tree".format(collision),
                       _snapshot(sa) == before_collision)
 
@@ -1257,18 +1257,18 @@ def _suite():
                 before_head = git_call(repo, ["rev-parse", "HEAD"])
                 rc, out = upgrade(nested)
                 check("U14c {} refuses before mutation with dirty-store advice".format(case),
-                      rc == EXIT_ERROR and target_rel in out and "Commit your store changes" in out)
+                      rc == EXIT_ERROR and target_rel in out and "Commit your changes" in out)
                 check("U14c {} unchanged tree, index and HEAD".format(case),
                       _snapshot(repo) == before and (repo / ".git/index").read_bytes() == before_index
                       and git_call(repo, ["rev-parse", "HEAD"]) == before_head)
                 flipped_rc, flipped_out = flipped_upgrade(nested, lossy_prefix)
                 if case == "ancestor":
                     check("U14c ancestor FLIP loses dirt advice but the absent-path guard still refuses",
-                          flipped_rc == EXIT_ERROR and "Commit your store changes" not in flipped_out
+                          flipped_rc == EXIT_ERROR and "Commit your changes" not in flipped_out
                           and "ignored planned destinations" in flipped_out and _snapshot(repo) == before)
                 else:
                     check("U14c {} FLIP loses pre-mutation refusal and changes manifest".format(case),
-                          flipped_rc in (EXIT_OK, EXIT_ERROR) and "Commit your store changes" not in flipped_out
+                          flipped_rc in (EXIT_OK, EXIT_ERROR) and "Commit your changes" not in flipped_out
                           and (nested / ".working/toml/manifest.toml").read_bytes()
                               != before[os.fsdecode(prefix) + ".working/toml/manifest.toml"])
 
