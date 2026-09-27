@@ -299,17 +299,39 @@ def red_on_revert(source, f):
 
 
 def runner_check(expected, text=None, *, fail_own=0):
+    import errno
     import os
     import shlex
     import shutil
     import signal
+    import stat
     import tempfile
+    from contextlib import ExitStack
 
     identity = "runner/declared-test-executes"
     # Vector-only entry points never call this registration check.
     # Refuse an escaped fixture invocation before any shell can launch.
     if "p0_log" in os.environ:
         raise RuntimeError(identity + "/cannot-evaluate/recursion")
+    # env -i removes the environment marker, but preserves pass_fds. Both
+    # twins recognize the same private-file payload, without an env-supplied
+    # descriptor number. /dev/fd must be enumerable; inspection errors refuse.
+    marker_bytes = b"OPF runner registration recursion v1\n"
+    try:
+        for entry in os.listdir("/dev/fd"):
+            fd = int(entry)
+            try:
+                info = os.fstat(fd)
+            except OSError as exc:
+                # The descriptor used to list /dev/fd has already closed.
+                if exc.errno == errno.EBADF:
+                    continue
+                raise
+            if (stat.S_ISREG(info.st_mode) and info.st_size == len(marker_bytes)
+                    and os.pread(fd, len(marker_bytes), 0) == marker_bytes):
+                raise RuntimeError(identity + "/cannot-evaluate/recursion")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(identity + "/cannot-evaluate/recursion-marker") from exc
     if type(fail_own) is not int or fail_own not in (0, 1, 2, 7):
         raise ValueError(identity + "/invalid-failure-code")
     here = Path(__file__).resolve().parent
@@ -331,9 +353,14 @@ def runner_check(expected, text=None, *, fail_own=0):
     # Fix-4 accounting: in-runner PATH changes remain covered by the
     # function shim (PASS in-runner-path; RED removed-function-shim).
     # The PATH fixture also covers child shells, command and env forms.
-    # Absolute paths, or bypassing the function together with changing
-    # PATH, remain outside interception; this is not a process sandbox.
-    # Removing the log environment marker can bypass recursion refusal.
+    # PD-SFS-THREAT-BOUND: runners written to defeat this check are outside
+    # scope, including wrappers recognizing injected output and swallowing
+    # real SELF-TEST FAIL, PACK-MANIFEST FAIL or CANNOT diagnostics, and bare
+    # alternate interpreter names such as python3.14. No mechanism covers them.
+    # Absolute paths, or bypassing the function together with changing PATH,
+    # remain outside interception. Deliberately closing inherited descriptors
+    # while clearing the environment can bypass recursion refusal and spawn
+    # nested sessions outside timeout killpg containment. Not a process sandbox.
     # Intercepted siblings return 0; their failure propagation is outside
     # this check too.
     fixture = r'''#!/bin/sh
@@ -351,10 +378,15 @@ case " $* " in *check_opf_init_p0.py*) exit 2;; esac
 exit 0
 '''
     # Preserve ordinary caller variables (including CI) so conditional
-    # dispatch is exercised. Remove execution controls, then pin configuration
-    # and fixture variables to scratch; this is not an environment sandbox.
-    with tempfile.TemporaryDirectory(prefix="opf-p0-registration-") as tmp:
+    # dispatch is exercised. Remove the execution controls listed below, then
+    # pin configuration and fixture variables; not an environment sandbox.
+    # Match main's caller-cwd dispatch while keeping fixture files private.
+    caller_cwd = Path.cwd()
+    with tempfile.TemporaryDirectory(prefix="opf-p0-registration-") as tmp, ExitStack() as resources:
         os.chmod(tmp, 0o700)
+        marker = resources.enter_context(tempfile.TemporaryFile(dir=tmp))
+        marker.write(marker_bytes)
+        marker.flush()
         if os.pathsep in tmp:
             raise RuntimeError(identity + "/cannot-evaluate/pathsep")
         executable = Path(tmp) / "python3"
@@ -364,7 +396,7 @@ exit 0
         log.write_bytes(b"")
         log.chmod(0o600)
         env = {name: value for name, value in os.environ.items()
-               if name not in ("BASH_ENV", "ENV")
+               if name not in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4")
                and not name.startswith(("GIT_", "BASH_FUNC_", "PYTHON", "LD_"))}
         env.update({name: tmp for name in env if name.startswith("XDG_")})
         env.update({"PATH": tmp + os.pathsep + os.defpath, "TMPDIR": tmp,
@@ -380,8 +412,9 @@ exit 0
         def run_shell(body):
             with subprocess.Popen(
                     [bash, "--noprofile", "--norc", "-c", body, str(runner)],
-                    cwd=tmp, env=env, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, text=True, start_new_session=True) as proc:
+                    cwd=caller_cwd, env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, start_new_session=True,
+                    pass_fds=(marker.fileno(),)) as proc:
                 try:
                     stdout, stderr = proc.communicate(timeout=30)
                 except subprocess.TimeoutExpired:
@@ -488,6 +521,17 @@ def runner_red_checks(expected):
                 '?*:opf-init-p0-selftest) return 0;; esac\n', 1)),
             AssertionError, identity + "/pass-lines")
 
+    # Exercise the lost main case from the repository (or standalone) root.
+    from contextlib import chdir
+    with chdir(runner.parents[2]):
+        if not Path("opf/tools/run_all_checks.sh").is_file():
+            raise AssertionError(identity + "/cwd-fixture")
+        red("cwd-conditional-skip", lambda: runner_check(
+            expected, source.replace(
+                anchor, anchor + '  if [ -e opf/tools/run_all_checks.sh ]; then '
+                'case "$name" in opf-init-p0-selftest) return 0;; esac; fi\n', 1)),
+            AssertionError, identity + "/pass-lines")
+
     # Exit from the dispatcher before the runner can report success.
     red("return-code", lambda: runner_check(
         expected, source.replace(anchor, anchor + "  exit 1\n", 1)),
@@ -551,6 +595,45 @@ def runner_red_checks(expected):
                     identity + "/cannot-evaluate/recursion")
                 if launch.call_count:
                     raise AssertionError(identity + "/recursion/unexpected-launch")
+
+    # Scrub only our registration's environment. Substitute a bounded entry
+    # probe for the suite script: it loads the real runner_check, but forbids
+    # every nested Popen even if the recursion guard is reverted. A nonzero
+    # outer runner exit alone is insufficient: require the exact refusal and
+    # zero launch attempts recorded by the child after env -i.
+    with tempfile.TemporaryDirectory(prefix="opf-recursion-red-") as tmp:
+        os.chmod(tmp, 0o700)
+        report = Path(tmp) / "refusal.txt"
+        nested = Path(tmp) / Path(__file__).name
+        nested.write_text(
+            "import os, runpy\n"
+            "from pathlib import Path\n"
+            "from unittest.mock import patch\n"
+            f"scope = runpy.run_path({str(Path(__file__).resolve())!r})\n"
+            f"assert {'p0_log'!r} not in os.environ\n"
+            "with patch('subprocess.Popen', side_effect=AssertionError('nested launch')) as launch:\n"
+            "    try:\n"
+            "        scope['runner_check'](())\n"
+            "    except RuntimeError as exc:\n"
+            "        assert not launch.called\n"
+            f"        Path({str(report)!r}).write_text(str(exc), encoding='utf-8')\n"
+            "    else:\n"
+            "        raise AssertionError('recursion accepted')\n"
+            "raise SystemExit(2)\n", encoding="utf-8")
+        nested.chmod(0o600)
+        own_line = own_lines[0]
+        script_arg = '"$here/check_opf_init_p0.py"'
+        if own_line.count("python3 ") != 1 or own_line.count(script_arg) != 1:
+            raise AssertionError(identity + "/red-fixture")
+        scrubbed = own_line.replace(
+            "python3 ", "env -i PATH=/usr/bin:/bin python3 ", 1).replace(
+                script_arg, shlex.quote(str(nested)), 1)
+        red("scrubbed-environment", lambda: runner_check(
+            expected, source.replace(own_line, scrubbed, 1)),
+            AssertionError, identity + "/return-code")
+        if report.read_text(encoding="utf-8") != identity + "/cannot-evaluate/recursion":
+            raise AssertionError(identity + "/scrubbed-environment/wrong-refusal")
+        print("PASS " + identity + "/scrubbed-environment/no-nested-launch")
 
     # A harmless competing executable makes reverting the function safe.
     # The normal check requires exactly one own call in the fixture's log.
@@ -617,7 +700,7 @@ def runner_red_checks(expected):
     launches = 0
 
     def without_dirname(*args, **kwargs):
-        kwargs["env"] = dict(kwargs["env"], PATH=kwargs["cwd"])
+        kwargs["env"] = dict(kwargs["env"], PATH=kwargs["env"]["TMPDIR"])
         return probe_only(*args, **kwargs)
 
     with patch("subprocess.Popen", side_effect=without_dirname):
