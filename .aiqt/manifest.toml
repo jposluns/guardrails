@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "bb59a4151ffa1fa329ae7c32ef49604e72d50fe8c977ccb9dd4d3b6e32a72ae5"
+tree-sha256 = "06690e6c326bee4e73287352fa3c462eefa755caec18b52c406ed87301b4f36f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2191,8 +2191,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 40263
-sha256 = "bdbfe43214ee63ffe62886c70d8a6e530e10c6be6f560295eb53aa5d160276e8"
+bytes = 40314
+sha256 = "fd00cc2a06f16e784e2acccf5cfba581ab31627607205a7b61d9cde29ff4fdff"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2521,13 +2521,13 @@ sha256 = "b9a2b208abc3fd7d566ab94510a7eb14d663f09da6153e243bee4ef0f4433a72"
 
 [[sources]]
 path = "opf/tools/_opf_changelog.py"
-bytes = 80969
-sha256 = "b1ccc82062d51a1b7c041a9dd6c1b3df621ea70aa24fe1320f8877ae515c9486"
+bytes = 81456
+sha256 = "4b6aed11dfb1c1d86c46825db4f6c5dbdb881f59163a7db093d0085cefd1d401"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 311166
-sha256 = "a2018f0a5c1b21f8258796a33f6f04ad86f4a8afa57a66aac84e5e2b72f6cdfd"
+bytes = 311455
+sha256 = "af4d4ac2f39027fac5704c9ecbb435357e7e8fe549ec168e9cd1d638f911a53f"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -2546,8 +2546,8 @@ sha256 = "e18f27743f5ba1e2ccb4d30a362e87283f62ec315e92c2ee1fa312ecb4397559"
 
 [[sources]]
 path = "opf/tools/_opf_import.py"
-bytes = 622209
-sha256 = "7ce8b84538c8e34c8215795ff81cdcf8f8e8a2655f8966d5e04f5565c5c9d30a"
+bytes = 622316
+sha256 = "bf51ea4e259dbecc58929f2cb22a7cb049ac2647ca1a3b6638fe5596e0d6e8f0"
 
 [[sources]]
 path = "opf/tools/_opf_importers.py"
@@ -2600,6 +2600,11 @@ bytes = 13312
 sha256 = "7bdd24728ff15f73777b17756b02018fc42db305f43e919e0fce12edb6329c8f"
 
 [[sources]]
+path = "opf/tools/_opf_manifest_regressions.py"
+bytes = 8719
+sha256 = "e51a48e981c165f2b3397f92482daa6a3aa3f949d614279c9e7e0050769d6b95"
+
+[[sources]]
 path = "opf/tools/_opf_observe.py"
 bytes = 77600
 sha256 = "913fd0877012b0e82f4a5f81e976934cc115818f56f40e35a71b2e2236600f73"
@@ -2626,23 +2631,23 @@ sha256 = "5a78221917356c99cfe71ed15ac11eec970854a784f2c9054acb48c723d06f81"
 
 [[sources]]
 path = "opf/tools/_opf_store.py"
-bytes = 160345
-sha256 = "3fe424e8b1c039888e83ede2169d1eef9c269f024bdd09b2ea1fbdfd9cb947a2"
+bytes = 160356
+sha256 = "b1e5390e82da204b66393a024c885a6936293802ea785fa5f20b367bd412a91c"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
-bytes = 285287
-sha256 = "fd33bd0549129a1dbd122ee5f4c3bedd03187a37c21da37049ef18e241277abe"
+bytes = 285258
+sha256 = "61dc25a9fd08ca3ecdcb57b43fb2dbea9889f2636c443eb57742091b1b1d2845"
 
 [[sources]]
 path = "opf/tools/_opf_worklog.py"
-bytes = 21759
-sha256 = "8c5d18c4906bef9f514c0b412a3b65a8e9a18c347fce985d988b2322e8b02e7d"
+bytes = 22369
+sha256 = "12604fa50d6dd94b2861455251afdee0988dc8c43362bb59ec1d1290698ddc5c"
 
 [[sources]]
 path = "opf/tools/_opf_worklog_regressions.py"
-bytes = 33854
-sha256 = "65f7c644a8387fa46a1476b854b4d40ecd41432db039e7aebd7df77a6072695a"
+bytes = 39871
+sha256 = "2e1bebf51df19fb31132af306cab757d827fbbeb253a84d88b8de7329a32bd64"
 
 [[sources]]
 path = "opf/tools/_semver.py"
