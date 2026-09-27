@@ -2200,6 +2200,13 @@ def _upgrade_run(root):
         _base_model = manifest_model.get(_opf_store.STANDARD_TOKEN)
         if not isinstance(_base_model, dict):
             _base_model = manifest_model.get(_opf_store.PRIOR_STANDARD_TOKEN)
+        # Worklog activation is independent of spec_version. Refuse before even
+        # the cleanliness probe or lease can write; a later render fence is too late.
+        # Normalize only the retired base-table name for the shared loader check.
+        try:
+            _opf_worklog.generation({"opf": _base_model})
+        except _opf_worklog.WorklogError as exc:
+            raise _UpgradeError(str(exc)) from exc
         sv = _base_model.get("spec_version") if isinstance(_base_model, dict) else None
         if sv == _UPGRADE_TO:
             # F2: a store already at the target is a no-op ONLY when it is genuinely doctor-VALID at 1.1.0.

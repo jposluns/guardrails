@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Bounded, in-memory regressions for the PR-1 intake boundary.
+"""Bounded regressions for the PR-1 intake boundary.
 
 The fixture replaces contained filesystem primitives, not the loader or TOML
-parser. Permission failures are injected at read time so these tests also work
+parser. Upgrade additionally uses isolated on-disk stores and the real CLI.
+Permission failures are injected at read time so these tests also work
 as root. Production callers and their exception translations still execute.
 """
 import contextlib
@@ -135,6 +136,132 @@ def _readers(fx):
     }
 
 
+def _upgrade_preflight_regressions(check, fence):
+    """Exercise both upgrade origins through the CLI, with real git/store bytes.
+
+    Refusal snapshots include every non-git path and the git index. A separate
+    lease spy detects even an acquire/release cycle that leaves no final bytes.
+    No production I/O or validator is replaced in the end-to-end cases.
+    """
+    import io
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+    import tomllib
+
+    import _opf_emit
+    import _opf_init
+    import check_opf_upgrade as fixtures
+    import opf
+
+    if opf._bootstrap() != 0:
+        raise RuntimeError("upgrade regression bootstrap failed")
+    git = shutil.which("git", path=os.defpath)
+    if git is None:
+        raise RuntimeError("upgrade regression requires git")
+    cli = Path(__file__).resolve().with_name("opf.py")
+
+    def snapshot(root):
+        # os.walk's onerror prevents an unreadable subtree passing as empty.
+        def unreadable(exc):
+            raise exc
+        result = {}
+        for parent, dirs, files in os.walk(root, onerror=unreadable):
+            if Path(parent) == root:
+                dirs.remove(".git")
+            for name in dirs + files:
+                path = Path(parent) / name
+                rel = path.relative_to(root).as_posix()
+                mode = path.lstat().st_mode
+                if stat.S_ISDIR(mode):
+                    result[rel] = ("dir",)
+                elif stat.S_ISREG(mode):
+                    result[rel] = ("file", path.read_bytes())
+                else:
+                    raise RuntimeError("unexpected fixture path: " + rel)
+        return result, (root / ".git/index").read_bytes()
+
+    with tempfile.TemporaryDirectory(prefix="opf-worklog-upgrade-") as temporary:
+        base = Path(temporary).resolve()
+        home = base / "home"
+        home.mkdir()
+        # No inherited GIT_* redirection, config, hooks, or author identity.
+        env = {"PATH": os.defpath, "HOME": str(home), "XDG_CONFIG_HOME": str(home),
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
+               "LC_ALL": "C", "TZ": "UTC", "TMPDIR": str(base)}
+
+        def git_call(root, *args):
+            subprocess.run(
+                [git, "-C", str(root), "-c", "init.templateDir=",
+                 "-c", "init.defaultBranch=main", "-c", "core.hooksPath=" + str(home),
+                 "-c", "commit.gpgSign=false", "-c", "user.name=OPF fixture",
+                 "-c", "user.email=fixture@example.invalid", *args],
+                env=env, cwd=base, check=True, capture_output=True, timeout=30)
+
+        for origin in ("1.0.0", "1.1.0"):
+            for unsupported in (True, False):
+                label = "F5-upgrade-" + origin
+                root = base / (origin + ("-future" if unsupported else "-legacy"))
+                machine = root / ".working/toml"
+                machine.mkdir(parents=True)
+                if origin == "1.0.0":
+                    # Frozen legacy bytes shared with the existing upgrade gate.
+                    manifest = tomllib.loads(fixtures._FIX_MANIFEST)
+                    counters = fixtures._FIX_COUNTERS
+                    indexes = fixtures._FIX_INDEX_TYPES
+                    token = "devprocess"
+                else:
+                    manifest = tomllib.loads(_opf_init.build_manifest())
+                    manifest["opf"]["spec_version"] = origin
+                    counters = _opf_init.build_counters()
+                    indexes = _opf_init.INDEX_TYPES
+                    token = "opf"
+                if unsupported:
+                    manifest[token]["worklog"] = 2
+                    (machine / "worklog").mkdir()
+                else:
+                    check(label + "-legacy-key-absent", "worklog" not in manifest[token])
+                    (machine / "worklog.toml").write_text(fixtures._FIX_WORKLOG, encoding="utf-8")
+                (machine / "manifest.toml").write_text(_opf_emit.emit_checked(manifest), encoding="utf-8")
+                (machine / "counters.toml").write_text(counters, encoding="utf-8")
+                (machine / "version.toml").write_text(fixtures._FIX_VERSION, encoding="utf-8")
+                for name in indexes:
+                    (machine / (name + ".index.toml")).write_text(fixtures._FIX_INDEX, encoding="utf-8")
+                (root / _opf_store.POINTER_REL).write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
+                (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+                git_call(root, "init")
+                git_call(root, "--literal-pathspecs", "add", "--", ".working",
+                         _opf_store.POINTER_REL, "CHANGELOG.md")
+                git_call(root, "commit", "-m", "seed upgrade regression")
+                before, index_before = snapshot(root)
+                if unsupported:
+                    with patch.dict(os.environ, env, clear=True), \
+                            patch.object(opf, "_upgrade_acquire_lease",
+                                         side_effect=opf._UpgradeError("lease reached")) as lease, \
+                            contextlib.redirect_stdout(io.StringIO()), \
+                            contextlib.redirect_stderr(io.StringIO()):
+                        message = _error(lambda: opf._upgrade_run(str(root)))
+                    check(label + "-before-lease", message == fence and lease.call_count == 0)
+                proc = subprocess.run(
+                    [sys.executable, "-I", "-B", str(cli), "upgrade", "--root", str(root)],
+                    env=env, cwd=base, capture_output=True, text=True, timeout=120)
+                after, index_after = snapshot(root)
+                if unsupported:
+                    check(label + "-refuses-generation", proc.returncode == 2
+                          and fence in proc.stderr)
+                    check(label + "-store-byte-identical", after == before)
+                    check(label + "-git-index-byte-identical", index_after == index_before)
+                else:
+                    upgraded = tomllib.loads((machine / "manifest.toml").read_text(encoding="utf-8"))
+                    check(label + "-legacy-succeeds", proc.returncode == 0
+                          and "doctor-VALID" in proc.stdout
+                          and upgraded["opf"]["spec_version"] == _opf_store.SUPPORTED_SPEC_VERSION)
+                    check(label + "-legacy-generation-one", "worklog" not in upgraded["opf"]
+                          and wl.generation(upgraded) == 1)
+
+
 def self_test():
     failures, checks = [], []
 
@@ -208,6 +335,8 @@ def self_test():
         mv = _opf_store.validate_manifest(fx.manifest)
         check("F5-production-manifest", mv.status == _opf_store.CANNOT_EVALUATE
               and mv.findings == [fence])
+
+    _upgrade_preflight_regressions(check, fence)
 
     with patch.object(_opf_store, "SUPPORTED_WORKLOG", 2):
         for gen in (1, 2):
