@@ -319,10 +319,14 @@ def runner_check(expected, text=None):
     def registrations(body):
         # Deliberately bounded grammar: quoted gate name, python3, literal
         # arguments or double-quoted $here paths, on one unindented line.
-        # This is not a Bash parser; wrappers and other shell syntax refuse.
+        # This is not a Bash parser: every line spelling the run_gate token
+        # must be canonical, except the exact definition line below. This
+        # refuses prefixes, groups and function wrappers on those lines.
+        # Invocations that never spell the token (variables, eval of
+        # computed text, aliases) are invisible to this static check.
         calls = []
         for line in body.splitlines():
-            if not re.match(r"^\s*run_gate\b", line) or line == "run_gate() {":
+            if not re.search(r"\brun_gate\b", line) or line == "run_gate() {":
                 continue
             try:
                 words = shlex.split(line)
@@ -349,6 +353,8 @@ def runner_check(expected, text=None):
     # Absolute paths or a changed PATH can run a real gate before a missing
     # expected call is detected. Extra unintercepted executions need not change
     # this log at all. This is not a process sandbox or a roster-coverage check.
+    # Intercepted siblings return 0, so sibling failure propagation via
+    # failed=1 and the final exit is outside this check.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$p0_log" || exit 2
 if [ "$#" -eq 5 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
@@ -403,7 +409,9 @@ exit 0
 
         # Probe with exactly the runner's cwd, flags and environment. A noexec
         # fixture or unusable PATH must never fall through to the real gates.
-        probe = run_shell("type -P python3")
+        # Also require the runner utility and the fixture interpreter.
+        probe = run_shell("type -P dirname >/dev/null && test -x /bin/sh && "
+                          "type -P python3")
         if probe.returncode != 0 or probe.stdout != str(executable) + "\n":
             raise RuntimeError(identity + "/cannot-evaluate/interception")
         proc = run_shell(source)
@@ -416,6 +424,7 @@ exit 0
 
 def runner_red_checks(expected):
     import os
+    import subprocess
     import tempfile
     from unittest.mock import patch
 
@@ -446,8 +455,18 @@ def runner_red_checks(expected):
     # This tests dispatch divergence, not deletion from the on-disk roster.
     red("dispatch-divergence", lambda: runner_check(expected, skip),
         AssertionError, identity + "/argv-log")
+    # Exit from the dispatcher before the runner can report success.
+    red("return-code", lambda: runner_check(
+        expected, source.replace(anchor, anchor + "  exit 1\n", 1)),
+        AssertionError, identity + "/return-code")
     original_read = Path.read_text
     grammar_cases = (
+        ("colon-prefix", ":; " + sibling[0]),
+        ("true-prefix", "true; " + sibling[0]),
+        ("brace-group", "{ " + sibling[0].rstrip("\n") + "; }\n"),
+        ("conditional", "if :; then " + sibling[0].rstrip("\n") + "; fi\n"),
+        ("and-prefix", ": && " + sibling[0]),
+        ("function-wrapper", "wrapper() { " + sibling[0].rstrip("\n") + "; }\n"),
         ("indented-registration-dispatch-skip", "  " + sibling[0]),
         ("tab-separated-registration", sibling[0].replace("run_gate ", "run_gate\t", 1)),
         ("trailing-comment", sibling[0].rstrip("\n") + " # comment\n"),
@@ -470,8 +489,35 @@ def runner_red_checks(expected):
         red(label + "-candidate", lambda: runner_check(expected, changed), RuntimeError,
             identity + "/cannot-evaluate/grammar")
 
-    # Discriminates only where TMPDIR has no default ACL: a default ACL
-    # overrides the umask, so there this case passes with or without the chmods.
+    # Remove every execute bit, including for root. Permit only the probe:
+    # a reverted interception guard must never launch the real runner.
+    original_chmod = Path.chmod
+    original_popen = subprocess.Popen
+    launches = 0
+
+    def non_executable(path, mode, *args, **kwargs):
+        if path.name == "python3":
+            mode = 0o600
+        return original_chmod(path, mode, *args, **kwargs)
+
+    def probe_only(*args, **kwargs):
+        nonlocal launches
+        launches += 1
+        if launches > 1:
+            raise AssertionError(identity + "/interception/unexpected-launch")
+        return original_popen(*args, **kwargs)
+
+    with patch.object(Path, "chmod", non_executable), \
+            patch("subprocess.Popen", side_effect=probe_only):
+        red("non-executable-fixture", lambda: runner_check(expected), RuntimeError,
+            identity + "/cannot-evaluate/interception")
+        if launches != 1:
+            raise AssertionError(identity + "/interception/launch-count")
+
+    # Discriminates only where TMPDIR has no default ACL and the process
+    # lacks CAP_DAC_OVERRIDE (root commonly has it in CI containers).
+    # Either a default ACL overriding umask or that capability makes this
+    # case non-discriminating: it can pass with or without the chmods.
     saved = os.umask(0o200)
     try:
         try:
