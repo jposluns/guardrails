@@ -1600,16 +1600,16 @@ def _cmd_upgrade(rest):
     a model regeneration through the canonical new-document emitter (bump spec_version; drop the retired
     decision_support module WHERE PRESENT; add each contribution/maintainer_decision/preference_pattern type
     row NOT already declared by an enabled 1.0.0 module; add the two new view rows; WIDEN the DECISIONS.md
-    composed view WHERE DECLARED; extend counters with the CN/MD/PP zeros preserving existing high-waters;
-    create the missing empty indexes, skipping any that already exist), RENDERS the declared views, and
-    requires a full doctor VALID before offering the staged change. It is ORIGIN-AWARE: a governance- or
-    decision_support-enabled 1.0.0 store, and a store that omits the optional decision_support key or the
-    DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4). Before ANY write it enforces two fail-closed
-    preconditions: STORE-PATH CLEANLINESS over the .working subtree and declared product-scope render
-    targets, with an untracked lease handled separately (HEAD is a verified restore path for
-    the checked paths, SECA-verified-restore-path) and a SINGLE-WRITER LEASE it claims atomically and holds across the mutation,
-    render, and final doctor (spec 5.7). It NEVER commits: the adopter reviews and merges. A store already at
-    {to} returns without those migration preconditions: doctor-VALID yields a byte no-op (exit 0),
+    composed view WHERE DECLARED; extend counters with zeros for any missing CN/MD/PP namespace, preserving
+    existing high-waters; create the missing empty indexes, skipping any that already exist), RENDERS the
+    declared views, and requires a full doctor VALID before offering the staged change. It is ORIGIN-AWARE:
+    a governance- or decision_support-enabled 1.0.0 store, and a store that omits the optional
+    decision_support key or the DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4). Before ANY
+    write it enforces two fail-closed preconditions: STORE-PATH CLEANLINESS over the .working subtree and
+    declared product-scope render targets, with an untracked lease handled separately (HEAD is a verified
+    restore path for the checked paths, SECA-verified-restore-path) and a SINGLE-WRITER LEASE it claims
+    atomically and holds across the mutation, render, and final doctor (spec 5.7). It NEVER commits: the
+    adopter reviews and merges. A store already at {to} returns without those migration preconditions: doctor-VALID yields a byte no-op (exit 0),
     otherwise it exits 2 without writing. A NOT-ADOPTED root is NOT APPLICABLE
     (exit 0), any other non-resolved status a located cannot-evaluate (exit 2). Two disclosed residuals: a
     killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
@@ -1709,9 +1709,10 @@ def _upgrade_partial_recovery_text(store_root):
 def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_relpaths):
     """Recovery advice for a post-mutation failure (render or doctor): the touched set is KNOWN, and with the
     step-3 cleanliness precondition in force everything dirty under the probe scope after a failed run is
-    upgrade-written by construction, so this enumerated, subtree-scoped remedy is complete for the checked paths
-    of the run that printed it; ignored files are outside the cleanliness check and are not covered. The DISTINCT roots are threaded (explicit-binding-over-ambient-context): tracked store paths
-    under `.working`, and the upgrade-created untracked files, are recovered under the STORE root (where
+    upgrade-written by construction, so this enumerated, subtree-scoped remedy is complete for the checked
+    paths of the run that printed it; ignored files are outside the cleanliness check and are not covered.
+    The DISTINCT roots are threaded (explicit-binding-over-ambient-context): tracked store paths under
+    `.working`, and the upgrade-created untracked files, are recovered under the STORE root (where
     `.working` lives); a declared product-scope target rendered this run is recovered under the PRODUCT root.
     The two roots differ for a RELOCATED store (the pointer resolves `.working` to a store separate from the
     product tree), where using one root for both would aim the `.working` restore at the wrong repository.
@@ -1924,10 +1925,10 @@ def _upgrade_check_clean(res, manifest_model):
     """STEP 3 (M3): store-cleanliness precondition, run AFTER the read-only triage/plan and immediately
     BEFORE lease acquisition and the first write. Prove over EXACTLY the paths this upgrade can write (the
     `.working` subtree at the store root, plus any declared product-scope render target) that the git index
-    and working tree equal HEAD, so the committed HEAD is a verified restore path for the checked tracked and
-    untracked paths (SECA-verified-restore-path); ignored files are outside the check. Only the UNTRACKED lease path is EXCLUDED (byte-literal): a held
-    (untracked "??") lease is step 4's own specific never-seize refusal, not generic dirt; a TRACKED lease on
-    that path is instead refused DISTINCTLY as a spec-5.7 violation (in _upgrade_parse_porcelain), never
+    and working tree equal HEAD, so the committed HEAD is a verified restore path for the checked tracked
+    and untracked paths (SECA-verified-restore-path); ignored files are outside the check. Only the
+    UNTRACKED lease path is EXCLUDED (byte-literal): a held (untracked "??") lease is step 4's own specific
+    never-seize refusal, not generic dirt; a TRACKED lease on that path is instead refused DISTINCTLY as a spec-5.7 violation (in _upgrade_parse_porcelain), never
     excluded. Refuses fail-closed (exit 2) on any dirt, naming up to 10 paths plus the total, advising
     commit-your-changes and NEVER a restore (the dirt is the owner's own work, preserve-uncommitted-work).
 
@@ -2259,8 +2260,9 @@ def _upgrade_run(root):
         new_counters_bytes = _opf_emit.emit_checked(new_counters).encode("utf-8")
 
         # STEP 3 (M3): the LAST read-only gate. Prove HEAD is a verified restore path over the checked
-        # paths (ignored files excluded) before any write; a dirty store refuses fail-closed with commit-your-changes advice,
-        # never a restore (the dirt is the owner's work). The lease path is excluded (step 4's own refusal).
+        # paths (ignored files excluded) before any write; a dirty store refuses fail-closed with
+        # commit-your-changes advice, never a restore (the dirt is the owner's work). The lease path is
+        # excluded (step 4's own refusal).
         _upgrade_check_clean(res, manifest_model)
 
         product_targets = _upgrade_product_render_targets(manifest_model)
