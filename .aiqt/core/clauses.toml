@@ -896,7 +896,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 18
 end-line = 18
 canonical-text = "Never weaken a gate to obtain a pass; fix the artefact instead."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.2"
@@ -905,7 +905,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 18
 end-line = 18
 canonical-text = "Never weaken a gate to obtain a pass; fix the artefact instead."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.3"
@@ -914,7 +914,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 19
 end-line = 20
 canonical-text = "A failing gate is signal;\nunderstand why it failed before considering any override."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.4"
@@ -923,7 +923,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 20
 end-line = 22
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.5"
@@ -932,7 +932,7 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 20
 end-line = 22
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.6"
@@ -941,70 +941,133 @@ source-path = ".aiqt/core/rules/integ-gate-discipline.md"
 start-line = 20
 end-line = 22
 canonical-text = "A security floor, a deny list, a permission\nfloor, or a required-check set, never shrinks silently: any reduction, whatever motivated it, lands only\nthrough the maintainer's explicit, recorded authorization."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.7"
 corpus-id = "gatdis"
 source-path = ".aiqt/core/rules/integ-gate-discipline.md"
-start-line = 24
-end-line = 26
+start-line = 39
+end-line = 41
 canonical-text = "A gate verdict is trusted only when it is read from the gate's own unmasked termination status, or from\na structured terminal result bound to the exact revision under gate; a downstream pipeline's status, a\ntruncated delivery, a textual success token, or a result for a different revision is not that verdict."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.8"
 corpus-id = "gatdis"
 source-path = ".aiqt/core/rules/integ-gate-discipline.md"
-start-line = 26
-end-line = 29
+start-line = 41
+end-line = 44
 canonical-text = "A\npending, missing, ambiguous, malformed, unknown, or unreadable result is unverified, never a pass, and the\ngated action stays a separate step, withheld until terminal success is observed, so a check folded into the\nsame unverified apply or merge does not establish the checkpoint."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.9"
 corpus-id = "gatdis"
 source-path = ".aiqt/core/rules/integ-gate-discipline.md"
-start-line = 31
-end-line = 36
+start-line = 46
+end-line = 51
 canonical-text = "When a command's own termination status is the evidence a verdict rests on, that status is taken only from a\nconstruct that faithfully propagates the gating command's own exit, never from one that can report success\nwhile the gate failed; sequencing that preserves the gate's failure, such as a short-circuit that runs the\nnext command only on the gate's success or an explicit re-raise of the gate's saved exit, is not this\nhazard, so the test is whether the construct's terminal status still reflects the gate's, not merely whether\nanother command follows it."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.10"
 corpus-id = "gatdis"
 source-path = ".aiqt/core/rules/integ-gate-discipline.md"
-start-line = 36
-end-line = 40
+start-line = 51
+end-line = 55
 canonical-text = "An always-succeeding trailer appended after the gate, a `true`, a `:`, a\nstatus-printing echo of the prior exit, or any other no-op whose own success overwrites the gate's exit,\nmakes the compound report the trailer's status, not the gate's, so a failing gate reads as a pass; a printed\ncopy of the exit is output, not the verdict, and such a status-masking trailer is never appended to a\ncommand whose exit is relied on."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.11"
 corpus-id = "gatdis"
 source-path = ".aiqt/core/rules/integ-gate-discipline.md"
-start-line = 40
-end-line = 43
+start-line = 55
+end-line = 58
 canonical-text = "The exit of a launcher, dispatcher, wrapper, or detached background task\ncarries the gate's verdict only where it demonstrably propagates the gate's own exit; a carrier that reports\nits own success regardless of what the gate returned yields the vehicle's status, not the verdict, which is\nthen read from the gate's own result instead."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.12"
 corpus-id = "gatdis"
 source-path = ".aiqt/core/rules/integ-gate-discipline.md"
-start-line = 45
-end-line = 48
+start-line = 60
+end-line = 63
 canonical-text = "An event-triggered gate is relied on only after its trigger's preconditions are confirmed against\nauthoritative state: a pipeline triggered by a change request needs an open change request for the exact\nrevision and intended base before any run can exist, so where the precondition is unmet the absence of a\nreported failure is a missing result, never a pass."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gatdis.13"
 corpus-id = "gatdis"
 source-path = ".aiqt/core/rules/integ-gate-discipline.md"
-start-line = 48
-end-line = 50
+start-line = 63
+end-line = 65
 canonical-text = "A pushed revision, an acknowledged dispatch, or an\nelapsed wait is not evidence the trigger fired; a run is confirmed to exist for the revision under gate\nbefore anything is read from its outcome."
-source-digest = "7bd00b7d40290abd3221d3b05e4ab70cbbba21f2fe245309b0838968c7b793ab"
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
+
+[[clause]]
+clause-id = "gatdis.14"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 24
+end-line = 25
+canonical-text = "Replacing or removing a control, a gate, a check, a hook, a validator, or another guard, is a set operation,\nso a replacement is treated as a reduction until its coverage is shown."
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
+
+[[clause]]
+clause-id = "gatdis.15"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 25
+end-line = 27
+canonical-text = "Before such a change is dispatched\nfor review or integrated, the threats or cases the outgoing control covered are enumerated from its own\ncode, its tests, its specification, and its disclosed residual, never from a recollection of its purpose."
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
+
+[[clause]]
+clause-id = "gatdis.16"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 28
+end-line = 31
+canonical-text = "Each enumerated case is then accounted for in one of three states: covered, shown by a reference to the\nreplacement code that handles it and a case exercised against the replacement and observed to be caught;\nunreachable, shown by the change that removes the capability the case depends on and an observed attempt\nconfirming the path is unavailable; or disclosed as no longer covered."
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
+
+[[clause]]
+clause-id = "gatdis.17"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 31
+end-line = 32
+canonical-text = "A case disclosed as no longer covered\nis a reduction, and it lands only through the maintainer's explicit, recorded authorization."
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
+
+[[clause]]
+clause-id = "gatdis.18"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 32
+end-line = 33
+canonical-text = "A case left in\nnone of the three states is a silent reduction, and the change is not dispatched while one remains."
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
+
+[[clause]]
+clause-id = "gatdis.19"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 33
+end-line = 35
+canonical-text = "The\nenumeration and its accounting are recorded with the change, so a verifier reproduces them rather than\nre-deriving the covered set."
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
+
+[[clause]]
+clause-id = "gatdis.20"
+corpus-id = "gatdis"
+source-path = ".aiqt/core/rules/integ-gate-discipline.md"
+start-line = 35
+end-line = 37
+canonical-text = "Where a case is covered by a surviving sibling control rather than by the\nreplacement, that coverage is cited on the same evidence, and the lost overlap is weighed under the\ndefence-in-depth-default rule rather than assumed free."
+source-digest = "9a63652194fa01e678df4ee7043a086709382dbca362ae668691418535ca16c6"
 
 [[clause]]
 clause-id = "gensrc.1"
@@ -1544,7 +1607,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 16
 end-line = 17
 canonical-text = "A change that alters behaviour lands together with an automated test or gate that fails when the change is\nabsent."
-source-digest = "09c63b73d0ea6a4d1e49a8a648158921efe34cc7003780060f9e093d8d65406d"
+source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
 
 [[clause]]
 clause-id = "chgchk.2"
@@ -1553,7 +1616,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 17
 end-line = 18
 canonical-text = "Verification leaves a durable artefact that keeps guarding the behaviour after the one-time\nverification pass has moved on."
-source-digest = "09c63b73d0ea6a4d1e49a8a648158921efe34cc7003780060f9e093d8d65406d"
+source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
 
 [[clause]]
 clause-id = "chgchk.3"
@@ -1562,7 +1625,70 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 20
 end-line = 26
 canonical-text = "The check is confirmed to run, not merely to exist. A test or gate that is present but never reached,\nmisplaced in its file, wrongly indented, or never registered with the runner, provides no coverage, and a\npassing suite is not evidence that it holds: a check that never executed and one that executed and passed are\nindistinguishable from the suite's green alone. Before that green is trusted for the new behaviour, confirm\nthe check executed, by observing it run or by a deliberate flip that shows it failing without the change, and\nprefer a runner that reports the count or identity of the checks it actually ran over a hand-maintained\nassertion that they are all present."
-source-digest = "09c63b73d0ea6a4d1e49a8a648158921efe34cc7003780060f9e093d8d65406d"
+source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+
+[[clause]]
+clause-id = "chgchk.4"
+corpus-id = "chgchk"
+source-path = ".aiqt/core/rules/quali-change-carries-check.md"
+start-line = 28
+end-line = 29
+canonical-text = "A check that asserts an absence, that a finding is not raised, an error is not thrown, or an action is not\ntaken, is held to a stricter form of that confirmation."
+source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+
+[[clause]]
+clause-id = "chgchk.5"
+corpus-id = "chgchk"
+source-path = ".aiqt/core/rules/quali-change-carries-check.md"
+start-line = 29
+end-line = 31
+canonical-text = "Observing such a check run is not evidence that it\nguards the change, because an absence assertion passes both when the feature under test suppresses the\noutcome and when the input never reaches the path that would produce it."
+source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+
+[[clause]]
+clause-id = "chgchk.6"
+corpus-id = "chgchk"
+source-path = ".aiqt/core/rules/quali-change-carries-check.md"
+start-line = 31
+end-line = 33
+canonical-text = "The check discriminates only when\nits input is one the feature under test changes, so that removing the feature makes the asserted outcome\nappear."
+source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+
+[[clause]]
+clause-id = "chgchk.7"
+corpus-id = "chgchk"
+source-path = ".aiqt/core/rules/quali-change-carries-check.md"
+start-line = 33
+end-line = 34
+canonical-text = "Each such check is paired with a deliberate flip that removes or disables the feature, and it is\nobserved to fail under that flip before its pass is trusted."
+source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+
+[[clause]]
+clause-id = "chgchk.8"
+corpus-id = "chgchk"
+source-path = ".aiqt/core/rules/quali-change-carries-check.md"
+start-line = 34
+end-line = 36
+canonical-text = "A flip that yields only a build failure, an\nexecution error, or an unrelated outcome establishes no discrimination; the flip counts only when the\nasserted outcome itself appears."
+source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+
+[[clause]]
+clause-id = "chgchk.9"
+corpus-id = "chgchk"
+source-path = ".aiqt/core/rules/quali-change-carries-check.md"
+start-line = 36
+end-line = 38
+canonical-text = "Where the feature can be disabled within the suite, the pairing is kept as a\ndurable companion case that asserts the outcome does appear without the feature, so a later change that stops\nthe input reaching that path fails the suite rather than passing silently."
+source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+
+[[clause]]
+clause-id = "chgchk.10"
+corpus-id = "chgchk"
+source-path = ".aiqt/core/rules/quali-change-carries-check.md"
+start-line = 38
+end-line = 40
+canonical-text = "This attaches to an absence check\nrelied on as the check a change carries, not to an incidental negative assertion inside a check whose\ndiscrimination already rests on a positive assertion."
+source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
 
 [[clause]]
 clause-id = "cmpmig.1"
