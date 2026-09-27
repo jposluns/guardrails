@@ -1025,6 +1025,94 @@ def _watchdog_completion_case(mode):
     return EXIT_OK
 
 
+def _watchdog_overlap_case(mode):
+    """Fix the fork/close interleaving; no sleep decides which caller finishes first."""
+    import select
+    import threading
+    from unittest.mock import patch
+    import _opf_emit as emit
+
+    caller = os.getpid()
+    paused, resume = threading.Event(), threading.Event()
+    sibling_started = threading.Event()
+    release_r, release_w = os.pipe()
+    entered_r, entered_w = os.pipe()
+    real_start = emit._FixtureProcess.start
+    results, owners, errors = {}, {}, []
+
+    def start(owner):
+        pid = real_start(owner)
+        if os.getpid() == caller:
+            name = threading.current_thread().name
+            owners[name] = owner
+            if name == "A":
+                if mode == "success":
+                    # A's entire tree has exited successfully, with bytes buffered,
+                    # but its caller still holds wfd. B must fork in this window.
+                    ended = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+                    assert ended.si_code == os.CLD_EXITED and ended.si_status == 0
+                paused.set()
+                assert resume.wait(10), "A was not resumed"
+            else:
+                sibling_started.set()  # B's guardian has inherited A's writer
+        return pid
+
+    def blocked():
+        os.write(entered_w, b"R")
+        assert os.read(release_r, 1) == b"G"
+        return "B-OK"
+
+    def call(name):
+        try:
+            thunk = (lambda: "A-OK") if name == "A" else blocked
+            timeout = 5 if name == "A" else 15
+            if mode == "timeout":
+                thunk = blocked if name == "A" else (lambda: "B-OK")
+                timeout = 1 if name == "A" else 15
+            results[name] = emit.run_bounded(thunk, timeout_s=timeout)
+        except BaseException as exc:
+            errors.append((name, repr(exc)))
+
+    a = threading.Thread(target=call, args=("A",), name="A", daemon=True)
+    b = threading.Thread(target=call, args=("B",), name="B", daemon=True)
+    try:
+        with patch.object(emit._FixtureProcess, "start", start):
+            try:
+                a.start()
+                assert paused.wait(10), "A did not reach its pre-close barrier"
+                b.start()
+                assert sibling_started.wait(10), "B did not fork while A held wfd"
+                ready, _, _ = select.select([entered_r], [], [], 10)
+                assert ready and os.read(entered_r, 1) == b"R", "blocked thunk never ran"
+                resume.set()
+                a.join(10)
+                assert not a.is_alive(), "A waited beyond its execution/cleanup budget"
+            finally:
+                resume.set()
+                # B cannot finish the success case until A has returned. On the
+                # old EOF-gated collector this forces A to report a false TIMEOUT.
+                os.write(release_w, b"G")
+                a.join(10)
+                if b.ident is not None:
+                    b.join(20)
+        assert not a.is_alive() and not b.is_alive(), "overlap workers survived"
+        assert not errors, errors
+        assert set(owners) == {"A", "B"}, owners
+        assert all(owner.collected and emit._fixture_child_reaped(owner.pid)
+                   for owner in owners.values()), "overlap guardian not collected"
+        if mode == "success":
+            assert owners["A"].status == 0 and not owners["A"].timed_out
+        expected = {"A": "A-OK" if mode == "success" else "TIMEOUT", "B": "B-OK"}
+        print("opf watchdog overlap:", mode, results, "expected", expected)
+        assert results == expected, results
+    finally:
+        os.close(release_r)
+        os.close(release_w)
+        os.close(entered_r)
+        os.close(entered_w)
+    return EXIT_OK
+
+
 def _watchdog_regression_self_test():
     """R10: startup/collection/exit bounds and the registered runner under hostile inherited state."""
     import signal
@@ -1041,6 +1129,9 @@ def _watchdog_regression_self_test():
     cases = [(mode, prefix + "return opf._watchdog_deadline_case(" + repr(mode) + ")", 10)
              for mode in ("delayed-start", "stuck-start", "pipe-stall", "exit-stall",
                           "transient-census")]
+    cases.extend(("overlap-" + mode,
+                  prefix + "return opf._watchdog_overlap_case(" + repr(mode) + ")", 60)
+                 for mode in ("success", "timeout"))
     cases.extend((mode, prefix + "return opf._watchdog_safety_case(" + repr(mode) + ")", 15)
                  for mode in ("ignored-chld", "reaper-chld", "lost-reap", "lost-cleanup",
                               "high-fd", "huge-timeout", "fork-error", "poll-error", "missing-reap",

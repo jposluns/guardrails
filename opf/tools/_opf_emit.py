@@ -1294,11 +1294,22 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
             if remaining <= 0:
                 timed_out = True
                 break
-            if eof:
-                wstatus = child.poll()
-                if wstatus is not None:
-                    timed_out = child.timed_out
-                    break
+            # EOF depends on every writer: a concurrent helper fork can inherit our
+            # writer before the caller closes it. Only this call's guardian
+            # receipt certifies that its tree has stopped writing; never wait
+            # for a sibling's inherited descriptor to close before polling it.
+            wstatus = child.poll()
+            if wstatus is not None:
+                timed_out = child.timed_out
+                if not eof:
+                    # The receipt follows ECHILD, so the complete (at most 200
+                    # byte) payload is already buffered. Drain without waiting
+                    # for EOF, including when status wins the first poll.
+                    try:
+                        data = (data + os.read(rfd, 200))[:200]
+                    except BlockingIOError:
+                        pass
+                break
             ready = poller.poll(max(1, math.ceil(min(remaining, 0.01) * 1000)))
             if ready:
                 try:
