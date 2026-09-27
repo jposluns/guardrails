@@ -81,9 +81,10 @@
       <div class="card">
         <h3>By hand (fallback)</h3>
         <p>Create the plain-TOML store, configure your own checks, and work records-first. The standard
-          requires no particular tool. The reference tooling currently checks inline-layout stores at
-          spec 1.2.0 with baseline record types; it does not yet render per-record stores or validate
-          module-tier records, so a hand-built store using those features cannot yet be fully checked by it.</p>
+          requires no particular tool. The reference tooling validates spec 1.2.0 stores in either
+          layout, with limits: it does not yet render or drift-check per-record views, and the baseline
+          validator reports module-tier and importer record content schemas as cannot-evaluate. A
+          hand-built store using those features cannot yet be fully checked by it.</p>
       </div>
     </div>
     <p>On the assistant-driven path, ask for a plan naming what to create, import, or retire and how the
@@ -162,11 +163,15 @@
       them. It makes no store change, and its report is a structured per-check verdict map, the findings
       and cannot-evaluates, and a residual count, never a wall of diff lines. Its coverage spans schema
       validity, ID uniqueness and counter monotonicity, bidirectional index reconciliation, transition
-      legality, the all-or-none resolution bundle, byte drift for supported deterministic views, worklog span
-      tiling and frozen digests, changelog coverage and freeze, archive integrity, the tracked-store
+      legality where observations suffice, the all-or-none resolution bundle, byte drift for every
+      declared view in an inline-layout store, worklog span tiling and frozen digests, changelog coverage
+      and freeze, archive integrity, the tracked-store
       requirement, pointer and sync-target agreement, and path containment.</p>
-    <p>Doctor reports per-record view drift and module-tier record schemas as cannot-evaluate. It does
-      not check behind, ahead, or divergence against a sync target.</p>
+    <p>Doctor reports per-record view drift and the content schemas of module-tier and importer
+      records, including <code>legacy_fragment</code>, as cannot-evaluate. Transition checks also report
+      cannot-evaluate when legality depends on an unidentified last-transition actor or a rejection
+      requires unavailable pre-proposal state. Doctor does not check behind, ahead, or divergence
+      against a sync target.</p>
     <p><b style="color:var(--ink)">Result.</b> A valid, invalid, or cannot-evaluate verdict with the
       per-check breakdown, exiting 0, 1, or 2 to match.</p>
     <p class="refchips"><code>opf doctor</code> <code>opf doctor --root .</code></p>
@@ -193,7 +198,9 @@
     <p><b style="color:var(--ink)">Result.</b> An inventory, a staged run id and report, an acceptance
       record, or a promoted store, one per mode; everything not confidently mapped is quarantined rather
       than dropped, and the originals stay in place until an <code>--apply</code> promotes a fully
-      reviewed run.</p>
+      reviewed run. An import that promotes quarantined <code>legacy_fragment</code> records can succeed
+      while subsequent doctor checks report cannot-evaluate, because the baseline validator does not
+      validate those records' content schemas.</p>
     <p class="refchips"><code>opf import --scan --set sources.toml</code> <code>opf import --plan --set sources.toml</code> <code>opf import --review R --actor "you" --decisions d.toml</code> <code>opf import --apply R</code></p>
 
     <h3 id="cmd-upgrade"><code>opf upgrade</code></h3>
@@ -280,9 +287,10 @@
     <h2>The manual path, step by step</h2>
     <p class="lead">OPFiles specifies formats, layout, naming, lifecycle, and enforcement posture, and
       requires no particular tool: the specification states that a project can conform with
-      hand-maintained files and its own checks. The reference tooling currently checks inline-layout
-      stores at spec 1.2.0 with baseline record types; it does not yet render per-record stores or validate
-      module-tier records, so a hand-built store using those features cannot yet be fully checked by it.</p>
+      hand-maintained files and its own checks. The reference tooling validates spec 1.2.0 stores in
+      either layout, with limits: it does not yet render or drift-check per-record views, and the baseline
+      validator reports module-tier and importer record content schemas as cannot-evaluate. A hand-built
+      store using those features cannot yet be fully checked by it.</p>
     <p>The shape of the manual path is short: create the store (either run <code>opf init</code> to
       scaffold it, or write the files from the specification and schemas), commit it, generate the views
       with <code>opf render --write</code> for a supported store or your own renderer, and then work
@@ -301,11 +309,13 @@
       <li><b style="color:var(--ink)"><code>manifest.toml</code></b>: the control document and
         discovery marker. It declares <code>standard = "opf"</code> (the exact discovery token) in
         its <code>[opf]</code> table, along with the base <code>spec_version</code> you conform to,
-        the storage <code>layout</code>, and the enforcement <code>posture</code>.</li>
+        the storage <code>layout</code>, the enforcement <code>posture</code>, and
+        <code>import_status</code>. Register each enabled type in <code>[types.&lt;name&gt;]</code>,
+        declare <code>[views]</code>, and supply the other tables the standard defines.</li>
       <li><b style="color:var(--ink)"><code>counters.toml</code></b>: the per-namespace ID
         high-water marks, so an ID is never reused.</li>
       <li><b style="color:var(--ink)"><code>version.toml</code></b>: the version and release ledger
-        (numbers and digests only, never prose).</li>
+        (numbers, dates, spans, and digests, never release prose).</li>
       <li><b style="color:var(--ink)"><code>worklog.toml</code></b>: the durable operational record:
         one entry per change, correctable in place until a release freezes its span, never deleted.
         It is the exempt ledger, not a typed index.</li>
@@ -359,8 +369,8 @@
     <p>One rule of adoption carries the whole convention: lowercase files are machine source you change
       through tooling or review; UPPERCASE files are generated or published deliverables you read and
       never hand-edit. The curated <code>CHANGELOG.md</code> is the one you edit, and only through its
-      publish flow. Once the files exist, commit them, then run <code>opf render --write</code> (or your
-      own generator) to produce the views from their sources.</p>
+      publish flow. Once the files exist, commit them, then run <code>opf render --write</code> for an
+      inline-layout store (or your own generator) to produce the views from their sources.</p>
   </div>
 </section>
 

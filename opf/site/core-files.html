@@ -280,7 +280,7 @@
     <p class="eyebrow">Core store file</p>
     <h2 id="version-title">The version ledger</h2>
     <p class="refchips"><code>version.toml</code> <code>.working/toml/</code></p>
-    <p class="lead">The version and release ledger: numbers, dates, spans, and digests, never prose.</p>
+    <p class="lead">The version and release ledger: numbers, dates, spans, and digests, never release prose.</p>
   </div>
 
   <section class="section-alt">
@@ -324,12 +324,13 @@
         <code>VERSION.md</code> but omits the root <code>VERSION</code> view. When recording the first
         release, declare that view so the reference renderer can produce the required root file.
         Doctor checks <code>VERSION</code> whenever releases exist, even if its view is undeclared
-        (see <a href="./tooling">reference tooling</a>). The ledger is
+        (see <a href="./adopt#cmd-doctor">doctor coverage</a>). The ledger is
         created by <code>opf init</code> (empty), updated by the release cut (a new append-only release
         row) and the changelog publish and rollup flow (summary rows and their digests), and read by
         <code>opf render</code> (the VERSION and VERSION.md renders), the changelog range-coverage and
         freeze gates, <code>opf doctor</code> (span tiling, frozen coverage digests, append-only
-        history), and release-delta tooling in the AIQT reference suite, as a consumer of the ledger.</p>
+        history). The specification identifies the ledger as the intended input to release-delta
+        tooling; that integration is planned and is not implemented in the reference tooling.</p>
     </div>
   </section>
 
@@ -359,7 +360,7 @@
         </div>
         <div>
           <dt>Read by</dt>
-          <dd class="refchips"><code>opf render</code> <code>opf doctor</code> <span>changelog gates</span> <span>release-delta tooling</span></dd>
+          <dd class="refchips"><code>opf render</code> <code>opf doctor</code> <span>changelog gates</span></dd>
         </div>
       </dl>
     </div>

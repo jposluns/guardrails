@@ -17,8 +17,10 @@ checks source integrity and regenerated outputs; other deliverable failures can 
 actual_remote, prior), and runs the U6 `validate_store` store-integrity engine over them, returning that
 engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0). Doctor is read-only; its
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
-(spec 9.2): `opf upgrade [--root DIR]` is the in-place, additive, idempotent upgrade from 1.0.0 or 1.1.0
-to 1.2.0. The 1.1.0 path changes only spec_version; the 1.0.0 path also applies the earlier schema delta
+(spec 9.2): `opf upgrade [--root DIR] [--homes-plan]`. With `--homes-plan`, it prints the homes-generation
+migration plan read-only and exits without upgrading. Otherwise it is the in-place, additive, idempotent
+upgrade from 1.0.0 or 1.1.0 to 1.2.0. The 1.1.0 path changes only spec_version; the 1.0.0 path also
+applies the earlier schema delta
 (base-table and discovery-token rename, decision_support retirement, type and view declarations,
 DECISIONS.md source widening, counters, and missing indexes). Neither creates init.toml provenance.
 It refuses a store above the tooling spec or non-canonical manifest/counters, renders declared views,

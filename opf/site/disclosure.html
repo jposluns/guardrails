@@ -89,14 +89,19 @@
         specified controls, not complete CLI coverage: <code>opf sync</code> is planned, and
         <code>opf init</code> takes no lock or lease and does not serialize concurrent writers.</li>
       <li><b style="color:var(--ink)">Reference-tooling residuals</b>: doctor reports per-record
-        view drift and module-tier record schemas as cannot-evaluate, and does not check behind,
-        ahead, or divergence against a sync target.</li>
+        view drift and the content schemas of module-tier and importer records, including
+        <code>legacy_fragment</code>, as cannot-evaluate. An import that promotes quarantined
+        <code>legacy_fragment</code> records can succeed while subsequent doctor checks report
+        cannot-evaluate. Transition checks also report cannot-evaluate when legality depends on an
+        unidentified last-transition actor or a rejection requires unavailable pre-proposal state.
+        Doctor does not check behind, ahead, or divergence against a sync target.</li>
       <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
         it supports; a profile it does not support is recorded as present-but-unevaluated rather than
         failing base validation.</li>
-      <li><b style="color:var(--ink)">The discovery token</b> is a single exact string, stable
-        within a base-schema major line: a mistyped or altered token is a cannot-evaluate that stops
-        the tool, never a silent empty store.</li>
+      <li><b style="color:var(--ink)">The discovery token</b> is a single exact string. A mistyped
+        or altered token is a cannot-evaluate that stops the tool, never a silent empty store. A rename
+        ships only with the tested <code>opf upgrade</code> migration, as the 1.0.0 to 1.1.0 rename of
+        <code>devprocess</code> to <code>opf</code> did.</li>
       <li><b style="color:var(--ink)">A host provider's conveniences</b> call the external API of the
         host the target names. The egress bound is that named host and nothing else; the standard
         cannot vouch for the host's own behaviour beyond that bound.</li>

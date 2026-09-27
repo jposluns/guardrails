@@ -127,7 +127,7 @@
           <span class="chip"><code>opf init</code></span>
           <span class="chip"><code>opf render</code></span>
           <span class="chip"><code>opf doctor</code></span>
-          <p>Created by <code>opf init</code> (empty index), then records by process as work is planned; updated by state transitions under the status grammar and maintainer ratification of proposed terminals; read by <code>opf render</code> and validated by <code>opf doctor</code> (schema validity, ID uniqueness, transition legality, no-resurrection).</p>
+          <p>Created by <code>opf init</code> (empty index), then records by process as work is planned; updated by state transitions under the status grammar and maintainer ratification of proposed terminals; read by <code>opf render</code> and validated by <code>opf doctor</code> (schema validity, ID uniqueness, transition legality where observations suffice, no-resurrection). Actor-dependent transitions with an unidentified last-transition actor and rejections requiring unavailable pre-proposal state report cannot-evaluate.</p>
         </dd>
       </div>
     </dl>
@@ -257,7 +257,7 @@
           <span class="chip"><code>opf init</code></span>
           <span class="chip"><code>opf render</code></span>
           <span class="chip"><code>opf doctor</code></span>
-          <p>Created by <code>opf init</code> (empty index) and by whoever observes a defect, human or assistant; updated by resolution transitions, maintainer ratification, and severity grading at or after the fix decision; read by <code>opf render</code> (FINDINGS.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, transition legality).</p>
+          <p>Created by <code>opf init</code> (empty index) and by whoever observes a defect, human or assistant; updated by resolution transitions, maintainer ratification, and severity grading at or after the fix decision; read by <code>opf render</code> (FINDINGS.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, transition legality where observations suffice). Actor-dependent transitions with an unidentified last-transition actor and rejections requiring unavailable pre-proposal state report cannot-evaluate.</p>
         </dd>
       </div>
     </dl>
@@ -1043,7 +1043,7 @@
     (none)              CL   reserved unassigned, so it can never half-collide with "changelog"
   </pre></div>
     <p>These are outline state sets; the full module record schemas ship with the module schemas release. The delivery-assurance <code>release</code> record, where enabled, references a <code>version.toml</code> release row by version string: the ledger row is the fact, the record is the delivery-assurance envelope around it.</p>
-    <p><code>legacy_fragment</code> is created only by an importer, never scaffolded: everything an import cannot confidently map becomes quarantined fragment data with source path, digest, span, and run ID, so nothing is dropped. The scaffolded counters file already carries the LF namespace at zero, so a fresh store can accept quarantine imports without a schema change. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
+    <p><code>legacy_fragment</code> is created only by an importer, never scaffolded: everything an import cannot confidently map becomes quarantined fragment data with source path, digest, span, and run ID, so nothing is dropped. The scaffolded counters file already carries the LF namespace at zero, so a fresh store can accept quarantine imports without a schema change. An import that promotes quarantined <code>legacy_fragment</code> records can succeed while subsequent doctor checks report cannot-evaluate, because the baseline validator does not validate those records' content schemas. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Not every project needs delivery assurance or operational-policy records on day one.</blockquote>

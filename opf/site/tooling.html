@@ -114,9 +114,9 @@
       <span class="chip">Schema validity</span>
       <span class="chip">ID uniqueness and counter monotonicity</span>
       <span class="chip">Bidirectional index reconciliation</span>
-      <span class="chip">Transition legality</span>
+      <span class="chip">Transition legality where observations suffice</span>
       <span class="chip">The all-or-none resolution bundle</span>
-      <span class="chip">Byte drift for supported deterministic views</span>
+      <span class="chip">Byte drift for every declared view (inline layout)</span>
       <span class="chip">Worklog span tiling and frozen digests</span>
       <span class="chip">Changelog coverage and freeze</span>
       <span class="chip">Archive integrity</span>
@@ -124,8 +124,11 @@
       <span class="chip">Pointer and sync-target agreement</span>
       <span class="chip">Path containment</span>
     </p>
-    <p>Doctor reports per-record view drift and module-tier record schemas as cannot-evaluate. It does
-      not check behind, ahead, or divergence against a sync target.</p>
+    <p>Doctor reports per-record view drift and the content schemas of module-tier and importer
+      records, including <code>legacy_fragment</code>, as cannot-evaluate. Transition checks also report
+      cannot-evaluate when legality depends on an unidentified last-transition actor or a rejection
+      requires unavailable pre-proposal state. Doctor does not check behind, ahead, or divergence
+      against a sync target.</p>
     <p>At the strictest posture, an unreadable, unparseable, or unresolvable declared input is a
       failure, never an empty or clean result.</p>
   </div>

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "760d8646996ae562e1b745e9c6dcd9992b55add33f9772d81a4a5f76a27795d5"
+tree-sha256 = "0a83aa7a2792cd6949a8b3c91616f7f2dc660cf4c430788e8ba15ea1c3ced914"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2381,13 +2381,13 @@ sha256 = "44fabb8f383a49b5344a6d3e1ff0b4e2ef3afe2411e3d2f0c0b00829bafecccb"
 
 [[sources]]
 path = "opf/site/adopt.html"
-bytes = 32515
-sha256 = "12787002a68853b1da3e26fba2c5fe70c33b0135d67de2b1d5c0342eea188bec"
+bytes = 33426
+sha256 = "72af35a824b7ca0cf88e699bc33555c542f92065151ab0c7504251d438119dba"
 
 [[sources]]
 path = "opf/site/adopt.md"
-bytes = 3425
-sha256 = "e50bfc6f1da57b64667ec2a8ae19df556daf96e65e359a51fc7cca09eb621a14"
+bytes = 4320
+sha256 = "487ce52b17b60a0567c0827f02439d1795971f2a9a741bc019bbc22fd84e8269"
 
 [[sources]]
 path = "opf/site/aiqt.html"
@@ -2396,13 +2396,13 @@ sha256 = "1d872467316921e13b40f5fcfdc8793a6eca716df15f078c961e65415afa43b6"
 
 [[sources]]
 path = "opf/site/core-files.html"
-bytes = 34082
-sha256 = "1e158c77158eb0ab1a76c6888d7140cdd6084217d0800aea1c38219dab1b9318"
+bytes = 34151
+sha256 = "15a102869181a426c6d8c184a60b321a047771ec266e6fa646a68ca02114d9bb"
 
 [[sources]]
 path = "opf/site/disclosure.html"
-bytes = 8274
-sha256 = "95c768a2f3abca761e744a0a13400349800a6e6aad25a55178b5c065b9db3d91"
+bytes = 8805
+sha256 = "6fdc402e64ca0a4ea99c907bf8478401308795cdeee9ce6492b849ec0a76a9eb"
 
 [[sources]]
 path = "opf/site/favicon.svg"
@@ -2411,18 +2411,18 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "opf/site/index.html"
-bytes = 23328
-sha256 = "185197e3eac3b92f255ffce3992f82e29ac49e8bb7dd82e239d8db4d448dabcd"
+bytes = 23426
+sha256 = "8194b5c21fc159177acd7d1082163702cdfbae6031e086ec69b0d673ead44352"
 
 [[sources]]
 path = "opf/site/llms.txt"
-bytes = 1623
-sha256 = "17d24bf934fd973e13174b0f1d7a25d49500d90d1b77c032cdd97c6b43877761"
+bytes = 1704
+sha256 = "777a4fb3a6134375bbd64557a892ea103808999f4f2ea31bf3783d25f6087196"
 
 [[sources]]
 path = "opf/site/record-indexes.html"
-bytes = 67660
-sha256 = "fff07aa24a83c51341fbb71b7e7a194e52c3bf8b06efeb3df48a790f6ac38e6f"
+bytes = 68237
+sha256 = "8bb356843e7cb9db12c97224620599ad0a4832515116a3ea45c84eb58134820d"
 
 [[sources]]
 path = "opf/site/roadmap.html"
@@ -2456,8 +2456,8 @@ sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
 path = "opf/site/tooling.html"
-bytes = 11582
-sha256 = "a623b4cf73424017f3e055bd9396b9337e6aad5f36609d0bff79557539c42aeb"
+bytes = 11872
+sha256 = "8fb3ff7c6b1739472c9eda385233bce2fedfd3d82cc8a86490b47733f1897b67"
 
 [[sources]]
 path = "opf/spec/OPF-INIT-D2B-REVIEW.md"
@@ -2846,8 +2846,8 @@ sha256 = "6223c8b0179dc455c0c1648ef7ca8aada011bf8af29037bef3ede413fbaeb6e4"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 222979
-sha256 = "94163a1c21f19314cf8011e988779597bdcb0735effd84c5001685094c618ecd"
+bytes = 223114
+sha256 = "00799d4c7f02f6101ea55eb513b1bf6d5198edaf4158c5c0fbab06e7e4afa3ee"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
