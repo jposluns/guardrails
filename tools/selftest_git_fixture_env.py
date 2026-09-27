@@ -29,7 +29,9 @@ routing/scope check proves the scrub call site and its position in the named ent
 later git call in the same process still runs under it; launch aliases, indirect helper calls,
 early returns and control-flow reachability are outside this syntactic check's coverage. The
 config-injection lane derives registered self-test commands and runs them under caller hooks and ignore
-files, attributes and fsmonitor, with separate malformed-config probes;
+files, attributes and fsmonitor, with separate malformed-config probes. Selection is by
+selftest_ script name or --self-test/--selftest/--suite flag, not by behaviour: a
+registered gate that builds fixtures only through another entry mode is outside this roster;
 the repository-selector lanes below exercise the corpus member. The trust check covers LITERAL
 subprocess.run launches (a launch built
 through a variable is outside its reach); and the end-to-end probe poisons two representative
@@ -382,12 +384,20 @@ CONFIG_EXCLUSIONS = {
 }
 
 
+def _command_identity(argv):
+    """Match CI-parity's single leading ./ normalization; retain argv for execution."""
+    script = argv[0][2:] if argv[0].startswith("./") else argv[0]
+    return (script, *argv[1:])
+
+
 def _registered_selftests(root=ROOT):
     """Parse every registry before selecting self-tests; preserve exact script arguments.
     Reuse CI-parity's fail-closed shell/YAML grammar. Only the standalone runner's
     validated directory binding and terminal exit need normalization.
-    Declaration coverage only: unregistered entries and conditional reachability
-    are outside this inventory. Manifest runners also run directly, because the
+    Declaration coverage only: selection uses a selftest_ basename or an explicit
+    --self-test, --selftest or --suite flag, not fixture-building behaviour.
+    Other entry modes, unregistered entries and conditional reachability are outside
+    this inventory. Manifest runners also run directly, because the
     execution gate deliberately sanitizes its child environment.
     """
     from check_ci_parity import extract_local, extract_ci, _strip_comment, _tokenize, normalize
@@ -407,8 +417,10 @@ def _registered_selftests(root=ROOT):
             lines[-1] = "# validated terminal exit"
             source = "\n".join(lines).replace('"$here/', '"opf/tools/')
         result = extract(source)
-        if result.diagnostics or not result.members:
-            raise ValueError("{}: {}".format(relative, result.diagnostics or "empty registry"))
+        if result.diagnostics:
+            raise ValueError("{}: registry diagnostics: {}".format(relative, result.diagnostics))
+        if not result.members:
+            raise ValueError(relative + ": empty registry")
         selected = set()
         for member in result.members:
             argv = tuple(member.split(" "))
@@ -444,16 +456,19 @@ def _registered_selftests(root=ROOT):
         raise ValueError("cannot read suite runner registry")
     runners = {row["id"]: row["runner"] for row in suites}
     for argv in sorted(commands):
-        if argv[0] == "tools/check_selftest_execution.py" and "--suite" in argv:
+        identity = _command_identity(argv)
+        if identity[0] == "tools/check_selftest_execution.py" and "--suite" in identity:
             if len(argv) != 3 or argv[1] != "--suite" or argv[2] not in runners:
                 raise ValueError("unparseable suite invocation: {!r}".format(argv))
-            if argv not in CONFIG_EXCLUSIONS["all"]:
+            if identity not in CONFIG_EXCLUSIONS["all"]:
                 commands.add((runners[argv[2]],))
+    identities = {_command_identity(argv) for argv in commands}
     for lane, exclusions in CONFIG_EXCLUSIONS.items():
         for argv, reason in exclusions.items():
-            if argv not in commands or not reason.strip():
+            if argv not in identities or not reason.strip():
                 raise ValueError("stale or unreasoned {} exclusion: {!r}".format(lane, argv))
-    commands.difference_update(CONFIG_EXCLUSIONS["all"])
+    commands = {argv for argv in commands
+                if _command_identity(argv) not in CONFIG_EXCLUSIONS["all"]}
     if not commands:
         raise ValueError("empty config-injection roster")
     for argv in commands:
@@ -511,7 +526,7 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
                 '[ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then printf "system\\n" >> {log}; fi\n'
                 'exec {git} "$@"\n'.format(
                     git=shlex.quote(real_git),
-                    archive="yes" if argv in CONFIG_EXCLUSIONS["archive"] else "no",
+                    archive="yes" if _command_identity(argv) in CONFIG_EXCLUSIONS["archive"] else "no",
                     root=shlex.quote(str(ROOT)), home=shlex.quote(member_env["HOME"]),
                     xdg=shlex.quote(member_env["XDG_CONFIG_HOME"]), log=shlex.quote(str(exposure)),
                     system="yes" if system else "no"), encoding="utf-8")
@@ -541,7 +556,7 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
 
 def _member_result(results, member, column):
     """Legacy IDs report derived runs, including every registered argument variant."""
-    values = [value[column] for argv, value in results.items() if argv[0] == member]
+    values = [value[column] for argv, value in results.items() if _command_identity(argv)[0] == member]
     if not values:
         return "missing registered member: " + member
     want = 0 if column == 0 else b""
@@ -550,33 +565,100 @@ def _member_result(results, member, column):
 
 def _roster_checks():
     from unittest.mock import patch
+    import check_ci_parity
+    import check_selftest_execution
+
     original = Path.read_text
-    for check_id, relative, text in (
-            ("roster/empty-local-refused", "tools/run_all_checks.sh", ""),
-            ("roster/unparseable-local-refused", "tools/run_all_checks.sh",
-             'run_gate "bad" python3 -I -B "$unknown" --self-test\n'),
-            ("roster/empty-opf-refused", "opf/tools/run_all_checks.sh", ""),
-            ("roster/unparseable-ci-refused", ".github/workflows/quality.yml",
-             'jobs:\n  quality:\n    steps:\n      - run: python3 tools/x.py --self-test | cat\n'),
+    local = "tools/run_all_checks.sh"
+    opf = "opf/tools/run_all_checks.sh"
+    ci = ".github/workflows/quality.yml"
+    local_text = (ROOT / local).read_text(encoding="utf-8")
+    ci_text = (ROOT / ci).read_text(encoding="utf-8")
+    binding = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
+
+    def refusal():
+        try:
+            _registered_selftests()
+        except ValueError as exc:
+            return str(exc)
+        return ""
+
+    # Require THIS guard's diagnostic: an unrelated downstream refusal is not
+    # evidence that the intended guard ran. Bad commands augment a valid roster.
+    for check_id, relative, text, diagnostic in (
+            ("roster/empty-local-refused", local, "", local + ": empty registry"),
+            ("roster/unparseable-local-refused", local,
+             local_text + '\nrun_gate "cont" python3 -I -B tools/check_secrets.py \\\n  --self-test\n',
+             local + ": registry diagnostics:"),
+            ("roster/empty-opf-refused", opf, binding + "\nexit 0\n",
+             opf + ": empty registry"),
+            ("roster/standalone-scaffold-refused", opf, binding + "\n" + binding + "\nexit 0\n",
+             "unsupported standalone runner scaffold"),
+            ("roster/unparseable-ci-refused", ci,
+             ci_text + '\n      - run: python3 -I -B tools/check_secrets.py --self-test | cat\n',
+             ci + ": registry diagnostics:"),
+            ("roster/dynamic-arguments-refused", local,
+             local_text + '\nrun_gate "dynamic" python3 -I -B tools/check_secrets.py --self-test --base "$MODE"\n',
+             "dynamic self-test arguments:"),
+            ("roster/launcher-refused", local,
+             local_text + '\nrun_gate "launcher" python3 -B -I tools/check_secrets.py --self-test\n',
+             "unsupported self-test launcher:"),
+            ("roster/empty-selftests-refused", local,
+             'run_gate "live" python3 -I -B tools/check_secrets.py\n',
+             local + ": empty self-test roster"),
+            ("roster/prefixed-invalid-suite-refused", local,
+             local_text + '\nrun_gate "bad-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-selftest --extra\n',
+             "unparseable suite invocation:"),
     ):
         def read(path, *args, **kwargs):
             return text if path == ROOT / relative else original(path, *args, **kwargs)
         with patch.object(Path, "read_text", read):
-            try:
-                _registered_selftests()
-            except (OSError, ValueError):
-                refused = True
-            else:
-                refused = False
-        check(check_id, refused, True)
+            got = refusal()
+        check(check_id, got.startswith(diagnostic), True)
+
+    # A parser/member provenance mismatch must not silently drop a selected member.
+    extract = check_ci_parity.extract_local
+    def missing_origin(text):
+        result = extract(text)
+        return result._replace(origins={})
+    with patch.object(check_ci_parity, "extract_local", missing_origin):
+        got = refusal()
+    check("roster/missing-origin-refused",
+          got.startswith("cannot recover exact self-test arguments:"), True)
+
+    stale = ("tools/check_secrets.py", "--self-test", "--stale-exclusion")
+    with patch.dict(CONFIG_EXCLUSIONS["all"], {stale: "Synthetic stale exclusion."}):
+        got = refusal()
+    check("roster/stale-exclusion-refused",
+          got.startswith("stale or unreasoned all exclusion:"), True)
+
     extra = '\nrun_gate "argument-probe" python3 -I -B tools/check_secrets.py --self-test --red-on-revert\n'
     def read(path, *args, **kwargs):
         value = original(path, *args, **kwargs)
-        return value + extra if path == ROOT / "tools/run_all_checks.sh" else value
+        return value + extra if path == ROOT / local else value
     with patch.object(Path, "read_text", read):
         roster = _registered_selftests()
     check("roster/registered-arguments", ("tools/check_secrets.py", "--self-test",
                                          "--red-on-revert") in roster, True)
+
+    suites = check_selftest_execution._manifest_suites(CHECKS_MANIFEST)
+    extra = '\nrun_gate "new-suite" python3 -I -B ./tools/check_selftest_execution.py --suite roster-probe\n'
+    with patch.object(Path, "read_text", read), patch.object(
+            check_selftest_execution, "_manifest_suites", return_value=suites + [
+                {"id": "roster-probe", "runner": "tools/check_secrets.py",
+                 "expected-check-ids": ["probe"]}]):
+        roster = _registered_selftests()
+    check("roster/prefixed-suite-expanded",
+          ("./tools/check_selftest_execution.py", "--suite", "roster-probe") in roster
+          and ("tools/check_secrets.py",) in roster, True)
+
+    extra = '\nrun_gate "recursive-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-selftest\n'
+    with patch.object(Path, "read_text", read):
+        roster = _registered_selftests()
+    check("roster/prefixed-recursion-excluded",
+          ("tools/check_selftest_execution.py", "--suite", "git-fixture-env-selftest") not in roster
+          and ("./tools/check_selftest_execution.py", "--suite", "git-fixture-env-selftest") not in roster
+          and ("tools/selftest_git_fixture_env.py",) not in roster, True)
 
 
 def _opf_both_legs():
@@ -856,7 +938,7 @@ def _config_injection_lane(base):
     (home / ".gitconfig").write_text(malformed, encoding="utf-8")
     (xdg / "git" / "config").write_text(malformed, encoding="utf-8")
     malformed_results = _config_results(
-        [argv for argv in roster if argv not in CONFIG_EXCLUSIONS["malformed"]],
+        [argv for argv in roster if _command_identity(argv) not in CONFIG_EXCLUSIONS["malformed"]],
         env, marker, monitor_marker)
     check("config/registered-malformed", [argv for argv, value in malformed_results.items()
                                         if value != (0, b"", b"", b"")], [])
@@ -917,6 +999,7 @@ def _config_injection_lane(base):
     system_results = _config_results(roster, system_env, marker, monitor_marker, system=True)
     check("config/registered-system", [argv for argv, value in system_results.items()
                                      if value != (0, b"", b"", b"")], [])
+    return system_results
 
 
 def _run_config_member(member, env):
@@ -995,8 +1078,31 @@ def _manifest_extra_setup_failures():
         check(check_id, refused, True)
 
 
-def _opf_home_lifecycles():
-    """Observe each entry before its delegate, then force exceptional restoration."""
+# These registered self-tests exercise data/text/filesystem fixtures, not a git
+# lifecycle. They still require a successful observed system-config-lane run.
+# New modules and removed wrappers are NOT implicitly exempt.
+OPF_LIFECYCLE_EXEMPTIONS = {
+    "opf/tools/_opf_adopt.py": "In-memory adoption vocabulary and validator vectors.",
+    "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
+    "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
+    "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
+    "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
+    "opf/tools/check_opf_homes_migrate.py": "Homes planning over materialized store fixtures.",
+    "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
+    "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
+    "opf/tools/check_opf_init_p0.py": "P0 store validation and runner registration vectors.",
+    "opf/tools/selftest_commonmark_conformance.py": "CommonMark parser conformance vectors.",
+    "opf/tools/selftest_commonmark_headings.py": "Heading selection and vendor-manifest fixtures.",
+}
+
+
+def _opf_home_lifecycles(config_results):
+    """Account for every registered OPF module and its observed command variants.
+    Wrapped entries must isolate before delegation and restore after an exception.
+    Explicit non-git exemptions still run under the config observer; its absolute
+    executable/replaced-PATH residual applies. Delegate discovery alone cannot
+    prove every entry route is wrapped; the command runs supply that other layer.
+    """
     code = "\n".join((
         "import importlib, inspect, json, os, sys",
         "sys.path.insert(0, sys.argv[1])",
@@ -1021,15 +1127,25 @@ def _opf_home_lifecycles():
         "    pass",
         "print(json.dumps([seen, dict(os.environ) == saved]))",
     ))
-    # Discover delegates in registered OPF source, not a hand-maintained roster.
     results = {}
-    paths = sorted({argv[0] for argv in _registered_selftests()
-                    if argv[0].startswith("opf/tools/")})
-    for relative in paths:
+    roster = [argv for argv in _registered_selftests()
+              if _command_identity(argv)[0].startswith("opf/tools/")]
+    paths = {_command_identity(argv)[0] for argv in roster}
+    missing = set(OPF_LIFECYCLE_EXEMPTIONS) - paths
+    for argv in roster:
+        if config_results.get(argv) != (0, b"", b"", b""):
+            missing.add(_command_identity(argv)[0])
+    for relative in sorted(paths):
         tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
-        for node in tree.body:
-            if not isinstance(node, ast.FunctionDef) or not node.name.endswith("_isolated"):
-                continue
+        delegates = [node for node in tree.body
+                     if isinstance(node, ast.FunctionDef) and node.name.endswith("_isolated")]
+        reason = OPF_LIFECYCLE_EXEMPTIONS.get(relative)
+        if not delegates:
+            if not reason or not reason.strip():
+                missing.add(relative)
+        elif reason is not None:
+            missing.add(relative)  # A stale exemption must be reviewed and removed.
+        for node in delegates:
             module, entry = Path(relative).stem, node.name[:-len("_isolated")]
             env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg",
                        GIT_CONFIG_NOSYSTEM="0")
@@ -1041,7 +1157,7 @@ def _opf_home_lifecycles():
             except ValueError:
                 got = (child.returncode, child.stdout, child.stderr)
             results[module, entry] = got
-    check("env/registered-opf-lifecycles", bool(results) and all(
+    check("env/registered-opf-lifecycles", bool(paths) and not missing and bool(results) and all(
         value == (0, [[[True, True, True, True]], True]) for value in results.values()), True)
     for check_id, module, entry in (
             ("env/opf-upgrade-home-lifecycle", "check_opf_upgrade", "_suite"),
@@ -1396,10 +1512,10 @@ def main(report_path=None):
 
         _roster_checks()
         _opf_both_legs()
-        _config_injection_lane(base)
+        config_results = _config_injection_lane(base)
         _manifest_setup_failures(base)
         _manifest_extra_setup_failures()
-        _opf_home_lifecycles()
+        _opf_home_lifecycles(config_results)
 
         # ---------- layer 3: the end-to-end leak probe ----------
         decoy = _build_decoy(base)

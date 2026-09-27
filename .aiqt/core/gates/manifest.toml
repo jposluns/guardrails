@@ -488,7 +488,7 @@ script = "opf/tools/_opf_import.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
+class = "c"
 residue = "It runs _opf_import.py --self-test directly, exercising import operation-layer and staging invariants over synthetic stores through the module's own fixture-isolation entry point. It asserts representative returned verdicts and fixture state, not the import engine's whole input space or behaviour against a live adopter repository. It does not by itself prove isolation against every caller configuration or exercise the opf.py CLI routing. No undeniable linkage to a single corpus rule is claimed."
 
 [[gate]]
@@ -497,7 +497,7 @@ script = "opf/tools/_opf_ingest.py"
 rules = []
 platform = "ci"
 default = "block"
-class = "a"
+class = "c"
 residue = "It runs _opf_ingest.py --self-test directly, exercising detection, worksheet validation, and planning invariants over synthetic stores through the module's own fixture-isolation entry point. It asserts representative verdicts and fixture state, not the ingest engine's whole input space, apply behaviour, or behaviour against a live adopter repository. Symlink cases may be skipped when the platform reports unsupported symlinks. It does not by itself prove isolation against every caller configuration or exercise the opf.py CLI routing. No undeniable linkage to a single corpus rule is claimed."
 
 [[gate]]
