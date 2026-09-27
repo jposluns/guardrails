@@ -42,12 +42,13 @@ VECTOR ROSTER (U1-U25, P1):
       module): every delivery_assurance row/index/counter preserved value-exact; doctor VALID.
   U12 baseline plus an untracked well-formed foreign lease.toml: exit 2, the refusal names the holder, the
       lease is NOT deleted, the tree is unchanged.
+  U12b ignored lease: held-lease never-seize refusal, unchanged bytes; exclusion flip restores dirt advice.
   U13 baseline plus a malformed lease.toml: exit 2 (present is held, never absent); not deleted; unchanged.
-  U14 baseline plus an uncommitted worklog.toml edit: exit 2 BEFORE any mutation; the refusal names the
+  U14 baseline plus an uncommitted counters.toml edit: exit 2 BEFORE any mutation; the refusal names the
       dirty path and advises commit-your-changes, never a whole-tree restore; the owner edit intact.
-  U14b ignored pre-existing render target: exit 2 with the ordinary dirty-store remedy, bytes and index
-      unchanged; moving it aside permits upgrade, with unrelated ignored build content untouched.
-      Removing --ignored=matching from the probe fails this case.
+  U14b ignored render destinations and directory collisions refuse before mutation; ignored prefix
+      siblings and declared unmanaged content permit doctor-VALID upgrades. Companion flips restore
+      the erroneous refusals. Collapsed ignored ancestors still expose occupied destinations.
   U15 [types.contribution] pre-declared: exit 2 naming contribution as an impossible 1.0.0 shape; unchanged.
   U16 governance=false plus [types.maintainer_decision]: exit 2 naming the module inconsistency; unchanged.
   U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.1.0 triage refusals (with the scoped
@@ -68,7 +69,7 @@ VECTOR ROSTER (U1-U25, P1):
       R1b leading-space prefix test (_upgrade_probe_dirty keeps a " leading/"-prefixed lease excluded; fails
       under the old .strip()).
   U19 R1 recovery-text root-binding: opf._upgrade_recovery_text called directly with DISTINCT store/product
-      roots; the `.working` restore + created-file removal name the store root, the product target the product
+      roots; planned-path restore + created-file removal name the store root, the product target the product
       root (fails without the distinct-roots fix).
   U20 R8 module-coupling refusal: governance=true with maintainer_action but maintainer_decision ABSENT (a
       module-inconsistent 1.0.0 shape the delta would silently cure) refuses exit 2 before mutation; unchanged.
@@ -96,7 +97,7 @@ VECTOR ROSTER (U1-U25, P1):
       UNKNOWN [modules] key refuses UPFRONT (merge-base _validate_modules parity), while the known-but-retired
       decision_support key still plans; fails without the upfront unknown-key check.
   U27 R1a relocated partial-recovery: a RELOCATED store (store_root != product_root) at spec_version 1.1.0 but
-      not doctor-VALID names the STORE root (not the CLI product root) for the F2 .working restore advice.
+      not doctor-VALID names the STORE root for inspection; no unverified subtree restore is offered.
   P1  a seeded migration property test: 12 generated genuine-VALID 1.0.0 variants (module subset with the
       G2 coupling, 0-2 records per migrated type with matching high-waters, DECISIONS.md declared/omitted,
       the decision_support key present/absent) each upgrade to a doctor-VALID 1.1.0 store with every index
@@ -560,6 +561,33 @@ def _suite():
         def upgrade(store):
             return _run_opf(["upgrade", "--root", str(store)], env_holder["env"])
 
+        def flipped_upgrade(store, flip):
+            """Run a controlled regression in an isolated child; the normal fixture is unchanged on refusal."""
+            script = (
+                "import sys\nsys.path.insert(0, {!r})\nimport opf\nopf._bootstrap()\n".format(
+                    str(Path(__file__).resolve().parent))
+                + flip + "\nsys.exit(opf._cmd_upgrade(['--root', sys.argv[1]]))\n")
+            proc = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", script, str(store)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180,
+                env=env_holder["env"])
+            return proc.returncode, proc.stdout + proc.stderr
+
+        no_ignored_filter = (
+            "original = opf._upgrade_parse_porcelain\n"
+            "def parse(raw, prefix, lease, specs):\n"
+            "    extra = [r[3:].decode('utf-8').removeprefix(prefix).rstrip('/')\n"
+            "             for r in raw.split(b'\\x00') if r.startswith(b'!! ')]\n"
+            "    return original(raw, prefix, lease, list(specs) + extra)\n"
+            "opf._upgrade_parse_porcelain = parse\n")
+        whole_store_scope = (
+            "original = opf._upgrade_write_scope\n"
+            "def scope(*args):\n"
+            "    plan = original(*args)\n"
+            "    plan['store'] = ('.working',)\n"
+            "    return plan\n"
+            "opf._upgrade_write_scope = scope\n")
+
         def doctor(store):
             return _run_opf(["doctor", "--root", str(store)], env_holder["env"])
 
@@ -823,6 +851,32 @@ def _suite():
             check("U12 lease NOT deleted", (mach12 / _opf_check.LEASE_NAME).is_file())
             check("U12 tree unchanged", _snapshot(s12) == before12)
 
+            # U12b) An ignored lease reaches O_EXCL, with the never-seize remedy, never commit/move.
+            s12b = base / "u12b-ignored-lease"
+            s12b.mkdir()
+            mach12b = build_store(s12b)
+            lease12b = mach12b / _opf_check.LEASE_NAME
+            lease12b.write_bytes((mach12 / _opf_check.LEASE_NAME).read_bytes())
+            rel12b = lease12b.relative_to(s12b).as_posix()
+            (s12b / ".git/info").mkdir()
+            (s12b / ".git/info/exclude").write_text("/" + rel12b + "\n", encoding="utf-8")
+            before12b = _snapshot(s12b)
+            check("U12b fixture lease is ignored",
+                  git_call(s12b, ["check-ignore", "--", rel12b]).strip() == rel12b)
+            rc12b, out12b = upgrade(s12b)
+            check("U12b ignored lease gets held-lease never-seize refusal",
+                  rc12b == EXIT_ERROR and "peer-runner" in out12b
+                  and "The lease is never seized (spec 5.7)" in out12b
+                  and "confirmed NO opf run is live" in out12b
+                  and "Commit your store changes" not in out12b)
+            flip12b, text12b = flipped_upgrade(s12b,
+                "original = opf._upgrade_parse_porcelain\n"
+                "opf._upgrade_parse_porcelain = lambda raw, prefix, lease, specs: "
+                "original(raw, prefix, None, specs)\n")
+            check("U12b FLIP excluding no lease restores the incorrect dirty-store remedy",
+                  flip12b == EXIT_ERROR and "Commit your store changes" in text12b)
+            check("U12b both refusals preserve lease and tree", _snapshot(s12b) == before12b)
+
             # U13) baseline plus a MALFORMED lease.toml (present is held, never absent).
             s13 = base / "u13-lease-malformed"
             s13.mkdir()
@@ -834,16 +888,16 @@ def _suite():
             check("U13 lease NOT deleted", (mach13 / _opf_check.LEASE_NAME).is_file())
             check("U13 tree unchanged", _snapshot(s13) == before13)
 
-            # U14) baseline plus an uncommitted worklog.toml edit (the reproduced dirty-store case).
+            # U14) A canonical, uncommitted counters edit at a planned rewrite destination.
             s14 = base / "u14-dirty"
             s14.mkdir()
             mach14 = build_store(s14)
-            (mach14 / _opf_check.WORKLOG_NAME).write_text(
-                "entry = []\nschema = 1\n# an uncommitted owner edit\n", encoding="utf-8")
+            (mach14 / _opf_check.COUNTERS_NAME).write_text(
+                _FIX_COUNTERS.replace("BI = 0", "BI = 1"), encoding="utf-8")
             before14 = _snapshot(s14)
             rc14, out14 = upgrade(s14)
             check("U14 dirty store refuses BEFORE mutation (exit 2)", rc14 == EXIT_ERROR)
-            check("U14 refusal names the dirty path", "worklog.toml" in out14 and "clean" in out14)
+            check("U14 refusal names the dirty path", "counters.toml" in out14 and "clean" in out14)
             check("U14 advises commit-your-changes and offers no restore command (the dirt is the owner's)",
                   "Commit your store changes" in out14 and "restore --staged" not in out14)
             check("U14 owner edit intact and tree unchanged", _snapshot(s14) == before14)
@@ -882,6 +936,107 @@ def _suite():
                   saved14b.read_bytes() == before14b[ignored_rel])
             check("U14b ignored content outside the written scope is untouched",
                   (outside / "cache").read_bytes() == before14b["outside-build/cache"])
+
+            # U14b scope regressions: component-prefix siblings and declared unmanaged ignored content.
+            # The .working.bak case also probes the old coarse pathspec directly: the new write plan
+            # no longer selects .working, so this is the discriminating companion for that Git quirk.
+            for sibling, version_view in ((".working.bak", False),
+                                          (".working/CONTRIBUTIONS.md.bak", False),
+                                          ("VERSIONS", True)):
+                sc = base / ("u14b-sibling-" + sibling.replace("/", "-"))
+                sc.mkdir()
+                model = tomllib.loads(_FIX_MANIFEST)
+                extra = {}
+                if sibling.startswith(".working/"):
+                    model["unmanaged"] = {"paths": [sibling]}
+                if version_view:
+                    import _opf_release
+                    import _opf_changelog
+                    changelog = "# Changelog\n\n## 0.1.0\n"
+                    entries, _findings = _opf_changelog._changelog_entries(changelog)
+                    model["views"]["VERSION"] = {
+                        "kind": "deterministic", "sources": ["version"], "target": "VERSION"}
+                    extra[_opf_check.VERSION_NAME] = _opf_emit.emit_checked({
+                        "schema": 1, "summary": [{"covers": "0.1.0", "status": "published",
+                            "digest": _opf_changelog.freeze_digest(entries[0][1])}], "release": [{
+                            "version": "0.1.0", "date": "2026-01-01T00:00:00Z",
+                            "worklog_span": [], "coverage_digest": _opf_release.coverage_digest([])}]})
+                build_store(sc, manifest=_opf_emit.emit_checked(model), extra_files=extra)
+                if version_view:
+                    (sc / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+                    git_call(sc, ["add", "--", "CHANGELOG.md"])
+                    git_call(sc, ["commit", "-m", "release heading"])
+                (sc / ".git/info").mkdir()
+                (sc / ".git/info/exclude").write_text("/" + sibling + "/\n", encoding="utf-8")
+                owner = sc / sibling / "owner"
+                owner.parent.mkdir(parents=True)
+                owner.write_bytes(b"unrelated ignored owner bytes\n")
+                if sibling == ".working.bak":
+                    raw = git_call(sc, ["--literal-pathspecs", "status", "--porcelain=v1", "-z",
+                                        "--untracked-files=all", "--ignored=matching", "--no-renames",
+                                        "--", ".working"]).encode("utf-8")
+                    check("U14b .working.bak fixture exercises Git's prefix-sibling record",
+                          b"!! .working.bak/\x00" in raw)
+                    check("U14b .working.bak component filter excludes the real Git record",
+                          opf._upgrade_parse_porcelain(raw, "", None, [".working"]) == [])
+                    check("U14b .working.bak FLIP admitting the sibling surfaces it as dirt",
+                          opf._upgrade_parse_porcelain(raw, "", None, [".working", sibling])
+                          == [sibling + "/"])
+                else:
+                    flipped_rc, flipped_out = flipped_upgrade(sc, no_ignored_filter)
+                    check("U14b {} FLIP removing ignored filtering refuses".format(sibling),
+                          flipped_rc == EXIT_ERROR and sibling in flipped_out
+                          and "Commit your store changes" in flipped_out)
+                src, sout = upgrade(sc)
+                check("U14b {} upgrades to doctor-VALID".format(sibling),
+                      src == EXIT_OK and "doctor-VALID" in sout)
+                check("U14b {} owner bytes survive".format(sibling),
+                      owner.read_bytes() == b"unrelated ignored owner bytes\n")
+
+            su = base / "u14b-unmanaged"
+            su.mkdir()
+            unmanaged_model = tomllib.loads(_FIX_MANIFEST)
+            unmanaged_model["unmanaged"] = {"paths": [".working/cache"]}
+            build_store(su, manifest=_opf_emit.emit_checked(unmanaged_model))
+            (su / ".git/info").mkdir()
+            (su / ".git/info/exclude").write_text("/.working/cache/\n", encoding="utf-8")
+            cache = su / ".working/cache/output.bin"
+            cache.parent.mkdir()
+            cache.write_bytes(b"unmanaged output\n")
+            flipped_rc, flipped_out = flipped_upgrade(su, whole_store_scope)
+            check("U14b unmanaged FLIP whole-subtree scope refuses the ignored cache",
+                  flipped_rc == EXIT_ERROR and ".working/cache/" in flipped_out
+                  and "Commit your store changes" in flipped_out)
+            urc, uout = upgrade(su)
+            check("U14b declared unmanaged ignored content upgrades to doctor-VALID",
+                  urc == EXIT_OK and "doctor-VALID" in uout)
+            check("U14b unmanaged bytes survive", cache.read_bytes() == b"unmanaged output\n")
+            check("U14b staging uses individual destinations, excludes cache and lease",
+                  "--literal-pathspecs add -- .working\n" not in uout
+                  and ".working/cache" not in uout and "lease.toml" not in uout)
+
+            # A collapsed ignored ancestor must not hide a write destination, and a directory at a
+            # destination is a collision, even when Git reports it with a trailing slash.
+            for collision in ("ancestor", "directory"):
+                sa = base / ("u14b-" + collision)
+                sa.mkdir()
+                build_store(sa)
+                (sa / ".git/info").mkdir()
+                target = sa / ignored_rel
+                if collision == "ancestor":
+                    rule = "/.working/\n"
+                    target.write_bytes(b"owner content\n")
+                else:
+                    rule = "/" + ignored_rel + "/\n"
+                    target.mkdir()
+                    (target / "owner").write_bytes(b"owner content\n")
+                (sa / ".git/info/exclude").write_text(rule, encoding="utf-8")
+                before_collision = _snapshot(sa)
+                arc, aout = upgrade(sa)
+                check("U14b {} refuses before mutation".format(collision),
+                      arc == EXIT_ERROR and ignored_rel in aout and "Commit your store changes" in aout)
+                check("U14b {} preserves owner content and tree".format(collision),
+                      _snapshot(sa) == before_collision)
 
             # U15) [types.contribution] pre-declared: an impossible 1.0.0 shape.
             s15 = base / "u15-contribution-predeclared"
@@ -935,8 +1090,9 @@ def _suite():
             rc17d, out17d = upgrade(s1)
             check("U17 partial 1.1.0 store is not a false rc-0 no-op (exit 2)", rc17d == EXIT_ERROR)
             check("U17 partial store fail-closed names not-doctor-VALID", "NOT doctor-VALID" in out17d)
-            check("U17 partial-store recovery offers the .working-scoped restore command",
-                  "--literal-pathspecs restore --staged --worktree -- .working" in out17d)
+            check("U17 partial-store recovery requires reconstructing the earlier write plan",
+                  "earlier run's planned destinations" in out17d and "Exclude unmanaged paths and the lease"
+                  in out17d and "restore --staged" not in out17d)
             check("U17 partial-store recovery warns against a whole-tree restore",
                   "Never run a whole-tree restore" in out17d)
             drc17d, dout17d = doctor(s1)
@@ -978,7 +1134,7 @@ def _suite():
             # vectors.) A lone NUL that a naive split would read as clean must refuse.
             def _grammar_ok(raw, prefix="", lease=None):
                 try:
-                    return opf._upgrade_parse_porcelain(raw, prefix, lease), None
+                    return opf._upgrade_parse_porcelain(raw, prefix, lease, [".working"]), None
                 except opf._UpgradeError as exc:
                     return None, str(exc)
             _clean, _ = _grammar_ok(b"")
@@ -1037,8 +1193,8 @@ def _suite():
                 _vres, _verr = _grammar_ok(_vp + b" .working/toml/x\x00", prefix="", lease=None)
                 check("U18/R6 valid pair {!r} parses (no over-refusal)".format(_vp),
                       _vres == [".working/toml/x"] and _verr is None)
-            # A well-formed record: ONLY a well-formed UNTRACKED ("??") lease is EXCLUDED (step 4's
-            # never-seize case). Ignored ("!!") leases remain dirt. A TRACKED lease record is a spec-5.7
+            # Both UNTRACKED ("??") and IGNORED ("!!") exact leases are excluded for step 4's
+            # never-seize refusal. A TRACKED lease record is a spec-5.7
             # committed/tracked-lease anomaly and is REFUSED fail-closed here, never silently excluded (a
             # silent drop of a " D" committed-then-deleted lease is exactly the M3 fail-open this closes: it
             # would let step 4's O_EXCL acquire succeed on the now-absent file and sweep the deletion into the
@@ -1047,8 +1203,8 @@ def _suite():
             check("U18/R6 well-formed UNTRACKED lease record still excluded (step-4 never-seize)", _exok == [])
             _ignored, _ierr = _grammar_ok(b"!! sub/" + _lease_rel.encode("utf-8") + b"\x00",
                                           prefix="sub/", lease=_lease_rel)
-            check("U18/R6 ignored lease is dirt, neither excluded nor mislabelled tracked",
-                  _ignored == [_lease_rel] and _ierr is None)
+            check("U18/R6 ignored lease excluded (step-4 never-seize)",
+                  _ignored == [] and _ierr is None)
             for _tp in (b" D", b"D ", b" M", b"MM", b"M ", b"MD", b"A ", b"AD", b"DD", b"AU", b"UU"):
                 _tres, _terr = _grammar_ok(_tp + b" " + _lease_rel.encode("utf-8") + b"\x00",
                                            prefix="", lease=_lease_rel)
@@ -1057,6 +1213,20 @@ def _suite():
             _dnl, _ = _grammar_ok(b" M .working/toml/x\x00", prefix="", lease=_lease_rel)
             check("U18/R6 well-formed dirty non-lease record still surfaced", _dnl == [".working/toml/x"])
             check("U18/R6 clean tree (empty payload) still passes", _grammar_ok(b"")[0] == [])
+
+            # Scope filtering is restricted to well-formed ignored records. Malformed records outside
+            # scope still refuse, and tracked/untracked records outside scope are never silently dropped.
+            for payload, expected in (
+                    (b"!! .working\x00", [".working"]),
+                    (b"!! .working/\x00", [".working/"]),
+                    (b"!! .working/child\x00", [".working/child"]),
+                    (b"!! .working.bak/\x00", []),
+                    (b"?? .working.bak/child\x00", [".working.bak/child"]),
+                    (b" M .working.bak/child\x00", [".working.bak/child"])):
+                parsed, error = _grammar_ok(payload)
+                check("U18 component scope {!r}".format(payload), parsed == expected and error is None)
+            malformed, error = _grammar_ok(b"ZZ .working.bak/child\x00")
+            check("U18 malformed out-of-scope status still refuses", malformed is None and error is not None)
 
             # R1b: the show-prefix normalization must strip ONLY the trailing newline, never LEADING
             # whitespace, so a store dir whose name begins with a space keeps its prefix and its lease is
@@ -1084,19 +1254,24 @@ def _suite():
                   _r1b_dirty == [])
 
             # U19) R1: the post-mutation recovery text threads DISTINCT roots. Called directly (like U18):
-            # `.working` restore + created-file removal name the STORE root; a product target names the
+            # Planned-path restore + created-file removal name the STORE root; a product target names the
             # PRODUCT root. Without the fix (one root for both) the product line names the store root.
             _rt = opf._upgrade_recovery_text("/store/root", "/product/root",
-                                             ["toml/contribution.index.toml"], ["VERSION"])
-            check("U19 .working restore names the store root",
-                  "git -C /store/root --literal-pathspecs restore --staged --worktree -- .working" in _rt)
+                                             [".working/toml/contribution.index.toml"], ["VERSION"],
+                                             [".working/toml/manifest.toml",
+                                              ".working/toml/contribution.index.toml"])
+            check("U19 restore names only the planned pre-existing store path",
+                  "git -C /store/root --literal-pathspecs restore --staged --worktree "
+                  "-- .working/toml/manifest.toml\n" in _rt)
             check("U19 created-file removal is under the store root",
-                  "/store/root/toml/contribution.index.toml" in _rt and "/product/root/toml" not in _rt)
+                  "/store/root/.working/toml/contribution.index.toml" in _rt
+                  and "/product/root/.working/toml" not in _rt)
             check("U19 product target restore names the product root",
                   "git -C /product/root --literal-pathspecs restore --staged --worktree -- VERSION" in _rt)
             check("U19 inspect line names the store root",
                   "inspect first: git -C /store/root --literal-pathspecs status --ignored=matching "
-                  "--untracked-files=all -- .working" in _rt)
+                  "--untracked-files=all -- .working/toml/contribution.index.toml "
+                  ".working/toml/manifest.toml\n" in _rt)
 
             # U20) R8: governance=true with maintainer_action but maintainer_decision ABSENT (a module-
             # inconsistent 1.0.0 shape the delta would silently cure) now REFUSES unchanged, before mutation.
@@ -1353,11 +1528,8 @@ def _suite():
                   "governance" in out26 and "boolean" in out26)
             check("U26/R8 tree unchanged (refused before mutation)", _snapshot(s26) == before26)
 
-            # U27) R1a: a RELOCATED store (store_root != product_root) whose F2 partial-recovery advice must
-            # name the STORE root for the .working restore, not the CLI product root. Build a product repo, a
-            # store in a subdir with the pointer at the product root, migrate to VALID 1.1.0 and commit, then
-            # break the store so the F2 partial-recovery branch fires. With the R1a fix the .working restore
-            # is `git -C <store-subdir>`; without it (CLI product root) it names the product root.
+            # U27) A relocated interrupted run names the STORE root for inspection. Its earlier plan
+            # is unknown, so advice must not offer a subtree restore over unchecked owner content.
             import shlex as _shlex_r1a
             prod27 = base / "u27-relocated"
             store27 = prod27 / "sub-store"
@@ -1383,12 +1555,12 @@ def _suite():
             rc27b, out27b = upgrade(prod27)
             check("U27 relocated partial store fails closed (exit 2)", rc27b == EXIT_ERROR)
             check("U27 relocated partial store names not-doctor-VALID", "NOT doctor-VALID" in out27b)
-            _want27 = ("git -C {} --literal-pathspecs restore --staged --worktree -- .working"
+            _want27 = ("git -C {} --literal-pathspecs status --ignored=matching"
                        .format(_shlex_r1a.quote(str(store27))))
-            _bad27 = ("git -C {} --literal-pathspecs restore --staged --worktree -- .working"
+            _bad27 = ("git -C {} --literal-pathspecs status --ignored=matching"
                       .format(_shlex_r1a.quote(str(prod27))))
-            check("U27 relocated .working restore names the STORE root, not the product root (R1a)",
-                  _want27 in out27b and _bad27 not in out27b)
+            check("U27 partial-run inspection names STORE root and offers no unverified restore",
+                  _want27 in out27b and _bad27 not in out27b and "restore --staged" not in out27b)
 
             # U28) FIX1 compound-failure surfaces BOTH: a mid-run failure (the view render RAISES after the
             # manifest+counters mutation) is already propagating with its own "staged change is left for
@@ -1855,8 +2027,9 @@ def _suite():
             # false-positive, not exec.
             sL = base / "u28l-normalizing"
             sL.mkdir()
-            machL = build_store(sL, extra_files={"norm.dat": "abc123\n"}, commit=False)
-            _normtgt = "{}/norm.dat".format(_mach_rel_flt)
+            machL = build_store(sL, commit=False)
+            _normtgt = opf._opf_views._spec_destination("DECISIONS.md")[1]
+            (sL / _normtgt).write_text("abc123\n", encoding="utf-8")
             git_call(sL, ["config", "filter.norm.clean", "sed 's/[0-9]//g'"])
             git_call(sL, ["config", "filter.norm.required", "true"])   # git-lfs shape: a required driver
             (sL / ".gitattributes").write_text("{} filter=norm\n".format(_normtgt), encoding="utf-8")
