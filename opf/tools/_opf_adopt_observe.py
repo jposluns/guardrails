@@ -52,9 +52,11 @@ Quarantine creation uses atomic mkdir, which is the directory equivalent of
 exclusive creation; O_EXCL is used for every file creation. Existing run or
 quarantine directories are never reused. Files are opened descriptor-relative
 with no-follow and nonblocking flags and reread with inode/stamp checks.
-SIGINT and SIGALRM are blocked across exclusive mkdir and ownership registration.
-Refused attempts and cancellation escaping observation gathering, even after
-sealing, trigger descriptor-relative, symlink-resistant removal of the owned run.
+Each run name contains 128 CSPRNG bits and is registered as PENDING before mkdir;
+cleanup removes a pending or owned directory without following symlinks. EEXIST
+refuses and disclaims ownership of the colliding entry. Creation needs no signal
+control. Rollback stays armed through finalization and the return handoff, so
+escaping cancellation clears evidence and removes the run even after sealing.
 Cleanup failure refuses with a named cleanup note and no capability or sealed
 success record. OS deletion failure, process death, cancellation during rmtree
 (which can leave a partial tree), and same-privilege interference remain outside
@@ -578,34 +580,18 @@ def _fetch(url, cap, parent, context):
         return _response(_Wire(secured, request_deadline), cap)
 
 
-@contextlib.contextmanager
-def _creation_signals():
-    # Defer signal-handler cancellation until a successful exclusive create has
-    # an owner. Restore the caller's mask, including on FileExistsError.
-    _require(
-        threading.current_thread() is threading.main_thread()
-        and callable(getattr(signal, "pthread_sigmask", None)),
-        CANNOT_EVALUATE, "quarantine", "signal-safe creation unavailable",
-    )
-    previous = signal.pthread_sigmask(
-        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGALRM},
-    )
+def _open_directory(parent, name, fresh=False, owner=None):
     try:
-        yield
-    finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
-
-
-def _open_directory(parent, name, fresh=False, created=None):
-    try:
-        with _creation_signals():
-            os.mkdir(name, 0o700, dir_fd=parent)
-            if created is not None:
-                created()
+        os.mkdir(name, 0o700, dir_fd=parent)
     except FileExistsError:
+        if owner is not None:
+            owner.state = "COLLISION"
         if fresh:
             raise ObserveError(CANNOT_EVALUATE, "quarantine",
                                "exclusive directory already exists")
+    else:
+        if owner is not None:
+            owner.created()
     fd = os.open(
         name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
         dir_fd=parent,
@@ -628,39 +614,53 @@ def _open_directory(parent, name, fresh=False, created=None):
 
 
 class _QuarantineOwner:
-    """Retain the parent descriptor until the final observation is settled."""
+    """Keep rollback usable after quarantine descriptor teardown.
 
-    def __init__(self, parent, name):
+    The private random name is pending before exclusive creation. Reopen the
+    parent without following any symlink and confirm its identity for removal,
+    so finalization never closes the only rollback handle. OS deletion failure,
+    process death, cancellation during rmtree (possibly leaving a partial tree),
+    and same-privilege interference remain outside the cleanup guarantee.
+    """
+
+    def __init__(self, parent, name, parent_path):
         _require(shutil.rmtree.avoids_symlink_attacks,
                  CANNOT_EVALUATE, "cleanup", "safe cleanup unavailable")
-        self.parent = os.dup(parent)
+        parent_stat = os.fstat(parent)
+        self.parent_identity = (parent_stat.st_dev, parent_stat.st_ino)
+        self.parent_path = parent_path
         self.name = name
-        self.owned = False
+        self.state = "PENDING"
 
     def created(self):
-        self.owned = True
+        self.state = "OWNED"
 
     def remove(self):
-        if self.owned:
-            shutil.rmtree(self.name, dir_fd=self.parent)
-            self.owned = False
+        if self.state in ("PENDING", "OWNED"):
+            parent = store._open_dir_nofollow(self.parent_path)
+            try:
+                opened = os.fstat(parent)
+                _require((opened.st_dev, opened.st_ino) == self.parent_identity,
+                         CANNOT_EVALUATE, "cleanup", "cleanup parent changed")
+                try:
+                    named = os.stat(self.name, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    self.state = "REMOVED"
+                    return
+                _require(stat.S_ISDIR(named.st_mode),
+                         CANNOT_EVALUATE, "cleanup", "cleanup entry is not a directory")
+                shutil.rmtree(self.name, dir_fd=parent)
+                self.state = "REMOVED"
+            finally:
+                os.close(parent)
 
     def finish(self, keep):
-        try:
-            if not keep:
-                self.remove()
-        finally:
-            try:
-                os.close(self.parent)
-            except BaseException:
-                # Even descriptor teardown can invalidate a successful gather.
-                # If the descriptor is no longer usable, report the residue.
-                self.remove()
-                raise
+        if not keep:
+            self.remove()
 
 
 @contextlib.contextmanager
-def _quarantine(root, request_id, owners):
+def _quarantine(root, owners):
     store._journal.require_containment()
     with contextlib.ExitStack() as stack:
         def hold(fd):
@@ -670,13 +670,15 @@ def _quarantine(root, request_id, owners):
         root_fd = hold(store._open_dir_nofollow(root))
         working = hold(_open_directory(root_fd, ".working"))
         adopt = hold(_open_directory(working, "adopt"))
-        owner = _QuarantineOwner(adopt, request_id)
+        # Independent of the public request ID: never infer a capability from it.
+        run_name = "observe-" + secrets.token_hex(16)
+        owner = _QuarantineOwner(adopt, run_name, root + "/.working/adopt")
         owners.append(owner)
         run = hold(_open_directory(
-            adopt, request_id, fresh=True, created=owner.created,
+            adopt, run_name, fresh=True, owner=owner,
         ))
         quarantine = hold(_open_directory(run, "quarantine", fresh=True))
-        path = root + "/.working/adopt/" + request_id + "/quarantine"
+        path = root + "/.working/adopt/" + run_name + "/quarantine"
         for entry in list(sys.path) + os.environ.get("PATH", "").split(os.pathsep):
             if not isinstance(entry, str):
                 continue
@@ -878,11 +880,12 @@ def _unpack(parent, archive, deadline, commit=None):
                         else None)
             _require(
                 offset == 512 and expected is not None
-                and info.size == len(expected)
+                and header[124:136] == b"00000000064\0"
                 and header[:100] == b"pax_global_header".ljust(100, b"\0")
                 and not any(header[345:500])
                 and header[100:108] == b"0000666\0"
-                and info.uid == 0 and info.gid == 0
+                and header[108:116] == b"0000000\0"
+                and header[116:124] == b"0000000\0"
                 and header[265:297] == b"root".ljust(32, b"\0")
                 and header[297:329] == b"root".ljust(32, b"\0")
                 and raw[offset:offset + 512] == expected.ljust(512, b"\0"),
@@ -982,7 +985,7 @@ def _work(request, policy, observation, notes, deadline, owners):
     with _environment():
         context = _client_context()
         with _quarantine(
-            request["product_root"], observation["request_id"], owners,
+            request["product_root"], owners,
         ) as (qfd, path):
             archive = None
             anchors = []
@@ -1042,18 +1045,14 @@ def gather_release(request, policy):
     observation = {}
     notes = []
     owners = []
+    rollback_armed = True
     try:
         _gather_release(request, policy, observation, notes, owners)
-    except BaseException:
-        # A sealed record is not retainable if gathering did not return.
-        observation.clear()
-        raise
-    finally:
         keep = observation.get("status") == VALID and "record" in observation
         for owner in owners:
             try:
                 owner.finish(keep)
-            except BaseException as exc:
+            except Exception as exc:
                 observation.pop("quarantine", None)
                 observation.pop("members", None)
                 observation.pop("record", None)
@@ -1061,9 +1060,22 @@ def gather_release(request, policy):
                 _note(notes, CANNOT_EVALUATE, "cleanup",
                       "quarantine cleanup or descriptor close failed; "
                       "private residue may remain: " + type(exc).__name__)
-                if not isinstance(exc, Exception):
-                    raise
-    return observation, notes
+        rollback_armed = False
+        return observation, notes
+    except BaseException:
+        # Also rearm if cancellation lands between disarming and RETURN_VALUE.
+        rollback_armed = True
+        raise
+    finally:
+        if rollback_armed:
+            observation.clear()
+            for owner in owners:
+                try:
+                    owner.finish(False)
+                except Exception as exc:
+                    _note(notes, CANNOT_EVALUATE, "cleanup",
+                          "quarantine rollback failed; private residue may remain: "
+                          + type(exc).__name__)
 
 
 def _gather_release(request, policy, observation, notes, owners):
@@ -1342,6 +1354,7 @@ def self_test(vectors_only=False):
     original_fetch = _fetch
     original_tls = _tls
     original_remove = _QuarantineOwner.remove
+    original_public_gather = gather_release
     public_ip = "93.184.216.34"
     commit = "a" * 40
     release_url = "https://codeload.github.com/jposluns/guardrails/tar.gz/" + commit
@@ -1589,7 +1602,7 @@ def self_test(vectors_only=False):
                 return True
             if len(parts) < 3 or parts[:2] != (".working", "adopt"):
                 return False
-            if schema._RUN_ID_RE.fullmatch(parts[2]) is None:
+            if re.fullmatch(r"observe-[0-9a-f]{32}", parts[2], re.ASCII) is None:
                 return False
             if scaffolding and len(parts) == 3:
                 return True
@@ -1753,6 +1766,14 @@ def self_test(vectors_only=False):
         cancel_after_mkdir=True, public_wrapper=True)
     add("TG-12/cancellation-after-seal", "CANCELLED", "cancelled-retention",
         cancel_after_seal=True, public_wrapper=True)
+    add("TG-12/process-sigint-after-mkdir", "CANCELLED", "pending-process-sigint",
+        cancel_after_mkdir=True, creation_signal="process", public_wrapper=True)
+    add("TG-12/itimer-after-mkdir", "CANCELLED", "pending-real-timer",
+        cancel_after_mkdir=True, creation_signal="timer", public_wrapper=True)
+    add("TG-12/cancellation-during-finalization", "CANCELLED", "finalize-rollback",
+        cancel_finalization="finalize", public_wrapper=True)
+    add("TG-12/cancellation-at-return", "CANCELLED", "return-rollback",
+        cancel_finalization="return", public_wrapper=True)
 
     bad_archives = [
         ("traversal", [root_row, ("wrap/../escape", tarfile.REGTYPE, b"x")]),
@@ -1804,6 +1825,17 @@ def self_test(vectors_only=False):
     metadata[148:156] = ("%06o\0 " % sum(metadata[:512])).encode("ascii")
     add("TG-13/git-global-metadata", CANNOT_EVALUATE, "git-comment",
         archive=gzip.compress(bytes(metadata), mtime=0))
+    for label, start, value in (
+        ("space-padded-owners", 108, b"0000000 " * 2),
+        ("blank-owners", 108, b" " * 16),
+        ("space-padded-size", 124, b"00000000064 "),
+    ):
+        metadata = bytearray(gzip.decompress(archive([global_row, root_row, member])))
+        metadata[start:start + len(value)] = value
+        metadata[148:156] = b" " * 8
+        metadata[148:156] = ("%06o\0 " % sum(metadata[:512])).encode("ascii")
+        add("TG-13/git-" + label, CANNOT_EVALUATE, "git-comment",
+            archive=gzip.compress(bytes(metadata), mtime=0))
     for label, rows in (
         ("wrong-commit", [("pax_global_header", tarfile.XGLTYPE,
                           pax_record(b"comment=" + b"b" * 40)), root_row, member]),
@@ -1899,21 +1931,96 @@ def self_test(vectors_only=False):
         path_before = list(sys.path)
         environment_before = None
         cancellation_boundary = []
+        cancelled_observations = []
         original_created = _QuarantineOwner.created
         original_gather = _gather_release
 
+        @contextlib.contextmanager
+        def unmasked_helper():
+            # Force process-directed delivery through another thread, including
+            # when a regressed implementation masks signals in the main thread.
+            watched = {signal.SIGINT, signal.SIGALRM}
+            previous = signal.pthread_sigmask(signal.SIG_BLOCK, watched)
+            ready = threading.Event()
+            stop = threading.Event()
+            errors = []
+
+            def helper():
+                old_mask = None
+                try:
+                    old_mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, watched)
+                    ready.set()
+                    stop.wait()
+                except BaseException as exc:
+                    errors.append(type(exc).__name__)
+                    ready.set()
+                finally:
+                    if old_mask is not None:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+            thread = threading.Thread(target=helper, daemon=True)
+            try:
+                thread.start()
+                if not ready.wait(2.0) or errors:
+                    raise RuntimeError("unmasked signal helper unavailable")
+                yield
+            finally:
+                stop.set()
+                if thread.ident is not None:
+                    thread.join(timeout=2.0)
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+                if thread.is_alive() or errors:
+                    raise RuntimeError("unmasked signal helper teardown failed")
+
         def cancel_before_registration(owner):
-            # Target this thread: the signal must remain pending until the
-            # exclusive mkdir and registration critical section has finished.
             cancellation_boundary.append("after-mkdir")
+            kind = config.get("creation_signal")
+            if kind == "process":
+                os.kill(os.getpid(), signal.SIGINT)
+                time.sleep(1.0)
+                raise AssertionError("process-directed SIGINT did not cancel")
+            if kind == "timer":
+                old_handler = signal.getsignal(signal.SIGALRM)
+                old_timer = signal.getitimer(signal.ITIMER_REAL)
+                started = time.monotonic()
+
+                def interrupt(signum, frame):
+                    raise KeyboardInterrupt
+
+                try:
+                    signal.signal(signal.SIGALRM, interrupt)
+                    signal.setitimer(signal.ITIMER_REAL, 0.01)
+                    time.sleep(1.0)
+                    raise AssertionError("ITIMER_REAL did not cancel")
+                finally:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    signal.signal(signal.SIGALRM, old_handler)
+                    remaining, interval = old_timer
+                    if remaining:
+                        remaining = max(0.001, remaining - (time.monotonic() - started))
+                    signal.setitimer(signal.ITIMER_REAL, remaining, interval)
             signal.pthread_kill(threading.get_ident(), signal.SIGINT)
             original_created(owner)
+
+        def finalization_trace(frame, event, arg):
+            if frame.f_code is module.gather_release.__code__ and event == "line":
+                relative = frame.f_lineno - frame.f_code.co_firstlineno
+                if relative == finalization_line:
+                    observed = frame.f_locals["observation"]
+                    if (observed.get("status") != VALID
+                            or type(observed.get("record")) is not bytes):
+                        raise AssertionError("finalization fixture did not reach sealed evidence")
+                    cancelled_observations.append(observed)
+                    cancellation_boundary.append(config["cancel_finalization"])
+                    raise KeyboardInterrupt
+            return finalization_trace
 
         def cancel_after_sealing(req, pol, observed, gathered_notes, owners):
             original_gather(req, pol, observed, gathered_notes, owners)
             if observed.get("status") != VALID or type(observed.get("record")) is not bytes:
                 raise AssertionError("cancellation fixture did not reach a sealed observation")
             cancellation_boundary.append("after-seal")
+            cancelled_observations.append(observed)
             raise KeyboardInterrupt
 
         def fixture_context():
@@ -2065,6 +2172,8 @@ def self_test(vectors_only=False):
                 if config.get("cancel_after_mkdir"):
                     previous_interrupt = signal.signal(signal.SIGINT, signal.default_int_handler)
                     stack.callback(signal.signal, signal.SIGINT, previous_interrupt)
+                    if config.get("creation_signal"):
+                        stack.enter_context(unmasked_helper())
                     patch(_QuarantineOwner, "created", cancel_before_registration)
                 if config.get("cancel_after_seal"):
                     patch(module, "_gather_release", cancel_after_sealing)
@@ -2164,8 +2273,18 @@ def self_test(vectors_only=False):
                         policy_check = _archive_member_policy
                         patch(module, "_archive_member_policy",
                               lambda info, global_header=False: policy_check(info))
-                    elif mutation == "creation-signals":
-                        patch(module, "_creation_signals", contextlib.nullcontext)
+                    elif mutation in ("creation-signals", "pending-process-sigint",
+                                      "pending-real-timer"):
+                        # Keep the original row/mutant name; its replacement
+                        # guard is pending ownership, with no signal masking.
+                        patch(_QuarantineOwner, "remove", source_mutant(
+                            original_remove, 'self.state in ("PENDING", "OWNED")',
+                            'self.state == "OWNED"',
+                        ))
+                    elif mutation in ("finalize-rollback", "return-rollback"):
+                        patch(module, "gather_release", source_mutant(
+                            original_public_gather, "if rollback_armed:", "if False:",
+                        ))
                     elif mutation == "cancelled-retention":
                         patch(module, "gather_release", source_mutant(
                             gather_release, "observation.clear()", "pass",
@@ -2195,6 +2314,22 @@ def self_test(vectors_only=False):
                         patch(module, "_unpack", candidate_mutant)
                     else:
                         raise AssertionError("unregistered mutation")
+
+                if config.get("cancel_finalization"):
+                    target = (
+                        'keep = observation.get("status")'
+                        if config["cancel_finalization"] == "finalize"
+                        else "return observation, notes"
+                    )
+                    source_lines = inspect.getsource(original_public_gather).splitlines()
+                    selected = [index for index, line in enumerate(source_lines)
+                                if line.strip().startswith(target)]
+                    if len(selected) != 1:
+                        raise AssertionError("finalization injection must select one line")
+                    finalization_line = selected[0]
+                    previous_trace = sys.gettrace()
+                    stack.callback(sys.settrace, previous_trace)
+                    sys.settrace(finalization_trace)
 
                 # Observe the return contract, not the diagnostic wording:
                 # disabling the truncation guard must not hide behind a later
@@ -2236,6 +2371,11 @@ def self_test(vectors_only=False):
                 passed = passed and cancellation_boundary == ["after-mkdir"]
             if config.get("cancel_after_seal"):
                 passed = passed and cancellation_boundary == ["after-seal"]
+            if config.get("cancel_finalization"):
+                passed = (passed and cancellation_boundary == [config["cancel_finalization"]])
+            if config.get("cancel_after_seal") or config.get("cancel_finalization"):
+                passed = (passed and len(cancelled_observations) == 1
+                          and cancelled_observations[0] == {})
             if status == "CANCELLED":
                 passed = passed and observation is None and not _GATHER_LOCK.locked()
             if status in (INVALID, CANNOT_EVALUATE):
