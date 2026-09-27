@@ -2306,22 +2306,28 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             the two ingest-acceptance ids grade the durable home at generation 2 and the staged acceptance ids then
             report that grading (a completeness id the completeness result, every other the binding result); every
             other id, and every id of an ordinary run, is compared. The generation-dependent scope rows are graded
-            apart below. Detached fixtures require the homes-2 transaction binding refusal separately."""
+            apart below. Transaction rows retain the legacy absent-record detail at generation 1 and grade the
+            exact homes-2 detail separately; detached fixtures require the homes-2 binding refusal."""
             first = _chk.check_staged_run(run_dir)
             with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
                 second = _chk.check_staged_run(run_dir, homes=2)
             staged = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
             ingest = first["ingest-run-structure"] != (True, "not an ingest run")
             varies = _chk._INGEST_ACCEPTANCE_CHECKS + staged if ingest else ()
+            varies += _chk._TRANSACTION_CHECKS
             if detached:
                 # This fixture has no store binding: homes 2 cannot grade its transactions.
                 # Keep every other equality and the legacy transaction positive intact.
-                varies += _chk._TRANSACTION_CHECKS
                 check(label + "-detached-transactions", all(
                     first[cid] == (True, "no transaction record (run not yet applied)")
                     and second[cid] == (
                         False, "cannot evaluate: store binding refused "
                         "(no registered store binding for homes generation 2)")
+                    for cid in _chk._TRANSACTION_CHECKS))
+            else:
+                check(label + "-transactions", all(
+                    first[cid] == (True, "no transaction record (run not yet applied)")
+                    and second[cid] == (True, _chk._HOMES2_NO_LEGACY_TRANSACTION_DETAIL)
                     for cid in _chk._TRANSACTION_CHECKS))
             check(label + "-generation-2", set(second) == set(first) == set(_chk.EXPECTED_CHECKS)
                   and all(second[cid] == first[cid] for cid in first if cid not in varies)

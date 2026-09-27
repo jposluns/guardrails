@@ -241,7 +241,7 @@ def _staged_root_self_test(check):
             check("staged-root-no-transaction-" + kind, lambda:
                   clean["staged-run-structure"] == (True, "")
                   and all(clean[cid] == (
-                      True, "no legacy transaction record (publication attempts are not graded by this gate)")
+                      True, gate._HOMES2_NO_LEGACY_TRANSACTION_DETAIL)
                       for cid in gate._TRANSACTION_CHECKS))
             # Inject only after binding: the real constructor has already classified both homes.
             real_bind, real_stage = gate._staged_run_store_fd, store.stage_run

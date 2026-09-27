@@ -1611,6 +1611,8 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
 _INGEST_EVIDENCE_REGISTRY = (("acceptance.json", "VALIDATE", "ingest-acceptance-binding", "if-reviewed"),)
 _INGEST_ACCEPTANCE_CHECKS = ("ingest-acceptance-binding", "ingest-acceptance-completeness")
 _TRANSACTION_CHECKS = ("transaction-schema", "transaction-consistency")
+_HOMES2_NO_LEGACY_TRANSACTION_DETAIL = (
+    "no legacy transaction record (publication attempts are not graded by this gate)")
 
 
 def _gate_homes(homes):
@@ -2642,7 +2644,7 @@ def _check_staged_run(rd, homes=None):
                 # It proves neither "not applied" nor absence of an outstanding attempt.
                 # _opf_ingest_apply._apply_locked owns attempt classification and refuses
                 # open attempts before invoking this gate; standalone callers get no such check.
-                detail = ("no legacy transaction record (publication attempts are not graded by this gate)"
+                detail = (_HOMES2_NO_LEGACY_TRANSACTION_DETAIL
                           if gen == 2 else "no transaction record (run not yet applied)")
                 record("transaction-schema", True, detail)
                 record("transaction-consistency", not ctl_problems, "; ".join(ctl_problems) or detail)
@@ -3235,7 +3237,7 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
         for cid in _TRANSACTION_CHECKS:
             if baseline[cid] == (True, "no transaction record (run not yet applied)"):
                 expected_second[cid] = (
-                    True, "no legacy transaction record (publication attempts are not graded by this gate)")
+                    True, _HOMES2_NO_LEGACY_TRANSACTION_DETAIL)
         # A detached copy retains legacy transaction grading only at generation 1.
         # Core-read failures return before transaction grading and keep their prerequisite error.
         if not all(value == baseline["staged-run-structure"] for value in baseline.values()):
@@ -5280,7 +5282,7 @@ def _self_test():
                         all(not second[cid][0] and "not a JSON object" in second[cid][1]
                             for cid in _INGEST_ACCEPTANCE_CHECKS))
                    and all(second[cid] == (
-                       True, "no legacy transaction record (publication attempts are not graded by this gate)")
+                       True, _HOMES2_NO_LEGACY_TRANSACTION_DETAIL)
                        for cid in _TRANSACTION_CHECKS)
                    and all(second[cid] == first[cid] for cid in first
                            if cid not in _INGEST_ACCEPTANCE_CHECKS + staged_ids + _TRANSACTION_CHECKS))
