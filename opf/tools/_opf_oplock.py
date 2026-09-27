@@ -304,9 +304,11 @@ spelling (getcwd there decides), so the key never rests on them alone: each comp
 store's path inside its toplevel must appear verbatim in its parent's directory listing and lead,
 opened no-follow, to the store root's own identity, so a store addressed by any spelling but the
 stored one refuses and no spelling makes one store key two homes (a directory between the
-toplevel and a nested store that cannot be listed refuses too); a mount-level alias is outside that
-guarantee, since a bind mount inside the enclosing work tree gives one store two real paths with one
-identity and so two keyed homes, a disclosed residual; a store root that is ITSELF a repository is
+toplevel and a nested store that cannot be listed refuses too); a mount-level alias can give one
+store two lock identities: two keyed homes inside one work tree, the store root when the alias lies
+outside any repository while the native path uses a keyed home, or another repository's home when
+the alias lies inside a different work tree. Two concurrent holders are possible through such an
+alias, a disclosed residual; a store root that is ITSELF a repository is
 resolved only when git's --show-toplevel there names it, so such a store whose .git sets
 core.bare=true (git answers no toplevel) or core.worktree to another directory (git names that
 directory) refuses, where it once anchored on --git-common-dir alone; git's answers for a
@@ -1182,9 +1184,10 @@ def _nested_store_rel(store_root, toplevel):
 def _nested_store_key(rel):
     """The control-home key of a store NESTED in a repository: NESTED_HOME_PREFIX followed by the
     sha256 hex digest of its WHOLE validated path relative to the toplevel (`rel`, checked against
-    git's --show-prefix, the directory listings, and the store's identity before it is keyed). So
-    the same store in any worktree of one repository keys the same home, and two distinct stores,
-    even two with the same final component, never do."""
+    git's --show-prefix, the directory listings, and the store's identity before it is keyed).
+    The same relative path in worktrees of one repository keys the same home; distinct relative
+    paths are separated by the digest. No spelling of one store keys two homes (a mount-level
+    alias is a disclosed residual)."""
     return NESTED_HOME_PREFIX + hashlib.sha256(os.fsencode(rel)).hexdigest()
 
 
@@ -1305,7 +1308,8 @@ def _bind_repository_view(toplevel, ident, rel, store_ident):
             if name not in _dir_names(fd, path):
                 raise OpLockError("the store path component {!r} is not spelled as the listing of "
                                   "{} spells it (a case- or normalization-insensitive filesystem); "
-                                  "refusing, so one store can never key two control homes".format(
+                                  "refusing, so no spelling of one store keys two control homes "
+                                  "(a mount-level alias is a disclosed residual)".format(
                                       name, path))
             path = os.path.join(path, name)
             child = owner.adopt(_open_dir_at(fd, name, path))
@@ -4567,8 +4571,7 @@ def _t_e1_nested_store_shared_anchor(d, env):
     cap = acquire_operation(plain, "op-plain")   # no enclosing repository: the store root
     assert os.path.isfile(os.path.join(plain, CONTROL_DIRNAME, ANCHOR_NAME))
     release_operation(cap)
-    funcs = _st_named("_control_root_dir", "_enclosing_git_toplevel", "_require_git_toplevel",
-                      "_git_rev_parse_path", "_git_rev_parse_output", "_refuse_submodule",
+    funcs = _st_named("_control_root_dir", "_enclosing_git_toplevel", "_git_rev_parse_output",
                       "_nested_store_key", "_open_store_home", "_git_view", "_nested_store_rel",
                       "_refuse_submodule_layout", "_bind_repository_view", "_dir_names",
                       "_root_spelling")
@@ -6392,7 +6395,8 @@ def _st_in_child(body):
 def _st_named(*names):
     """The module-level functions (or Class.method) among `names` that exist in this module, so a
     sweep list written for this round still runs against an earlier round's copy (the fail-before
-    evidence), where a name introduced by this round is simply absent."""
+    evidence), where a name introduced by this round is simply absent. That tolerance is only
+    for fail-before copies: T-named validates every call in the CURRENT module's source."""
     found = []
     g = globals()
     for name in names:
@@ -6403,6 +6407,46 @@ def _st_named(*names):
         if obj is not None:
             found.append(obj)
     return found
+
+
+def _st_assert_named_calls(source):
+    """Close the CURRENT source's literal _st_named rosters over its top-level definitions.
+    Class.method names must also name a method defined directly in that class. Dynamic arguments
+    refuse rather than silently escaping the source check; fail-before copies use _st_named's
+    runtime tolerance without applying this current-source assertion to the older definitions."""
+    import ast
+
+    tree = ast.parse(source)
+    definitions = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    names = {node.name for node in tree.body if isinstance(node, definitions)}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            names.update(node.name + "." + child.name for child in node.body
+                         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    for call in ast.walk(tree):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id == "_st_named"):
+            continue
+        assert not call.keywords, "_st_named keywords at line {}".format(call.lineno)
+        for arg in call.args:
+            assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
+                "_st_named nonliteral name at line {}".format(arg.lineno))
+            assert arg.value in names, "_st_named unresolved name: {!r}".format(arg.value)
+
+
+def _t_named_roster(d, env):
+    """Every current roster resolves; inserting a bogus name fails at that exact name."""
+    with open(__file__, encoding="utf-8") as source_file:
+        source = source_file.read()
+    _st_assert_named_calls(source)
+    bogus = "_st_named_bogus_discriminator"
+    mutant = source + "\n_st_named({!r})\n".format(bogus)
+    try:
+        _st_assert_named_calls(mutant)
+    except AssertionError as exc:
+        assert str(exc) == "_st_named unresolved name: {!r}".format(bogus), str(exc)
+    else:
+        raise AssertionError("the _st_named bogus-name discriminator did not fail")
 
 
 def _st_section_codes():
@@ -6598,7 +6642,7 @@ def _t_f5_1_signal_acquisition(d, env):
     funcs = _st_named("_acquire_body", "_create_control_file", "_publish_staged",
                       "_set_record_mode", "_open_path_dir_nofollow", "_fstat_or_refuse",
                       "_classify_git_entry", "_open_control_dir", "_open_dir_at",
-                      "_control_root_dir", "_git_rev_parse_path", "_git_rev_parse_output",
+                      "_control_root_dir", "_git_rev_parse_output",
                       "_git_view", "_root_spelling", "_bind_repository_view",
                       "_validate_ctl_dir_fd", "_validate_file_fd", "_flock_exclusive",
                       "_post_lock_anchor_check", "_lstat_at", "_classify_stale", "_control_payload",
@@ -9149,6 +9193,8 @@ def self_test():
         return 2
 
     tests = (
+        ("T-named current _st_named rosters resolve, with a bogus-name discriminator",
+         _t_named_roster),
         ("T-c1 authoritative common git dir (worktree, scrubbed env, bogus gitdir)",
          _t_c1_common_dir_authority),
         ("T-c2 anchor validation and persistence", _t_c2_anchor_validation),
