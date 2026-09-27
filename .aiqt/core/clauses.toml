@@ -2732,7 +2732,7 @@ source-path = ".aiqt/core/rules/security-seci-cryptography.md"
 start-line = 27
 end-line = 28
 canonical-text = "Cryptography uses current, approved algorithms and correct parameters, with no weak, deprecated, or\nhome-grown schemes."
-source-digest = "1bf50736913f4bd0ba7881d607c177e1f899eb115c0409ac541596aa9e32178a"
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
 
 [[clause]]
 clause-id = "seccry.2"
@@ -2741,7 +2741,7 @@ source-path = ".aiqt/core/rules/security-seci-cryptography.md"
 start-line = 27
 end-line = 28
 canonical-text = "Cryptography uses current, approved algorithms and correct parameters, with no weak, deprecated, or\nhome-grown schemes."
-source-digest = "1bf50736913f4bd0ba7881d607c177e1f899eb115c0409ac541596aa9e32178a"
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
 
 [[clause]]
 clause-id = "seccry.3"
@@ -2750,7 +2750,7 @@ source-path = ".aiqt/core/rules/security-seci-cryptography.md"
 start-line = 28
 end-line = 28
 canonical-text = "Data is protected in transit and at rest to the strength its sensitivity requires."
-source-digest = "1bf50736913f4bd0ba7881d607c177e1f899eb115c0409ac541596aa9e32178a"
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
 
 [[clause]]
 clause-id = "seccry.4"
@@ -2759,7 +2759,7 @@ source-path = ".aiqt/core/rules/security-seci-cryptography.md"
 start-line = 28
 end-line = 28
 canonical-text = "Data is protected in transit and at rest to the strength its sensitivity requires."
-source-digest = "1bf50736913f4bd0ba7881d607c177e1f899eb115c0409ac541596aa9e32178a"
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
 
 [[clause]]
 clause-id = "seccry.5"
@@ -2768,7 +2768,7 @@ source-path = ".aiqt/core/rules/security-seci-cryptography.md"
 start-line = 29
 end-line = 31
 canonical-text = "Protection in transit is never defeated by disabling its verification: certificate and hostname validation\nstay on, and code never disables TLS peer verification or accepts a self-signed or mismatched certificate\nto work around a connection error."
-source-digest = "1bf50736913f4bd0ba7881d607c177e1f899eb115c0409ac541596aa9e32178a"
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
 
 [[clause]]
 clause-id = "seccry.6"
@@ -2777,7 +2777,61 @@ source-path = ".aiqt/core/rules/security-seci-cryptography.md"
 start-line = 29
 end-line = 31
 canonical-text = "Protection in transit is never defeated by disabling its verification: certificate and hostname validation\nstay on, and code never disables TLS peer verification or accepts a self-signed or mismatched certificate\nto work around a connection error."
-source-digest = "1bf50736913f4bd0ba7881d607c177e1f899eb115c0409ac541596aa9e32178a"
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
+
+[[clause]]
+clause-id = "seccry.7"
+corpus-id = "seccry"
+source-path = ".aiqt/core/rules/security-seci-cryptography.md"
+start-line = 33
+end-line = 34
+canonical-text = "Where an organization selects an integrity-hashing algorithm and no external mandate applies,\nSHA-512 or BLAKE2b is recommended."
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
+
+[[clause]]
+clause-id = "seccry.8"
+corpus-id = "seccry"
+source-path = ".aiqt/core/rules/security-seci-cryptography.md"
+start-line = 34
+end-line = 35
+canonical-text = "Where an organization selects a message authentication code\n(MAC) and no external mandate applies, HMAC-SHA-512 or KMAC256 is recommended."
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
+
+[[clause]]
+clause-id = "seccry.9"
+corpus-id = "seccry"
+source-path = ".aiqt/core/rules/security-seci-cryptography.md"
+start-line = 37
+end-line = 38
+canonical-text = "SHA-256 for integrity hashing and HMAC-SHA-256 for MACs remain acceptable when they meet the\napplicable requirements and use correct parameters."
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
+
+[[clause]]
+clause-id = "seccry.10"
+corpus-id = "seccry"
+source-path = ".aiqt/core/rules/security-seci-cryptography.md"
+start-line = 38
+end-line = 39
+canonical-text = "These recommendations do not require\nmigration from SHA-256 or HMAC-SHA-256 or make an otherwise compliant use non-compliant."
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
+
+[[clause]]
+clause-id = "seccry.11"
+corpus-id = "seccry"
+source-path = ".aiqt/core/rules/security-seci-cryptography.md"
+start-line = 41
+end-line = 42
+canonical-text = "Where an external specification or mandate determines the algorithm, this recommendation does\nnot override that requirement."
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
+
+[[clause]]
+clause-id = "seccry.12"
+corpus-id = "seccry"
+source-path = ".aiqt/core/rules/security-seci-cryptography.md"
+start-line = 42
+end-line = 42
+canonical-text = "Historical SHA-256 evidence retains its labels and recorded digests."
+source-digest = "aecd04a29c4b0132ee3ddbec5b2220312d6fdbba149ea63b42d572f557cdc807"
 
 [[clause]]
 clause-id = "secsup.1"
