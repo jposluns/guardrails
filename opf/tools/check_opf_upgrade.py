@@ -751,7 +751,8 @@ def _suite():
                 _opf_store.SUPPORTED_SPEC_VERSION) in out2)
             check("U2 idempotent second run is a byte no-op", _snapshot(s1) == before)
 
-            # U28) OPF-D2B PR3a: a 1.1.0 (D2a) store upgrades to 1.2.0 by the spec_version bump ALONE:
+            # U28) OPF-D2B PR3a: the 1.1.0 -> 1.2.0 schema delta changes only spec_version.
+            # This fixture has current declared views, so regeneration leaves their bytes unchanged;
             # every other manifest field, the counters, every index, version, and worklog stay byte-
             # identical, no init.toml provenance is fabricated, the store is doctor-VALID, and a second
             # run is a byte no-op. Fails without the 1.1.0 origin (the 1.0.0 planner refuses [opf]).
@@ -778,7 +779,7 @@ def _suite():
             after28 = _snapshot(s28)
             mrel = "{}/{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR,
                                      _opf_store.MANIFEST_NAME)
-            check("U28 nothing else changed (counters, indexes, version, worklog byte-identical)",
+            check("U28 current-view fixture changes only the manifest",
                   {k: v for k, v in after28.items() if k != mrel}
                   == {k: v for k, v in before28.items() if k != mrel})
             check("U28 no provenance fabricated", not (mach28 / _opf_check.INIT_PROVENANCE_NAME).exists())
@@ -1300,6 +1301,9 @@ def _suite():
                     real_env["HOME"] = str(ignore_home)
                     config_home = ignore_home / ".config" if ignored_by == "default" else base / "r5-xdg"
                     if ignored_by == "xdg":
+                        # Advice-only coverage: _scrubbed_env drops XDG_CONFIG_HOME, so this case
+                        # does not discriminate core.excludesFile neutralization in the probes.
+                        # The printed add command still runs with this override in real_env.
                         real_env["XDG_CONFIG_HOME"] = str(config_home)
                     (config_home / "git").mkdir(parents=True)
                     (config_home / "git/ignore").write_text(rule, encoding="utf-8")

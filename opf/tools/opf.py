@@ -19,14 +19,16 @@ engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0).
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
 (spec 9.2): `opf upgrade [--root DIR] [--homes-plan]`. With `--homes-plan`, it prints the homes-generation
 migration plan read-only and exits without upgrading. Otherwise it is the in-place, additive, idempotent
-upgrade from 1.0.0 or 1.1.0 to 1.2.0. The 1.1.0 path changes only spec_version; the 1.0.0 path also
-applies the earlier schema delta
+upgrade from 1.0.0 or 1.1.0 to 1.2.0. The 1.1.0 schema delta changes only spec_version; declared views
+are then regenerated, so a stale committed view can change. The 1.0.0 path also applies the earlier
+schema delta
 (base-table and discovery-token rename, decision_support retirement, type and view declarations,
 DECISIONS.md source widening, counters, and missing indexes). Neither creates init.toml provenance.
 It refuses a store above the tooling spec. When migrating a 1.0.0 or 1.1.0 store, its preconditions
-include readable, canonical manifest/counters matching a recognised origin shape, a clean .working
-subtree and declared product-scope render targets, and acquisition of its lease. An untracked lease
-is handled separately by the lease-acquisition check. It then applies the schema delta,
+include readable, canonical manifest/counters matching a recognised origin shape, cleanliness over
+planned schema/render destinations and index collision candidates (including ignored files there),
+and acquisition of its lease. An untracked or ignored lease is excepted from the cleanliness check
+and handled separately by lease acquisition. It then applies the schema delta,
 renders declared views, and requires a full doctor VALID before offering the uncommitted change for
 review and merge. A store already at the
 tooling spec_version is a byte no-op when doctor-VALID and exits 2 otherwise; a NOT-ADOPTED root reports
@@ -1179,9 +1181,9 @@ def _cmd_init(rest):
 # constant silently drift from the roster.
 _UPGRADE_FROM = "1.0.0"
 # OPF-D2B PR3a (PD-D2B-PR3-SCHEMA decision 5): base spec 1.2.0 admits the managed bootstrap provenance
-# `.working/toml/init.toml` a coupled init writes. The 1.1.0 -> 1.2.0 allowed delta is the spec_version
+# `.working/toml/init.toml` a coupled init writes. The 1.1.0 -> 1.2.0 schema delta is the spec_version
 # bump ALONE: a 1.1.0 (D2a) store gains no init.toml (no provenance is ever fabricated for it), and a 1.0.0
-# store takes the full 1.0.0 delta straight to 1.2.0 (the later hop adds nothing else).
+# store takes the full 1.0.0 schema delta straight to 1.2.0. Declared views are then regenerated.
 _UPGRADE_MID = "1.1.0"
 _UPGRADE_TO = "1.2.0"
 _UPGRADE_NEW_TYPES = ("contribution", "maintainer_decision", "preference_pattern")
@@ -1590,13 +1592,15 @@ def _upgrade_plan_minor(manifest_model, counters_model):
 
 def _cmd_upgrade(rest):
     """`opf upgrade [--root DIR]`: the in-place, additive, idempotent store-schema upgrade to the tooling
-    spec_version {to} (spec 9.2). Two origins are supported: a 1.1.0 store takes the 1.1.0 -> {to} delta,
-    the spec_version bump alone (no init.toml provenance is fabricated, nothing else changes); a 1.0.0
-    store takes the full delta below, straight to {to}.
+    spec_version {to} (spec 9.2). Two origins are supported: a 1.1.0 store takes the 1.1.0 -> {to} schema
+    delta, changing only spec_version (no init.toml provenance is fabricated); a 1.0.0 store takes the
+    full schema delta below, straight to {to}. Declared views are then regenerated, so a stale
+    committed view can change.
     It RESOLVES the store at --root and refuses a store above the tooling spec. When migrating a 1.0.0
     or 1.1.0 store, its preconditions include readable, canonical manifest/counters matching a recognised
-    origin shape, cleanliness over planned schema/render destinations and index collision candidates,
-    and acquisition of its lease. An untracked or ignored lease is handled separately by lease acquisition.
+    origin shape, cleanliness over planned schema/render destinations and index collision candidates
+    (including ignored files there), and acquisition of its lease. An untracked or ignored lease is
+    excepted from the cleanliness check and handled separately by lease acquisition.
     It then applies EXACTLY the allowed delta as
     a model regeneration through the canonical new-document emitter (bump spec_version; drop the retired
     decision_support module WHERE PRESENT; add each contribution/maintainer_decision/preference_pattern type
@@ -2499,7 +2503,10 @@ def _upgrade_run(root):
                 "decisions_view": "unchanged" if minor else (
                     "widened" if origin["decisions_declared"] else "not-declared")},
                 sort_keys=True))
-            print("opf upgrade: review the staged changes, then stage and commit the planned destinations "
+            print("opf upgrade: regenerated views reflect working-tree store content, including uncommitted "
+                  "source edits outside the cleanliness scope. Before committing, review those edits and "
+                  "commit the intended sources with their views, or set them aside and regenerate the views.")
+            print("opf upgrade: review the uncommitted changes, then stage and commit the planned destinations "
                   "(never `add -A`, which would sweep in unrelated work). The commands use -f for "
                   "these named destinations because the safety probes neutralize global/system config "
                   "and core.excludesFile (including default HOME/XDG global ignores). They read "
