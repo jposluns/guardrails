@@ -517,9 +517,10 @@ def _open_store_root_fd(store_root, pointer):
     return _open_root_fd(store_root)
 
 
-def _read_toml_contained(root_fd, relpath):
+def _read_toml_contained(root_fd, relpath, *, with_raw=False):
     """Read and parse a contained TOML file beneath root_fd, no-follow. Returns the parsed dict, or None
-    when the file (or a parent) is absent. StoreError (a cannot-evaluate) on an unreadable file, a
+    when the file (or a parent) is absent. with_raw=True returns (original_bytes, parsed_dict) on
+    presence, preserving the same read safeguards. StoreError (a cannot-evaluate) on an unreadable file, a
     refused symlink, or a TOML/parse error: an unreadable input is a failure, never an empty pass."""
     try:
         st = _journal._lstat_contained(root_fd, relpath)
@@ -570,7 +571,8 @@ def _read_toml_contained(root_fd, relpath):
         raise StoreError("{} read {} bytes, over the {}-byte store-read cap (a raced swap or growth past "
                          "the pre-open size; fail-closed)".format(relpath, len(data), MAX_STORE_READ_BYTES))
     try:
-        return tomllib.loads(data.decode("utf-8"))
+        parsed = tomllib.loads(data.decode("utf-8"))
+        return (data, parsed) if with_raw else parsed
     except (UnicodeDecodeError, ValueError) as exc:
         # tomllib.TOMLDecodeError is a ValueError subclass, but an oversized BASE-10 integer literal (a
         # token past CPython's ~4300-digit limit) makes tomllib raise a BARE ValueError from int(), not a

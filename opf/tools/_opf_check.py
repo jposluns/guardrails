@@ -55,6 +55,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _opf_worklog   # noqa: E402  worklog shape authority
 import _opf_store     # noqa: E402  shared homes and operand boundaries
 import _journal        # noqa: E402  contained no-follow parent-open primitive (reused for listing / raw reads)
 import _opf_emit       # noqa: E402  U8 canonical emitter (the per-record digest basis)
@@ -86,7 +87,7 @@ from _opf_release import (  # noqa: E402
 # Fixed store-tree file / directory names (OPF-SPEC 4.2 layout; all lowercase machine source).
 COUNTERS_NAME = "counters.toml"
 VERSION_NAME = "version.toml"
-WORKLOG_NAME = "worklog.toml"
+WORKLOG_NAME = _opf_worklog.LEGACY_NAME
 LEASE_NAME = "lease.toml"                  # present only while the single-writer lease is held (spec 5.7)
 # The managed bootstrap provenance a coupled D2b `opf init` writes (OPF-INIT-D2B "Bootstrap Provenance",
 # base spec 1.2.0): a managed machine-store leaf when present, never required (an upgraded D2a store has
@@ -1129,11 +1130,19 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
     return recs, recon
 
 
-def _gather_worklog(root_fd, relpath, registered_vendors, rep, required):
+def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine_rel=None):
     """Read and validate a worklog.toml (active or an archive bucket) through U3's validate_worklog, and
     return its WL-number -> entry map. A required (active) worklog that is absent is CANNOT-EVALUATE; an
     archive-bucket worklog that is absent returns None (the caller only reads it when the bucket has one)."""
-    data, st = _read_toml(root_fd, relpath, rep)
+    try:
+        if machine_rel is None:       # explicitly named archive bucket, never shape-probed (M7)
+            data = _opf_worklog.load_archive_worklog_at(root_fd, relpath)
+        else:
+            data = _opf_worklog.load_worklog_at(root_fd, machine_rel, required=False)
+        st = "absent" if data is None else "present"
+    except _opf_worklog.WorklogError as exc:
+        rep.cant(str(exc))
+        return None
     if st == "error":
         return None
     if st == "absent":
@@ -1985,8 +1994,13 @@ def classify_containment(manifest_data, machine_rel):
                 malformed.append(
                     "C-CONTAINMENT: [unmanaged] path entry {} is not a contained store-relative string "
                     "(spec 14.2); the unmanaged declaration cannot be evaluated".format(_safe_display(p)))
-    ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, WORKLOG_NAME, LEASE_NAME,
-                              INIT_PROVENANCE_NAME})
+    try:
+        worklog2 = _opf_worklog.generation(manifest_data) == 2
+    except _opf_worklog.WorklogError as exc:
+        malformed.append("C-CONTAINMENT: " + str(exc))
+        worklog2 = False
+    ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, LEASE_NAME,
+                              INIT_PROVENANCE_NAME} | (set() if worklog2 else {WORKLOG_NAME}))
     # Importer namespaces (legacy_fragment) are schema-deferred and, per the decoupled D6 design, are NOT
     # declared in the manifest [types]; their type index (e.g. legacy_fragment.index.toml) is therefore a
     # managed leaf IF PRESENT even without a declaration, mirroring C-COUNTERS' optional_namespaces
@@ -2012,6 +2026,8 @@ def classify_containment(manifest_data, machine_rel):
         prefix = mrel + "/"
         if p.startswith(prefix):
             r = p[len(prefix):]
+            if worklog2 and r.startswith(_opf_worklog.DIRECTORY_NAME + "/"):
+                return _opf_worklog.parse_worklog_filename(r.split("/", 1)[1]) is not None
             if "/" not in r:
                 if r in ledger_names:
                     return True
@@ -2023,7 +2039,7 @@ def classify_containment(manifest_data, machine_rel):
                         return True
             elif layout == "per-record":
                 head, tail = r.split("/", 1)
-                # worklog has no per-record bodies either (F2): entries live in worklog.toml, never in
+                # Generation-1 worklog has no per-record bodies (F2): entries live in worklog.toml, not in
                 # worklog/<id>.toml.
                 if "/" not in tail and tail.endswith(".toml") and head in enabled_types \
                         and head not in _LEDGER_TYPES \
@@ -2129,6 +2145,11 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
         # directory, or a tree of only empty dirs, escaped grading entirely).
         if full == mrel or _under_any(full, staged_roots):
             return True
+        if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
+            try:
+                return _opf_worklog.generation(manifest_data) == 2
+            except _opf_worklog.WorklogError:
+                return False
         if layout == "per-record" and full in perrecord_body_dirs:
             return True
         return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
@@ -2484,7 +2505,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     active_recs, recon = _gather_active_records(root_fd, machine_rel, enabled_types, layout,
                                                 registered_vendors, rep)
     active_worklog = _gather_worklog(root_fd, _rel(machine_rel, WORKLOG_NAME), registered_vendors, rep,
-                                     required=True) or {}
+                                     required=True, machine_rel=machine_rel) or {}
 
     # --- C-PERRECORD-RECONCILE: replay the bidirectional index<->body reconciliation (spec 13) --------
     rep.ran("C-PERRECORD-RECONCILE")

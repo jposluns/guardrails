@@ -909,7 +909,11 @@ def _worklog_ids(store_root_fd, machine_rel, roster=None, registered_vendors=fro
     kind vocabulary is the accepted set here), so a promoted entry using a custom registered kind fails closed
     to CANNOT-EVALUATE rather than being wrongly accepted."""
     rel = "{}/worklog.toml".format(machine_rel)
-    data = _read_toml(store_root_fd, rel)
+    import _opf_worklog
+    try:
+        data = _opf_worklog.load_worklog_at(store_root_fd, machine_rel, required=False)
+    except _opf_worklog.WorklogError as exc:
+        raise _cannot(str(exc))
     if data is None:
         return []
     wv = _opf_release.validate_worklog(data, registered_vendors=registered_vendors)

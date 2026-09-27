@@ -75,8 +75,9 @@ def _bootstrap():
     that could not be brought in."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_importers, _opf_observe, _opf_absorb
-    global _opf_ingest
+    global _opf_ingest, _opf_worklog
     try:
+        import _opf_worklog     # manifest-selected worklog intake + WL reference grammar
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
         import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
         import _opf_release     # U3: version.toml + worklog.toml + span tiling + coverage digests + release cut
@@ -3333,6 +3334,7 @@ def _self_tests():
     ("opf-store", _opf_store.self_test),
     ("opf-schema", _opf_schema.self_test),
     ("opf-release", _opf_release.self_test),
+    ("opf-worklog", _opf_worklog.self_test),
     ("opf-changelog", _opf_changelog.self_test),
     ("opf-emit", _opf_emit.self_test),
     ("opf-views", _opf_views.self_test),

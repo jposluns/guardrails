@@ -81,6 +81,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal          # noqa: E402  contained (dir-fd, no-follow) readers + JournalError + containment probe
 import _opf_store        # noqa: E402  store resolution + discovery + manifest base/profile schema
 import _opf_schema       # noqa: E402  record envelope + baseline type schemas + status parsing + id shape
+import _opf_worklog      # noqa: E402  manifest-selected ledger intake
 import _opf_release      # noqa: E402  version.toml + worklog.toml validators + SemVer
 import _opf_emit          # noqa: E402  canonical TOML emitter (emit_checked) for the machine projection
 
@@ -138,12 +139,12 @@ class ViewsError(Exception):
 
 # --- source-name -> store file resolution (spec 4.2) -------------------------------------------------
 
-def _source_relpath(machine_rel, name):
+def _source_relpath(machine_rel, name, manifest=None):
     """The store-relative path of a view source. A baseline record type reads its `<type>.index.toml`
-    inline index (spec 9, `layout = "inline"`); the worklog and version ledgers read their own single
-    files (spec 4.2, 6.1). An unknown source name is a manifest/tooling inconsistency, fail-closed."""
+    inline index (spec 9, `layout = "inline"`); worklog follows its manifest generation while version
+    remains a single file. An unknown source name is a manifest/tooling inconsistency, fail-closed."""
     if name == "worklog":
-        return "{}/worklog.toml".format(machine_rel)
+        return _opf_worklog.source_relpath(machine_rel, manifest if manifest is not None else {"opf": {}})
     if name == "version":
         return "{}/version.toml".format(machine_rel)
     if name in _opf_schema.BASELINE_SPECS:
@@ -234,10 +235,12 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds):
     contract: _opf_release.validate_worklog type-pins a PRESENT marker (a non-integer or unsupported
     version is refused) but PERMITS an absent one. A schema-less ledger authored for another schema
     version is not caught here; grading an unsupported-schema-version ledger is U3/U6 remit (F2)."""
-    got = _read_raw_and_parsed(store_root_fd, relpath)
-    if got is None:
-        raise ViewsError("declared source {} is missing (the worklog ledger must exist)".format(relpath))
-    raw, data = got
+    try:
+        raw, data = _opf_worklog.load_worklog_at(
+            store_root_fd, relpath.rsplit("/", 1)[0], with_raw=True,
+            read_legacy=_read_raw_and_parsed)
+    except _opf_worklog.WorklogError as exc:
+        raise ViewsError(str(exc))
     wv = _opf_release.validate_worklog(data, registered_vendors=registered_vendors,
                                        registered_kinds=registered_kinds)
     if wv.status != _opf_store.VALID:
@@ -1617,7 +1620,7 @@ def plan_views(store_root_fd, machine_rel):
     raw_by_relpath = {}
     rows_by_source = {}
     for name in sorted(needed):
-        relpath = _source_relpath(machine_rel, name)
+        relpath = _source_relpath(machine_rel, name, manifest)
         if name == "worklog":
             raw, entries = _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds)
             rows_by_source[name] = entries
@@ -1657,8 +1660,8 @@ def plan_views(store_root_fd, machine_rel):
         if name == "VERSION":
             text = body                                   # header-exempt exact-bytes deliverable (spec 6.1)
         else:
-            source_blobs = {_source_relpath(machine_rel, s): raw_by_relpath[_source_relpath(machine_rel, s)]
-                            for s in required}
+            source_blobs = {_source_relpath(machine_rel, s, manifest):
+                            raw_by_relpath[_source_relpath(machine_rel, s, manifest)] for s in required}
             if kind == "projection":
                 # A machine projection (spec 10.5) carries the SAME identity header as a markdown view, but a
                 # `.toml` deliverable takes it as leading `#` comment lines (_toml_header), never the HTML

@@ -103,6 +103,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _commonmark_headings  # noqa: E402  U5: vendored-Marko CommonMark heading recognition (parse-only, fail-closed)
 import _journal        # noqa: E402  contained (dir-fd, no-follow) reader + JournalError + containment probe
 import _opf_store      # noqa: E402  U1: store resolution + discovery + the contained TOML reader
+import _opf_worklog    # noqa: E402  shared active worklog intake
 import _opf_release    # noqa: E402  U3: version.toml / worklog.toml validators + covers parsing + coverage recompute
 # U1 supplies the outcome vocabulary the release-triad validators return; reuse it so U5 grades a ledger
 # exactly as U3 does rather than re-declaring VALID / CANNOT-EVALUATE.
@@ -468,7 +469,7 @@ def _load_inputs(resolution, product_root):
     try:
         try:
             version_data = _opf_store._read_toml_contained(store_fd, resolution.machine_rel + "/version.toml")
-            worklog_data = _opf_store._read_toml_contained(store_fd, resolution.machine_rel + "/worklog.toml")
+            worklog_data = _opf_worklog.load_worklog_at(store_fd, resolution.machine_rel, required=False)
             manifest_data = _opf_store._read_toml_contained(
                 store_fd, resolution.machine_rel + "/" + _opf_store.MANIFEST_NAME)
         except (_opf_store.StoreError, OSError) as exc:
