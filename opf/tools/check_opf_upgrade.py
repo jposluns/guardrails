@@ -2006,7 +2006,9 @@ def _suite():
                 opf._opf_views.render = _orig_render28
             check("U28/FIX1 compound failure exits 2", rc28 == EXIT_ERROR)
             check("U28/FIX1 the mid-run render recovery advice still reaches the operator",
-                  "uncommitted change is left for review" in out28)
+                  any(line.startswith("opf upgrade: refused: view render after the schema delta failed")
+                      and "uncommitted change is left for review" in line
+                      for line in out28.splitlines()))
             check("U28/FIX1 the render failure (not the lease error) governs the refusal line",
                   "view render after the schema delta failed" in out28)
             check("U28/FIX1 the lease-replaced note is ALSO surfaced (not displaced)",

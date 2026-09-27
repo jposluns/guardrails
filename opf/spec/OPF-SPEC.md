@@ -1036,8 +1036,9 @@ It fails closed on an unresolvable store, a declared `spec_version` ABOVE the to
 a divergence, a held lease, or any populated state that contradicts its preconditions; it never
 lowers the fail-closed floor. Before any write it enforces two fail-closed preconditions: it claims
 the single-writer lease (section 5.7) and holds it across the whole mutation, and it verifies the
-store working tree is clean over exactly the paths it will write, so the committed HEAD is a verified
-restore path for that blast radius; a held lease or a dirty store refuses, and a dirty store is asked
+working tree is clean, including ignored files, over the planned schema and render destinations
+(store and product roots) and the index collision candidates, so the committed HEAD is a verified
+restore path for that scope; a held lease or a dirty store refuses, and a dirty store is asked
 to commit its own changes, never restored by the tool. After applying the schema delta, it regenerates
 the declared views and requires a full doctor VALID before offering the uncommitted change for the
 adopter's own branch-and-merge. It never stages or commits the change.
