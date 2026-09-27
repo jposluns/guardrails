@@ -34,6 +34,7 @@ run_gate "opf-upgrade-selftest"        python3 -I -B "$here/check_opf_upgrade.py
 run_gate "opf-import-selftest"         python3 -I -B "$here/check_opf_import.py" --self-test
 run_gate "opf-ingest-selftest"         python3 -I -B "$here/check_opf_ingest.py" --self-test
 run_gate "opf-adopt-selftest"          python3 -I -B "$here/_opf_adopt.py" --self-test
+run_gate "opf-pack-manifest-selftest"  python3 -I -B "$here/_opf_pack_manifest.py" --self-test
 run_gate "opf-oplock-selftest"         python3 -I -B "$here/_opf_oplock.py" --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B "$here/_opf_init_substrate.py" --self-test
 run_gate "opf-init-builders-selftest"  python3 -I -B "$here/_opf_init.py" --self-test

@@ -694,6 +694,15 @@ class = "a"
 residue = "It exercises the OPF adoption schemas and closed twelve-op vocabulary through the existing pure-validator vectors, plus the read-only investigate/plan fixture suite. The planning suite checks canonical observation/inventory/plan digest bindings, deterministic emission, attributed revisions, stale-inventory refusal, unresolved migration without staging, observed move-target absence, preservation of the resolver's foreign-store CANNOT-EVALUATE status, injected read failure, missing sources, symlink/hardlink/FIFO refusal, representative resource bounds, malformed inputs and pointers, unresolved manifests, and recorded machine-store/unmanaged exclusions. It checks fixture byte preservation and denies write-mode opens, subprocess creation and journal transactions during its successful planning case. Outcomes come from returned statuses and unittest results, not grepped prose. Coverage is representative, not exhaustive: it does not prove race freedom against an adversarial writer, complete foreign-file detection inside excluded machine-store subtrees, semantic configuration or pipeline detection, companion-store support, trusted release payloads, valid import acceptance, cross-operation executability, hook activation, live-adopter behavior, or adoption success. The engine returns inert bytes and implements no apply or acceptance operation. Its linkage to a single corpus rule is not undeniable, so none is claimed here."
 
 [[gate]]
+id = "opf-pack-manifest-selftest"
+script = "opf/tools/_opf_pack_manifest.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "Exercises the shared pack-manifest parser with frozen ROOT/TREE hashes, exact root.txt grammar, generator-shaped and independently authored malformed TOML, exact INVALID/CANNOT_EVALUATE statuses, closed keys and vocabularies, contained paths, ordering, uniqueness, digest consistency, and inclusive resource bounds. Named guard mutations must turn their status discriminators red. Generator recipe parity and consumer refusal translation run in tools/check_manifest.py --self-test; physical standalone execution belongs to the closure gate. Coverage is limited to the enumerated vectors and mutations, not the whole input space. VALID means schema-valid, not authenticated: TREE equality, actual bytes, ownership and set equality remain consumer obligations; managed-block digests cover only their blocks. Input caps are not a process sandbox, and larger releases or changed formats refuse until a reviewed update. The generator remains a separate emitter. No network observation, quarantine, trust quorum, registry activation, or live adoption is exercised. Its linkage to a single corpus rule is not undeniable, so none is claimed here."
+
+[[gate]]
 id = "opf-standalone-closure"
 script = "tools/check_opf_standalone_closure.py"
 rules = []
