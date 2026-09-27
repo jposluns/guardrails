@@ -11,20 +11,26 @@ passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exa
 `--check | --write` (a bare `render` is a usage error, exit 2); `--check` is the read-only drift check
 (forwarding to the U4 engine) and `--write` (VC-4/PR-C) is the mutating half: it gathers the inert git-derived
 observations caller-side (_opf_observe.gather) and hands them to the U4 engine, which composes the EXISTING U6
-`validate_store` store-integrity gate and permits the write only on a VALID verdict, refusing an INVALID or
-CANNOT-EVALUATE store with exit 2 and writing nothing. `doctor` HAS landed (PR-B): `opf doctor
+`validate_store` store-integrity gate and permits writing when source integrity holds. Post-write validation
+checks source integrity and regenerated outputs; other deliverable failures can remain. `doctor` HAS landed: `opf doctor
 [--root DIR]` RESOLVES the store, gathers the inert git-derived observations (_opf_observe.gather: tracked,
 actual_remote, prior), and runs the U6 `validate_store` store-integrity engine over them, returning that
 engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0). Doctor is read-only; its
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
-(spec 9.2): `opf upgrade [--root DIR]` is the in-place, additive, idempotent 1.0.0 -> 1.1.0 store-schema
-upgrade. It refuses fail-closed on a store above the tooling spec or on a non-canonical manifest/counters,
-applies exactly the allowed delta as a canonical model regeneration (bump spec_version; retire the
-decision_support module; add the contribution/maintainer_decision/preference_pattern type rows and the two
-new view rows; extend counters with CN/MD/PP preserving existing high-waters; create the three missing empty
-indexes, skipping any that already exist), renders the declared views, and requires a full doctor VALID
-before offering the staged change; it never commits (the adopter reviews and merges). A store already at the
-tooling spec_version is a byte no-op; a NOT-ADOPTED root reports NOT APPLICABLE and exits 0. `import` HAS
+(spec 9.2): `opf upgrade [--root DIR] [--homes-plan]`. With `--homes-plan`, it prints the homes-generation
+migration plan read-only and exits without upgrading. Otherwise it is the in-place, additive, idempotent
+upgrade from 1.0.0 or 1.1.0 to 1.2.0. The 1.1.0 path changes only spec_version; the 1.0.0 path also
+applies the earlier schema delta
+(base-table and discovery-token rename, decision_support retirement, type and view declarations,
+DECISIONS.md source widening, counters, and missing indexes). Neither creates init.toml provenance.
+It refuses a store above the tooling spec. When migrating a 1.0.0 or 1.1.0 store, its preconditions
+include readable, canonical manifest/counters matching a recognised origin shape, a clean .working
+subtree and declared product-scope render targets, and acquisition of its lease. An untracked lease
+is handled separately by the lease-acquisition check. It then applies the schema delta,
+renders declared views, and requires a full doctor VALID before offering the uncommitted change for
+review and merge. A store already at the
+tooling spec_version is a byte no-op when doctor-VALID and exits 2 otherwise; a NOT-ADOPTED root reports
+NOT APPLICABLE and exits 0. `import` HAS
 landed (OPF-IMPORT-VERB): `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review
 <run-id> --actor NAME (--decisions FILE | --interactive) | --apply <run-id>)` wires the reserved verb onto
 the U7 operation layer (_opf_import scan/plan/review/apply). Exactly one mode is required; `--scan` renders
@@ -34,6 +40,11 @@ attributed acceptance.json (no live-store write), and `--apply` wires onto the P
 0/1/2 verdict to the CLI exit contract. Unlike the applicability-probe siblings, import is a REQUESTED
 operation: an unresolved / NOT-ADOPTED root fails cannot-evaluate (exit 2) with a "run `opf init` first"
 message rather than reporting NOT APPLICABLE (divergence D7).
+
+`init` HAS landed: `opf init [--root DIR]` creates validated store sources, a pointer, and a starter
+`CHANGELOG.md` when none exists, without git writes or rendering.
+`absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
+prints a changelog draft or freeze digest without writing files.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -490,8 +501,9 @@ def _cmd_render(rest):
     exactly the required one (0 clean, 1 drift, 2 cannot-evaluate; a NOT-ADOPTED root reports NOT APPLICABLE
     and exits 0, the pack's own `--root .` case). The mutating `--write` half (VC-4/PR-C) gathers the inert
     git-derived observations caller-side (_opf_observe.gather over the RESOLVED store, exactly as doctor does)
-    and hands them to the same engine, which composes the U6 store-integrity gate and permits the write only
-    on a VALID verdict, printing the findings/cannot-evaluates and returning 2 (writing nothing) otherwise, so
+    and hands them to the same engine, which composes the store-integrity gate and permits the write only
+    when source integrity is sound, printing the findings/cannot-evaluates and returning 2 (writing nothing)
+    otherwise, so
     a write can never read as a silent no-op. Exactly one of `--check`/`--write` is required: a bare
     `opf render` is a usage error (a preview never defaults into a write). The parser is the house fail-closed
     idiom (unknown token, an empty or option-looking or duplicate --root value -> exit 2), matching
@@ -1581,28 +1593,33 @@ def _cmd_upgrade(rest):
     spec_version {to} (spec 9.2). Two origins are supported: a 1.1.0 store takes the 1.1.0 -> {to} delta,
     the spec_version bump alone (no init.toml provenance is fabricated, nothing else changes); a 1.0.0
     store takes the full delta below, straight to {to}.
-    It RESOLVES the store at --root, refuses fail-closed on a store above the tooling spec or on
-    a non-canonical (hand-edited/comment-bearing) manifest or counters, applies EXACTLY the allowed delta as
+    It RESOLVES the store at --root and refuses a store above the tooling spec. When migrating a 1.0.0
+    or 1.1.0 store, its preconditions include readable, canonical manifest/counters matching a recognised
+    origin shape, cleanliness over planned schema/render destinations and index collision candidates,
+    and acquisition of its lease. An untracked or ignored lease is handled separately by lease acquisition.
+    It then applies EXACTLY the allowed delta as
     a model regeneration through the canonical new-document emitter (bump spec_version; drop the retired
     decision_support module WHERE PRESENT; add each contribution/maintainer_decision/preference_pattern type
     row NOT already declared by an enabled 1.0.0 module; add the two new view rows; WIDEN the DECISIONS.md
-    composed view WHERE DECLARED; extend counters with the CN/MD/PP zeros preserving existing high-waters;
-    create the missing empty indexes, skipping any that already exist), RENDERS the declared views, and
-    requires a full doctor VALID before offering the staged change. It is ORIGIN-AWARE: a governance- or
-    decision_support-enabled 1.0.0 store, and a store that omits the optional decision_support key or the
-    DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4). Before ANY write it enforces two fail-closed
-    preconditions: STORE-PATH CLEANLINESS, including ignored files, over planned destinations and collisions
-    (HEAD preserves pre-existing tracked content, SECA-verified-restore-path) and a SINGLE-WRITER LEASE
-    it claims atomically and holds across the mutation,
-    render, and final doctor (spec 5.7). It NEVER commits: the adopter reviews and merges. A store already at
-    {to} is a byte no-op (idempotent, still requiring doctor-VALID); a NOT-ADOPTED root is NOT APPLICABLE
-    (exit 0), any other non-resolved status a located cannot-evaluate (exit 2). Two disclosed residuals: a
-    killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
-    through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers; and the lease is not
-    made observable at a sync target before writes (spec 5.7) because this build has no sync runtime, so the
-    guarantee is single-host single-writer. A third disclosed residual: this build has no 1.0.0 pre-doctor,
-    so a 1.0.0 store invalid in a way the origin preconditions do not inspect fails only AFTER mutation (at
-    the render or the final doctor). Under the single-writer contract, recovery restores pre-existing
+    composed view WHERE DECLARED; extend counters with zeros for any missing CN/MD/PP namespace,
+    preserving existing high-waters; create the missing empty indexes, skipping any that already exist),
+    RENDERS the declared views, and requires a full doctor VALID before offering the staged change. It is
+    ORIGIN-AWARE: a governance- or decision_support-enabled 1.0.0 store, and a store that omits the
+    optional decision_support key or the DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4).
+    Before ANY write it enforces two fail-closed preconditions: STORE-PATH CLEANLINESS, including ignored
+    files, over planned destinations and collisions (HEAD preserves pre-existing tracked content,
+    SECA-verified-restore-path), with an untracked or ignored lease handled separately, and a
+    SINGLE-WRITER LEASE it claims atomically and holds across the mutation, render, and final doctor (spec
+    5.7). It NEVER commits: the adopter reviews and merges. A store already at {to} returns without those
+    migration preconditions: doctor-VALID yields a byte no-op (exit 0), otherwise it exits 2 without
+    writing. A NOT-ADOPTED root is NOT APPLICABLE (exit 0), any other non-resolved status a located
+    cannot-evaluate (exit 2). Two disclosed residuals: a killed run leaves the lease, which is
+    spec-conformant (present only while held; a leftover is released through operator reconciliation, spec
+    5.7) and is what the EEXIST refusal covers; and the lease is not made observable at a sync target
+    before writes (spec 5.7) because this build has no sync runtime, so the guarantee is single-host
+    single-writer. A third disclosed residual: this build has no pre-doctor for a 1.0.0 or 1.1.0 origin,
+    so an older store invalid in a way the origin preconditions do not inspect fails only AFTER mutation
+    (at the render or the final doctor). Under the single-writer contract, recovery restores pre-existing
     tracked content from HEAD and removes upgrade-created files within the checked store/product scope;
     pre-existing untracked or ignored content in that scope refuses before mutation.""".format(
         to=_UPGRADE_TO)
@@ -2043,6 +2060,9 @@ def _upgrade_check_clean(res, write_scope):
     plus the lease, immediately before mutation. Tracked dirt and untracked/ignored destination content
     refuse: HEAD must preserve pre-existing content. Exact untracked "??" and ignored "!!" leases are
     excluded for step 4's O_EXCL never-seize refusal; tracked lease dirt refuses distinctly (spec 5.7).
+    This follows read-only triage/plan and precedes lease acquisition and the first write. Refuses
+    fail-closed (exit 2) on dirt, naming up to 10 paths plus the total and advising commit or move aside,
+    never a restore of the owner's work.
 
     Literal pathspecs alone do not bound --ignored=matching: the parser filters ignored prefix siblings,
     and the probe expands collapsed ignored ancestors within the same scope. Declared unmanaged paths

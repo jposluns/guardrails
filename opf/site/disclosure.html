@@ -67,11 +67,12 @@
 <section class="section-alt">
   <div class="wrap">
     <h2>Residual coverage the gates do not reach</h2>
-    <p>Each gate names what it does and does not decide. The residuals below are disclosed as part of
-      the standard, not discovered after a gate fails:</p>
+    <p>Each gate names what it does and does not decide. The residuals below cover both the standard
+      and the reference tooling:</p>
     <ul class="clean">
-      <li><b style="color:var(--ink)">Changelog freeze</b> checks that a published entry's bytes
-        match a recorded digest; it does not judge whether the prose is accurate or complete.</li>
+      <li><b style="color:var(--ink)">Changelog freeze</b> compares a published entry's LF-normalized
+        UTF-8 digest with its recorded digest. Line-ending-only changes do not alter that digest;
+        the check does not judge whether the prose is accurate or complete.</li>
       <li><b style="color:var(--ink)">Range coverage</b> checks that changelog entries tile every
         released version with no gap or overlap; it does not judge the quality of what they say.</li>
       <li><b style="color:var(--ink)">The unreleased worklog tail</b> is reviewed rather than
@@ -82,18 +83,33 @@
       <li><b style="color:var(--ink)">The tracked-store check</b> confirms the store is a tracked git
         repository whose pointer, recorded sync target, and actual remote agree; it does not verify
         that the repository is backed up, accessible, or hosted anywhere in particular.</li>
-      <li><b style="color:var(--ink)">The single-writer lease</b> leaves a propagation window between
-        taking the lease and its reaching the sync target; the store-consistency divergence check is
-        the overlapping control that catches a collision in that window, and the two together, not the
-        lease alone, are the guard. The standard-level limit is that cross-system reconciliation
-        (opf sync) leaves a window in which a second system can begin before it observes the held
-        lease, and the divergence check detects the collision afterward.</li>
+      <li><b style="color:var(--ink)">The single-writer lease</b> has a propagation window in the
+        standard's cross-system contract: a second system may begin before observing the held lease.
+        The contract requires a divergence check to detect that collision afterward. These are
+        specified controls, not complete CLI coverage: <code>opf sync</code> is planned, and
+        <code>opf init</code> takes no lock or lease and does not serialize concurrent writers.</li>
+      <li><b style="color:var(--ink)">Reference-tooling residuals</b>: doctor reports per-record
+        view drift and the content schemas of module-tier and importer records, including
+        <code>legacy_fragment</code>, as cannot-evaluate. A declared view outside the baseline set,
+        such as a module-type index mirror, makes the whole drift check cannot-evaluate. The reference
+        renderer does not render or drift-check per-record views. For a store with module-tier or
+        importer records, or a per-record store that declares views, doctor's overall verdict is
+        cannot-evaluate (exit 2). An import that promotes quarantined <code>legacy_fragment</code>
+        records can succeed, but afterwards doctor reports cannot-evaluate, <code>opf render --write</code>
+        refuses, and <code>opf upgrade</code> exits 2 without offering the change, because the baseline
+        validator does not validate those records' content schemas. Module-tier records have the same
+        effect. If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before
+        failing at render, leaving the changes in place for recovery. Transition checks also report
+        cannot-evaluate when legality depends on an
+        unidentified last-transition actor or a rejection requires unavailable pre-proposal state.
+        Doctor does not check behind, ahead, or divergence against a sync target.</li>
       <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
         it supports; a profile it does not support is recorded as present-but-unevaluated rather than
         failing base validation.</li>
-      <li><b style="color:var(--ink)">The discovery token</b> is a single exact string, stable
-        within a base-schema major line: a mistyped or altered token is a cannot-evaluate that stops
-        the tool, never a silent empty store.</li>
+      <li><b style="color:var(--ink)">The discovery token</b> is a single exact string. A mistyped
+        or altered token is a cannot-evaluate that stops the tool, never a silent empty store. A rename
+        ships only with the tested <code>opf upgrade</code> migration, as the 1.0.0 to 1.1.0 rename of
+        <code>devprocess</code> to <code>opf</code> did.</li>
       <li><b style="color:var(--ink)">A host provider's conveniences</b> call the external API of the
         host the target names. The egress bound is that named host and nothing else; the standard
         cannot vouch for the host's own behaviour beyond that bound.</li>
@@ -107,9 +123,9 @@
 
 <section>
   <div class="wrap">
-    <h2>Authorship, trademarks, and licence</h2>
-    <p>OPFiles is a neutral, self-contained standard authored and maintained by Jeff Posluns and
-      open source under the Apache License 2.0 (except vendored third-party material, which remains under its own terms). AIQT and AIQT Guardrails are trademarks
+    <h2>Authorship and trademarks</h2>
+    <p>OPFiles is a neutral, self-contained standard authored and maintained by Jeff Posluns.
+      AIQT and AIQT Guardrails are trademarks
       of Jeff Posluns (registration pending), and AIQT is a brand, not a legal entity; the standard's
       formal name, the AIQT Development Operational Standard, uses the AIQT trademark. AIQT Guardrails is one reference enforcement suite and one consumer of
       the standard, carried as a single optional profile; a base adopter need not adopt the suite.</p>
