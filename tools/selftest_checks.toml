@@ -415,6 +415,19 @@ expected-check-ids = [
 id = "git-fixture-env-selftest"
 runner = "tools/selftest_git_fixture_env.py"
 expected-check-ids = [
+  "config/registered-combined",
+  "config/registered-malformed",
+  "config/registered-system",
+  "config/system-control",
+  "config/xdg-malformed-control",
+  "env/lifecycle-path-removal-red",
+  "env/opf-ingest-apply-both-legs",
+  "env/registered-opf-lifecycles",
+  "roster/empty-local-refused",
+  "roster/empty-opf-refused",
+  "roster/registered-arguments",
+  "roster/unparseable-ci-refused",
+  "roster/unparseable-local-refused",
   "config/explicit-ignore-control",
   "config/explicit-attributes-control",
   "config/xdg-ignore-control",

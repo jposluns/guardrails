@@ -78,7 +78,8 @@ def _self_test():
     import tempfile
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
-        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home):
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
             return _self_test_isolated()
 
 

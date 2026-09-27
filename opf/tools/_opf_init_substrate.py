@@ -2422,6 +2422,10 @@ def _t_s22_close_failure_unwind(d, env):
 
 
 def self_test():
+    return _opf_oplock._st_with_git_lifecycle(self_test_isolated)
+
+
+def self_test_isolated():
     """Regression roster (the PR2 resume-substrate T-s witnesses), each a fail-to-pass
     discriminator against a named behaviour: the sibling-home placement under the composed
     authoritative control root (T-s1), the live-capability write gate (T-s2), the

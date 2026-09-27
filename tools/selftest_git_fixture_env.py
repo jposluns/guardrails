@@ -28,7 +28,7 @@ Verdicts use child return codes and byte comparisons, never output tokens. DISCL
 routing/scope check proves the scrub call site and its position in the named entry, not that every
 later git call in the same process still runs under it; launch aliases, indirect helper calls,
 early returns and control-flow reachability are outside this syntactic check's coverage. The
-config-injection lane runs the explicitly listed member self-tests under caller hooks and ignore
+config-injection lane derives registered self-test commands and runs them under caller hooks and ignore
 files, attributes and fsmonitor, with separate malformed-config probes;
 the repository-selector lanes below exercise the corpus member. The trust check covers LITERAL
 subprocess.run launches (a launch built
@@ -362,20 +362,317 @@ def _caller_env_archive_only():
         return "cannot inspect caller-env uses: {}".format(exc)
 
 
+CONFIG_EXCLUSIONS = {
+    "all": {
+        ("tools/check_selftest_execution.py", "--suite", "git-fixture-env-selftest"):
+            "This suite cannot recursively launch itself; its controls run here directly.",
+    },
+    "archive": {
+        ("tools/check_release_build.py", "--self-test"):
+            "Only the exact real-root archive launch may retain caller configuration.",
+        ("tools/check_release_delta.py", "--self-test"):
+            "Only the exact real-root archive launch may retain caller configuration.",
+    },
+    "malformed": {
+        ("tools/check_release_build.py", "--self-test"):
+            "Real-checkout archives intentionally retain caller trust configuration.",
+        ("tools/check_release_delta.py", "--self-test"):
+            "Real-checkout archives intentionally retain caller trust configuration.",
+    },
+}
+
+
+def _registered_selftests(root=ROOT):
+    """Parse every registry before selecting self-tests; preserve exact script arguments.
+    Reuse CI-parity's fail-closed shell/YAML grammar. Only the standalone runner's
+    validated directory binding and terminal exit need normalization.
+    Declaration coverage only: unregistered entries and conditional reachability
+    are outside this inventory. Manifest runners also run directly, because the
+    execution gate deliberately sanitizes its child environment.
+    """
+    from check_ci_parity import extract_local, extract_ci, _strip_comment, _tokenize, normalize
+    from check_selftest_execution import _manifest_suites
+
+    commands = set()
+    for relative, extract in (("tools/run_all_checks.sh", extract_local),
+                              ("opf/tools/run_all_checks.sh", extract_local),
+                              (".github/workflows/quality.yml", extract_ci)):
+        source = (root / relative).read_text(encoding="utf-8")
+        if relative.startswith("opf/"):
+            binding = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
+            lines = source.splitlines()
+            if lines.count(binding) != 1 or lines[-1] != "exit 0":
+                raise ValueError("unsupported standalone runner scaffold")
+            lines[lines.index(binding)] = "# validated standalone directory binding"
+            lines[-1] = "# validated terminal exit"
+            source = "\n".join(lines).replace('"$here/', '"opf/tools/')
+        result = extract(source)
+        if result.diagnostics or not result.members:
+            raise ValueError("{}: {}".format(relative, result.diagnostics or "empty registry"))
+        selected = set()
+        for member in result.members:
+            argv = tuple(member.split(" "))
+            if not ("--self-test" in argv or "--selftest" in argv or "--suite" in argv
+                    or Path(argv[0]).name.startswith("selftest_")):
+                continue
+            if any("<ref:" in arg for arg in argv):
+                raise ValueError("dynamic self-test arguments: " + member)
+            candidates = []
+            for line_number in result.origins:
+                code = _strip_comment(source.splitlines()[line_number - 1]).strip()
+                if code.startswith("run:"):
+                    code = code[4:].strip()
+                parsed = _tokenize(code)
+                if not parsed.ok:
+                    raise ValueError("unparseable self-test command: " + code)
+                tokens = parsed.value
+                if tokens[:1] == ["run_gate"]:
+                    tokens = tokens[2:]
+                normalized = normalize(tokens)
+                if normalized.ok and normalized.value == member:
+                    if tokens[:3] != ["python3", "-I", "-B"]:
+                        raise ValueError("unsupported self-test launcher: " + code)
+                    candidates.append(tuple(tokens[3:]))
+            if not candidates:
+                raise ValueError("cannot recover exact self-test arguments: " + member)
+            selected.update(candidates)
+        if not selected:
+            raise ValueError(relative + ": empty self-test roster")
+        commands.update(selected)
+    suites = _manifest_suites(root / "tools" / "selftest_checks.toml")
+    if suites is None:
+        raise ValueError("cannot read suite runner registry")
+    runners = {row["id"]: row["runner"] for row in suites}
+    for argv in sorted(commands):
+        if argv[0] == "tools/check_selftest_execution.py" and "--suite" in argv:
+            if len(argv) != 3 or argv[1] != "--suite" or argv[2] not in runners:
+                raise ValueError("unparseable suite invocation: {!r}".format(argv))
+            if argv not in CONFIG_EXCLUSIONS["all"]:
+                commands.add((runners[argv[2]],))
+    for lane, exclusions in CONFIG_EXCLUSIONS.items():
+        for argv, reason in exclusions.items():
+            if argv not in commands or not reason.strip():
+                raise ValueError("stale or unreasoned {} exclusion: {!r}".format(lane, argv))
+    commands.difference_update(CONFIG_EXCLUSIONS["all"])
+    if not commands:
+        raise ValueError("empty config-injection roster")
+    for argv in commands:
+        (root / argv[0]).read_bytes()
+    return tuple(sorted(commands))
+
+
+def _config_results(roster, env, marker, monitor_marker, system=False):
+    """Observe launches as well as verdicts, including silent configuration reads.
+    Each command receives a private copy of the poison tree so concurrent markers
+    cannot clear or contaminate another command's evidence.
+    The shim covers basename launches and executables resolved through this PATH.
+    Hardcoded absolute executables and descendants replacing PATH are residuals.
+    Exact git --version is exempt: it does not discover repository configuration.
+    Real-root archives have the exact-command exception documented above.
+    """
+    import shlex
+    from concurrent.futures import ThreadPoolExecutor
+
+    def run(argv):
+        with tempfile.TemporaryDirectory(prefix="config-member-") as directory:
+            private = Path(directory)
+            caller = private / "caller"
+            shutil.copytree(marker.parent, caller)
+            # Rebind the copied poison's absolute paths, including hook and monitor
+            # outputs. Binary git-control objects are copied unchanged.
+            for path in caller.rglob("*"):
+                if not path.is_file():
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except UnicodeError:
+                    continue
+                replaced = text.replace(str(marker.parent), str(caller))
+                if replaced != text:
+                    path.write_text(replaced, encoding="utf-8")
+            member_env = {k: v.replace(str(marker.parent), str(caller)) for k, v in env.items()}
+            real_git = shutil.which("git", path=member_env.get("PATH", os.defpath))
+            if real_git is None:
+                raise ValueError("config observation requires git")
+            hook_log = caller / marker.name
+            monitor_log = caller / monitor_marker.name
+            exposure = private / "exposure"
+            wrapper = private / "git"
+            wrapper.write_text(
+                '#!/bin/sh\n'
+                'if [ "$#" = 1 ] && [ "$1" = --version ]; then exec {git} "$@"; fi\n'
+                'if [ {archive} = yes ] && [ "$#" = 6 ] && [ "$1" = -C ] && '
+                '[ "$2" = {root} ] && [ "$3" = -c ] && '
+                '[ "$4" = core.attributesFile=/dev/null ] && '
+                '[ "$5" = archive ] && [ "$6" = HEAD ]; then exec {git} "$@"; fi\n'
+                '[ "${{HOME:-}}" != {home} ] || printf "home\\n" >> {log}\n'
+                '[ "${{XDG_CONFIG_HOME:-}}" != {xdg} ] || printf "xdg\\n" >> {log}\n'
+                'if [ {system} = yes ] && [ "${{GIT_CONFIG_NOSYSTEM:-}}" != 1 ] && '
+                '[ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then printf "system\\n" >> {log}; fi\n'
+                'exec {git} "$@"\n'.format(
+                    git=shlex.quote(real_git),
+                    archive="yes" if argv in CONFIG_EXCLUSIONS["archive"] else "no",
+                    root=shlex.quote(str(ROOT)), home=shlex.quote(member_env["HOME"]),
+                    xdg=shlex.quote(member_env["XDG_CONFIG_HOME"]), log=shlex.quote(str(exposure)),
+                    system="yes" if system else "no"), encoding="utf-8")
+            wrapper.chmod(0o700)
+            member_env["PATH"] = directory + os.pathsep + member_env.get("PATH", os.defpath)
+            exposure.write_bytes(b"")
+            subprocess.run(["git", "config", "--get", "user.name"], env=member_env,
+                           capture_output=True, timeout=60)
+            live = exposure.read_bytes()
+            if b"home\n" not in live or b"xdg\n" not in live or (system and b"system\n" not in live):
+                raise ValueError("config observer did not detect its positive control")
+            exposure.write_bytes(b"")
+            hook_log.write_bytes(b"")
+            monitor_log.write_bytes(b"")
+            rc = _run_config_member(argv, member_env)
+            result = (rc, hook_log.read_bytes(), monitor_log.read_bytes(), exposure.read_bytes())
+            print("CONFIG RUN {}: rc={}, exposure={}".format(
+                " ".join(argv), rc, sorted(set(result[3].decode().splitlines()))), flush=True)
+            return argv, result
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = dict(pool.map(run, roster))
+    marker.write_bytes(b"")
+    monitor_marker.write_bytes(b"")
+    return results
+
+
+def _member_result(results, member, column):
+    """Legacy IDs report derived runs, including every registered argument variant."""
+    values = [value[column] for argv, value in results.items() if argv[0] == member]
+    if not values:
+        return "missing registered member: " + member
+    want = 0 if column == 0 else b""
+    return want if all(value == want for value in values) else values
+
+
+def _roster_checks():
+    from unittest.mock import patch
+    original = Path.read_text
+    for check_id, relative, text in (
+            ("roster/empty-local-refused", "tools/run_all_checks.sh", ""),
+            ("roster/unparseable-local-refused", "tools/run_all_checks.sh",
+             'run_gate "bad" python3 -I -B "$unknown" --self-test\n'),
+            ("roster/empty-opf-refused", "opf/tools/run_all_checks.sh", ""),
+            ("roster/unparseable-ci-refused", ".github/workflows/quality.yml",
+             'jobs:\n  quality:\n    steps:\n      - run: python3 tools/x.py --self-test | cat\n'),
+    ):
+        def read(path, *args, **kwargs):
+            return text if path == ROOT / relative else original(path, *args, **kwargs)
+        with patch.object(Path, "read_text", read):
+            try:
+                _registered_selftests()
+            except (OSError, ValueError):
+                refused = True
+            else:
+                refused = False
+        check(check_id, refused, True)
+    extra = '\nrun_gate "argument-probe" python3 -I -B tools/check_secrets.py --self-test --red-on-revert\n'
+    def read(path, *args, **kwargs):
+        value = original(path, *args, **kwargs)
+        return value + extra if path == ROOT / "tools/run_all_checks.sh" else value
+    with patch.object(Path, "read_text", read):
+        roster = _registered_selftests()
+    check("roster/registered-arguments", ("tools/check_secrets.py", "--self-test",
+                                         "--red-on-revert") in roster, True)
+
+
+def _opf_both_legs():
+    code = "\n".join((
+        "import json, os, sys",
+        "from unittest.mock import patch",
+        "sys.path.insert(0, sys.argv[1])",
+        "import _opf_ingest_apply as module",
+        "saved = dict(os.environ)",
+        "seen = []",
+        "class StopProbe(Exception): pass",
+        "def observe():",
+        "    home = os.environ.get('HOME')",
+        "    seen.append([home != saved.get('HOME'), os.path.isdir(home),",
+        "                 home == os.environ.get('XDG_CONFIG_HOME'),",
+        "                 os.environ.get('GIT_CONFIG_NOSYSTEM') == '1'])",
+        "    return 0",
+        "def red():",
+        "    observe()",
+        "    raise StopProbe()",
+        "with patch.object(module, 'self_test', observe), patch.object(module, '_red_on_revert_main', red):",
+        "    try: module.main(['--self-test', '--red-on-revert'])",
+        "    except StopProbe: pass",
+        "print(json.dumps([seen, dict(os.environ) == saved]))",
+    ))
+    env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg",
+               GIT_CONFIG_NOSYSTEM="0")
+    child = subprocess.run([sys.executable, "-I", "-B", "-c", code,
+                            str(ROOT / "opf" / "tools")], env=env,
+                           capture_output=True, text=True, timeout=60)
+    check("env/opf-ingest-apply-both-legs", (child.returncode, json.loads(child.stdout)),
+          (0, [[[True, True, True, True], [True, True, True, True]], True]))
+
+
+def _system_pin_probe(base, lifecycle):
+    """Observe basename resolution after the same GIT_* scrub production uses."""
+    from unittest.mock import patch
+    observer_dir = base / "observe-bin"
+    observer_dir.mkdir(exist_ok=True)
+    observer = observer_dir / "git"
+    observer.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$GIT_CONFIG_NOSYSTEM\" \"$GIT_CONFIG_SYSTEM\"\n",
+        encoding="utf-8")
+    observer.chmod(0o700)
+    with patch.dict(os.environ, PATH=str(observer_dir) + os.pathsep + os.defpath):
+        saved = dict(os.environ)
+        try:
+            with lifecycle():
+                stripped = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+                child = subprocess.run(["git"], env=stripped, capture_output=True,
+                                       text=True, timeout=60)
+                pins = (child.returncode, child.stdout.splitlines())
+                raise RuntimeError("fixture restoration probe")
+        except RuntimeError as exc:
+            if str(exc) != "fixture restoration probe":
+                raise
+        return pins, dict(os.environ) == saved
+
+
+def _system_pin_checks(base):
+    import types
+    tree = ast.parse(Path(_git_fixture_env.__file__).read_text(encoding="utf-8"))
+    assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                   and any(ast.unparse(t) == "os.environ['PATH']" for t in node.targets)]
+    if len(assignments) != 1:
+        raise ValueError("cannot uniquely mutate lifecycle PATH installation")
+    assignments[0].value = ast.parse('saved.get("PATH", os.defpath)', mode="eval").body
+    mutant = types.ModuleType("fixture_path_mutant")
+    exec(compile(ast.fix_missing_locations(tree), "<path-removal-mutant>", "exec"),
+         mutant.__dict__)
+    pins, restored = _system_pin_probe(base, _git_fixture_env.fixture_git_lifecycle)
+    check("env/lifecycle-system-pins", pins, (0, ["1", os.devnull]))
+    check("env/lifecycle-restores-caller", restored, True)
+    pins, restored = _system_pin_probe(base, mutant.fixture_git_lifecycle)
+    check("env/lifecycle-path-removal-red", (pins, restored), ((0, ["", ""]), True))
+
+
 def _config_injection_lane(base):
     """CONFIG-INJECTION: no inherited GIT_* pins may hide the caller's on-disk poison.
     Each member gets rc and hook-byte assertions; neither one substitutes for the other.
     A real commit first proves the marker hooks execute under this caller configuration.
     Hooks/ignore poison cannot see read-only git calls. The fsmonitor marker covers
     index reads; malformed HOME/XDG config also covers reads such as rev-parse.
-    The literal member rows below are the CONFIG_MEMBERS inventory. Every member
-    receives hooks, explicit and fallback ignore/attributes, and fsmonitor poison.
+    Commands come from the shell/Quality registries, with exact script arguments.
+    Literal legacy IDs below report results; they never select which commands run.
     The legacy /hooks IDs assert both hook and fsmonitor marker bytes. Separate
     malformed-config runs exclude the two real-checkout archive readers, which
-    retain caller config by contract. This does not certify every git command,
-    system configuration, or repository-local configuration."""
+    retain caller config by contract. System poison uses a PATH shim, never /etc.
+    Hardcoded absolute executables, a replaced PATH, and repository-local config
+    remain outside the shim's coverage; see _config_results."""
     import shlex
 
+    roster = _registered_selftests()
+    print("CONFIG ROSTER: {} commands".format(len(roster)), flush=True)
+    for argv in roster:
+        print("  " + " ".join(argv), flush=True)
     home, xdg, hooks = (base / name for name in ("config-home", "config-xdg", "config-hooks"))
     for directory in (home / ".config" / "git", xdg / "git", hooks):
         directory.mkdir(parents=True)
@@ -455,6 +752,9 @@ def _config_injection_lane(base):
                            capture_output=True, timeout=60)
     check("config/combined-fsmonitor-control", (probe.returncode, bool(monitor_marker.read_bytes())),
           (0, True))
+    combined = _config_results(roster, env, marker, monitor_marker)
+    check("config/registered-combined", [argv for argv, value in combined.items()
+                                       if value != (0, b"", b"", b"")], [])
     for rc_id, hooks_id, member in (
             ("config/selftest_aiqt_corpus/rc", "config/selftest_aiqt_corpus/hooks",
              "tools/selftest_aiqt_corpus.py"),
@@ -509,22 +809,9 @@ def _config_injection_lane(base):
             ("config/opf/rc", "config/opf/hooks",
              "opf/tools/opf.py"),
     ):
-        marker.write_bytes(b"")
-        monitor_marker.write_bytes(b"")
-        path = ROOT / member
-        args = [] if path.name.startswith("selftest_") else ["--self-test"]
-        try:
-            proc = subprocess.run([sys.executable, "-I", "-B", str(path), *args],
-                                  cwd=ROOT, env=env, capture_output=True, text=True, timeout=1200)
-            rc = proc.returncode
-            if rc:
-                print("CONFIG-INJECTION {}:\n{}".format(member, (proc.stdout + proc.stderr)[-2000:]),
-                      file=sys.stderr)
-        except (OSError, subprocess.SubprocessError) as exc:
-            rc = str(exc)
-        check(rc_id, rc, 0)
-        check(hooks_id, (marker.read_bytes(), monitor_marker.read_bytes()), (b"", b""))
-
+        check(rc_id, _member_result(combined, member, 0), 0)
+        check(hooks_id, (_member_result(combined, member, 1),
+                         _member_result(combined, member, 2)), (b"", b""))
 
     # No hooks or ignore poison in these lanes: read-only production helpers
     # must be tested independently of fixture writes.
@@ -544,6 +831,11 @@ def _config_injection_lane(base):
     probe = subprocess.run(["git", "-C", str(control), "rev-parse", "HEAD"], env=env,
                            capture_output=True, timeout=60)
     check("config/malformed-control", probe.returncode != 0, True)
+    (home / ".gitconfig").write_text(fsconfig, encoding="utf-8")
+    (xdg / "git" / "config").write_text(malformed, encoding="utf-8")
+    probe = subprocess.run(["git", "-C", str(control), "rev-parse", "HEAD"], env=env,
+                           capture_output=True, timeout=60)
+    check("config/xdg-malformed-control", probe.returncode != 0, True)
 
     for fs_rc_id, fs_marker_id, member in (
             ("config/check_manifest/fsmonitor-rc", "config/check_manifest/fsmonitor",
@@ -558,11 +850,16 @@ def _config_injection_lane(base):
         (home / ".gitconfig").write_text(fsconfig, encoding="utf-8")
         (xdg / "git" / "config").write_text(fsconfig, encoding="utf-8")
         monitor_marker.write_bytes(b"")
-        rc = _run_config_member(member, env)
+        rc = _run_config_member((member, "--self-test"), env)
         check(fs_rc_id, rc, 0)
         check(fs_marker_id, monitor_marker.read_bytes(), b"")
     (home / ".gitconfig").write_text(malformed, encoding="utf-8")
     (xdg / "git" / "config").write_text(malformed, encoding="utf-8")
+    malformed_results = _config_results(
+        [argv for argv in roster if argv not in CONFIG_EXCLUSIONS["malformed"]],
+        env, marker, monitor_marker)
+    check("config/registered-malformed", [argv for argv, value in malformed_results.items()
+                                        if value != (0, b"", b"", b"")], [])
     for malformed_id, member in (
             ("config/selftest_aiqt_corpus/malformed", "tools/selftest_aiqt_corpus.py"),
             ("config/selftest_orch_hooks/malformed", "tools/selftest_orch_hooks.py"),
@@ -589,14 +886,43 @@ def _config_injection_lane(base):
             ("config/_opf_ingest_apply/malformed", "opf/tools/_opf_ingest_apply.py"),
             ("config/opf/malformed", "opf/tools/opf.py"),
     ):
-        check(malformed_id, _run_config_member(member, env), 0)
+        check(malformed_id, _member_result(malformed_results, member, 0), 0)
+
+    # Simulate an installed system config without writing /etc. Reassert its path
+    # only when a child did not disable or explicitly replace system configuration.
+    system = base / "system-gitconfig"
+    system.write_text(config, encoding="utf-8")
+    empty_home = base / "system-lane-home"
+    empty_home.mkdir()
+    bin_dir = base / "system-bin"
+    bin_dir.mkdir()
+    real_git = shutil.which("git")
+    if real_git is None:
+        raise ValueError("system lane requires git")
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        '#!/bin/sh\n'
+        'if [ "${{GIT_CONFIG_NOSYSTEM:-}}" != 1 ] && [ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then\n'
+        '  export GIT_CONFIG_SYSTEM={}\n'
+        'fi\nexec {} "$@"\n'.format(shlex.quote(str(system)), shlex.quote(real_git)),
+        encoding="utf-8")
+    wrapper.chmod(0o700)
+    system_env = dict(env, HOME=str(empty_home), XDG_CONFIG_HOME=str(empty_home),
+                      PATH=str(bin_dir) + os.pathsep + env.get("PATH", os.defpath))
+    monitor_marker.write_bytes(b"")
+    probe = subprocess.run(["git", "-C", str(control), "ls-files"], env=system_env,
+                           capture_output=True, timeout=60)
+    check("config/system-control", (probe.returncode, bool(monitor_marker.read_bytes())),
+          (0, True))
+    system_results = _config_results(roster, system_env, marker, monitor_marker, system=True)
+    check("config/registered-system", [argv for argv, value in system_results.items()
+                                     if value != (0, b"", b"", b"")], [])
 
 
 def _run_config_member(member, env):
     try:
-        args = [] if Path(member).name.startswith("selftest_") else ["--self-test"]
-        proc = subprocess.run([sys.executable, "-I", "-B", str(ROOT / member), *args],
-                              cwd=ROOT, env=env, capture_output=True, text=True, timeout=1200)
+        proc = subprocess.run([sys.executable, "-I", "-B", str(ROOT / member[0]), *member[1:]],
+                              cwd=ROOT, env=env, capture_output=True, text=True, errors="replace", timeout=1200)
         if proc.returncode:
             print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr),
                   file=sys.stderr)
@@ -672,7 +998,7 @@ def _manifest_extra_setup_failures():
 def _opf_home_lifecycles():
     """Observe each entry before its delegate, then force exceptional restoration."""
     code = "\n".join((
-        "import importlib, json, os, sys",
+        "import importlib, inspect, json, os, sys",
         "sys.path.insert(0, sys.argv[1])",
         "module = importlib.import_module(sys.argv[2])",
         "entry = sys.argv[3]",
@@ -682,15 +1008,41 @@ def _opf_home_lifecycles():
         "def stop(*args):",
         "    home = os.environ.get('HOME')",
         "    seen.append([home != saved.get('HOME'),",
-        "                 home == os.environ.get('XDG_CONFIG_HOME'), os.path.isdir(home)])",
+        "                 home == os.environ.get('XDG_CONFIG_HOME'), os.path.isdir(home),",
+        "                 os.environ.get('GIT_CONFIG_NOSYSTEM') == '1'])",
         "    raise StopProbe()",
         "setattr(module, entry + '_isolated', stop)",
         "try:",
-        "    getattr(module, entry)()",
+        "    fn = getattr(module, entry)",
+        "    args = [None for p in inspect.signature(fn).parameters.values()",
+        "            if p.default is inspect.Parameter.empty]",
+        "    fn(*args)",
         "except StopProbe:",
         "    pass",
         "print(json.dumps([seen, dict(os.environ) == saved]))",
     ))
+    # Discover delegates in registered OPF source, not a hand-maintained roster.
+    results = {}
+    paths = sorted({argv[0] for argv in _registered_selftests()
+                    if argv[0].startswith("opf/tools/")})
+    for relative in paths:
+        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef) or not node.name.endswith("_isolated"):
+                continue
+            module, entry = Path(relative).stem, node.name[:-len("_isolated")]
+            env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg",
+                       GIT_CONFIG_NOSYSTEM="0")
+            child = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", code, str(ROOT / "opf" / "tools"), module, entry],
+                env=env, capture_output=True, text=True, timeout=60)
+            try:
+                got = (child.returncode, json.loads(child.stdout))
+            except ValueError:
+                got = (child.returncode, child.stdout, child.stderr)
+            results[module, entry] = got
+    check("env/registered-opf-lifecycles", bool(results) and all(
+        value == (0, [[[True, True, True, True]], True]) for value in results.values()), True)
     for check_id, module, entry in (
             ("env/opf-upgrade-home-lifecycle", "check_opf_upgrade", "_suite"),
             ("env/opf-import-home-lifecycle", "check_opf_import", "_self_test"),
@@ -698,15 +1050,7 @@ def _opf_home_lifecycles():
             ("env/opf-ingest-apply-home-lifecycle", "_opf_ingest_apply", "self_test"),
             ("env/opf-tooling-home-lifecycle", "opf", "run_self_tests"),
     ):
-        env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg")
-        child = subprocess.run(
-            [sys.executable, "-I", "-B", "-c", code, str(ROOT / "opf" / "tools"), module, entry],
-            env=env, capture_output=True, text=True, timeout=60)
-        try:
-            got = (child.returncode, json.loads(child.stdout))
-        except ValueError:
-            got = (child.returncode, child.stdout, child.stderr)
-        check(check_id, got, (0, [[[True, True, True]], True]))
+        check(check_id, results.get((module, entry)), (0, [[[True, True, True, True]], True]))
 
 
 def _build_decoy(base):
@@ -952,27 +1296,7 @@ def main(report_path=None):
             got = "OPF isolation child failed: {}".format(exc)
         check("env/opf-init-inherited-allowlist", got, (0, [True, True, True]))
 
-        # Observe the wrapper's actual child environment after a production-style scrub.
-        from unittest.mock import patch
-        observer = base / "observe-git-env"
-        observer.write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"$GIT_CONFIG_NOSYSTEM\" \"$GIT_CONFIG_SYSTEM\"\n",
-            encoding="utf-8")
-        observer.chmod(0o700)
-        saved_env = dict(os.environ)
-        try:
-            with patch.object(_git_fixture_env.shutil, "which", return_value=str(observer)):
-                with _git_fixture_env.fixture_git_lifecycle() as executable:
-                    stripped = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-                    child = subprocess.run([executable], env=stripped, capture_output=True,
-                                           text=True, timeout=60)
-                    pins = (child.returncode, child.stdout.splitlines())
-                    raise RuntimeError("fixture restoration probe")
-        except RuntimeError as exc:
-            if str(exc) != "fixture restoration probe":
-                raise
-        check("env/lifecycle-system-pins", pins, (0, ["1", os.devnull]))
-        check("env/lifecycle-restores-caller", dict(os.environ), saved_env)
+        _system_pin_checks(base)
 
         # ---------- layer 2: per-member routing ----------
         for check_id, member_rel, scrub_names in (
@@ -1002,7 +1326,7 @@ def main(report_path=None):
                 ("route/check-record-sections", "tools/check_record_sections.py",
                  "_selftest_git", "env", "git_fixture_env", True),
                 ("route/check-portability", "tools/check_portability.py",
-                 "self_test_main", "git_env", "git_fixture_env", True),
+                 "_self_test_main_isolated", "git_env", "git_fixture_env", True),
                 ("route/gen-manifest", "tools/gen_manifest.py",
                  "_git", "env", "git_fixture_env", "computed"),
                 ("route/check-release-delta-env", "tools/check_release_delta.py",
@@ -1012,7 +1336,7 @@ def main(report_path=None):
                 ("route/check-release-delta-spy", "tools/check_release_delta.py",
                  "_spy_index", "senv", "git_fixture_env", True),
                 ("route/check-release-build-attestation", "tools/check_release_build.py",
-                 "self_test_main", "ge", "git_fixture_env", "attestation"),
+                 "_self_test_main_isolated", "ge", "git_fixture_env", "attestation"),
                 ("route/check-branch-root", "tools/check_branch_root.py",
                  "_fixture_git", "env", "git_fixture_env", "computed"),
                 ("route/check-gensrc-failclose", "tools/check_gensrc_failclose.py",
@@ -1020,7 +1344,7 @@ def main(report_path=None):
                 ("route/qa-adapter-fixture-env", "tools/_qa_adapter.py",
                  "_self_test_isolated", "genv", "git_fixture_env", True),
                 ("route/check-opf-init", "opf/tools/check_opf_init.py",
-                 "_suite", "fixture_env", "_scrubbed_env", False),
+                 "_suite_isolated", "fixture_env", "_scrubbed_env", False),
         ):
             check(check_id, _binding_calls(ROOT / member, owner, binding, factory, launches), True)
         for check_id, member, owner in (
@@ -1070,6 +1394,8 @@ def main(report_path=None):
         ):
             check(check_id, _archive_reads_use_caller_env(ROOT / member_rel), True)
 
+        _roster_checks()
+        _opf_both_legs()
         _config_injection_lane(base)
         _manifest_setup_failures(base)
         _manifest_extra_setup_failures()

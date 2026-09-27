@@ -342,6 +342,13 @@ def _test_git_stash_ref(failures):
 
 
 def main():
+    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
+    scrub_git_environment()
+    with fixture_git_lifecycle():
+        return _main_isolated()
+
+
+def _main_isolated():
     scrub_git_environment()
     handler = aiqt_hooks.git_discard
     try:
@@ -359,7 +366,7 @@ def main():
     # The synthetic handler environment must not include harness config pins: the
     # production guard correctly treats those as repository-view overrides. Fixture
     # git subprocesses receive git_fixture_env() explicitly, including all three pins.
-    # Handler-internal scrubs still have their documented system-config residual.
+    # The entry's PATH lifecycle reasserts system pins after handler-internal scrubs.
     for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"):
         os.environ.pop(key, None)
     # F-106 regression guard: run the whole self-test with NO ambient git identity, so the EN-6 recovery

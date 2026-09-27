@@ -75,6 +75,16 @@ def _snapshot(root):
 
 
 def _suite(invoke):
+    """Isolate fixture configuration and restore the caller even on failure."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _suite_isolated(invoke)
+
+
+def _suite_isolated(invoke):
     """Run parser, publication, refusal, and preservation vectors against fresh fixtures."""
     try:
         import tomllib

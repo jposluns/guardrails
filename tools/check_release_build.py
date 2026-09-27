@@ -1176,7 +1176,14 @@ def _run_pre_tag_quiet(root, candidate_sha, qa_path, qa_sha256, first_pin, evide
 _ARCHIVE_FAILCLOSED_REENTRANT = False
 
 
-def self_test_main():  # noqa: C901  a flat sequence of independent predicate and fixture cases
+def self_test_main():
+    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
+    scrub_git_environment()
+    with fixture_git_lifecycle():
+        return _self_test_main_isolated()
+
+
+def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent predicate and fixture cases
     # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
     # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
     # children) would redirect the fixture's init/add/commit into the CALLER's repository.

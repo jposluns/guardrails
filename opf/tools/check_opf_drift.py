@@ -120,6 +120,16 @@ def _run_render_check(root, capture):
 
 
 def _self_test():
+    """Isolate fixture configuration and restore the caller even on failure."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _self_test_isolated()
+
+
+def _self_test_isolated():
     """Build synthetic stores and assert the 0/1/2 contract end to end through opf.py. Returns 0 clean,
     1 on a failing drift ASSERTION, 2 on a HARNESS error (a fixture could not be built or read)."""
     import contextlib

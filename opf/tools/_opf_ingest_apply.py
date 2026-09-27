@@ -1764,7 +1764,8 @@ def self_test(only=None):
     import tempfile
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
-        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home):
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
             return self_test_isolated(only)
 
 
@@ -2421,13 +2422,25 @@ def _red_on_revert_main():
     return 0
 
 
+def _self_test_main(args):
+    """Keep both registered self-test legs inside the same isolation boundary."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _self_test_main_isolated(args)
+
+
+def _self_test_main_isolated(args):
+    rc = self_test()
+    return rc if rc != 0 or "--red-on-revert" not in args else _red_on_revert_main()
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
-    if args == ["--self-test"]:
-        return self_test()
-    if args == ["--self-test", "--red-on-revert"]:
-        rc = self_test()
-        return rc if rc != 0 else _red_on_revert_main()
+    if args in (["--self-test"], ["--self-test", "--red-on-revert"]):
+        return _self_test_main(args)
     print("_opf_ingest_apply: the ingest promotion coordinator; run with --self-test (add --red-on-revert "
           "for the guard-discrimination harness; no verb is wired in this slice).",
           file=sys.stderr if args else sys.stdout)

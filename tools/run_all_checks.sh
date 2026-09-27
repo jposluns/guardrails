@@ -81,6 +81,9 @@ run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-
 run_gate "opf-homes-migrate-selftest" python3 -I -B opf/tools/check_opf_homes_migrate.py --self-test --red-on-revert
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
 run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
+run_gate "opf-import-direct-selftest" python3 -I -B opf/tools/_opf_import.py --self-test
+run_gate "opf-ingest-direct-selftest" python3 -I -B opf/tools/_opf_ingest.py --self-test
+run_gate "opf-observe-direct-selftest" python3 -I -B opf/tools/_opf_observe.py --self-test
 run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
 run_gate "opf-drift" python3 -I -B opf/tools/check_opf_drift.py
 run_gate "opf-doctor-selftest" python3 -I -B opf/tools/check_opf_doctor.py --self-test

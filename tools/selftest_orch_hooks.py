@@ -225,6 +225,13 @@ def now_iso(hours_ago=0):
 
 
 def main(report_path=None):
+    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
+    scrub_git_environment()
+    with fixture_git_lifecycle():
+        return _main_isolated(report_path)
+
+
+def _main_isolated(report_path=None):
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-orch-selftest-"))
     except OSError as exc:
