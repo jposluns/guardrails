@@ -1609,8 +1609,9 @@ def _cmd_upgrade(rest):
     declared product-scope render targets, with an untracked lease handled separately (HEAD is a verified
     restore path for the checked paths, SECA-verified-restore-path) and a SINGLE-WRITER LEASE it claims
     atomically and holds across the mutation, render, and final doctor (spec 5.7). It NEVER commits: the
-    adopter reviews and merges. A store already at {to} returns without those migration preconditions: doctor-VALID yields a byte no-op (exit 0),
-    otherwise it exits 2 without writing. A NOT-ADOPTED root is NOT APPLICABLE
+    adopter reviews and merges. A store already at {to} returns without those migration preconditions:
+    doctor-VALID yields a byte no-op (exit 0), otherwise it exits 2 without writing. A NOT-ADOPTED root is
+    NOT APPLICABLE
     (exit 0), any other non-resolved status a located cannot-evaluate (exit 2). Two disclosed residuals: a
     killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
     through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers; and the lease is not
@@ -1928,9 +1929,10 @@ def _upgrade_check_clean(res, manifest_model):
     and working tree equal HEAD, so the committed HEAD is a verified restore path for the checked tracked
     and untracked paths (SECA-verified-restore-path); ignored files are outside the check. Only the
     UNTRACKED lease path is EXCLUDED (byte-literal): a held (untracked "??") lease is step 4's own specific
-    never-seize refusal, not generic dirt; a TRACKED lease on that path is instead refused DISTINCTLY as a spec-5.7 violation (in _upgrade_parse_porcelain), never
-    excluded. Refuses fail-closed (exit 2) on any dirt, naming up to 10 paths plus the total, advising
-    commit-your-changes and NEVER a restore (the dirt is the owner's own work, preserve-uncommitted-work).
+    never-seize refusal, not generic dirt; a TRACKED lease on that path is instead refused DISTINCTLY as a
+    spec-5.7 violation (in _upgrade_parse_porcelain), never excluded. Refuses fail-closed (exit 2) on any
+    dirt, naming up to 10 paths plus the total, advising commit-your-changes and NEVER a restore (the dirt
+    is the owner's own work, preserve-uncommitted-work).
 
     Residual (disclose-guard-residuals): the probe uses --untracked-files=all, which does NOT surface a
     git-IGNORED file under the scope; a conforming store has no ignored render targets, so an ignored file
