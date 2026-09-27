@@ -1877,8 +1877,8 @@ def self_test(only=None):
 # Every row carries a declared class. A "safety" row's mutant returns a wrong result at the outcome boundary
 # (a false abort, a false promotion or completed no-op, a released lock, an escape or lost result, or a
 # confirmed commit or genuine rollback misreported as indeterminate), or, for a unit-level guard, breaks that
-# guard's own contract. The harness independently records Boolean outcomes at those boundaries;
-# a failed diagnostic assertion alone cannot qualify a safety row.
+# guard's own contract. Each row declares its asserted Boolean outcomes in _REVERT_ASSERTED; the harness
+# requires a flip inside that set. Diagnostics and flips outside the declaration cannot qualify a safety row.
 # A "guard-execution" row proves execution (its diagnostic, or the probe firing), not a change to its
 # asserted safety outcome. Other checks may change incidentally; they do not upgrade this claim,
 # and a sibling "/isolated" row proves the safety property instead. An isolated row tests the guard's
@@ -2110,9 +2110,9 @@ def _d_run_name_bound(kind):
 
 def _d_home_symlink_route(kind):
     """A symlinked staging home refuses whatever the spelling (canonical, dotdot, "/.", trailing "/", an ancestor
-    symlink). Removing the spelled-route provenance probe grades each as detached, missing the corrupt record."""
+    symlink). Removing the spelled-route provenance probe grades each as detached instead of refusing."""
     def test(module, base_dir):
-        root, rid, staged = _st_staged(base_dir, "symlink-route-" + kind, kind)
+        root, rid, staged = _st_staged(base_dir, "symlink-route-" + kind, kind, corrupt=False)
         link = base_dir / ("symlink-route-link-" + kind)
         link.symlink_to(staged.parent)
         staging = root / _opf_store.STAGING_REL
@@ -2133,7 +2133,7 @@ def _d_home_symlink_route(kind):
 def _d_home_relative(kind, homes, case):
     """R1 refuses a relative symlink-bearing unheld route from every generated starting depth."""
     def test(module, base_dir):
-        root, rid, staged = _st_staged(base_dir, "relative-" + kind, kind)
+        root, rid, staged = _st_staged(base_dir, "relative-" + kind, kind, corrupt=False)
         if case.startswith("legacy"):
             run = root / _opf_import._import_run_locations(rid, 1)[0]
             staged.rename(run)
@@ -2201,18 +2201,19 @@ def _st_route_facts(cwd, spelling, depth):
     return links, visited
 
 
-def _st_home_verdict(result, reads, root, rid):
-    """Registered requires the exact corrupt transaction bytes read at the physical store identity.
-    An arbitrary schema failure is not evidence that the store-root record was read."""
+def _st_home_verdict(result, reads, root, rid, corrupt=True):
+    """Registered requires the expected transaction read at the physical store identity.
+    Neither a schema failure nor an absent-record verdict alone proves a registered read."""
     schema = result["transaction-schema"]
     if schema[1].startswith("cannot evaluate:"):
         return "refused"
-    if schema == _ST_DETACHED:
-        return "detached"
     st = root.stat()
     txn = str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME)
-    if schema[0] is False and ((st.st_dev, st.st_ino), txn, b"state =\n") in reads:
+    body = b"state =\n" if corrupt else None
+    if schema[0] is (not corrupt) and ((st.st_dev, st.st_ino), txn, body) in reads:
         return "registered"
+    if schema == _ST_DETACHED:
+        return "detached"
     return "unexpected:" + repr(schema)
 
 
@@ -2327,7 +2328,7 @@ def _st_home_topology(base_dir, kind, placement, corrupt=True):
     return root, canonical, physical, aliases, inside, held, claimants
 
 
-def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, deep_only=False):
+def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, deep_only=False, corrupt=True):
     """Every matrix cell is independently classified from absolute spelling, links, holder, and second claim.
     No canonical-verdict equivalence substitutes for the structural expectation. Count each mismatching
     cell once. Proc magic links keep their descriptor live for the entire placement."""
@@ -2335,7 +2336,7 @@ def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, de
     mismatches, count = [], 0
     for placement in placements:
         root, canonical, physical, aliases, inside, held, claimants = _st_home_topology(
-            base_dir, kind, placement)
+            base_dir, kind, placement, corrupt=corrupt)
         rid = physical.name
         depth = max(len(rel.split("/")) for gen in (1, 2)
                     for rel in _opf_import._import_run_locations(rid, gen)) - 1
@@ -2397,7 +2398,7 @@ def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, de
 
                         with patch.object(module, "_read_store_control", read):
                             result = _st_graded(module, root, spelling, homes, cwd)
-                        got = _st_home_verdict(result, reads, root, rid)
+                        got = _st_home_verdict(result, reads, root, rid, corrupt=corrupt)
                         count += 1
                         case = "{}/{}/homes-{}/{}/{}".format(placement, kind, homes, cwd, label)
                         if got != expected:
@@ -2429,6 +2430,7 @@ TESTS += (("home-property", _t_home_property),)
 def _d_home_claim_ancestors(kind, starting=False):
     """R2 needs both ancestor probes: the foreign claim is reached only by the selected probe."""
     def test(module, base_dir):
+        from unittest.mock import patch
         root, rid, staged = _st_staged(base_dir, "claim-" + kind, kind, corrupt=False)
         run = root / _opf_import._import_run_locations(rid, 1)[0]
         staged.rename(run)
@@ -2442,10 +2444,23 @@ def _d_home_claim_ancestors(kind, starting=False):
         cwd = working if starting else deep
         spelling = ("d1/d2/d3/d4/L/" if starting else "../../../../alt/") + rid
         outcomes = []
+        read_control = module._read_store_control
+        st = root.stat()
+        txn = str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME)
         for homes in (1, 2):
-            clean = _st_graded(module, root, run, homes)
+            reads = []
+
+            def read(fd, rel):
+                body = read_control(fd, rel)
+                opened = os.fstat(fd)
+                reads.append(((opened.st_dev, opened.st_ino), rel, body))
+                return body
+
+            with patch.object(module, "_read_store_control", read):
+                clean = _st_graded(module, root, run, homes)
             result = _st_graded(module, root, spelling, homes, cwd)
-            outcomes.append(all(clean[cid][0] for cid in _ST_TXN)
+            outcomes.append(((st.st_dev, st.st_ino), txn, None) in reads
+                            and all(clean[cid][0] for cid in _ST_TXN)
                             and all(not result[cid][0] and "ambiguous second store claim" in result[cid][1]
                                     for cid in _ST_TXN))
         identity = "gate/home-start-ancestors/" if starting else "gate/home-property-ancestors/"
@@ -2475,7 +2490,8 @@ def _d_home_rule(kind, rule):
     def test(module, base_dir):
         placements = (("chained", "external-root-out", "external-target", "proc-fd", "detached-alias")
                       if rule == "unheld-link" else ("shared-ancestor", "nested-shared"))
-        count, mismatches = _st_home_property(module, base_dir, kind, placements=placements)
+        count, mismatches = _st_home_property(
+            module, base_dir, kind, placements=placements, corrupt=(rule != "unheld-link"))
         _revert_check(count and not mismatches, "gate/home-" + rule + "/" + kind)
     return test
 
@@ -2504,7 +2520,7 @@ def _d_home_unheld_relative(kind):
         outcomes = []
         for placement in ("cwd-alias", "detached-relative", "detached-absolute"):
             root, _canonical, physical, _aliases, inside, _held, _claims = _st_home_topology(
-                base_dir, kind, placement)
+                base_dir, kind, placement, corrupt=False)
             cwd = inside[0] if placement == "cwd-alias" else physical.parent
             for homes in (1, 2):
                 relative = _st_graded(module, root, physical.name, homes, cwd)
@@ -2760,10 +2776,10 @@ def _d_home_rename_at_lookup_isolated(kind):
 def _d_home_retained(kind):
     """A store component renamed at lookup, briefly restored for absolute-route resolution, leaves the run
     physically unregistered at each ancestry probe. Retained binding refuses; serving only the fresh
-    classification instead downgrades to detached, missing the corrupt record."""
+    classification instead downgrades to detached instead of refusing the changed home."""
     def test(module, base_dir):
         from unittest.mock import patch
-        root, rid, staged = _st_staged(base_dir, "retained-" + kind, kind)
+        root, rid, staged = _st_staged(base_dir, "retained-" + kind, kind, corrupt=False)
         staging = root / _opf_store.STAGING_REL
         error = _st_located("the run's registered home changed during grading (the run or a store component was "
                             "renamed or replaced); fail-closed, never re-read as detached")
@@ -3113,8 +3129,8 @@ _STRIPS = dict((("helper-guard", (_HELPER_GUARD, _HELPER_REVERTED.replace("rever
                + tuple((label + "-call", (_CALL_GUARDS[label], _call_reverted(label, "stripped")))
                        for label in _CALL_GUARDS))
 _LAUNCHED_LAYERS = ("helper-guard", "launch-boundary")
-# Rows whose focused assertion can fail on diagnostics or probe firing alone claim only guard execution,
-# even if other checks flip. Each has an "/isolated" safety row; every other row must prove a Boolean flip.
+# Rows whose mutant changes no declared asserted Boolean outcome claim only guard execution, even if
+# other checks flip. Each has an "/isolated" safety row; safety requires a flip inside _REVERT_ASSERTED.
 _GUARD_EXECUTION = frozenset((
     "postlaunch/complete-fault-not-aborted", "postlaunch/reread-fault-not-aborted",
     "postlaunch/complete-lost-not-aborted", "postlaunch/foreign-txn-not-escaped", "postlaunch/reread-guarded",
@@ -3336,17 +3352,69 @@ _DISCRIMINATORS += tuple(
 _DISCRIMINATORS += tuple(
     ("gate/home-" + rule + "/" + kind + "/isolated", "gate", _d_home_second_claim_isolated(kind, rule),
      "        if held and reached:\n",
-     _ST_SEEN_SET_REVERTED if rule == "property-holding" else "        if False:  # reverted R2\n")
+     _ST_SEEN_SET_REVERTED if rule == "property-holding" else "        if False:  # reverted fail-closed rule\n")
     for kind in ("import", "ingest") for rule in ("property-holding", "second-claim"))
 
 
 # Unit rows observe the named contract directly; every other row observes the public outcome.
+# The property-holding/second-claim /isolated rows deliberately use the public boundary: corrupt=False
+# removes the overlapping record finding, so their declared transaction bits measure R2 refusal itself.
 _REVERT_UNIT_BOUNDARIES = {
     "path/canonical-contained": ("_canonical", "_StageError"),
     "allocation/journal-lock-required": ("reserve_ingest_ids", "AllocationError"),
     **{"gate/home-rename-at-lookup/" + kind + "/isolated": ("_physical_home", "_GateError")
        for kind in ("import", "ingest")},
 }
+
+
+# Declared outcome sets, independent of observed flips. None means every invocation of that named
+# gate check; apply contracts name the zero-based call ordinal as well as its outcome. A returned bit
+# covers an escaping call that cannot provide result fields. The fixture's oracle and call alignment
+# still need review: this guard cannot establish that an author chose the right asserted contract.
+_REVERT_ASSERTED = {
+    identity: tuple((None, cid) for cid in _ST_TXN)
+    for identity, key, *_rest in _DISCRIMINATORS if key == "gate"
+}
+_REVERT_ASSERTED.update({identity: ((None, "refused"),) for identity in _REVERT_UNIT_BOUNDARIES})
+_REVERT_ASSERTED.update({
+    "gate/run-name-bound/" + kind: ((None, "staged-run-structure"),)
+    for kind in ("import", "ingest")
+})
+_REVERT_ASSERTED.update({
+    "gate/staged-run-store-depth/" + kind: ((None, "transaction-schema"),)
+    for kind in ("import", "ingest")
+})
+_REVERT_ASSERTED.update({
+    "acceptance/reject-refused": ((0, "promoted=False"), (0, "outcome=rejected")),
+    "per-record/inline-required": ((0, "promoted=False"), (0, "verdict=" + str(CANNOT_EVALUATE))),
+})
+# Each listed apply row asserts this outcome on this call; incidental flips on setup or earlier
+# interrupted calls cannot stand in for the re-apply/no-op contract.
+for _call, _outcome, _identities in (
+    (0, "promoted", (
+        "postverify/committed-not-aborted", "postverify/foreign-class-not-aborted",
+        "postlaunch/returned-is-committed", "postlaunch/unprintable-not-aborted",
+        "cleanup/root-close-not-aborted", "cleanup/lock-release-not-escaped",
+        "cleanup/op-release-not-escaped", "cleanup/diagnostic-not-escaped",
+        "cleanup/writer-release-call-not-escaped", "cleanup/op-release-call-not-escaped",
+        "cleanup/writer-release-call-diagnostic-not-escaped", "cleanup/op-release-call-diagnostic-not-escaped")),
+    (0, "indeterminate", (
+        "postlaunch/complete-fault-not-aborted", "postlaunch/reread-fault-not-aborted",
+        "postlaunch/complete-lost-not-aborted", "postlaunch/foreign-txn-not-escaped",
+        "postlaunch/reread-guarded", "postlaunch/indeterminate-not-aborted",
+        "postcommit/complete-unconfirmed-not-promoted", "postlaunch/helper-failure-not-aborted",
+        "postlaunch/nested-failure-not-aborted", "cleanup/diagnostic-call-not-escaped")),
+    (0, "aborted", ("postlaunch/rollback-still-aborted",)),
+    (1, "aborted", (
+        "postcommit/complete-unconfirmed-reapply-refused", "postlaunch/interrupt-retains-lock",
+        "postlaunch/exit-retains-lock", "postlaunch/interrupting-format-retains-lock")),
+    (1, "noop_already_complete", (
+        "cleanup/root-close-call-not-aborted", "cleanup/root-close-call-diagnostic-not-aborted")),
+):
+    for _identity in _identities:
+        _REVERT_ASSERTED[_identity] = ((_call, "returned"), (_call, "outcome=" + _outcome))
+        if _identity in _GUARD_EXECUTION:
+            _REVERT_ASSERTED[_identity + "/isolated"] = _REVERT_ASSERTED[_identity]
 
 
 def _revert_trace(module, key, identity, trace):
@@ -3397,40 +3465,71 @@ def _revert_trace(module, key, identity, trace):
     return patch.object(module, method, observed)
 
 
-def _revert_boolean_witness(identity, baseline, mutant, safety):
-    """Require a measured flip for safety; missing calls/checks are not Boolean flips."""
+def _revert_boolean_witness(identity, baseline, mutant, safety, asserted):
+    """Require a flip inside the declared outcome set; missing calls/checks are not flips."""
+    if (not isinstance(asserted, tuple) or not asserted
+            or any(not isinstance(item, tuple) or len(item) != 2
+                   or not (item[0] is None or type(item[0]) is int and item[0] >= 0)
+                   or not isinstance(item[1], str) or not item[1] for item in asserted)
+            or len(set(asserted)) != len(asserted)):
+        raise RuntimeError("malformed asserted outcome set: " + identity)
     for trace in (baseline, mutant):
         if any(type(bit) is not bool for call in trace for bit in call.values()):
             raise RuntimeError("non-Boolean outcome evidence: " + identity)
-    flips = ["{}:{}".format(index, cid)
-             for index, (before, after) in enumerate(zip(baseline, mutant))
-             for cid in sorted(before.keys() & after.keys()) if before[cid] is not after[cid]]
-    if safety and not flips:
-        raise RuntimeError("safety row has no Boolean outcome flip: " + identity)
-    return flips
+    if any(not any((ordinal is None or ordinal == index) and cid in call
+                   for index, call in enumerate(baseline)) for ordinal, cid in asserted):
+        raise RuntimeError("unobserved asserted outcome: " + identity)
+    changed = [(index, cid, before[cid], after[cid])
+               for index, (before, after) in enumerate(zip(baseline, mutant))
+               for cid in sorted(before.keys() & after.keys()) if before[cid] is not after[cid]]
+    flips = ["{}:{}:{}->{}".format(*item) for item in changed]
+    witnesses = [flip for flip, (index, cid, _before, _after) in zip(flips, changed)
+                 if (index, cid) in asserted or (None, cid) in asserted]
+    if safety and not witnesses:
+        raise RuntimeError("safety row has no asserted Boolean outcome flip: {}; all_flips={}".format(
+            identity, ",".join(flips) or "none"))
+    return flips, witnesses
 
 
 def _t_revert_boolean_guard(_base, check):
     """Negative controls use the same observer and refusing gate as the real mutation harness."""
     from types import SimpleNamespace
     traces = []
-    for ok, detail in ((False, "guard diagnostic"), (False, "different diagnostic"), (True, "different diagnostic")):
-        module = SimpleNamespace(EXPECTED_CHECKS=("check",),
-                                 check_staged_run=lambda: {"check": (ok, detail)})
+    asserted = ((0, "check"),)
+    for ok, unrelated, detail in ((False, False, "guard diagnostic"),
+                                  (False, False, "different diagnostic"),
+                                  (True, False, "different diagnostic"),
+                                  (False, True, "different diagnostic")):
+        module = SimpleNamespace(EXPECTED_CHECKS=("check", "unrelated"),
+                                 check_staged_run=lambda: {"check": (ok, detail),
+                                                          "unrelated": (unrelated, "other check")})
         trace = []
         with _revert_trace(module, "gate", "control", trace):
             module.check_staged_run()
         traces.append(trace)
-    check("Boolean-flip-control", bool(_revert_boolean_witness("control", traces[0], traces[2], True)))
-    for label, mutant in (("diagnostic-only", traces[1]), ("missing", []),
+    check("Boolean-flip-control", bool(_revert_boolean_witness(
+        "control", traces[0], traces[2], True, asserted)[1]))
+    for label, mutant in (("diagnostic-only", traces[1]), ("incidental-only", traces[3]),
+                          ("wrong-call", traces[0] + traces[2]), ("missing", []),
                           ("missing-check", [{}]), ("non-Boolean", [{"check": 0}])):
         refused = False
         try:
-            _revert_boolean_witness("control", traces[0], mutant, True)
+            _revert_boolean_witness("control", traces[0], mutant, True, asserted)
+        except RuntimeError as exc:
+            refused = True
+            if label == "incidental-only":
+                check("Boolean-incidental-flip-reported", "0:unrelated:False->True" in str(exc))
+                print("BOOLEAN NEGATIVE CONTROL:", exc)
+        check("Boolean-refuses-" + label, refused)
+    check("Boolean-guard-execution", not _revert_boolean_witness(
+        "control", traces[0], traces[1], False, asserted)[1])
+    for declaration in ((), ((0, "absent"),), ((1, "check"),), ((True, "check"),)):
+        refused = False
+        try:
+            _revert_boolean_witness("control", traces[0], traces[2], True, declaration)
         except RuntimeError:
             refused = True
-        check("Boolean-refuses-" + label, refused)
-    check("Boolean-guard-execution", not _revert_boolean_witness("control", traces[0], traces[1], False))
+        check("Boolean-refuses-declaration-" + repr(declaration), refused)
     for bad in ({}, {"check": (0, "diagnostic")}, {"check": False}):
         module = SimpleNamespace(EXPECTED_CHECKS=("check",), check_staged_run=lambda: bad)
         refused = False
@@ -3447,7 +3546,7 @@ TESTS += (("revert-boolean-guard", _t_revert_boolean_guard),)
 
 def _red_on_revert():
     """Run the discriminators in a private temporary tree. Return 0 when every guard reverts to RED and
-    restores to PASS; refuse a safety row without a Boolean flip, a survived reversal, a wrong assertion,
+    restores to PASS; refuse a safety row without an asserted Boolean flip, a survived reversal, a wrong assertion,
     or a non-unique mutation target."""
     import shutil
     import tempfile
@@ -3461,6 +3560,13 @@ def _red_on_revert():
     if (not _GUARD_EXECUTION <= set(ids)
             or any(i + "/isolated" not in ids or i + "/isolated" in _GUARD_EXECUTION for i in _GUARD_EXECUTION)):
         raise RuntimeError("a guard-execution row is undeclared or has no /isolated safety row")
+    rows = {row[0]: row for row in _DISCRIMINATORS}
+    if set(_REVERT_ASSERTED) != set(ids):
+        raise RuntimeError("asserted outcome declarations differ from discriminator registry")
+    for identity in _GUARD_EXECUTION:
+        parent, isolated = rows[identity], rows[identity + "/isolated"]
+        if (parent[1], parent[3], parent[4]) != (isolated[1], isolated[3], isolated[4]):
+            raise RuntimeError("isolated row has a different mutation target: " + identity)
     base = Path(tempfile.mkdtemp(prefix="opf-ingest-apply-revert-")).resolve()
     ran, classes = [], dict(safety=0, guard_execution=0)
     try:
@@ -3505,7 +3611,9 @@ def _red_on_revert():
             finally:
                 sys.modules.pop(mutant.__name__, None)
             kind = "guard-execution" if identity in _GUARD_EXECUTION else "safety"
-            flips = _revert_boolean_witness(identity, baseline_bits, mutant_bits, kind == "safety")
+            asserted = _REVERT_ASSERTED[identity]
+            flips, witnesses = _revert_boolean_witness(
+                identity, baseline_bits, mutant_bits, kind == "safety", asserted)
             restored = _load_revert_candidate(source, "_revert_restored_{}".format(number), file_path)
             try:
                 restored_bits = []
@@ -3519,7 +3627,9 @@ def _red_on_revert():
             print("RED-ON-REVERT", identity, "assertion=" + identity, "class=" + kind,
                   "baseline=" + ("stripped:" + "+".join(strips) if strips else "pristine"), "restored=PASS",
                   "boolean_flip=" + ("yes" if flips else "no"),
-                  "boolean_witness=" + (flips[0] if flips else "none"), "candidate_sha256=" + digest)
+                  "asserted=" + ",".join("{}:{}".format("*" if i is None else i, cid) for i, cid in asserted),
+                  "boolean_flips=" + (",".join(flips) or "none"),
+                  "boolean_witness=" + (",".join(witnesses) or "none"), "candidate_sha256=" + digest)
             ran.append(identity)
     finally:
         shutil.rmtree(str(base), ignore_errors=True)
