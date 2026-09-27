@@ -443,6 +443,37 @@ def _journal_binds_record(jfd, txn, txn_bytes, run_id, txn_rel):
     return ""
 
 
+def _bind_run_name(fd, name):
+    """B1: bind the run's identity name to its descriptor. Every store-relative location and record path is
+    built from the supplied path's final component, which is the opened directory's own entry only when the
+    kernel resolved that component itself: a "/." or trailing "/" suffix moves O_NOFOLLOW off a symlink, so
+    `link/.` opens the link's target under the link's name. The name is admitted only when the opened
+    directory's physical parent (`..` from the descriptor, O_NOFOLLOW) holds an entry of exactly that name
+    which, classified no-follow, is a directory with the descriptor's (st_dev, st_ino). An empty, ".", or ".."
+    name, an absent entry, another object, or a parent that cannot be opened or classified is a _GateError
+    (CANNOT-EVALUATE): the run is never graded under a name that is not its own entry."""
+    if name in ("", ".", ".."):
+        raise _GateError("the staged run dir path ends in no directory entry name ({!r}); spell the run dir "
+                         "by its own entry name".format(name))
+    try:
+        run = os.fstat(fd)
+        parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+    except (OSError, ValueError) as exc:
+        raise _GateError("cannot open the staged run dir's parent no-follow to bind its name ({})".format(exc))
+    try:
+        entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        entry = None
+    except (OSError, ValueError) as exc:
+        raise _GateError("cannot classify the staged run dir's entry {!r} no-follow ({})".format(name, exc))
+    finally:
+        os.close(parent)
+    if (entry is None or not stat.S_ISDIR(entry.st_mode)
+            or (entry.st_dev, entry.st_ino) != (run.st_dev, run.st_ino)):
+        raise _GateError("the staged run dir's spelled name {!r} is not its own directory entry (a symlink "
+                         "reached through a '/.' or trailing '/' spelling, or a renamed run)".format(name))
+
+
 class _RunDir:
     """A-M1/A-M2: the SUPPLIED staged run directory, opened ONCE no-follow as a directory descriptor, its
     entries CLASSIFIED FIRST by a fail-closed no-follow listing (`tree`: relpath -> "file" / "dir" / "other"),
@@ -451,22 +482,45 @@ class _RunDir:
     O_NOFOLLOW | O_NONBLOCK, validated S_ISREG on the opened descriptor before a byte is read, capped). So
     a FIFO, device, socket, or symlink standing in for an artefact is a located _GateError, never a hang or
     a followed link, and every check reads the SAME directory the classification observed (never a
-    reconstructed conventional path: whether the run is an ingest run is decided from THIS listing)."""
+    reconstructed conventional path: whether the run is an ingest run is decided from THIS listing).
+
+    The run's identity name is bound to the descriptor (_bind_run_name) before anything is read, and its store
+    binding is classified ONCE, here, and retained for the whole grading (_classify_run_homes; every later
+    store lookup is a duplicate of the retained descriptor, re-verified by _registered_run_store_fd). A
+    classification failure is retained too, so every store-dependent check reports the same error while the
+    staged-data checks still grade the listing."""
 
     def __init__(self, run_dir):
         self.path = Path(run_dir)
+        # The exact string opened below, which _spelled_route re-resolves to establish home provenance.
+        self.spelling = str(run_dir)
+        # The spelled final component, admitted by _bind_run_name only as the opened directory's own entry.
+        # `path.name` is the same string, so every `rd.path.name` / `run_dir.name` reader reads the bound name.
+        self.name = self.path.name
+        self.home_binding = None
+        self.home_error = None
         try:
-            self.fd = os.open(str(run_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            self.fd = os.open(self.spelling, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except (OSError, ValueError) as exc:
             raise _GateError("cannot open the staged run dir no-follow ({})".format(exc))
         try:
+            _bind_run_name(self.fd, self.name)
             self.tree = _list_run_tree(self.fd)
+            try:
+                self.home_binding = _classify_run_homes(self)
+            except Exception as exc:  # noqa: BLE001 - retained; each store-dependent check fails closed on it
+                self.home_error = exc
         except BaseException:
-            os.close(self.fd)
+            self.close()
             raise
 
     def close(self):
-        os.close(self.fd)
+        try:
+            for fd in (self.home_binding or {}).values():
+                os.close(fd)
+        finally:
+            self.home_binding = None
+            os.close(self.fd)
 
     def kind(self, rel):
         """The classified kind of a run-relative entry ("file" / "dir" / "other"), or None when absent."""
@@ -1558,47 +1612,193 @@ def _gate_homes(homes):
     return homes
 
 
-def _registered_run_store_fd(rd, generation):
-    """The store root whose `generation` run home IS the opened run directory, or None when no such home is.
-    Identity is descriptor-bound, never read from the supplied spelling: for each location the shared
-    constructor (_opf_import._import_run_locations) registers, the candidate store root is the run
-    descriptor's parent at that location's depth (`..` resolved by the kernel from rd.fd, so a dotdot,
-    relative, or ancestor-symlink spelling binds the same physical ancestry), the location is walked
-    no-follow beneath it, and the walked directory must be the opened run by (st_dev, st_ino). Only an absent
-    component reads as no match; an ancestor or component that cannot be opened (a symlink, a non-directory,
-    EACCES) raises, so identity that cannot be established is never classified as detached. The spelling
-    never admits: a path that spells a registered home its descriptor ancestry does not hold (a symlinked
-    store component) refuses. Residual: a mount that re-roots the run's ancestry (a bind mount) is classified
-    by the mounted ancestry, which is the only ancestry its descriptor has."""
-    import _journal
-    import _opf_import as imp
-    run = os.fstat(rd.fd)
-    locations = imp._import_run_locations(rd.path.name, generation)
-    for rel in locations:
-        fd = os.open("/".join([".."] * len(rel.split("/"))), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                     dir_fd=rd.fd)
-        try:
+def _fd_identity(fd):
+    st = os.fstat(fd)
+    return st.st_dev, st.st_ino
+
+
+def _physical_home(rd, rel):
+    """The opened run's physical ancestor at the depth of the registered location `rel`, as a descriptor the
+    caller closes, when every component of `rel` names that ancestry no-follow: walking UPWARD from the run
+    descriptor (`..`, O_NOFOLLOW), each ancestor must hold the corresponding component as an entry that,
+    classified no-follow, is a directory whose (st_dev, st_ino) is the level below. None when some component
+    does not (absent, a symlink, a non-directory, or another directory): this location does not hold the run.
+    Nothing beneath a candidate root the run does not descend from is ever walked, so an unrelated obstruction
+    (a `<store>/.working/.working` file met by the legacy candidate of a staging run) is never fatal. The run's
+    own entry is bound (_bind_run_name), so a final component that no longer names the run is a _GateError,
+    never "not here"; an ancestor that cannot be opened or classified raises, being the run's own route."""
+    cur = os.dup(rd.fd)
+    try:
+        for depth, comp in enumerate(reversed(rel.split("/"))):
+            below = _fd_identity(cur)
+            parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
+            os.close(cur)
+            cur = parent
             try:
-                check_fd = _journal._open_dir_contained(fd, rel)
+                entry = os.stat(comp, dir_fd=cur, follow_symlinks=False)
             except FileNotFoundError:
-                check_fd = None
-            if check_fd is not None:
+                entry = None
+            if entry is None or not stat.S_ISDIR(entry.st_mode) or (entry.st_dev, entry.st_ino) != below:
+                if depth == 0:
+                    raise _GateError("the bound run name {!r} no longer names the opened run directory (renamed "
+                                     "or replaced during grading); fail-closed, never classified as "
+                                     "detached".format(comp))
+                return None
+        found, cur = cur, None
+        return found
+    finally:
+        if cur is not None:
+            os.close(cur)
+
+
+# The kernel's own bound on the symbolic links one path resolution follows (Linux MAXSYMLINKS, ELOOP beyond).
+_ROUTE_SYMLINK_LIMIT = 40
+
+
+def _spelled_route(rd, visit):
+    """Re-resolve the SUPPLIED spelling (rd.spelling, the exact string _RunDir opened) in user space,
+    descriptor-bound, calling visit(dir_fd) at every directory its resolution passes through, including each
+    directory a followed symlink sits in. Each component is classified no-follow beneath the current
+    descriptor: a directory is opened O_DIRECTORY | O_NOFOLLOW, `..` is taken from the current descriptor as
+    the kernel takes it, and a symlink is expanded in place (an absolute target restarts at "/"), at most
+    _ROUTE_SYMLINK_LIMIT times. The resolution must end at the opened run by (st_dev, st_ino). A component that
+    no longer resolves, a non-directory, too many links, or a different final directory is a _GateError: the
+    spelling changed since the run was opened, so its provenance cannot be established."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    pending = rd.spelling.split("/")
+    expanded = 0
+    try:
+        cur = os.open("/" if rd.spelling.startswith("/") else ".", flags)
+    except OSError as exc:
+        raise _GateError("cannot open the supplied run path's starting directory ({})".format(exc))
+    try:
+        visit(cur)
+        while pending:
+            comp = pending.pop(0)
+            if comp in ("", "."):
+                continue
+            if comp != "..":
+                st = os.stat(comp, dir_fd=cur, follow_symlinks=False)
+                if stat.S_ISLNK(st.st_mode):
+                    expanded += 1
+                    if expanded > _ROUTE_SYMLINK_LIMIT:
+                        raise _GateError("the supplied run path follows more than {} symbolic links".format(
+                            _ROUTE_SYMLINK_LIMIT))
+                    target = os.readlink(comp, dir_fd=cur)
+                    pending[:0] = target.split("/")
+                    if target.startswith("/"):
+                        nfd = os.open("/", flags)
+                        os.close(cur)
+                        cur = nfd
+                        visit(cur)
+                    continue
+            nfd = os.open(comp, flags, dir_fd=cur)
+            os.close(cur)
+            cur = nfd
+            visit(cur)
+        if _fd_identity(cur) != _fd_identity(rd.fd):
+            raise _GateError("the supplied run path no longer resolves to the opened run directory (changed "
+                             "during grading); its home provenance cannot be established")
+    except (OSError, ValueError) as exc:
+        raise _GateError("the supplied run path's route cannot be re-resolved no-follow ({}); its home "
+                         "provenance cannot be established".format(exc))
+    finally:
+        os.close(cur)
+
+
+def _classify_run_homes(rd):
+    """Classify the opened run's store binding: {registered location: store-root descriptor} (the caller
+    closes them) for every location, of every generation the shared constructor
+    (_opf_import._import_run_locations) registers, that PHYSICALLY holds the run (_physical_home). Provenance is
+    descriptor-bound, never read from the spelling's suffix: the supplied spelling's own route is re-resolved
+    (_spelled_route) and, at every directory it passes through, each location is resolved as a string-path
+    consumer resolves it (following symlinks). A directory whose location reaches the opened run by identity
+    without being the physical store root holding that location puts a symlink on the home route, which
+    refuses (a _GateError) whatever the spelling: canonical, dotdot, "/.", trailing "/", relative, or through
+    an ancestor symlink. That string-path probe is SPECULATIVE (a directory the spelling merely passes through
+    may carry anything beneath it), so a probe that cannot resolve (absent, ENOTDIR, EACCES, ELOOP) is no
+    match and never fatal; only the run's own established route (_bind_run_name, _physical_home, the
+    spelling's own resolution) fails closed. A symlink on the route to the store ROOT, above every registered
+    component, is not on the home route and binds the physical store."""
+    import _opf_import as imp
+    run = _fd_identity(rd.fd)
+    rels = []
+    for generation in (1, 2):
+        for rel in imp._import_run_locations(rd.name, generation):
+            if rel not in rels:
+                rels.append(rel)
+    held = {}
+    try:
+        for rel in rels:
+            fd = _physical_home(rd, rel)
+            if fd is not None:
+                held[rel] = fd
+        roots = {rel: _fd_identity(fd) for rel, fd in held.items()}
+
+        def visit(dfd):
+            for rel in rels:
                 try:
-                    home = os.fstat(check_fd)
-                finally:
-                    os.close(check_fd)
-                if (home.st_dev, home.st_ino) == (run.st_dev, run.st_ino):
-                    return fd
-        except BaseException:
+                    st = os.stat(rel, dir_fd=dfd)
+                except (OSError, ValueError):
+                    continue
+                if (st.st_dev, st.st_ino) == run and roots.get(rel) != _fd_identity(dfd):
+                    raise _GateError("run path reaches the registered home {!r} through a symlink its "
+                                     "descriptor ancestry does not hold".format(rel))
+
+        _spelled_route(rd, visit)
+    except BaseException:
+        for fd in held.values():
             os.close(fd)
-            raise
-        os.close(fd)
-    for rel in locations:
-        parts = tuple(rel.split("/"))
-        if rd.path.parts[-len(parts):] == parts:
-            raise _GateError("run path spells the registered home {!r}, which its descriptor ancestry does "
-                             "not hold".format(rel))
-    return None
+        raise
+    return held
+
+
+def _retained_homes(rd, fresh):
+    """The binding the run's first classification retained (rd.home_binding), once a fresh classification is
+    shown to find the same locations at the same store roots. A home missing or mismatched since (the run
+    renamed to a sibling, a store component renamed or replaced) is a _GateError, never a re-read."""
+    def ids(homes):
+        return {rel: _fd_identity(fd) for rel, fd in homes.items()}
+    if ids(fresh) != ids(rd.home_binding):
+        raise _GateError("the run's registered home changed during grading (the run or a store component was "
+                         "renamed or replaced); fail-closed, never re-read as detached")
+    return rd.home_binding
+
+
+def _registered_run_store_fd(rd, generation):
+    """The store root whose `generation` run home IS the opened run directory, or None when no such home is,
+    from the classification _RunDir retained when the run was opened (_classify_run_homes). Every descriptor
+    returned is a duplicate of the RETAINED store root, and each call first re-classifies and requires the
+    same binding (_retained_homes): a home later missing or mismatched refuses, so a rename during grading
+    never downgrades a registered run to the detached fallback, and no check reads a store other than the one
+    the run was classified under. A retained classification failure is re-raised at every call.
+    Residuals (disclose-guard-residuals):
+    - M1, concurrent rename: the classification is a sequence of descriptor-relative steps, not one atomic
+      observation. A store component renamed while the FIRST classification runs, and restored before any
+      re-classification, can classify a registered run by the renamed ancestry (detached). A rename that
+      persists through the whole grading leaves the run physically detached: a spelling through the renamed
+      component then fails to resolve (refused), while a physical or relative spelling classifies it detached,
+      its physical state. Every window after the first classification is closed by the retained binding, and
+      no read is re-resolved from a path.
+    - A registered home that is itself a symlink, graded by a spelling that never passes through the symlink
+      (the run's physical path, or a relative path from a working directory already inside the symlink's
+      target), is physically outside every store: no descriptor the gate holds records the symlink, so the
+      run is classified detached (the detached-fallback residual of _staged_run_store_fd).
+    - A mount that re-roots the run's ancestry (a bind mount) is classified by the mounted ancestry, which is
+      the only ancestry its descriptor has."""
+    import _opf_import as imp
+    if rd.home_binding is None:
+        raise rd.home_error or _GateError("the run's store binding was never classified")
+    fresh = _classify_run_homes(rd)
+    try:
+        bound = _retained_homes(rd, fresh)
+        for rel in imp._import_run_locations(rd.name, generation):
+            if rel in bound:
+                return os.dup(bound[rel])
+        return None
+    finally:
+        for fd in fresh.values():
+            os.close(fd)
 
 
 def _ingest_store_fd(rd, homes=None):
@@ -1618,7 +1818,12 @@ def _staged_run_store_fd(rd, homes):
     run (.working/staging/<kind>/<run-id>) reads its store four levels up, whatever path spells it. A run
     that a home registered in another generation holds refuses; only a detached copy that no generation's
     run home holds by identity keeps the legacy three-up parent, which is bound to no store (disclosed
-    residual)."""
+    residual). M2: classification walks only the run's own physical ancestry and probes registered
+    locations speculatively beneath the directories the supplied spelling passes through, so an unrelated
+    obstruction (a `.working` that is a file, a symlink, or unreadable, beside or above the run) never refuses
+    a detached copy. A detached copy IS refused when its own ancestry, up to the deepest registered location
+    (four levels), cannot be opened or classified, or when its spelling cannot be re-resolved: provenance that
+    cannot be established is never classified as detached."""
     fd = _ingest_store_fd(rd, homes)
     if fd is None:
         # Enumerate the constructor's registered generations, including inactive ones: using
@@ -2736,14 +2941,21 @@ def _self_test_gate_generation_transaction_cases():
         os.mkfifo(str(path))
 
     def store_root_unopenable(run, store):
+        # The store root is reached upward from the run one `..` at a time (_physical_home) or, for a detached
+        # copy, by the multi-level fallback; both refuse once the open would yield the store root.
         real_open = os.open
+        root = os.stat(str(store))
         parents = {"/".join([".."] * len(rel.split("/")))
                    for rel in imp._import_run_locations(run.name, 2)}
 
         def refuse(path, *args, **kwargs):
             if path in parents:
                 raise OSError("store root unavailable (injected)")
-            return real_open(path, *args, **kwargs)
+            fd = real_open(path, *args, **kwargs)
+            if path == ".." and _fd_identity(fd) == (root.st_dev, root.st_ino):
+                os.close(fd)
+                raise OSError("store root unavailable (injected)")
+            return fd
         return patch.object(os, "open", side_effect=refuse)
 
     def rehash(run, store):
@@ -4367,18 +4579,137 @@ def _self_test():
             staging = alias_root / imp._opf_store.STAGING_REL
             os.rename(str(staging), str(elsewhere))
             os.symlink(str(elsewhere), str(staging))
-            spelled = ("cannot evaluate: cannot open the store root beneath the run dir no-follow (run path spells "
-                       "the registered home {!r}, which its descriptor ancestry does not hold)".format(
+            spelled = ("cannot evaluate: cannot open the store root beneath the run dir no-follow (run path reaches "
+                       "the registered home {!r} through a symlink its descriptor ancestry does not hold)".format(
                            imp._opf_store.stage_run(kind, alias_run.name)))
             expect("txn-alias-symlinked-staging-cannot-" + kind, all(
                 graded_as(alias_run, None, homes)[cid] == (False, spelled)
                 for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
+            # Flip (codex round-3 P1): a suffix-matched refusal lets every alias of the symlinked home through
+            # to the three-up fallback; provenance is the spelling's own descriptor-bound route instead.
+            for label, spelling in (("dotdot", alias_run / ".." / alias_run.name), ("dot", str(alias_run) + "/."),
+                                    ("slash", str(alias_run) + "/"), ("ancestor-symlink", link / alias_run.name)):
+                expect("txn-alias-symlinked-staging-{}-cannot-{}".format(label, kind), all(
+                    graded_as(spelling, None, homes)[cid] == (False, spelled)
+                    for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
             detached = base / "alias-detached-{}".format(kind) / "d" / alias_run.name
             detached.parent.mkdir(parents=True)
             os.rename(str(elsewhere / kind / alias_run.name), str(detached))
             expect("txn-alias-detached-" + kind, all(
                 graded_as(detached, None, homes)[cid] == (True, "no transaction record (run not yet applied)")
                 for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
+
+        # Round 3 (B1, codex P1 and P2): every case at both staging kinds and both generations, in its own
+        # scope so no name leaks into the cases below.
+        def round_3_cases():
+            def graded_in(root, spelling, homes, cwd=None):
+                cwd_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    if cwd is not None:
+                        os.chdir(str(cwd))
+                    if homes == 1:
+                        return check_staged_run(spelling, homes=1)
+                    with imp._self_test_homes2_active(root):
+                        return check_staged_run(spelling, homes=2)
+                finally:
+                    os.fchdir(cwd_fd)
+                    os.close(cwd_fd)
+
+            def staged_run(kind, corrupt=True):
+                root, _machine = build_store({})
+                run = _self_test_gate_generation_disk(root, "accepted", location=kind)
+                if corrupt:
+                    record = root / imp.IMPORT_OPS_REL / run.name / imp.TRANSACTION_NAME
+                    record.parent.mkdir(parents=True)
+                    record.write_bytes(b"state =\n")
+                return root, run
+
+            def located(detail):
+                return "cannot evaluate: cannot open the store root beneath the run dir no-follow ({})".format(detail)
+
+            this = sys.modules[__name__]
+            real_store_fd, real_tree = _staged_run_store_fd, _list_run_tree
+            for kind in ("import", "ingest"):
+                # Flip (B1): building locations from the spelled name grades a renamed registered run, spelled
+                # `link/.` or `link/`, as detached under the link's name; the name is bound to the descriptor.
+                root, run = staged_run(kind)
+                moved = run.parent / "renamed"
+                os.rename(str(run), str(moved))
+                link = base / "decoupled-{}".format(kind) / run.name
+                link.parent.mkdir()
+                os.symlink(str(moved), str(link))
+                unbound = ("cannot evaluate: the staged run dir's spelled name {!r} is not its own directory entry "
+                           "(a symlink reached through a '/.' or trailing '/' spelling, or a renamed run)".format(
+                               run.name))
+                expect("txn-alias-decoupled-" + kind, all(
+                    graded_in(root, spelling, homes) == dict((cid, (False, unbound)) for cid in EXPECTED_CHECKS)
+                    for spelling in (str(link) + "/.", str(link) + "/") for homes in (1, 2)))
+                # Flip (codex P2): walking the legacy candidate beneath <store>/.working meets an unrelated
+                # .working/.working file and refuses the canonical staging run; only the run's own route is fatal.
+                root, run = staged_run(kind, corrupt=False)
+                (root / ".working" / ".working").write_bytes(b"unrelated\n")
+                clean, legacy = graded_in(root, run, 2), graded_in(root, run, 1)
+                expect("txn-unrelated-working-file-" + kind,
+                       set(clean) == set(EXPECTED_CHECKS) and all(ok for ok, _d in clean.values())
+                       and all(legacy[cid] == (False, mismatch) for cid in _TRANSACTION_CHECKS))
+                # M2: the same obstruction three levels above a detached copy never refuses it either.
+                detached = base / "detached-obstructed-{}".format(kind) / "a" / "b" / run.name
+                shutil.copytree(str(run), str(detached))
+                (detached.parents[2] / ".working").write_bytes(b"unrelated\n")
+                expect("txn-detached-unrelated-working-file-" + kind, all(
+                    graded_in(root, detached, homes)[cid] == (True, "no transaction record (run not yet applied)")
+                    for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
+                # Flip (codex P1 #2): a run renamed to a sibling at the transaction lookup, an empty directory at
+                # its former name, re-classifies as detached; its own bound entry no longer naming it refuses.
+                root, run = staged_run(kind)
+                renamed = located("the bound run name {!r} no longer names the opened run directory (renamed or "
+                                  "replaced during grading); fail-closed, never classified as detached".format(
+                                      run.name))
+
+                def renaming(rd, homes, run=run):
+                    os.rename(str(run), str(run.parent / "moved"))
+                    run.mkdir()
+                    return real_store_fd(rd, homes)
+                outcomes = []
+                for homes in (1, 2):
+                    with unittest.mock.patch.object(this, "_staged_run_store_fd", side_effect=renaming):
+                        result = graded_in(root, run / ".." / run.name, homes)
+                    run.rmdir()
+                    os.rename(str(run.parent / "moved"), str(run))
+                    outcomes.append(all(result[cid] == (False, renamed) for cid in _TRANSACTION_CHECKS))
+                expect("txn-rename-at-lookup-" + kind, all(outcomes))
+
+                # The same run renamed before its first classification, a symlink left at its bound name.
+                def swapping(fd, run=run):
+                    os.rename(str(run), str(run.parent / "moved"))
+                    os.symlink("moved", str(run))
+                    return real_tree(fd)
+                outcomes = []
+                for homes in (1, 2):
+                    with unittest.mock.patch.object(this, "_list_run_tree", side_effect=swapping):
+                        result = graded_in(root, run.name + "/.", homes, cwd=run.parent)
+                    run.unlink()
+                    os.rename(str(run.parent / "moved"), str(run))
+                    outcomes.append(all(result[cid] == (False, renamed) for cid in _TRANSACTION_CHECKS))
+                expect("txn-rename-before-classification-" + kind, all(outcomes))
+                # Flip (codex P1 #2, retained binding): a store component renamed at the lookup leaves a relative
+                # spelling resolvable and the run physically unregistered; the retained binding refuses the change.
+                staging = root / imp._opf_store.STAGING_REL
+                changed = located("the run's registered home changed during grading (the run or a store component "
+                                  "was renamed or replaced); fail-closed, never re-read as detached")
+
+                def moving(rd, homes, staging=staging):
+                    os.rename(str(staging), str(staging.parent / "moved"))
+                    return real_store_fd(rd, homes)
+                outcomes = []
+                for homes in (1, 2):
+                    with unittest.mock.patch.object(this, "_staged_run_store_fd", side_effect=moving):
+                        result = graded_in(root, Path(run.name), homes, cwd=run.parent)
+                    os.rename(str(staging.parent / "moved"), str(staging))
+                    outcomes.append(all(result[cid] == (False, changed) for cid in _TRANSACTION_CHECKS))
+                expect("txn-home-retained-" + kind, all(outcomes))
+
+        round_3_cases()
         # Flip: a _gate_homes that returns its input unvalidated admits each malformed generation.
         with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
             refused = []

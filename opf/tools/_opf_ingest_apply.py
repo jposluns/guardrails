@@ -2006,7 +2006,7 @@ def _d_staging_generation_mismatch(kind):
 def _d_staging_alias(kind):
     """An alias of a registered run (a dotdot, relative, or ancestor-symlink spelling) is located by descriptor
     identity: it refuses the generation mismatch, reads the true store-root record, and ignores a .working decoy.
-    Restoring the literal-suffix locator sends every alias to the three-up fallback."""
+    Restoring a literal-suffix match on the physical walk loses every alias's located home."""
     def test(module, base_dir):
         from unittest.mock import patch
         root, rid, run = _st_build(base_dir, "staging-alias-" + kind)
@@ -2041,6 +2041,160 @@ def _d_staging_alias(kind):
                 outcomes.append(located["transaction-schema"][0] is (corrupt is decoy))
             corrupt.unlink()
         _revert_check(all(outcomes), "gate/staging-alias/" + kind)
+    return test
+
+
+_ST_TXN = ("transaction-schema", "transaction-consistency")
+
+
+def _st_staged(base_dir, name, kind, corrupt=True):
+    """An _st_build run moved to its `kind` staging home, beside a corrupt store-root transaction record when
+    `corrupt`. Returns (root, rid, staged)."""
+    root, rid, run = _st_build(base_dir, name)
+    staged = root / _opf_store.stage_run(kind, rid)
+    staged.parent.mkdir(parents=True)
+    run.rename(staged)
+    if corrupt:
+        record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        record.parent.mkdir(parents=True)
+        record.write_bytes(b"state =\n")
+    return root, rid, staged
+
+
+def _st_graded(module, root, spelling, homes, cwd=None):
+    """The candidate gate's verdict on `spelling` (from `cwd` when given) under homes generation `homes`."""
+    from unittest.mock import patch
+    cwd_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if cwd is not None:
+            os.chdir(str(cwd))
+        if homes == 1:
+            with patch.object(_opf_store, "SUPPORTED_HOMES", 1):
+                return module.check_staged_run(spelling, homes=1)
+        with _opf_import._self_test_homes2_active(root):
+            return module.check_staged_run(spelling, homes=2)
+    finally:
+        os.fchdir(cwd_fd)
+        os.close(cwd_fd)
+
+
+def _st_located(detail):
+    return "cannot evaluate: cannot open the store root beneath the run dir no-follow ({})".format(detail)
+
+
+def _d_run_name_bound(kind):
+    """A registered run renamed to a non-run-id entry and spelled `link/.` or `link/` through a symlink named
+    as the run is refused whole (the spelled name is not its own entry). Removing the name binding grades the
+    staged checks under the link's name, so staged-run-structure passes a directory whose entry is no run id."""
+    def test(module, base_dir):
+        root, rid, staged = _st_staged(base_dir, "name-bound-" + kind, kind)
+        moved = staged.parent / "renamed"
+        staged.rename(moved)
+        link = base_dir / ("name-bound-link-" + kind) / rid
+        link.parent.mkdir()
+        link.symlink_to(moved)
+        unbound = ("cannot evaluate: the staged run dir's spelled name {!r} is not its own directory entry (a "
+                   "symlink reached through a '/.' or trailing '/' spelling, or a renamed run)".format(rid))
+        outcomes = [_st_graded(module, root, str(link) + suffix, homes) ==
+                    dict((cid, (False, unbound)) for cid in module.EXPECTED_CHECKS)
+                    for suffix in ("/.", "/") for homes in (1, 2)]
+        _revert_check(all(outcomes), "gate/run-name-bound/" + kind)
+    return test
+
+
+def _d_home_symlink_route(kind):
+    """A symlinked staging home refuses whatever the spelling (canonical, dotdot, "/.", trailing "/", an ancestor
+    symlink). Removing the spelled-route provenance probe grades each as detached, missing the corrupt record."""
+    def test(module, base_dir):
+        root, rid, staged = _st_staged(base_dir, "symlink-route-" + kind, kind)
+        link = base_dir / ("symlink-route-link-" + kind)
+        link.symlink_to(staged.parent)
+        staging = root / _opf_store.STAGING_REL
+        elsewhere = base_dir / ("symlink-route-elsewhere-" + kind)
+        staging.rename(elsewhere)
+        staging.symlink_to(elsewhere)
+        error = _st_located("run path reaches the registered home {!r} through a symlink its descriptor "
+                            "ancestry does not hold".format(_opf_store.stage_run(kind, rid)))
+        outcomes = []
+        for spelling in (staged, staged / ".." / rid, str(staged) + "/.", str(staged) + "/", link / rid):
+            for homes in (1, 2):
+                result = _st_graded(module, root, spelling, homes)
+                outcomes.append(all(result[cid] == (False, error) for cid in _ST_TXN))
+        _revert_check(all(outcomes), "gate/home-symlink-route/" + kind)
+    return test
+
+
+def _d_home_speculative(kind):
+    """An unrelated <store>/.working/.working file changes no result of a canonical staged run. Making a
+    speculative candidate's unresolvable probe fatal refuses the run on that obstruction."""
+    def test(module, base_dir):
+        root, _rid, staged = _st_staged(base_dir, "speculative-" + kind, kind, corrupt=False)
+        clean = [_st_graded(module, root, staged, homes) for homes in (1, 2)]
+        (root / ".working" / ".working").write_bytes(b"unrelated\n")
+        obstructed = [_st_graded(module, root, staged, homes) for homes in (1, 2)]
+        _revert_check(obstructed == clean, "gate/home-speculative/" + kind)
+    return test
+
+
+def _d_home_rename_at_lookup(kind):
+    """A run renamed to a sibling (an empty directory at its former name) at the transaction lookup, or before
+    its first classification (a symlink at its bound name), refuses on its own entry. Making that entry's
+    mismatch read as "not here" classifies the second schedule as detached, missing the corrupt record."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, staged = _st_staged(base_dir, "rename-lookup-" + kind, kind)
+        moved = staged.parent / "moved"
+        error = _st_located("the bound run name {!r} no longer names the opened run directory (renamed or "
+                            "replaced during grading); fail-closed, never classified as detached".format(rid))
+        real_store_fd, real_tree = module._staged_run_store_fd, module._list_run_tree
+
+        def renaming(rd, homes):
+            staged.rename(moved)
+            staged.mkdir()
+            return real_store_fd(rd, homes)
+
+        def swapping(fd):
+            staged.rename(moved)
+            staged.symlink_to("moved")
+            return real_tree(fd)
+        outcomes = []
+        for homes in (1, 2):
+            with patch.object(module, "_staged_run_store_fd", side_effect=renaming):
+                result = _st_graded(module, root, staged / ".." / rid, homes)
+            staged.rmdir()
+            moved.rename(staged)
+            outcomes.append(all(result[cid] == (False, error) for cid in _ST_TXN))
+            with patch.object(module, "_list_run_tree", side_effect=swapping):
+                result = _st_graded(module, root, rid + "/.", homes, cwd=staged.parent)
+            staged.unlink()
+            moved.rename(staged)
+            outcomes.append(all(result[cid] == (False, error) for cid in _ST_TXN))
+        _revert_check(all(outcomes), "gate/home-rename-at-lookup/" + kind)
+    return test
+
+
+def _d_home_retained(kind):
+    """A store component renamed at the transaction lookup leaves a relative spelling resolvable and the run
+    physically unregistered; the binding retained from the first classification refuses the change. Serving
+    the fresh classification instead downgrades the run to the detached fallback, missing the corrupt record."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, staged = _st_staged(base_dir, "retained-" + kind, kind)
+        staging = root / _opf_store.STAGING_REL
+        error = _st_located("the run's registered home changed during grading (the run or a store component was "
+                            "renamed or replaced); fail-closed, never re-read as detached")
+        real_store_fd = module._staged_run_store_fd
+
+        def moving(rd, homes):
+            staging.rename(staging.parent / "moved")
+            return real_store_fd(rd, homes)
+        outcomes = []
+        for homes in (1, 2):
+            with patch.object(module, "_staged_run_store_fd", side_effect=moving):
+                result = _st_graded(module, root, Path(rid), homes, cwd=staged.parent)
+            (staging.parent / "moved").rename(staging)
+            outcomes.append(all(result[cid] == (False, error) for cid in _ST_TXN))
+        _revert_check(all(outcomes), "gate/home-retained/" + kind)
     return test
 
 
@@ -2474,9 +2628,26 @@ _DISCRIMINATORS = tuple(
      "if other is not None:", "if False:")
     for kind in ("import", "ingest")) + tuple(
     ("gate/staging-alias/" + kind, "gate", _d_staging_alias(kind),
-     "    for rel in locations:\n        fd = os.open(",
-     '    for rel in locations:\n        if rd.path.parts[-len(rel.split("/")):] != tuple(rel.split("/")):\n'
-     "            continue\n        fd = os.open(")
+     "            fd = _physical_home(rd, rel)\n",
+     '            fd = _physical_home(rd, rel) if rd.path.parts[-len(rel.split("/")):] == tuple(rel.split("/")) '
+     "else None\n")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/run-name-bound/" + kind, "gate", _d_run_name_bound(kind),
+     "            _bind_run_name(self.fd, self.name)\n", "            pass  # reverted: _bind_run_name\n")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-symlink-route/" + kind, "gate", _d_home_symlink_route(kind),
+     "        _spelled_route(rd, visit)\n", "        pass  # reverted: _spelled_route(rd, visit)\n")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-speculative/" + kind, "gate", _d_home_speculative(kind),
+     "                except (OSError, ValueError):\n                    continue\n",
+     "                except FileNotFoundError:\n                    continue\n")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-rename-at-lookup/" + kind, "gate", _d_home_rename_at_lookup(kind),
+     '                if depth == 0:\n                    raise _GateError("the bound run name',
+     '                if False:\n                    raise _GateError("the bound run name')
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-retained/" + kind, "gate", _d_home_retained(kind),
+     "        bound = _retained_homes(rd, fresh)\n", "        bound = fresh\n")
     for kind in ("import", "ingest")) + (
     ("gate/transaction-generation-required", "gate", _d_transaction_generation_required,
      "if gen is None:\n        for cid in _TRANSACTION_CHECKS:\n            record(cid, False, gen_error)",
