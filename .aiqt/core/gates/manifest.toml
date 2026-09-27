@@ -366,6 +366,15 @@ class = "a"
 residue = "It checks version format and single-sourcing. It arguably serves the change-tracking discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here."
 
 [[gate]]
+id = "release-cut"
+script = "tools/check_release_cut.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "Checks declared root-changelog release transitions against local ancestry, deriving the protected ref from GITHUB_BASE_REF when set or origin/HEAD otherwise, and evaluating HEAD, index and working-file snapshots separately. Unresolved protected refs fail closed. PR/push event binding (part B) is not yet implemented; CI uses the local ancestry comparison. A matching declaration is author-controlled and does not prove authorization, readiness or semantic release scope. Other version sources, intermediate transitions inside a squash, atomicity of intermediate commits and freshness of unfetched remote refs remain outside coverage. Snapshots are sampled separately, so callers must exclude concurrent writers. Committed and index reads bypass checkout filters; transformed working files can cause refusal. Input-path submodules and symlinks are refused rather than traversed. Safe working-file traversal requires POSIX descriptor-relative no-follow operations. Enforcement depends on trusted executable provenance, gate code, repository configuration and protected-branch review."
+
+[[gate]]
 id = "version-monotonicity"
 script = "tools/check_version_monotonicity.py"
 rules = []
