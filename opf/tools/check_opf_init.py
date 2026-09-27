@@ -185,7 +185,7 @@ def _suite_isolated(invoke):
 
         def git_input(root, args, data):
             # A stdin-fed fixture git call (git update-index --index-info reads the index entry from
-            # stdin); _run_git has no stdin channel. Runs under _opf_observe._scrubbed_env (PATH and the
+            # stdin). Runs under _opf_observe._scrubbed_env (PATH and the
             # isolated HOME carried over, global/system config neutralized, and EVERY ambient GIT_* variable
             # dropped), so an inherited GIT_INDEX_FILE / GIT_DIR / GIT_WORK_TREE / GIT_OBJECT_DIRECTORY /
             # GIT_COMMON_DIR cannot redirect this write to a caller's external index or repository; it stays
