@@ -483,6 +483,33 @@ class = "a"
 residue = "It exercises the OPF core-tooling dispatcher (opf/tools/opf.py --self-test) end to end: it runs every registered helper self-test in order (the store, schema, release, and emitter helpers over synthetic stores) and the aggregator's own fail-closed return-vocabulary guard, under which a helper returning a bool, a float, or an out-of-range int fails the aggregate closed rather than reading as clean, and the worst outcome wins so one degraded helper is never masked by a later clean one. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative synthetic scenarios with exact exit-code matches, not each helper's whole input space; it now exercises the render, doctor, upgrade, and import verbs' dispatch and argument handling via the opf-cli routing leg (usage errors fail closed; render --check/--write forwards to the U4 engine over synthetic and non-adopter stores; doctor and upgrade resolve and route over synthetic and non-adopter stores; and import wires scan/plan/review/apply onto the U7 operation layer, an unresolved store failing cannot-evaluate, --scan writing nothing, --plan staging a run, --review capturing acceptance, and the deferred --apply stub failing cannot-evaluate mutating nothing), while the remaining store verbs (migrate, sync) stay recognized names that fail closed as not-yet-implemented until their unit lands; and it runs over synthetic stores rather than a real adopter --root, so it does not verify behaviour against a live product repository."
 
 [[gate]]
+id = "opf-import-direct-selftest"
+script = "opf/tools/_opf_import.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It runs _opf_import.py --self-test directly, exercising import operation-layer and staging invariants over synthetic stores through the module's own fixture-isolation entry point. It asserts representative returned verdicts and fixture state, not the import engine's whole input space or behaviour against a live adopter repository. It does not by itself prove isolation against every caller configuration or exercise the opf.py CLI routing. No undeniable linkage to a single corpus rule is claimed."
+
+[[gate]]
+id = "opf-ingest-direct-selftest"
+script = "opf/tools/_opf_ingest.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It runs _opf_ingest.py --self-test directly, exercising detection, worksheet validation, and planning invariants over synthetic stores through the module's own fixture-isolation entry point. It asserts representative verdicts and fixture state, not the ingest engine's whole input space, apply behaviour, or behaviour against a live adopter repository. Symlink cases may be skipped when the platform reports unsupported symlinks. It does not by itself prove isolation against every caller configuration or exercise the opf.py CLI routing. No undeniable linkage to a single corpus rule is claimed."
+
+[[gate]]
+id = "opf-observe-direct-selftest"
+script = "opf/tools/_opf_observe.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It runs _opf_observe.py --self-test directly, exercising returned observations over synthetic git repositories: tracked and untracked manifests, zero/one/multiple remotes, committed prior records and digests, unborn HEAD, a non-repository directory, and malformed prior TOML. Coverage is representative, not the observation layer's whole input space or behaviour against a live adopter repository; missing git produces a successful SKIP, so exit zero alone does not prove the git cases ran. It does not by itself prove isolation against every caller configuration or exercise the opf.py CLI routing. No undeniable linkage to a single corpus rule is claimed."
+
+[[gate]]
 id = "opf-drift"
 script = "opf/tools/check_opf_drift.py"
 rules = []
