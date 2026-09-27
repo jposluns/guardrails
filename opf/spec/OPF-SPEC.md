@@ -203,13 +203,18 @@ The owning writer or migration derives each inventory from the run's transaction
 receipt and publishes it exclusively with the retained bytes. An inventory is never rewritten, so
 a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is
 not a journal projection and remains available in a clone without journals.
+A phase inventory may be published in the same transaction as the base inventory to claim the
+promotion receipt without creating a receipt/inventory digest cycle.
 
 C-EVIDENCE-ENUM reconciles exact membership, directory structure, regular-file types, sizes and
 digests: every payload file under `.working/imported/` and `.working/archive/`, meaning every file
 other than a bundle-root inventory, is claimed by exactly one row, and every inventory is itself
 schema-checked against the shape above rather than claimed. Unlisted or unclaimed entries, a bundle
 without an inventory, and missing listed files are findings; unreadable or malformed inputs,
-including a path claimed twice, cannot evaluate. A phase inventory never substitutes for a missing
+including a path claimed twice, cannot evaluate. The recognized legacy format
+`opf.ingest.evidence-inventory/v1` is refused as the named `legacy-ingest-inventory` finding under
+C-EVIDENCE-ENUM, without migration or rewriting; completed-ingest replay cannot evaluate that bundle.
+A phase inventory never substitutes for a missing
 `inventory.toml`: such a bundle cannot evaluate. Deleting a whole bundle, inventory and payload
 together, is outside this local snapshot check; independent history is required to detect that
 loss. Inventories assert membership, not authenticated actor history. The contained reader's size

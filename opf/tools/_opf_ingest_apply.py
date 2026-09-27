@@ -476,7 +476,7 @@ def _staging_removals(root_fd, run_rel, frozen, ops):
 def _publication_ops(root_fd, machine_rel, run_rel, run_id, attempt, plan, frozen, live, reservation,
                      acc_raw, binding, roster, vendors):
     """ONE journaled publication, in dependency order: evidence, destinations, source removals, records
-    and manifest, evidence inventory, promotion receipt, then the terminal staging deletion."""
+    and manifest, base evidence inventory, promotion receipt and its phase inventory, then staging deletion."""
     ops = _Ops(root_fd)
     home = plan.evidence_home
     evidence = [(home + "/" + _opf_import.ACCEPTANCE_NAME, acc_raw)]
@@ -613,6 +613,8 @@ def _verify_completed(cap, root_fd, run_id, attempt):
         if "sha256:" + _sha(alloc) != receipt["reservation_digest"]:
             raise _cannot("completed run {}: the reservation does not match its receipt".format(run_id))
         _completed_evidence(root_fd, run_id, intent, receipt)
+    except _opf_store.StoreError as exc:
+        raise _cannot("completed run {}: {}".format(run_id, exc))
     except (UnicodeDecodeError, ValueError, RecursionError, KeyError, TypeError) as exc:
         raise _cannot("completed run {}: its retained evidence is malformed ({!r})".format(run_id, exc))
     ref = dict(txn_id=_opf_journal.attempt_txn(KIND, run_id, attempt), journal_rel=_opf_store.journal_root(KIND))
@@ -1925,7 +1927,9 @@ def _t_evidence_composition(base, check):
                 dict(format=EVIDENCE_INVENTORY_FORMAT, file=[]), "empty phase"),
              "off-inventory file", PROMOTION_NAME),
             ("old-format", inv, _opf_import._emit_bytes(old, "old inventory"),
-             "C-EVIDENCE-LEGACY-INGEST", "inventory.toml"),
+             "legacy-ingest-inventory", "inventory.toml"),
+            ("old-format-phase", phase, _opf_import._emit_bytes(old, "old phase inventory"),
+             "legacy-ingest-inventory", "inventory-promotion.toml"),
             ("retained-byte", home / "originals/legacy/mig.md", b"changed",
              "size or digest mismatch", "originals/legacy/mig.md"),
             ("extra-payload", home / "unclaimed.txt", b"extra",
@@ -1942,15 +1946,82 @@ def _t_evidence_composition(base, check):
             check("evidence-" + label + "-replay", refused.verdict == CANNOT_EVALUATE
                   and refused.outcome != "noop_already_complete"
                   and _st_tree(root) == damaged and _st_counters(root) == counters)
-            if label == "old-format":
-                check("evidence-old-format-named",
-                      any("C-EVIDENCE-LEGACY-INGEST" in msg for msg in refused.findings))
+            if label in ("old-format", "old-format-phase"):
+                check("evidence-" + label + "-named",
+                      rep.checks == {"C-EVIDENCE-ENUM": "FINDING"} and not rep.cannot
+                      and any("C-EVIDENCE-ENUM: legacy-ingest-inventory:" in msg
+                              and member in msg for msg in rep.findings)
+                      and any("legacy-ingest-inventory" in msg for msg in refused.findings))
             if saved is None:
                 target.unlink()
             else:
                 target.write_bytes(saved)
         check("evidence-fixture-restored", inv.read_bytes() == base_raw and phase.read_bytes() == phase_raw
               and _st_tree(root) == before)
+
+
+def _t_evidence_entries(base, check):
+    """Replay must form a refusal without changing retained bytes or counters."""
+    import _opf_check
+    root, rid, run = _st_build(base, "evidence-entries")
+    with _opf_import._self_test_homes2_active(root):
+        result = apply_ingest(root, rid, now=_NOW)
+        check("evidence-entries-promoted", result.verdict == CLEAN and result.promoted is True)
+        before, counters = _st_tree(root), _st_counters(root)
+        home = root / _opf_import._ingest_acceptance_home(rid)
+        for kind in ("symlink", "fifo", "mode000", "extra-directory"):
+            target = home / kind
+            if kind == "symlink":
+                target.symlink_to("review", target_is_directory=True)
+            elif kind == "fifo":
+                os.mkfifo(target)
+            else:
+                target.mkdir()
+                if kind == "mode000":
+                    target.chmod(0)
+            try:
+                original_stat = target.lstat()
+                diagnostic = "evidence directory membership differs from its inventories"
+                if kind != "extra-directory":
+                    fd = _opf_store._open_root_fd(root)
+                    try:
+                        rel = target if kind == "mode000" else home
+                        try:
+                            _opf_check._list_contained(fd, str(rel.relative_to(root)))
+                        except _opf_store.StoreError as exc:
+                            diagnostic = str(exc)
+                        else:
+                            raise RuntimeError("fixture did not trigger StoreError: " + kind)
+                    finally:
+                        os.close(fd)
+                refused, escaped = None, None
+                try:
+                    refused = apply_ingest(root, rid, now=_NOW)
+                except Exception as exc:  # turn an escape into the named regression assertion
+                    escaped = exc
+                check("evidence-" + kind + "-replay", escaped is None and refused is not None
+                      and refused.verdict == CANNOT_EVALUATE
+                      and refused.outcome != "noop_already_complete"
+                      and any(diagnostic in msg for msg in refused.findings))
+                current_stat = target.lstat()
+                check("evidence-" + kind + "-entry-unchanged",
+                      (current_stat.st_ino, current_stat.st_mode) ==
+                      (original_stat.st_ino, original_stat.st_mode)
+                      and (kind != "symlink" or os.readlink(target) == "review")
+                      and _st_counters(root) == counters)
+            finally:
+                if kind in ("mode000", "extra-directory"):
+                    target.chmod(0o700)
+                    target.rmdir()
+                else:
+                    target.unlink()
+            # Snapshot after removing the injected FIFO/unreadable entry: never follow or read it.
+            check("evidence-" + kind + "-bytes-unchanged", _st_tree(root) == before
+                  and _st_counters(root) == counters)
+            again = apply_ingest(root, rid, now=_NOW)
+            check("evidence-" + kind + "-restored", again.verdict == CLEAN
+                  and again.outcome == "noop_already_complete" and _st_tree(root) == before
+                  and _st_counters(root) == counters)
 
 
 def _t_evidence_move(base, check):
@@ -1982,6 +2053,7 @@ def _t_evidence_move(base, check):
 
 
 TESTS = (("evidence-composition", _t_evidence_composition), ("evidence-move", _t_evidence_move),
+         ("evidence-entries", _t_evidence_entries),
          ("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
          ("unreviewed-refused", _t_unreviewed_refused), ("traversal-refused", _t_traversal_refused),
          ("mint-move-toctou", _t_mint_move_toctou), ("per-record-refused", _t_per_record_refused),
@@ -3959,8 +4031,8 @@ def _evidence_red_on_revert():
     new_shape = ('format="opf.ingest.evidence-inventory/v1", schema=SCHEMA, run_id=run_id,\n'
                  '        entry=[dict(path=p[len(home) + 1:], sha256=_sha(d), size=len(d)) '
                  'for p, d in sorted(evidence)]')
-    legacy_refusal = ('raise ValueError("C-EVIDENCE-LEGACY-INGEST: old-format ingest inventory is unsupported; "'
-                      '\n                         "refused without migration or rewrite")')
+    legacy_refusal = ('raise _LegacyIngestInventory("legacy-ingest-inventory: old-format ingest inventory is unsupported; "'
+                      '\n                                     "refused without migration or rewrite")')
     cases = (
         ("writer-schema", "_opf_ingest_apply", old_shape, new_shape, "evidence-doctor"),
         ("receipt-claim", "_opf_ingest_apply",
@@ -3975,6 +4047,18 @@ def _evidence_red_on_revert():
         ("exact-replay-membership", "_opf_ingest_apply",
          'if set(expected) != (present - inventories) | moved:', 'if False:',
          "evidence-extra-payload-replay"),
+        ("legacy-finding-grade", "_opf_check",
+         'rep.finding("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))',
+         'rep.cant("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))',
+         "evidence-old-format-named"),
+        ("exact-replay-directories", "_opf_ingest_apply",
+         'if directories != claimed_dirs:', 'if False:', "evidence-extra-directory-replay"),
+        *((kind + "-replay-refusal", "_opf_ingest_apply",
+           ('except _opf_store.StoreError as exc:\n'
+            '        raise _cannot("completed run {}: {}".format(run_id, exc))'),
+           ('except ZeroDivisionError as exc:\n'
+            '        raise _cannot("completed run {}: {}".format(run_id, exc))'),
+           "evidence-" + kind + "-replay") for kind in ("symlink", "fifo", "mode000")),
         ("retained-digest", "_opf_ingest_apply",
          'if _sha(data) != row["sha256"] or len(data) != row["size"]:', 'if False:',
          "evidence-retained-byte-replay"),
@@ -4010,7 +4094,12 @@ def _evidence_red_on_revert():
                             module._self_test_generation_detail(check)
                         else:
                             owner = module if module_name == "_opf_ingest_apply" else sys.modules[__name__]
-                            test = owner._t_evidence_move if name == "retained-move" else owner._t_evidence_composition
+                            if name == "retained-move":
+                                test = owner._t_evidence_move
+                            elif name == "exact-replay-directories" or name.endswith("-replay-refusal"):
+                                test = owner._t_evidence_entries
+                            else:
+                                test = owner._t_evidence_composition
                             test(Path(tmp) / name / phase, check)
                     if label not in seen or (phase == "mutant" and label not in failures):
                         raise RuntimeError("evidence reversal survived: " + name)
