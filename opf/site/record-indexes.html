@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Record indexes | OPFiles</title>
-<meta name="description" content="The eleven baseline typed record indexes, plus optional module and importer types: one schema-validated TOML source per record type, each paired with a generated, byte-gated view.">
+<meta name="description" content="The eleven baseline typed indexes, their declared generated views, and the planned module schemas.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Record indexes | OPFiles">
-<meta property="og:description" content="The eleven baseline typed record indexes, plus optional module and importer types: one schema-validated TOML source per record type, each paired with a generated, byte-gated view.">
+<meta property="og:description" content="The eleven baseline typed indexes, their declared generated views, and the planned module schemas.">
 <meta name="twitter:card" content="summary">
 </head>
 <body>
@@ -51,7 +51,7 @@
   <div class="refhead pagehead">
     <p class="eyebrow">Reference</p>
     <h1>Record indexes</h1>
-    <p class="lead">Eleven baseline typed indexes, plus optional module and importer types, one schema-validated TOML source per record type, each paired with a generated, byte-gated view. Choose a type to see what it carries and what it protects.</p>
+    <p class="lead">Eleven baseline typed indexes, their declared generated views, and the planned module schemas. The examples show inline storage; the specification also defines per-record storage, which the reference renderer does not support. Lifecycle descriptions state the standard's rules; they do not imply an automatic writer for each transition. Choose a type to inspect.</p>
   </div>
 
   <div class="navtabs" data-reference-hub role="tablist" aria-label="Record type">
@@ -98,11 +98,11 @@
   <span class="tok-key">title</span>  = <span class="tok-str">"Add the drift gate to CI"</span></div>
     </div>
     <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-    <p>The shared index shape: <code>schema = 1</code> plus an array of <code>[[record]]</code> rows. Each record carries the standard envelope: <code>id</code>, <code>type</code>, <code>status</code>, <code>title</code>, <code>created_at</code> and <code>updated_at</code> (RFC 3339 UTC, read from the clock), <code>actor.kind</code> (maintainer, assistant, automation, or importer), optional <code>summary</code>, <code>links</code> (a closed vocabulary: supersedes, resolves, remediates, receipt_of, corrects, follows, relates, exemplifies, derives_from), <code>refs</code> (captured external sources: path, url, or doc), and registered <code>x-&lt;vendor&gt;</code> extensions. Schemas are closed; an unknown key is a validation failure.</p>
+    <p>The shared index shape is <code>schema = 1</code> plus <code>[[record]]</code> rows. The envelope requires <code>id</code>, <code>type</code>, <code>status</code>, <code>title</code>, timestamps, and <code>actor.kind</code> (maintainer, assistant, automation, or importer). Timestamps use RFC 3339 UTC; an importer may omit an unknown <code>created_at</code> with provenance. Optional fields include <code>summary</code>, <code>links</code>, <code>refs</code>, and registered <code>x-&lt;vendor&gt;</code> extensions. Links use the closed vocabulary supersedes, resolves, remediates, receipt_of, corrects, follows, relates, exemplifies, and derives_from. References identify a path, URL, or document. Schemas are closed; unknown keys are validation findings.</p>
 
     <h3>The problem it solves</h3>
-    <blockquote class="refpull">A backlog that lives in prose drifts: items vanish, "done" means different things, and blocked work hides.</blockquote>
-    <p>Typed records give each item a permanent ID, a closed state set, and a ratification step: an assistant or automation finishing an item lands <code>done/proposed</code>, and only a maintainer transition removes the qualifier. Blocked-ness is deliberately never a stored state; it is derived from active blocks at view time, so it can never go stale in the record.</p>
+    <blockquote class="refpull">Give planned work explicit identities and completion rules.</blockquote>
+    <p>The standard gives each item a permanent ID, closed states, and ratification rules: an assistant or automation terminal transition lands with <code>/proposed</code>, and only a maintainer removes the qualifier. Blocked-ness is derived from active blocks at render time; the result still depends on the recorded blocks being current.</p>
 
     <dl class="refstrip">
       <div>
@@ -127,7 +127,7 @@
           <span class="chip"><code>opf init</code></span>
           <span class="chip"><code>opf render</code></span>
           <span class="chip"><code>opf doctor</code></span>
-          <p>Created by <code>opf init</code> (empty index), then records by process as work is planned; updated by state transitions under the status grammar and maintainer ratification of proposed terminals; read by <code>opf render</code> and validated by <code>opf doctor</code> (schema validity, ID uniqueness, transition legality, no-resurrection).</p>
+          <p>Created by <code>opf init</code> (empty index), then records by process as work is planned; updated by state transitions under the status grammar and maintainer ratification of proposed terminals; read by <code>opf render</code> and validated by <code>opf doctor</code> (schema validity, ID uniqueness, transition legality where observations suffice, no-resurrection). Actor-dependent transitions with an unidentified last-transition actor and rejections requiring unavailable pre-proposal state report cannot-evaluate.</p>
         </dd>
       </div>
     </dl>
@@ -136,7 +136,7 @@
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h4>A ratified "done", not a felt one</h4>
-      <p>A backlog whose completion claims are gated: "done" is a ratified transition with a durable receipt, not a feeling, which helps prevent silent scope loss and unratified completion from entering the record.</p>
+      <p>The intended benefit is reviewable completion: the standard requires a ratified transition and a durable receipt. The checks validate the recorded relationship, not whether the work was actually completed.</p>
     </div>
   </div>
 </section>
@@ -164,7 +164,7 @@
   <span class="tok-key">status</span>     = <span class="tok-str">"recorded"</span>
   <span class="tok-key">links</span>      = [{ <span class="tok-key">rel</span> = <span class="tok-str">"receipt_of"</span>, <span class="tok-key">id</span> = <span class="tok-str">"BI-42"</span> }]</div>
     </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p class="code-cap">Illustrative excerpt: title, created_at, updated_at, and actor are omitted for brevity.</p>
     <p>The shared index shape (<code>schema = 1</code> plus <code>[[record]]</code> rows) with the standard envelope and no type-specific extra fields. The single state is <code>recorded</code>, with no transitions and never proposable: a factual receipt awaits no ratification, so it carries no <code>/proposed</code> qualifier. It links <code>receipt_of</code> to the backlog item it witnesses; a standalone receipt is legal only for imported history with provenance.</p>
 
     <h3>The problem it solves</h3>
@@ -183,7 +183,7 @@
         <dt>Lifecycle</dt>
         <dd>
           <p><code>recorded</code> (terminal only)</p>
-          <p>A single state, no transitions, and never proposable: a factual receipt awaits no ratification, so it carries no <code>/proposed</code> qualifier. A ratified <code>done</code> on a backlog item creates the receipt in the same act, one to one. Like all records in unqualified terminal states other than the worklog, receipts may rotate to the calendar-year archive on manifest-declared thresholds; rotation is enumerated relocation, never deletion, so every receipt remains resolvable forever.</p>
+          <p>A single state, no transitions, and never proposable. A ratified backlog <code>done</code> requires a receipt in the same act, one to one; imported standalone receipts require provenance. Receipts may rotate under manifest-declared thresholds, preserving their IDs and archived content.</p>
         </dd>
       </div>
       <div>
@@ -200,8 +200,8 @@
     <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
-      <h4>An audit-ready record of completion</h4>
-      <p>An audit-ready record of what was finished, when, and on whose ratification. Because a receipt exists only for a ratified completion, the DONE view helps prevent proposed or asserted completion from reading as settled fact.</p>
+      <h4>A linkable completion record</h4>
+      <p>The intended benefit is a linkable completion record. Native receipts witness ratified backlog completion; imported standalone receipts instead rest on provenance. Neither a receipt nor its view establishes that the recorded work occurred.</p>
     </div>
   </div>
 </section>
@@ -229,12 +229,12 @@
   <span class="tok-key">status</span>   = <span class="tok-str">"fixed"</span>
   <span class="tok-key">severity</span> = <span class="tok-str">"major"</span></div>
     </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p class="code-cap">Illustrative excerpt: title, created_at, updated_at, and actor are omitted for brevity.</p>
     <p>The shared index shape with the standard envelope plus one type-specific field, <code>severity</code>. Links typically carry <code>remediates</code> toward the backlog item or change that fixes the finding; refs capture the evidence (a path and line, a URL, or a document and section) at the moment the claim is made.</p>
 
     <h3>The problem it solves</h3>
-    <blockquote class="refpull">Defects argued about in chat disappear; defects recorded with permanent IDs get resolved or explicitly accepted.</blockquote>
-    <p>Two rules keep the record honest: severity is graded at or after the fix decision, never before, so triage pressure cannot downgrade a defect to avoid fixing it; and an assistant or automation closing a finding lands <code>fixed/proposed</code>, awaiting maintainer ratification.</p>
+    <blockquote class="refpull">Record defects with permanent IDs and explicit outcomes.</blockquote>
+    <p>The standard requires severity grading at or after the fix decision. An assistant or automation terminal transition carries <code>/proposed</code> until maintainer ratification.</p>
 
     <dl class="refstrip">
       <div>
@@ -257,7 +257,7 @@
           <span class="chip"><code>opf init</code></span>
           <span class="chip"><code>opf render</code></span>
           <span class="chip"><code>opf doctor</code></span>
-          <p>Created by <code>opf init</code> (empty index) and by whoever observes a defect, human or assistant; updated by resolution transitions, maintainer ratification, and severity grading at or after the fix decision; read by <code>opf render</code> (FINDINGS.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, transition legality).</p>
+          <p>Created by <code>opf init</code> (empty index) and by whoever observes a defect, human or assistant; updated by resolution transitions, maintainer ratification, and severity grading at or after the fix decision; read by <code>opf render</code> (FINDINGS.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, transition legality where observations suffice). Actor-dependent transitions with an unidentified last-transition actor and rejections requiring unavailable pre-proposal state report cannot-evaluate.</p>
         </dd>
       </div>
     </dl>
@@ -265,8 +265,8 @@
     <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
-      <h4>A register that cannot quietly shrink</h4>
-      <p>A defect register that cannot quietly shrink: every confirmed observation has a permanent row that leaves only through a named, ratified outcome. This helps prevent the silent disappearance of inconvenient findings.</p>
+      <h4>A register with explicit outcomes</h4>
+      <p>The intended benefit is to keep findings visible until a recorded resolution. Permanent IDs and explicit outcomes make the record inspectable; they do not establish that every real defect was recorded or resolved.</p>
     </div>
   </div>
 </section>
@@ -296,12 +296,12 @@
   <span class="tok-key">decided_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span>
   <span class="tok-key">decided_by</span> = <span class="tok-str">"maintainer"</span></div>
     </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p class="code-cap">Illustrative excerpt: title, created_at, updated_at, and actor are omitted for brevity.</p>
     <p>The shared index shape with the standard envelope plus the resolution bundle fields: <code>decision</code>, <code>decided_at</code>, and <code>decided_by</code>. An open decision carries none of the three; a decided one carries all three. A decided record may be superseded by a new decision linking <code>supersedes</code>; the decision-resolution join walks that chain to find the current effective resolution.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Half-recorded decisions are worse than none.</blockquote>
-    <p>A decision with no decider, or a decider with no decision text, cannot be audited or relied on. The all-or-none bundle makes a partial resolution a validation failure rather than a lurking ambiguity, and the supersession chain keeps exactly one current effective resolution per question.</p>
+    <p>An incomplete bundle omits part of the decision or its attribution. Validation rejects a partial resolution, and the decision-resolution join derives the effective answer through supersession links.</p>
 
     <dl class="refstrip">
       <div>
@@ -334,7 +334,7 @@
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h4>Decisions with provenance</h4>
-      <p>Decisions with provenance: who decided, when, and what exactly, with the current answer always derivable by machine. This helps prevent stale or contradictory decision records from steering later work.</p>
+      <p>The resolution bundle records who decided, when, and what, and the join derives the current effective answer. The intended benefit is fewer stale or contradictory decisions in later work.</p>
     </div>
   </div>
 </section>
@@ -366,7 +366,7 @@
   <span class="tok-key">action</span>         = <span class="tok-str">"added a bounded retry to the fixture setup"</span>
   <span class="tok-key">actor</span>          = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
       </div>
-      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p class="code-cap">Illustrative excerpt: created_at and updated_at are omitted for brevity.</p>
       <p>The shared index shape with the standard envelope plus two type-specific fields:
         <code>classification</code> (the basis that classified the decision as the actor's to make)
         and <code>action</code> (what was done). There are no transitions; overturning is always a new
@@ -377,7 +377,7 @@
 
   <section class="section-alt">
     <div class="wrap">
-      <blockquote class="refpull">Autonomy without a trail erodes oversight.</blockquote>
+      <blockquote class="refpull">Record autonomous decisions for later review.</blockquote>
       <h3>The problem it solves</h3>
       <p>Recording every self-made call with its basis makes autonomous operation reviewable after
         the fact: a maintainer can audit what was decided under standing authority and overturn
@@ -426,8 +426,8 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
         <h3>What it protects</h3>
-        <p>Reviewable autonomy: standing authority comes with a recorded, immutable trail, which helps
-          prevent quiet scope creep in what an assistant decides for itself.</p>
+        <p>The intended benefit is reviewable autonomy: record the basis for each self-made decision
+          and use a new linking record to overturn it.</p>
       </div>
     </div>
   </section>
@@ -465,7 +465,7 @@
   <span class="tok-key">decision</span> = <span class="tok-str">"yes; the gate blocks merge on any view drift"</span>
   <span class="tok-key">actor</span>    = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
       </div>
-      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p class="code-cap">Illustrative excerpt: created_at and updated_at are omitted for brevity.</p>
       <p>The shared index shape with the standard envelope plus <code>decision</code>. A ruling may
         link <code>exemplifies</code> to the <a href="./record-indexes#preference-pattern">preference pattern</a> it
         instantiates, feeding the distillation of standing preferences from individual rulings. It is
@@ -525,8 +525,8 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
         <h3>What it protects</h3>
-        <p>An authoritative, immutable register of the human's rulings, which helps prevent a decision
-          from being re-litigated, mis-remembered, or silently reattributed.</p>
+        <p>The intended benefit is a durable register of the maintainer's rulings. Review the recorded
+          attribution; the schema's actor-kind restriction is not authentication.</p>
       </div>
     </div>
   </section>
@@ -565,7 +565,7 @@
   <span class="tok-key">rationale</span> = <span class="tok-str">"scope creep is where regressions and review cost hide"</span>
   <span class="tok-key">actor</span>     = { <span class="tok-key">kind</span> = <span class="tok-str">"maintainer"</span> }</div>
       </div>
-      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p class="code-cap">Illustrative excerpt: created_at and updated_at are omitted for brevity.</p>
       <p>The shared index shape with the standard envelope plus <code>context</code> and
         <code>rationale</code>. <a href="./record-indexes#maintainer-decision">Maintainer decisions</a> may link
         <code>exemplifies</code> toward the pattern they instantiate, so the evidence for a pattern
@@ -576,11 +576,11 @@
 
   <section class="section-alt">
     <div class="wrap">
-      <blockquote class="refpull">Individual rulings answer individual questions; patterns keep the maintainer from answering the same question forever.</blockquote>
+      <blockquote class="refpull">Use recorded patterns to guide recurring decisions.</blockquote>
       <h3>The problem it solves</h3>
-      <p>Distillation is useful and risky in equal measure, so the standard gates it: an
-        assistant-distilled pattern lands <code>active/proposed</code> and steers nothing until a
-        maintainer ratifies it to the unqualified <code>active</code>.</p>
+      <p>The standard requires an assistant-distilled pattern to carry <code>active/proposed</code>
+        until a maintainer ratifies it to <code>active</code>. Treat an unratified pattern as a
+        proposal, not standing policy.</p>
     </div>
   </section>
 
@@ -626,9 +626,8 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
         <h3>What it protects</h3>
-        <p>Standing preferences that are explicit, ratified, and able to be retired, which helps reduce
-          repeated clarification and helps prevent an assistant's own inference about "what the
-          maintainer wants" from hardening into unratified policy.</p>
+        <p>The intended benefits are fewer repeated clarifications and explicit standing preferences.
+          Keep assistant-inferred preferences proposed until the maintainer ratifies them.</p>
       </div>
     </div>
   </section>
@@ -650,7 +649,7 @@
         <span>namespace BL</span>
         <code>.working/toml/</code>
       </div>
-      <p class="lead">A record that named work cannot proceed: it <code>scopes</code> an enumerated list of record IDs and feeds the actionability rule, so only a maintainer-ratified active block hides work.</p>
+      <p class="lead">A record that named work cannot proceed: it <code>scopes</code> an enumerated list of record IDs and feeds the actionability rule, so only an unqualified active block hides work; an assistant- or automation-created block stays proposed until a maintainer ratifies it.</p>
     </div>
 
     <h3>Template</h3>
@@ -663,12 +662,12 @@
   <span class="tok-key">status</span> = <span class="tok-str">"active"</span>
   <span class="tok-key">scopes</span> = [<span class="tok-str">"BI-42"</span>, <span class="tok-str">"BI-43"</span>]</div>
     </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
-    <p>The shared index shape with the standard envelope plus <code>scopes</code>, the enumerated record IDs the block covers. States: <code>active</code> (initial, gated) to <code>released</code> or <code>expired</code> (terminal). Blocked-ness is never stored on the scoped records; it is derived at view time through the block join.</p>
+      <p class="code-cap">Illustrative excerpt: title, created_at, updated_at, and actor are omitted for brevity.</p>
+    <p>The shared index shape with the standard envelope plus <code>scopes</code>, the enumerated record IDs the block covers. States: <code>active</code> (initial; gated for assistant and automation actors) to <code>released</code> or <code>expired</code> (terminal). Blocked-ness is never stored on the scoped records; it is derived at view time through the block join.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">"Blocked" is one of the easiest states to abuse: it can park inconvenient work indefinitely.</blockquote>
-    <p>The standard makes a block a scoped, auditable record rather than a mood, and gates its creation: a block created by an assistant or automation is <code>active/proposed</code>, a proposal that hides nothing and justifies no stop until a maintainer ratifies it. Moving work to blocked is the maintainer's decision, structurally.</p>
+    <p>The standard makes a block a scoped, auditable record rather than a mood, and gates its creation: a block created by an assistant or automation is <code>active/proposed</code>, a proposal that hides nothing and justifies no stop until a maintainer ratifies it. The gate applies to assistant and automation actors; an unqualified active block from another actor also counts toward blocked-ness.</p>
 
     <dl class="refstrip">
       <div>
@@ -703,7 +702,7 @@
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h4>Blocks you can audit</h4>
-      <p>Blocks that are visible, scoped, and ratified, which helps prevent manufactured stops: work reads as blocked only on a grant the record can show.</p>
+      <p>The intended benefit is an inspectable reason for holding work. The actionability join uses unqualified active blocks; review whether the recorded block is accurate and authorized.</p>
     </div>
   </div>
 </section>
@@ -731,11 +730,11 @@
   <span class="tok-key">status</span>  = <span class="tok-str">"current"</span>
   <span class="tok-key">summary</span> = <span class="tok-str">"Drift gate merged; OPF verbs next"</span></div>
     </div>
-    <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p class="code-cap">Illustrative excerpt: title, created_at, updated_at, and actor are omitted for brevity.</p>
     <p>The shared index shape with the standard envelope and no type-specific extra fields; the handoff's content rides <code>summary</code>, <code>links</code>, and <code>refs</code>. States: <code>current</code> (initial) to <code>superseded</code> (terminal).</p>
 
     <h3>The problem it solves</h3>
-    <blockquote class="refpull">Sessions end, contexts truncate, and whatever lived only in conversation is gone.</blockquote>
+    <blockquote class="refpull">Record the state needed for the next session.</blockquote>
     <p>A records-first discipline resumes from the durable handoff rather than starting cold, and the single-current rule means there is never ambiguity about which snapshot is authoritative. A handoff records where the work stands, what is in flight, and what comes next.</p>
 
     <dl class="refstrip">
@@ -768,7 +767,7 @@
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
       <h4>Continuity across sessions</h4>
-      <p>Continuity across sessions and machines: resuming from the recorded handoff helps reduce cold-start reconstruction and helps prevent constraints and in-flight state from lapsing when a context is lost.</p>
+      <p>Resuming from a recorded handoff is intended to reduce context reconstruction and preserve constraints and work in flight. Reconcile it against current state before relying on it.</p>
     </div>
   </div>
 </section>
@@ -799,12 +798,12 @@
   <span class="tok-key">refs</span>   = [{ <span class="tok-key">kind</span> = <span class="tok-str">"doc"</span>, <span class="tok-key">locator</span> = <span class="tok-str">"OPF-SPEC.md#8"</span>, <span class="tok-key">note</span> = <span class="tok-str">"envelope fields"</span> }]
   <span class="tok-key">actor</span>  = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
       </div>
-      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p class="code-cap">Illustrative excerpt: created_at and updated_at are omitted for brevity.</p>
       <p>The shared index shape with the standard envelope and no type-specific extra fields; the
         captured sources themselves ride the envelope's <code>refs</code> array, each entry
         <code>{kind, locator, note}</code> with <code>kind</code> one of <code>path</code>,
         <code>url</code>, or <code>doc</code>. This type is the inward counterpart of
-        <a href="./record-indexes#contribution">contribution</a>, which records what the project sends out.</p>
+        <a href="./record-indexes#contribution">contribution</a>, which records what the project proposes or sends out.</p>
     </div>
   </section>
 
@@ -858,9 +857,9 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
         <h3>What it protects</h3>
-        <p>Claims with their evidence attached at birth, which helps reduce the likelihood of
-          unsourced assertions hardening into recorded fact, and makes every load-bearing claim
-          re-checkable at its source.</p>
+        <p>Capture evidence when making a claim so another reader can inspect its source. This is
+          intended to reduce unsupported assertions; the record does not establish source accuracy
+          or continued availability.</p>
       </div>
     </div>
   </section>
@@ -875,13 +874,13 @@
 <section class="tabpanel" id="contribution" role="tabpanel" aria-labelledby="tab-contribution" tabindex="0">
   <div class="wrap refhead">
     <p class="eyebrow">Record index</p>
-    <h2 id="contribution-title">Work sent to a peer project</h2>
+    <h2 id="contribution-title">Work proposed or sent to a peer project</h2>
     <div class="refchips">
       <code>contribution.index.toml</code>
       <span>namespace CN</span>
       <span>.working/toml/</span>
     </div>
-    <p class="lead">An artefact, fix, or proposal this project sent to a peer project, with a delivery receipt: the outward counterpart to <a href="./record-indexes#reference">reference</a>, which records what comes in.</p>
+    <p class="lead">A record of an artefact, fix, or proposal intended for a peer project: the outward counterpart to <a href="./record-indexes#reference">reference</a>, which records what comes in. It tracks proposal, delivery, and outcome; delivery details become required once sent, while recipient receipt fields are optional and permitted only at acknowledgement.</p>
   </div>
 
   <section>
@@ -901,12 +900,13 @@
   <span class="tok-key">delivery</span>       = { <span class="tok-key">channel</span> = <span class="tok-str">"pr"</span>, <span class="tok-key">ref</span> = <span class="tok-str">"peer/repo#128"</span>, <span class="tok-key">sent_at</span> = <span class="tok-str">"2026-09-04T09:37:48Z"</span> }
   <span class="tok-key">actor</span>          = { <span class="tok-key">kind</span> = <span class="tok-str">"assistant"</span> }</div>
       </div>
-      <p class="code-cap">Illustrative excerpt: the envelope fields (created_at, updated_at, actor) are omitted for brevity.</p>
+      <p class="code-cap">Illustrative excerpt: created_at and updated_at are omitted for brevity.</p>
       <p>The shared index shape with the standard envelope plus <code>recipient</code>,
         <code>dedup_class</code>, <code>content_digest</code>, and the <code>delivery</code> bundle
         <code>{channel, ref, sent_at, receipt_ref?, receipted_at?}</code>: channel, ref, and sent_at
-        are required once sent and forbidden before, and the receipt fields are legal only at
-        acknowledged. <code>acknowledged</code> is the single positive terminal (responded, adopted,
+        are required once sent. Before sending, channel and ref may describe planned delivery, but
+        sent_at is forbidden. Receipt fields are legal only at acknowledged.
+        <code>acknowledged</code> is the single positive terminal (responded, adopted,
         reshaped, or declined); the outcome lives in <code>summary</code> or an extension, never as a
         state. A contribution typically links <code>derives_from</code> the internal finding,
         decision, or backlog item that motivated it, and carries no fleet-specific semantics; those
@@ -919,8 +919,10 @@
       <blockquote class="refpull">Outbound work is an external action, so its claim, "we sent this", is gated.</blockquote>
       <h3>The problem it solves</h3>
       <p>An assistant lands <code>sent/proposed</code>, awaiting a maintainer's ratification that it
-        was genuinely sent, unless the adopter has declared a standing authorization for that named
-        recipient. An absent or malformed declaration fails closed, so gating stays on by default.</p>
+        was genuinely sent. The standard lets an adopter declare a standing authorization for a named
+        recipient, which relieves per-send gating; an absent or malformed declaration fails closed. The
+        reference doctor does not yet read such a declaration, so it treats every assistant or
+        automation <code>sent</code> as gated.</p>
     </div>
   </section>
 
@@ -966,9 +968,8 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
         <h3>What it protects</h3>
-        <p>An auditable record of the project's recorded outbound actions, with delivery evidence
-          attached, which helps prevent an asserted send from reading as a settled fact before it is
-          ratified or receipted.</p>
+        <p>The intended benefit is an auditable record of outbound actions. Review the delivery
+          evidence and any standing authorization; schema validation does not prove a send occurred.</p>
       </div>
     </div>
   </section>
@@ -990,7 +991,7 @@
         <span>8 record types</span>
         <span>+ 1 importer-only</span>
       </div>
-      <p class="lead">Beyond the twelve baseline types, eight record types ship in four optional modules, one type belongs to the importer alone, and two names are reserved. Modules are default-off, each enabled by one manifest edit.</p>
+      <p>Beyond the twelve baseline types, the specification names eight types in four optional modules, one importer-only type, and two reserved names or namespaces. Modules default off; a manifest edit enables their declarations, while full module record schemas remain planned.</p>
     </div>
 
     <h3>The module and importer types</h3>
@@ -1044,11 +1045,11 @@
     (none)              CL   reserved unassigned, so it can never half-collide with "changelog"
   </pre></div>
     <p>These are outline state sets; the full module record schemas ship with the module schemas release. The delivery-assurance <code>release</code> record, where enabled, references a <code>version.toml</code> release row by version string: the ledger row is the fact, the record is the delivery-assurance envelope around it.</p>
-    <p><code>legacy_fragment</code> is created only by an importer, never scaffolded: everything an import cannot confidently map becomes quarantined fragment data with source path, digest, span, and run ID, so nothing is dropped. The scaffolded counters file already carries the LF namespace at zero, so a fresh store can accept quarantine imports without a schema change. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
+    <p><code>legacy_fragment</code> is created only by an importer, never scaffolded: everything an import cannot confidently map becomes quarantined fragment data with source path, digest, span, and run ID, so nothing is dropped. The scaffolded counters file already carries the LF namespace at zero, so a fresh store can accept quarantine imports without a schema change. An import that promotes quarantined <code>legacy_fragment</code> records can succeed, but afterwards doctor reports cannot-evaluate, <code>opf render --write</code> refuses, and <code>opf upgrade</code> exits 2 without offering the change, because the baseline validator does not validate those records' content schemas. Module-tier records have the same effect. If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery. Module-type index mirrors are deferred until the module record schemas ship; the reference renderer covers the baseline types today and reports a per-record layout or an unknown view as a clear cannot-evaluate rather than guessing.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Not every project needs delivery assurance or operational-policy records on day one.</blockquote>
-    <p>Default-off modules keep the baseline small while keeping the extended vocabulary standard: when a project grows into a capability, the types, namespaces, and states are already defined, so no adopter invents an incompatible local variant. Enabling a module makes its types valid to declare, each with its normative namespace; a module-tier type declared without its module enabled is a validation failure.</p>
+    <p>Default-off modules are intended to keep the baseline small while sharing an extended vocabulary. Enabling a module permits its type declarations with normative namespaces; declaring a module type without enabling its module is a validation finding. Enabling it does not supply a missing record schema.</p>
 
     <dl class="refstrip">
       <div>
@@ -1078,7 +1079,7 @@
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><path d="M16.5 13.5v6M13.5 16.5h6"/></svg></span>
       <h4>Growth without fragmentation</h4>
-      <p>Capability arrives as a reviewed manifest edit with standard semantics, which helps prevent per-project dialects of the same operational ideas.</p>
+      <p>The intended benefit is shared semantics as projects adopt additional record types. A reviewed manifest edit enables declarations; full module record validation and rendering remain separate implementation work.</p>
     </div>
   </div>
 </section>

@@ -2,11 +2,11 @@
 
 This is the machine-readable adoption guide. The human-readable page is at /adopt.
 
-OPFiles is an operational-files standard: a `.working/` store of lowercase TOML sources, generated uppercase views, and a drift check that rejects any view that no longer matches its source. Adopting with an AI development assistant is the recommended path; adopting by hand is the fallback for when you cannot. Both paths reach the same gated store.
+OPFiles is an operational-files standard: a `.working/` store of lowercase TOML sources, generated uppercase views, and a drift check for comparing declared views with their sources. Adopting with an AI development assistant is the recommended path; adopting by hand is the fallback for when you cannot. Both paths target the same store format; configure and verify the required checks separately.
 
 ## What an OPFiles store is
 
-The store lives in your product repository. Lowercase files under `.working/toml/` are machine source you change through tooling or review. Uppercase files at the `.working/` top level are generated views you read and never hand-edit. A committed pointer `.opf.toml` at the repository root names where the store lives, and the curated `CHANGELOG.md` and the generated `VERSION` sit at the repository root.
+By default, the store lives under `.working/` in your product repository; the committed `.opf.toml` pointer can name a separate store repository. Paths under `.working/` are relative to the store repository. Lowercase files under `.working/toml/` are machine source you change through tooling or review. Uppercase files at the `.working/` top level are generated views you read and never hand-edit. The pointer `.opf.toml` and curated `CHANGELOG.md` sit at the product repository root. A generated product-root `VERSION` is required whenever releases exist. The initial scaffold omits its view declaration; add that declaration when recording the first release so the reference renderer can produce the file. Doctor checks `VERSION` whenever releases exist, even if its view is undeclared.
 
 ## Before you apply: verify the artifact digest
 
@@ -14,14 +14,16 @@ Before scaffolding or applying anything to your project, obtain the pack's artif
 
 ## The recommended path: assistant-guided adoption
 
-Point your AI development assistant at this site or the repository and tell it to adopt OPFiles, or to adopt AIQT, which brings OPFiles with it. It reads the standard, inspects your project, and proposes a short plan: what it will create, import, or retire, and how the pieces wire together. On your approval it scaffolds and validates the store, wires the records-first process into your project's assistant instructions, and leaves the `.working/` store for your review.
+Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review the plan before authorizing changes, then inspect the scaffolded store, the validation results, and any records-first instructions added to your project. If adopting AIQT, include OPFiles in that plan.
 
 ## Adopting by hand
 
-1. Create the machine store at `.working/toml/`: `manifest.toml` (the control document, declaring `standard = "opf"`, the base `spec_version`, the storage `layout`, and the enforcement `posture`), `counters.toml` (the per-namespace ID high-water marks), `version.toml` (the version and release ledger, numbers and digests only), `worklog.toml` (the append-only operational record), and the eleven baseline typed indexes as `<type>.index.toml`, empty to start.
+1. Create the machine store at `.working/toml/`: `manifest.toml` (the control document: an `[opf]` table declaring `standard = "opf"`, the base `spec_version`, the storage `layout`, the enforcement `posture`, and `import_status`, plus a `[types.<name>]` registration for every enabled type, the declared `[views]`, and the other tables the standard defines; see section 9 of OPF-SPEC.md, linked from /standard), `counters.toml` (the per-namespace ID high-water marks), `version.toml` (the version and release ledger, numbers, dates, spans, and digests, never release prose), `worklog.toml` (the durable operational record: one entry per change, correctable before its span is released, frozen afterward, never deleted), and the eleven baseline typed indexes as `<type>.index.toml`, empty to start.
 2. Write the committed pointer `.opf.toml` at your product repository root, so the store resolves from a stable location.
 3. Work records-first: treat the store as the source of truth, append a worklog entry per change, keep the backlog, findings, and decisions in their typed files, and regenerate the views rather than editing them.
-4. Wire the drift check as a required commit or CI check: it re-renders the views from their sources and rejects any that disagree, so the sources and the views cannot drift apart.
+4. Configure the drift check as a required commit or CI check: it re-renders the declared views from their sources and fails on byte differences. The reference tooling reports per-record view drift as cannot-evaluate.
+
+The reference tooling validates spec 1.2.0 stores in either layout, with limits: it does not render or drift-check per-record views, and doctor reports module-tier and importer record content schemas as cannot-evaluate. For a store with module-tier or importer records, or a per-record store that declares views, doctor's overall verdict is cannot-evaluate (exit 2). An import that promotes quarantined `legacy_fragment` records can succeed, but afterwards doctor reports cannot-evaluate, `opf render --write` refuses, and `opf upgrade` exits 2 without offering the change, because the baseline validator does not validate those records' content schemas. Module-tier records have the same effect. If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery. Transition checks also report cannot-evaluate when legality depends on an unidentified last-transition actor or a rejection requires unavailable pre-proposal state. See /disclosure for the tooling's limits.
 
 Conformance you assert by hand is self-asserted until the reference validator has checked it, and you should say so wherever you claim it.
 
