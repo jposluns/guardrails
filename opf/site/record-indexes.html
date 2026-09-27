@@ -649,7 +649,7 @@
         <span>namespace BL</span>
         <code>.working/toml/</code>
       </div>
-      <p class="lead">A record that named work cannot proceed: it <code>scopes</code> an enumerated list of record IDs and feeds the actionability rule, so only a maintainer-ratified active block hides work.</p>
+      <p class="lead">A record that named work cannot proceed: it <code>scopes</code> an enumerated list of record IDs and feeds the actionability rule, so only an unqualified active block hides work; an assistant- or automation-created block stays proposed until a maintainer ratifies it.</p>
     </div>
 
     <h3>Template</h3>
@@ -663,11 +663,11 @@
   <span class="tok-key">scopes</span> = [<span class="tok-str">"BI-42"</span>, <span class="tok-str">"BI-43"</span>]</div>
     </div>
       <p class="code-cap">Illustrative excerpt: title, created_at, updated_at, and actor are omitted for brevity.</p>
-    <p>The shared index shape with the standard envelope plus <code>scopes</code>, the enumerated record IDs the block covers. States: <code>active</code> (initial, gated) to <code>released</code> or <code>expired</code> (terminal). Blocked-ness is never stored on the scoped records; it is derived at view time through the block join.</p>
+    <p>The shared index shape with the standard envelope plus <code>scopes</code>, the enumerated record IDs the block covers. States: <code>active</code> (initial; gated for assistant and automation actors) to <code>released</code> or <code>expired</code> (terminal). Blocked-ness is never stored on the scoped records; it is derived at view time through the block join.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">"Blocked" is one of the easiest states to abuse: it can park inconvenient work indefinitely.</blockquote>
-    <p>The standard makes a block a scoped, auditable record rather than a mood, and gates its creation: a block created by an assistant or automation is <code>active/proposed</code>, a proposal that hides nothing and justifies no stop until a maintainer ratifies it. Moving work to blocked is the maintainer's decision, structurally.</p>
+    <p>The standard makes a block a scoped, auditable record rather than a mood, and gates its creation: a block created by an assistant or automation is <code>active/proposed</code>, a proposal that hides nothing and justifies no stop until a maintainer ratifies it. The gate applies to assistant and automation actors; an unqualified active block from another actor also counts toward blocked-ness.</p>
 
     <dl class="refstrip">
       <div>

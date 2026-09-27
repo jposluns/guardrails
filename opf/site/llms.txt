@@ -8,7 +8,7 @@ OPFiles is a neutral operational-files standard: lowercase TOML sources paired w
 - [Adopt](/adopt): adopt with your AI development assistant, or create the plain-TOML store and wire its checks by hand.
 - [Adopt, machine-readable](/adopt.md): the machine-readable adoption guide an assistant follows, including the digest-verification and scaffolding steps.
 - [Reference tooling](/tooling): the eight standard verbs are init, import, doctor, render, migrate, sync, upgrade, and absorb. The reference CLI implements six; migrate and sync are planned.
-- [Core store files](/core-files): the manifest, the ID counters, the version ledger, the append-only worklog, and the single-writer lease.
+- [Core store files](/core-files): the manifest, the ID counters, the version ledger, the durable worklog, and the single-writer lease.
 - [Record indexes](/record-indexes): the eleven baseline typed indexes and their declared generated views; per-record storage and module rendering have additional implementation limits.
 - [Pointer, meta and generated](/store-meta): the committed store pointer, the calendar-year archive, and the generated DECISIONS.toml projection.
 - [OPFiles and AIQT](/aiqt): how OPFiles relates to the AIQT Guardrails pack that adopts it.

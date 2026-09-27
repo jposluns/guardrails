@@ -51,7 +51,7 @@
   <div class="refhead pagehead">
     <p class="eyebrow">Reference</p>
     <h1>Core store files</h1>
-    <p class="lead">The store's control and ledger files: the manifest that declares the store, the ID counters, the version stamp, the append-only worklog, and the concurrency lease. Choose a file to see what it holds and what it protects.</p>
+    <p class="lead">The store's control and ledger files: the manifest that declares the store, the ID counters, the version ledger, the worklog (appended per change, correctable until released, then frozen), and the concurrency lease. Choose a file to see what it holds and what it protects.</p>
   </div>
 
   <div class="navtabs" data-reference-hub role="tablist" aria-label="Core store file">
@@ -159,7 +159,7 @@
         </div>
         <div>
           <dt>Read by</dt>
-          <dd class="refchips"><code>opf render</code> <code>opf doctor</code> <span>implemented readers of an existing store</span></dd>
+          <dd class="refchips"><code>opf render</code> <code>opf doctor</code> <code>opf upgrade</code> <code>opf import</code> <code>opf absorb</code> <span>implemented readers of an existing store</span></dd>
         </div>
         <div>
           <dt>Written by</dt>
@@ -314,14 +314,17 @@
       </div>
       <p>A release cut appends a row and freezes the covered worklog span; from then on any change to
         those entries breaks the recorded digest and fails the gate. Publishing a changelog summary
-        records its freeze digest here; editing a published entry is therefore never silent, because the
-        changed bytes break the digest and the edit is structurally a re-publication. A fresh store
-        scaffolds an empty ledger (<code>release = []</code>, <code>summary = []</code>).</p>
+        records its freeze digest here. The freeze check compares the published entry's LF-normalized
+        UTF-8 digest with its recorded digest; line-ending-only changes do not alter that digest.
+        Other edits require recorded re-publication. A fresh store scaffolds an empty ledger
+        (<code>release = []</code>, <code>summary = []</code>).</p>
       <p>It renders two deterministic views: the root <code>VERSION</code> file (the latest release's
         version as exact bytes, the one generated file that carries no header) and the optional human view
-        <code>VERSION.md</code>. Both are byte-drift-gated. The reference scaffold's pinned initial view
-        set declares <code>VERSION.md</code>; the root <code>VERSION</code> view row joins the manifest
-        where the adopter's release flow requires it (see the site note on tooling status). The ledger is
+        <code>VERSION.md</code>. Both are byte-drift-gated. The initial scaffold declares
+        <code>VERSION.md</code> but omits the root <code>VERSION</code> view. When recording the first
+        release, declare that view so the reference renderer can produce the required root file.
+        Doctor checks <code>VERSION</code> whenever releases exist, even if its view is undeclared
+        (see <a href="./tooling">reference tooling</a>). The ledger is
         created by <code>opf init</code> (empty), updated by the release cut (a new append-only release
         row) and the changelog publish and rollup flow (summary rows and their digests), and read by
         <code>opf render</code> (the VERSION and VERSION.md renders), the changelog range-coverage and
@@ -335,8 +338,9 @@
       <h3>The problem it solves</h3>
       <p class="refpull">Keep version metadata, detailed entries, and public summaries separate.</p>
       <p>The release triad assigns version metadata to the ledger, detailed entries to the worklog,
-        and curated prose to <code>CHANGELOG.md</code>. The root <code>VERSION</code> file is
-        rendered from the latest ledger release when declared as a view. Release rows are append-only and
+        and curated prose to <code>CHANGELOG.md</code>. The root <code>VERSION</code> file is required
+        whenever releases exist and rendered from the latest ledger release when declared as a view.
+        Release rows are append-only and
         immutable; summary rows change through publication and supersession under their own rules.</p>
     </div>
   </section>
@@ -442,7 +446,7 @@
       <dl class="refstrip">
         <div>
           <dt>Records</dt>
-          <dd class="refchips"><code>[[entry]]</code> <span>one per change</span> <span>append-only, never deleted</span></dd>
+          <dd class="refchips"><code>[[entry]]</code> <span>one per change</span> <span>never deleted; frozen once released</span></dd>
         </div>
         <div>
           <dt>Renders</dt>
@@ -506,7 +510,9 @@
         renders from it.</p>
       <p>The standard describes acquisition before mutation and release at clean close or after
         reconciliation of a dead run. Implemented coverage is narrower: <code>opf upgrade</code> claims
-        a lease, and <code>opf doctor</code> validates its shape when present. <code>opf init</code>
+        a lease, and <code>opf doctor</code> validates its shape when present.
+        <code>opf import --apply</code> serializes promotion with its own journal lock and never seizes
+        a live lock. <code>opf init</code>
         supplies no lock or lease and does not serialize concurrent writers. <code>opf sync</code>
         and <code>opf migrate</code> are planned, not implemented cross-system enforcement.</p>
     </div>
@@ -529,7 +535,7 @@
       <dl class="refstrip">
         <div>
           <dt>Held during</dt>
-          <dd class="refchips"><span>standard: store mutations</span> <span>CLI: upgrade; init has no lease</span></dd>
+          <dd class="refchips"><span>standard: store mutations</span> <span>CLI lease: upgrade; init has no lease</span> <span>import --apply: separate promotion journal lock</span></dd>
         </div>
         <div>
           <dt>Contains</dt>

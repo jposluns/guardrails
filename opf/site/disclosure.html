@@ -67,11 +67,12 @@
 <section class="section-alt">
   <div class="wrap">
     <h2>Residual coverage the gates do not reach</h2>
-    <p>Each gate names what it does and does not decide. The residuals below are disclosed as part of
-      the standard, not discovered after a gate fails:</p>
+    <p>Each gate names what it does and does not decide. The residuals below cover both the standard
+      and the reference tooling:</p>
     <ul class="clean">
-      <li><b style="color:var(--ink)">Changelog freeze</b> checks that a published entry's bytes
-        match a recorded digest; it does not judge whether the prose is accurate or complete.</li>
+      <li><b style="color:var(--ink)">Changelog freeze</b> compares a published entry's LF-normalized
+        UTF-8 digest with its recorded digest. Line-ending-only changes do not alter that digest;
+        the check does not judge whether the prose is accurate or complete.</li>
       <li><b style="color:var(--ink)">Range coverage</b> checks that changelog entries tile every
         released version with no gap or overlap; it does not judge the quality of what they say.</li>
       <li><b style="color:var(--ink)">The unreleased worklog tail</b> is reviewed rather than
@@ -87,6 +88,9 @@
         The contract requires a divergence check to detect that collision afterward. These are
         specified controls, not complete CLI coverage: <code>opf sync</code> is planned, and
         <code>opf init</code> takes no lock or lease and does not serialize concurrent writers.</li>
+      <li><b style="color:var(--ink)">Reference-tooling residuals</b>: doctor reports per-record
+        view drift and module-tier record schemas as cannot-evaluate, and does not check behind,
+        ahead, or divergence against a sync target.</li>
       <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
         it supports; a profile it does not support is recorded as present-but-unevaluated rather than
         failing base validation.</li>
@@ -106,9 +110,9 @@
 
 <section>
   <div class="wrap">
-    <h2>Authorship, trademarks, and licence</h2>
-    <p>OPFiles is a neutral, self-contained standard authored and maintained by Jeff Posluns and
-      open source under the Apache License 2.0 (except vendored third-party material, which remains under its own terms). AIQT and AIQT Guardrails are trademarks
+    <h2>Authorship and trademarks</h2>
+    <p>OPFiles is a neutral, self-contained standard authored and maintained by Jeff Posluns.
+      AIQT and AIQT Guardrails are trademarks
       of Jeff Posluns (registration pending), and AIQT is a brand, not a legal entity; the standard's
       formal name, the AIQT Development Operational Standard, uses the AIQT trademark. AIQT Guardrails is one reference enforcement suite and one consumer of
       the standard, carried as a single optional profile; a base adopter need not adopt the suite.</p>

@@ -19,10 +19,12 @@ engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0).
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
 (spec 9.2): `opf upgrade [--root DIR]` is the in-place, additive, idempotent upgrade from 1.0.0 or 1.1.0
 to 1.2.0. The 1.1.0 path changes only spec_version; the 1.0.0 path also applies the earlier schema delta
-(type and view declarations, counters, and missing indexes). Neither creates init.toml provenance.
+(base-table and discovery-token rename, decision_support retirement, type and view declarations,
+DECISIONS.md source widening, counters, and missing indexes). Neither creates init.toml provenance.
 It refuses a store above the tooling spec or non-canonical manifest/counters, renders declared views,
 and requires a full doctor VALID before offering the uncommitted change for review and merge. A store already at the
-tooling spec_version is a byte no-op; a NOT-ADOPTED root reports NOT APPLICABLE and exits 0. `import` HAS
+tooling spec_version is a byte no-op when doctor-VALID and exits 2 otherwise; a NOT-ADOPTED root reports
+NOT APPLICABLE and exits 0. `import` HAS
 landed (OPF-IMPORT-VERB): `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review
 <run-id> --actor NAME (--decisions FILE | --interactive) | --apply <run-id>)` wires the reserved verb onto
 the U7 operation layer (_opf_import scan/plan/review/apply). Exactly one mode is required; `--scan` renders
