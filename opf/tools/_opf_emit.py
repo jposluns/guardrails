@@ -587,17 +587,189 @@ def _rejects(document):
         return True
 
 
-def run_status_owned(*args, **kwargs):
-    """Self-test subprocess launcher: refuse dispositions that can hide a failed exit status.
+class ChildStatusUnavailable(RuntimeError):
+    """Cannot-evaluate: no observed wait status; never a successful fixture."""
 
-    As with run_bounded, callers must not change SIGCHLD or run competing wait calls during
-    the launch. This guard preserves caller state; it cannot police native or concurrent reapers.
+
+class FixtureIncomplete(RuntimeError):
+    """The requested fixture did not deliver its bound completion record."""
+
+
+def _fixture_wait(pid, flags):
+    """Keep ECHILD distinct; subprocess's wait/poll may synthesize a zero."""
+    import os
+    try:
+        return os.waitpid(pid, flags)
+    except OSError as exc:
+        raise ChildStatusUnavailable("cannot collect fixture status: " + str(exc)) from exc
+
+
+def _run_fixture_process(argv, *, timeout=120, cwd=None, env=None):
+    """Capture bytes and a raw wait status without subprocess wait/poll/communicate.
+
+    Temporary files avoid pipe backpressure while the parent waits. No caller signal
+    state is borrowed. Timeout cleanup uses WNOWAIT before signalling; as in run_bounded,
+    a concurrent reaper between that probe and kill remains outside the cleanup contract.
+    This is a trusted self-test harness, not a hostile-code sandbox.
     """
+    import os
     import signal
     import subprocess
+    import tempfile
+    import time
+    import math
     if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
-        raise RuntimeError("cannot collect child status: unowned SIGCHLD disposition")
-    return subprocess.run(*args, **kwargs)
+        raise ChildStatusUnavailable("cannot collect fixture status: unowned SIGCHLD disposition")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError("fixture timeout must be finite and positive")
+    timeout = float(timeout)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("fixture timeout must be finite and positive")
+    if not all(hasattr(os, n) for n in ("waitid", "WNOWAIT", "P_PID")):
+        raise ChildStatusUnavailable("fixture supervision requires waitid/WNOWAIT")
+
+    class RawChild(subprocess.Popen):
+        # Only this collector reaps. No destructor poll or deferred implicit reap.
+        def __del__(self):
+            pass
+
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        deadline = time.monotonic() + timeout
+        child = RawChild(argv, stdout=out, stderr=err, cwd=cwd, env=env)
+        try:
+            while True:
+                pid, status = _fixture_wait(child.pid, os.WNOHANG)
+                if pid == child.pid:
+                    child.returncode = os.waitstatus_to_exitcode(status)
+                    break
+                if pid != 0:
+                    raise ChildStatusUnavailable("unexpected fixture wait PID")
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                time.sleep(0.005)
+        except ChildStatusUnavailable:
+            raise                              # ownership unknown: issue no signal
+        except BaseException:
+            # Timeout/cancellation must not abandon a still-owned fixture.
+            try:
+                os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                os.kill(child.pid, signal.SIGKILL)
+            except OSError as exc:
+                raise ChildStatusUnavailable("cannot clean up fixture: " + str(exc)) from exc
+            pid, status = _fixture_wait(child.pid, 0)
+            if pid != child.pid:
+                raise ChildStatusUnavailable("unexpected fixture cleanup PID")
+            child.returncode = os.waitstatus_to_exitcode(status)
+            raise
+        out.seek(0)
+        err.seek(0)
+        return subprocess.CompletedProcess(argv, child.returncode, out.read(), err.read())
+
+
+def _fixture_main(nonce, fixture_id, argv, expected, process_fixture):
+    """Emit only after the requested fixture and its expected-outcome assertion finish."""
+    import json
+    import runpy
+    import sys
+    if process_fixture:
+        # Crash subjects and Git setup cannot emit Python completion records.
+        # Their supervisor asserts the raw outcome before attesting completion.
+        result = _run_fixture_process(argv)
+        sys.stdout.buffer.write(result.stdout)
+        sys.stderr.buffer.write(result.stderr)
+        rc = result.returncode
+    else:
+        if argv[:3] != [sys.executable, "-I", "-B"] or len(argv) < 4:
+            raise ValueError("fixture requires an explicit isolated Python command")
+        try:
+            if argv[3] == "-c":
+                sys.argv = ["-c", *argv[5:]]
+                exec(compile(argv[4], "<opf-fixture>", "exec"), {"__name__": "__main__"})
+            else:
+                sys.argv = argv[3:]
+                runpy.run_path(argv[3], run_name="__main__")
+            rc = 0
+        except SystemExit as exc:
+            rc = 0 if exc.code is None else exc.code
+    if type(rc) is not int or rc != expected:
+        raise AssertionError("fixture {!r}: expected exit {}, observed {!r}".format(
+            fixture_id, expected, rc))
+    sys.stdout.flush()
+    sys.stdout.buffer.write(("\nOPF-FIXTURE " + json.dumps([nonce, fixture_id]) + "\n").encode())
+    sys.stdout.buffer.flush()
+
+
+def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture=False,
+                     timeout=120, cwd=None, env=None, capture_output=False, text=False,
+                     stdout=None, stderr=None, check=False):
+    """Success requires a fresh (nonce, fixture) completion record AND observed exit zero.
+
+    expected_returncode describes the subject, not the supervisor: an expected CLI
+    refusal or deliberate crash is asserted inside the fixture, whose own exit must be
+    zero. Returned stdout excludes the protocol trailer. Missing/mismatched records are
+    failures; unavailable status is a distinct cannot-evaluate even with a valid record.
+    Records bind trusted fixtures to launches; they do not authenticate malicious code
+    that can read its argv and deliberately forge the record.
+    """
+    import json
+    import secrets
+    import subprocess
+    import sys
+    from pathlib import Path
+    if not isinstance(fixture_id, str) or not fixture_id:
+        raise ValueError("fixture_id must be nonempty")
+    if type(expected_returncode) is not int:
+        raise ValueError("expected_returncode must be an integer")
+    if stdout not in (None, subprocess.PIPE) or stderr not in (None, subprocess.PIPE):
+        raise ValueError("fixture output must be captured")
+    nonce = secrets.token_hex(32)
+    code = ("import sys, json; sys.path.insert(0, " + repr(str(Path(__file__).resolve().parent))
+            + "); from _opf_emit import _fixture_main; "
+            + "_fixture_main(*json.loads(sys.argv[1]))")
+    command = [sys.executable, "-I", "-B", "-c", code,
+               json.dumps([nonce, fixture_id, list(argv), expected_returncode, process_fixture])]
+    result = _run_fixture_process(command, timeout=timeout, cwd=cwd, env=env)
+    trailer = ("\nOPF-FIXTURE " + json.dumps([nonce, fixture_id]) + "\n").encode()
+    if not result.stdout.endswith(trailer):
+        raise FixtureIncomplete("missing/mismatched completion for " + fixture_id
+                                + ": " + result.stderr.decode("utf-8", "replace"))
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
+    result.stdout = result.stdout[:-len(trailer)]
+    if text:
+        result.stdout = result.stdout.decode("utf-8")
+        result.stderr = result.stderr.decode("utf-8")
+    return result
+
+
+def _fixture_child_reaped(pid):
+    """Check the cleanup fixture's assertion, releasing ownership on any returned PID.
+
+    False records a failed reap assertion even when this probe reaped the leaked child.
+    Unexpected wait errors cannot establish that assertion and propagate cannot-evaluate.
+    Live-child cleanup shares run_bounded's competing-reaper probe-to-signal residual.
+    """
+    import os
+    import signal
+    try:
+        waited, _ = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return True
+    except OSError as exc:
+        raise ChildStatusUnavailable("cannot evaluate fixture reap: " + str(exc)) from exc
+    if waited == pid:
+        return False
+    if waited != 0:
+        raise ChildStatusUnavailable("unexpected cleanup fixture PID")
+    try:
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        os.kill(pid, signal.SIGKILL)
+        waited, _ = os.waitpid(pid, 0)
+    except OSError as exc:
+        raise ChildStatusUnavailable("cannot clean up fixture: " + str(exc)) from exc
+    if waited != pid:
+        raise ChildStatusUnavailable("unexpected cleanup reap PID")
+    return False
 
 
 def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
@@ -1306,19 +1478,7 @@ def self_test():
                             "rfd cleanup (read fd leaked; finding 7)")
         _pid7c = _cap7.get("pid")
         if _pid7c is not None:
-            _reaped7 = False
-            try:
-                _os6.waitpid(_pid7c, _os6.WNOHANG)         # ECHILD iff run_bounded already reaped it
-                # NOT raised: the child was NOT reaped by run_bounded; clean it up so the self-test leaks none
-                try:
-                    _os6.kill(_pid7c, _sig6.SIGKILL)
-                    _os6.waitpid(_pid7c, 0)
-                except OSError:
-                    pass
-            except ChildProcessError:
-                _reaped7 = True
-            except OSError:
-                _reaped7 = True
+            _reaped7 = _fixture_child_reaped(_pid7c)
             if not _reaped7:
                 failures.append("run_bounded/wfd-close-raise-unreaped-child: a raising parent wfd close "
                                 "skipped the child reap (zombie left; finding 7)")

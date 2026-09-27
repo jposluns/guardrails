@@ -229,10 +229,13 @@ def _watchdog_isolation_self_test():
                 + "); import opf; sys.exit(opf._watchdog_timer_case("
                 + repr(label) + ", " + repr(mode) + "))")
         try:
-            result = run_status_owned([sys.executable, "-B", "-c", code],
+            result = run_status_owned([sys.executable, "-I", "-B", "-c", code],
+                                    fixture_id="timer/" + label + "/" + mode,
                                     capture_output=True, text=True, timeout=180)
             ok = result.returncode == EXIT_OK
             detail = result.stdout + result.stderr
+        except (RuntimeError, subprocess.CalledProcessError) as exc:
+            ok, detail = False, str(exc)
         except subprocess.TimeoutExpired:
             ok, detail = False, "fixture exceeded its 180s process bound"
         if not ok:
@@ -498,7 +501,7 @@ def _watchdog_safety_case(mode):
 
 
 def _watchdog_launcher_case(label, disposition):
-    """Inject exit-37 children into both watchdog launchers and the shared status guard."""
+    """Inject exit-37 subjects into both watchdog matrices and the completion launcher."""
     import contextlib
     import io
     import signal
@@ -510,19 +513,20 @@ def _watchdog_launcher_case(label, disposition):
     def shared():
         try:
             run_status_owned([sys.executable, "-I", "-B", "-c", "raise SystemExit(37)"],
-                             check=True, capture_output=True, timeout=5)
+                             fixture_id="launcher/exit-37", check=True, capture_output=True, timeout=5)
         except (RuntimeError, subprocess.CalledProcessError):
             return EXIT_FINDING
         return EXIT_OK
 
     runner = {"isolation": _watchdog_isolation_self_test,
               "regression": _watchdog_regression_self_test, "shared": shared}[label]
-    real_run = subprocess.run
+    import _opf_emit
+    real_run = _opf_emit._run_fixture_process
     statuses = []
 
     def failure(*args, **kwargs):
         result = real_run([sys.executable, "-I", "-B", "-c", "raise SystemExit(37)"],
-                          capture_output=True, text=True, timeout=5)
+                          timeout=5)
         statuses.append(result.returncode)
         if kwargs.get("check") and result.returncode:
             raise subprocess.CalledProcessError(result.returncode, result.args)
@@ -532,7 +536,7 @@ def _watchdog_launcher_case(label, disposition):
     hostile = signal.SIG_IGN if disposition == "ignored" else lambda *_: None
     try:
         signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-        with patch.object(subprocess, "run", failure), \
+        with patch.object(_opf_emit, "_run_fixture_process", failure), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             control = runner()
             control_ok = control == EXIT_FINDING and bool(statuses) and set(statuses) == {37}
@@ -546,6 +550,135 @@ def _watchdog_launcher_case(label, disposition):
     print("opf watchdog launcher:", label, disposition, "PASS" if ok else "FAIL",
           "refused", result, "launched statuses", statuses)
     return EXIT_OK if ok else EXIT_FINDING
+
+
+def _watchdog_completion_case(mode):
+    """Run each irreversible audit-hook/disposition experiment in its own fixture process."""
+    import json
+    import signal
+    import subprocess
+    import tempfile
+    import threading
+    from unittest.mock import patch
+    import _opf_emit as emit
+
+    command = [sys.executable, "-I", "-B", "-c", "pass"]
+
+    def launch(code="pass", **kwargs):
+        return emit.run_status_owned([*command[:4], code],
+                                     fixture_id="completion/" + mode, timeout=10, **kwargs)
+
+    def refuses(error, call):
+        try:
+            call()
+        except error:
+            return
+        raise AssertionError("fixture was accepted: " + mode)
+
+    if mode == "audit-ignore":
+        events = []
+
+        def ignore(event, args):
+            if event == "subprocess.Popen":
+                events.append(event)
+                signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+
+        sys.addaudithook(ignore)
+        refuses(emit.ChildStatusUnavailable, lambda: launch("import os; os._exit(37)"))
+        assert events and signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN
+    elif mode == "reaper":
+        real_wait = emit._fixture_wait
+        for code, expected in (("pass", 0), ("import os; os._exit(37)", 37)):
+            stolen = []
+
+            def compete(pid, flags):
+                if not stolen:
+                    worker = threading.Thread(target=lambda: stolen.append(os.waitpid(pid, 0)))
+                    worker.start()
+                    worker.join(5)
+                    assert not worker.is_alive(), "reaper fixture exceeded its bound"
+                return real_wait(pid, flags)
+
+            with patch.object(emit, "_fixture_wait", compete):
+                refuses(emit.ChildStatusUnavailable, lambda: launch(code))
+            assert len(stolen) == 1 and os.waitstatus_to_exitcode(stolen[0][1]) == expected
+            assert signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
+    elif mode in ("nonce", "fixture-id", "status"):
+        real_run = emit._run_fixture_process
+        seen = []
+
+        def alter(argv, **kwargs):
+            payload = json.loads(argv[-1])
+            seen.append(payload[0])
+            if mode == "status":
+                record = "\nOPF-FIXTURE " + json.dumps(payload[:2]) + "\n"
+                argv = [*command[:4], "import sys; sys.stdout.write(" + repr(record)
+                        + "); sys.stdout.flush(); raise SystemExit(37)"]
+            else:
+                payload[0 if mode == "nonce" else 1] += "-wrong"
+                argv = [*argv[:-1], json.dumps(payload)]
+            return real_run(argv, **kwargs)
+
+        with patch.object(emit, "_run_fixture_process", alter):
+            for _ in range(2):
+                refuses(subprocess.CalledProcessError if mode == "status" else emit.FixtureIncomplete,
+                        launch)
+        assert len(set(seen)) == 2, "each launch needs a fresh nonce"
+    elif mode == "early-exit":
+        real_run = emit._run_fixture_process
+        with tempfile.TemporaryDirectory(prefix="opf-site-exit-") as directory:
+            Path(directory, "sitecustomize.py").write_text(
+                "import os\nprint('EARLY', flush=True)\nos._exit(0)\n", encoding="utf-8")
+            env = dict(os.environ, PYTHONPATH=directory)
+            result = launch("print('RAN')", env=env)
+            assert result.stdout == b"RAN\n"
+
+            def unisolated(argv, **kwargs):
+                return real_run([arg for arg in argv if arg != "-I"], **kwargs)
+
+            # Removing isolation really reaches sitecustomize; the missing completion
+            # must still refuse its zero exit. This also discriminates the record check.
+            with patch.object(emit, "_run_fixture_process", unisolated):
+                refuses(emit.FixtureIncomplete, lambda: launch(env=env))
+        refuses(emit.FixtureIncomplete, lambda: launch("import os; os._exit(0)"))
+    elif mode == "cleanup-cancel":
+        real_wait = emit._fixture_wait
+        seen = []
+
+        def cancel(pid, flags):
+            if not seen:
+                seen.append(pid)
+                raise RuntimeError("cancel collection")
+            return real_wait(pid, flags)
+
+        with patch.object(emit, "_fixture_wait", cancel):
+            refuses(RuntimeError, lambda: launch("import time; time.sleep(60)"))
+        pid = seen[0]
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            waited = None
+        if waited == 0:                         # clean up a regressed collector
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        assert waited is None, "cancelled collector abandoned its fixture"
+    elif mode == "cleanup-reaped":
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)                       # deliberate zombie stimulus, not a test verdict
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        with patch.object(os, "kill") as kill:
+            assert emit._fixture_child_reaped(pid) is False
+        assert not kill.called, "cleanup signalled a PID after its probe reaped it"
+        assert emit._fixture_child_reaped(pid) is True
+        with patch.object(os, "waitpid", side_effect=OSError(5, "fixture EIO")), \
+                patch.object(os, "kill") as kill:
+            refuses(emit.ChildStatusUnavailable, lambda: emit._fixture_child_reaped(pid))
+        assert not kill.called
+    else:
+        raise AssertionError("unknown completion fixture: " + mode)
+    print("opf completion:", mode, "PASS")
+    return EXIT_OK
 
 
 def _watchdog_regression_self_test():
@@ -572,6 +705,10 @@ def _watchdog_regression_self_test():
                   + repr(label) + ", " + repr(disposition) + "))", 30)
                  for label in ("isolation", "regression", "shared")
                  for disposition in ("ignored", "handler"))
+    cases.extend(("completion-" + mode,
+                  prefix + "sys.exit(opf._watchdog_completion_case(" + repr(mode) + "))", 40)
+                 for mode in ("audit-ignore", "reaper", "nonce", "fixture-id", "status",
+                              "early-exit", "cleanup-reaped", "cleanup-cancel"))
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix
@@ -584,8 +721,11 @@ def _watchdog_regression_self_test():
     for label, code, timeout in cases:
         try:
             result = run_status_owned([sys.executable, "-I", "-B", "-c", code],
+                                    fixture_id="watchdog/" + label,
                                     capture_output=True, text=True, timeout=timeout)
             ok, detail = result.returncode == EXIT_OK, result.stdout + result.stderr
+        except (RuntimeError, subprocess.CalledProcessError) as exc:
+            ok, detail = False, str(exc)
         except subprocess.TimeoutExpired:
             ok, detail = False, "fixture exceeded its independent process bound"
         print("opf watchdog regression:", label, "PASS" if ok else "FAIL", detail)

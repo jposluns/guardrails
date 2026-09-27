@@ -2137,7 +2137,7 @@ def self_test():
         _child = run_status_owned(
             [sys.executable, "-I", "-B", "-c", _child_src,
              str(Path(__file__).resolve().parent), rel_prod.name],
-            cwd=str(base), capture_output=True, text=True)
+            fixture_id="relative-root-resolves", cwd=str(base), capture_output=True, text=True)
         _rel_status, _rel_store = (json.loads(_child.stdout)
                                    if _child.returncode == 0 and _child.stdout else (None, None))
         check("relative-root-resolves", _rel_status == RESOLVED)

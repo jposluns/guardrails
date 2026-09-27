@@ -1015,7 +1015,8 @@ def _upgrade_preflight_regressions(check, fence):
                  "-c", "init.defaultBranch=main", "-c", "core.hooksPath=" + str(home),
                  "-c", "commit.gpgSign=false", "-c", "user.name=OPF fixture",
                  "-c", "user.email=fixture@example.invalid", *args],
-                env=env, cwd=base, check=True, capture_output=True, timeout=30)
+                fixture_id="upgrade-git/" + root.name + "/" + args[0], process_fixture=True,
+                env=env, cwd=base, check=True, capture_output=True, timeout=150)
 
         for origin in ("1.0.0", "1.1.0"):
             for unsupported in (True, False):
@@ -1063,10 +1064,12 @@ def _upgrade_preflight_regressions(check, fence):
                     check(label + "-before-lease", message == fence and lease.call_count == 0)
                 proc = _opf_emit.run_status_owned(
                     [sys.executable, "-I", "-B", str(cli), "upgrade", "--root", str(root)],
+                    fixture_id=label + ("/future" if unsupported else "/legacy"),
+                    expected_returncode=2 if unsupported else 0,
                     env=env, cwd=base, capture_output=True, text=True, timeout=120)
                 after, index_after = snapshot(root)
                 if unsupported:
-                    check(label + "-refuses-generation", proc.returncode == 2
+                    check(label + "-refuses-generation", proc.returncode == 0
                           and fence in proc.stderr)
                     check(label + "-store-byte-identical", after == before)
                     check(label + "-git-index-byte-identical", index_after == index_before)

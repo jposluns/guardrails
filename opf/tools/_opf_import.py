@@ -5441,8 +5441,9 @@ raise SystemExit(result.verdict)
 """
     cp = _opf_emit.run_status_owned([sys.executable, "-I", "-B", "-c", child,
                          str(Path(__file__).resolve().parent), str(root), run, mirror, now.isoformat()],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-    require("D5-killed-after-view", cp.returncode == 137
+                        fixture_id="D5-killed-after-view", expected_returncode=137, process_fixture=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=150)
+    require("D5-killed-after-view", cp.returncode == 0
             and (root / mirror).read_bytes() != before_mirror)
     journal_root = root / IMPORT_JOURNAL_REL
     rfd = _opf_store._open_store_root_fd(root, False)
@@ -6672,8 +6673,8 @@ def self_test():
         opf_py = str(Path(__file__).resolve().parent / "opf.py")
         root4, machine4 = build_store(sources={"a.txt": src})
         cp_nomode = _opf_emit.run_status_owned([sys.executable, "-I", "-B", opf_py, "import", "--root", str(root4)],
-                                   capture_output=True)
-        check("3-verb-no-mode-exits-2", cp_nomode.returncode == 2)
+                                   fixture_id="3-verb-no-mode", expected_returncode=2, capture_output=True)
+        check("3-verb-no-mode-exits-2", cp_nomode.returncode == 0)
         check("3-verb-no-mode-stages-nothing", not (machine4.parent / "imports").exists())
         # Stage a real run over root4, then `--apply` it WITHOUT a review: apply_import (PR-C, now real) finds
         # no acceptance.json, so the run is not promotion-ready -> exit 2, and the store machine tree is
@@ -6685,8 +6686,9 @@ def self_test():
         machine4_before = snapshot(machine4)
         cp_apply = _opf_emit.run_status_owned([sys.executable, "-I", "-B", opf_py, "import", "--apply",
                                    plan4.run_id or "imp-00000000T000000Z-0000000000000000",
-                                   "--root", str(root4)], capture_output=True)
-        check("3-apply-unreviewed-exits-2", cp_apply.returncode == 2)
+                                   "--root", str(root4)], fixture_id="3-apply-unreviewed",
+                                   expected_returncode=2, capture_output=True)
+        check("3-apply-unreviewed-exits-2", cp_apply.returncode == 0)
         check("3-apply-unreviewed-mutates-nothing", snapshot(machine4) == machine4_before)
 
         # 4: R6 active collision: a fully-valid active index already carries the id next_id will mint (BI-1

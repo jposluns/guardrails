@@ -2027,9 +2027,9 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                     [sys.executable, "-I", "-B", str(Path(__file__).with_name("opf.py")),
                      "import", "--root", str(root), "--plan", "--dispositions", str(wp),
                      "--ingest-options", str(op), "--include", files[0]],
-                    capture_output=True, check=False)
-                check("cli-malformed" if malformed else "cli-valid",
-                      proc.returncode == (2 if malformed else 0))
+                    fixture_id="cli-malformed" if malformed else "cli-valid",
+                    expected_returncode=2 if malformed else 0, capture_output=True)
+                check("cli-malformed" if malformed else "cli-valid", proc.returncode == 0)
 
     def reconcile():
         for case, verdict in (("digest-drift", CANNOT_EVALUATE), ("omission", FINDING),
@@ -3422,6 +3422,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                             tools=str(Path(__file__).resolve().parent), ingest=fifo_runs[0], core=fifo_runs[1])
                     try:
                         _fifo = run_status_owned([sys.executable, "-I", "-B", "-c", probe], timeout=120,
+                                               fixture_id="pr4b-disc-am2-fifo-nonblocking",
                                                capture_output=True)
                         _fifo_ok = _fifo.returncode == 0
                     except subprocess.TimeoutExpired:
