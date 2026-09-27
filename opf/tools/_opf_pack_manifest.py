@@ -411,18 +411,18 @@ def _runner_check(expected, text=None, *, fail_own=0):
     bash = os.path.abspath(bash)
     # The on-disk runner is the call roster, including for a mutated source.
     # This parser covers its one-line run_gate registrations, not general
-    # shell; anything else refuses before any shell can launch.
+    # shell; malformed registrations or unresolved dollars refuse before launch.
     own_argv = tuple(os.fsencode(arg) for arg in (
         "-I", "-B", str(here / "_opf_pack_manifest.py"), "--self-test"))
     roster = []
     try:
         for line in runner.read_text(encoding="utf-8").splitlines():
             if line.lstrip().startswith("run_gate "):
-                words = shlex.split(line)
-                if len(words) < 6 or words[2:5] != ["python3", "-I", "-B"]:
+                words = [word.replace("$here", str(here)) for word in shlex.split(line)]
+                if (any("$" in word for word in words)
+                        or len(words) < 6 or words[2:5] != ["python3", "-I", "-B"]):
                     raise ValueError(line)
-                roster.append(tuple(os.fsencode(word.replace("$here", str(here)))
-                                    for word in words[3:]))
+                roster.append(tuple(os.fsencode(word) for word in words[3:]))
     except (OSError, ValueError) as exc:
         raise RuntimeError(identity + "/cannot-evaluate/roster") from exc
     if roster.count(own_argv) != 1:
@@ -440,7 +440,7 @@ def _runner_check(expected, text=None, *, fail_own=0):
     # remain outside this check.
     # Fix-4 accounting: in-runner PATH changes remain covered, now by the
     # read-only PATH pin rather than a shell function (PASS in-runner-path;
-    # RED removed-function-shim, which removes the pin). No function or
+    # RED removed-path-pin, which removes the pin). No function or
     # alias stands in for python3. Shells: bash --noprofile --norc runs the
     # runner, /bin/sh the fixture. The PATH fixture also covers child
     # shells, command and env forms, each run as a dispatch route
@@ -449,18 +449,22 @@ def _runner_check(expected, text=None, *, fail_own=0):
     # scope, including wrappers recognizing injected output and swallowing
     # real SELF-TEST FAIL, PACK-MANIFEST FAIL or CANNOT diagnostics, and bare
     # alternate interpreter names such as python3.14. No mechanism covers them.
-    # Absolute paths, hash -p, and a PATH replaced in a child process (env
-    # PATH=... or a child shell that reassigns it) remain outside
-    # interception: the pin binds only the runner's own shell. Under set -e
-    # a pinned assignment fails the runner (return-code), never a false
-    # pass. Deliberately closing inherited descriptors
+    # Absolute paths, command -p, hash -p, and a PATH replaced in a child
+    # process (env PATH=... or a child shell that reassigns it) remain outside
+    # interception: the pin binds only the runner's own shell. This runner
+    # does not set -e: a rejected PATH assignment can abort the rest of its
+    # line while later lines continue; a prefix assignment runs the command
+    # with the pinned PATH. Skipped or unintercepted registered calls fail
+    # invocation reconciliation; this detects bypasses, not prevents them.
+    # Deliberately closing inherited descriptors
     # while clearing the environment can bypass recursion refusal and spawn
     # nested sessions outside timeout killpg containment. Not a process sandbox.
     # Intercepted siblings return 0; their failure propagation is outside
     # this check too.
-    # Routes under test reach only this suite's in-memory vector leg and
-    # the private argv log, so the executable fixture and its checked log
-    # suffice without enforced isolation (quali-test-hermeticity).
+    # The runner and fixed mutations exercised here dispatch the executable
+    # fixtures or the declared interpreter and suite inputs; they contain no
+    # service client or outside-state operation. This bounded code review,
+    # not PATH interception alone, is the basis for omitting isolation.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$manifest_log" || exit 2
 if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
@@ -593,6 +597,7 @@ exit 0
     # invocation evidence, even when every earlier identity passed.
     if calls != roster:
         raise AssertionError(identity + "/invocations")
+    return roster
 
 
 def _runner_routes(identity):
@@ -694,6 +699,30 @@ def _runner_red_checks(expected):
         else:
             raise AssertionError(identity + "/" + label + "/not-red")
         print("RED {} -> {}".format(label, wanted))
+
+    # Unsupported expansion in any registration word refuses before launch.
+    original_read_text = Path.read_text
+    for label, old, new in (
+        ("roster-braced-here", "$here/", "${here}/"),
+        ("roster-variable", "$here/", "$other/"),
+        ("roster-name-variable", "opf-homes-selftest", "opf-$other-selftest"),
+    ):
+        roster_source = source.replace(old, new, 1)
+        if roster_source == source:
+            raise AssertionError(identity + "/red-fixture")
+
+        def read_roster(path, *args, **kwargs):
+            if path == runner:
+                return roster_source
+            return original_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", read_roster), \
+                patch("subprocess.Popen", side_effect=AssertionError(
+                    identity + "/roster/unexpected-launch")) as launch:
+            red(label, lambda: _runner_check(expected), RuntimeError,
+                identity + "/cannot-evaluate/roster")
+            if launch.called:
+                raise AssertionError(identity + "/roster/unexpected-launch")
 
     # Set CI in the caller, not in the constructed runner environment.
     with patch.dict(os.environ, {"CI": "true"}):
@@ -837,18 +866,35 @@ def _runner_red_checks(expected):
         print("PASS " + identity + "/scrubbed-environment/no-nested-launch")
 
     # A harmless competing executable makes removing the PATH pin safe.
-    # The normal check requires exactly one own call in the fixture's log.
-    # The RED keeps its fix-4 identity; it now removes the pin that
-    # replaced the function shim, so the in-runner PATH change wins.
+    # Check its own evidence too: zero calls with the pin, the complete
+    # on-disk roster without it. Exact NUL framing rejects malformed logs.
     with tempfile.TemporaryDirectory(prefix="opf-runner-path-") as tmp:
         os.chmod(tmp, 0o700)
         if os.pathsep in tmp:
             raise RuntimeError(identity + "/cannot-evaluate/pathsep")
+        competing_log = Path(tmp) / "competing-argv.log"
+        competing_log.write_bytes(b"")
+        competing_log.chmod(0o600)
         stub = Path(tmp) / "python3"
-        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.write_text(
+            "#!/bin/sh\nprintf '%s\\0' \"$#\" \"$@\" >> "
+            + shlex.quote(str(competing_log)) + " || exit 2\nexit 0\n", encoding="utf-8")
         stub.chmod(0o700)
+
+        def check_competing_log(calls):
+            try:
+                actual = competing_log.read_bytes()
+            except OSError as exc:
+                raise RuntimeError(identity + "/cannot-evaluate/competing-argv-log") from exc
+            wanted = b"".join(
+                b"\0".join((str(len(argv)).encode("ascii"), *argv)) + b"\0"
+                for argv in calls)
+            if actual != wanted:
+                raise AssertionError(identity + "/competing-invocations")
+
         changed_path = "PATH=" + shlex.quote(tmp) + ":$PATH\n" + source
-        _runner_check(expected, changed_path)
+        roster = _runner_check(expected, changed_path)
+        check_competing_log([])
         print("PASS " + identity + "/in-runner-path")
 
         original_popen = subprocess.Popen
@@ -863,10 +909,22 @@ def _runner_red_checks(expected):
             return original_popen(command, *args[1:], **kwargs)
 
         with patch("subprocess.Popen", side_effect=without_pin):
-            red("removed-function-shim", lambda: _runner_check(expected, changed_path),
+            red("removed-path-pin", lambda: _runner_check(expected, changed_path),
                 AssertionError, identity + "/pass-lines")
         if removed != 1:
             raise AssertionError(identity + "/in-runner-path/removed-count")
+
+        check_competing_log(roster)
+        print("PASS " + identity + "/removed-path-pin/invocations")
+        # The empty-log assertion discriminates: without the pin, calls appear.
+        red("competing-log-not-empty", lambda: check_competing_log([]),
+            AssertionError, identity + "/competing-invocations")
+        competing_log.unlink()
+        red("missing-competing-log", lambda: check_competing_log(roster),
+            RuntimeError, identity + "/cannot-evaluate/competing-argv-log")
+        competing_log.write_bytes(b"malformed")
+        red("malformed-competing-log", lambda: check_competing_log(roster),
+            AssertionError, identity + "/competing-invocations")
 
     # Remove every execute bit, including for root. Permit only the probe:
     # a reverted interception guard must never launch the real runner.

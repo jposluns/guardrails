@@ -28,11 +28,14 @@ double of the launch interface, which launches nothing, is outside this requirem
 the shells, if any, and the invocation routes it exercises, including child processes, has each fixture record
 the invocations it receives, and checks that invocation evidence against the invocations each test case
 expects. The harness initializes executable lookup and configuration from controlled inputs. Where the
-substituted executable could reach live credentials, remote services, or state outside the fixture through
-the invocation routes under test, the harness enforces isolation: it removes access to live credentials
-and remote services, confines writes to its fixture, and limits reads to declared inputs, among them the
-code under test. Where those routes are confined to declared inputs and fixture state, executable fixtures
-and checked invocation evidence suffice without enforced isolation. Placing a fixture first on the executable
+external executable being substituted, or its service, could reach live credentials, remote services,
+or state outside the fixture by any route available to the code under test, including absolute paths,
+a replaced search path, or clients that bypass the executable, the harness enforces isolation: it removes
+access to live credentials and remote services, confines writes to its fixture, and limits reads to
+declared inputs, among them the code under test. Only where every route by which the code under test could
+launch that executable or reach its service, not only the declared invocation routes, is confined to
+declared inputs and fixture state do executable fixtures and checked invocation evidence suffice without
+enforced isolation. Placing a fixture first on the executable
 search path does not intercept absolute-path calls, calls using a replaced search path, or clients
 implemented without that executable, so executable fixtures supplement required isolation and never replace
 it. If the required isolation cannot be established, or the verification cannot determine whether it is
