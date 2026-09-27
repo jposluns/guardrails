@@ -300,6 +300,7 @@ def red_on_revert(source, f):
 
 def runner_check(expected, text=None, *, fail_own=0):
     import errno
+    import fcntl
     import os
     import shlex
     import shutil
@@ -327,9 +328,13 @@ def runner_check(expected, text=None, *, fail_own=0):
                 if exc.errno == errno.EBADF:
                     continue
                 raise
-            if (stat.S_ISREG(info.st_mode) and info.st_size == len(marker_bytes)
-                    and os.pread(fd, len(marker_bytes), 0) == marker_bytes):
-                raise RuntimeError(identity + "/cannot-evaluate/recursion")
+            if stat.S_ISREG(info.st_mode) and info.st_size == len(marker_bytes):
+                # An unrelated write-only log cannot be our readable marker.
+                if fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_WRONLY:
+                    continue
+                # Readable candidates still fail closed on inspection errors.
+                if os.pread(fd, len(marker_bytes), 0) == marker_bytes:
+                    raise RuntimeError(identity + "/cannot-evaluate/recursion")
     except (OSError, ValueError) as exc:
         raise RuntimeError(identity + "/cannot-evaluate/recursion-marker") from exc
     if type(fail_own) is not int or fail_own not in (0, 1, 2, 7):
@@ -487,6 +492,48 @@ exit 0
         raise AssertionError(identity + "/own-argv")
 
 
+def _runner_write_only_fd_check():
+    import os
+    import subprocess
+    import tempfile
+
+    identity = "runner/declared-test-executes/inherited-write-only-fd"
+    # Run the full self-test with a genuine inherited 37-byte O_WRONLY fd.
+    # Suppress only this self-spawning case in the child; keep its other
+    # vectors, registration checks and REDs enabled.
+    with tempfile.TemporaryDirectory(prefix="opf-write-only-fd-") as tmp:
+        os.chmod(tmp, 0o700)
+        log = Path(tmp) / "ordinary.log"
+        log.write_bytes(b"x" * 37)
+        log.chmod(0o600)
+        fd = os.open(log, os.O_WRONLY | os.O_APPEND)
+        try:
+            child = (
+                "import fcntl, importlib, os, sys\n"
+                "from pathlib import Path\n"
+                "from unittest.mock import patch\n"
+                f"assert os.fstat({fd}).st_size == 37\n"
+                f"assert fcntl.fcntl({fd}, fcntl.F_GETFL) & os.O_ACCMODE == os.O_WRONLY\n"
+                "sys.argv = sys.argv[1:]\n"
+                "sys.path.insert(0, str(Path(sys.argv[0]).parent))\n"
+                "module = importlib.import_module(Path(sys.argv[0]).stem)\n"
+                "with patch.object(module, '_runner_write_only_fd_check'):\n"
+                "    raise SystemExit(module.main())\n")
+            try:
+                # Deliberate fast-fail ceiling for this regression child.
+                proc = subprocess.run(
+                    [sys.executable, "-I", "-B", "-c", child,
+                     str(Path(__file__).resolve()), "--self-test", "--red-on-revert"],
+                    pass_fds=(fd,), capture_output=True, text=True, timeout=300)
+            except Exception as exc:
+                raise AssertionError(identity) from exc
+            if proc.returncode != 0:
+                raise AssertionError(identity)
+        finally:
+            os.close(fd)
+    print("PASS " + identity)
+
+
 def runner_red_checks(expected):
     import os
     import shlex
@@ -523,12 +570,14 @@ def runner_red_checks(expected):
 
     # Exercise the lost main case from the repository (or standalone) root.
     from contextlib import chdir
-    with chdir(runner.parents[2]):
-        if not Path("opf/tools/run_all_checks.sh").is_file():
+    root = runner.parents[2]
+    relative_runner = runner.relative_to(root)
+    with chdir(root):
+        if not relative_runner.is_file():
             raise AssertionError(identity + "/cwd-fixture")
         red("cwd-conditional-skip", lambda: runner_check(
             expected, source.replace(
-                anchor, anchor + '  if [ -e opf/tools/run_all_checks.sh ]; then '
+                anchor, anchor + '  if [ -e ' + shlex.quote(str(relative_runner)) + ' ]; then '
                 'case "$name" in opf-init-p0-selftest) return 0;; esac; fi\n', 1)),
             AssertionError, identity + "/pass-lines")
 
@@ -626,13 +675,27 @@ def runner_red_checks(expected):
         if own_line.count("python3 ") != 1 or own_line.count(script_arg) != 1:
             raise AssertionError(identity + "/red-fixture")
         scrubbed = own_line.replace(
-            "python3 ", "env -i PATH=/usr/bin:/bin python3 ", 1).replace(
-                script_arg, shlex.quote(str(nested)), 1)
-        red("scrubbed-environment", lambda: runner_check(
-            expected, source.replace(own_line, scrubbed, 1)),
-            AssertionError, identity + "/return-code")
-        if report.read_text(encoding="utf-8") != identity + "/cannot-evaluate/recursion":
-            raise AssertionError(identity + "/scrubbed-environment/wrong-refusal")
+            "python3 ", "env -i PATH=/usr/bin:/bin " + shlex.quote(sys.executable) + " ",
+            1).replace(script_arg, shlex.quote(str(nested)), 1)
+        refusal_identity = identity + "/scrubbed-environment/wrong-refusal"
+        try:
+            try:
+                runner_check(expected, source.replace(own_line, scrubbed, 1))
+            except AssertionError as exc:
+                if str(exc) != identity + "/return-code":
+                    raise
+            else:
+                raise AssertionError("scrubbed runner accepted")
+            refusal = report.read_text(encoding="utf-8")
+        except Exception as exc:
+            # Missing/unreadable reports and unexpected runner outcomes are
+            # failures of this RED, not harness cannot-evaluate outcomes.
+            raise AssertionError(refusal_identity) from exc
+        if refusal != identity + "/cannot-evaluate/recursion":
+            raise AssertionError(refusal_identity)
+        # The child writes this exact report only after asserting zero Popen
+        # attempts. Announce the RED only once that evidence has been read.
+        print("RED scrubbed-environment -> " + identity + "/cannot-evaluate/recursion")
         print("PASS " + identity + "/scrubbed-environment/no-nested-launch")
 
     # A harmless competing executable makes reverting the function safe.
@@ -733,6 +796,8 @@ def runner_red_checks(expected):
                     identity + "/cannot-evaluate/pathsep")
                 if launch.call_count:
                     raise AssertionError(identity + "/pathsep/unexpected-launch")
+
+    _runner_write_only_fd_check()
 
 
 def main():
