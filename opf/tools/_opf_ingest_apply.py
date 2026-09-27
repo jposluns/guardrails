@@ -2328,12 +2328,14 @@ def _st_home_topology(base_dir, kind, placement, corrupt=True):
     return root, canonical, physical, aliases, inside, held, claimants
 
 
-def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, deep_only=False, corrupt=True):
+def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, deep_only=False, corrupt=True,
+                      asserted_identity=None):
     """Every matrix cell is independently classified from absolute spelling, links, holder, and second claim.
     No canonical-verdict equivalence substitutes for the structural expectation. Count each mismatching
     cell once. Proc magic links keep their descriptor live for the entire placement."""
     from unittest.mock import patch
     mismatches, count = [], 0
+    protected_calls = []
     for placement in placements:
         root, canonical, physical, aliases, inside, held, claimants = _st_home_topology(
             base_dir, kind, placement, corrupt=corrupt)
@@ -2378,6 +2380,8 @@ def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, de
                         # Pin the untraversed-home-link residual, including the earlier-chdir placement.
                         spellings.append(("physical", str(physical)))
                     for label, spelling in spellings:
+                        if (placement, homes, cwd, label) == ("shared-ancestor", 1, base_dir, "alias-0"):
+                            protected_calls.append(count)
                         links, visited = _st_route_facts(cwd, spelling, depth)
                         second = any(str(claimant) in visited for claimant in claimants)
                         if placement == "held-cwd-alias":
@@ -2406,6 +2410,12 @@ def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, de
         finally:
             if proc_fd is not None:
                 os.close(proc_fd)
+    # Bind the declared ordinal to the actual matrix cell, even when corrupt bits all stay False.
+    if asserted_identity is not None and (asserted_identity.rsplit("/", 1)[-1] != kind
+            or len(protected_calls) != 1 or any(
+            ordinal != protected_calls[0]
+            for ordinal, _cid, _expected in _REVERT_ASSERTED[asserted_identity])):
+        raise RuntimeError("asserted home call identity drift: " + asserted_identity)
     return count, mismatches
 
 
@@ -2481,7 +2491,8 @@ def _d_home_property_holding(kind):
     def test(module, base_dir):
         count, mismatches = _st_home_property(
             module, base_dir, kind,
-            placements=("none", "same-root-alias", "shared-ancestor", "nested-shared"))
+            placements=("none", "same-root-alias", "shared-ancestor", "nested-shared"),
+            asserted_identity="gate/home-property-holding/" + kind)
         _revert_check(count and not mismatches, "gate/home-property-holding/" + kind)
     return test
 
@@ -2491,7 +2502,8 @@ def _d_home_rule(kind, rule):
         placements = (("chained", "external-root-out", "external-target", "proc-fd", "detached-alias")
                       if rule == "unheld-link" else ("shared-ancestor", "nested-shared"))
         count, mismatches = _st_home_property(
-            module, base_dir, kind, placements=placements, corrupt=(rule != "unheld-link"))
+            module, base_dir, kind, placements=placements, corrupt=(rule != "unheld-link"),
+            asserted_identity="gate/home-second-claim/" + kind if rule == "second-claim" else None)
         _revert_check(count and not mismatches, "gate/home-" + rule + "/" + kind)
     return test
 
@@ -3387,7 +3399,7 @@ for _kind in ("import", "ingest"):
         ("home-rename-at-lookup", 0, False, _ST_TXN),
         ("home-retained", 0, False, _ST_TXN),
         ("home-property-ancestors", 1, False, _ST_TXN),  # claimed spelling after clean
-        # none: 64 calls; same-root-alias: 80; shared-ancestor's first alias: offset 4.
+        # _st_home_property checks these ordinals against shared-ancestor/homes-1/base_dir/alias-0.
         ("home-property-holding", 148, False, _ST_TXN),
         ("home-start-ancestors", 1, False, _ST_TXN),
         ("home-unheld-link", 0, False, _ST_TXN),  # chained canonical route
@@ -3493,7 +3505,9 @@ def _revert_trace(module, key, identity, trace):
 
 
 def _revert_boolean_witness(identity, baseline, mutant, safety, asserted):
-    """Require the declared call and flip direction; missing calls/checks are not flips."""
+    """Safety requires the declared call/direction; guard-execution forbids declared ids at any call.
+    Missing calls/checks are not flips; fixture call alignment still needs review.
+    """
     if (not isinstance(asserted, tuple) or not asserted
             or any(not isinstance(item, tuple) or len(item) != 3
                    or type(item[0]) is not int or item[0] < 0
@@ -3516,15 +3530,18 @@ def _revert_boolean_witness(identity, baseline, mutant, safety, asserted):
     if safety and not witnesses:
         raise RuntimeError("safety row has no asserted Boolean outcome flip: {}; all_flips={}".format(
             identity, ",".join(flips) or "none"))
-    if not safety and witnesses:
+    declared_ids = {cid for _ordinal, cid, _expected in asserted}
+    if not safety and any(cid in declared_ids for _index, cid, _before, _after in changed):
         raise RuntimeError("guard-execution row has an asserted Boolean outcome flip; reclassify as safety: "
                            + identity)
     return flips, witnesses
 
 
-def _t_revert_boolean_guard(_base, check):
+def _t_revert_boolean_guard(base, check):
     """Negative controls use the same observer and refusing gate as the real mutation harness."""
     from types import SimpleNamespace
+    from unittest.mock import patch
+    import check_opf_import as gate
     traces = []
     asserted = ((0, "check", False),)
     for ok, unrelated, detail in ((False, False, "guard diagnostic"),
@@ -3549,6 +3566,10 @@ def _t_revert_boolean_guard(_base, check):
          True, ((1, "check", False),)),
         ("wrong-direction", traces[2], traces[0], True, asserted),
         ("guard-execution-flip", traces[0], traces[2], False, asserted),
+        ("guard-execution-other-call", traces[0] + traces[0], traces[0] + traces[2], False, asserted),
+        ("guard-execution-other-direction", traces[0] + traces[2], traces[0] + traces[0], False, asserted),
+        ("guard-execution-other-check-call", traces[0] + traces[0], traces[0] + traces[3],
+         False, asserted + ((0, "unrelated", False),)),
         ("missing", traces[0], [], True, asserted),
         ("missing-check", traces[0], [{}], True, asserted),
         ("non-Boolean", traces[0], [{"check": 0}], True, asserted),
@@ -3590,6 +3611,21 @@ def _t_revert_boolean_guard(_base, check):
         except RuntimeError:
             refused = True
         check("Boolean-refuses-malformed-" + repr(bad), refused)
+
+    # Drift to another corrupt call with the same baseline bits; only matrix identity can refuse it.
+    for kind in ("import", "ingest"):
+        for rule in ("property-holding", "second-claim"):
+            identity = "gate/home-" + rule + "/" + kind
+            drifted = tuple((ordinal + 1, cid, expected)
+                            for ordinal, cid, expected in _REVERT_ASSERTED[identity])
+            test = _d_home_property_holding(kind) if rule == "property-holding" else _d_home_rule(kind, rule)
+            refused = False
+            with patch.dict(_REVERT_ASSERTED, {identity: drifted}):
+                try:
+                    test(gate, base / ("ordinal-drift-" + rule + "-" + kind))
+                except RuntimeError as exc:
+                    refused = str(exc) == "asserted home call identity drift: " + identity
+            check("Boolean-refuses-ordinal-drift-" + rule + "-" + kind, refused)
 
     # Exercise apply's real projection, including an escape that supplies only the returned bit.
     apply_traces = []
