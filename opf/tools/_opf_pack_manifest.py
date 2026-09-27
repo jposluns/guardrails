@@ -462,9 +462,13 @@ def _runner_check(expected, text=None, *, fail_own=0):
     # Intercepted siblings return 0; their failure propagation is outside
     # this check too.
     # The runner, its fixtures, this harness, and the fixed mutations exercised
-    # here each launch only the executable fixtures or the declared interpreter
-    # by absolute path on declared suite inputs; they contain no service client
-    # or outside-state operation. This bounded code review, not PATH interception
+    # here launch no route to python3 other than the executable fixtures or the
+    # declared interpreter by absolute path on declared suite inputs (their
+    # other launches: bash, /bin/sh running the fixture, env, and dirname). The
+    # forwarded --vectors-only run and the modules it imports, themselves
+    # declared suite inputs, take no process-launching or service route on that
+    # path, and the environment filter below drops credential carriers from the
+    # passed environment. This bounded code review, not PATH interception
     # alone, is the basis for omitting isolation.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$manifest_log" || exit 2
@@ -480,8 +484,9 @@ case " $* " in *_opf_pack_manifest.py*) exit 2;; esac
 exit 0
 '''
     # Preserve ordinary caller variables (including CI) so conditional
-    # dispatch is exercised. Remove the execution controls listed below, then
-    # pin configuration and fixture variables; not an environment sandbox.
+    # dispatch is exercised. Remove the execution controls and the credential
+    # carriers matched below, then pin configuration and fixture variables;
+    # not an environment sandbox: only the named patterns are dropped.
     # Preserve the pack twin's existing scratch cwd; caller-cwd dispatch is
     # outside this twin's coverage.
     with tempfile.TemporaryDirectory(prefix="opf-pack-registration-") as tmp, ExitStack() as resources:
@@ -499,7 +504,12 @@ exit 0
         log.chmod(0o600)
         env = {name: value for name, value in os.environ.items()
                if name not in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4")
-               and not name.startswith(("GIT_", "BASH_FUNC_", "PYTHON", "LD_"))}
+               and not name.startswith(("GIT_", "BASH_FUNC_", "PYTHON", "LD_",
+                                        "SSH_", "AWS_", "GPG_"))
+               and not any(marker in name for marker in
+                           ("TOKEN", "SECRET", "PASSWORD", "PASSPHRASE",
+                            "CREDENTIAL", "APIKEY", "API_KEY", "ACCESS_KEY",
+                            "AUTH"))}
         env.update({name: tmp for name in env if name.startswith("XDG_")})
         env.update({"PATH": tmp + os.pathsep + os.defpath, "TMPDIR": tmp,
                     "HOME": tmp, "XDG_CONFIG_HOME": tmp, "XDG_CACHE_HOME": tmp,

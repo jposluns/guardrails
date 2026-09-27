@@ -749,18 +749,18 @@ double of the launch interface, which launches nothing, is outside this requirem
 the shells, if any, and the invocation routes it exercises, including child processes, has each fixture record
 the invocations it receives, and checks that invocation evidence against the invocations each test case
 expects. The harness initializes executable lookup and configuration from controlled inputs. The routes,
-including absolute paths, a replaced search path, and clients implemented without that executable,
-by which the substituted executable is launched or its service reached are every route that
-the code under test, or the verification itself (its test cases, inputs, fixtures, harness,
-and mutations), can take when run as the verification runs it, including routes taken in turn
-by anything either of them loads or launches and by any service or already-running process
-either of them contacts; a route counts whether or not review finds it, and no route counts
-merely because other inputs could make the code take it. Where any such route could reach live
-credentials, remote services, or state outside the fixture and its declared inputs, the harness
-enforces isolation over every such route: it removes access to live credentials and remote
-services, confines writes to its fixture, and limits reads to declared inputs, among them the code
-under test. Only where every such route to that executable or its service, not only the declared
-invocation routes, is confined to declared inputs and fixture state do executable fixtures and checked
+including absolute paths, a replaced search path, and clients implemented without that executable, by which
+the substituted executable is launched or its service reached are all routes that the code under test, or
+the verification itself (its test cases, inputs, fixtures, harness, and mutations), can take when run as
+the verification runs it, including routes taken in turn, at any depth, by anything loaded, launched, or
+contacted along such a route; a route counts whether or not review finds it, and a route reachable only
+under inputs the verification neither supplies nor passes through does not count. Where any such route
+could, in that run, reach live credentials, among them credentials inherited through the passed
+environment, reach remote services, write outside the fixture, or read outside the fixture and its declared
+inputs, the harness enforces isolation over every such route: it removes access to live credentials and
+remote services, confines writes to its fixture, and limits reads to declared inputs, among them the code
+under test. Only where every such route to that executable or its service, not only the declared invocation
+routes, is confined to fixture state and to reads of declared inputs do executable fixtures and checked
 invocation evidence suffice without enforced isolation. Placing a fixture first on the executable
 search path does not intercept absolute-path calls, calls using a replaced search path, or clients
 implemented without that executable, so executable fixtures supplement required isolation and never replace
