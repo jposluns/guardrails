@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "7a815c9eeccb212d6c9d9af6c63334d8cee20cd530c34b9a96b0985aa2b16e12"
+tree-sha256 = "cd1f2cb305018391098b8f111b3b16eeb6d34c6bd189d7b767593b513b0392d5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2191,8 +2191,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 40175
-sha256 = "9fd15ca9c6f915cf0b920e1e72407ff51caddcedfad52e6955b9a7c3eab66981"
+bytes = 40214
+sha256 = "6b716ffca94f2def112d2568e258af16e470157926c1f6e82ba497ab4d501578"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -3243,6 +3243,11 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 path = "tools/check_release_build.py"
 bytes = 182272
 sha256 = "3e50583f0a84c71eea3935d977556670bb9086bbbac6e0d83517fa055ef7a778"
+
+[[sources]]
+path = "tools/check_release_cut.py"
+bytes = 37803
+sha256 = "52959d3b0597453447ab426126fef701137b493d67cd6893e0beec93cfd9c5f9"
 
 [[sources]]
 path = "tools/check_release_delta.py"
