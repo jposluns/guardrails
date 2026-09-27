@@ -56,7 +56,7 @@ VECTOR ROSTER (U1-U25, P1):
   U14d absent ignored view/index/product destinations: refuse before mutation; probe-removal flips mutate.
   U15 [types.contribution] pre-declared: exit 2 naming contribution as an impossible 1.0.0 shape; unchanged.
   U16 governance=false plus [types.maintainer_decision]: exit 2 naming the module inconsistency; unchanged.
-  U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.1.0 triage refusals (with the scoped
+  U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.2.0 triage refusals (with the scoped
       recovery text).
   U17b post-manifest exception: planned restore/rm advice and F2 candidates, with suppression flips.
   U18 postcondition unit vectors: call opf._upgrade_postcondition directly with hand-mutated new models; each
@@ -80,7 +80,7 @@ VECTOR ROSTER (U1-U25, P1):
   U20 R8 module-coupling refusal: governance=true with maintainer_action but maintainer_decision ABSENT (a
       module-inconsistent 1.0.0 shape the delta would silently cure) refuses exit 2 before mutation; unchanged.
   U21 R2 absent-table migration: the missing [modules], missing [views], and both-missing origins (each oracle-
-      graded doctor-VALID at merge-base 1c90fbb) migrate to a doctor-VALID 1.1.0 store; an absent table is
+      graded doctor-VALID at merge-base 1c90fbb) migrate to a doctor-VALID 1.2.0 store; an absent table is
       never invented as an empty table beyond the two new views [views] must carry.
   U22 R1 nested-store held lease: a store root BELOW the git repo root with a foreign held lease reaches step
       4's never-seize message, not step 3's dirty-store remedy (the lease_excl prefix-normalization fix).
@@ -102,11 +102,11 @@ VECTOR ROSTER (U1-U25, P1):
       module set still plans; end-to-end, a stored governance="x" refuses exit 2 before any mutation. FIX3: an
       UNKNOWN [modules] key refuses UPFRONT (merge-base _validate_modules parity), while the known-but-retired
       decision_support key still plans; fails without the upfront unknown-key check.
-  U27 R1a relocated partial-recovery: a RELOCATED store (store_root != product_root) at spec_version 1.1.0 but
+  U27 R1a relocated partial-recovery: a RELOCATED store (store_root != product_root) at spec_version 1.2.0 but
       not doctor-VALID names the STORE root for inspection; no unverified subtree restore is offered.
   P1  a seeded migration property test: 12 generated genuine-VALID 1.0.0 variants (module subset with the
       G2 coupling, 0-2 records per migrated type with matching high-waters, DECISIONS.md declared/omitted,
-      the decision_support key present/absent) each upgrade to a doctor-VALID 1.1.0 store with every index
+      the decision_support key present/absent) each upgrade to a doctor-VALID 1.2.0 store with every index
       byte-identical, every pre-existing counter preserved, and worklog/version byte-identical.
 
 Exit convention: 0 observed assertions pass; 1 an assertion fails; 2 cannot evaluate the harness.

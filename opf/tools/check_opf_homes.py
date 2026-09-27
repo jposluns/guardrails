@@ -3,6 +3,8 @@
 
 Checks documented topology against the constructor authority. Text checks protect the planned
 contract, not runtime conformance to homes 2. No store is mutated or required to install a block.
+Residual: wording checks require pinned text to be present; they do not detect added contradictory
+claims that leave the pins intact.
 """
 import re
 import sys
@@ -35,8 +37,9 @@ _CONTRACT = {
         'dispositioned.',
         'A base-schema version bump ships a tested, in-place store-schema upgrade (opf upgrade).',
         'The upgrade is idempotent.',
-        'A purely schema-level bump is additive, using direct atomic file replacement and '
-        'sequential writes with recovery scope held in memory, not a durable transaction journal.',
+        'A purely schema-level bump is additive, using atomic replacement of existing files, '
+        'create-only writes for new index files, and sequential writes with recovery scope held '
+        'in memory, not a durable transaction journal.',
         'A homes-generation bump additionally relocates OPF control areas as a versioned, '
         'journaled, fail-closed relocation.',
         'Every destination is digest-verified before its source is removed.',
@@ -1256,11 +1259,18 @@ def self_test():
           contract_findings(text.replace(body, mutated, 1)))
     # Pin every normative sentence in 9.2 and exercise each deletion independently.
     normalized = " ".join(body.replace("`", "").split())
+
+    def replace_body(replacement):
+        # Keep the body separate from both its heading and the following section.
+        return text.replace(body, "\n\n" + replacement + "\n\n", 1)
+
+    check("spec-control-9.2-undeleted", lambda:
+          contract_findings(replace_body(normalized)) == [])
     for fragment in _CONTRACT["9.2"]:
-        mutated = text.replace(body, normalized.replace(fragment, "", 1), 1)
+        mutated = replace_body(normalized.replace(fragment, "", 1))
         check("spec-flip-9.2-" + fragment, lambda f=fragment, m=mutated:
               normalized.count(f) == 1 and
-              "spec 9.2 missing contract: " + f in contract_findings(m))
+              contract_findings(m) == ["spec 9.2 missing contract: " + f])
     for failure in failures:
         print("FAIL: " + failure)
     print("OPF-HOMES SELF-TEST: {} ({} checks)".format("FAILED" if failures else "OK", checked))
