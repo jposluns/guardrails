@@ -353,6 +353,8 @@ def _runner_check(expected, text=None):
     import ast
     import os
     import shlex
+    import shutil
+    import signal
     import subprocess
     import tempfile
 
@@ -360,22 +362,45 @@ def _runner_check(expected, text=None):
     runner = here / "run_all_checks.sh"
     registered = runner.read_text(encoding="utf-8")
     source = registered if text is None else text
-    # Compare with the unmodified, single-line registrations, including when
-    # the candidate text deliberately removes this suite's registration.
-    calls = []
-    for line in registered.splitlines():
-        if line.startswith("run_gate "):
-            words = shlex.split(line)
-            if len(words) < 4 or words[2] != "python3":
-                raise AssertionError("runner/pack-manifest-registration")
+    identity = "runner/pack-manifest-registration"
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError(identity + "/cannot-evaluate/bash")
+    bash = os.path.abspath(bash)
+
+    def registrations(body):
+        # Deliberately bounded grammar: quoted gate name, python3, literal
+        # arguments or double-quoted $here paths, on one unindented line.
+        # This is not a Bash parser; wrappers and other shell syntax refuse.
+        calls = []
+        for line in body.splitlines():
+            if not re.match(r"^\s*run_gate\b", line) or line == "run_gate() {":
+                continue
+            try:
+                words = shlex.split(line)
+            except ValueError as exc:
+                raise RuntimeError(identity + "/cannot-evaluate/grammar") from exc
+            if not re.fullmatch(
+                    r'run_gate "[A-Za-z0-9_-]+" +python3'
+                    r'(?: +(?:[A-Za-z0-9_./=-]+|"\$here/[A-Za-z0-9_./-]+"))+ *',
+                    line):
+                raise RuntimeError(identity + "/cannot-evaluate/grammar")
             calls.append([word.replace("$here/", str(here) + "/") for word in words[3:]])
+        return calls
+
+    # The file defines expected dispatch, not an independently required roster.
+    # Validate candidate grammar too, but never derive expected argv from it.
+    calls = registrations(registered)
+    registrations(source)
     if not calls:
-        raise AssertionError("runner/pack-manifest-registration")
+        raise RuntimeError(identity + "/cannot-evaluate/grammar")
     wanted = b"".join(os.fsencode(word) + b"\0"
                       for args in calls for word in [str(len(args)), *args])
-    # Bash dispatches through PATH to an executable /bin/sh fixture; child
-    # shells inherit PATH too. Absolute paths or replaced PATH bypass it, but
-    # then the exact invocation log cannot match. This is not a process sandbox.
+    # Equality of argc-framed records binds the number, order and arguments of
+    # intercepted calls to the parsed registrations, including dispatcher skips.
+    # Absolute paths or a changed PATH can run a real gate before a missing
+    # expected call is detected. Extra unintercepted executions need not change
+    # this log at all. This is not a process sandbox or a roster-coverage check.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$manifest_log" || exit 2
 if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
@@ -387,29 +412,144 @@ exit 0
 '''
     # No inherited BASH_ENV, exported functions, Python or Git controls.
     with tempfile.TemporaryDirectory(prefix="opf-pack-registration-") as tmp:
+        os.chmod(tmp, 0o700)
+        if os.pathsep in tmp:
+            raise RuntimeError(identity + "/cannot-evaluate/pathsep")
         executable = Path(tmp) / "python3"
         executable.write_text(fixture, encoding="utf-8")
         executable.chmod(0o700)
         log = Path(tmp) / "argv.log"
         log.write_bytes(b"")
-        proc = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-c", source, str(runner)],
-            cwd=tmp, env={"PATH": tmp + os.pathsep + os.defpath, "TMPDIR": tmp,
-                          "HOME": tmp, "XDG_CONFIG_HOME": tmp, "XDG_CACHE_HOME": tmp,
-                          "XDG_DATA_HOME": tmp, "XDG_STATE_HOME": tmp, "LC_ALL": "C",
-                          "PYTHONDONTWRITEBYTECODE": "1", "manifest_log": str(log),
-                          "manifest_python": sys.executable,
-                          "manifest_test": str(here / "_opf_pack_manifest.py")},
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=30,
-        )
+        log.chmod(0o600)
+        env = {"PATH": tmp + os.pathsep + os.defpath, "TMPDIR": tmp,
+               "HOME": tmp, "XDG_CONFIG_HOME": tmp, "XDG_CACHE_HOME": tmp,
+               "XDG_DATA_HOME": tmp, "XDG_STATE_HOME": tmp, "LC_ALL": "C",
+               "PYTHONDONTWRITEBYTECODE": "1", "manifest_log": str(log),
+               "manifest_python": sys.executable,
+               "manifest_test": str(here / "_opf_pack_manifest.py")}
+
+        def run_shell(body):
+            with subprocess.Popen(
+                    [bash, "--noprofile", "--norc", "-c", body, str(runner)],
+                    cwd=tmp, env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, start_new_session=True) as proc:
+                try:
+                    stdout, stderr = proc.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    # Kill descendants even when the shell itself has exited.
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        proc.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # An escaped session may still hold a pipe. Closing it
+                        # bounds collection; such processes are not contained.
+                        proc.stdout.close()
+                        proc.stderr.close()
+                    raise RuntimeError(identity + "/cannot-evaluate/timeout") from None
+                return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+        # Probe with exactly the runner's cwd, flags and environment. A noexec
+        # fixture or unusable PATH must never fall through to the real gates.
+        probe = run_shell("type -P python3")
+        if probe.returncode != 0 or probe.stdout != str(executable) + "\n":
+            raise RuntimeError(identity + "/cannot-evaluate/interception")
+        proc = run_shell(source)
         recorded = log.read_bytes()
-    reports = [ast.literal_eval(line[len("PACK-MANIFEST "):])
-               for line in proc.stdout.splitlines()
-               if line.startswith("PACK-MANIFEST ")]
-    if proc.returncode != 0 or recorded != wanted or reports != [
-            {"executed": expected, "failures": []}]:
-        raise AssertionError("runner/pack-manifest-registration")
+    if proc.returncode != 0:
+        raise AssertionError(identity + "/return-code")
+    try:
+        reports = [ast.literal_eval(line[len("PACK-MANIFEST "):])
+                   for line in proc.stdout.splitlines()
+                   if line.startswith("PACK-MANIFEST ")]
+    except (SyntaxError, ValueError) as exc:
+        raise AssertionError(identity + "/pass-lines") from exc
+    if reports != [{"executed": expected, "failures": []}]:
+        raise AssertionError(identity + "/pass-lines")
+    if recorded != wanted:
+        raise AssertionError(identity + "/argv-log")
+
+
+def _runner_red_checks(expected):
+    import os
+    import tempfile
+    from unittest.mock import patch
+
+    runner = Path(__file__).resolve().parent / "run_all_checks.sh"
+    source = runner.read_text(encoding="utf-8")
+    identity = "runner/pack-manifest-registration"
+    sibling = [line for line in source.splitlines(keepends=True)
+               if line.startswith('run_gate "opf-homes-selftest"')]
+    anchor = '  local name="$1"; shift\n'
+    if len(sibling) != 1 or source.count(anchor) != 1:
+        raise AssertionError(identity + "/red-fixture")
+    skip = source.replace(
+        anchor, anchor + '  if [ "$name" = opf-homes-selftest ]; then return 0; fi\n', 1)
+
+    def red(label, call, error, wanted):
+        try:
+            call()
+        except error as exc:
+            if str(exc) != wanted:
+                raise AssertionError(identity + "/" + label + "/wrong-red") from exc
+        except Exception as exc:
+            raise AssertionError(identity + "/" + label + "/wrong-error") from exc
+        else:
+            raise AssertionError(identity + "/" + label + "/not-red")
+        print("RED {} -> {}".format(label, wanted))
+
+    # Same registered text; the dispatcher skips a canonical sibling call.
+    # This tests dispatch divergence, not deletion from the on-disk roster.
+    red("dispatch-divergence", lambda: _runner_check(expected, skip),
+        AssertionError, identity + "/argv-log")
+    original_read = Path.read_text
+    grammar_cases = (
+        ("indented-registration-dispatch-skip", "  " + sibling[0]),
+        ("tab-separated-registration", sibling[0].replace("run_gate ", "run_gate\t", 1)),
+        ("trailing-comment", sibling[0].rstrip("\n") + " # comment\n"),
+        ("non-python3", sibling[0].replace("python3", "sh", 1)),
+        ("continuation", sibling[0].replace("python3 ", "python3 \\\n", 1)),
+        ("unclosed-quote", sibling[0].rstrip("\n") + ' "\n'),
+    )
+    for label, line in grammar_cases:
+        changed = skip.replace(sibling[0], line, 1)
+
+        def read(path, *args, **kwargs):
+            if path == runner:
+                return changed
+            return original_read(path, *args, **kwargs)
+
+        # Exercise production's registered==source path, not only a candidate.
+        with patch.object(Path, "read_text", read):
+            red(label, lambda: _runner_check(expected), RuntimeError,
+                identity + "/cannot-evaluate/grammar")
+        red(label + "-candidate", lambda: _runner_check(expected, changed), RuntimeError,
+            identity + "/cannot-evaluate/grammar")
+
+    # Discriminates only where TMPDIR has no default ACL: a default ACL
+    # overrides the umask, so there this case passes with or without the chmods.
+    saved = os.umask(0o200)
+    try:
+        try:
+            _runner_check(expected)
+        except Exception as exc:
+            raise AssertionError(identity + "/umask-0200") from exc
+    finally:
+        os.umask(saved)
+    print("PASS " + identity + "/umask-0200")
+
+    # Block every launch so a reverted guard cannot execute a real gate.
+    # Reset tempfile's cache as well as TMPDIR to exercise this exact directory.
+    with tempfile.TemporaryDirectory(prefix="opf-path" + os.pathsep) as tmp:
+        with patch.dict(os.environ, {"TMPDIR": tmp}), patch.object(tempfile, "tempdir", tmp):
+            with patch("subprocess.Popen", side_effect=AssertionError(
+                    identity + "/pathsep/unexpected-launch")) as launch:
+                red("tmpdir-pathsep", lambda: _runner_check(expected), RuntimeError,
+                    identity + "/cannot-evaluate/pathsep")
+                if launch.call_count:
+                    raise AssertionError(identity + "/pathsep/unexpected-launch")
 
 
 def _runner_registration_test(expected):
@@ -426,24 +566,12 @@ def _runner_registration_test(expected):
     try:
         _runner_check(expected, source.replace(lines[0], "", 1))
     except AssertionError as exc:
-        if str(exc) != "runner/pack-manifest-registration":
+        if str(exc) != "runner/pack-manifest-registration/pass-lines":
             raise
     else:
         raise AssertionError("runner/pack-manifest-registration-not-red")
-    print("RED runner-registration -> runner/pack-manifest-registration")
-    # A sibling suite's omitted registration is caught by the argv log.
-    sibling = [line for line in source.splitlines(keepends=True)
-               if line.startswith('run_gate "opf-homes-selftest"')]
-    if len(sibling) != 1:
-        raise AssertionError("runner/pack-manifest-unique-sibling-registration")
-    try:
-        _runner_check(expected, source.replace(sibling[0], "", 1))
-    except AssertionError as exc:
-        if str(exc) != "runner/pack-manifest-registration":
-            raise
-    else:
-        raise AssertionError("runner/pack-manifest-sibling-registration-not-red")
-    print("RED sibling-registration -> runner/pack-manifest-registration")
+    print("RED own-dispatch -> runner/pack-manifest-registration/pass-lines")
+    _runner_red_checks(expected)
 
 
 def self_test(vectors_only=False):
