@@ -343,7 +343,74 @@ def _case_passes(case):
     )
 
 
-def self_test():
+def _runner_check(expected, text=None):
+    """Prove exact dispatch using the real shell text, as the P0 suite does.
+
+    Other Python gates are intercepted. Only this parser's vector leg runs,
+    avoiding recursive registration checks. This proves this registration,
+    not the other gates' health or arbitrary shell-wrapper equivalence.
+    """
+    import ast
+    import os
+    import subprocess
+    import tempfile
+
+    here = Path(__file__).resolve().parent
+    runner = here / "run_all_checks.sh"
+    source = runner.read_text(encoding="utf-8") if text is None else text
+    prefix = r'''
+python3() {
+  if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
+      && [ "$3" = "$manifest_test" ] && [ "$4" = "--self-test" ]; then
+    "$manifest_python" -I -B "$manifest_test" --self-test --vectors-only
+  else
+    case " $* " in *_opf_pack_manifest.py*) return 2;; esac
+    return 0
+  fi
+}
+manifest_python="$1"
+manifest_test="$2"
+'''
+    # No inherited BASH_ENV, exported functions, Python or Git controls.
+    with tempfile.TemporaryDirectory(prefix="opf-pack-registration-") as tmp:
+        proc = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", prefix + source,
+             str(runner), sys.executable, str(here / "_opf_pack_manifest.py")],
+            cwd=tmp, env={"PATH": os.defpath, "TMPDIR": tmp,
+                          "PYTHONDONTWRITEBYTECODE": "1"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=30,
+        )
+    reports = [ast.literal_eval(line[len("PACK-MANIFEST "):])
+               for line in proc.stdout.splitlines()
+               if line.startswith("PACK-MANIFEST ")]
+    if proc.returncode != 0 or reports != [
+            {"executed": expected, "failures": []}]:
+        raise AssertionError("runner/pack-manifest-registration")
+
+
+def _runner_registration_test(expected):
+    runner = Path(__file__).resolve().parent / "run_all_checks.sh"
+    source = runner.read_text(encoding="utf-8")
+    _runner_check(expected, source)
+    print("PASS runner/pack-manifest-registration")
+    lines = [line for line in source.splitlines(keepends=True)
+             if line.startswith('run_gate "opf-pack-manifest-selftest"')]
+    if len(lines) != 1:
+        raise AssertionError("runner/pack-manifest-unique-registration")
+    # Delete only this registration; a manifest refresh cannot repair the
+    # dedicated assertion because it never reads the release manifest.
+    try:
+        _runner_check(expected, source.replace(lines[0], "", 1))
+    except AssertionError as exc:
+        if str(exc) != "runner/pack-manifest-registration":
+            raise
+    else:
+        raise AssertionError("runner/pack-manifest-registration-not-red")
+    print("RED runner-registration -> runner/pack-manifest-registration")
+
+
+def self_test(vectors_only=False):
     """0 success, 1 discriminator failure, 2 harness cannot-evaluate.
 
     Guard mutations are local, restored by mock.patch, and judged solely by
@@ -478,6 +545,11 @@ def self_test():
                     check("RED/" + guard,
                           _case_passes(("disabled", base, VALID))
                           and not _case_passes(("over", base, INVALID)))
+        if not vectors_only and not failures:
+            _runner_registration_test(executed)
+    except AssertionError as exc:
+        print("PACK-MANIFEST FAIL:", str(exc), file=sys.stderr)
+        return 1
     except Exception as exc:
         print("PACK-MANIFEST CANNOT_EVALUATE:", type(exc).__name__, str(exc),
               file=sys.stderr)
@@ -489,10 +561,11 @@ def self_test():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--vectors-only", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if not args.self_test:
         parser.error("--self-test is required; use the library for parsing")
-    return self_test()
+    return self_test(vectors_only=args.vectors_only)
 
 
 if __name__ == "__main__":

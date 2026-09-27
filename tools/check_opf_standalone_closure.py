@@ -66,6 +66,36 @@ _SUBSET = [
 _SUBSET_TIMEOUT_S = 600  # generous: the conformance replay and fuzz legs are the slowest members.
 
 
+def _check_pack_manifest_registration(subset):
+    """Independent requirement, not inferred from the release manifest.
+
+    Covers this exact closure-roster tuple, not arbitrary dispatcher changes
+    or the registrations of other gates.
+    """
+    expected = ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"])
+    matches = [row for row in subset
+               if row[0] == expected[0] or row[1] == expected[1]]
+    if matches != [expected]:
+        raise AssertionError("closure/pack-manifest-registration")
+
+
+def _pack_manifest_registration_self_test():
+    _check_pack_manifest_registration(_SUBSET)
+    print("PASS closure/pack-manifest-registration")
+    # Mutate the real roster, independently of the shell-runner deletion.
+    # No digest or generated-manifest check participates in the verdict.
+    changed = list(_SUBSET)
+    changed.remove(("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]))
+    try:
+        _check_pack_manifest_registration(changed)
+    except AssertionError as exc:
+        if str(exc) != "closure/pack-manifest-registration":
+            raise
+    else:
+        raise AssertionError("closure/pack-manifest-registration-not-red")
+    print("RED closure-registration -> closure/pack-manifest-registration")
+
+
 def _isolated_env():
     """A minimal environment for the isolated subset. PYTHONPATH and PYTHONHOME are dropped so nothing off
     the copied tree can be imported (belt-and-suspenders atop `python3 -I`, which already ignores them), and
@@ -108,6 +138,7 @@ def _run_one(opf_root, script, args, run_dir, env):
 
 def _run_subset(opf_root, run_dir):
     """Run every subset member. Returns a list of (name, rc, tail)."""
+    _check_pack_manifest_registration(_SUBSET)
     env = _isolated_env()
     return [(name, *(_run_one(opf_root, script, args, run_dir, env)))
             for name, script, args in _SUBSET]
@@ -128,7 +159,11 @@ def run(root):
         except OSError as exc:
             print("error: could not materialize the isolated opf/ copy: {}".format(exc), file=sys.stderr)
             return 2
-        results = _run_subset(opf_root, tmp)
+        try:
+            results = _run_subset(opf_root, tmp)
+        except AssertionError as exc:
+            print("STANDALONE CLOSURE: FAILED:", str(exc), file=sys.stderr)
+            return 1
         failed = [(name, rc, tail) for name, rc, tail in results if rc != 0]
         for name, rc, tail in results:
             print("  {:32s} {}".format(name, "OK" if rc == 0 else "FAILED rc={}".format(rc)))
@@ -150,6 +185,11 @@ def self_test_main():
     the pre-move upward edge (opf/tools/_opf_store.py importing `_parse` from AIQT's `check_versions` instead
     of the extracted `_semver`); with no AIQT tree reachable that import fails, so the subset must return
     non-zero. A gate that passed the deliberately-broken copy would provide no coverage."""
+    try:
+        _pack_manifest_registration_self_test()
+    except AssertionError as exc:
+        print("SELF-TEST FAIL:", str(exc), file=sys.stderr)
+        return 1
     failures = []
     root = repo_root()
 
