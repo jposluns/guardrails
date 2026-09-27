@@ -3392,17 +3392,21 @@ def _physical_tests(base, env, ok, signal):
 
     # R11 topology: a nested product prefix and a linked worktree both bind correctly; a symlinked
     # product root and a concurrent holder refuse.
-    # A NESTED product prefix (no .git at the product root) is REFUSED, explicitly: the lock module
-    # roots a .git-less store's control tree at the store root, so an init there could not share the
-    # anchor a later acquire_operation on the resolved store would take (disclosed; the binding
-    # itself observes the prefix, witnessed through observe_binding).
+    # A NESTED product prefix (no .git at the product root) binds through the lock module's shared
+    # control-root resolution: the enclosing repository's common git dir keys a per-store home, so
+    # the init records under, and shares the anchor of, the SAME home a later acquire_operation on
+    # the resolved store opens; nothing is rooted at the product root itself.
     repo = _plain_repo(os.path.join(base, "nested"), env)
     sub = os.path.join(repo, "prod")
     os.mkdir(sub)
     rc, res, err = _child(sub, env)
-    ok("R11-nested-prefix-refused", res and res["status"] == REFUSED
-       and "no .git entry" in res["primary_failure"]["detail"]
-       and os.listdir(sub) == [], str(res) + err[-400:])
+    nested_home = _opf_oplock._st_nested_home(repo, "prod")
+    ok("R11-nested-prefix-initialized", res and res["status"] == VIEWS_READY
+       and os.path.isdir(os.path.join(nested_home, _opf_init_substrate.SUBSTRATE_DIRNAME,
+                                      _opf_init_substrate.OPS_DIRNAME))
+       and not os.path.exists(os.path.join(sub, _opf_init_substrate.SUBSTRATE_DIRNAME))
+       and not os.path.exists(os.path.join(sub, _opf_oplock.CONTROL_DIRNAME)),
+       str(res) + err[-400:])
     ok("R11-nested-binding-observed", observe_binding(sub)[0]["product_prefix"] == "prod")
     main = _plain_repo(os.path.join(base, "wt-main"), env)
     wt = os.path.join(base, "wt-linked")
