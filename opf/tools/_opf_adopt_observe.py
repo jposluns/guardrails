@@ -52,13 +52,15 @@ Quarantine creation uses atomic mkdir, which is the directory equivalent of
 exclusive creation; O_EXCL is used for every file creation. Existing run or
 quarantine directories are never reused. Files are opened descriptor-relative
 with no-follow and nonblocking flags and reread with inode/stamp checks.
-Refused or cancelled attempts remove their exclusively created run directory,
-including quarantine, using descriptor-relative, symlink-resistant cleanup.
+SIGINT and SIGALRM are blocked across exclusive mkdir and ownership registration.
+Refused attempts and cancellation escaping observation gathering, even after
+sealing, trigger descriptor-relative, symlink-resistant removal of the owned run.
 Cleanup failure refuses with a named cleanup note and no capability or sealed
-success record; private residue or held descriptors can remain after OS failure.
+success record. OS deletion failure, process death, cancellation during rmtree
+(which can leave a partial tree), and same-privilege interference remain outside
+the cleanup guarantee; private residue or held descriptors may remain.
 Scaffolding (.working/adopt) may remain. Callers must never reconstruct a
-capability from request_id. Process death and same-privilege interference are
-outside cleanup's guarantee.
+capability from request_id.
 
 R1: bootstrap code/policy, the Python runtime, OS, resolver, and system CA store
 are trusted. Compromise of those components defeats these guarantees.
@@ -90,6 +92,7 @@ import queue
 import re
 import secrets
 import shutil
+import signal
 import socket
 import ssl
 import stat
@@ -575,11 +578,30 @@ def _fetch(url, cap, parent, context):
         return _response(_Wire(secured, request_deadline), cap)
 
 
+@contextlib.contextmanager
+def _creation_signals():
+    # Defer signal-handler cancellation until a successful exclusive create has
+    # an owner. Restore the caller's mask, including on FileExistsError.
+    _require(
+        threading.current_thread() is threading.main_thread()
+        and callable(getattr(signal, "pthread_sigmask", None)),
+        CANNOT_EVALUATE, "quarantine", "signal-safe creation unavailable",
+    )
+    previous = signal.pthread_sigmask(
+        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGALRM},
+    )
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
 def _open_directory(parent, name, fresh=False, created=None):
     try:
-        os.mkdir(name, 0o700, dir_fd=parent)
-        if created is not None:
-            created()
+        with _creation_signals():
+            os.mkdir(name, 0o700, dir_fd=parent)
+            if created is not None:
+                created()
     except FileExistsError:
         if fresh:
             raise ObserveError(CANNOT_EVALUATE, "quarantine",
@@ -857,6 +879,12 @@ def _unpack(parent, archive, deadline, commit=None):
             _require(
                 offset == 512 and expected is not None
                 and info.size == len(expected)
+                and header[:100] == b"pax_global_header".ljust(100, b"\0")
+                and not any(header[345:500])
+                and header[100:108] == b"0000666\0"
+                and info.uid == 0 and info.gid == 0
+                and header[265:297] == b"root".ljust(32, b"\0")
+                and header[297:329] == b"root".ljust(32, b"\0")
                 and raw[offset:offset + 512] == expected.ljust(512, b"\0"),
                 CANNOT_EVALUATE, "archive",
                 "global header is not the sole leading pinned git comment",
@@ -1016,6 +1044,10 @@ def gather_release(request, policy):
     owners = []
     try:
         _gather_release(request, policy, observation, notes, owners)
+    except BaseException:
+        # A sealed record is not retainable if gathering did not return.
+        observation.clear()
+        raise
     finally:
         keep = observation.get("status") == VALID and "record" in observation
         for owner in owners:
@@ -1296,7 +1328,6 @@ def self_test(vectors_only=False):
     import io
     import json
     import inspect
-    import signal
     import textwrap
     import subprocess
     import tempfile
@@ -1322,6 +1353,9 @@ def self_test(vectors_only=False):
             info = tarfile.TarInfo(name)
             info.type = kind
             info.mode = 0o755 if name.endswith("pre-commit") else 0o644
+            if kind == tarfile.XGLTYPE:
+                info.mode = 0o666
+                info.uname = info.gname = "root"
             info.size = len(payload)
             if kind in (tarfile.LNKTYPE, tarfile.SYMTYPE):
                 info.linkname = "outside"
@@ -1349,19 +1383,29 @@ def self_test(vectors_only=False):
     class WatchdogExpired(BaseException):
         pass
 
-    @contextlib.contextmanager
-    def watchdog():
-        # Independent of every production deadline and timeout. Refuse to
-        # replace another caller's active timer.
+    def watchdog_preconditions():
+        if (threading.current_thread() is not threading.main_thread()
+                or not all(callable(getattr(signal, name, None)) for name in (
+                    "getitimer", "setitimer", "pthread_sigmask", "pthread_kill",
+                ))
+                or not hasattr(signal, "ITIMER_REAL")
+                or not hasattr(signal, "SIGALRM")):
+            raise RuntimeError("fixture watchdog primitives unavailable")
         if signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
             raise RuntimeError("fixture watchdog timer already in use")
+
+    @contextlib.contextmanager
+    def watchdog(seconds):
+        # Independent of every production deadline and timeout. Refuse to
+        # replace another caller's active timer.
+        watchdog_preconditions()
         previous = signal.getsignal(signal.SIGALRM)
 
         def expired(signum, frame):
             raise WatchdogExpired()
 
         signal.signal(signal.SIGALRM, expired)
-        signal.setitimer(signal.ITIMER_REAL, 3.0)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
         try:
             yield
         finally:
@@ -1447,9 +1491,9 @@ def self_test(vectors_only=False):
                     break
                 secured = None
                 try:
-                    raw.settimeout(0.5)
+                    raw.settimeout(2.0)
                     if self.mode == "tls-stall":
-                        self.stop.wait(0.5)
+                        self.stop.wait(1.10)
                         continue
                     secured = self.context.wrap_socket(raw, server_side=True)
                     request = bytearray()
@@ -1691,20 +1735,24 @@ def self_test(vectors_only=False):
         archive_cap=len(baseline_archive) + 64,
         archive=baseline_archive + b"x" * 65, absent="archive")
     add("TG-11/slow-drip", CANNOT_EVALUATE, "request-deadline",
-        mode="slow", response=reply(b"x" * 200), fetch_bound=0.80)
+        mode="slow", response=reply(b"x" * 200), fetch_bound=1.00)
     add("TG-11/read-inactivity", CANNOT_EVALUATE, "inactivity",
-        mode="stall", fetch_bound=0.35)
+        mode="stall", fetch_bound=0.50)
     add("TG-11/stalled-resolver", CANNOT_EVALUATE, "resolver-deadline",
-        stalled_resolver=True, fetch_bound=0.35)
+        stalled_resolver=True, fetch_bound=0.50)
     add("TG-11/connect-timeout", CANNOT_EVALUATE, "connect-deadline",
-        connect_stall=True, fetch_bound=0.35)
+        connect_stall=True, fetch_bound=0.50)
     add("TG-11/tls-timeout", CANNOT_EVALUATE, "tls-deadline",
-        mode="tls-stall", fetch_bound=0.35)
+        mode="tls-stall", fetch_bound=0.50)
     add("TG-12/observer-backstop", CANNOT_EVALUATE, "backstop", exception=True)
     add("TG-12/public-wrapper-backstop", CANNOT_EVALUATE, "wrapper",
         wrapper_exception=True)
     add("TG-12/cancellation", "CANCELLED", "cancellation", cancellation=True,
         public_wrapper=True)
+    add("TG-12/cancellation-after-mkdir", "CANCELLED", "creation-signals",
+        cancel_after_mkdir=True, public_wrapper=True)
+    add("TG-12/cancellation-after-seal", "CANCELLED", "cancelled-retention",
+        cancel_after_seal=True, public_wrapper=True)
 
     bad_archives = [
         ("traversal", [root_row, ("wrap/../escape", tarfile.REGTYPE, b"x")]),
@@ -1739,6 +1787,23 @@ def self_test(vectors_only=False):
     comment = pax_record(b"comment=" + commit.encode("ascii"))
     global_row = ("pax_global_header", tarfile.XGLTYPE, comment)
     member = ("wrap/data", tarfile.REGTYPE, b"data")
+    add("TG-13/git-global-name", CANNOT_EVALUATE, "git-comment",
+        archive=archive([
+            ("../../../../etc/cron.d/evil", tarfile.XGLTYPE, comment),
+            root_row, member,
+        ]))
+    metadata = bytearray(gzip.decompress(archive([global_row, root_row, member])))
+    for start, value in (
+        (100, b"0000777\0"), (108, b"0000001\0"), (116, b"0000001\0"),
+        (265, b"attacker".ljust(32, b"\0")),
+        (297, b"attacker".ljust(32, b"\0")),
+        (345, b"unexpected".ljust(155, b"\0")),
+    ):
+        metadata[start:start + len(value)] = value
+    metadata[148:156] = b" " * 8
+    metadata[148:156] = ("%06o\0 " % sum(metadata[:512])).encode("ascii")
+    add("TG-13/git-global-metadata", CANNOT_EVALUATE, "git-comment",
+        archive=gzip.compress(bytes(metadata), mtime=0))
     for label, rows in (
         ("wrong-commit", [("pax_global_header", tarfile.XGLTYPE,
                           pax_record(b"comment=" + b"b" * 40)), root_row, member]),
@@ -1833,6 +1898,23 @@ def self_test(vectors_only=False):
         elapsed = 0.0
         path_before = list(sys.path)
         environment_before = None
+        cancellation_boundary = []
+        original_created = _QuarantineOwner.created
+        original_gather = _gather_release
+
+        def cancel_before_registration(owner):
+            # Target this thread: the signal must remain pending until the
+            # exclusive mkdir and registration critical section has finished.
+            cancellation_boundary.append("after-mkdir")
+            signal.pthread_kill(threading.get_ident(), signal.SIGINT)
+            original_created(owner)
+
+        def cancel_after_sealing(req, pol, observed, gathered_notes, owners):
+            original_gather(req, pol, observed, gathered_notes, owners)
+            if observed.get("status") != VALID or type(observed.get("record")) is not bytes:
+                raise AssertionError("cancellation fixture did not reach a sealed observation")
+            cancellation_boundary.append("after-seal")
+            raise KeyboardInterrupt
 
         def fixture_context():
             environments.append(set(os.environ))
@@ -1935,10 +2017,14 @@ def self_test(vectors_only=False):
                 patch = lambda obj, name, value: stack.enter_context(
                     mock.patch.object(obj, name, value)
                 )
-                patch(module, "CONNECT_SECONDS", 0.20)
-                patch(module, "INACTIVITY_SECONDS", 0.15)
-                patch(module, "REQUEST_SECONDS", 0.80)
-                patch(module, "GATHER_SECONDS", 1.20)
+                # Only the five TG-11 timing rows use short deadlines. Other
+                # rows and their mutants need headroom under host load.
+                timing = "fetch_bound" in config
+                scale = 1.0 if timing else 10.0
+                patch(module, "CONNECT_SECONDS", 0.20 * scale)
+                patch(module, "INACTIVITY_SECONDS", 0.15 * scale)
+                patch(module, "REQUEST_SECONDS", 0.80 * scale)
+                patch(module, "GATHER_SECONDS", 1.60 * scale)
                 patch(module, "_lookup", lookup)
                 patch(module, "_connect", connect)
                 patch(module, "_peer", lambda sock: (
@@ -1976,6 +2062,12 @@ def self_test(vectors_only=False):
                         "CURL_CA_BUNDLE": str(home / "absent-ca"),
                         "GIT_TRACE": str(home / "must-not-write"),
                     }))
+                if config.get("cancel_after_mkdir"):
+                    previous_interrupt = signal.signal(signal.SIGINT, signal.default_int_handler)
+                    stack.callback(signal.signal, signal.SIGINT, previous_interrupt)
+                    patch(_QuarantineOwner, "created", cancel_before_registration)
+                if config.get("cancel_after_seal"):
+                    patch(module, "_gather_release", cancel_after_sealing)
                 if config.get("seal_exception"):
                     patch(module, "_seal_observation", fail_seal)
                 if config.get("late_exception"):
@@ -2072,6 +2164,12 @@ def self_test(vectors_only=False):
                         policy_check = _archive_member_policy
                         patch(module, "_archive_member_policy",
                               lambda info, global_header=False: policy_check(info))
+                    elif mutation == "creation-signals":
+                        patch(module, "_creation_signals", contextlib.nullcontext)
+                    elif mutation == "cancelled-retention":
+                        patch(module, "gather_release", source_mutant(
+                            gather_release, "observation.clear()", "pass",
+                        ))
                     elif mutation == "cleanup":
                         patch(_QuarantineOwner, "remove", lambda owner: None)
                     elif mutation == "cleanup-failure":
@@ -2113,7 +2211,7 @@ def self_test(vectors_only=False):
                 started = time.monotonic()
                 with deny_effects(product, violations):
                     try:
-                        with watchdog():
+                        with watchdog(3.0 if timing else 30.0):
                             observation, notes = call(copy.deepcopy(request), copy.deepcopy(policy))
                         status = observation["status"]
                     except WatchdogExpired:
@@ -2134,6 +2232,10 @@ def self_test(vectors_only=False):
                 and environment_restored
                 and not server.errors
             )
+            if config.get("cancel_after_mkdir"):
+                passed = passed and cancellation_boundary == ["after-mkdir"]
+            if config.get("cancel_after_seal"):
+                passed = passed and cancellation_boundary == ["after-seal"]
             if status == "CANCELLED":
                 passed = passed and observation is None and not _GATHER_LOCK.locked()
             if status in (INVALID, CANNOT_EVALUATE):
@@ -2186,7 +2288,10 @@ def self_test(vectors_only=False):
                     for request in server.requests
                 )
             if "fetch_bound" in config:
-                passed = (passed and elapsed < 1.20 and bool(fetch_durations)
+                # Request 0.80 < slow-drip bound 1.00 < gather 1.60.
+                # Connect 0.20 / inactivity 0.15 < other bounds 0.50
+                # < request 0.80; _Deadline reserves at most 0.05 seconds.
+                passed = (passed and elapsed < 1.60 and bool(fetch_durations)
                           and all(duration < config["fetch_bound"]
                                   for duration in fetch_durations))
             if identifier.startswith("TG-05/"):
@@ -2206,6 +2311,10 @@ def self_test(vectors_only=False):
             server.close()
 
     try:
+        # Missing timer support is a setup cannot-evaluate, before any row.
+        watchdog_preconditions()
+        with watchdog(3.0):
+            pass
         if not Path("/dev/shm").is_dir() or not Path("/proc/self/fd").is_dir():
             raise RuntimeError("local fixture filesystem primitives unavailable")
         with tempfile.TemporaryDirectory(prefix="opf-adopt-observe-", dir="/dev/shm") as temp:
