@@ -1605,6 +1605,7 @@ def _cmd_upgrade(rest):
     stays a verified restore path for the whole blast radius, so no owner work is lost.""".format(
         to=_UPGRADE_TO)
     root = None
+    homes_plan = False
     i = 0
     while i < len(rest):
         tok = rest[i]
@@ -1622,11 +1623,28 @@ def _cmd_upgrade(rest):
                 return EXIT_MALFORMED
             root = val
             i += 2
+        elif tok == "--homes-plan":
+            if homes_plan:
+                print("opf upgrade: --homes-plan given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            homes_plan = True
+            i += 1
         else:
             print("opf upgrade: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
     root = root if root is not None else "."
     try:
+        if homes_plan:
+            # Deliberately lazy: existing schema upgrades and other verbs do not
+            # load the new planner. The complete text is formed before printing.
+            import _opf_homes_migrate
+            try:
+                text = _opf_homes_migrate.plan_homes_migration(root)
+            except _opf_homes_migrate.MigrationPlanError as exc:
+                raise _UpgradeError(
+                    "homes-plan cannot evaluate: {}".format(exc)) from exc
+            print(text, end="")
+            return EXIT_OK
         return _upgrade_run(root)
     except _UpgradeError as exc:
         print("opf upgrade: refused: {}; exit 2".format(exc), file=sys.stderr)
