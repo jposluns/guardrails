@@ -803,7 +803,7 @@
         captured sources themselves ride the envelope's <code>refs</code> array, each entry
         <code>{kind, locator, note}</code> with <code>kind</code> one of <code>path</code>,
         <code>url</code>, or <code>doc</code>. This type is the inward counterpart of
-        <a href="./record-indexes#contribution">contribution</a>, which records what the project sends out.</p>
+        <a href="./record-indexes#contribution">contribution</a>, which records what the project proposes or sends out.</p>
     </div>
   </section>
 
@@ -874,7 +874,7 @@
 <section class="tabpanel" id="contribution" role="tabpanel" aria-labelledby="tab-contribution" tabindex="0">
   <div class="wrap refhead">
     <p class="eyebrow">Record index</p>
-    <h2 id="contribution-title">Work sent to a peer project</h2>
+    <h2 id="contribution-title">Work proposed or sent to a peer project</h2>
     <div class="refchips">
       <code>contribution.index.toml</code>
       <span>namespace CN</span>
@@ -919,8 +919,10 @@
       <blockquote class="refpull">Outbound work is an external action, so its claim, "we sent this", is gated.</blockquote>
       <h3>The problem it solves</h3>
       <p>An assistant lands <code>sent/proposed</code>, awaiting a maintainer's ratification that it
-        was genuinely sent, unless the adopter has declared a standing authorization for that named
-        recipient. An absent or malformed declaration fails closed, so gating stays on by default.</p>
+        was genuinely sent. The standard lets an adopter declare a standing authorization for a named
+        recipient, which relieves per-send gating; an absent or malformed declaration fails closed. The
+        reference doctor does not yet read such a declaration, so it treats every assistant or
+        automation <code>sent</code> as gated.</p>
     </div>
   </section>
 

@@ -1618,8 +1618,8 @@ def _cmd_upgrade(rest):
     guarantee is single-host single-writer. A third disclosed residual: this build has no pre-doctor for a
     1.0.0 or 1.1.0 origin, so an older store invalid in a way the origin preconditions do not inspect fails
     only AFTER mutation (at the render or the final doctor), recovering through the step-3 subtree-scoped
-    restore; the committed HEAD
-    stays a verified restore path for the whole blast radius, so no owner work is lost.""".format(
+    restore; the committed HEAD provides recovery for the paths the cleanliness check covers, while ignored
+    files are excluded from that check and may not be recoverable from HEAD.""".format(
         to=_UPGRADE_TO)
     root = None
     homes_plan = False

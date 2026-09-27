@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d6c538e90d09c88998ff2e0740fa306c0eac2a7a3dc273863a2fad545dd2fcfe"
+tree-sha256 = "af7bdb6a6a431e97e027602a89773f744c5d9c6eae3c08ab7293c978e0bfb5c6"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2396,8 +2396,8 @@ sha256 = "1d872467316921e13b40f5fcfdc8793a6eca716df15f078c961e65415afa43b6"
 
 [[sources]]
 path = "opf/site/core-files.html"
-bytes = 34127
-sha256 = "bb8dba2644a2f2708a68ca03f74dac5834d6dabf393439787bae26118ede0d4a"
+bytes = 34221
+sha256 = "e22cb7634771c97dcf34f226e279c109a9947dd27b1e975cbc424763cb3faf86"
 
 [[sources]]
 path = "opf/site/disclosure.html"
@@ -2421,8 +2421,8 @@ sha256 = "777a4fb3a6134375bbd64557a892ea103808999f4f2ea31bf3783d25f6087196"
 
 [[sources]]
 path = "opf/site/record-indexes.html"
-bytes = 68677
-sha256 = "35fea82bd3ee56e912a2ab11883322092378134c642b8e61971defa1e7b79727"
+bytes = 68850
+sha256 = "16209928b716d4a91101978f868e6e5562a93faeb43988bd2b2958424890055c"
 
 [[sources]]
 path = "opf/site/roadmap.html"
@@ -2846,8 +2846,8 @@ sha256 = "6223c8b0179dc455c0c1648ef7ca8aada011bf8af29037bef3ede413fbaeb6e4"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 224178
-sha256 = "6c0ec2cb6306f806a5ecef118306120b710bf3fa8b9ed8b4da59b2356e5d3e33"
+bytes = 224243
+sha256 = "1f3e6db8f477d8d75e6fb25dc62aca7b22be51b0bdc2e9b26f3b4e95f9d1ad63"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
