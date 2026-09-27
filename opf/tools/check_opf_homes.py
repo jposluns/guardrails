@@ -91,7 +91,7 @@ def _staged_generation_self_test(check):
         ("ordinary-unsupported-generation-cannot", ((1, 2),)),
     )
     outcomes = {name: [] for name, _ in cases}
-    unprobed, legacy = [], []
+    unprobed, unopened, legacy, ordered = [], [], [], []
     for is_ingest in (False, True):
         for empty in (False, True):
             rd, files = imp._memory_ingest_run()
@@ -108,13 +108,20 @@ def _staged_generation_self_test(check):
             if empty:
                 # Refusal must not depend on inventory rows or their consistency with other artefacts.
                 files[imp.INVENTORY_NAME] = imp._emit_bytes(imp._build_inventory([])[0], imp.INVENTORY_NAME)
-            with patch.object(gate, "_RunDir", return_value=rd), \
+            expected_failures = {"transaction-schema", "transaction-consistency"}
+            if empty:
+                expected_failures.add("report-binding-digests")
+                expected_failures.update(
+                    ("ingest-source-binding", "ingest-report-reproducibility")
+                    if is_ingest else ("proposals-artifact",))
+            with patch.object(gate, "_RunDir", return_value=rd) as open_run, \
                     patch.object(gate, "_ingest_store_fd", return_value=None) as locate, \
                     patch.object(gate, "_staged_run_store_fd",
                                  side_effect=gate._GateError("synthetic store unavailable")) as transaction:
                 for name, values in cases:
                     for ceiling, bad in values:
                         with patch.object(store, "SUPPORTED_HOMES", ceiling):
+                            open_run.reset_mock()
                             locate.reset_mock()
                             transaction.reset_mock()
                             result = (gate.check_staged_run(rd.path) if bad is None
@@ -125,16 +132,26 @@ def _staged_generation_self_test(check):
                                     not ok and detail.startswith("cannot evaluate:")
                                     and str(rd.path) in detail and reason in detail
                                     for ok, detail in result.values()))
+                            unopened.append(not open_run.called)
                             unprobed.append(not locate.called and not transaction.called)
                 for ceiling in (1, 2):
                     with patch.object(store, "SUPPORTED_HOMES", ceiling):
                         baseline = list(gate._check_staged_run(rd, homes=1).items())
-                        legacy.append(list(gate.check_staged_run(rd.path, homes=1).items()) == baseline)
+                        result = gate.check_staged_run(rd.path, homes=1)
+                        # Registry-complete: every expected id exactly once (order is pinned by the
+                        # baseline comparison below, since results are not emitted in registry order).
+                        ordered.append(len(result) == len(gate.EXPECTED_CHECKS) and
+                                       set(result) == set(gate.EXPECTED_CHECKS))
+                        legacy.append(list(result.items()) == baseline and
+                                      {cid: ok for cid, (ok, _detail) in result.items()} ==
+                                      {cid: cid not in expected_failures for cid in gate.EXPECTED_CHECKS})
                         if ceiling == 1:
                             legacy.append(list(gate.check_staged_run(rd.path).items()) == baseline)
     for name, values in outcomes.items():
         check(name, lambda v=values: all(v))
     check("staged-generation-no-store-probe", lambda: all(unprobed))
+    check("staged-generation-no-run-open", lambda: all(unopened))
+    check("staged-generation-registry-complete", lambda: all(ordered))
     check("staged-generation-legacy-values-and-order", lambda: all(legacy))
     with patch.object(gate, "_gate_homes", side_effect=gate._GateError("generation policy sentinel")):
         check("staged-generation-shared-row-policy", lambda: gate._row_scope_error(

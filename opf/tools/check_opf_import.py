@@ -4535,7 +4535,11 @@ def _self_test():
         for supported, supplied in ((1, (3, "2", True, 1.0, 0, 2)), (2, (3, "2", True, 1.0, 0))):
             with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", supported):
                 for bad in supplied:
-                    invalid = check_staged_run(h1_run, homes=bad)
+                    rd = _RunDir(h1_run)
+                    try:
+                        invalid = _check_staged_run(rd, homes=bad)
+                    finally:
+                        rd.close()
                     expect("ordinary-gate-homes-invalid-{}-{!r}".format(supported, bad),
                            all(invalid[cid][0] is False for cid in
                                ("ingest-acceptance-binding", "ingest-acceptance-completeness")))
