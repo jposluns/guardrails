@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f7ccb56dc88a7af25f4af79db9c52fa0cc997a75d8f57e8a4a61f3df58e3247f"
+tree-sha256 = "e963ce02bdbe90dabcbb0abdcf3d1f33fdaddf0866a907e39d6fc563bcb58c98"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 179826
-sha256 = "1de481d0abf64f54f414464b656fd205aa4a00099dc6a6d09c4f293440f08020"
+bytes = 181121
+sha256 = "7acead1661c18a1fa291b8f849f163cc3406e8322af3781a27a5c603d31c2bd0"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2191,8 +2191,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 40131
-sha256 = "3648d960de8c63dc4a9a9da4139f888a5bb3825a192f2a12c5d97947bcf12437"
+bytes = 40175
+sha256 = "9fd15ca9c6f915cf0b920e1e72407ff51caddcedfad52e6955b9a7c3eab66981"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2610,6 +2610,11 @@ bytes = 468573
 sha256 = "d9b2b4b0ae4db1e95fa1300d005111965c780e433544f728c591c13f68fffca1"
 
 [[sources]]
+path = "opf/tools/_opf_pack_manifest.py"
+bytes = 25652
+sha256 = "592d8203e27eae987f6c59d0ff1a8c6939a613ba522653a4e8bd3411340997bf"
+
+[[sources]]
 path = "opf/tools/_opf_release.py"
 bytes = 126880
 sha256 = "1851818f017658efd6722b070d8509c46ebb97d1216de463700fbf763a8abf21"
@@ -2846,8 +2851,8 @@ sha256 = "8c6c1ed8e45776df5268d6f4ac350a99e48c30cfb039e6eb6c73bcbcc8976009"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
-bytes = 2987
-sha256 = "163fa05b08cdd1cc466027d60b0c0b6b23c7c9ff8d05bb3838865eb1e4159161"
+bytes = 3082
+sha256 = "0373cd2b106a40e58390173cfc153383e10e960b486438d4e01d28c4eaebc311"
 
 [[sources]]
 path = "opf/tools/selftest_commonmark_conformance.py"
@@ -3171,8 +3176,8 @@ sha256 = "557ed1001be7a0969298463836fb894612dec1c60d5ad45a6b3446baada1a680"
 
 [[sources]]
 path = "tools/check_manifest.py"
-bytes = 35172
-sha256 = "835eda91456339fa529aa167495f2f09e4224f4580504c9da0a87502a544a0ec"
+bytes = 35428
+sha256 = "b240e25c47ccf2097b777e71f4d718e6556e776f45d595ddae2e2d6b6ae6e6a8"
 
 [[sources]]
 path = "tools/check_mappings.py"
@@ -3201,8 +3206,8 @@ sha256 = "f64934bd8d6522f9c01f804b0722d31d2708c4e6f89007be5200e5bbb9a3bb85"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
-bytes = 10317
-sha256 = "058f560df132569c6d9049ba85405535da6de80648509d13100839cd44a9ee56"
+bytes = 12047
+sha256 = "2d0a97b3b373ea721889cc22e30a1f0d39a338c9764bf24b1ee0b8078d402e80"
 
 [[sources]]
 path = "tools/check_overclaim.py"
@@ -3466,8 +3471,8 @@ sha256 = "6c0a50feeee104f3993c696a97f6860722e0deaa4ce75e494864d8662f0759d3"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 16631
-sha256 = "07645d9c730910ade088537d468fd9cc7e2375febda9f58261209d9faf16de82"
+bytes = 16727
+sha256 = "d8b33eb8fc566c73f807b98da1ccff173867627014bd522e377737b3c6290f3c"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
