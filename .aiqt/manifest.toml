@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1f97e9fa0bac0b393157ba07781497a7673ef74ed45ef67c11f6cbe3cc8d6d25"
+tree-sha256 = "5440a7353877fde9f45985fd66e98876cf5bb2a401536acb9f6f75c989f65ee3"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2526,8 +2526,8 @@ sha256 = "4b6aed11dfb1c1d86c46825db4f6c5dbdb881f59163a7db093d0085cefd1d401"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 314266
-sha256 = "4ac4dbf6549d97166a925fcc67273b26281c3525704b96fbae96a0f30a3f6140"
+bytes = 314967
+sha256 = "dcf7d944fbc9c762d852a950fa016cfc682c090b98c4a77630d3635069962b75"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -2601,8 +2601,8 @@ sha256 = "7bdd24728ff15f73777b17756b02018fc42db305f43e919e0fce12edb6329c8f"
 
 [[sources]]
 path = "opf/tools/_opf_manifest_regressions.py"
-bytes = 16123
-sha256 = "d626ac4fc4e5c118f630a857ed158c46780e465af3b8ca4a40ece4e28f6e85fd"
+bytes = 19116
+sha256 = "b8367c2b32163fab99bda6a4da1d0faf8d171d9170e907e5d4d2f72719b71478"
 
 [[sources]]
 path = "opf/tools/_opf_observe.py"
@@ -2631,23 +2631,23 @@ sha256 = "5a78221917356c99cfe71ed15ac11eec970854a784f2c9054acb48c723d06f81"
 
 [[sources]]
 path = "opf/tools/_opf_store.py"
-bytes = 160356
-sha256 = "b1e5390e82da204b66393a024c885a6936293802ea785fa5f20b367bd412a91c"
+bytes = 161787
+sha256 = "e058d5d52f597305833e4def0fa8e044a60189b56cd51ca28b0866a7e8a93c04"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
-bytes = 285575
-sha256 = "a9fab47a35d32f64aeaa7d9fd39e850718ae524c7e8416e85bb4c42cc5a12124"
+bytes = 285763
+sha256 = "cbab796cbc2b0841e4f6df1dddeeeb134008838391597edf1ea3316d36abe710"
 
 [[sources]]
 path = "opf/tools/_opf_worklog.py"
-bytes = 22600
-sha256 = "4160c8e375e2d6d384c56de514c6cf6c637f5f5f358343a39cc63be2ef34f84d"
+bytes = 22712
+sha256 = "9a140082e6424aae75b89b6ead288eff8a61c8f748d11cd12883dce5c52ab3a9"
 
 [[sources]]
 path = "opf/tools/_opf_worklog_regressions.py"
-bytes = 68164
-sha256 = "4cca2b44f848a8eafc1a7419d84661d8a1e5abd166d768ae2680c5f2f99b7618"
+bytes = 69535
+sha256 = "bcafcbc4bcce751b29b624c3c5e0c4b401778deb5f5c471b6425f71188906864"
 
 [[sources]]
 path = "opf/tools/_semver.py"
@@ -2861,8 +2861,8 @@ sha256 = "6223c8b0179dc455c0c1648ef7ca8aada011bf8af29037bef3ede413fbaeb6e4"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 227529
-sha256 = "819d5e668bb71ff67db97c92b6e537e8bc966d6e68956bec0369b5d02b33f8be"
+bytes = 230876
+sha256 = "2ebfacbebf7f83521024f8c043f33aa7d5f98106432bbf3689733223739303aa"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"

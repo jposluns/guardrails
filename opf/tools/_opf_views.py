@@ -263,7 +263,7 @@ def _with_worklog_diagnostics(read):
 
 
 def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, *,
-                  on_legacy_conflict=None):
+                  on_legacy_conflict=None, supported_profiles=None):
     """Load and validate worklog.toml (spec 6.2); return (raw_bytes, [entry, ...]) in file order.
     Disclosed divergence (disclose-guard-residuals): unlike the index schema marker, which
     _load_records pins MANDATORY and exact, the ledger schema marker follows U3 optional-marker
@@ -272,7 +272,8 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, 
     version is not caught here; grading an unsupported-schema-version ledger is U3/U6 remit (F2)."""
     got = _with_worklog_diagnostics(lambda: _opf_worklog.load_worklog_at(
         store_root_fd, relpath.rsplit("/", 1)[0], required=False, with_raw=True,
-        read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict))
+        read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict,
+        supported_profiles=supported_profiles))
     if got is None:
         raise ViewsError("declared source {} is missing (the worklog ledger must exist)".format(relpath))
     raw, data = got
@@ -1609,7 +1610,7 @@ def _render_resolved_store(product_root, res, check, capture=None):
         os.close(product_root_fd)
 
 
-def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None):
+def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported_profiles=None):
     """Phase 1 of the resolved-store render, extracted as a public READ-ONLY planner (OPF core-tooling U6
     reuses it for byte-level view-drift detection). Reads the manifest and every declared view source
     beneath store_root_fd, renders each declared target's full text, and returns the planned list of
@@ -1618,7 +1619,8 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None):
     or a byte-canon-invalid render, exactly as the render path does; _render_resolved calls it and performs
     the writes. It makes no state-changing or outbound side effect (a planner is a preview)."""
     manifest = _with_worklog_diagnostics(
-        lambda: _opf_worklog.read_manifest_at(store_root_fd, machine_rel))
+        lambda: _opf_worklog.read_manifest_at(
+            store_root_fd, machine_rel, supported_profiles=supported_profiles))
 
     # U4 renders the `inline` layout only. A `per-record` store is a CLEAR cannot-evaluate (deferred),
     # detected here from the manifest rather than mis-reported as a downstream malformed-record error and
@@ -1653,7 +1655,7 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None):
         if name == "worklog":
             raw, entries = _load_worklog(
                 store_root_fd, relpath, registered_vendors, registered_kinds,
-                on_legacy_conflict=on_legacy_conflict)
+                on_legacy_conflict=on_legacy_conflict, supported_profiles=supported_profiles)
             rows_by_source[name] = entries
         elif name == "version":
             raw, releases, summaries = _load_version(store_root_fd, relpath)

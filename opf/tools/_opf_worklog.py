@@ -71,7 +71,7 @@ class ManifestValidationError(WorklogError):
         super().__init__("; ".join(self.findings))
 
 
-def read_manifest_at(root_fd, machine_rel):
+def read_manifest_at(root_fd, machine_rel, *, supported_profiles=None):
     """Read the generation authority once, refusing intake failure before routing."""
     relpath = machine_rel + "/" + _opf_store.MANIFEST_NAME
     try:
@@ -80,7 +80,7 @@ def read_manifest_at(root_fd, machine_rel):
         raise ManifestReadError(relpath, exc) from exc
     if manifest is None:
         raise ManifestShapeError(relpath, manifest)
-    validation = _opf_store.validate_manifest(manifest)
+    validation = _opf_store.validate_manifest(manifest, supported_profiles)
     if validation.findings:
         raise ManifestValidationError(relpath, manifest, validation)
     return manifest
@@ -173,7 +173,7 @@ def _read_document(root_fd, relpath):
 
 
 def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read_legacy=None,
-                    on_legacy_conflict=None):
+                    on_legacy_conflict=None, supported_profiles=None):
     """Load only the manifest-selected source beneath an already-resolved descriptor.
 
     with_raw preserves legacy bytes; generation 2 uses a length-framed stream in
@@ -186,7 +186,7 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
     This callback cannot change source selection or permit a generation-2 conflict.
     """
     try:
-        manifest = read_manifest_at(root_fd, machine_rel)
+        manifest = read_manifest_at(root_fd, machine_rel, supported_profiles=supported_profiles)
         gen = generation(manifest)
         rel = source_relpath(machine_rel, manifest)
         other = machine_rel + "/" + (LEGACY_NAME if gen == 2 else DIRECTORY_NAME)

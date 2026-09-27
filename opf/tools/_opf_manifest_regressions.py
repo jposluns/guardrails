@@ -46,8 +46,42 @@ def _finding_sites(source, check):
                for child in ast.iter_child_nodes(parent)}
     unsupported = []
     sites = set()
-    # Exempt only this exact early-return defence, in its original position.
-    # A reachable append with identical wording is still an emission.
+    # Exempt only this exact defence AND its local unreachability proof.
+    # Pin the non-table rejection, the caller's skip, and the sole direct call.
+    # A changed prerequisite fails closed and puts the defence back in the census.
+    major = ast.parse("""
+def _profile_major(prof):
+    if not isinstance(prof, dict):
+        return None
+    parsed = _parse(prof.get("version")) if isinstance(prof.get("version"), str) else None
+    return None if parsed is None else parsed[0]
+""").body[0]
+    route = ast.parse("""
+prof_major = _profile_major(prof)
+if prof_major is None:
+    findings.append("[profiles.{}] is a supported profile but its major cannot be determined "
+                    "(version absent, non-string, or not a bare SemVer); fail-closed".format(
+                        _safe_display(name)))
+    continue
+if prof_major not in supported_majors:
+    unevaluated.append(name)
+    continue
+_validate_supported_profile(name, prof, spec_tuple, base_posture, modules_enabled,
+                            registered_vendors, findings)
+""").body
+    actual_major = copy.deepcopy(functions["_profile_major"])
+    if ast.get_docstring(actual_major) is not None:
+        actual_major.body.pop(0)
+    calls = [node for name in names for node in ast.walk(functions[name])
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "_validate_supported_profile"]
+    loop = parents.get(parents.get(calls[0])) if len(calls) == 1 else None
+    prerequisites = (
+        ast.dump(actual_major) == ast.dump(major)
+        and isinstance(loop, ast.For) and loop in functions["validate_manifest"].body
+        and [ast.dump(node) for node in loop.body[-len(route):]]
+        == [ast.dump(node) for node in route])
+    check("F2k-census-defence-prerequisites", prerequisites)
     defence = ast.parse("""
 if not isinstance(prof, dict):
     findings.append("{} is not a table".format(where))
@@ -56,7 +90,7 @@ if not isinstance(prof, dict):
     helper = functions["_validate_supported_profile"]
     guarded = helper.body[2] if len(helper.body) > 2 else None
     exempt = (guarded.body[0].value
-              if isinstance(guarded, ast.If)
+              if prerequisites and isinstance(guarded, ast.If)
               and ast.dump(guarded) == ast.dump(defence) else None)
     for name in names:
         for node in ast.walk(functions[name]):
@@ -138,6 +172,28 @@ if not isinstance(prof, dict):
 
 
 def _census_regressions(source, check):
+    for mutation in ("non-table-major", "missing-continue"):
+        tree = ast.parse(source)
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        if mutation == "non-table-major":
+            guard = functions["_profile_major"].body[1]
+            assert isinstance(guard, ast.If) and isinstance(guard.body[0], ast.Return)
+            guard.body[0].value = ast.Constant(value=1)
+        else:
+            loop = next(node for node in functions["validate_manifest"].body
+                        if isinstance(node, ast.For) and any(
+                            isinstance(child, ast.If)
+                            and ast.unparse(child.test) == "prof_major is None"
+                            for child in node.body))
+            guard = next(node for node in loop.body if isinstance(node, ast.If)
+                         and ast.unparse(node.test) == "prof_major is None")
+            assert isinstance(guard.body[-1], ast.Continue)
+            guard.body[-1] = ast.Pass()
+        failures = []
+        _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
+        check("F2k-census-rejects-" + mutation, failures == [
+            "F2k-census-defence-prerequisites", "F2g-census-site-count-71"])
+
     # Keep the count unchanged while adding an unrecognized emission style.
     extended = source.replace("    findings = []", "    findings = []; findings.extend([])", 1)
     failures = []

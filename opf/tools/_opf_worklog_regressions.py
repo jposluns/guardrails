@@ -686,10 +686,27 @@ def _doctor_reread_regressions(check):
     import _opf_emit
     for phase, mode in ((phase, mode)
                         for phase in ("records", "planner", "view-worklog")
-                        for mode in ("invalid", "generation", "parse", "unreadable", "absent")):
+                        for mode in ("invalid", "generation", "parse", "unreadable", "absent",
+                                     "profile", "profile-iterator")):
         with _Fixture() as fx:
             _manifest_readers(fx)
+            profile = mode in ("profile", "profile-iterator")
+            control = None
+            if profile:
+                fx.manifest["profiles"] = {"demo": {
+                    "version": "1.0.0", "base_compat": ">=1.2.0"}}
+                fx.files[M + "/manifest.toml"] = _opf_emit.emit_checked(fx.manifest).encode()
+                control = {"demo": [1]}
+                baseline = _opf_check.validate_store(fx.res, control)
+                check("F2k-doctor-reread-" + phase + "-" + mode + "-baseline",
+                      baseline.checks["C-MANIFEST"] == "PASS"
+                      and baseline.evaluated_profiles == ["demo"])
+                if mode == "profile-iterator":
+                    control = {"demo": iter([1])}
             bad = dict(fx.manifest, junk={})
+            if profile:
+                bad = dict(fx.manifest, profiles={"demo": {
+                    "version": "1.0.0", "base_compat": "<0.0.1"}})
             if mode == "generation":
                 bad = dict(fx.manifest, opf=dict(fx.manifest["opf"], worklog=2))
             payload = _opf_emit.emit_checked(bad).encode()
@@ -699,6 +716,8 @@ def _doctor_reread_regressions(check):
                 payload = PermissionError("fixture reread denied")
             expected = {
                 "invalid": "unknown top-level table(s): junk",
+                "profile": "[profiles.'demo'].base_compat '<0.0.1' does not admit the base spec_version",
+                "profile-iterator": "[profiles.'demo'].base_compat '<0.0.1' does not admit the base spec_version",
                 "generation": "[opf].worklog = 2 is not supported by this build "
                               "(maximum supported worklog generation: 1)",
                 "parse": "cannot parse m/manifest.toml",
@@ -714,6 +733,8 @@ def _doctor_reread_regressions(check):
                     expected = "cannot parse m/manifest.toml ({})".format(exc)
             original = {
                 "invalid": "manifest: " + expected,
+                "profile": "manifest: " + expected,
+                "profile-iterator": "manifest: " + expected,
                 "generation": "m/manifest.toml: " + expected,
                 "parse": "cannot read m/manifest.toml: " + expected,
                 "unreadable": "cannot read m/manifest.toml: " + expected,
@@ -754,7 +775,7 @@ def _doctor_reread_regressions(check):
             with patch.object(_journal, "_read_contained", side_effect=read), \
                     patch.object(wl, "load_worklog_at", side_effect=intake) as entered, \
                     patch.object(_opf_views, "plan_views", side_effect=plan) as planned:
-                result = _opf_check.validate_store(fx.res)
+                result = _opf_check.validate_store(fx.res, control)
             label = "F2j-doctor-reread-" + phase + "-" + mode
             messages = result.cannot_evaluate + result.findings
             reads = {"records": 2, "planner": 3, "view-worklog": 4}[phase]
@@ -763,7 +784,8 @@ def _doctor_reread_regressions(check):
                   and planned.call_count == (0 if phase == "records" else 1)
                   and len(manifest_reads) == reads - (mode == "absent"))
             check(label + "-manifest-verdict", result.checks["C-MANIFEST"] ==
-                  ("FINDING" if mode == "invalid" else "CANNOT-EVALUATE"))
+                  ("FINDING" if mode == "invalid" or profile else "CANNOT-EVALUATE")
+                  and result.status != _opf_store.VALID)
             check(label + "-original-once",
                   sum(expected in m for m in messages) == 1
                   and result.by_check.get("C-MANIFEST") == [original])

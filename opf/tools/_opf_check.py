@@ -1137,7 +1137,7 @@ def _worklog_legacy_conflict(_relpath):
 
 
 def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine_rel=None,
-                    *, propagate_manifest_failure=False):
+                    *, propagate_manifest_failure=False, supported_profiles=None):
     """Read and validate a worklog.toml (active or an archive bucket) through U3's validate_worklog, and
     return its WL-number -> entry map. A required (active) worklog that is absent is CANNOT-EVALUATE; an
     archive-bucket worklog that is absent returns None (the caller only reads it when the bucket has one).
@@ -1149,7 +1149,8 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
             data = _opf_worklog.load_archive_worklog_at(root_fd, relpath)
         else:
             data = _opf_worklog.load_worklog_at(
-                root_fd, machine_rel, required=False, on_legacy_conflict=_worklog_legacy_conflict)
+                root_fd, machine_rel, required=False, on_legacy_conflict=_worklog_legacy_conflict,
+                supported_profiles=supported_profiles)
         st = "absent" if data is None else "present"
     except _opf_worklog.ManifestShapeError as exc:
         if propagate_manifest_failure:
@@ -2520,6 +2521,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         if st == "absent":
             rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(manifest_rel))
         return [], []
+    # Freeze the effective scope before the first validation consumes a possible
+    # one-shot majors iterator. Reuse the validator's bounded materializer;
+    # malformed values remain malformed and retain its original diagnostic.
+    if supported_profiles is not None:
+        scope, scope_ok = _opf_store._require_mapping(supported_profiles)
+        if scope_ok:
+            supported_profiles = {name: _opf_store._materialize_majors(majors)
+                                  for name, majors in scope.items()}
     mv = validate_manifest(manifest_data, supported_profiles)
     if mv.status == CANNOT_EVALUATE:
         rep.cant("{}: {}".format(manifest_rel, "; ".join(mv.findings)))
@@ -2572,7 +2581,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     try:
         active_worklog = _gather_worklog(
             root_fd, _rel(machine_rel, WORKLOG_NAME), registered_vendors, rep,
-            required=True, machine_rel=machine_rel, propagate_manifest_failure=True) or {}
+            required=True, machine_rel=machine_rel, propagate_manifest_failure=True,
+            supported_profiles=supported_profiles) or {}
     except (_opf_worklog.ManifestShapeError, _opf_worklog.ManifestValidationError,
             _opf_worklog.ManifestReadError) as exc:
         _attribute_manifest_failure(rep, exc)
@@ -2934,7 +2944,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                   dict) and len(views_tbl) > 0:
         try:
             planned = _opf_views.plan_views(
-                root_fd, machine_rel, on_legacy_conflict=_worklog_legacy_conflict)
+                root_fd, machine_rel, on_legacy_conflict=_worklog_legacy_conflict,
+                supported_profiles=supported_profiles)
         except _opf_views.ViewsManifestError as exc:
             _attribute_manifest_failure(rep, exc.manifest_error)
             rep.cant("C-VIEW-DRIFT is not evaluated: {} failed manifest validation "

@@ -374,13 +374,22 @@ def snapshot_caller_alarm():
     monotonic baseline for the elapsed-aware restore, and whether a SIGALRM was already PENDING on entry.
     Returns an opaque tuple to hand to restore_caller_alarm() in the watchdog's finally. Call it BEFORE the
     probe installs its own handler / unblocks / arms its timer (so the pending reading is the caller's, not
-    the probe's)."""
+    the probe's). The read is bracketed: its full duration is charged as a
+    conservative bound. A pre-sample pause can therefore advance the deadline
+    by up to that bracket's width; it cannot extend it."""
     import signal as _signal
     import time as _time
+    _before = _time.monotonic()
     _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
+    _after = _time.monotonic()
+    # The kernel sampled somewhere inside this bracket. Charge its full width,
+    # so a pause after the read cannot move the caller's deadline into the future.
+    # Keep an expired active timer distinguishable from an inactive timer.
+    if _prev_value > 0.0:
+        _prev_value = max(1e-6, _prev_value - (_after - _before))
     _was_pending = (hasattr(_signal, "sigpending")
                     and _signal.SIGALRM in _signal.sigpending())
-    return (_prev_value, _prev_interval, _time.monotonic(), _was_pending)
+    return (_prev_value, _prev_interval, _after, _was_pending)
 
 
 def restore_caller_alarm(prev_value, prev_interval, t0, was_pending):
@@ -404,8 +413,24 @@ def restore_caller_alarm(prev_value, prev_interval, t0, was_pending):
     import time as _time
     import os as _os
     if prev_value > 0.0:
-        _rem = prev_value - (_time.monotonic() - t0)
-        _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, prev_interval)
+        _deadline = t0 + prev_value
+        _reserve = 0.0
+        while True:
+            _before = _time.monotonic()
+            _rem = _deadline - _before - _reserve
+            _signal.setitimer(_signal.ITIMER_REAL, max(1e-6, _rem), prev_interval)
+            _after = _time.monotonic()
+            _elapsed = _after - _before
+            if _rem <= 1e-6 or 0.0 <= _reserve - _elapsed <= 1e-6:
+                break
+            # Charge through the syscall, then recompute from the SAME deadline.
+            # Retry an undercharged arm, and also remove an obsolete large
+            # reserve after a one-off pause. A repeated pause can converge too.
+            # Accept only a bracket covered by its reserve, with surplus no
+            # larger than the timer's microsecond delivery floor. As with the
+            # read bracket, a pause after the syscall can conservatively advance
+            # delivery by the bracket width; no late-restore tolerance is added.
+            _reserve = _elapsed
     if was_pending:
         _os.kill(_os.getpid(), _signal.SIGALRM)
 

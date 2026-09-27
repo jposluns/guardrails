@@ -321,28 +321,98 @@ def _watchdog_observation_regressions():
         if restore_matches(restore) != expected:
             failures.append("F2j-timer-restore-arguments-" + label)
 
+    # Controlled pauses at the helper's two internal gaps. The fake kernel
+    # records the absolute deadline actually armed, so delaying the syscall
+    # after its arguments were computed cannot hide behind an argument check.
+    def gap_matches(snapshotter, restore, pause_at):
+        clock = 100.0
+        calls = []
+        paused = False
+
+        def monotonic():
+            return clock
+
+        def read(which):
+            nonlocal clock, paused
+            result = (108.0 - clock, 2.0)
+            if pause_at == "snapshot" and not paused:
+                paused = True
+                clock += 0.25             # after timer read, before timestamp
+            return result
+
+        def arm(which, value, interval=0.0):
+            nonlocal clock, paused
+            if pause_at == "rearm-repeat" or (pause_at == "rearm" and not paused):
+                paused = True
+                clock += 0.25             # arguments computed, syscall not yet run
+            calls.append((which, clock + value, interval))
+
+        with patch.object(time, "monotonic", side_effect=monotonic), \
+                patch.object(signal, "getitimer", side_effect=read), \
+                patch.object(signal, "sigpending", return_value=set()), \
+                patch.object(signal, "setitimer", side_effect=arm):
+            snapshot = snapshotter()
+            clock += 3.25
+            restore(*snapshot)
+        return (paused and bool(calls)
+                and calls[-1] == (signal.ITIMER_REAL, 108.0, 2.0))
+
+    def late_snapshot():
+        value, interval = signal.getitimer(signal.ITIMER_REAL)
+        return value, interval, time.monotonic(), False
+
+    def stale_restore(value, interval, t0, _pending):
+        remaining = value - (time.monotonic() - t0)
+        signal.setitimer(signal.ITIMER_REAL, max(1e-6, remaining), interval)
+
+    for pause_at in ("snapshot", "rearm", "rearm-repeat"):
+        for label, snapshotter, restore, expected in (
+                ("elapsed", _opf_store.snapshot_caller_alarm, _opf_store.restore_caller_alarm, True),
+                ("verbatim", _opf_store.snapshot_caller_alarm, verbatim, False),
+                ("dropped", _opf_store.snapshot_caller_alarm, lambda *_: None, False),
+                ("old-gap", late_snapshot if pause_at == "snapshot" else _opf_store.snapshot_caller_alarm,
+                 _opf_store.restore_caller_alarm if pause_at == "snapshot" else stale_restore, False)):
+            if gap_matches(snapshotter, restore, pause_at) != expected:
+                failures.append("F2k-timer-gap-" + pause_at + "-" + label)
+
     # Real arm/read scheduling pauses test only absence of false failure.
     # Unbounded oversleep must not determine whether a mutant is distinguished.
     real_get, real_set = signal.getitimer, signal.setitimer
     modules = (_opf_changelog, _opf_views, _opf_store, _opf_check)
-    for pause_at in ("arm", "read"):
+    for pause_at in ("arm", "read", "snapshot", "rearm"):
+        observing = rearm_paused = False
+
         def borrower():
+            nonlocal observing, rearm_paused
+            rearm_paused = False
             snapshot = _opf_store.snapshot_caller_alarm()
             real_set(signal.ITIMER_REAL, 0)
             time.sleep(0.05)
             _opf_store.restore_caller_alarm(*snapshot)
+            observing = True
             return EXIT_OK
 
         def arm(which, value, interval=0.0):
+            nonlocal rearm_paused
+            if pause_at == "rearm" and 0.0 < value < 3600.0 and not rearm_paused:
+                rearm_paused = True
+                time.sleep(0.10)          # pause after argument calculation
             result = real_set(which, value, interval)
             if pause_at == "arm" and value == 3600.0:
                 time.sleep(0.10)
             return result
 
         def observe(which):
-            if pause_at == "read":
+            nonlocal observing
+            # Keep the outer observation pause before its syscall. Separately
+            # delay snapshot delivery after the kernel has sampled the timer.
+            if pause_at == "read" and observing:
                 time.sleep(0.10)
-            return real_get(which)
+            result = real_get(which)
+            if pause_at == "snapshot" and not observing:
+                time.sleep(0.10)
+            observing = False
+            return result
 
         output = io.StringIO()
         with contextlib.ExitStack() as stack:
@@ -359,7 +429,7 @@ def _watchdog_observation_regressions():
         for failure in failures:
             print("opf watchdog observation regressions: FAIL: " + failure, file=sys.stderr)
         return EXIT_FINDING
-    print("opf watchdog observation regressions: PASS (restore arguments; real arm/read pauses)")
+    print("opf watchdog observation regressions: PASS (restore arguments; internal gaps; real arm/read pauses)")
     return EXIT_OK
 
 
