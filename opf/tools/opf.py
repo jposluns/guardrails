@@ -1272,7 +1272,8 @@ def _upgrade_plan(manifest_model, counters_model):
     and the pre-declared type/view rows -- and REFUSES any that fail (a _UpgradeError, fail-closed). It is NOT
     a complete 1.0.0 doctor: a 1.0.0 store invalid in a way these preconditions do not inspect (e.g. a missing
     type row, or a type carrying a wrong or non-normative namespace) is caught AFTER mutation by the render /
-    final-doctor gate, recovering through the step-3 subtree-scoped restore -- the no-complete-pre-doctor
+    final-doctor gate; recovery restores tracked paths from HEAD and removes upgrade-created files
+    within the checked scope -- the no-complete-pre-doctor
     residual disclosed on _cmd_upgrade. It is ORIGIN-AWARE: a governance-
     or decision_support-enabled 1.0.0 store already declares maintainer_decision / preference_pattern as a
     module-tier row (G1/G2), so the delta ADDS only the now-baseline types not already present and preserves
@@ -1590,8 +1591,9 @@ def _cmd_upgrade(rest):
     requires a full doctor VALID before offering the staged change. It is ORIGIN-AWARE: a governance- or
     decision_support-enabled 1.0.0 store, and a store that omits the optional decision_support key or the
     DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4). Before ANY write it enforces two fail-closed
-    preconditions: STORE-PATH CLEANLINESS over exactly the paths it writes (HEAD is a verified restore path,
-    SECA-verified-restore-path) and a SINGLE-WRITER LEASE it claims atomically and holds across the mutation,
+    preconditions: STORE-PATH CLEANLINESS, including ignored files, over exactly the paths it writes
+    (HEAD preserves pre-existing tracked content, SECA-verified-restore-path) and a SINGLE-WRITER LEASE
+    it claims atomically and holds across the mutation,
     render, and final doctor (spec 5.7). It NEVER commits: the adopter reviews and merges. A store already at
     {to} is a byte no-op (idempotent, still requiring doctor-VALID); a NOT-ADOPTED root is NOT APPLICABLE
     (exit 0), any other non-resolved status a located cannot-evaluate (exit 2). Two disclosed residuals: a
@@ -1600,8 +1602,9 @@ def _cmd_upgrade(rest):
     made observable at a sync target before writes (spec 5.7) because this build has no sync runtime, so the
     guarantee is single-host single-writer. A third disclosed residual: this build has no 1.0.0 pre-doctor,
     so a 1.0.0 store invalid in a way the origin preconditions do not inspect fails only AFTER mutation (at
-    the render or the final doctor), recovering through the step-3 subtree-scoped restore; the committed HEAD
-    stays a verified restore path for the whole blast radius, so no owner work is lost.""".format(
+    the render or the final doctor). Under the single-writer contract, recovery restores pre-existing
+    tracked content from HEAD and removes upgrade-created files within the checked store/product scope;
+    pre-existing untracked or ignored content in that scope refuses before mutation.""".format(
         to=_UPGRADE_TO)
     root = None
     homes_plan = False
@@ -1668,12 +1671,14 @@ def _upgrade_doctor(root):
 # --- STEP 3/4 upgrade preconditions: store cleanliness and the single-writer lease -------------------
 
 _UPGRADE_NO_WHOLE_TREE = ("Never run a whole-tree restore (git restore . / git reset --hard): it would "
-                          "destroy unrelated uncommitted work. Scope every recovery to the store subtree.")
+                          "destroy unrelated uncommitted work. Scope every recovery to the affected "
+                          "store and product paths.")
 
 
 def _upgrade_partial_recovery_text(store_root):
     """Recovery advice for the read-only F2 triage (a store declares the target spec_version but is NOT
-    doctor-VALID: a previously interrupted run). This path cannot know what that run touched, so the advice
+    doctor-VALID: a previously interrupted run). This path cannot verify the earlier cleanliness check
+    or know what that run touched, so the advice
     stays SUBTREE-SCOPED and review-first: inspect, then restore tracked store paths and remove upgrade-
     created untracked files, all under `.working`, never a whole-tree restore (preserve-uncommitted-work).
     The advice names the resolved STORE root (where `.working` lives), NOT the CLI product root: for a
@@ -1682,17 +1687,20 @@ def _upgrade_partial_recovery_text(store_root):
     import shlex
     r = shlex.quote(str(store_root))
     w = shlex.quote(_opf_store.WORKING_DIRNAME)
-    return ("Inspect the store subtree (git -C {r} --literal-pathspecs status -- {w}); restore ONLY its "
+    return ("Inspect the store subtree (git -C {r} --literal-pathspecs status --ignored=matching "
+            "--untracked-files=all -- {w}); after reconciling intervening owner edits, restore ONLY its "
             "tracked paths (git -C {r} --literal-pathspecs restore --staged --worktree -- {w}) and remove "
-            "the upgrade-created untracked files it lists, then re-run. {no}".format(r=r, w=w,
+            "only files identified as upgrade-created. Reconcile any product targets separately, "
+            "then re-run. {no}".format(r=r, w=w,
                                                                                      no=_UPGRADE_NO_WHOLE_TREE))
 
 
 def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_relpaths):
     """Recovery advice for a post-mutation failure (render or doctor): the touched set is KNOWN, and with the
-    step-3 cleanliness precondition in force everything dirty under the probe scope after a failed run is
-    upgrade-written by construction, so this enumerated, subtree-scoped remedy is COMPLETE for the run that
-    printed it. The DISTINCT roots are threaded (explicit-binding-over-ambient-context): tracked store paths
+    step-3 cleanliness precondition (including ignored files) and the single-writer contract, HEAD
+    preserves pre-existing tracked content in the checked scope; remove upgrade-created files to recover
+    previously absent paths. Inspect first for intervening owner edits. The DISTINCT roots are threaded
+    (explicit-binding-over-ambient-context): tracked store paths
     under `.working`, and the upgrade-created untracked files, are recovered under the STORE root (where
     `.working` lives); a declared product-scope target rendered this run is recovered under the PRODUCT root.
     The two roots differ for a RELOCATED store (the pointer resolves `.working` to a store separate from the
@@ -1702,7 +1710,8 @@ def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_r
     r = shlex.quote(str(store_root))
     w = shlex.quote(_opf_store.WORKING_DIRNAME)
     lines = ["opf upgrade: the staged change is left for review; recover it scoped to the paths this run "
-             "wrote (the cleanliness precondition proved nothing else is in the blast radius):",
+             "wrote (tracked content was clean against HEAD; untracked and ignored content was refused). "
+             "Inspect first for intervening owner edits:",
              "  restore tracked store paths: git -C {} --literal-pathspecs restore --staged --worktree "
              "-- {}".format(r, w)]
     if created_relpaths:
@@ -1712,7 +1721,8 @@ def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_r
     for p in sorted(product_relpaths):
         lines.append("  product target rendered: git -C {} --literal-pathspecs restore --staged --worktree "
                      "-- {} (or remove it if this run created it)".format(pr, shlex.quote(p)))
-    lines.append("  inspect first: git -C {} --literal-pathspecs status -- {}".format(r, w))
+    lines.append("  inspect first: git -C {} --literal-pathspecs status --ignored=matching "
+                 "--untracked-files=all -- {}".format(r, w))
     lines.append("  " + _UPGRADE_NO_WHOLE_TREE)
     return "\n".join(lines)
 
@@ -1734,7 +1744,7 @@ def _upgrade_product_render_targets(manifest_model):
     return targets
 
 
-# The EXACT set of valid `git status --porcelain=v1 -z --untracked-files=all --no-renames` XY status PAIRS,
+# The EXACT set of valid `git status --porcelain=v1 -z --untracked-files=all --ignored=matching --no-renames` XY status PAIRS,
 # enumerated precisely from the git-status(1) "Short Format" table for the installed git (git 2.53.0 in this
 # env; the table is stable across modern git) and EMPIRICALLY cross-checked by driving real index/worktree
 # states and observing the emitted XY. Validating the whole PAIR (not each char independently) closes the
@@ -1744,7 +1754,7 @@ def _upgrade_product_render_targets(manifest_model):
 # SUPERSET that would admit impossible ordinary pairs: git emits X=D ONLY with a space Y, and Y=A ONLY with a
 # space X, so DM DT DA (and MA TA) are unemittable and MUST be refused, not silently accepted as dirt.
 # Composition:
-#   - "??" untracked (--untracked-files=all is passed).
+#   - "??" untracked and "!!" ignored (--untracked-files=all --ignored=matching are passed).
 #   - ORDINARY (non-unmerged) changed entries, per the first table section with rename R and copy C EXCLUDED
 #     (--no-renames guarantees git emits neither) and U reserved to the unmerged tier. For each index letter X
 #     the EXACT set of worktree letters Y git can pair it with, straight off the man-page rows:
@@ -1752,8 +1762,8 @@ def _upgrade_product_render_targets(manifest_model):
 #         X in {M, T, A}:             Y in {' ', M, T, D}  (staged change, worktree clean/modified/typechg/del)
 #         X='D' (deleted from index): Y in {' '}           (a deleted-in-index path pairs ONLY with space)
 #   - the seven UNMERGED pairs, verbatim from git-status(1): DD AU UD UA DU AA UU.
-# "!!" (ignored) is deliberately ABSENT: --ignored is not passed, so it cannot appear and is treated as an
-# unexpected/malformed pair -> fail-closed. The per-X worktree sets are enumerated here, not the whole valid
+# Ignored entries are dirt, just like untracked entries; neither has a pre-existing HEAD restore path.
+# The per-X worktree sets are enumerated here, not the whole valid
 # set hardcoded flat, so each line stays auditable against the man-page table. Bytes throughout (2-byte keys).
 _PORCELAIN_ORDINARY_YSET = {
     0x20:     b"AMTD",   # X=' ': worktree added(intent-to-add)/modified/type-changed/deleted
@@ -1764,13 +1774,13 @@ _PORCELAIN_ORDINARY_YSET = {
 }
 _PORCELAIN_UNMERGED_PAIRS = (b"DD", b"AU", b"UD", b"UA", b"DU", b"AA", b"UU")
 _PORCELAIN_VALID_PAIRS = frozenset(
-    [b"??"]
+    [b"??", b"!!"]
     + [bytes((x, y)) for x, ys in _PORCELAIN_ORDINARY_YSET.items() for y in ys]
     + list(_PORCELAIN_UNMERGED_PAIRS))
 
 
 def _upgrade_parse_porcelain(raw, prefix, lease_excl):
-    """Parse a `git status --porcelain=v1 -z --untracked-files=all --no-renames` payload into the list of
+    """Parse a `git status --porcelain=v1 -z --untracked-files=all --ignored=matching --no-renames` payload into the list of
     dirty paths, each normalized `root`-relative (the `prefix`, the store's repo-root-relative path with a
     trailing '/', is stripped from every repository-root-relative porcelain path) and EXCLUDING `lease_excl`
     (a byte-literal store-relative path, when given). Factored PURE so the grammar refusal is directly unit-
@@ -1800,8 +1810,8 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl):
         # below (guard-input-soundness): a per-CHAR check accepts an IMPOSSIBLE pair (UT, ZZ, a blank pair, a
         # rename R, a copy C) whose chars each sit in a per-char set, and for the lease path that bogus record
         # would match the exclusion and be SILENTLY DROPPED -- a fail-open in the M3 cleanliness guard. The
-        # pair is validated whole against _PORCELAIN_VALID_PAIRS (?? plus the EXACT man-page ordinary
-        # enumeration, plus the seven unmerged pairs; !!, rename, copy, an impossible ordinary pair such as DM
+        # pair is validated whole against _PORCELAIN_VALID_PAIRS (?? and !! plus the EXACT man-page ordinary
+        # enumeration, plus the seven unmerged pairs; rename, copy, an impossible ordinary pair such as DM
         # or MA, and any U in a non-unmerged position all excluded).
         # Anything outside that set is MALFORMED -> fail-closed, never a drop.
         if rec[:2] not in _PORCELAIN_VALID_PAIRS:
@@ -1811,7 +1821,8 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl):
         pbytes = rec[3:]
         if prefix_b and pbytes.startswith(prefix_b):
             pbytes = pbytes[len(prefix_b):]
-        if lease_b is not None and pbytes == lease_b:
+        # An ignored lease remains ordinary dirt; only the exact "??" lease is excluded below.
+        if lease_b is not None and pbytes == lease_b and rec[:2] != b"!!":
             # The lease path. ONLY a well-formed UNTRACKED ("??") lease is the legitimate held-lease case
             # that step 4 handles as its never-seize refusal, so it is EXCLUDED here. Any OTHER (tracked)
             # status on the lease path -- " D", "D ", " M", "MM", ... -- means the lease is COMMITTED or
@@ -1835,7 +1846,7 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl):
 
 
 def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
-    """Run ONE hardened `git status --porcelain=v1 -z --untracked-files=all --no-renames` over `pathspecs`
+    """Run ONE hardened `git status --porcelain=v1 -z --untracked-files=all --ignored=matching --no-renames` over `pathspecs`
     beneath `root`, returning the list of dirty paths, each normalized to `root`-relative (excluding
     `lease_excl`, a byte-literal store-relative path, when given). The porcelain paths are REPOSITORY-root-
     relative, so the store's path within the repository (git rev-parse --show-prefix) is stripped, which is
@@ -1877,7 +1888,7 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
                             "without risking filter execution; refusing the destructive rewrite "
                             "(fail-closed)".format(exc))
     args = (["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
-             "--no-renames", "--"] + list(pathspecs))
+             "--ignored=matching", "--no-renames", "--"] + list(pathspecs))
     out = _opf_observe._run_git(git, root, args, config_overrides=neutralizing)
     if not out.completed:
         raise _UpgradeError("could not verify the store is clean before the upgrade ({}); refusing the "
@@ -1905,22 +1916,17 @@ def _upgrade_check_clean(res, manifest_model):
     """STEP 3 (M3): store-cleanliness precondition, run AFTER the read-only triage/plan and immediately
     BEFORE lease acquisition and the first write. Prove over EXACTLY the paths this upgrade can write (the
     `.working` subtree at the store root, plus any declared product-scope render target) that the git index
-    and working tree equal HEAD, so the committed HEAD is a verified restore path for the precise destruction
-    surface (SECA-verified-restore-path). Only the UNTRACKED lease path is EXCLUDED (byte-literal): a held
+    and tracked working tree equal HEAD, with no untracked or ignored content in that scope. HEAD thus
+    preserves pre-existing tracked content; recovery also removes upgrade-created files from previously
+    absent paths (SECA-verified-restore-path). Only the UNTRACKED lease path is EXCLUDED (byte-literal): a held
     (untracked "??") lease is step 4's own specific never-seize refusal, not generic dirt; a TRACKED lease on
     that path is instead refused DISTINCTLY as a spec-5.7 violation (in _upgrade_parse_porcelain), never
     excluded. Refuses fail-closed (exit 2) on any dirt, naming up to 10 paths plus the total, advising
     commit-your-changes and NEVER a restore (the dirt is the owner's own work, preserve-uncommitted-work).
 
-    Residual (disclose-guard-residuals): the probe uses --untracked-files=all, which does NOT surface a
-    git-IGNORED file under the scope; a conforming store has no ignored render targets, so an ignored file
-    there would neither block the run nor be restorable from HEAD. The alternative (--ignored) would over-
-    fire on ordinary build detritus, so this build accepts and discloses the narrower scope. A committed or
-    otherwise TRACKED lease.toml (itself a spec-5.7 violation: the lease should be present only while held) is
-    NOT part of that residual and is NOT silently excluded like the legitimate untracked held lease: it
-    surfaces on the lease path as a tracked porcelain status (e.g. " D" for a committed lease deleted in the
-    worktree) and is REFUSED fail-closed by _upgrade_parse_porcelain, naming the spec-5.7 tracked-lease
-    violation, so that corner is handled here rather than slipping past the lease exclusion into step 4.
+    Ignored entries ("!!"), including an ignored lease, use the same dirty-store refusal and remedy.
+    Ignore rules do not establish restorability. The literal pathspecs keep ignored content outside the
+    checked store subtree and declared product targets out of this gate.
 
     Residual (F-OPF-STATUSFILTER-LFS-FALSEPOS, disclose-guard-residuals): a store with an EXTERNAL NORMALIZING
     clean/process filter (the git-lfs shape) can read DIRTY here even when genuinely clean, because the probe
@@ -2240,8 +2246,9 @@ def _upgrade_run(root):
         new_counters_bytes = _opf_emit.emit_checked(new_counters).encode("utf-8")
 
         # STEP 3 (M3): the LAST read-only gate. Prove HEAD is a verified restore path over exactly the
-        # blast radius before any write; a dirty store refuses fail-closed with commit-your-changes advice,
-        # never a restore (the dirt is the owner's work). The lease path is excluded (step 4's own refusal).
+        # blast radius before any write, including ignored entries. Recovery restores tracked content
+        # and removes upgrade-created files. Dirt refuses with commit-your-changes advice, never a restore
+        # (the dirt is the owner's work). Only the exact untracked "??" lease is excluded (step 4's refusal).
         _upgrade_check_clean(res, manifest_model)
 
         product_targets = _upgrade_product_render_targets(manifest_model)

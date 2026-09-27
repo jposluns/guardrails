@@ -45,6 +45,9 @@ VECTOR ROSTER (U1-U25, P1):
   U13 baseline plus a malformed lease.toml: exit 2 (present is held, never absent); not deleted; unchanged.
   U14 baseline plus an uncommitted worklog.toml edit: exit 2 BEFORE any mutation; the refusal names the
       dirty path and advises commit-your-changes, never a whole-tree restore; the owner edit intact.
+  U14b ignored pre-existing render target: exit 2 with the ordinary dirty-store remedy, bytes and index
+      unchanged; moving it aside permits upgrade, with unrelated ignored build content untouched.
+      Removing --ignored=matching from the probe fails this case.
   U15 [types.contribution] pre-declared: exit 2 naming contribution as an impossible 1.0.0 shape; unchanged.
   U16 governance=false plus [types.maintainer_decision]: exit 2 naming the module inconsistency; unchanged.
   U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.1.0 triage refusals (with the scoped
@@ -56,11 +59,11 @@ VECTOR ROSTER (U1-U25, P1):
       lease after the prefix strip; PLUS the R6 fail-open vectors (a MALFORMED status -- ZZ, a blank pair, a
       rename R, a copy C -- for the lease path refuses rather than being silently dropped by the exclusion,
       while a well-formed dirty lease record is still excluded); PLUS the status-PAIR vectors (FIX2/FIX3: an
-      IMPOSSIBLE pair -- UT/TU with U only legal in an unmerged pair, ignored !! which --ignored-less status
-      cannot emit, AND the impossible ORDINARY pairs a {space,M,T,A,D} cartesian would wrongly admit, DM/DT/DA
+      IMPOSSIBLE pair -- UT/TU with U only legal in an unmerged pair, AND the impossible ORDINARY pairs a
+      {space,M,T,A,D} cartesian would wrongly admit, DM/DT/DA
       (X=D pairs only with space) and MA/TA (Y=A pairs only with space X) -- each refuses whole-pair, not
       per-char, for the lease AND a non-lease path, while a positive sweep of every emittable pair (all 17
-      ordinary pairs including ' A' intent-to-add and 'D ', plus ?? and the 7 unmerged) still parses; fails
+      ordinary pairs including ' A' intent-to-add and 'D ', plus ??, !! and the 7 unmerged) still parses; fails
       under the old per-char check or a cartesian superset); and the
       R1b leading-space prefix test (_upgrade_probe_dirty keeps a " leading/"-prefixed lease excluded; fails
       under the old .strip()).
@@ -845,6 +848,41 @@ def _suite():
                   "Commit your store changes" in out14 and "restore --staged" not in out14)
             check("U14 owner edit intact and tree unchanged", _snapshot(s14) == before14)
 
+            # U14b) An ignored pre-existing render target is owner work, not a clean destination.
+            # FLIP: removing --ignored=matching from the probe must fail the refusal/advice/unchanged
+            # assertions below. Moving the file aside is the supported route back to a clean upgrade.
+            s14b = base / "u14b-ignored"
+            s14b.mkdir()
+            build_store(s14b)
+            ignored_rel = opf._opf_views._spec_destination("CONTRIBUTIONS.md")[1]
+            (s14b / ".git/info").mkdir()
+            (s14b / ".git/info/exclude").write_text(
+                "/{}\n/outside-build/\n".format(ignored_rel), encoding="utf-8")
+            ignored_path = s14b / ignored_rel
+            ignored_path.write_text("owner's pre-existing contribution notes\n", encoding="utf-8")
+            outside = s14b / "outside-build"
+            outside.mkdir()
+            (outside / "cache").write_text("unrelated ignored content\n", encoding="utf-8")
+            check("U14b fixture target is ignored by git",
+                  git_call(s14b, ["check-ignore", "--", ignored_rel]).strip() == ignored_rel)
+            before14b = _snapshot(s14b)
+            index14b = git_call(s14b, ["ls-files", "--stage", "-z"])
+            rc14b, out14b = upgrade(s14b)
+            check("U14b ignored written path refuses BEFORE mutation (exit 2)", rc14b == EXIT_ERROR)
+            check("U14b ignored path gets the ordinary dirty-store remedy",
+                  ignored_rel in out14b and "Commit your store changes (or move them aside)" in out14b
+                  and "restore --staged" not in out14b)
+            check("U14b ignored owner bytes and tree unchanged", _snapshot(s14b) == before14b)
+            check("U14b index unchanged", git_call(s14b, ["ls-files", "--stage", "-z"]) == index14b)
+            saved14b = base / "u14b-owner-notes"
+            ignored_path.rename(saved14b)
+            rc14c, out14c = upgrade(s14b)
+            check("U14b moving ignored owner work aside permits upgrade", rc14c == EXIT_OK)
+            check("U14b saved owner bytes survive",
+                  saved14b.read_bytes() == before14b[ignored_rel])
+            check("U14b ignored content outside the written scope is untouched",
+                  (outside / "cache").read_bytes() == before14b["outside-build/cache"])
+
             # U15) [types.contribution] pre-declared: an impossible 1.0.0 shape.
             s15 = base / "u15-contribution-predeclared"
             s15.mkdir()
@@ -960,7 +998,7 @@ def _suite():
             # normal record. For the LEASE PATH the danger is acute: a bogus pair a per-char (or cartesian)
             # check accepts would match the lease exclusion and be SILENTLY DROPPED, making the M3 cleanliness
             # guard return CLEAN over dirt. The vectors cover out-of-vocabulary (ZZ), a blank pair, rename R and
-            # copy C (impossible under --no-renames), ignored !! (--ignored not passed), U in a non-unmerged
+            # copy C (impossible under --no-renames), U in a non-unmerged
             # position (UT/TU), AND the impossible ORDINARY pairs a {space,M,T,A,D} cartesian would wrongly
             # admit -- DM/DT/DA (git emits X=D only with a space Y) and MA/TA (git emits Y=A only with a space
             # X). Each must refuse on BOTH the lease path and a non-lease path; validating the whole XY pair
@@ -970,7 +1008,6 @@ def _suite():
                           (b"R ", "rename R"), (b"C ", "copy C"),
                           (b"UT", "impossible pair UT (U only in unmerged pairs)"),
                           (b"TU", "impossible pair TU (U only in unmerged pairs)"),
-                          (b"!!", "ignored !! (--ignored not passed)"),
                           (b"DM", "impossible ordinary DM (X=D pairs only with space)"),
                           (b"DT", "impossible ordinary DT (X=D pairs only with space)"),
                           (b"DA", "impossible ordinary DA (X=D pairs only with space)"),
@@ -987,10 +1024,10 @@ def _suite():
                       _nres is None and _nerr is not None)
             # Positive sweep: EVERY genuinely-emittable porcelain v1 pair for this command parses correctly, so
             # the tightened check never OVER-refuses. Enumerated independently of the parser's own table (an
-            # independent oracle) as the full emittable set: ?? untracked; the 17 ordinary pairs -- INCLUDING
+            # independent oracle) as the full emittable set: ?? untracked, !! ignored; the 17 ordinary pairs -- INCLUDING
             # ' A' (intent-to-add) and 'D ', whose silent omission by a future over-tightening a dropped vector
             # here would catch; and the seven unmerged pairs.
-            for _vp in (b"??",
+            for _vp in (b"??", b"!!",
                         b" A", b" M", b" T", b" D",
                         b"M ", b"MM", b"MT", b"MD",
                         b"T ", b"TM", b"TT", b"TD",
@@ -1001,13 +1038,17 @@ def _suite():
                 check("U18/R6 valid pair {!r} parses (no over-refusal)".format(_vp),
                       _vres == [".working/toml/x"] and _verr is None)
             # A well-formed record: ONLY a well-formed UNTRACKED ("??") lease is EXCLUDED (step 4's
-            # never-seize case). A TRACKED (non-"??") lease record on the lease path is a spec-5.7
+            # never-seize case). Ignored ("!!") leases remain dirt. A TRACKED lease record is a spec-5.7
             # committed/tracked-lease anomaly and is REFUSED fail-closed here, never silently excluded (a
             # silent drop of a " D" committed-then-deleted lease is exactly the M3 fail-open this closes: it
             # would let step 4's O_EXCL acquire succeed on the now-absent file and sweep the deletion into the
             # staged change set). Every emittable tracked status on the lease path must refuse.
             _exok, _ = _grammar_ok(b"?? " + _lease_rel.encode("utf-8") + b"\x00", prefix="", lease=_lease_rel)
             check("U18/R6 well-formed UNTRACKED lease record still excluded (step-4 never-seize)", _exok == [])
+            _ignored, _ierr = _grammar_ok(b"!! sub/" + _lease_rel.encode("utf-8") + b"\x00",
+                                          prefix="sub/", lease=_lease_rel)
+            check("U18/R6 ignored lease is dirt, neither excluded nor mislabelled tracked",
+                  _ignored == [_lease_rel] and _ierr is None)
             for _tp in (b" D", b"D ", b" M", b"MM", b"M ", b"MD", b"A ", b"AD", b"DD", b"AU", b"UU"):
                 _tres, _terr = _grammar_ok(_tp + b" " + _lease_rel.encode("utf-8") + b"\x00",
                                            prefix="", lease=_lease_rel)
@@ -1054,7 +1095,8 @@ def _suite():
             check("U19 product target restore names the product root",
                   "git -C /product/root --literal-pathspecs restore --staged --worktree -- VERSION" in _rt)
             check("U19 inspect line names the store root",
-                  "inspect first: git -C /store/root --literal-pathspecs status -- .working" in _rt)
+                  "inspect first: git -C /store/root --literal-pathspecs status --ignored=matching "
+                  "--untracked-files=all -- .working" in _rt)
 
             # U20) R8: governance=true with maintainer_action but maintainer_decision ABSENT (a module-
             # inconsistent 1.0.0 shape the delta would silently cure) now REFUSES unchanged, before mutation.

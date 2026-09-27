@@ -717,8 +717,8 @@ Notes on the roster:
   `done`; a standalone receipt is legal only for imported history with provenance.
 - A `finding` records the observation and links its remediation rather than containing it.
 - A `block` scopes one or more enumerated records and feeds actionability (section 8.5).
-- `contribution` records an artifact, fix, or proposal this project SENT to a peer project, with a
-  delivery receipt: the outward counterpart to `reference`, which records what comes in. It carries no
+- `contribution` records an artifact, fix, or proposal this project proposes or sends to a peer project,
+  with a delivery bundle once sent: the outward counterpart to `reference`, which records what comes in. It carries no
   fleet-specific semantics; those ride a registered `x-<vendor>` extension (section 8.7).
 - `maintainer_decision` and `preference_pattern` are baseline as of spec_version 1.1.0; they were
   module-tier in 1.0.0. With that change the governance module carries `maintainer_action` alone, and
@@ -830,7 +830,7 @@ Baseline types:
 | block | `active` > `released` or `expired` | Scopes an enumerated list of record IDs. A block created by an assistant or automation actor is `active/proposed` and is a proposal, not a grant: it does not count toward blocked-ness or justify a stop until a maintainer ratifies it. |
 | handoff | `current` > `superseded` | Posting a new handoff supersedes the previous in the same act; at most one `current` handoff exists. |
 | reference | `recorded` | Immutable captured reference. |
-| contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project sent to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` are required once sent, `sent_at` is forbidden before, and the receipt fields are legal only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome lives in `summary`/`x-<vendor>`, never as a state. A re-send is a new record linking `supersedes`; the superseded record records `superseded`. |
+| contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project proposes or sends to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` are required once sent, `sent_at` is forbidden before, and the receipt fields are legal only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome lives in `summary`/`x-<vendor>`, never as a state. A re-send is a new record linking `supersedes`; the superseded record records `superseded`. |
 | maintainer_decision | `recorded` | Created-terminal, immutable maintainer ruling carrying its `decision` (answer plus rationale). `actor.kind` is `maintainer` or `importer` only (a maintainer ruling with assistant attribution is a contradiction; `importer` covers migrated history). Overturning is a new record linking the old. It MAY `exemplifies` the preference_pattern it instantiates. |
 | preference_pattern | `active` > `retired` | A distilled preference pattern carrying `context` and `rationale` (with the envelope `title`). `active` is gated: an assistant-distilled pattern lands `active/proposed` awaiting maintainer ratification to the unqualified `active`. |
 
