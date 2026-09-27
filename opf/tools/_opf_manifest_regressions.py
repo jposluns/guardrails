@@ -44,6 +44,18 @@ def _finding_sites(source, check):
                for child in ast.iter_child_nodes(parent)}
     unsupported = []
     sites = set()
+    # Exempt only this exact early-return defence, in its original position.
+    # A reachable append with identical wording is still an emission.
+    defence = ast.parse("""
+if not isinstance(prof, dict):
+    findings.append("{} is not a table".format(where))
+    return
+""").body[0]
+    helper = functions["_validate_supported_profile"]
+    guarded = helper.body[2] if len(helper.body) > 2 else None
+    exempt = (guarded.body[0].value
+              if isinstance(guarded, ast.If)
+              and ast.dump(guarded) == ast.dump(defence) else None)
     for name in names:
         for node in ast.walk(functions[name]):
             parent = parents.get(node)
@@ -98,14 +110,15 @@ def _finding_sites(source, check):
                 and isinstance(node.value.args[0], ast.Name)
                 and node.value.args[0].id == "CANNOT_EVALUATE")
             if emission or rejection:
-                literals = [n.value for n in ast.walk(node)
-                            if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-                # validate_manifest rejects a non-table supported profile at
-                # _profile_major before calling this helper. Its defensive
-                # not-table branch cannot emit through the public validator.
-                if name == "_validate_supported_profile" and "{} is not a table" in literals:
+                # _profile_major rejects non-tables before this helper is called.
+                if node is exempt:
                     continue
-                sites.add(node.lineno)
+                sites.add((node.lineno, node.col_offset, node.end_lineno, node.end_col_offset))
+
+    # Coverage below uses Python line events. Overlapping line spans (including
+    # an append after a multiline call's closing parenthesis) are ambiguous.
+    lines = [line for start, _, end, _ in sites for line in range(start, end + 1)]
+    check("F2h-census-unambiguous-lines", len(set(lines)) == len(lines))
 
     check("F2g-census-recognized-emissions", not unsupported)
     # HEAD 3b5ea91: 67 append sites - 1 unreachable profile-table defence
@@ -131,6 +144,30 @@ def _census_regressions(source, check):
     failures = []
     _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
     check("F2g-census-rejects-shrink", failures == ["F2g-census-site-count-71"])
+
+    tree = ast.parse(source)
+    helper = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "_validate_supported_profile")
+    # Reachable for a supported profile missing base_compat; same wording as the
+    # unreachable defence must not exempt this different guarded structure.
+    helper.body.insert(3, ast.parse("""
+if not isinstance(prof.get("base_compat"), str):
+    findings.append("{} is not a table".format(where))
+""").body[0])
+    failures = []
+    _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
+    check("F2h-census-rejects-reachable-same-wording",
+          "F2g-census-site-count-71" in failures)
+
+    duplicate = source.replace(
+        'findings.append("[profiles] is not a table")',
+        'findings.append("[profiles] is not a table"); findings.append("new emission")', 1)
+    check("F2h-census-same-line-mutant-installed", duplicate != source)
+    failures = []
+    _finding_sites(duplicate, lambda name, ok: failures.append(name) if not ok else None)
+    check("F2h-census-rejects-same-line",
+          "F2g-census-site-count-71" in failures
+          and "F2h-census-unambiguous-lines" in failures)
 
 
 def manifest_cases(check):
@@ -259,6 +296,6 @@ def manifest_cases(check):
             results.append((name, data, validation, control))
     finally:
         sys.settrace(previous)
-    for line in sorted(sites):
-        check("F1-validator-finding-site-" + str(line), line in seen)
+    for span in sorted(sites):
+        check("F1-validator-finding-site-" + str(span), span[0] in seen)
     return results

@@ -1141,8 +1141,9 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
     """Read and validate a worklog.toml (active or an archive bucket) through U3's validate_worklog, and
     return its WL-number -> entry map. A required (active) worklog that is absent is CANNOT-EVALUATE; an
     archive-bucket worklog that is absent returns None (the caller only reads it when the bucket has one).
-    The enclosing traversal requests manifest failures back after diagnostic translation so it can
-    stop dependent archive reads; an ordinary ledger failure still permits archive diagnostics."""
+    The enclosing traversal receives manifest failures before diagnostic translation so it can
+    attribute the original diagnostics and stop dependent archive reads; an ordinary ledger
+    failure still permits archive diagnostics."""
     try:
         if machine_rel is None:       # explicitly named archive bucket, never shape-probed (M7)
             data = _opf_worklog.load_archive_worklog_at(root_fd, relpath)
@@ -1151,25 +1152,25 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
                 root_fd, machine_rel, required=False, on_legacy_conflict=_worklog_legacy_conflict)
         st = "absent" if data is None else "present"
     except _opf_worklog.ManifestShapeError as exc:
-        rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(exc.relpath)
-                 if exc.missing else "{}: {}".format(exc.relpath, exc))
         if propagate_manifest_failure:
             raise
+        rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(exc.relpath)
+                 if exc.missing else "{}: {}".format(exc.relpath, exc))
         return None
     except _opf_worklog.ManifestValidationError as exc:
+        if propagate_manifest_failure:
+            raise
         if exc.status == CANNOT_EVALUATE:
             rep.cant("{}: {}".format(exc.relpath, exc))
         else:
             rep.cant("{} is not evaluated: {} failed manifest validation "
                      "(see C-MANIFEST)".format(relpath, exc.relpath))
-        if propagate_manifest_failure:
-            raise
         return None
     except _opf_worklog.ManifestReadError as exc:
-        # Match _read_toml's manifest diagnostic, not the worklog ledger's path.
-        rep.cant("cannot read {}: {}".format(exc.relpath, exc))
         if propagate_manifest_failure:
             raise
+        # Match _read_toml's manifest diagnostic, not the worklog ledger's path.
+        rep.cant("cannot read {}: {}".format(exc.relpath, exc))
         return None
     except _opf_worklog.WorklogError as exc:
         rep.cant(str(exc))
@@ -2553,9 +2554,28 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             root_fd, _rel(machine_rel, WORKLOG_NAME), registered_vendors, rep,
             required=True, machine_rel=machine_rel, propagate_manifest_failure=True) or {}
     except (_opf_worklog.ManifestShapeError, _opf_worklog.ManifestValidationError,
-            _opf_worklog.ManifestReadError):
-        # Intake reopens the manifest. A failure there invalidates the enclosing
-        # traversal too; archive intake has no independent manifest gate.
+            _opf_worklog.ManifestReadError) as exc:
+        # Intake reopens the authority. Revisit its attribution without registering
+        # C-MANIFEST twice, and retain each original diagnostic before translating
+        # the dependent source's refusal. No archive traversal follows this failure.
+        current = rep._current
+        rep._current = "C-MANIFEST"
+        try:
+            if isinstance(exc, _opf_worklog.ManifestValidationError):
+                if exc.status == CANNOT_EVALUATE:
+                    rep.cant("{}: {}".format(exc.relpath, exc))
+                else:
+                    for finding in exc.findings:
+                        rep.finding("manifest: {}".format(finding))
+            elif isinstance(exc, _opf_worklog.ManifestShapeError):
+                rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(exc.relpath)
+                         if exc.missing else "{}: {}".format(exc.relpath, exc))
+            else:
+                rep.cant("cannot read {}: {}".format(exc.relpath, exc))
+        finally:
+            rep._current = current
+        rep.cant("{} is not evaluated: {} failed manifest validation "
+                 "(see C-MANIFEST)".format(_rel(machine_rel, WORKLOG_NAME), exc.relpath))
         return evaluated_profiles, unevaluated_profiles
 
     # --- C-PERRECORD-RECONCILE: replay the bidirectional index<->body reconciliation (spec 13) --------

@@ -177,8 +177,9 @@ def _watchdog_hostile_ambient_self_test():
             # value AND a nonzero repeating interval, F3), BLOCK SIGALRM, then self-signal so a SIGALRM is left
             # PENDING-and-BLOCKED (timer already fired).
             _signal.signal(_signal.SIGALRM, _benign)
+            _arm_before = _time.monotonic()
             _signal.setitimer(_signal.ITIMER_REAL, _FIX_VAL, _FIX_INT)
-            _t_arm = _time.monotonic()                            # F3: elapsed baseline for the fixture-value bound
+            _arm_after = _time.monotonic()
             _signal.pthread_sigmask(_signal.SIG_BLOCK, {_signal.SIGALRM})
             _os.kill(_os.getpid(), _signal.SIGALRM)
             _pending_ok = _signal.SIGALRM in _signal.sigpending()
@@ -190,10 +191,11 @@ def _watchdog_hostile_ambient_self_test():
             except BaseException as exc:                          # a watchdog crash is the pre-fix failure
                 _crashed = repr(exc)
                 rc = None
-            _fn_elapsed = _time.monotonic() - _t_arm              # upper bound on the elapsed the watchdog subtracts
             _blocked_after = _signal.SIGALRM in _signal.pthread_sigmask(_signal.SIG_BLOCK, set())
             _disp_after = _signal.getsignal(_signal.SIGALRM)
+            _read_before = _time.monotonic()
             _val_after, _int_after = _signal.getitimer(_signal.ITIMER_REAL)
+            _read_after = _time.monotonic()
             _pending_after = _signal.SIGALRM in _signal.sigpending()   # F2: caller pending must survive
             if not _pending_ok:
                 print("opf watchdog self-test: {}: setup did not leave SIGALRM pending".format(label),
@@ -225,17 +227,16 @@ def _watchdog_hostile_ambient_self_test():
                       "the probe's SIG_IGN discarded it and it was not re-posted (F2)".format(label),
                       file=sys.stderr)
                 ok = False
-            # F3 (round-12): the watchdog must restore the caller's ITIMER VALUE (elapsed-aware, per F2) AND
-            # its REPEATING INTERVAL, not merely leave some positive time. The value lies in
-            # (_FIX_VAL - _fn_elapsed, _FIX_VAL]: the watchdog subtracts an elapsed >= 0 and <= the whole
-            # fn() run, so a restored value below that band means the value was not preserved and one above
-            # _FIX_VAL means the elapsed was not subtracted at all. A small float slack absorbs monotonic
-            # jitter. The interval must be restored exactly to the fixture's _FIX_INT; a dropped
-            # interval-restoration leaves 0 and reds this (the mutant a one-shot fixture hid).
-            if not (_FIX_VAL - _fn_elapsed - 1e-3 <= _val_after <= _FIX_VAL + 1e-3):
+            # The arm and observation each happened somewhere inside their
+            # monotonic brackets. Include scheduling pauses on either side of
+            # either syscall; retain a small allowance for timer precision.
+            # The upper bound also rejects a timer restored without elapsed time.
+            _low = _FIX_VAL - (_read_after - _arm_before)
+            _high = _FIX_VAL - (_read_before - _arm_after)
+            if not (_low - 1e-3 <= _val_after <= _high + 1e-3):
                 print("opf watchdog self-test: {}: did not restore the caller's ITIMER_REAL value "
-                      "elapsed-aware (got {!r}, expected within ({:.6f}, {:.6f}]) (F2/F3)".format(
-                          label, _val_after, _FIX_VAL - _fn_elapsed, _FIX_VAL), file=sys.stderr)
+                      "elapsed-aware (got {!r}, expected within [{:.6f}, {:.6f}]) (F2/F3)".format(
+                          label, _val_after, _low, _high), file=sys.stderr)
                 ok = False
             if abs(_int_after - _FIX_INT) > 1e-6:
                 print("opf watchdog self-test: {}: did not restore the caller's ITIMER_REAL repeating "
@@ -261,6 +262,68 @@ def _watchdog_hostile_ambient_self_test():
         return EXIT_FINDING
     print("opf watchdog hostile-ambient self-test: PASS (changelog/views/store watchdogs survive a "
           "blocked+pending SIGALRM with mask, disposition, and timer restored)")
+    return EXIT_OK
+
+
+def _watchdog_observation_regressions():
+    """Exercise the real hostile-ambient wrapper with controlled timer borrowers.
+
+    Inject a scheduling pause around the actual arm/read syscalls, independently.
+    An elapsed-aware borrower must pass; a verbatim restoration must still fail.
+    """
+    import contextlib
+    import io
+    import signal
+    import time
+    from unittest.mock import patch
+
+    if not all(hasattr(signal, name) for name in
+               ("pthread_sigmask", "setitimer", "getitimer", "SIGALRM", "ITIMER_REAL")):
+        print("opf watchdog observation regressions: SKIP (no POSIX timer)")
+        return EXIT_OK
+    failures = []
+    real_get, real_set = signal.getitimer, signal.setitimer
+    modules = (_opf_changelog, _opf_views, _opf_store, _opf_check)
+    for pause_at in ("arm", "read"):
+        for verbatim in (False, True):
+            def borrower():
+                snapshot = _opf_store.snapshot_caller_alarm()
+                real_set(signal.ITIMER_REAL, 0)
+                time.sleep(0.05)
+                if verbatim:
+                    real_set(signal.ITIMER_REAL, snapshot[0], snapshot[1])
+                else:
+                    _opf_store.restore_caller_alarm(*snapshot)
+                return EXIT_OK
+
+            def arm(which, value, interval=0.0):
+                result = real_set(which, value, interval)
+                if pause_at == "arm" and value == 3600.0:
+                    time.sleep(0.01)
+                return result
+
+            def observe(which):
+                if pause_at == "read":
+                    time.sleep(0.01)
+                return real_get(which)
+
+            output = io.StringIO()
+            with contextlib.ExitStack() as stack:
+                for module in modules:
+                    stack.enter_context(patch.object(module, "self_test", borrower))
+                stack.enter_context(patch.object(signal, "setitimer", side_effect=arm))
+                stack.enter_context(patch.object(signal, "getitimer", side_effect=observe))
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    rc = _watchdog_hostile_ambient_self_test()
+            label = "F2h-timer-{}-{}".format(pause_at, "verbatim" if verbatim else "elapsed")
+            expected = EXIT_FINDING if verbatim else EXIT_OK
+            if rc != expected or (verbatim and "ITIMER_REAL value elapsed-aware" not in output.getvalue()):
+                failures.append(label + ": rc={!r}; ".format(rc) + output.getvalue())
+    if failures:
+        for failure in failures:
+            print("opf watchdog observation regressions: FAIL: " + failure, file=sys.stderr)
+        return EXIT_FINDING
+    print("opf watchdog observation regressions: PASS (arm/read pauses; verbatim mutants refused)")
     return EXIT_OK
 
 
@@ -3369,6 +3432,7 @@ def _self_tests():
     ("opf-absorb", _opf_absorb.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
+    ("opf-watchdog-observation", _watchdog_observation_regressions),
     ("opf-watchdog-hostile-ambient", _watchdog_hostile_ambient_self_test),
     ("opf-watchdog-wrapper-deadline", _watchdog_wrapper_caller_deadline_self_test),
     ("opf-watchdog-shared-restore", _watchdog_shared_restore_self_test),

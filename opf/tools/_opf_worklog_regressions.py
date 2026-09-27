@@ -33,6 +33,8 @@ import _opf_worklog as wl
 M = "m"
 LEGACY = "m/worklog.toml"
 ARCHIVE = "m/archive/2026/worklog.toml"
+_DOCTOR_DEPENDENT = ("m/worklog.toml is not evaluated: m/manifest.toml failed manifest "
+                     "validation (see C-MANIFEST)")
 BODY = (b'id = "WL-1"\ndate = "2026-01-01T00:00:00Z"\n'
         b'actor = {kind = "maintainer"}\nkind = "fixed"\nsummary = "x"\n')
 LEDGER = b"schema = 1\n[[entry]]\n" + BODY
@@ -219,7 +221,8 @@ def _manifest_read_regressions(check):
         "views": "cannot read m/manifest.toml (fixture unreadable)",
         "plan_views": "cannot read m/manifest.toml (fixture unreadable)",
         "import": "cannot read m/manifest.toml (fixture unreadable)",
-        "doctor": ["cannot read m/manifest.toml: cannot read m/manifest.toml (fixture unreadable)"],
+        "doctor": ["cannot read m/manifest.toml: cannot read m/manifest.toml (fixture unreadable)",
+                   _DOCTOR_DEPENDENT],
     }
     for caller, baseline in expected.items():
         label = "F1-baseline-manifest-unreadable-" + caller
@@ -274,7 +277,8 @@ def _manifest_diagnostics(data, validation):
         "doctor": (["m/manifest.toml: " + message]
                    if validation.status == _opf_store.CANNOT_EVALUATE else
                    ["m/worklog.toml is not evaluated: m/manifest.toml failed manifest "
-                    "validation (see C-MANIFEST)"]),
+                    "validation (see C-MANIFEST)"]
+                   + ["manifest: " + finding for finding in validation.findings]),
         "import": "store manifest is not VALID ({}: {})".format(validation.status, message),
     }
     base = data.get("opf") if isinstance(data, dict) else None
@@ -426,6 +430,8 @@ def _manifest_intake_regressions(check):
                 ["active worklog source under m is not evaluated: m/manifest.toml failed manifest "
                  "validation (see C-MANIFEST)"]
                 + ["manifest: " + finding for finding in validation.findings])}
+        if control is None and _DOCTOR_DEPENDENT not in expected["doctor"]:
+            expected["doctor"] = expected["doctor"] + [_DOCTOR_DEPENDENT]
         for caller, baseline in expected.items():
             label = "F1-manifest-{}-{}".format(mode, caller)
             with _Fixture() as fx:
@@ -601,10 +607,12 @@ def _entry_point_regressions(check):
         with _Fixture() as fx:
             readers = _manifest_readers(fx, control)
             # Apply has its own public preflight before it can acquire a lease.
+            readers.update({key: (lambda run=run: run()[1])
+                            for key, run in _outer_readers(fx).items()})
             readers.update(
-                import_apply=lambda: (_opf_import.apply_import(
+                import_apply_preflight=lambda: (_opf_import.apply_import(
                     fx.root, run_id, now=now).findings or [None])[0],
-                ingest_apply=lambda: (_opf_ingest_apply.apply_ingest(
+                ingest_apply_preflight=lambda: (_opf_ingest_apply.apply_ingest(
                     fx.root, run_id, now=now).findings or [None])[0],
                 loader_at=lambda: _error(lambda: wl.load_worklog_at(fx.fd, M)),
                 doctor_public=lambda: _doctor_public(fx, control))
@@ -671,6 +679,242 @@ def _entry_point_regressions(check):
             check("F2f-reachable-active-" + caller, LEGACY in reads)
             if caller == "doctor":
                 check("F2f-reachable-archive-doctor", ARCHIVE in reads)
+
+
+def _doctor_reread_regressions(check):
+    """Public doctor: first manifest read succeeds, second intake must own its fault."""
+    import _opf_emit
+    for mode in ("invalid", "generation", "parse", "unreadable", "absent"):
+        with _Fixture() as fx:
+            _manifest_readers(fx)
+            bad = dict(fx.manifest, junk={})
+            if mode == "generation":
+                bad = dict(fx.manifest, opf=dict(fx.manifest["opf"], worklog=2))
+            payload = _opf_emit.emit_checked(bad).encode()
+            if mode == "parse":
+                payload = b"not TOML ["
+            if mode == "unreadable":
+                payload = PermissionError("fixture reread denied")
+            expected = {
+                "invalid": "unknown top-level table(s): junk",
+                "generation": "[opf].worklog = 2 is not supported by this build "
+                              "(maximum supported worklog generation: 1)",
+                "parse": "cannot parse m/manifest.toml",
+                "unreadable": "cannot read m/manifest.toml (fixture reread denied)",
+                "absent": "m/manifest.toml is absent (the store manifest is required; spec 4.5)",
+            }[mode]
+            manifest_reads, later_reads = [], []
+            real_load = wl.load_worklog_at
+            armed = False
+
+            def read(fd, rel, **kwargs):
+                path = fx.path(fd, rel)
+                if path == M + "/manifest.toml":
+                    manifest_reads.append(path)
+                if armed:
+                    later_reads.append(path)
+                return fx.read(fd, rel, **kwargs)
+
+            def intake(*args, **kwargs):
+                nonlocal armed
+                armed = True
+                if mode == "absent":
+                    fx.files.pop(M + "/manifest.toml")
+                else:
+                    fx.files[M + "/manifest.toml"] = payload
+                return real_load(*args, **kwargs)
+
+            with patch.object(_journal, "_read_contained", side_effect=read), \
+                    patch.object(wl, "load_worklog_at", side_effect=intake) as entered:
+                result = _opf_check.validate_store(fx.res)
+            label = "F2h-doctor-reread-" + mode
+            messages = result.cannot_evaluate + result.findings
+            check(label + "-reached", entered.call_count == 1
+                  and len(manifest_reads) == (1 if mode == "absent" else 2))
+            check(label + "-manifest-verdict", result.checks["C-MANIFEST"] ==
+                  ("FINDING" if mode == "invalid" else "CANNOT-EVALUATE"))
+            check(label + "-original-once",
+                  sum(expected in m for m in messages) == 1
+                  and sum(expected in m for m in result.by_check.get("C-MANIFEST", [])) == 1)
+            check(label + "-dependent", result.by_check.get("C-RECORDS") == [_DOCTOR_DEPENDENT])
+            check(label + "-no-duplicate-check",
+                  not any("was run more than once" in m for m in messages))
+            check(label + "-no-worklog-read", not any(
+                path == LEGACY or path.startswith(M + "/worklog/")
+                or path.endswith("/worklog.toml") for path in later_reads))
+
+
+def _outer_readers(fx):
+    import io
+
+    def render(mode):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            rc = _opf_views.render([mode, "--root", str(fx.root)])
+        return rc, output.getvalue()
+
+    def plan():
+        result = _opf_import.plan_import(
+            fx.root, [], now=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
+            run_nonce="worklog-boundary")
+        return result.verdict, "\n".join(result.findings)
+
+    return {"render_check": lambda: render("--check"),
+            "render_write": lambda: render("--write"), "plan_import": plan}
+
+
+def _outer_entry_regressions(check):
+    """Outer public wrappers have distinct initial intake and later loader paths."""
+    for caller in ("render_check", "render_write", "plan_import"):
+        for mode in ("reachable", "invalid", "generation", "parse", "unreadable"):
+            with _Fixture() as fx:
+                _manifest_readers(fx)
+                run = _outer_readers(fx)[caller]
+                real_load = wl.load_worklog_at
+                reads = []
+                armed = False
+
+                def intake(*args, **kwargs):
+                    nonlocal armed
+                    armed = True
+                    _install_late_fault(fx, mode)
+                    return real_load(*args, **kwargs)
+
+                def read(fd, rel, **kwargs):
+                    path = fx.path(fd, rel)
+                    if armed:
+                        reads.append(path)
+                    if path == LEGACY:
+                        raise PermissionError("fixture active-read witness")
+                    return fx.read(fd, rel, **kwargs)
+
+                with patch.object(wl, "load_worklog_at", side_effect=intake) as entered, \
+                        patch.object(_journal, "_read_contained", side_effect=read):
+                    rc, message = run()
+                label = "F2h-outer-{}-{}".format(caller, mode)
+                check(label + "-reached-loader",
+                      entered.call_count >= 1 if mode == "reachable" else entered.call_count == 1)
+                check(label + "-refused", rc == 2 and _late_fault_text(mode) in message)
+                if mode == "reachable":
+                    check(label + "-active-witness", LEGACY in reads)
+                else:
+                    check(label + "-manifest-only", reads == [M + "/manifest.toml"])
+
+
+def _install_late_fault(fx, mode):
+    import _opf_emit
+    if mode == "invalid":
+        fx.files[M + "/manifest.toml"] = _opf_emit.emit_checked(dict(fx.manifest, junk={})).encode()
+    elif mode == "generation":
+        data = dict(fx.manifest, opf=dict(fx.manifest["opf"], worklog=2))
+        fx.files[M + "/manifest.toml"] = _opf_emit.emit_checked(data).encode()
+    elif mode == "parse":
+        fx.files[M + "/manifest.toml"] = b"not TOML ["
+    elif mode == "unreadable":
+        fx.files[M + "/manifest.toml"] = PermissionError("fixture late intake denied")
+
+
+def _late_fault_text(mode):
+    return {"reachable": "fixture active-read witness",
+            "invalid": "unknown top-level table(s): junk",
+            "generation": "[opf].worklog = 2 is not supported",
+            "parse": "cannot parse m/manifest.toml",
+            "unreadable": "fixture late intake denied"}[mode]
+
+
+@contextlib.contextmanager
+def _apply_ready(fx, caller, run_id):
+    """Intake-only fixtures, not staged-run, lock, or publication verification.
+
+    Supply reviewed-run/lock preconditions; keep public apply control flow,
+    manifest validation, counter validation, ID collectors and worklog intake real.
+    The active-read witness refuses before allocation or publication.
+    """
+    import check_opf_import
+    import _opf_emit
+    import _opf_ingest_apply as ingest
+    import _opf_journal
+    import _opf_oplock
+    with contextlib.ExitStack() as stack:
+        def mock(obj, name, **kwargs):
+            return stack.enter_context(patch.object(obj, name, **kwargs))
+
+        if caller == "apply_import":
+            run_rel = _opf_import.IMPORTS_REL + "/" + run_id
+            fx.files[run_rel + "/candidate/counters.toml"] = fx.files[M + "/counters.toml"]
+            mock(_journal, "ensure_journal_dirs", return_value=None)
+            mock(_journal, "open_journal_root_fd", side_effect=lambda *_: os.dup(fx.fd))
+            mock(_opf_import, "_claim_apply_lock", return_value="claimed")
+            mock(_opf_import, "_recover_open_txns", return_value=None)
+            mock(_journal, "release_lock", return_value=None)
+            mock(_opf_import, "_load_staged_run_for_review", return_value=("plan", "inventory", {}, {}, []))
+            mock(check_opf_import, "check_staged_run", return_value={"fixture-reviewed": (True, "")})
+            mock(_opf_import, "_read_json_acceptance", return_value=dict(
+                run_id=run_id, plan_digest="plan", inventory_digest="inventory", decisions=[]))
+            mock(_opf_import, "_validate_acceptance", return_value=[])
+            mock(_opf_import, "_staged_candidate_types", return_value=[])
+            mock(_opf_import, "_minted_by_namespace", return_value={})
+            # Defensive fence if a future edit bypasses the active-read refusal.
+            mock(_opf_import, "_build_promotion_machine_files",
+                 side_effect=AssertionError("unexpected publication preparation"))
+            yield _opf_import.apply_import
+        else:
+            # This API is intentionally dormant in shipped homes 1. Activate only
+            # this synthetic fixture, as the ingest apply self-tests do.
+            mock(_opf_store, "SUPPORTED_HOMES", new=2)
+            fx.manifest["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
+            fx.manifest["opf"]["homes"] = 2
+            fx.files[M + "/manifest.toml"] = _opf_emit.emit_checked(fx.manifest).encode()
+            mock(_opf_oplock, "acquire_operation", return_value=object())
+            mock(_opf_oplock, "release_operation", return_value=None)
+            mock(_opf_journal, "acquire_writer_lock", return_value=None)
+            mock(_opf_journal, "release_writer_lock", return_value=None)
+            mock(_opf_journal, "attempt_states", return_value={})
+            mock(ingest, "_locate_run", return_value="fixture-run")
+            mock(ingest, "_validated_snapshot", return_value=({}, {}))
+            mock(ingest, "_require_acceptance", return_value=b"fixture")
+            mock(ingest, "_execution_plan", return_value=SimpleNamespace())
+            mock(ingest, "_live_sources", return_value={})
+            yield ingest.apply_ingest
+
+
+def _apply_intake_regressions(check):
+    run_id = "imp-20260101T000000Z-0000000000000000"
+    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    for caller in ("apply_import", "apply_ingest"):
+        for mode in ("reachable", "invalid", "generation", "parse", "unreadable"):
+            with _Fixture() as fx:
+                _manifest_readers(fx)
+                real_load = wl.load_worklog_at
+                armed, reads = False, []
+
+                def intake(*args, **kwargs):
+                    nonlocal armed
+                    armed = True
+                    _install_late_fault(fx, mode)
+                    return real_load(*args, **kwargs)
+
+                def read(fd, rel, **kwargs):
+                    path = fx.path(fd, rel)
+                    if armed:
+                        reads.append(path)
+                    if path == LEGACY:
+                        raise PermissionError("fixture active-read witness")
+                    return fx.read(fd, rel, **kwargs)
+
+                with _apply_ready(fx, caller, run_id) as apply, \
+                        patch.object(wl, "load_worklog_at", side_effect=intake) as entered, \
+                        patch.object(_journal, "_read_contained", side_effect=read):
+                    result = apply(fx.root, run_id, now=now)
+                label = "F2h-{}-{}".format(caller, mode)
+                check(label + "-reached-loader", entered.call_count == 1)
+                check(label + "-refused", result.verdict == _opf_import.CANNOT_EVALUATE
+                      and result.promoted is False
+                      and any(_late_fault_text(mode) in m for m in result.findings))
+                if mode == "reachable":
+                    check(label + "-active-witness", LEGACY in reads)
+                else:
+                    check(label + "-manifest-only", reads == [M + "/manifest.toml"])
 
 
 def _upgrade_preflight_regressions(check, fence):
@@ -905,6 +1149,9 @@ def self_test():
     _manifest_intake_regressions(check)
     _entry_point_census(check)
     _entry_point_regressions(check)
+    _doctor_reread_regressions(check)
+    _outer_entry_regressions(check)
+    _apply_intake_regressions(check)
 
     archive_parse = ("cannot parse m/archive/2026/worklog.toml "
                      "(Expected '=' after a key in a key/value pair (at line 1, column 5))")
