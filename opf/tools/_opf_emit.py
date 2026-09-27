@@ -607,12 +607,20 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     Hardening: (fork-less) a host without os.fork returns SETUP-ERROR WITHOUT running the thunk, never the
     thunk's own result run unbounded. (child) the child resets SIGALRM to SIG_DFL AND UNBLOCKS it in its
     signal mask, so neither an inherited SIG_IGN disposition nor an inherited BLOCKED mask can defeat the
-    watchdog and leave the parent blocked in os.read() with no deadline; it then installs BOTH bounds or,
-    on any failure, writes a SETUP-ERROR token and exits WITHOUT running the thunk unbounded. (parent) the
-    read fd is closed and the child is reaped in an ENCLOSING finally, so a parent-side exception during the
-    pipe read cannot skip waitpid and orphan the child; both pipe fds are closed on a fork failure."""
+    child timer; it then installs BOTH bounds or writes SETUP-ERROR without running the thunk.
+    Independently, a parent-owned monotonic deadline starts BEFORE fork and covers child startup,
+    nonblocking pipe collection and exit. On expiry the parent kills the child's process group and
+    reaps the child, returning TIMEOUT even if bytes were buffered. Exceptions also kill and reap;
+    neither path relies on the child reaching its timer setup. Both pipe fds close on fork failure.
+
+    Residual: synchronous callbacks in the PARENT's fork path and uninterruptible kernel waits cannot
+    be preempted by this polling deadline. Reaping after SIGKILL relies on kernel progress. Descendants
+    that escape the child's process group are outside group cleanup; this is a self-test helper, not
+    a hostile-process sandbox."""
     import os
     import signal
+    import select
+    import time
     if not hasattr(os, "fork"):
         # A bound could NOT be installed on a fork-less host: a cannot-evaluate. Return the SETUP-ERROR
         # sentinel WITHOUT invoking the thunk (never run it unbounded); the caller fails closed because the
@@ -641,6 +649,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
             or (_rlim_inf > 0 and mem_bytes >= _rlim_inf)):
         return "SETUP-ERROR:BadMemBound"
     rfd, wfd = os.pipe()
+    deadline = time.monotonic() + timeout_s
     try:
         pid = os.fork()
     except OSError as exc:                               # fork failed: close BOTH pipe fds, no leak
@@ -650,11 +659,10 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     if pid == 0:                                         # child: bounded, writes one short token, never returns
         os.close(rfd)
         try:
-            # The child must not inherit an ambient SIG_IGN/custom SIGALRM disposition NOR a BLOCKED SIGALRM
-            # mask: either would keep the timer's SIGALRM from terminating the child and leave the parent
-            # blocked in os.read() with no deadline. Reset the disposition to SIG_DFL and UNBLOCK SIGALRM in
-            # the mask BEFORE arming the timer, then install BOTH bounds or, on any failure, write a
-            # SETUP-ERROR token and exit WITHOUT running the thunk unbounded.
+            # Both sides establish the group: the parent can do so even when an after_in_child
+            # callback stalls before this code. The child also does so before the thunk can fork.
+            os.setpgid(0, 0)
+            # Keep the child timer as an independent bound, with a deliverable disposition and mask.
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             if hasattr(signal, "pthread_sigmask"):
                 signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
@@ -678,31 +686,59 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         except OSError:
             pass
         os._exit(0)
-    # parent
+    # parent: never borrow a timer, handler, signal mask or pending notification.
     data = b""
     wstatus = None
+    timed_out = False
     try:
-        # Close the parent's WRITE end INSIDE the enclosing try, as the FIRST step, so that if this close
-        # raises (OSError EIO) the finally still closes rfd AND reaps the child, rather than leaking the read
-        # fd and orphaning the child as a close ahead of the try/finally did (codex round-8 finding 7). It
-        # must still precede the read loop: while the parent holds wfd open, os.read(rfd) would never see EOF
-        # after the child exits and would block forever.
+        # Keep close inside the cleanup scope, including the close-then-raise fault case.
         os.close(wfd)
+        try:
+            os.setpgid(pid, pid)
+        except ProcessLookupError:
+            pass                                        # child already exited; collect its status below
+        os.set_blocking(rfd, False)
+        eof = False
         while True:
-            chunk = os.read(rfd, 200)
-            if not chunk:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
                 break
-            data += chunk
+            if eof:
+                # EOF does not prove exit: a child can close its pipe then stall during teardown.
+                _wpid, status = os.waitpid(pid, os.WNOHANG)
+                if _wpid == pid:
+                    wstatus = status
+                    break
+            ready, _, _ = select.select([] if eof else [rfd], [], [], min(remaining, 0.01))
+            if ready:
+                try:
+                    chunk = os.read(rfd, 200)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    eof = True
+                else:
+                    data = (data + chunk)[:200]          # the short-token contract also bounds collection
     finally:
-        # Close the read fd AND reap the child even when the read loop raises, so a parent-side exception
-        # during the pipe read cannot skip waitpid and orphan the child. The child always arms its own
-        # SIGALRM timer (or exits at once on a setup failure), so this waitpid is bounded and cannot block
-        # indefinitely.
         try:
             os.close(rfd)
         finally:
-            _wpid, wstatus = os.waitpid(pid, 0)
-    return _bounded_child_result(data, wstatus)
+            if wstatus is None:
+                # Keep the child unreaped until group cleanup, so its PID cannot be recycled first.
+                # Kill the PID too: an exception may precede either side's setpgid.
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                finally:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    finally:
+                        _wpid, wstatus = os.waitpid(pid, 0)  # only blocking wait, AFTER SIGKILL
+    return "TIMEOUT" if timed_out else _bounded_child_result(data, wstatus)
 
 
 def _bounded_child_result(data, wstatus):

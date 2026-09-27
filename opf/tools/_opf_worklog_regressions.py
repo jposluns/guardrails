@@ -33,8 +33,6 @@ import _opf_worklog as wl
 M = "m"
 LEGACY = "m/worklog.toml"
 ARCHIVE = "m/archive/2026/worklog.toml"
-_DOCTOR_DEPENDENT = ("m/worklog.toml is not evaluated: m/manifest.toml failed manifest "
-                     "validation (see C-MANIFEST)")
 BODY = (b'id = "WL-1"\ndate = "2026-01-01T00:00:00Z"\n'
         b'actor = {kind = "maintainer"}\nkind = "fixed"\nsummary = "x"\n')
 LEDGER = b"schema = 1\n[[entry]]\n" + BODY

@@ -152,6 +152,10 @@ def _watchdog_timer_case(label, mode):
     def handler(sig, frame):
         fired.append(sig)
     signal.signal(signum, handler)
+    if mode == "expiry":
+        # This private subprocess must deliver the expiry even if its launcher blocked SIGALRM.
+        # Set the fixture's initial mask before arming/snapshotting; never change the launcher.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signum})
     interval = 1800.0 if mode == "periodic" else 0.0
     value = 0.0 if mode == "inactive" else (1.0 if mode == "expiry" else 3600.0)
     signal.setitimer(which, value, interval)
@@ -234,6 +238,145 @@ def _watchdog_isolation_self_test():
         print("opf watchdog isolation: FAIL (borrow helper still present)", file=sys.stderr)
     if not failed:
         print("opf watchdog isolation: PASS (caller timers and signal state untouched)")
+    return EXIT_FINDING if failed else EXIT_OK
+
+
+def _watchdog_deadline_case(mode):
+    """Private subprocess: at-fork hooks cannot be unregistered, so never install them in the runner."""
+    import signal
+    import threading
+    import time
+    from unittest.mock import patch
+    import _opf_emit
+
+    real_fork, real_pipe = os.fork, os.pipe
+    started_r, started_w = real_pipe()
+    child, pipe, rescuers, rescued = [], [], [], []
+    finished = threading.Event()
+
+    def kill_child(pid):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def rescue(pid):
+        # Independent of run_bounded: a removed parent deadline must FAIL, not hang this test.
+        if not finished.wait(3):
+            rescued.append(pid)
+            kill_child(pid)
+
+    def fork():
+        pid = real_fork()
+        if pid:
+            child.append(pid)
+            worker = threading.Thread(target=rescue, args=(pid,))
+            rescuers.append(worker)
+            worker.start()                              # start only AFTER fork, in the parent
+        return pid
+
+    def capture_pipe():
+        pair = real_pipe()
+        pipe[:] = pair
+        return pair
+
+    def stall():
+        while True:
+            time.sleep(60)
+
+    def startup():
+        os.write(started_w, b"started")
+        if mode == "delayed-start":
+            time.sleep(2)
+        else:
+            stall()
+
+    def thunk():
+        if mode in ("pipe-stall", "exit-stall"):
+            # Defeat the independent child timer deliberately: exercise the PARENT deadline.
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            os.write(started_w, b"started")
+            os.write(pipe[1], b"BUFFERED-TOKEN")
+            if mode == "exit-stall":
+                os.close(pipe[1])                       # EOF before exit must not permit an unbounded wait
+            stall()
+        return "RETURNED"
+
+    if mode in ("delayed-start", "stuck-start"):
+        os.register_at_fork(after_in_child=startup)
+    result, elapsed, reaped, gone = None, None, False, False
+    try:
+        start = time.monotonic()
+        with patch.object(os, "fork", fork), patch.object(os, "pipe", capture_pipe):
+            result = _opf_emit.run_bounded(thunk, timeout_s=0.25)
+        elapsed = time.monotonic() - start
+        finished.set()
+        for worker in rescuers:
+            worker.join()
+        # Assert reaping before emergency cleanup can conceal a leak. Only ECHILD proves reaping.
+        try:
+            os.waitpid(child[0], os.WNOHANG)
+        except ChildProcessError:
+            reaped = True
+        try:
+            os.kill(child[0], 0)
+        except ProcessLookupError:
+            gone = True
+        os.set_blocking(started_r, False)
+        reached = os.read(started_r, 200) == b"started"
+        ok = (result == "TIMEOUT" and elapsed < 1.5 and not rescued
+              and reached and gone)
+    finally:
+        finished.set()
+        for worker in rescuers:
+            worker.join()
+        if child and not reaped and not gone:
+            kill_child(child[0])
+            try:
+                os.waitpid(child[0], 0)
+            except ChildProcessError:
+                pass
+        os.close(started_r)
+        os.close(started_w)
+    print("opf watchdog deadline:", mode, "PASS" if ok else "FAIL",
+          result, elapsed, "rescued", bool(rescued), "reaped", reaped, "gone", gone)
+    return EXIT_OK if ok else EXIT_FINDING
+
+
+def _watchdog_regression_self_test():
+    """R10: startup/collection/exit bounds and the registered runner under hostile inherited state."""
+    import signal
+    import subprocess
+    if not hasattr(os, "register_at_fork") or not hasattr(signal, "pthread_sigmask"):
+        print("opf watchdog regressions: FAIL (required POSIX facilities unavailable)")
+        return EXIT_FINDING
+    prefix = ("import sys; sys.path.insert(0, " + repr(str(Path(__file__).resolve().parent))
+              + "); import opf; ")
+    cases = [(mode, prefix + "sys.exit(opf._watchdog_deadline_case(" + repr(mode) + "))", 10)
+             for mode in ("delayed-start", "stuck-start", "pipe-stall", "exit-stall")]
+    # Resolve the real registration, without recursively invoking this regression runner.
+    # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
+    cases.append(("blocked-isolation", prefix
+                  + "import signal; signal.signal(signal.SIGALRM, signal.SIG_IGN); "
+                  + "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}); "
+                  + "rc = opf._bootstrap(); "
+                  + "sys.exit(rc if rc else dict(opf._self_tests())['opf-watchdog-isolation']())",
+                  25 * 180 + 30))                       # the isolation matrix's full budget plus launch margin
+    failed = False
+    for label, code, timeout in cases:
+        try:
+            result = subprocess.run([sys.executable, "-I", "-B", "-c", code],
+                                    capture_output=True, text=True, timeout=timeout)
+            ok, detail = result.returncode == EXIT_OK, result.stdout + result.stderr
+        except subprocess.TimeoutExpired:
+            ok, detail = False, "fixture exceeded its independent process bound"
+        print("opf watchdog regression:", label, "PASS" if ok else "FAIL", detail)
+        failed = failed or not ok
     return EXIT_FINDING if failed else EXIT_OK
 
 
@@ -3123,6 +3266,7 @@ def _self_tests():
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-watchdog-isolation", _watchdog_isolation_self_test),
+    ("opf-watchdog-regressions", _watchdog_regression_self_test),
     ("opf-aggregator", _aggregator_self_test),
     ("opf-cli", _cli_self_test),
 )
