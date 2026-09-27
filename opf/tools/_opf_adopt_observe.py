@@ -1417,6 +1417,7 @@ def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False):
     The scope is this suite only.
     """
     import errno
+    import fcntl
     import json
     import shlex
     import subprocess
@@ -1441,9 +1442,16 @@ def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False):
                 if exc.errno == errno.EBADF:
                     continue
                 raise
-            if (stat.S_ISREG(info.st_mode) and info.st_size == len(marker_bytes)
-                    and os.pread(fd, len(marker_bytes), 0) == marker_bytes):
-                raise RuntimeError(identity + "/cannot-evaluate/recursion")
+            if stat.S_ISREG(info.st_mode) and info.st_size == len(marker_bytes):
+                # Admit only readable descriptors. O_PATH has O_RDONLY access
+                # bits but cannot be read. A failed flag query still refuses.
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                if (flags & getattr(os, "O_PATH", 0)
+                        or flags & os.O_ACCMODE not in (os.O_RDONLY, os.O_RDWR)):
+                    continue
+                # Readable candidates still fail closed on inspection errors.
+                if os.pread(fd, len(marker_bytes), 0) == marker_bytes:
+                    raise RuntimeError(identity + "/cannot-evaluate/recursion")
     except (OSError, ValueError) as exc:
         raise RuntimeError(identity + "/cannot-evaluate/recursion-marker") from exc
     if type(fail_own) is not int or fail_own not in (0, 1, 2, 7):
@@ -1621,6 +1629,69 @@ exit 0
         raise AssertionError(identity + "/own-argv")
 
 
+def _runner_non_readable_fd_checks(expected):
+    import json
+    import subprocess
+    import tempfile
+
+    kinds = [("write-only", os.O_WRONLY | os.O_APPEND)]
+    if hasattr(os, "O_PATH"):
+        kinds.append(("path", os.O_PATH))
+    # Each child exercises the real descriptor scan and one registration leg,
+    # including vector dispatch. It does not rerun the full registration REDs
+    # or this helper, so no recursive self-test suppression is needed.
+    for kind, flags in kinds:
+        identity = "runner/adopt-observe-registration/inherited-" + kind + "-fd"
+        with tempfile.TemporaryDirectory(prefix="opf-" + kind + "-fd-") as tmp:
+            os.chmod(tmp, 0o700)
+            log = Path(tmp) / "ordinary.log"
+            log.write_bytes(b"x" * 37)
+            log.chmod(0o600)
+            fd = os.open(log, flags)
+            try:
+                child = (
+                    "import fcntl, importlib, json, os, sys\n"
+                    "from pathlib import Path\n"
+                    f"assert os.fstat({fd}).st_size == 37\n"
+                    f"flags = fcntl.fcntl({fd}, fcntl.F_GETFL)\n"
+                    f"assert flags & os.O_ACCMODE == {flags & os.O_ACCMODE}\n"
+                    f"assert flags & {flags} == {flags}\n"
+                    "sys.argv = sys.argv[1:]\n"
+                    "sys.path.insert(0, str(Path(sys.argv[0]).parent))\n"
+                    "module = importlib.import_module(Path(sys.argv[0]).stem)\n"
+                    "try:\n"
+                    "    module._runner_check(json.loads(sys.argv[1]))\n"
+                    "except RuntimeError as exc:\n"
+                    "    if str(exc) != 'runner/adopt-observe-registration/cannot-evaluate/timeout':\n"
+                    "        raise\n"
+                    "    print(str(exc), file=sys.stderr)\n"
+                    "    raise SystemExit(2)\n")
+                try:
+                    # One _runner_check has two shell calls, each bounded by
+                    # 120s plus 5s cleanup. Allow 50s more for setup/teardown.
+                    proc = subprocess.run(
+                        [sys.executable, "-I", "-B", "-c", child,
+                         str(Path(__file__).resolve()), json.dumps(expected)],
+                        pass_fds=(fd,), capture_output=True, text=True, timeout=300)
+                except subprocess.TimeoutExpired as exc:
+                    print(identity + ": child timed out after {}s; stderr={!r}".format(
+                        exc.timeout, exc.stderr), file=sys.stderr)
+                    raise RuntimeError(identity + "/cannot-evaluate/timeout") from exc
+                except Exception as exc:
+                    print(identity + ": child launch failed: {!r}".format(exc), file=sys.stderr)
+                    raise AssertionError(identity) from exc
+                if proc.returncode != 0:
+                    # Surface the child's own diagnostics; failure identities stay exact.
+                    print(identity + ": child rc={}\n{}".format(proc.returncode, proc.stderr),
+                          file=sys.stderr)
+                    if proc.returncode == 2:
+                        raise RuntimeError(identity + "/cannot-evaluate/timeout")
+                    raise AssertionError(identity)
+            finally:
+                os.close(fd)
+        print("PASS " + identity)
+
+
 def _runner_red_checks(expected):
     import shlex
     import subprocess
@@ -1655,12 +1726,14 @@ def _runner_red_checks(expected):
             AssertionError, identity + "/pass-lines")
 
     # Exercise caller-cwd dispatch from the repository or standalone root.
-    with contextlib.chdir(runner.parents[2]):
-        if not Path("opf/tools/run_all_checks.sh").is_file():
+    root = runner.parents[2]
+    relative_runner = runner.relative_to(root)
+    with contextlib.chdir(root):
+        if not relative_runner.is_file():
             raise AssertionError(identity + "/cwd-fixture")
         red("cwd-conditional-skip", lambda: _runner_check(
             expected, source.replace(
-                anchor, anchor + '  if [ -e opf/tools/run_all_checks.sh ]; then '
+                anchor, anchor + '  if [ -e ' + shlex.quote(str(relative_runner)) + ' ]; then '
                 'case "$name" in opf-adopt-observe-selftest) return 0;; esac; fi\n', 1)),
             AssertionError, identity + "/pass-lines")
 
@@ -1758,13 +1831,26 @@ def _runner_red_checks(expected):
         if own_line.count("python3 ") != 1 or own_line.count(script_arg) != 1:
             raise AssertionError(identity + "/red-fixture")
         scrubbed = own_line.replace(
-            "python3 ", "env -i PATH=/usr/bin:/bin python3 ", 1).replace(
-                script_arg, shlex.quote(str(nested)), 1)
-        red("scrubbed-environment-exit", lambda: _runner_check(
-            expected, source.replace(own_line, scrubbed, 1)),
-            AssertionError, identity + "/return-code")
-        if report.read_text(encoding="utf-8") != identity + "/cannot-evaluate/recursion":
-            raise AssertionError(identity + "/scrubbed-environment/wrong-refusal")
+            "python3 ", "env -i PATH=/usr/bin:/bin " + shlex.quote(sys.executable) + " ",
+            1).replace(script_arg, shlex.quote(str(nested)), 1)
+        refusal_identity = identity + "/scrubbed-environment/wrong-refusal"
+        try:
+            try:
+                _runner_check(expected, source.replace(own_line, scrubbed, 1))
+            except AssertionError as exc:
+                if str(exc) != identity + "/return-code":
+                    raise
+            else:
+                raise AssertionError("scrubbed runner accepted")
+            refusal = report.read_text(encoding="utf-8")
+        except Exception as exc:
+            # Missing/unreadable reports and unexpected runner outcomes are
+            # failures of this RED, not harness cannot-evaluate outcomes.
+            raise AssertionError(refusal_identity) from exc
+        if refusal != identity + "/cannot-evaluate/recursion":
+            raise AssertionError(refusal_identity)
+        # The child writes this exact report only after asserting zero Popen
+        # attempts. Announce the RED only once that evidence has been read.
         print("RED scrubbed-environment -> " + identity + "/cannot-evaluate/recursion")
         print("PASS " + identity + "/scrubbed-environment/no-nested-launch")
 
@@ -1869,6 +1955,8 @@ def _runner_red_checks(expected):
                     identity + "/cannot-evaluate/pathsep")
                 if launch.call_count:
                     raise AssertionError(identity + "/pathsep/unexpected-launch")
+
+    _runner_non_readable_fd_checks(expected)
 
 
 def _runner_registration_test(expected):
