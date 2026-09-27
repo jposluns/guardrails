@@ -717,8 +717,8 @@ Notes on the roster:
   `done`; a standalone receipt is legal only for imported history with provenance.
 - A `finding` records the observation and links its remediation rather than containing it.
 - A `block` scopes one or more enumerated records and feeds actionability (section 8.5).
-- `contribution` records an artifact, fix, or proposal this project SENT to a peer project, with a
-  delivery receipt: the outward counterpart to `reference`, which records what comes in. It carries no
+- `contribution` records an artifact, fix, or proposal this project proposes or sends to a peer project,
+  with a delivery bundle once sent: the outward counterpart to `reference`, which records what comes in. It carries no
   fleet-specific semantics; those ride a registered `x-<vendor>` extension (section 8.7).
 - `maintainer_decision` and `preference_pattern` are baseline as of spec_version 1.1.0; they were
   module-tier in 1.0.0. With that change the governance module carries `maintainer_action` alone, and
@@ -830,7 +830,7 @@ Baseline types:
 | block | `active` > `released` or `expired` | Scopes an enumerated list of record IDs. A block created by an assistant or automation actor is `active/proposed` and is a proposal, not a grant: it does not count toward blocked-ness or justify a stop until a maintainer ratifies it. |
 | handoff | `current` > `superseded` | Posting a new handoff supersedes the previous in the same act; at most one `current` handoff exists. |
 | reference | `recorded` | Immutable captured reference. |
-| contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project sent to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` are required once sent, `sent_at` is forbidden before, and the receipt fields are legal only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome lives in `summary`/`x-<vendor>`, never as a state. A re-send is a new record linking `supersedes`; the superseded record records `superseded`. |
+| contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project proposes or sends to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` are required once sent, `sent_at` is forbidden before, and the receipt fields are legal only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome lives in `summary`/`x-<vendor>`, never as a state. A re-send is a new record linking `supersedes`; the superseded record records `superseded`. |
 | maintainer_decision | `recorded` | Created-terminal, immutable maintainer ruling carrying its `decision` (answer plus rationale). `actor.kind` is `maintainer` or `importer` only (a maintainer ruling with assistant attribution is a contradiction; `importer` covers migrated history). Overturning is a new record linking the old. It MAY `exemplifies` the preference_pattern it instantiates. |
 | preference_pattern | `active` > `retired` | A distilled preference pattern carrying `context` and `rationale` (with the envelope `title`). `active` is gated: an assistant-distilled pattern lands `active/proposed` awaiting maintainer ratification to the unqualified `active`. |
 
@@ -1036,10 +1036,12 @@ It fails closed on an unresolvable store, a declared `spec_version` ABOVE the to
 a divergence, a held lease, or any populated state that contradicts its preconditions; it never
 lowers the fail-closed floor. Before any write it enforces two fail-closed preconditions: it claims
 the single-writer lease (section 5.7) and holds it across the whole mutation, and it verifies the
-store working tree is clean over exactly the paths it will write, so the committed HEAD is a verified
-restore path for that blast radius; a held lease or a dirty store refuses, and a dirty store is asked
-to commit its own changes, never restored by the tool. It never commits: it stages the change and
-requires a full doctor VALID before the change is offered for the adopter's own branch-and-merge.
+working tree is clean, including ignored files, over the planned schema and render destinations
+(store and product roots) and the index collision candidates, so the committed HEAD is a verified
+restore path for that scope; a held lease or a dirty store refuses, and a dirty store is asked
+to commit its own changes, never restored by the tool. After applying the schema delta, it regenerates
+the declared views and requires a full doctor VALID before offering the uncommitted change for the
+adopter's own branch-and-merge. It never stages or commits the change.
 
 The manifest and counters rewrite is a model regeneration through the canonical new-document emitter,
 never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED
@@ -1068,8 +1070,9 @@ always-on, so a populated decision-support index is kept as is.
 Base spec 1.2.0 admits one new managed machine-store file, `.working/toml/init.toml`: the bootstrap
 provenance a coupled `opf init` records (its format is frozen in OPF-INIT-D2B). It is a managed leaf
 when present and is never required, so a store without it stays valid. For the 1.1.0 to 1.2.0 upgrade
-the allowed delta is the `spec_version` bump alone: no provenance is created for an existing store
-(none is ever fabricated), and no other field, file, or counter changes. A 1.0.0 store takes the
+the allowed schema delta is the `spec_version` bump alone: no other manifest field, schema file, or
+counter changes, and no provenance is created for an existing store (none is ever fabricated).
+Declared views are then regenerated, so a stale committed view can change. A 1.0.0 store takes the
 1.0.0 delta above directly to 1.2.0.
 
 ## 10. Views and deliverables
