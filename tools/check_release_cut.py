@@ -16,20 +16,23 @@ For pull_request events or when GITHUB_BASE_REF is set, require a merge HEAD
 whose raw first parent equals the resolved origin/GITHUB_BASE_REF tip, and use
 that parent as the comparison base. Missing or mismatched bindings fail closed.
 In GitHub Actions, only pull_request and push are supported. Push requires
---protected (a full ref or origin/BRANCH) and --base (the event's full before OID),
-with HEAD equal to the target. Every raw first-parent transition in base..HEAD
-is checked separately, including its declaration. A zero before is accepted only
+--protected equal to refs/remotes/origin/GITHUB_REF_NAME (origin/BRANCH is
+normalized), and --base equal to the workflow's PUSH_BEFORE event value.
+The event must name a branch, with HEAD equal to its protected tracking tip.
+Every raw first-parent transition in base..HEAD is checked separately, including
+its declaration. A zero before is accepted only
 for a proven root HEAD; new branches with pre-existing history are refused.
-Local runs use ancestry against --protected or origin/HEAD's target when omitted.
-A merge base equal to HEAD with a different target is refused. Local tip checks
-require HEAD also to equal origin/HEAD's resolved tip, then compare the last
-first-parent transition; candidate-branch self-selection cannot supply that tip.
+Local --protected must resolve to the same commit as origin/HEAD's target;
+omitting it selects that target. Local --base must equal the unique merge base
+of HEAD and that protected tip. A merge base equal to HEAD with a different
+target is refused. Local tip checks compare the last first-parent transition.
 Explicit refs must resolve and cannot be origin/HEAD; PR runs reject overrides.
-A non-PR --base enables the same first-parent range check locally. Empty ranges,
+An accepted --base enables the first-parent range check locally. Empty ranges,
 non-first-parent bases and malformed or missing history fail closed.
-Full event-payload authentication, protected-ref authority beyond the local tip
-check, and remote freshness remain outside coverage. Without --base, local tip
-checks cover only the last transition; other local/PR checks compare endpoints. Execution-report emission and registration in
+Full event-payload authentication, authority of the workflow environment and
+local origin/HEAD configuration, and remote freshness remain outside coverage.
+Without --base, local tip checks cover only the last transition; other local/PR
+checks compare endpoints. Execution-report emission and registration in
 tools/selftest_checks.toml are deferred; wrapper coverage is not claimed.
 Endpoint comparison cannot see transient changes inside a squash or prove
 atomicity of its intermediate commits. Other version
@@ -361,6 +364,15 @@ def first_parent_range(root, head, before):
     return list(reversed(transitions))
 
 
+def default_protected_ref(root):
+    protected = one_line(git(root, "symbolic-ref", "refs/remotes/origin/HEAD"), "origin/HEAD")
+    require(protected.startswith("refs/remotes/origin/")
+            and protected != "refs/remotes/origin/HEAD",
+            "origin/HEAD does not name an origin tracking branch")
+    git(root, "check-ref-format", protected)
+    return protected
+
+
 def context(root, protected=None, before=None):
     root = Path(one_line(git(root, "rev-parse", "--show-toplevel"), "repository root"))
     require(root.is_absolute(), "repository root must be absolute")
@@ -402,11 +414,23 @@ def context(root, protected=None, before=None):
                 "GITHUB_BASE_REF must name an origin tracking branch")
         # An explicit but unresolved PR target must not fall back to another branch.
     else:
-        protected = one_line(git(root, "symbolic-ref", "refs/remotes/origin/HEAD"), "origin/HEAD")
-        require(protected.startswith("refs/remotes/origin/")
-                and protected != "refs/remotes/origin/HEAD",
-                "origin/HEAD does not name an origin tracking branch")
+        protected = default_protected_ref(root)
     target, head = resolve(root, protected), resolve(root, "HEAD")
+    if not ci_context:
+        if actions and event == "push":
+            branch = os.environ.get("GITHUB_REF_NAME", "")
+            require(os.environ.get("GITHUB_REF_TYPE") == "branch" and bool(branch),
+                    "push requires a branch GITHUB_REF_NAME and GITHUB_REF_TYPE=branch")
+            expected = "refs/remotes/origin/" + branch
+            git(root, "check-ref-format", expected)
+            require(protected == expected,
+                    "push --protected must equal " + expected)
+            event_before = oid(os.environ.get("PUSH_BEFORE", "").encode(), "PUSH_BEFORE")
+            require(before == event_before, "push --base must equal workflow PUSH_BEFORE")
+        else:
+            default = default_protected_ref(root)
+            require(target == resolve(root, default),
+                    "local --protected must resolve to the origin/HEAD target: " + default)
     # Traverse the complete reachable commit ancestry, with shallow/grafts/graph and
     # replacement substitution disabled. Missing parents make rev-list fail.
     ancestry = git(root, "rev-list", "--parents", head, target)
@@ -430,12 +454,14 @@ def context(root, protected=None, before=None):
         if actions and event == "push":
             require(head == target, "push HEAD does not match --protected target")
         if before is not None:
+            if not actions:
+                require(before == base, "local --base must equal the protected merge base: " + base)
+            # The raw first-parent walk also proves nonzero --base is an ancestor
+            # of the push target, whose identity was bound to HEAD above.
             transitions = first_parent_range(root, head, before)
             base = transitions[0][0]
         elif head == target:
-            # A caller-selected candidate ref cannot establish the local protected tip.
-            require(resolve(root, "refs/remotes/origin/HEAD") == head,
-                    "local tip comparison requires the origin/HEAD tip")
+            # Non-PR target identity was checked even when --base was supplied.
             base = parents[0] if parents else None
     base_tree = commit_header(root, base)[0] if base is not None else None
     return root, {
@@ -618,7 +644,16 @@ def test_cases():
     for name in ("push-bare", "push-empty-ref", "push-invalid-ref", "push-missing-ref",
                  "push-origin-head", "push-origin-head-full", "ci-explicit-protected"):
         add(name, 2, tweak=name)
-    for name in ("descendant-branch", "descendant-tag", "candidate-self"):
+    for name in ("descendant-branch", "descendant-tag", "candidate-self", "behind-default",
+                 "ancestor-branch", "ancestor-origin", "ancestor-tag", "ancestor-base",
+                 "candidate-self-base", "local-missing-default"):
+        add(name, 2, after=cut, tweak=name)
+    for name in ("local-alias-branch", "local-alias-tag", "local-base"):
+        add(name, 1, after=cut, tweak=name)
+    add("local-base-declared", 0, after=cut, new=declaration, tweak="local-base")
+    for name in ("push-identity-branch", "push-identity-origin", "push-identity-tag",
+                 "push-before-narrowed", "push-before-missing", "push-before-invalid",
+                 "push-ref-name-missing", "push-ref-type-tag"):
         add(name, 2, after=cut, tweak=name)
     for name in ("event-dispatch", "event-merge-group", "event-missing"):
         add(name, 2, tweak=name)
@@ -738,15 +773,33 @@ def fixture_repo(parent, name, case, env):
         (root / CHANGELOG).write_bytes(fixture_changelog(["1.0.0", "1.1.0"]))
         command("add", "--", CHANGELOG)
         (root / CHANGELOG).write_bytes(after)
-    elif tweak in ("descendant-branch", "descendant-tag", "candidate-self"):
+    elif tweak in ("ancestor-branch", "ancestor-origin", "ancestor-tag", "ancestor-base",
+                   "candidate-self-base"):
+        for ref in ("refs/heads/attacker", "refs/remotes/origin/attacker", "refs/tags/attacker"):
+            command("update-ref", ref, head)
+        commit("no-op after undeclared append")
+    elif tweak in ("local-alias-branch", "local-alias-tag"):
+        command("update-ref", "refs/heads/alias", base)
+        command("update-ref", "refs/tags/alias", base)
+    elif tweak == "local-missing-default":
+        command("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    elif tweak in ("descendant-branch", "descendant-tag", "candidate-self", "behind-default"):
         if tweak == "candidate-self":
             commit("no-op after undeclared append")
         else:
             future = command("commit-tree", tree, "-p", head, payload=b"descendant\n")
             ref = "refs/tags/attacker" if tweak == "descendant-tag" else "refs/heads/attacker"
             command("update-ref", ref, future)
+            if tweak == "behind-default":
+                command("update-ref", "refs/remotes/origin/main", future)
     elif tweak == "protected" or (tweak and tweak.startswith("push-")):
-        if tweak == "push-noop":
+        if tweak in ("push-identity-branch", "push-identity-origin", "push-identity-tag",
+                     "push-before-narrowed"):
+            command("update-ref", "refs/heads/before", head)
+            head = commit("no-op after undeclared append")
+            for ref in ("refs/heads/attacker", "refs/remotes/origin/attacker", "refs/tags/attacker"):
+                command("update-ref", ref, head)
+        elif tweak == "push-noop":
             head = commit("no-op after cut")
         elif tweak == "push-two-cuts":
             write(fixture_changelog(["1.0.0", "1.1.0", "1.2.0"]),
@@ -860,16 +913,30 @@ def observe(script, root, tweak, env):
     args += [str(script), "--root", str(root)]
     if tweak and tweak.startswith("push-"):
         env.update({"CI": "true", "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push",
-                    "GITHUB_BASE_REF": "", "GITHUB_REF_NAME": "main"})
+                    "GITHUB_BASE_REF": "", "GITHUB_REF_NAME": "main",
+                    "GITHUB_REF_TYPE": "branch"})
+        event_before = one_line(git(root, "rev-parse", "refs/heads/main"), "fixture event before")
+        env["PUSH_BEFORE"] = "0" * len(event_before) if tweak == "push-root" else event_before
+        if tweak == "push-before-missing":
+            del env["PUSH_BEFORE"]
+        elif tweak == "push-before-invalid":
+            env["PUSH_BEFORE"] = "invalid"
+        elif tweak == "push-ref-name-missing":
+            del env["GITHUB_REF_NAME"]
+        elif tweak == "push-ref-type-tag":
+            env["GITHUB_REF_TYPE"] = "tag"
         if tweak != "push-bare":
             protected = {
                 "push-protected-full": "refs/remotes/origin/main",
+                "push-identity-branch": "refs/heads/attacker",
+                "push-identity-origin": "origin/attacker",
+                "push-identity-tag": "refs/tags/attacker",
                 "push-empty-ref": "",
                 "push-invalid-ref": "origin/../main",
                 "push-missing-ref": "origin/missing",
                 "push-origin-head": "origin/HEAD",
                 "push-origin-head-full": "refs/remotes/origin/HEAD",
-            }.get(tweak, "origin/" + env["GITHUB_REF_NAME"])
+            }.get(tweak, "origin/main")
             args += ["--protected", protected]
         if tweak != "push-no-base":
             # refs/heads/main retains the pre-push commit even after tracking refs move.
@@ -890,6 +957,12 @@ def observe(script, root, tweak, env):
                 before = one_line(git(root, "rev-parse", "refs/tags/before"), "tag object")
             elif tweak == "push-base-wrong-format":
                 before = "0" * (64 if len(before) == 40 else 40)
+            elif tweak == "push-before-narrowed":
+                before = resolve(root, "refs/heads/before")
+            # Existing range fixtures bind their event to the supplied invalid range,
+            # so the range validator, not the new equality guard, remains exercised.
+            if tweak.startswith("push-base-"):
+                env["PUSH_BEFORE"] = before
             args += ["--base", before]
     if tweak == "ci-explicit-protected":
         args += ["--protected", "origin/main"]
@@ -901,6 +974,21 @@ def observe(script, root, tweak, env):
             "descendant-tag": "refs/tags/attacker",
             "candidate-self": "refs/heads/feature",
         }[tweak]]
+    local_refs = {
+        "ancestor-branch": "refs/heads/attacker",
+        "ancestor-origin": "origin/attacker",
+        "ancestor-tag": "refs/tags/attacker",
+        "candidate-self-base": "refs/heads/feature",
+        "local-alias-branch": "refs/heads/alias",
+        "local-alias-tag": "refs/tags/alias",
+        "local-missing-default": "origin/main",
+    }
+    if tweak in local_refs:
+        args += ["--protected", local_refs[tweak]]
+    if tweak in ("ancestor-base", "candidate-self-base"):
+        args += ["--base", resolve(root, "refs/heads/attacker")]
+    elif tweak == "local-base":
+        args += ["--base", resolve(root, "refs/heads/main")]
     if tweak and tweak.startswith("event-"):
         env.update({"GITHUB_ACTIONS": "true", "GITHUB_BASE_REF": "", "GITHUB_EVENT_NAME": {
             "event-dispatch": "workflow_dispatch", "event-merge-group": "merge_group",
@@ -969,6 +1057,16 @@ def self_test(red_on_revert):
                       bare["code"] == 2 and "push requires explicit" in bare["detail"])
             if case_id in ("push-origin-head", "push-origin-head-full"):
                 check(case_id + "-ambiguous", "not origin/HEAD" in report["detail"])
+            if case_id in ("ancestor-branch", "ancestor-origin", "ancestor-tag",
+                           "candidate-self", "candidate-self-base",
+                           "descendant-branch", "descendant-tag"):
+                check(case_id + "-identity", "local --protected must resolve" in report["detail"])
+            if case_id == "ancestor-base":
+                check(case_id + "-binding", "local --base must equal" in report["detail"])
+            if case_id in ("push-identity-branch", "push-identity-origin", "push-identity-tag"):
+                check(case_id + "-identity", "push --protected must equal" in report["detail"])
+            if case_id == "push-before-narrowed":
+                check(case_id + "-binding", "push --base must equal" in report["detail"])
             if case_id == "ci-explicit-protected":
                 check(case_id + "-binding", "derives its target" in report["detail"])
             if case_id == "staged-hidden":
@@ -1007,9 +1105,17 @@ def self_test(red_on_revert):
                 ("explicit-protected", "root, binding = context(root, protected, before)",
                  "root, binding = context(root, None, before)", "push-protected", 2),
                 ("descendant-target", "require(base != head or head == target,",
-                 "require(True,", "descendant-branch", 0),
-                ("candidate-self", 'require(resolve(root, "refs/remotes/origin/HEAD") == head,',
+                 "require(True,", "behind-default", 0),
+                ("candidate-self", "require(target == resolve(root, default),",
                  "require(True,", "candidate-self", 0),
+                ("protected-identity", "require(target == resolve(root, default),",
+                 "require(True,", "ancestor-branch", 0),
+                ("local-base-binding", 'require(before == base,',
+                 "require(True,", "ancestor-base", 0),
+                ("push-identity", "require(protected == expected,",
+                 "require(True,", "push-identity-origin", 1),
+                ("push-before-binding", "require(before == event_before,",
+                 "require(True,", "push-before-narrowed", 0),
                 ("push-range", 'for parent, revision in binding["transitions"]:',
                  'for parent, revision in binding["transitions"][-1:]:', "push-noop-undeclared", 0),
                 ("ci-event", 'require(event in ("pull_request", "push"),',
