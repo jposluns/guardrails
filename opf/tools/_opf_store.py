@@ -197,7 +197,7 @@ RESERVED_EXCLUDED_TYPES = {
 # Section shapes (closed keysets; see the ambiguity note in the module docstring).
 OPF_KEYS = frozenset({"standard", "spec_version", "layout", "posture", "import_status"})
 # Recognized-but-OPTIONAL [opf] keys: absent homes means legacy generation 1; required-ness waits for L4.
-OPF_OPTIONAL_KEYS = frozenset({"homes"})
+OPF_OPTIONAL_KEYS = frozenset({"homes", "worklog"})
 STORE_KEYS = frozenset({"sync_target"})
 PROFILE_KEYS = frozenset({"version", "base_compat", "posture_floor", "required_modules",
                           "extension_namespace"})

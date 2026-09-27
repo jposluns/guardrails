@@ -55,6 +55,17 @@ class ManifestShapeError(WorklogError):
         super().__init__(message)
 
 
+class ManifestValidationError(WorklogError):
+    """A present manifest failed the store validator; no source may be probed."""
+
+    def __init__(self, relpath, manifest, validation):
+        self.relpath = relpath
+        self.manifest = manifest
+        self.status = validation.status
+        self.findings = tuple(validation.findings)
+        super().__init__("; ".join(self.findings))
+
+
 def read_manifest_at(root_fd, machine_rel):
     """Read the generation authority once, refusing intake failure before routing."""
     relpath = machine_rel + "/" + _opf_store.MANIFEST_NAME
@@ -62,8 +73,11 @@ def read_manifest_at(root_fd, machine_rel):
         manifest = _opf_store._read_toml_contained(root_fd, relpath)
     except _opf_store.StoreError as exc:
         raise ManifestReadError(relpath, exc) from exc
-    if not isinstance(manifest, dict) or not isinstance(manifest.get("opf"), dict):
+    if manifest is None:
         raise ManifestShapeError(relpath, manifest)
+    validation = _opf_store.validate_manifest(manifest)
+    if validation.findings:
+        raise ManifestValidationError(relpath, manifest, validation)
     return manifest
 
 
@@ -334,7 +348,9 @@ def _self_test():
         machine = root / ".working/custom"
         machine.mkdir(parents=True)
         manifest = machine / "manifest.toml"
-        manifest.write_text('[opf]\nstandard = "opf"\nhomes = 2\n', encoding="utf-8")
+        import _opf_init
+        valid_manifest = _opf_init.build_manifest()
+        manifest.write_text(valid_manifest, encoding="utf-8")
         legacy = machine / LEGACY_NAME
         raw = b'# retained bytes\nschema = 1\n[[entry]]\nid = "WL-1"\ndate = "2026-01-01T00:00:00Z"\nactor = {kind = "maintainer"}\nkind = "fixed"\nsummary = "x"\n'
         legacy.write_bytes(raw)
@@ -366,7 +382,8 @@ def _self_test():
             directory = machine / DIRECTORY_NAME
             directory.mkdir()
             check("gen1-mixed-refused", refused(lambda: load_worklog_at(fd, ".working/custom")))
-            manifest.write_text("[opf]\nworklog = 2\n", encoding="utf-8")
+            manifest.write_text(valid_manifest.replace('[opf]\n', '[opf]\nworklog = 2\n'),
+                                encoding="utf-8")
             check("gen2-mixed-refused", refused(lambda: load_worklog_at(fd, ".working/custom")))
             legacy.unlink()
             check("empty-directory", load_worklog_at(fd, ".working/custom") == {"schema": 1, "entry": []})
@@ -416,7 +433,7 @@ def _self_test():
             directory.symlink_to(machine, target_is_directory=True)
             check("directory-symlink", refused(lambda: load_worklog_at(fd, ".working/custom")))
             directory.unlink()
-            manifest.write_text("[opf]\n", encoding="utf-8")
+            manifest.write_text(valid_manifest, encoding="utf-8")
             check("legacy-optional-absence", load_worklog_at(fd, ".working/custom", required=False) is None)
             check("legacy-required-absence", refused(lambda: load_worklog_at(fd, ".working/custom")))
             manifest.unlink()

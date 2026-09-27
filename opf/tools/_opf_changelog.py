@@ -478,6 +478,10 @@ def _load_inputs(resolution, product_root):
                        "manifest.toml does not validate against the manifest "
                        "schema: {} (fail-closed, spec 4.5/9)".format(exc))
             return None, None, None, frozenset(), message
+        except _opf_worklog.ManifestValidationError as exc:
+            return None, None, None, frozenset(), (
+                "manifest.toml does not validate against the manifest "
+                "schema: {} (fail-closed, spec 4.5/9)".format(exc))
         except (_opf_store.StoreError, OSError) as exc:
             # A StoreError (unreadable/unparseable) OR a raw OSError (e.g. a PermissionError from the
             # contained lstat inside _read_toml_contained) is the fail-closed cannot-evaluate (spec 3/7.1;

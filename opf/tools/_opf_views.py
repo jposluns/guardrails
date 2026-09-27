@@ -242,6 +242,8 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, 
             read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict)
     except _opf_worklog.ManifestShapeError as exc:
         raise ViewsError(str(exc) if exc.missing else "manifest is not valid: {}".format(exc))
+    except _opf_worklog.ManifestValidationError as exc:
+        raise ViewsError("manifest is not valid: {}".format(exc)) from exc
     except _opf_worklog.ManifestReadError as exc:
         # U4's legacy manifest reader used a different non-regular-file label
         # and exposed the parser's recursion message without U1's extra context.

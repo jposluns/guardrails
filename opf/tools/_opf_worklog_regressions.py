@@ -33,10 +33,13 @@ LEDGER = b"schema = 1\n[[entry]]\n" + BODY
 
 class _Fixture:
     def __init__(self, gen=1):
-        self.manifest = {"opf": {"standard": "opf", "layout": "inline", "worklog": gen}}
+        import _opf_emit
+        import _opf_init
+        self.manifest = _opf_store.tomllib.loads(_opf_init.build_manifest())
+        if gen != 1:
+            self.manifest["opf"]["worklog"] = gen
         self.files = {
-            "m/manifest.toml": ('[opf]\nstandard = "opf"\nlayout = "inline"\n'
-                                'worklog = {}\n'.format(gen)).encode(),
+            "m/manifest.toml": _opf_emit.emit_checked(self.manifest).encode(),
             "m/version.toml": b"schema = 1\n",
             "CHANGELOG.md": b"",
         }
@@ -122,7 +125,7 @@ def _doctor(fx, archive=False):
     _opf_check._gather_worklog(
         fx.fd, ARCHIVE if archive else LEGACY, frozenset(), rep, required=not archive,
         machine_rel=None if archive else M)
-    return rep.cannot
+    return rep.cannot + rep.findings
 
 
 def _readers(fx):
@@ -195,6 +198,35 @@ def _manifest_read_regressions(check):
                   and attempted == [manifest_rel])
 
 
+def _manifest_diagnostics(data, validation):
+    """32fcfbc manifest translations, including U7's earlier layout gate.
+
+    _opf_views.plan_views; _opf_changelog._load_inputs (also absorb);
+    _opf_import._require_inline_layout/stage_import;
+    _opf_check._validate_opened_store. Loader uses U1's findings.
+    """
+    message = "; ".join(validation.findings)
+    expected = {
+        "loader": message,
+        "views": "manifest is not valid: " + message,
+        "changelog": ("manifest.toml does not validate against the manifest schema: "
+                      + message + " (fail-closed, spec 4.5/9)"),
+        "doctor": (["m/manifest.toml: " + message]
+                   if validation.status == _opf_store.CANNOT_EVALUATE else
+                   ["manifest: " + finding for finding in validation.findings]),
+        "import": "store manifest is not VALID ({}: {})".format(validation.status, message),
+    }
+    base = data.get("opf") if isinstance(data, dict) else None
+    layout = base.get("layout") if isinstance(base, dict) else None
+    if isinstance(data, dict) and layout != "inline":
+        expected["import"] = (
+            "m/manifest.toml: storage layout {!r} is unsupported; U7's inline active-store readers stage only "
+            "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
+            "partial inline read that would miss per-record ids or admit a phantom target)".format(layout))
+    expected["absorb"] = expected["changelog"]
+    return expected
+
+
 def _manifest_intake_regressions(check):
     """The post-resolution intake class, not just the last reported sibling.
 
@@ -210,6 +242,7 @@ def _manifest_intake_regressions(check):
     race/hardlink enforcement test. Production parsing and translation run,
     except for defensive non-table and deterministic parser-limit seams.
     """
+    import _opf_emit
     import _opf_init
 
     p = "m/manifest.toml"
@@ -265,11 +298,19 @@ def _manifest_intake_regressions(check):
         ("top-level-type", "parse", [], "manifest is not a table"),
         ("opf-absent", "read", b"schema = 1\n", identify),
         ("opf-not-table", "read", b"opf = 1\n", identify),
+        ("opf-empty", "read", b"[opf]\n", identify),
+        ("standard-absent", "read", b'[opf]\nlayout = "inline"\n', identify),
+        ("standard-wrong", "read", b'[opf]\nstandard = "other"\nlayout = "inline"\n', identify),
+        ("standard-wrong-type", "read", b'[opf]\nstandard = 7\nlayout = "inline"\n', identify),
     ]
     for mode, bits in (("symlink", stat.S_IFLNK), ("fifo", stat.S_IFIFO),
                        ("socket", stat.S_IFSOCK), ("directory", stat.S_IFDIR),
                        ("block-device", stat.S_IFBLK), ("char-device", stat.S_IFCHR)):
         cases.append((mode, "stat", SimpleNamespace(st_mode=bits, st_size=0), exotic))
+
+    from _opf_manifest_regressions import manifest_cases
+    for name, data, validation, control in manifest_cases(check):
+        cases.append(("generated-" + name, "validation", (data, control), "; ".join(validation.findings)))
 
     for mode, phase, value, message in cases:
         expected = dict.fromkeys(("loader", "views", "import", "changelog", "absorb"), message)
@@ -283,18 +324,13 @@ def _manifest_intake_regressions(check):
                 doctor=[p + " is absent (the store manifest is required; spec 4.5)"])
             expected["import"] = expected.pop("import_")
             expected["absorb"] = expected["changelog"]
-        elif mode in ("top-level-type", "opf-absent", "opf-not-table"):
-            expected["views"] = "manifest is not valid: " + message
-            expected["changelog"] = ("manifest.toml does not validate against the manifest schema: "
-                                     + message + " (fail-closed, spec 4.5/9)")
-            expected["absorb"] = expected["changelog"]
-            expected["doctor"] = [p + ": " + message]
-            expected["import"] = (
-                "store manifest is not VALID (CANNOT-EVALUATE: manifest is not a table)"
-                if mode == "top-level-type" else
-                "m/manifest.toml: storage layout None is unsupported; U7's inline active-store readers stage only "
-                "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
-                "partial inline read that would miss per-record ids or admit a phantom target)")
+        elif phase == "validation" or mode in (
+                "top-level-type", "opf-absent", "opf-not-table", "opf-empty",
+                "standard-absent", "standard-wrong", "standard-wrong-type"):
+            data = (_opf_store.tomllib.loads(value.decode()) if phase == "read" else
+                    value[0] if phase == "validation" else value)
+            control = value[1] if phase == "validation" else None
+            expected = _manifest_diagnostics(data, _opf_store.validate_manifest(data, control))
         elif message == exotic:
             expected["views"] = (p + " is present but is not a regular file "
                                  "(a FIFO, device, socket, or directory; fail-closed, never opened)")
@@ -313,6 +349,12 @@ def _manifest_intake_regressions(check):
                 armed, attempted = False, []
                 original_load = wl.load_worklog_at
                 original_parse = _opf_store.tomllib.loads
+                original_validate = _opf_store.validate_manifest
+
+                def validate(data, *args, **kwargs):
+                    if armed and phase == "validation":
+                        return original_validate(data, value[1])
+                    return original_validate(data, *args, **kwargs)
 
                 def result(item):
                     if isinstance(item, Exception):
@@ -334,13 +376,16 @@ def _manifest_intake_regressions(check):
                     return fx.lstat(fd, rel)
 
                 def read(fd, rel, **kwargs):
-                    if probe(fd, rel) and phase == "read":
-                        return result(value), fx.lstat(fd, rel)
+                    if probe(fd, rel):
+                        if phase == "read":
+                            return result(value), fx.lstat(fd, rel)
+                        if phase == "validation" and isinstance(value[0], dict):
+                            return _opf_emit.emit_checked(value[0]).encode(), fx.lstat(fd, rel)
                     return fx.read(fd, rel, **kwargs)
 
                 def parse(raw, **kwargs):
-                    if armed and phase == "parse" and raw == fx.files[p].decode("utf-8"):
-                        return result(value)
+                    if armed and phase in ("parse", "validation") and raw == fx.files[p].decode("utf-8"):
+                        return result(value[0] if phase == "validation" else value)
                     return original_parse(raw, **kwargs)
 
                 def load_after_resolution(*args, **kwargs):
@@ -353,10 +398,14 @@ def _manifest_intake_regressions(check):
                 with patch.object(_journal, "_lstat_contained", side_effect=lstat), \
                         patch.object(_journal, "_read_contained", side_effect=read), \
                         patch.object(_opf_store.tomllib, "loads", side_effect=parse), \
+                        patch.object(_opf_store, "validate_manifest", side_effect=validate), \
                         patch.object(wl, "load_worklog_at", side_effect=load_after_resolution) as intake:
                     actual = readers[caller]()
                 check(label, actual == baseline and intake.call_count == 1
                       and bool(attempted) and set(attempted) == {p})
+                check(label + "-diagnostic", actual == baseline)
+                check(label + "-manifest-only",
+                      bool(attempted) and set(attempted) == {p})
 
 
 def _upgrade_preflight_regressions(check, fence):
@@ -555,9 +604,10 @@ def self_test():
              "(maximum supported worklog generation: 1)")
     check("F5-shipped-ceiling", _opf_store.SUPPORTED_WORKLOG == 1)
     with _Fixture(2) as fx:
+        expected = _manifest_diagnostics(fx.manifest, _opf_store.validate_manifest(fx.manifest))
         for caller, read in _readers(fx).items():
-            check("F5-production-" + caller, read() == fence)
-        check("F5-production-doctor", _doctor(fx) == [fence])
+            check("F5-production-" + caller, read() == expected[caller])
+        check("F5-production-doctor", _doctor(fx) == expected["doctor"])
         mv = _opf_store.validate_manifest(fx.manifest)
         check("F5-production-manifest", mv.status == _opf_store.CANNOT_EVALUATE
               and mv.findings == [fence])

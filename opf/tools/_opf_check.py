@@ -1151,6 +1151,13 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
         rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(exc.relpath)
                  if exc.missing else "{}: {}".format(exc.relpath, exc))
         return None
+    except _opf_worklog.ManifestValidationError as exc:
+        if exc.status == CANNOT_EVALUATE:
+            rep.cant("{}: {}".format(exc.relpath, exc))
+        else:
+            for finding in exc.findings:
+                rep.finding("manifest: {}".format(finding))
+        return None
     except _opf_worklog.ManifestReadError as exc:
         # Match _read_toml's manifest diagnostic, not the worklog ledger's path.
         rep.cant("cannot read {}: {}".format(exc.relpath, exc))

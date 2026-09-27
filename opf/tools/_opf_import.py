@@ -917,15 +917,16 @@ def _worklog_ids(store_root_fd, machine_rel, roster=None, registered_vendors=fro
         if exc.missing:
             raise _cannot("{}: the store manifest is absent; the storage layout cannot be determined "
                           "(spec 9)".format(exc.relpath))
-        if exc.not_table:
-            # TOML cannot produce this shape. Retain the public manifest gate's
-            # refusal rather than the old private layout helper's AttributeError.
-            raise _cannot("store manifest is not VALID ({}: {})".format(
-                _opf_store.CANNOT_EVALUATE, exc))
-        raise _cannot("{}: storage layout None is unsupported; U7's inline active-store readers stage only "
-                      "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
-                      "partial inline read that would miss per-record ids or admit a phantom target)".format(
-                          exc.relpath))
+    except _opf_worklog.ManifestValidationError as exc:
+        base = exc.manifest.get("opf") if isinstance(exc.manifest, dict) else None
+        layout = base.get("layout") if isinstance(base, dict) else None
+        if isinstance(exc.manifest, dict) and layout != "inline":
+            raise _cannot("{}: storage layout {!r} is unsupported; U7's inline active-store readers stage only "
+                          "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
+                          "partial inline read that would miss per-record ids or admit a phantom target)".format(
+                              exc.relpath, layout)) from exc
+        raise _cannot("store manifest is not VALID ({}: {})".format(
+            exc.status, exc)) from exc
     except _opf_store.StoreError as exc:
         raise _cannot(str(exc))
     except _journal.JournalError as exc:
