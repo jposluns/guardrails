@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T5, T9-T11)
+  check_opf_record.py --self-test                    the fixture suite (T1-T5, T9-T14)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -13,11 +13,13 @@ Each case runs on its own copy of that template; the root is removed in a finall
       (flip: drop the byte-reproduction precondition)
   T2  create with links and refs round-trips, the published bytes are canonical, and a lossy emitter is
       refused before any write (flip: publish raw emit output instead of emit_checked)
-  T3  a plan that mutates one extra field of an existing record refuses exit 2, bytes untouched
+  T3  a plan that mutates one extra field of an existing record, or the initial status or requested title
+      of the new record, or the requested summary of a new worklog entry, refuses exit 2, bytes untouched
       (flip: drop the allowed-delta postcondition)
   T4  two sequential creates claim BI-1 then BI-2 with monotonic counters; a counters map missing an
       enabled namespace refuses (flip: drop the known-complete proof)
-  T5  a kill at each journal step, then reconciliation on the next run, leaves the operands exactly the
+  T5  a kill at each journal step leaves the killed run's lease, which refuses the next run before any
+      recovery write; once the operator releases it, reconciliation leaves the operands exactly the
       prestate or exactly the poststate, the poststate iff the transaction is COMPLETE, and no killed run
       reports an id (flip: write counters outside the journaled transaction)
   T9  a held lease refuses exit 2 and is never seized; success is reported only after the lease release
@@ -26,6 +28,14 @@ Each case runs on its own copy of that template; the root is removed in a finall
       review and the lease released (flip: skip the final doctor)
   T11 worklog-append claims the next WL id with no status qualifier; an id inside a released span refuses
       exit 2, bytes untouched (flip: drop the released-span check)
+  T12 an interrupted journal while another live run holds the shared lease (taken through the upgrade
+      verb) refuses exit 2 with every byte untouched and the peer's lease intact (flip: recover without
+      the lease)
+  T13 an interrupted journal whose operand was edited after the interruption, on the prestate side or the
+      poststate side, refuses exit 2 naming the path, every byte untouched; once the edit is undone the
+      next run reconciles (flip: drop the intervening-edit check)
+  T14 create with an unknown or path-like --type refuses with the enabled-baseline-types message, not an
+      operand read failure (flip: skip the --type check before the operand read)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -260,6 +270,25 @@ def t3_postcondition(fx):
         result = record_cli(env, root, CREATE)
     refused(result, "postcondition failed")
     assert snapshot(root) == before, "T3 bytes untouched"
+    # The newly appended row is checked against a delta derived from the request, never against the
+    # planner's own row: tampering with it after planning must refuse too, in both planners.
+    for label, sub, args, key, field, value in (
+            ("initial-status", "create", CREATE, "record", "status", "active"),
+            ("requested-title", "create", CREATE, "record", "title", "not the requested title"),
+            ("worklog-summary", "worklog-append", APPEND, "entry", "summary", "not the requested summary")):
+        root = fx.case("t3-appended-" + label)
+
+        def appended_tampering(req, ctx, operand, now, planner=record._PLANNERS[sub], key=key, field=field,
+                               value=value):
+            plan = planner(req, ctx, operand, now)
+            operand.new_model[key][-1][field] = value
+            return plan
+
+        before = snapshot(root)
+        with patch.dict(record._PLANNERS, {sub: appended_tampering}):
+            result = record_cli(env, root, args)
+        refused(result, "postcondition failed")
+        assert snapshot(root) == before, ("T3 bytes untouched", label)
 
 
 # --- T4: allocation (sequential claims, the known-complete proof) -------------------------------------------
@@ -355,7 +384,15 @@ def t5_crash(fx):
         proc = child(env, root, CREATE, kill=point, flip=flip)
         assert proc.returncode == 137, ("T5 the child is killed at", point, proc.returncode, proc.stderr[-800:])
         assert '"event": "recorded"' not in proc.stdout, ("T5 a killed run reports no id", point)
+        # The killed run leaves its lease, and a held lease refuses the next run before any recovery write.
+        assert (Path(root) / LEASE).exists(), ("T5 the killed run leaves its lease", point)
+        held = snapshot(root)
+        refused(record_cli(env, root, CREATE), "runs only under the single-writer lease")
+        assert snapshot(root) == held, ("T5 a held lease refuses before any recovery write", point)
+        # The operator's explicit reconciliation step (no opf run is live): release the leftover lease.
+        (Path(root) / LEASE).unlink()
         refused(record_cli(env, root, CREATE), "was reconciled")
+        assert not (Path(root) / LEASE).exists(), ("T5 recovery releases the lease it took", point)
         states = journal_states(root)
         assert not any(s == "open" for s in states.values()), ("T5 every transaction terminal", point, states)
         assert not (Path(root) / record.JOURNAL_REL / "lock").exists(), ("T5 the journal lock released", point)
@@ -455,12 +492,85 @@ def flip_t11():
     return patch.object(record, "_check_released_span", lambda version_model, wl_number: None)
 
 
+# --- T12, T13: recovery runs only under the lease and never overwrites an intervening edit ---------------
+
+def _interrupted(fx, name, point="after-apply-0"):
+    """A store whose create was killed at `point` (at after-apply-0 counters.toml holds its poststate and
+    the index its prestate), with the dead run's leftover lease released as the operator's own step."""
+    root = fx.case(name)
+    proc = child(fx.env, root, CREATE, kill=point)
+    assert proc.returncode == 137, ("the child is killed at", point, proc.returncode, proc.stderr[-800:])
+    (Path(root) / LEASE).unlink()
+    return root
+
+
+def t12_recovery_lease(fx):
+    env = fx.env
+    root = _interrupted(fx, "t12-live-peer")
+    # A live peer takes the shared lease through the upgrade verb, as `opf upgrade` does.
+    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        peer = guard.acquire_lease(root_fd, MACH, "upgrade")
+        try:
+            before = snapshot(root)
+            refused(record_cli(env, root, CREATE), "runs only under the single-writer lease")
+            assert snapshot(root) == before, "T12 no recovery write while a peer holds the lease"
+            assert read(root, LEASE) == peer, "T12 the peer's lease is intact, never seized"
+        finally:
+            guard.release_lease(root_fd, MACH, peer, "upgrade")
+    finally:
+        os.close(root_fd)
+    refused(record_cli(env, root, CREATE), "was reconciled")
+    assert not any(s == "open" for s in journal_states(root).values()), "T12 reconciled once the peer is gone"
+
+
+def flip_t12():
+    return patch.object(record, "_with_recovery_lease", lambda ctx, pending, recover: recover())
+
+
+def t13_intervening_edit(fx):
+    env = fx.env
+    for rel, side in ((BI_INDEX, "prestate"), (COUNTERS, "poststate")):
+        root = _interrupted(fx, "t13-" + side)
+        original = read(root, rel)
+        (Path(root) / rel).write_bytes(original + b"# an owner's note written after the interruption\n")
+        before = snapshot(root)
+        result = record_cli(env, root, CREATE)
+        refused(result, "an intervening edit")
+        assert rel in result[2], ("T13 the edited path is named", rel, result[2][-800:])
+        assert snapshot(root) == before, ("T13 the intervening edit is never overwritten", rel)
+        # Once the owner undoes the edit, the next run reconciles.
+        (Path(root) / rel).write_bytes(original)
+        refused(record_cli(env, root, CREATE), "was reconciled")
+        assert not any(s == "open" for s in journal_states(root).values()), ("T13 reconciled", rel)
+
+
+def flip_t13():
+    return patch.object(record, "_unexplained_operands", lambda root_fd, jr_fd, txns: [])
+
+
+# --- T14: --type is checked before any operand read ---------------------------------------------------------
+
+def t14_type_before_read(fx):
+    env = fx.env
+    root = fx.case("t14-type")
+    before = snapshot(root)
+    for rtype in ("bogus", "../counters"):
+        args = ["create", "--type", rtype, "--title", "t", "--actor", "maintainer"]
+        refused(record_cli(env, root, args), "enabled baseline record types only")
+        assert snapshot(root) == before, ("T14 bytes untouched", rtype)
+
+
+def flip_t14():
+    return patch.object(record, "_check_request", lambda req, ctx: None)
+
+
 def flip_t1():
     return patch.object(record, "_require_canonical", lambda operand: None)
 
 
 def flip_t3():
-    return patch.object(record, "_postcondition", lambda plan, counters_rel: None)
+    return patch.object(record, "_postcondition", lambda plan, req, ctx, now: None)
 
 
 # --- the runner ------------------------------------------------------------------------------------------------
@@ -474,6 +584,9 @@ TESTS = (
     ("T9-lease-release-before-success", t9_lease, flip_t9),
     ("T10-final-doctor", t10_final_doctor, flip_t10),
     ("T11-worklog-released-span", t11_worklog, flip_t11),
+    ("T12-recovery-under-the-lease", t12_recovery_lease, flip_t12),
+    ("T13-recovery-intervening-edit", t13_intervening_edit, flip_t13),
+    ("T14-create-type-before-read", t14_type_before_read, flip_t14),
 )
 
 

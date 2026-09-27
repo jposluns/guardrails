@@ -509,11 +509,13 @@ store, but two branches of a store that rides the product repository each start 
 committed `counters.toml`, so each can claim the same record ID. Store files are therefore never
 hand-merged: after a merge conflict on a store path, take the integration base's version of the
 conflicted store files and redo the authoring operation on that base, which claims the next ID
-afresh (section 8.8). A hand-merged store file is not in canonical form, so the next `opf record`
-or `opf upgrade` refuses it by its byte-reproduction precondition; a merge that resolves without a
-conflict yet duplicates an ID is caught by `opf doctor`, which checks store-wide ID uniqueness and
-that every ID lies within its counter (section 8.2). A collision is never resolved by decrementing
-a counter or reusing an ID.
+afresh (section 8.8). The byte-reproduction precondition of `opf record` and `opf upgrade` refuses
+only a store file whose bytes are not the canonical serialization of its content, such as one
+carrying comments or non-canonical formatting. A hand edit or hand merge that leaves canonical bytes
+passes it undetected, so this integration-base rule is a separate requirement that the precondition
+does not enforce. A merge that resolves without a conflict yet duplicates an ID is caught by
+`opf doctor`, which checks store-wide ID uniqueness and that every ID lies within its counter
+(section 8.2). A collision is never resolved by decrementing a counter or reusing an ID.
 
 ### 5.8 The public deliverables are identical across topologies
 
@@ -907,12 +909,18 @@ shapes this specification already defines, so it adds no store-format change and
 Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its
 guarantees:
 
-1. Resolve the store, then reconcile any interrupted authoring transaction first; a reconciled
-   interruption refuses the new operation, so the operator inspects it before anything new is
-   written.
+1. Resolve the store, then reconcile any interrupted authoring transaction first. Reconciliation
+   writes the store, so it runs only under the single-writer lease that publication uses: a held
+   lease refuses before any recovery write and is never seized. An operand changed since the
+   interruption, to bytes that are neither its journaled prestate nor its planned poststate nor a
+   write of either torn by the interruption, is reported and refused, never overwritten. A
+   reconciled interruption refuses the new operation, so the operator inspects it before anything
+   new is written.
 2. Precondition: re-emitting the unchanged parsed model of every file the operation rewrites
-   reproduces its on-disk bytes exactly (the section 9.2 rule). A comment-bearing, hand-edited, or
-   hand-merged file refuses and is left untouched.
+   reproduces its on-disk bytes exactly (the section 9.2 rule). A file carrying comments or
+   non-canonical serialization refuses and is left untouched. The check proves serialization only:
+   a hand edit or hand merge that leaves canonical bytes is not detectable by it, and the
+   integration-base merge policy of section 5.7 remains a separate requirement.
 3. Claim each new ID as one atomic act (section 8.2). At homes 1 the `counters.toml` advance is an
    operand of the same journaled transaction, under the held lease, and IDs are reported only once
    that transaction has completed, so a rollback never withdraws an ID anyone has seen. At homes 2
@@ -920,7 +928,9 @@ guarantees:
    publication (section 4.2).
 4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
    delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
-   one status and `updated_at` change), value for value, before anything is written.
+   one status and `updated_at` change), value for value, before anything is written. The expected
+   delta is derived from the request, the claimed IDs, the clock value, and the schema rules, never
+   from the planned rows themselves.
 5. The in-repo store contract (section 5.7): the planned destinations are clean, including ignored
    files, and the single-writer lease is held across publication, render, and the final doctor.
 6. Every rewritten file is published in one crash-durable journaled transaction, so an

@@ -11,16 +11,22 @@
 
 Every subcommand runs ONE shared operation sequence (_run_operation), the `opf upgrade` shell applied to
 record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
-  1. resolve the store; reconcile any interrupted `opf record` journal FIRST (a reconciled interruption
-     refuses this run, exit 2, so the operator inspects it before anything new is written);
-  2. read the manifest, counters.toml, and the operand file (the type's `<type>.index.toml`, or
-     worklog.toml), plus version.toml for the released-span boundary;
+  1. resolve the store; reconcile any interrupted `opf record` journal FIRST. Recovery writes the store,
+     so it runs only under the single-writer lease (a held lease refuses before any recovery write and is
+     never seized) and only when every operand still holds a state the journal explains (an intervening
+     edit is surfaced and refused, never overwritten); a reconciled interruption refuses this run, exit 2,
+     so the operator inspects it before anything new is written;
+  2. read the manifest; a `create --type` that is not an enabled baseline type refuses here, before any
+     operand path is built from it; read counters.toml and the operand file (the type's
+     `<type>.index.toml`, or worklog.toml), plus version.toml for the released-span boundary;
   3. PRECONDITION: re-emitting each operand's UNCHANGED parsed model reproduces its on-disk bytes exactly
-     (a comment-bearing or hand-edited file refuses, bytes untouched);
+     (a file carrying comments or non-canonical serialization refuses, bytes untouched; a hand edit or
+     merge that leaves canonical bytes is NOT detectable by this check);
   4. plan the new models: claim the ids through the ONE allocation seam (claim_ids), compose and
      validate the record through the _opf_schema primitives, refuse an append into a released span;
-  5. POSTCONDITION: the old->new model diff equals exactly the allowed delta (the planned rows appended,
-     the counters advanced by exactly the claim, nothing else), value for value;
+  5. POSTCONDITION: each emitted document, reparsed, equals its prior bytes, reparsed, plus exactly the
+     allowed delta, value for value. The delta is derived INDEPENDENTLY of the planner's rows, from a
+     pre-planning copy of the request, the allocation result, the clock value, and the schema rules;
   6. the planned-destination cleanliness gate and the single-writer lease (the shared _opf_write_guard
      shell, moved from opf.py), held across publication, render, and the final doctor;
   7. ONE _journal.run_transaction publishes every operand (counters first), rooted at
@@ -44,8 +50,14 @@ recovery text, as `opf upgrade` does); a completed transaction's journal directo
 .aiqt/record/journal as local recovery evidence; the lease is not made observable at a sync target (no
 sync runtime in this build, so the guarantee is single-host single-writer); two branches allocating from
 the same committed counters can both claim an id, which spec 5.7's store-path merge policy and doctor's
-C-ID-SPACE check (not this verb) catch.
+C-ID-SPACE check (not this verb) catch; the byte-reproduction precondition proves serialization only, so
+a hand edit or hand merge that leaves canonical bytes passes it and spec 5.7's integration-base rule stays
+a separate requirement; recovery proves each operand's state under the lease, but the journal engine's
+restore then rewrites without re-checking, so an edit landing in that window, or one that leaves an exact
+byte prefix of the journaled preimage or planned bytes (read as a torn write), is not detected.
 """
+import base64
+import binascii
 import copy
 import datetime
 import hashlib
@@ -55,6 +67,7 @@ import shlex
 import stat
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -239,12 +252,14 @@ def _read_operand(root_fd, rel):
 
 def _require_canonical(operand):
     """PRECONDITION (the spec 9.2 guard, applied to every file this operation rewrites): re-emitting the
-    UNCHANGED parsed model must reproduce the on-disk bytes exactly, proving the file is canonical and
-    comment-free, so a whole-document regeneration loses nothing. A hand-edited, hand-merged, or
-    comment-bearing file refuses and is left untouched."""
+    UNCHANGED parsed model must reproduce the on-disk bytes exactly, proving the file is canonically
+    serialized and comment-free, so a whole-document regeneration loses nothing. A file carrying comments
+    or non-canonical serialization refuses and is left untouched. It proves SERIALIZATION only: a hand edit
+    or hand merge that leaves canonical bytes is not detectable here, so spec 5.7's integration-base merge
+    policy remains a separate requirement this check does not enforce."""
     if _emit_bytes(operand.model) != operand.raw:
-        raise RecordError("{} is not in canonical new-document form (hand-edited, hand-merged, or "
-                          "comment-bearing); refusing a whole-document rewrite that could lose content. "
+        raise RecordError("{} is not in canonical new-document form (it carries comments or non-canonical "
+                          "serialization); refusing a whole-document rewrite that could lose content. "
                           "Restore it from the integration base and redo the operation there (spec 5.7); "
                           "nothing written (fail-closed)".format(operand.rel))
 
@@ -378,15 +393,35 @@ def _index_rows(operand):
 
 
 class Plan:
-    """The planned publication: the operands in journal order (counters first), the rows each appends,
-    and the ids claimed. The postcondition checks the operands against exactly this delta."""
-    __slots__ = ("operands", "appended", "claims", "ids")
+    """The planned publication: the operands in journal order (counters first) and the ids claimed. It
+    carries no copy of the appended rows: the postcondition derives the allowed delta on its own
+    (_expected_delta) and checks the emitted operands against that."""
+    __slots__ = ("operands", "ids")
 
-    def __init__(self, operands, appended, claims, ids):
+    def __init__(self, operands, ids):
         self.operands = operands      # [Operand], counters first
-        self.appended = appended      # {rel: (list key, [rows])}
-        self.claims = claims          # {namespace: count}
         self.ids = ids                # the claimed ids, in claim order
+
+
+def _require_create_type(rtype, ctx):
+    """`create` mints only an enabled baseline type, never one another subcommand owns. Returns its
+    TypeSpec. _run_operation calls this (through _check_request) right after the manifest and BEFORE any
+    operand read, because the index path is built from --type: an unknown or path-like --type gets this
+    refusal, not a read failure. The planner re-checks through the same function."""
+    if rtype in _OTHER_SUBCOMMAND:
+        raise RecordError("create does not mint {} records; use opf record {} (fail-closed)".format(
+            rtype, _OTHER_SUBCOMMAND[rtype]))
+    spec = _opf_schema.BASELINE_SPECS.get(rtype)
+    if spec is None or rtype not in ctx.types:
+        raise RecordError("create supports the enabled baseline record types only, not {!r} (module-tier "
+                          "record schemas have not shipped); fail-closed".format(rtype))
+    return spec
+
+
+def _check_request(req, ctx):
+    """The request checks that need the manifest but must precede every operand read."""
+    if req.subcommand == "create":
+        _require_create_type(req.values["--type"], ctx)
 
 
 def _plan_create(req, ctx, operand, now):
@@ -395,13 +430,7 @@ def _plan_create(req, ctx, operand, now):
     (reference, autonomous_decision, maintainer_decision) carries no qualifier. The id is claimed through
     the seam; the record is validated by validate_record before anything is planned further."""
     rtype = req.values["--type"]
-    spec = _opf_schema.BASELINE_SPECS.get(rtype)
-    if rtype in _OTHER_SUBCOMMAND:
-        raise RecordError("create does not mint {} records; use opf record {} (fail-closed)".format(
-            rtype, _OTHER_SUBCOMMAND[rtype]))
-    if spec is None or rtype not in ctx.types:
-        raise RecordError("create supports the enabled baseline record types only, not {!r} (module-tier "
-                          "record schemas have not shipped); fail-closed".format(rtype))
+    spec = _require_create_type(rtype, ctx)
     rows = _index_rows(operand)
     (rid,) = _claim(ctx, [spec.namespace])
     if any(isinstance(r, dict) and r.get("id") == rid for r in rows):
@@ -424,11 +453,9 @@ def _plan_create(req, ctx, operand, now):
             raise RecordError("--scope applies to block records only, not {}; fail-closed".format(rtype))
         record["scopes"] = list(req.scopes)
     _validated(record, rtype, ctx)
-    # Append to a DEEP copy: sharing row objects with the old model would let a stray mutation of an
-    # existing row alter both sides and slip past the postcondition.
     operand.new_model = copy.deepcopy(operand.model)
     operand.new_model["record"] = list(operand.new_model.get("record", [])) + [record]
-    return Plan([ctx.counters, operand], {operand.rel: ("record", [record])}, {spec.namespace: 1}, [rid])
+    return Plan([ctx.counters, operand], [rid])
 
 
 def _plan_worklog_append(req, ctx, operand, now):
@@ -454,40 +481,94 @@ def _plan_worklog_append(req, ctx, operand, now):
     _validated(entry, "worklog", ctx)
     operand.new_model = copy.deepcopy(model)
     operand.new_model["entry"] = list(operand.new_model.get("entry", [])) + [entry]
-    return Plan([ctx.counters, operand], {operand.rel: ("entry", [entry])}, {ns: 1}, [wid])
+    return Plan([ctx.counters, operand], [wid])
 
 
 _PLANNERS = {"create": _plan_create, "worklog-append": _plan_worklog_append}
 
 
-def _postcondition(plan, counters_rel):
-    """POSTCONDITION (the spec 9.2 guard, applied to record authoring): for every operand, the new model
-    must equal EXACTLY the old model plus the operation's allowed delta, value for value: the planned
-    rows appended to the operand's row list, the counters advanced by exactly the claim, and nothing else.
-    A stray mutation of an existing record, a lost or reordered row, a changed schema marker, or a counter
-    moved by anything but the claim refuses before anything is written."""
+def _postcondition_failed(what):
+    return RecordError("postcondition failed: {}; nothing written (fail-closed)".format(what))
+
+
+def _reparse(raw, rel):
+    """A fresh model parsed from bytes: it shares no object with any model the planner built."""
+    try:
+        return tomllib.loads(raw.decode("utf-8"))
+    except (AttributeError, UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError) as exc:
+        raise _postcondition_failed("{} cannot be reparsed ({})".format(rel, exc))
+
+
+def _expected_delta(req, ctx, counters_raw, operand_rel, operand_raw, now):
+    """The allowed delta, derived INDEPENDENTLY of the planner's output: ([(rel, expected model)] in
+    journal order, the expected ids). The inputs are the request (the caller passes a copy taken before
+    planning), the allocation result (claim_ids over the high-water map reparsed from the bytes the plan
+    was made from), the clock value, and the schema rules (the type's namespace, initial state, gating, and
+    the proposer kinds of spec 8.4). The baselines are reparsed from the planned-from bytes, so no expected
+    row or table is an object any planned model holds. Deliberately not composed through the planner's
+    helpers: a planner that drifts from these rules is refused, not mirrored."""
+    ts = _rfc3339(now)
+    if req.subcommand == "create":
+        rtype = req.values["--type"]
+        spec = _opf_schema.BASELINE_SPECS[rtype]
+        ns, key = spec.namespace, "record"
+    else:
+        ns, key = _opf_release.WL_NAMESPACE, "entry"
+    counters = _reparse(counters_raw, ctx.counters.rel)
+    high, findings = _counter_state(ctx, counters)
+    if findings:
+        raise _postcondition_failed("the prior counters.toml cannot license the claim")
+    ids, new_high = claim_ids(ctx.homes, high, [ns], known_complete=True)
+    table = dict(counters.get("counters") or {})
+    if new_high[ns] != table.get(ns, 0) + 1:
+        raise _postcondition_failed("the claim does not advance {} by exactly one".format(ns))
+    table[ns] = new_high[ns]
+    counters["counters"] = table
+    row = {"id": ids[0], "actor": dict(req.actor)}
+    if req.subcommand == "create":
+        proposed = req.actor["kind"] in _opf_schema.PROPOSER_KINDS and spec.initial in spec.gated
+        row.update({"type": rtype, "status": spec.initial + ("/proposed" if proposed else ""),
+                    "title": req.values["--title"], "created_at": ts, "updated_at": ts})
+        row.update({name: value for name, value in req.fields})
+        if req.scopes:
+            row["scopes"] = list(req.scopes)
+    else:
+        row.update({"date": ts, "kind": req.values["--kind"]})
+        if "--detail" in req.values:
+            row["detail"] = req.values["--detail"]
+    if "--summary" in req.values:
+        row["summary"] = req.values["--summary"]
+    if req.links:
+        row["links"] = [{"rel": link["rel"], "id": link["id"]} for link in req.links]
+    if req.refs:
+        row["refs"] = [{"kind": ref["kind"], "locator": ref["locator"], "note": ref["note"]} for ref in req.refs]
+    document = _reparse(operand_raw, operand_rel)
+    document[key] = list(document.get(key, [])) + [row]
+    return [(ctx.counters.rel, counters), (operand_rel, document)], ids
+
+
+def _postcondition(plan, req, ctx, now):
+    """POSTCONDITION (the spec 9.2 guard, applied to record authoring): every operand's EMITTED bytes,
+    reparsed (a copy sharing nothing with the planner's rows), must equal EXACTLY its prior bytes,
+    reparsed, plus the allowed delta _expected_delta derives on its own, value for value: the one new row
+    appended with the requested content, the initial status the schema rules give, the clock's timestamps,
+    and the claimed id; the counters advanced by exactly the claim; nothing else. A stray mutation of an
+    existing record or of the new row, a lost or reordered row, a changed schema marker, or a counter
+    moved by anything but the claim refuses before anything is written. `req` must be a copy of the
+    request taken before planning, so nothing the planner does can reach the oracle."""
+    operand_rel = _operand_rel(req, ctx)
     rels = [o.rel for o in plan.operands]
-    if len(set(rels)) != len(rels) or counters_rel not in rels or set(plan.appended) - set(rels):
-        raise RecordError("postcondition failed: the operand set does not match the planned delta; "
-                          "nothing written (fail-closed)")
-    for operand in plan.operands:
-        expected = copy.deepcopy(operand.model)
-        if operand.rel == counters_rel:
-            table = dict(expected.get("counters") or {})
-            for ns, count in plan.claims.items():
-                table[ns] = table.get(ns, 0) + count
-            expected["counters"] = table
-        if operand.rel in plan.appended:
-            key, rows = plan.appended[operand.rel]
-            expected[key] = list(expected.get(key, [])) + list(rows)
-        if operand.new_model != expected:
-            raise RecordError("postcondition failed: the planned {} differs from its allowed delta (only the "
-                              "planned rows appended and the counters advanced by exactly the claim); nothing "
-                              "written (fail-closed)".format(operand.rel))
-    appended_ids = [row.get("id") for _key, rows in plan.appended.values() for row in rows]
-    if appended_ids != plan.ids:
-        raise RecordError("postcondition failed: the appended rows do not carry exactly the claimed ids; "
-                          "nothing written (fail-closed)")
+    if rels != [ctx.counters.rel, operand_rel]:
+        raise _postcondition_failed("the operand set {} is not counters.toml then {}".format(rels, operand_rel))
+    raws = {o.rel: o.raw for o in plan.operands}
+    expected, ids = _expected_delta(req, ctx, raws[ctx.counters.rel], operand_rel, raws[operand_rel], now)
+    if list(plan.ids) != ids:
+        raise _postcondition_failed("the plan does not report exactly the claimed ids {}".format(ids))
+    for operand, (rel, model) in zip(plan.operands, expected):
+        if operand.new_raw is None or _reparse(operand.new_raw, rel) != model:
+            raise _postcondition_failed("the emitted {} differs from its allowed delta (exactly the requested "
+                                        "row appended and the counters advanced by exactly the "
+                                        "claim)".format(rel))
 
 
 # --- the journal: startup reconciliation and the one journaled publication ---------------------------
@@ -496,15 +577,215 @@ def _journal_root(res):
     return Path(res.store_root) / JOURNAL_REL
 
 
+def _journal_view(jr_fd, journal_root):
+    """(owner, txns, states): the journal lock owner, the transaction directories, and each one's durable
+    state. Read-only. JournalError on an unreadable lock or a corrupt journal."""
+    owner = _journal.read_lock_owner(journal_root)
+    txns = _journal._journal_txn_dirs(jr_fd, journal_root)
+    return owner, txns, {t.name: _journal.classify_state(jr_fd, t) for t in txns}
+
+
+def _refuse_live_owner(owner):
+    if owner is not None and not _journal.owner_confirmed_dead(owner):
+        raise RecordError("another opf record run holds the record journal lock (pid {}); it is never seized. "
+                          "Wait for it to finish, then re-run (fail-closed)".format(owner.get("pid")))
+
+
+def _planned_payloads(intent, ops):
+    """Per op, the planned poststate bytes _publish records in the INTENT header, or None where absent or
+    not proven against the op's poststate digest (a torn write of that op then cannot be explained)."""
+    header = intent.get("header")
+    staged = header.get("staged") if isinstance(header, dict) else None
+    out = [None] * len(ops)
+    if isinstance(staged, list) and len(staged) == len(ops):
+        for i, (text, op) in enumerate(zip(staged, ops)):
+            try:
+                data = base64.b64decode(text, validate=True)
+                if _sha256(data) == op["poststate"]["content-sha256"]:
+                    out[i] = data
+            except (binascii.Error, ValueError, TypeError, KeyError):
+                pass
+    return out
+
+
+def _preimage_bytes(jr_fd, txn, prestate):
+    """The retained preimage of one op, read contained beneath the journal root and proven against its
+    recorded digest, or None."""
+    rel = "{}/preimages/{}".format(Path(txn).name, prestate.get("payload"))
+    try:
+        pfd, name = _journal._open_parent(jr_fd, rel)
+        try:
+            data, _st = _journal._read_at(pfd, name, rel, cap=prestate["size"])
+        finally:
+            os.close(pfd)
+    except (_journal.JournalError, OSError, KeyError, TypeError):
+        return None
+    return data if _sha256(data) == prestate.get("sha256") else None
+
+
+def _operand_unexplained(root_fd, jr_fd, txn, op, planned, rolling_back):
+    """Why one operand's current state is NOT one its open transaction explains, or None when it is.
+    Explained: a singly-linked regular file at the journaled mode holding exactly the journaled preimage,
+    exactly the planned poststate, a strict byte prefix of the planned bytes (the crash tore the write), or,
+    once a rollback has begun, a strict byte prefix of the preimage (the crash tore the restore)."""
+    try:
+        pre, post = op["prestate"], op["poststate"]
+        if op["op"] != "write" or pre.get("kind") != "file" or post.get("kind") != "file":
+            return "it is not a file write this verb journals"
+        data, st = _journal._read_contained(root_fd, op["path"], require_single_link=True)
+    except (KeyError, TypeError, AttributeError):
+        return "its journal entry is malformed"
+    except (_journal.JournalError, OSError) as exc:
+        return "it cannot be read as the journaled regular file ({})".format(exc)
+    if stat.S_IMODE(st.st_mode) != pre.get("mode"):
+        return "its mode is no longer the journaled mode"
+    if _sha256(data) in (pre.get("sha256"), post.get("content-sha256")):
+        return None
+    if planned is not None and len(data) < len(planned) and planned.startswith(data):
+        return None
+    if rolling_back:
+        preimage = _preimage_bytes(jr_fd, txn, pre)
+        if preimage is not None and len(data) < len(preimage) and preimage.startswith(data):
+            return None
+    return ("it holds bytes that are neither the journaled preimage nor the planned poststate, nor a write of "
+            "either torn by the interruption: an intervening edit")
+
+
+def _unexplained_operands(root_fd, jr_fd, txns):
+    """The recovery clean-state rule: one line per operand of an open transaction whose state that
+    transaction does not explain (_operand_unexplained). Recovery refuses on any line, so an edit made
+    since the interruption is surfaced, never overwritten. Read-only."""
+    problems = []
+    for txn in txns:
+        frames, _torn, _good = _journal.read_frames(jr_fd, txn)
+        _journal._validate_terminal_agreement(frames)
+        intent = _journal._first(frames, _journal.F_INTENT)
+        ops = intent.get("ops") if isinstance(intent, dict) else None
+        if not isinstance(ops, list):
+            problems.append("{}: its INTENT carries no operation list".format(txn.name))
+            continue
+        rolling_back = any(ftype == _journal.F_RIP for ftype, _obj in frames)
+        for op, planned in zip(ops, _planned_payloads(intent, ops)):
+            why = _operand_unexplained(root_fd, jr_fd, txn, op, planned, rolling_back)
+            if why:
+                path = op.get("path") if isinstance(op, dict) else None
+                problems.append("{} (transaction {}): {}".format(path, txn.name, why))
+    return problems
+
+
+def _leftover_lock_outcome(owner, states):
+    """The outcome line when a dead run left only its journal lock (every transaction already terminal).
+    _publish names each transaction record-<subcommand>.<pid>.<time_ns>, reading time_ns after it takes
+    the journal lock, so the dead owner's own transaction carries its pid and a stamp no earlier than the
+    lock's utc second; a retained transaction outside that bound belongs to an earlier run."""
+    head = "a leftover journal lock of a dead run was released; every transaction was already terminal"
+    try:
+        since = int(datetime.datetime.strptime(owner["utc"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc).timestamp())
+    except (KeyError, TypeError, ValueError):
+        return head + (" (which of them the dead run opened cannot be told from its lock; git status shows "
+                       "whether its record files changed)")
+    own = []
+    for name, state in states.items():
+        parts = name.split(".")
+        if (len(parts) == 3 and parts[0].startswith("record-") and parts[1] == str(owner.get("pid"))
+                and parts[2].isdigit() and int(parts[2]) // 10 ** 9 >= since):
+            own.append((int(parts[2]), name, state))
+    if not own:
+        return head + " and the dead run had opened none, so it published nothing"
+    _stamp, name, state = max(own)
+    if state == "complete":
+        return head + (": the dead run's transaction {} is COMPLETE, so its publication is present in the "
+                       "working tree, with its render and final doctor never run".format(name))
+    return head + ": the dead run's transaction {} {}, so it published nothing".format(
+        name, "was rolled back" if state == "rolled-back" else "never opened")
+
+
+def _with_recovery_lease(ctx, pending, recover):
+    """Run `recover` holding the single-writer lease, claimed exactly as publication claims it. A present
+    lease (a live peer's, or the interrupted run's own leftover) refuses before any recovery write and is
+    never seized: releasing a leftover lease stays the operator's explicit reconciliation step. The lease
+    is released on every exit; a release failure after a refusal is surfaced and never displaces it."""
+    try:
+        lease = _opf_write_guard.acquire_lease(ctx.root_fd, ctx.machine_rel, VERB)
+    except _opf_write_guard.WriteGuardError as exc:
+        raise RecordError("an interrupted opf record publication needs reconciliation ({}), and reconciliation "
+                          "writes the store, so it runs only under the single-writer lease: {} Nothing was "
+                          "written (fail-closed)".format(pending, exc))
+    try:
+        result = recover()
+    except BaseException:
+        try:
+            _release(ctx, lease)
+        except Exception as rel_exc:  # noqa: BLE001  surfaced, never displaces the original failure
+            print("opf record: additionally, releasing the lease failed ({}); it is LEFT in place (never "
+                  "seized, spec 5.7) and the failure above still governs.".format(rel_exc), file=sys.stderr)
+        raise
+    _release(ctx, lease)
+    return result
+
+
+def _recover_journal(ctx, jr_fd, journal_root):
+    """Recovery proper, under the held lease: None when (re-read under the lease) nothing needs it, else
+    the outcome lines. The clean-state rule runs BEFORE any journal or operand write: every open
+    transaction's operands must hold a state it explains, else the run refuses naming each path, leaving
+    the journal, its lock, and every operand exactly as found. Only then is a confirmed-dead owner's journal
+    lock broken after every transaction reconciles to terminal (_journal.reconcile_and_claim_stale), or an
+    unlocked open transaction recovered under a fresh journal lock. Recovery rolls each open transaction
+    FORWARD when every poststate already verifies, else back from its preimages."""
+    root_fd = ctx.root_fd
+    try:
+        owner, txns, before = _journal_view(jr_fd, journal_root)
+        opened = sorted(n for n, s in before.items() if s == "open")
+        if owner is None and not opened:
+            return None
+        _refuse_live_owner(owner)
+        problems = _unexplained_operands(root_fd, jr_fd, [t for t in txns if t.name in opened])
+        if problems:
+            raise RecordError(
+                "an interrupted opf record publication cannot be reconciled without overwriting a change made "
+                "since it was interrupted: {}. Nothing was written; the journal and every operand are left "
+                "exactly as found. Either restore each path to its journaled preimage (under {}/<transaction>/"
+                "preimages, or from HEAD when it holds those bytes) and re-run, or keep the edit and retire the "
+                "transaction by moving its directory out of {} yourself (fail-closed)".format(
+                    "; ".join(problems), JOURNAL_REL, JOURNAL_REL))
+        if owner is not None:
+            if _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd, SESSION_ID) != "acquired":
+                raise RecordError("the record journal lock became live during reconciliation; it is never "
+                                  "seized. Re-run once no opf record run is live (fail-closed)")
+        else:
+            _journal.acquire_lock(journal_root, SESSION_ID)
+        try:
+            for txn in txns:
+                _journal.recover(jr_fd, txn, root_fd)
+            after = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
+        finally:
+            _journal.release_lock(journal_root)
+    except (_journal.JournalError, OSError) as exc:
+        raise RecordError("the record journal {} cannot be reconciled ({}); fail-closed".format(JOURNAL_REL, exc))
+    outcomes = []
+    for name in opened:
+        if after.get(name) == "complete":
+            outcomes.append("{} rolled FORWARD (its publication is present in the working tree, uncommitted; "
+                            "its render and final doctor never ran)".format(name))
+        elif after.get(name) == "rolled-back":
+            outcomes.append("{} rolled BACK to its prestate".format(name))
+        else:
+            raise RecordError("the record journal transaction {} did not reconcile to a terminal state ({}); "
+                              "fail-closed".format(name, after.get(name)))
+    return outcomes or [_leftover_lock_outcome(owner, after)]
+
+
 def _reconcile_journal(ctx):
     """Reconcile an interrupted `opf record` publication BEFORE anything else, then refuse this run.
-    Nothing to do when the journal root is absent, or when no lock is held and every transaction is
-    terminal. A lock held by a possibly-live owner is never seized. A confirmed-dead owner's lock is
-    broken only after every transaction reconciles to terminal (_journal.reconcile_and_claim_stale); an
-    open transaction without a lock is recovered under a fresh lock. Recovery rolls each open transaction
-    FORWARD when every poststate already verifies, else back from its preimages, so the store is exactly
-    the prestate or exactly the poststate. The run then refuses (exit 2) naming each outcome: the operator
-    inspects the result, and reconciles the interrupted run's lease, before re-running."""
+    Nothing to do, and nothing written, when the journal root is absent, or when no journal lock is held
+    and every transaction is terminal. Otherwise recovery is a STORE WRITE, so it runs only under the
+    rules publication runs under: a journal lock held by a possibly-live owner is never seized; the
+    single-writer lease is claimed exactly as publication claims it, so a present lease refuses before any
+    recovery write (_with_recovery_lease); and every operand must hold a state its transaction explains
+    (_unexplained_operands), so an intervening edit is surfaced and refused. The store then ends exactly
+    at the prestate or exactly at the poststate, the lease is released, and the run refuses (exit 2)
+    naming each outcome: the operator inspects the result before re-running."""
     root_fd = ctx.root_fd
     try:
         st = _journal._lstat_contained(root_fd, JOURNAL_REL)
@@ -521,53 +802,32 @@ def _reconcile_journal(ctx):
         raise RecordError("cannot open the record journal {} ({}); fail-closed".format(JOURNAL_REL, exc))
     try:
         try:
-            owner = _journal.read_lock_owner(journal_root)
-            txns = _journal._journal_txn_dirs(jr_fd, journal_root)
-            before = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
-            opened = sorted(n for n, s in before.items() if s == "open")
-            if owner is None and not opened:
-                return
-            if owner is not None:
-                if not _journal.owner_confirmed_dead(owner):
-                    raise RecordError("another opf record run holds the record journal lock (pid {}); it is "
-                                      "never seized. Wait for it to finish, then re-run (fail-closed)".format(
-                                          owner.get("pid")))
-                if _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd, SESSION_ID) != "acquired":
-                    raise RecordError("the record journal lock became live during reconciliation; it is never "
-                                      "seized. Re-run once no opf record run is live (fail-closed)")
-            else:
-                _journal.acquire_lock(journal_root, SESSION_ID)
-                for txn in txns:
-                    _journal.recover(jr_fd, txn, root_fd)
-            try:
-                after = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
-            finally:
-                _journal.release_lock(journal_root)
-        except _journal.JournalError as exc:
+            owner, _txns, states = _journal_view(jr_fd, journal_root)
+        except (_journal.JournalError, OSError) as exc:
             raise RecordError("the record journal {} cannot be reconciled ({}); fail-closed".format(
                 JOURNAL_REL, exc))
+        opened = sorted(n for n, s in states.items() if s == "open")
+        if owner is None and not opened:
+            return
+        _refuse_live_owner(owner)
+        pending = "open transaction(s) {}".format(", ".join(opened)) if opened else "a dead run's journal lock"
+        outcomes = _with_recovery_lease(ctx, pending, lambda: _recover_journal(ctx, jr_fd, journal_root))
     finally:
         _journal._close_fd_quietly(jr_fd)
-    outcomes = []
-    for name in opened:
-        if after.get(name) == "complete":
-            outcomes.append("{} rolled FORWARD (its publication is present in the working tree, uncommitted; "
-                            "its render and final doctor never ran)".format(name))
-        else:
-            outcomes.append("{} rolled BACK to its prestate".format(name))
-    if not outcomes:
-        outcomes.append("a leftover journal lock of a dead run was released; every transaction was already "
-                        "terminal (a completed publication is present, uncommitted, with its render and final "
-                        "doctor never run)")
-    lease_rel = ctx.rel(_opf_check.LEASE_NAME)
+    if outcomes is None:
+        return
     raise RecordError("an interrupted opf record run was reconciled before this operation: {}. Nothing was "
-                      "recorded by this run. Inspect the store paths (git status), run opf doctor, and "
-                      "release the interrupted run's lease {} yourself if it is still present and no opf run "
-                      "is live (spec 5.7), then re-run".format("; ".join(outcomes), lease_rel))
+                      "recorded by this run. Inspect the store paths (git status) and run opf doctor, then "
+                      "re-run".format("; ".join(outcomes)))
 
 
 def _sha256(data):
     return hashlib.sha256(data).hexdigest()
+
+
+# How a failed publication's transaction is described when the journal lock is retained for reconciliation.
+_FAILED_STATE = {"open": "still open",
+                 "complete": "COMPLETE (its publication is present, with its render and final doctor never run)"}
 
 
 def _publish(ctx, plan, subcommand):
@@ -576,8 +836,11 @@ def _publish(ctx, plan, subcommand):
     and mode the plan was made from: capture refuses (nothing opened) if the file changed since it was
     read, and apply re-verifies the captured preimage on the opened fd. Crash anywhere leaves the store
     exactly the prestate or exactly the poststate once recovered (_reconcile_journal on the next run).
-    Raises RecordError; the journal lock is released on every exit except a rollback that did not
-    complete, which keeps it for the next run's reconciliation."""
+    The INTENT header also carries every operand's planned bytes, so a later recovery can tell a write the
+    crash tore (a byte prefix of them) from an intervening edit (_unexplained_operands); a publication
+    whose INTENT would pass the journal-read cap is refused by the engine before it opens. Raises
+    RecordError; the journal lock is released on every exit except a failure that may have left the
+    transaction open, which keeps it for the next run's reconciliation."""
     root_fd = ctx.root_fd
     journal_root = _journal_root(ctx.res)
     try:
@@ -605,21 +868,28 @@ def _publish(ctx, plan, subcommand):
                                              "sha256": _sha256(operand.raw)}})
             content[operand.rel] = operand.new_raw
         txn_id = "record-{}.{}.{}".format(subcommand, os.getpid(), time.time_ns())
-        header = {"unit": SESSION_ID, "kind": "record-" + subcommand}
+        header = {"unit": SESSION_ID, "kind": "record-" + subcommand,
+                  "staged": [base64.b64encode(operand.new_raw).decode("ascii") for operand in plan.operands]}
         try:
             _journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
                                      lambda op: content[op["path"]], SESSION_ID)
-        except _journal.JournalError as exc:
+        except (_journal.JournalError, OSError) as exc:
+            # An absent transaction directory reads as nothing-opened (read_frames), so a failure before
+            # INTENT (the budget refusal, a failed mkdir or preimage capture) is told apart from one after it.
             try:
                 state = _journal.classify_state(jr_fd, journal_root / txn_id)
             except _journal.JournalError:
-                state = "open"
-            if state in ("nothing-opened", "rolled-back"):
+                state = None
+            if state == "nothing-opened":
+                raise RecordError("the publication was refused before its transaction opened ({}); no operand "
+                                  "was touched and nothing recorded (fail-closed)".format(exc))
+            if state == "rolled-back":
                 raise RecordError("the publication was refused and rolled back to the prestate ({}); nothing "
                                   "recorded (fail-closed)".format(exc))
             retain = True
-            raise RecordError("the publication FAILED and its rollback did not complete ({}); the journal "
-                              "lock is retained so the next opf record run reconciles it (fail-closed)".format(exc))
+            raise RecordError("the publication FAILED and its transaction {} is {} ({}); the journal lock is "
+                              "retained so the next opf record run reconciles it (fail-closed)".format(
+                                  txn_id, _FAILED_STATE.get(state, "in an unreadable state"), exc))
     finally:
         if held and not retain:
             try:
@@ -747,21 +1017,27 @@ def _run_operation(req):
         raise RecordError("cannot open the store root {} ({}); fail-closed".format(res.store_root, exc))
     try:
         ctx = Context(res, root, root_fd)
-        # 1. an interrupted earlier run is reconciled, and refuses this one, before anything is read.
+        # 1. an interrupted earlier run is reconciled (under the lease), and refuses this one, before
+        # anything is read.
         _reconcile_journal(ctx)
-        # 2. read the models this operation plans from.
+        # 2. read the models this operation plans from; the request checks that need the manifest run
+        # before any operand path is built from the request.
         _load_manifest(ctx)
+        _check_request(req, ctx)
         ctx.counters = _read_operand(root_fd, ctx.rel(_opf_check.COUNTERS_NAME))
         ctx.version = _read_operand(root_fd, ctx.rel(_opf_check.VERSION_NAME)).model
         operand = _read_operand(root_fd, _operand_rel(req, ctx))
         # 3. PRECONDITION: every file this operation rewrites is canonical (byte reproduction).
         for op in (ctx.counters, operand):
             _require_canonical(op)
-        # 4. plan (the claim goes through the one allocation seam), then 5. POSTCONDITION.
-        plan = _PLANNERS[req.subcommand](req, ctx, operand, _clock_now())
-        _postcondition(plan, ctx.counters.rel)
+        # 4. plan (the claim goes through the one allocation seam) and emit, then 5. POSTCONDITION over
+        # the emitted bytes, against the oracle's own copy of the request taken before planning.
+        now = _clock_now()
+        request = copy.deepcopy(req)
+        plan = _PLANNERS[req.subcommand](req, ctx, operand, now)
         for op in plan.operands:
             op.new_raw = _emit_bytes(op.new_model)
+        _postcondition(plan, request, ctx, now)
         # 6. the planned-destination cleanliness gate, then the single-writer lease.
         scope = _opf_write_guard.plan_write_scope(ctx.machine_rel, ctx.manifest,
                                                   [op.rel for op in plan.operands], VERB)
@@ -909,8 +1185,8 @@ def _self_test_units(check):
         ctx = Context(SimpleNamespace(machine_rel=".working/toml"), ".", None)
         ctx.homes = 1
         ctx.types = dict(_opf_store.BASELINE_TYPES)
-        ctx.counters = Operand(".working/toml/counters.toml", b"", 0o644,
-                               {"schema": 1, "counters": dict(counters)})
+        counters_model = {"schema": 1, "counters": dict(counters)}
+        ctx.counters = Operand(".working/toml/counters.toml", _emit_bytes(counters_model), 0o644, counters_model)
         ctx.version = version or {"schema": 1, "release": [], "summary": []}
         return ctx
 
@@ -931,8 +1207,15 @@ def _self_test_planners(check, ctx_of, full, now):
         rel = c.rel(r.values["--type"] + _opf_check.INDEX_SUFFIX) if r.subcommand == "create" \
             else c.rel(_opf_check.WORKLOG_NAME)
         key = "record" if r.subcommand == "create" else "entry"
-        op = Operand(rel, b"", 0o644, {"schema": 1, key: list(rows)})
+        m = {"schema": 1, key: list(rows)}
+        op = Operand(rel, _emit_bytes(m), 0o644, m)
         return _PLANNERS[r.subcommand](r, c, op, now), c, op
+
+    def post(p, c, argv):
+        """Emit the planned operands, then run the postcondition against a fresh parse of the request."""
+        for o in p.operands:
+            o.new_raw = _emit_bytes(o.new_model)
+        return _postcondition(p, parse_request(argv), c, now)
 
     # -- the create planner --------------------------------------------------------------------------------
     p, c, op = plan(["create", "--type", "block", "--title", "b", "--actor", "assistant", "--scope", "BI-1"])
@@ -981,22 +1264,39 @@ def _self_test_planners(check, ctx_of, full, now):
     base_rows = [{"id": "BI-1", "title": "kept"}]
     argv = ["create", "--type", "backlog_item", "--title", "b", "--actor", "maintainer"]
     p, c, op = plan(argv, rows=base_rows, counters=dict(full, BI=1))
-    check("the genuine plan passes the postcondition", _postcondition(p, c.counters.rel) is None)
+    check("the genuine plan passes the postcondition", post(p, c, argv) is None)
     mutations = (
         ("an extra field mutation", lambda p, c, op: op.new_model["record"][0].__setitem__("title", "x")),
         ("a dropped existing row", lambda p, c, op: op.new_model["record"].pop(0)),
         ("an over-advanced counter", lambda p, c, op: c.counters.new_model["counters"].__setitem__("BI", 3)),
         ("another counter moved", lambda p, c, op: c.counters.new_model["counters"].__setitem__("FN", 1)),
-        ("a changed schema marker", lambda p, c, op: op.new_model.__setitem__("schema", 2)))
+        ("a changed schema marker", lambda p, c, op: op.new_model.__setitem__("schema", 2)),
+        ("a changed appended status", lambda p, c, op: op.new_model["record"][-1].__setitem__("status", "active")),
+        ("a changed appended title", lambda p, c, op: op.new_model["record"][-1].__setitem__("title", "x")),
+        ("an extra appended field", lambda p, c, op: op.new_model["record"][-1].__setitem__("summary", "x")),
+        ("a changed appended id", lambda p, c, op: op.new_model["record"][-1].__setitem__("id", "BI-9")),
+        ("a second appended row", lambda p, c, op: op.new_model["record"].append(dict(op.new_model["record"][-1]))))
     for label, mutate in mutations:
         p, c, op = plan(argv, rows=base_rows, counters=dict(full, BI=1))
         mutate(p, c, op)
         check("the postcondition refuses {}".format(label),
-              _refuses(lambda: _postcondition(p, c.counters.rel), "postcondition failed"))
+              _refuses(lambda: post(p, c, argv), "postcondition failed"))
+    wl_argv = ["worklog-append", "--kind", "added", "--summary", "s", "--actor", "assistant", "--detail", "d"]
+    p, c, op = plan(wl_argv)
+    check("the genuine worklog plan passes the postcondition", post(p, c, wl_argv) is None)
+    for field, value in (("summary", "x"), ("kind", "removed"), ("detail", "x"), ("date", "2026-01-01T00:00:00Z")):
+        p, c, op = plan(wl_argv)
+        op.new_model["entry"][-1][field] = value
+        check("the postcondition refuses a changed appended worklog {}".format(field),
+              _refuses(lambda: post(p, c, wl_argv), "postcondition failed"))
     p, c, op = plan(argv)
     p.ids = ["BI-9"]
     check("the postcondition refuses rows not carrying the claimed ids",
-          _refuses(lambda: _postcondition(p, c.counters.rel), "claimed ids"))
+          _refuses(lambda: post(p, c, argv), "claimed ids"))
+    p, c, op = plan(argv)
+    p.operands = p.operands[1:]
+    check("the postcondition refuses a plan missing the counters operand",
+          _refuses(lambda: post(p, c, argv), "operand set"))
 
 
 if __name__ == "__main__":
