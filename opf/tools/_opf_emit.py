@@ -707,14 +707,27 @@ def _fixture_children():
     return pids
 
 
-def _fixture_drain(subject, subject_fd=None):
+# Cleanup has its own minimum grace after execution expires. While execution
+# time remains, use that remaining budget instead if it is larger. This is a
+# polling bound, not a guarantee that blocking kernel operations will return.
+_FIXTURE_CLEANUP_GRACE = 5.0
+
+
+def _fixture_cleanup_deadline(execution_deadline=None):
+    import time
+    floor = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+    return floor if execution_deadline is None else max(floor, execution_deadline)
+
+
+def _fixture_drain(subject, subject_fd=None, *, deadline=None):
     """Dedicated single-threaded subreaper: every child belongs to this fixture.
 
     Kill groups BEFORE reaping leaders, then collect adopted descendants, including
     nested guardians and descendants in other sessions. Only kernel ECHILD proves
     completion. /proc read failures refuse; an empty snapshot is retried, never
-    treated as completion or an immediate contradiction. Cleanup has a five-second
-    polling budget; expiry yields cannot-evaluate, never success. Syscalls still
+    treated as completion or an immediate contradiction. The caller supplies one
+    cleanup deadline, shared by normal and failure paths; absent one, the named
+    minimum grace applies. Expiry yields cannot-evaluate, never success. Syscalls still
     require kernel progress. Subjects attacking their guardian are outside this
     trusted harness's contract.
     """
@@ -722,7 +735,11 @@ def _fixture_drain(subject, subject_fd=None):
     import signal
     import time
     status = None
-    deadline = time.monotonic() + 5
+    if deadline is None:
+        deadline = _fixture_cleanup_deadline()
+    # Cancel the owned subject immediately, even while a census is empty. The
+    # ownership check makes this safe on a retry after the subject was reaped.
+    _fixture_signal(subject, signal.SIGKILL, subject_fd)
     while True:
         try:
             os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
@@ -756,6 +773,14 @@ _fixture_socket_lock = threading.Lock()
 _fixture_sockets = weakref.WeakSet()
 
 
+def _fixture_close_sockets(*endpoints):
+    # socket.close() invalidates fileno() before releasing the kernel descriptor.
+    # Keep that whole window atomic with registration and guardian fork.
+    with _fixture_socket_lock:
+        for endpoint in endpoints:
+            endpoint.close()
+
+
 class _FixtureProcess:
     """Shared fork/exec tree owner. No caller signal state is borrowed.
 
@@ -778,8 +803,7 @@ class _FixtureProcess:
         try:
             self.report = tempfile.TemporaryFile()
         except BaseException:
-            self.control.close()
-            self.peer.close()
+            _fixture_close_sockets(self.control, self.peer)
             raise
 
     def start(self):
@@ -804,12 +828,12 @@ class _FixtureProcess:
         with _fixture_socket_lock:
             pid = os.fork()
         if pid == 0:
-            subject = subject_fd = None
+            subject = subject_fd = cleanup_deadline = None
             stage = "startup"
             try:
                 for endpoint in list(_fixture_sockets):
                     if endpoint is not self.peer:
-                        endpoint.close()
+                        _fixture_close_sockets(endpoint)
                 os.setpgid(0, 0)
                 _fixture_subreaper()
                 os.write(self.peer.fileno(), b"R")
@@ -817,10 +841,20 @@ class _FixtureProcess:
                     os._exit(0)  # cancelled before GO: no subject exists
                 subject = os.fork()
                 if subject == 0:
-                    self.peer.close()
-                    self.report.close()
-                    os.setpgid(0, 0)
-                    return 0
+                    try:
+                        _fixture_close_sockets(self.peer)
+                        self.report.close()
+                        os.setpgid(0, 0)
+                        return 0
+                    except BaseException:
+                        # This is the subject, not the guardian: its report is
+                        # already closed. Preserve the bootstrap cause on fd 2.
+                        import traceback
+                        try:
+                            with os.fdopen(os.dup(2), "w") as diagnostic:
+                                traceback.print_exc(file=diagnostic)
+                        finally:
+                            os._exit(125)
                 stage = "subject-group"
                 _fixture_setpgid(subject)
                 subject_fd = _fixture_pidfd(subject)
@@ -842,7 +876,8 @@ class _FixtureProcess:
                         pass
                     time.sleep(0.005)
                 stage = "drain"
-                status = _fixture_drain(subject, subject_fd)
+                cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
+                status = _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
                 subject = None
                 if subject_fd is not None:
                     os.close(subject_fd)
@@ -882,7 +917,9 @@ class _FixtureProcess:
                 record_failure()  # preserve the cause even if cleanup cannot finish
                 try:
                     if subject is not None:
-                        _fixture_drain(subject, subject_fd)
+                        if cleanup_deadline is None:
+                            cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
+                        _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
                     failure["cleanup"] = "ECHILD" if subject is not None else "no subject"
                 except BaseException as cleanup_exc:
                     failure["cleanup"] = detail(cleanup_exc)
@@ -894,7 +931,7 @@ class _FixtureProcess:
                     finally:
                         os._exit(125)
         self.pid = pid
-        self.peer.close()
+        _fixture_close_sockets(self.peer)
         self.pidfd = _fixture_pidfd(pid)
         os.setpgid(pid, pid)
         self.control.setblocking(False)
@@ -954,8 +991,8 @@ class _FixtureProcess:
     def close(self):
         import os
         import signal
-        self.control.close()  # cancellation addresses this guardian, never a stale PID
-        self.peer.close()
+        # Cancellation addresses this guardian, never a stale PID.
+        _fixture_close_sockets(self.control, self.peer)
         try:
             if self.pid is not None and not self.collected:
                 if not self.armed:
@@ -1111,10 +1148,15 @@ def _fixture_child_reaped(pid):
     return False
 
 
+def _bounded_setup_error(exc):
+    """Retain the error type and bounded guardian receipt on the sentinel channel."""
+    return "SETUP-ERROR:" + type(exc).__name__ + ":" + str(exc)[:8192]
+
+
 def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS and return that
     str, or a sentinel: 'TIMEOUT' (wall-clock bound tripped), 'OOM' (address-space bound tripped),
-    'CHILD-DIED', 'ERROR:<Type>' (the thunk raised), or 'SETUP-ERROR:<Type>' (the child could NOT install
+    'CHILD-DIED', 'ERROR:<Type>' (the thunk raised), or 'SETUP-ERROR:<Type>[:detail]' (the child could NOT install
     its bounds, fork failed, or child ownership is unprovable: a cannot-evaluate, never a normal result). Several
     adversarial vectors drive an engine over a declared 10**9 high-water/span or a deeply-shared DAG; run
     IN-PROCESS a regression that reverted the bounded counting or an identity short-circuit would HANG or
@@ -1187,7 +1229,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     try:
         rfd, wfd = os.pipe()
     except OSError as exc:
-        return "SETUP-ERROR:" + type(exc).__name__
+        return _bounded_setup_error(exc)
     child = None
     try:
         child = _FixtureProcess(deadline)
@@ -1205,7 +1247,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
             raise
         if isinstance(exc, TimeoutError):
             return "TIMEOUT"
-        return "SETUP-ERROR:" + type(exc).__name__
+        return _bounded_setup_error(exc)
     if pid == 0:                                         # child: bounded, writes one short token, never returns
         os.close(rfd)
         try:
@@ -1240,7 +1282,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     data = b""
     wstatus = None
     timed_out = False
-    ownership_lost = False
+    failures = []
     try:
         os.close(wfd)
         os.set_blocking(rfd, False)
@@ -1268,18 +1310,18 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
                     poller.unregister(rfd)
                 else:
                     data = (data + chunk)[:200]
-    except ChildStatusUnavailable:
-        ownership_lost = True
+    except ChildStatusUnavailable as exc:
+        failures.append(_bounded_setup_error(exc))
     finally:
         try:
             os.close(rfd)
         finally:
             try:
                 child.close()
-            except ChildStatusUnavailable:
-                ownership_lost = True
-    if ownership_lost:
-        return "SETUP-ERROR:ChildOwnershipLost"
+            except ChildStatusUnavailable as exc:
+                failures.append(_bounded_setup_error(exc))
+    if failures:
+        return "; ".join(failures)
     wstatus = child.status
     return "TIMEOUT" if timed_out else _bounded_child_result(data, wstatus)
 

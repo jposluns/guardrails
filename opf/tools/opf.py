@@ -256,6 +256,8 @@ def _watchdog_deadline_case(mode):
     import time
     from unittest.mock import patch
     import _opf_emit
+    import json
+    import tempfile
 
     real_fork, real_pipe = os.fork, os.pipe
     started_r, started_w = real_pipe()
@@ -286,7 +288,7 @@ def _watchdog_deadline_case(mode):
             stall()
 
     def thunk():
-        if mode in ("pipe-stall", "exit-stall"):
+        if mode in ("pipe-stall", "exit-stall", "transient-census"):
             # Defeat the independent child timer deliberately: exercise the PARENT deadline.
             signal.setitimer(signal.ITIMER_REAL, 0)
             os.write(started_w, b"started")
@@ -298,23 +300,73 @@ def _watchdog_deadline_case(mode):
 
     if mode in ("delayed-start", "stuck-start"):
         os.register_at_fork(after_in_child=startup)
+    real_signal = _opf_emit._fixture_signal
+    real_drain, real_children = _opf_emit._fixture_drain, _opf_emit._fixture_children
+    empty_since = [None]
+    events = tempfile.TemporaryFile()
+
+    def record(row):
+        os.write(events.fileno(), (json.dumps(row) + "\n").encode("ascii"))
+
+    def cancel(pid, signum, *args, **kwargs):
+        sent = real_signal(pid, signum, *args, **kwargs)
+        if sent and signum == signal.SIGKILL:
+            record(["cancel", time.monotonic()])
+        return sent
+
+    def drain(*args, **kwargs):
+        try:
+            return real_drain(*args, **kwargs)
+        finally:
+            record(["drain", time.monotonic(), kwargs["deadline"]])
+
+    def census():
+        if mode == "transient-census":
+            if empty_since[0] is None:
+                empty_since[0] = time.monotonic()
+            if time.monotonic() - empty_since[0] < 1.6:
+                return []
+        return real_children()
+
     result, elapsed, reaped = None, None, False
     try:
         start = time.monotonic()
-        with patch.object(os, "fork", fork), patch.object(os, "pipe", capture_pipe):
+        with patch.object(os, "fork", fork), patch.object(os, "pipe", capture_pipe), \
+                patch.object(_opf_emit, "_fixture_signal", cancel), \
+                patch.object(_opf_emit, "_fixture_drain", drain), \
+                patch.object(_opf_emit, "_fixture_children", census):
             result = _opf_emit.run_bounded(thunk, timeout_s=0.25)
-        elapsed = time.monotonic() - start
+        finished = time.monotonic()
+        elapsed = finished - start
+        events.seek(0)
+        rows = [json.loads(line) for line in events]
+        cancellations = [row[1] for row in rows if row[0] == "cancel"]
+        drains = [row for row in rows if row[0] == "drain"]
+        cancelled = min(cancellations) if cancellations else None
+        # Execution latency ends at the observed signal, never at cleanup end.
+        execution_ok = cancelled is not None and 0.25 <= cancelled - start < 1.5
+        # Cleanup is checked against its own declared deadline. One second is
+        # allowed separately for receipt delivery and parent scheduling.
+        cleanup_limit = max([row[2] for row in drains] or
+                            [(cancelled or start) + _opf_emit._FIXTURE_CLEANUP_GRACE])
+        cleanup_ok = (all(row[1] <= row[2] for row in drains)
+                      and finished <= cleanup_limit + 1)
+        if mode == "transient-census":
+            # The old combined 1.5 s assertion rejects this passing cleanup.
+            assert elapsed > 1.5 and drains, (elapsed, rows)
         # The helper owns cleanup. A diagnostic never sends another signal.
         reaped = _opf_emit._fixture_child_reaped(child[0])
         os.set_blocking(started_r, False)
         reached = os.read(started_r, 200) == b"started"
-        ok = (result == "TIMEOUT" and elapsed < 1.5
+        ok = (result == "TIMEOUT" and execution_ok and cleanup_ok
               and reached and reaped)
     finally:
         os.close(started_r)
         os.close(started_w)
+        events.close()
     print("opf watchdog deadline:", mode, "PASS" if ok else "FAIL",
-          result, elapsed, "reaped", reaped)
+          result, "execution", None if cancelled is None else cancelled - start,
+          "total", elapsed, "cleanup", cleanup_ok, "reaped", reaped)
     return EXIT_OK if ok else EXIT_FINDING
 
 
@@ -413,9 +465,10 @@ def _watchdog_safety_case(mode):
                         stack.enter_context(patch.object(os, "waitpid", return_value=(0, 0)))
                         stack.enter_context(patch.object(os, "waitid", steal_cleanup))
                     result = _opf_emit.run_bounded(lambda: "OK", timeout_s=0.1)
-                expected = ("SETUP-ERROR:ChildOwnershipLost" if mode.startswith("lost-")
+                expected = ("SETUP-ERROR:ChildStatusUnavailable:" if mode.startswith("lost-")
                             else "SETUP-ERROR:ChildOwnership")
-                ok = (result == expected and not kills and closed()
+                matches = result.startswith(expected) if mode.startswith("lost-") else result == expected
+                ok = (matches and not kills and closed()
                       and signal.getsignal(signal.SIGCHLD) == disposition)
                 ok = ok and (stolen == children and len(children) == 1 if mode.startswith("lost-")
                              else not children and not pipes)
@@ -437,7 +490,7 @@ def _watchdog_safety_case(mode):
         elif mode == "fork-error":
             with patch.object(os, "fork", side_effect=RuntimeError("fork setup")):
                 result = _opf_emit.run_bounded(lambda: "UNBOUNDED")
-            ok = result == "SETUP-ERROR:RuntimeError" and len(pipes) == 2 and closed()
+            ok = result == "SETUP-ERROR:RuntimeError:fork setup" and len(pipes) == 2 and closed()
         elif mode == "poll-error":
             import select
             real_poll, calls = select.poll, []
@@ -615,6 +668,151 @@ def _watchdog_completion_case(mode):
         with patch.object(emit, "_fixture_subreaper",
                           side_effect=OSError(errno.EIO, "injected guardian exception")):
             diagnose()  # before READY must carry the same evidence
+    elif mode == "bounded-diagnostics":
+        def check():
+            result = emit.run_bounded(lambda: "OK", timeout_s=2)
+            assert result.startswith("SETUP-ERROR:ChildStatusUnavailable:"), result
+            for text in ("OSError", '"errno": 5', "QA15-CAUSE",
+                         "raw wait status=32000", "exitcode=125"):
+                assert text in result, result
+
+        for boundary in ("_fixture_subreaper", "_fixture_setpgid"):
+            with patch.object(emit, boundary, side_effect=OSError(5, "QA15-CAUSE")):
+                check()
+                with patch.object(emit, "_bounded_setup_error",
+                                  side_effect=lambda exc: "SETUP-ERROR:" + type(exc).__name__):
+                    refuses(AssertionError, check)
+        # Also retain evidence from close(), not only startup and poll().
+        real_close = emit._FixtureProcess.close
+        def fail_close(child):
+            real_close(child)
+            raise emit.ChildStatusUnavailable("raw wait status=32000; QA15-CLOSE")
+        def check_close():
+            result = emit.run_bounded(lambda: "OK", timeout_s=2)
+            assert "QA15-CLOSE" in result and "raw wait status=32000" in result, result
+        with patch.object(emit._FixtureProcess, "close", fail_close):
+            check_close()
+            with patch.object(emit, "_bounded_setup_error",
+                              side_effect=lambda exc: "SETUP-ERROR:" + type(exc).__name__):
+                refuses(AssertionError, check_close)
+    elif mode == "cleanup-budget":
+        import time
+        # A controlled clock discriminates the remaining-deadline policy without
+        # making the test itself depend on host scheduling.
+        def policy():
+            with patch.object(time, "monotonic", return_value=100):
+                assert emit._fixture_cleanup_deadline(120) == 120
+                assert emit._fixture_cleanup_deadline(99) == 100 + emit._FIXTURE_CLEANUP_GRACE
+                assert emit._fixture_cleanup_deadline() == 100 + emit._FIXTURE_CLEANUP_GRACE
+        policy()
+        with patch.object(emit, "_fixture_cleanup_deadline",
+                          side_effect=lambda deadline=None: time.monotonic() + 5):
+            refuses(AssertionError, policy)
+        # Observe forwarding and error-path reuse in the real guardian. Fail the
+        # first drain; let the second perform real cleanup under the SAME bound.
+        with tempfile.TemporaryFile() as log:
+            real_drain = emit._fixture_drain
+            attempts = []
+            real_budget = emit._fixture_cleanup_deadline
+            def budget(execution_deadline=None):
+                bound = real_budget(execution_deadline)
+                os.write(log.fileno(), (json.dumps([execution_deadline, bound]) + "\n").encode("ascii"))
+                return bound
+            def retry(subject, subject_fd=None, *, deadline=None):
+                attempts.append(deadline)
+                os.write(log.fileno(), (repr(deadline) + "\n").encode("ascii"))
+                if len(attempts) == 1:
+                    raise OSError(5, "QA15-RETRY")
+                return real_drain(subject, subject_fd, deadline=deadline)
+            with patch.object(emit, "_fixture_drain", retry), \
+                    patch.object(emit, "_fixture_cleanup_deadline", budget):
+                refuses(emit.ChildStatusUnavailable, launch)
+            log.seek(0)
+            bounds = [json.loads(line) for line in log]
+            assert len(bounds) == 3 and bounds[0][0] is not None, bounds
+            assert bounds[0][1] == bounds[1] == bounds[2], bounds
+        # Empty census never licenses completion, even when its budget expires.
+        with patch.object(os, "waitid", return_value=None), \
+                patch.object(emit, "_fixture_signal", return_value=True), \
+                patch.object(emit, "_fixture_children", return_value=[]), \
+                patch.object(time, "monotonic", side_effect=[100, 102]), \
+                patch.object(time, "sleep"):
+            refuses(emit.ChildStatusUnavailable,
+                    lambda: emit._fixture_drain(123, deadline=101))
+    elif mode == "deadline-flips":
+        real_run = emit.run_bounded
+        def late(thunk, **kwargs):
+            return real_run(thunk, **dict(kwargs, timeout_s=2))
+        with patch.object(emit, "run_bounded", late):
+            assert _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
+        import time
+        with patch.object(emit, "_fixture_cleanup_deadline",
+                          side_effect=lambda deadline=None: time.monotonic() - 1):
+            assert _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
+        real_signal, first = emit._fixture_signal, [True]
+        def census_only(*args, **kwargs):
+            if first[0]:
+                first[0] = False
+                return False
+            return real_signal(*args, **kwargs)
+        with patch.object(emit, "_fixture_signal", census_only):
+            assert _watchdog_deadline_case("transient-census") == EXIT_FINDING
+    elif mode == "socket-close":
+        import socket
+        import time
+        real_close = socket.socket.close
+
+        def checked(endpoint):
+            if endpoint in emit._fixture_sockets:
+                assert emit._fixture_socket_lock.locked(), "endpoint close outside fork lock"
+            return real_close(endpoint)
+
+        def exercise():
+            with patch.object(socket.socket, "close", checked):
+                other = emit._FixtureProcess(time.monotonic() + 10)
+                try:
+                    assert emit.run_bounded(lambda: "OK", timeout_s=2) == "OK"
+                    with patch.object(tempfile, "TemporaryFile", side_effect=OSError(5, "report")):
+                        refuses(OSError, lambda: emit._FixtureProcess(time.monotonic() + 10))
+                finally:
+                    other.close()
+        exercise()
+        # Deterministic observation of the critical window, without a scheduler
+        # race: removing serialization exposes close() while the fork lock is free.
+        def unlocked(*endpoints):
+            for endpoint in endpoints:
+                endpoint.close()
+        with patch.object(emit, "_fixture_close_sockets", unlocked):
+            refuses(AssertionError, exercise)
+    elif mode == "subject-setup":
+        real_subreaper, real_setpgid = emit._fixture_subreaper, os.setpgid
+        in_guardian = [False]
+        def mark():
+            real_subreaper()
+            in_guardian[0] = True
+        def fail_subject(pid, group):
+            if pid == 0 and in_guardian[0]:
+                raise OSError(5, "QA15-SUBJECT")
+            return real_setpgid(pid, group)
+
+        def check():
+            with tempfile.TemporaryFile() as err:
+                saved = os.dup(2)
+                try:
+                    os.dup2(err.fileno(), 2)
+                    with patch.object(emit, "_fixture_subreaper", mark), \
+                            patch.object(os, "setpgid", fail_subject):
+                        assert emit.run_bounded(lambda: "OK", timeout_s=2) == "CHILD-DIED"
+                finally:
+                    os.dup2(saved, 2)
+                    os.close(saved)
+                err.seek(0)
+                diagnostic = err.read()
+                assert b"Traceback" in diagnostic and b"OSError: [Errno 5] QA15-SUBJECT" in diagnostic
+        check()
+        import traceback
+        with patch.object(traceback, "print_exc"):
+            refuses(AssertionError, check)
     elif mode == "empty-children":
         real_read, real_drain = Path.read_text, emit._fixture_drain
 
@@ -624,13 +822,13 @@ def _watchdog_completion_case(mode):
             return real_read(path, *args, **kwargs)
 
         first = [True]
-        def old_census(subject, subject_fd=None):
+        def old_census(subject, subject_fd=None, **kwargs):
             if first[0]:
                 first[0] = False
                 children = Path("/proc/self/task/{}/children".format(os.getpid()))
                 if not children.read_text(encoding="ascii").split():
                     raise emit.ChildStatusUnavailable("child census disagrees with waitid")
-            return real_drain(subject, subject_fd)
+            return real_drain(subject, subject_fd, **kwargs)
 
         with patch.object(Path, "read_text", empty):
             # Flip: the old immediate-fatal census rejects this exact stimulus.
@@ -841,7 +1039,8 @@ def _watchdog_regression_self_test():
     prefix = ("import sys; sys.path.insert(0, " + repr(str(Path(__file__).resolve().parent))
               + "); import opf; ")
     cases = [(mode, prefix + "return opf._watchdog_deadline_case(" + repr(mode) + ")", 10)
-             for mode in ("delayed-start", "stuck-start", "pipe-stall", "exit-stall")]
+             for mode in ("delayed-start", "stuck-start", "pipe-stall", "exit-stall",
+                          "transient-census")]
     cases.extend((mode, prefix + "return opf._watchdog_safety_case(" + repr(mode) + ")", 15)
                  for mode in ("ignored-chld", "reaper-chld", "lost-reap", "lost-cleanup",
                               "high-fd", "huge-timeout", "fork-error", "poll-error", "missing-reap",
@@ -857,7 +1056,8 @@ def _watchdog_regression_self_test():
                               "early-exit", "cleanup-reaped", "cleanup-cancel", "premature-exit",
                               "nested-timeout", "nested-cancel", "no-signal-echild",
                               "exec-first", "group-ownership", "guardian-error",
-                              "empty-children", "inherited-control"))
+                              "empty-children", "inherited-control", "bounded-diagnostics",
+                              "cleanup-budget", "deadline-flips", "socket-close", "subject-setup"))
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix
