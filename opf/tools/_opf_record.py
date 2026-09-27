@@ -3,11 +3,23 @@
 
   opf record create --type T --title S --actor KIND[:ID] [--summary S] [--link REL=ID]...
                     [--ref KIND LOCATOR NOTE]... [--field NAME=VALUE]... [--scope ID]... [--root DIR]
+  opf record transition ID STATE --actor KIND[:ID] [--reason S] [--root DIR]
+  opf record done-with-receipt BI-ID --actor maintainer[:ID] [--summary S] [--root DIR]
   opf record worklog-append --kind K --summary S --actor KIND[:ID] [--detail S] [--link REL=ID]...
                     [--ref KIND LOCATOR NOTE]... [--root DIR]
-  opf record transition ...          recognized, NOT YET IMPLEMENTED in this build (fail-closed, exit 2)
-  opf record done-with-receipt ...   recognized, NOT YET IMPLEMENTED in this build (fail-closed, exit 2)
   _opf_record.py --self-test         the unit leg (also registered in opf.py --self-test)
+
+`create`, `transition`, and `done-with-receipt` each append their own worklog entry (spec 6.2: one entry
+per change) in the SAME journaled transaction as the change. The entry's `detail` opens with a fixed
+lifecycle line (`opf-record create ID STATUS` or `opf-record transition ID FROM -> TO`): the record history
+that the envelope does not carry (spec 8.3). `transition` takes the target STATE only: an assistant or
+automation author landing a terminal or gated state gets `/proposed` (spec 8.4). A maintainer rejection of a
+`/proposed` record requires --reason and must return to the pre-proposal state recorded by the latest
+lifecycle line for that record; with no such line the rejection cannot be verified and refuses.
+`done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
+`active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
+`receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
+`done`, so no ratified item can exist without its receipt.
 
 Every subcommand runs ONE shared operation sequence (_run_operation), the `opf upgrade` shell applied to
 record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
@@ -16,22 +28,28 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
      never seized) and only when every operand still holds a state the journal explains (an intervening
      edit is surfaced and refused, never overwritten); a reconciled interruption refuses this run, exit 2,
      so the operator inspects it before anything new is written;
-  2. read the manifest; a `create --type` that is not an enabled baseline type refuses here, before any
-     operand path is built from it; read counters.toml and the operand file (the type's
-     `<type>.index.toml`, or worklog.toml), plus version.toml for the released-span boundary;
+  2. read the manifest; a `create --type` that is not an enabled baseline type, or a `transition` id
+     outside every enabled transitionable type's namespace, refuses here, before any operand path is built
+     from it; read counters.toml, worklog.toml, and the operand index (the type's `<type>.index.toml`, plus
+     done.index.toml for a receipt), plus version.toml for the released-span boundary;
   3. PRECONDITION: re-emitting each operand's UNCHANGED parsed model reproduces its on-disk bytes exactly
      (a file carrying comments or non-canonical serialization refuses, bytes untouched; a hand edit or
      merge that leaves canonical bytes is NOT detectable by this check);
   4. plan the new models: claim the ids through the ONE allocation seam (claim_ids), compose and
-     validate the record through the _opf_schema primitives, refuse an append into a released span;
+     validate each record through the _opf_schema primitives (validate_transition for a status change),
+     refuse an append into a released span;
   5. POSTCONDITION: each emitted document, reparsed, equals its prior bytes, reparsed, plus exactly the
-     allowed delta, value for value. The delta is derived INDEPENDENTLY of the planner's rows, from a
-     pre-planning copy of the request, the allocation result, the clock value, and the schema rules;
+     allowed delta, value for value (the new rows appended, the counters advanced by exactly the claim,
+     and for a transition one `status` and `updated_at` change on the one named record). The delta is
+     derived INDEPENDENTLY of the planner's rows, from a pre-planning copy of the request, the allocation
+     result, the clock value, the planned-from bytes, and the schema rules;
   6. the planned-destination cleanliness gate and the single-writer lease (the shared _opf_write_guard
      shell, moved from opf.py), held across publication, render, and the final doctor;
   7. ONE _journal.run_transaction publishes every operand (counters first), rooted at
      .aiqt/record/journal, each operand pinned to the exact bytes it was planned from;
-  8. render the declared views (--write), then require a full doctor VALID;
+  8. render the declared views (--write), then require a full doctor VALID (a status change may leave
+     only doctor's cannot-evaluate for exactly that record and from/to pair, pending until commit, and
+     never a finding: _snapshot_pending);
   9. release the lease, THEN report: the ids, the files, and that the change is left UNCOMMITTED in the
      working tree (this verb never runs git add or commit).
 
@@ -41,8 +59,9 @@ the counters without ever un-publishing an observed id. Homes 2 (the irrevocable
 journals/<kind>/allocations reservation, spec 4.2) is not active in this build, and the seam refuses it
 fail-closed rather than claim through the homes-1 path.
 
-Exit contract: 0 recorded and doctor-VALID (uncommitted); 2 refusal or cannot-evaluate, with recovery
-text where the working tree changed. Exit 1 is not used (it is doctor's own finding code).
+Exit contract: 0 recorded and doctor-VALID, or carrying only that pending cannot-evaluate (uncommitted);
+2 refusal or cannot-evaluate, with recovery text where the working tree changed. Exit 1 is not used (it
+is doctor's own finding code).
 
 DISCLOSED RESIDUALS: there is no pre-doctor, so a store invalid in a way the preconditions do not inspect
 fails only at the final doctor, after publication (the change is then left for review with scoped
@@ -54,7 +73,13 @@ C-ID-SPACE check (not this verb) catch; the byte-reproduction precondition prove
 a hand edit or hand merge that leaves canonical bytes passes it and spec 5.7's integration-base rule stays
 a separate requirement; recovery proves each operand's state under the lease, but the journal engine's
 restore then rewrites without re-checking, so an edit landing in that window, or one that leaves an exact
-byte prefix of the journaled preimage or planned bytes (read as a torn write), is not detected.
+byte prefix of the journaled preimage or planned bytes (read as a torn write), is not detected. A
+transition changes `status` and `updated_at` only, so a target state that requires further fields (a
+`decided` pending_decision's resolution bundle, a `sent` contribution's delivery bundle) refuses at
+validate_record; posting a new handoff does not supersede the previous one in the same act. The
+pre-proposal state is read from the active worklog only: a record proposed outside this verb, or whose
+proposing entry has rotated to an archive, cannot be rejected here (refused, never guessed). A transition
+refuses when the clock has not passed the record's recorded timestamps.
 """
 import base64
 import binascii
@@ -63,6 +88,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shlex
 import stat
 import sys
@@ -86,7 +112,6 @@ EXIT_MALFORMED = 2
 
 VERB = "record"
 SUBCOMMANDS = ("create", "transition", "done-with-receipt", "worklog-append")
-IMPLEMENTED = ("create", "worklog-append")
 # The journal root, at the STORE root and outside `.working/`, so it is never a store operand and never
 # enters the containment walk (the .aiqt/import/journal precedent).
 JOURNAL_REL = ".aiqt/record/journal"
@@ -101,10 +126,22 @@ _NON_STRING_FIELDS = frozenset(("scopes", "delivery"))
 
 _OPTIONS = {
     "create": ("--root", "--type", "--title", "--summary", "--actor", "--link", "--ref", "--field", "--scope"),
+    "transition": ("--root", "--actor", "--reason"),
+    "done-with-receipt": ("--root", "--actor", "--summary"),
     "worklog-append": ("--root", "--kind", "--summary", "--actor", "--detail", "--link", "--ref"),
 }
-_REQUIRED = {"create": ("--type", "--title", "--actor"), "worklog-append": ("--kind", "--summary", "--actor")}
+_REQUIRED = {"create": ("--type", "--title", "--actor"), "transition": ("--actor",),
+             "done-with-receipt": ("--actor",), "worklog-append": ("--kind", "--summary", "--actor")}
 _REPEATED = frozenset(("--link", "--ref", "--field", "--scope"))
+# The leading positional operands, named for the usage refusal.
+_POSITIONALS = {"transition": ("ID", "STATE"), "done-with-receipt": ("BI-ID",)}
+_ID_RE = re.compile(r"^([A-Z]{2})-([1-9][0-9]*)\Z")
+BACKLOG = "backlog_item"
+# The first line of every auto-appended worklog entry's `detail`: a fixed grammar recording the change,
+# so a record's lifecycle (which the envelope does not carry, spec 8.3) is recoverable from the worklog.
+# `create` writes `opf-record create ID STATUS`; `transition` and `done-with-receipt` write
+# `opf-record transition ID FROM -> TO`.
+_LIFECYCLE_RE = re.compile(r"^opf-record (create|transition) ([A-Z]{2}-[1-9][0-9]*) (?:(\S+) -> )?(\S+)\Z")
 
 
 class RecordError(Exception):
@@ -113,10 +150,11 @@ class RecordError(Exception):
 
 class Request:
     """One parsed `opf record` invocation."""
-    __slots__ = ("subcommand", "root", "values", "links", "refs", "fields", "scopes", "actor")
+    __slots__ = ("subcommand", "root", "values", "links", "refs", "fields", "scopes", "actor", "positionals")
 
     def __init__(self, subcommand):
         self.subcommand = subcommand
+        self.positionals = []
         self.root = "."
         self.values = {}
         self.links = []
@@ -156,22 +194,35 @@ def _parse_pair(option, value):
     return name, rest
 
 
+def _require_maintainer(actor):
+    """done-with-receipt is maintainer-only: the ratified `done` and its receipt are a maintainer act."""
+    if actor["kind"] != "maintainer":
+        raise RecordError("done-with-receipt is maintainer-only (spec 8.5); an {} reaching done uses opf record "
+                          "transition, which lands done/proposed with no receipt until a maintainer "
+                          "ratifies".format(actor["kind"]))
+
+
 def parse_request(argv):
     """Parse `opf record <subcommand> ...` into a Request, or raise RecordError (a usage refusal, exit 2).
-    A recognized-but-unimplemented subcommand refuses here, before any store is touched. Every option
-    value must be present, non-empty, and must not start with `--` (so a swallowed next option is refused
-    rather than read as a value); a single-valued option given twice refuses."""
+    Every option value must be present, non-empty, and must not start with `--` (so a swallowed next
+    option is refused rather than read as a value); a single-valued option given twice refuses. The
+    positional operands of `transition` and `done-with-receipt` come first and are grammar-checked here,
+    and a non-maintainer `done-with-receipt` refuses here, all before any store is touched."""
     if not argv:
         raise RecordError("a subcommand is required: one of {}".format(", ".join(SUBCOMMANDS)))
     sub = argv[0]
     if sub not in SUBCOMMANDS:
         raise RecordError("unknown subcommand {!r}; known subcommands: {}".format(sub, ", ".join(SUBCOMMANDS)))
-    if sub not in IMPLEMENTED:
-        raise RecordError("{}: not yet implemented in this build (fail-closed)".format(sub))
     req = Request(sub)
     allowed = _OPTIONS[sub]
     seen = set()
-    i = 1
+    names = _POSITIONALS.get(sub, ())
+    req.positionals = list(argv[1:1 + len(names)])
+    if len(req.positionals) != len(names) or any(v == "" or v.startswith("-") for v in req.positionals):
+        raise RecordError("{}: requires the operand(s) {} before any option".format(sub, " ".join(names)))
+    if names and not _ID_RE.match(req.positionals[0]):
+        raise RecordError("{}: {!r} is not a record id (<NS>-<n>, spec 8.2)".format(sub, req.positionals[0]))
+    i = 1 + len(names)
     while i < len(argv):
         tok = argv[i]
         if tok not in allowed:
@@ -205,6 +256,13 @@ def parse_request(argv):
     missing = [opt for opt in _REQUIRED[sub] if opt not in seen]
     if missing:
         raise RecordError("{}: missing required option(s) {}".format(sub, ", ".join(missing)))
+    if sub == "transition" and "/" in req.positionals[1]:
+        raise RecordError("transition: give the target STATE, not {!r}; the '/proposed' qualifier follows from "
+                          "the actor (spec 8.4)".format(req.positionals[1]))
+    if sub == "done-with-receipt":
+        _require_maintainer(req.actor)
+        if _ID_RE.match(req.positionals[0]).group(1) != _opf_store.BASELINE_TYPES[BACKLOG]:
+            raise RecordError("done-with-receipt: {} is not a backlog item id".format(req.positionals[0]))
     return req
 
 
@@ -269,7 +327,7 @@ def _require_canonical(operand):
 class Context:
     """The resolved store and the models this operation plans from."""
     __slots__ = ("res", "root", "root_fd", "machine_rel", "manifest", "homes", "types", "vendors",
-                 "counters", "version")
+                 "counters", "version", "worklog", "done_index")
 
     def __init__(self, res, root, root_fd):
         self.res = res
@@ -282,6 +340,8 @@ class Context:
         self.vendors = frozenset()
         self.counters = None
         self.version = None
+        self.worklog = None        # the worklog operand: every subcommand appends one entry
+        self.done_index = None     # the done index operand, read by done-with-receipt only
 
     def rel(self, name):
         return "{}/{}".format(self.machine_rel, name)
@@ -393,14 +453,108 @@ def _index_rows(operand):
 
 
 class Plan:
-    """The planned publication: the operands in journal order (counters first) and the ids claimed. It
-    carries no copy of the appended rows: the postcondition derives the allowed delta on its own
-    (_expected_delta) and checks the emitted operands against that."""
-    __slots__ = ("operands", "ids")
+    """The planned publication: the operands in journal order (counters first, worklog last), the ids
+    claimed, and for a status change its (id, from, to). It carries no copy of the appended or changed
+    rows: the postcondition derives the allowed delta on its own (_expected_delta) and checks the emitted
+    operands, and this triple, against that."""
+    __slots__ = ("operands", "ids", "transition")
 
-    def __init__(self, operands, ids):
+    def __init__(self, operands, ids, transition=None):
         self.operands = operands      # [Operand], counters first
         self.ids = ids                # the claimed ids, in claim order
+        self.transition = transition  # (id, from status, to status) of a status change, else None
+
+
+def _require_unseated(rows, rid, rel):
+    if any(isinstance(r, dict) and r.get("id") == rid for r in rows):
+        raise RecordError("the claimed id {} is already seated in {} (counters.toml is behind the store; a "
+                          "regressed counter is never a licence to allocate); fail-closed".format(rid, rel))
+
+
+def _worklog_entries(ctx):
+    model = ctx.worklog.model
+    if not (isinstance(model, dict) and set(model) <= _opf_release.WORKLOG_TOP_KEYS
+            and model.get("schema") == _opf_schema.SUPPORTED_SCHEMA
+            and isinstance(model.get("entry", []), list)):
+        raise RecordError("{} is not a schema-1 worklog ledger; fail-closed".format(ctx.worklog.rel))
+    return model.get("entry", [])
+
+
+def _lifecycle_entry(ctx, wid, now, actor, kind, summary, detail, links):
+    """The worklog entry a mutating subcommand appends for its own change (spec 6.2: one entry per change),
+    validated as a worklog record and refused if its id would land inside a released span."""
+    _require_unseated(_worklog_entries(ctx), wid, ctx.worklog.rel)
+    _check_released_span(ctx.version, int(wid.split("-", 1)[1]))
+    entry = {"id": wid, "date": _rfc3339(now), "actor": dict(actor), "kind": kind, "summary": summary,
+             "detail": detail, "links": [dict(link) for link in links]}
+    return _validated(entry, "worklog", ctx)
+
+
+def _append_worklog(ctx, entry):
+    ctx.worklog.new_model = copy.deepcopy(ctx.worklog.model)
+    ctx.worklog.new_model["entry"] = list(ctx.worklog.new_model.get("entry", [])) + [entry]
+
+
+def _pre_proposal_state(entries, rid, status):
+    """The recorded pre-proposal state of `rid`, now at the `/proposed` `status`: the FROM state of the
+    latest lifecycle line for `rid`, provided that line is the transition that landed exactly `status` from
+    an unqualified state. None when the worklog does not record it (the record was proposed outside this
+    verb, the proposing entry was rotated to an archive, or the latest line is some other change): the
+    rejection target then cannot be verified, and validate_transition grades it CANNOT-EVALUATE."""
+    for entry in reversed(entries):
+        detail = entry.get("detail") if isinstance(entry, dict) else None
+        if not isinstance(detail, str):
+            continue
+        m = _LIFECYCLE_RE.match(detail.split("\n", 1)[0])
+        if m is None or m.group(2) != rid:
+            continue
+        if m.group(1) == "transition" and m.group(4) == status and m.group(3) and "/" not in m.group(3):
+            return m.group(3)
+        return None
+    return None
+
+
+def _parse_ts(value):
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+
+
+def _require_later(row, ts):
+    """A transition's updated_at must be strictly later than every timestamp the record already carries:
+    an equal updated_at would make the changed record read as its own creation snapshot (spec 8.3, 8.4)."""
+    new = _parse_ts(ts)
+    for key in ("created_at", "updated_at"):
+        if key not in row:
+            continue
+        old = _parse_ts(row[key])
+        if old is None:
+            raise RecordError("{} {} {!r} is not an RFC 3339 timestamp; fail-closed".format(
+                row.get("id"), key, row[key]))
+        if new <= old:
+            raise RecordError("the clock ({}) is not later than {} {} {}; a transition's updated_at must follow "
+                              "it (spec 8.3). Nothing written; retry once the clock has advanced".format(
+                                  ts, row.get("id"), key, row[key]))
+
+
+def _locate(operand, rid):
+    """The one row of `operand` carrying `rid`, or a refusal (absent, or seated more than once)."""
+    rows = _index_rows(operand)
+    hits = [r for r in rows if isinstance(r, dict) and r.get("id") == rid]
+    if not hits:
+        raise RecordError("{} is not a record in {}; fail-closed".format(rid, operand.rel))
+    if len(hits) > 1:
+        raise RecordError("{} is seated {} times in {} (a duplicate id, spec 8.2); fail-closed".format(
+            rid, len(hits), operand.rel))
+    return hits[0]
+
+
+def _change_row(operand, rid, fields):
+    operand.new_model = copy.deepcopy(operand.model)
+    for row in operand.new_model["record"]:
+        if isinstance(row, dict) and row.get("id") == rid:
+            row.update(fields)
 
 
 def _require_create_type(rtype, ctx):
@@ -419,9 +573,12 @@ def _require_create_type(rtype, ctx):
 
 
 def _check_request(req, ctx):
-    """The request checks that need the manifest but must precede every operand read."""
+    """The request checks that need the manifest but must precede every operand read: the index path is
+    built from `create --type` or from a `transition` id's namespace."""
     if req.subcommand == "create":
         _require_create_type(req.values["--type"], ctx)
+    elif req.subcommand == "transition":
+        _operand_rel(req, ctx)
 
 
 def _plan_create(req, ctx, operand, now):
@@ -432,10 +589,8 @@ def _plan_create(req, ctx, operand, now):
     rtype = req.values["--type"]
     spec = _require_create_type(rtype, ctx)
     rows = _index_rows(operand)
-    (rid,) = _claim(ctx, [spec.namespace])
-    if any(isinstance(r, dict) and r.get("id") == rid for r in rows):
-        raise RecordError("the claimed id {} is already seated in {} (counters.toml is behind the store; a "
-                          "regressed counter is never a licence to allocate); fail-closed".format(rid, operand.rel))
+    rid, wid = _claim(ctx, [spec.namespace, _opf_release.WL_NAMESPACE])
+    _require_unseated(rows, rid, operand.rel)
     ts = _rfc3339(now)
     qual = "proposed" if req.actor["kind"] in _opf_schema.PROPOSER_KINDS and spec.initial in spec.gated else None
     record = {"id": rid, "type": rtype, "status": spec.initial if qual is None else spec.initial + "/" + qual,
@@ -453,38 +608,161 @@ def _plan_create(req, ctx, operand, now):
             raise RecordError("--scope applies to block records only, not {}; fail-closed".format(rtype))
         record["scopes"] = list(req.scopes)
     _validated(record, rtype, ctx)
+    entry = _lifecycle_entry(ctx, wid, now, req.actor, "added",
+                             "created {} ({}) at {}".format(rid, rtype, record["status"]),
+                             "opf-record create {} {}".format(rid, record["status"]),
+                             [{"rel": "relates", "id": rid}])
     operand.new_model = copy.deepcopy(operand.model)
     operand.new_model["record"] = list(operand.new_model.get("record", [])) + [record]
-    return Plan([ctx.counters, operand], [rid])
+    _append_worklog(ctx, entry)
+    return Plan([ctx.counters, operand, ctx.worklog], [rid, wid])
 
 
 def _plan_worklog_append(req, ctx, operand, now):
     """`worklog-append`: one entry appended to the UNRELEASED tail of worklog.toml (spec 6.2). A worklog
     entry records a fact, so it takes no `/proposed` qualifier whatever the actor (its status is fixed
-    `recorded`, spec 8.3/8.4). An id that would fall inside a released span refuses."""
-    model = operand.model
-    if not (isinstance(model, dict) and set(model) <= _opf_release.WORKLOG_TOP_KEYS
-            and model.get("schema") == _opf_schema.SUPPORTED_SCHEMA
-            and isinstance(model.get("entry", []), list)):
-        raise RecordError("{} is not a schema-1 worklog ledger; fail-closed".format(operand.rel))
-    entries = model.get("entry", [])
+    `recorded`, spec 8.3/8.4). An id that would fall inside a released span refuses. A --detail may not
+    open with the lifecycle grammar, which is reserved for this verb's own entries."""
+    entries = _worklog_entries(ctx)
     ns = _opf_release.WL_NAMESPACE
     (wid,) = _claim(ctx, [ns])
-    if any(isinstance(e, dict) and e.get("id") == wid for e in entries):
-        raise RecordError("the claimed id {} is already seated in {} (counters.toml is behind the store); "
-                          "fail-closed".format(wid, operand.rel))
+    _require_unseated(entries, wid, operand.rel)
     _check_released_span(ctx.version, int(wid.split("-", 1)[1]))
     entry = {"id": wid, "date": _rfc3339(now), "actor": dict(req.actor), "kind": req.values["--kind"]}
     _envelope_extras(req, entry)
     if "--detail" in req.values:
+        if _LIFECYCLE_RE.match(req.values["--detail"].split("\n", 1)[0]):
+            raise RecordError("worklog-append --detail may not open with an opf-record lifecycle line; that "
+                              "grammar is reserved for the entries opf record writes for its own changes (it is "
+                              "the recorded pre-proposal state); fail-closed")
         entry["detail"] = req.values["--detail"]
     _validated(entry, "worklog", ctx)
-    operand.new_model = copy.deepcopy(model)
-    operand.new_model["entry"] = list(operand.new_model.get("entry", [])) + [entry]
-    return Plan([ctx.counters, operand], [wid])
+    _append_worklog(ctx, entry)
+    return Plan([ctx.counters, ctx.worklog], [wid])
 
 
-_PLANNERS = {"create": _plan_create, "worklog-append": _plan_worklog_append}
+def _derived_status(kind, spec, cur_state, target):
+    """The status a transition to `target` lands: `/proposed` when an assistant or automation enters a
+    terminal or gated state (spec 8.4); otherwise the bare state. A move to the current state (a
+    ratification attempt) stays bare, so validate_transition judges it as ratification."""
+    if kind in _opf_schema.PROPOSER_KINDS and target != cur_state and (target in spec.terminal
+                                                                       or target in spec.gated):
+        return target + "/proposed"
+    return target
+
+
+def _checked_reason(req):
+    """The reason validate_transition judges a rejection by: the operator's --reason, verbatim, or None
+    (a rejection's reason is never supplied here). The worklog entry records --reason from the request
+    itself, so this seam feeds only the check."""
+    return req.values.get("--reason")
+
+
+def _require_receipt_path(rtype, to_status):
+    """A backlog item lands at unqualified `done` only through done-with-receipt, which mints its receipt in
+    the same act (spec 8.5), so `transition` never leaves a ratified item without its receipt."""
+    if rtype == BACKLOG and to_status == "done":
+        raise RecordError("a backlog item lands at unqualified done only through opf record done-with-receipt, "
+                          "which mints its one-to-one done receipt in the same act (spec 8.5); fail-closed")
+
+
+def _plan_transition(req, ctx, operand, now):
+    """`transition ID STATE`: one status change checked by validate_transition (spec 8.4, 8.5). The target
+    status is derived from the actor: an assistant or automation landing a terminal or gated state gets
+    `/proposed`. Leaving a `/proposed` status for another state is a rejection: maintainer-only, --reason
+    required, and it must return to the pre-proposal state the worklog records for this record. A
+    backlog item never lands at unqualified `done` here (done-with-receipt mints the receipt in the same
+    act). The change is `status` and `updated_at` on that one record, plus its own worklog entry."""
+    rid, target = req.positionals
+    row = _locate(operand, rid)
+    rtype = row.get("type")
+    spec = _opf_schema.BASELINE_SPECS.get(rtype) if isinstance(rtype, str) else None
+    if spec is None or ctx.types.get(rtype) != _ID_RE.match(rid).group(1):
+        raise RecordError("{} in {} does not carry its index's baseline type; fail-closed".format(rid, operand.rel))
+    current = row.get("status")
+    parsed, err = _opf_schema.parse_status(current, spec)
+    if parsed is None:
+        raise RecordError("{} status {!r} cannot be parsed ({}); fail-closed".format(rid, current, err))
+    cur_state, cur_qual = parsed
+    kind = req.actor["kind"]
+    to_status = _derived_status(kind, spec, cur_state, target)
+    _require_receipt_path(rtype, to_status)
+    rejection = cur_qual == "proposed" and target != cur_state
+    pre = _pre_proposal_state(_worklog_entries(ctx), rid, current) if rejection else None
+    tc = _opf_schema.validate_transition(rtype, current, to_status, kind, pre_proposal_state=pre,
+                                         reason=_checked_reason(req))
+    if tc.status != _opf_store.VALID:
+        unrecorded = rejection and pre is None
+        raise RecordError("{} {} -> {} by a {} is {}: {}{} (fail-closed)".format(
+            rid, current, to_status, kind, tc.status, "; ".join(tc.findings),
+            "; the worklog records no pre-proposal state for {} (no opf-record transition line landed {})".format(
+                rid, current) if unrecorded else ""))
+    ts = _rfc3339(now)
+    _require_later(row, ts)
+    fields = {"status": to_status, "updated_at": ts}
+    _validated(dict(row, **fields), rtype, ctx)
+    (wid,) = _claim(ctx, [_opf_release.WL_NAMESPACE])
+    detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
+    if "--reason" in req.values:
+        detail += "\nreason: " + req.values["--reason"]
+    verb = "rejected" if rejection else "ratified" if cur_qual == "proposed" else "transitioned"
+    entry = _lifecycle_entry(ctx, wid, now, req.actor, "changed",
+                             "{} {} from {} to {}".format(verb, rid, current, to_status), detail,
+                             [{"rel": "relates", "id": rid}])
+    _change_row(operand, rid, fields)
+    _append_worklog(ctx, entry)
+    return Plan([ctx.counters, operand, ctx.worklog], [wid], transition=(rid, current, to_status))
+
+
+def _plan_done_with_receipt(req, ctx, operand, now):
+    """`done-with-receipt BI-ID` (maintainer-only, checked by the parser and again here): `active -> done`,
+    or the ratification `done/proposed -> done`, AND the one-to-one `done` receipt linked `receipt_of`,
+    both in this one publication (spec 8.5). A backlog item that already has a receipt refuses."""
+    (rid,) = req.positionals
+    _require_maintainer(req.actor)
+    row = _locate(operand, rid)
+    current = row.get("status")
+    if row.get("type") != BACKLOG or current not in ("active", "done/proposed"):
+        raise RecordError("done-with-receipt moves an active or done/proposed backlog item to done; {} is {!r} "
+                          "(fail-closed)".format(rid, current))
+    tc = _opf_schema.validate_transition(BACKLOG, current, "done", req.actor["kind"])
+    if tc.status != _opf_store.VALID:
+        raise RecordError("{} {} -> done is {}: {} (fail-closed)".format(rid, current, tc.status,
+                                                                          "; ".join(tc.findings)))
+    done_rows = _index_rows(ctx.done_index)
+    held = [r.get("id") for r in done_rows if isinstance(r, dict) and any(
+        isinstance(link, dict) and link.get("rel") == "receipt_of" and link.get("id") == rid
+        for link in (r.get("links") if isinstance(r.get("links"), list) else []))]
+    if held:
+        raise RecordError("{} already has a done receipt ({}); the receipt is one-to-one (spec 8.5), "
+                          "fail-closed".format(rid, ", ".join(map(str, held))))
+    ts = _rfc3339(now)
+    _require_later(row, ts)
+    fields = {"status": "done", "updated_at": ts}
+    _validated(dict(row, **fields), BACKLOG, ctx)
+    dn_ns = _opf_store.BASELINE_TYPES["done"]
+    did, wid = _claim(ctx, [dn_ns, _opf_release.WL_NAMESPACE])
+    _require_unseated(done_rows, did, ctx.done_index.rel)
+    receipt = {"id": did, "type": "done", "status": "recorded", "title": row.get("title"), "created_at": ts,
+               "updated_at": ts, "actor": dict(req.actor), "links": [{"rel": "receipt_of", "id": rid}]}
+    if "--summary" in req.values:
+        receipt["summary"] = req.values["--summary"]
+    _validated(receipt, "done", ctx)
+    verb = "ratified" if current == "done/proposed" else "completed"
+    entry = _lifecycle_entry(ctx, wid, now, req.actor, "changed",
+                             "{} {} from {} to done with receipt {}".format(verb, rid, current, did),
+                             "opf-record transition {} {} -> done\nreceipt: {}".format(rid, current, did),
+                             [{"rel": "relates", "id": rid}, {"rel": "relates", "id": did}])
+    _change_row(operand, rid, fields)
+    ctx.done_index.new_model = copy.deepcopy(ctx.done_index.model)
+    ctx.done_index.new_model["record"] = list(ctx.done_index.new_model.get("record", [])) + [receipt]
+    _append_worklog(ctx, entry)
+    return Plan([ctx.counters, operand, ctx.done_index, ctx.worklog], [did, wid],
+                transition=(rid, current, "done"))
+
+
+_PLANNERS = {"create": _plan_create, "transition": _plan_transition,
+             "done-with-receipt": _plan_done_with_receipt, "worklog-append": _plan_worklog_append}
 
 
 def _postcondition_failed(what):
@@ -499,76 +777,166 @@ def _reparse(raw, rel):
         raise _postcondition_failed("{} cannot be reparsed ({})".format(rel, exc))
 
 
-def _expected_delta(req, ctx, counters_raw, operand_rel, operand_raw, now):
+def _expected_rels(req, ctx):
+    """The operand set the request implies, in journal order: counters first, the worklog last, and between
+    them the record index a create or a status change rewrites (plus done.index.toml for a receipt)."""
+    worklog = ctx.rel(_opf_check.WORKLOG_NAME)
+    if req.subcommand == "worklog-append":
+        return [ctx.counters.rel, worklog]
+    if req.subcommand == "done-with-receipt":
+        return [ctx.counters.rel, ctx.rel(BACKLOG + _opf_check.INDEX_SUFFIX),
+                ctx.rel("done" + _opf_check.INDEX_SUFFIX), worklog]
+    return [ctx.counters.rel, _operand_rel(req, ctx), worklog]
+
+
+def _prior_row(document, rid, rel):
+    """The one row of a reparsed prior index carrying `rid` (the oracle's own lookup)."""
+    rows = document.get("record") if isinstance(document, dict) else None
+    hits = [r for r in rows if isinstance(r, dict) and r.get("id") == rid] if isinstance(rows, list) else []
+    if len(hits) != 1:
+        raise _postcondition_failed("{} is not seated exactly once in the prior {}".format(rid, rel))
+    return hits[0]
+
+
+def _expected_entry(wid, ts, actor, kind, summary, detail, targets):
+    return {"id": wid, "date": ts, "actor": dict(actor), "kind": kind, "summary": summary, "detail": detail,
+            "links": [{"rel": "relates", "id": target} for target in targets]}
+
+
+def _expected_delta(req, ctx, raws, now):
     """The allowed delta, derived INDEPENDENTLY of the planner's output: ([(rel, expected model)] in
-    journal order, the expected ids). The inputs are the request (the caller passes a copy taken before
-    planning), the allocation result (claim_ids over the high-water map reparsed from the bytes the plan
-    was made from), the clock value, and the schema rules (the type's namespace, initial state, gating, and
-    the proposer kinds of spec 8.4). The baselines are reparsed from the planned-from bytes, so no expected
-    row or table is an object any planned model holds. Deliberately not composed through the planner's
-    helpers: a planner that drifts from these rules is refused, not mirrored."""
+    journal order, the expected ids, the expected (id, from, to) of a status change or None). The inputs
+    are the request (the caller passes a copy taken before planning), the allocation result (claim_ids
+    over the high-water map reparsed from the bytes the plan was made from), the clock value, the
+    planned-from bytes, and the schema rules (the type's namespace, initial state, terminal and gated
+    states, and the proposer kinds of spec 8.4). Every baseline, including the one row a status change
+    rewrites and its prior status, is reparsed from the planned-from bytes, so no expected row or table is
+    an object any planned model holds. Deliberately not composed through the planner's helpers: a planner
+    that drifts from these rules is refused, not mirrored. The oracle derives the delta only; the
+    legality of a status change (validate_transition, the rejection's reason and pre-proposal state, the
+    maintainer-only receipt) is the planner's refusal and is not judged again here."""
     ts = _rfc3339(now)
-    if req.subcommand == "create":
+    sub = req.subcommand
+    wl = _opf_release.WL_NAMESPACE
+    rels = _expected_rels(req, ctx)
+    docs = {rel: _reparse(raws[rel], rel) for rel in rels}
+    if sub == "create":
         rtype = req.values["--type"]
         spec = _opf_schema.BASELINE_SPECS[rtype]
-        ns, key = spec.namespace, "record"
+        demand = [spec.namespace, wl]
+    elif sub == "done-with-receipt":
+        demand = [_opf_store.BASELINE_TYPES["done"], wl]
     else:
-        ns, key = _opf_release.WL_NAMESPACE, "entry"
-    counters = _reparse(counters_raw, ctx.counters.rel)
+        demand = [wl]
+    counters = docs[ctx.counters.rel]
     high, findings = _counter_state(ctx, counters)
     if findings:
         raise _postcondition_failed("the prior counters.toml cannot license the claim")
-    ids, new_high = claim_ids(ctx.homes, high, [ns], known_complete=True)
+    ids, new_high = claim_ids(ctx.homes, high, demand, known_complete=True)
     table = dict(counters.get("counters") or {})
-    if new_high[ns] != table.get(ns, 0) + 1:
-        raise _postcondition_failed("the claim does not advance {} by exactly one".format(ns))
-    table[ns] = new_high[ns]
+    for ns in demand:
+        if new_high[ns] != table.get(ns, 0) + 1:
+            raise _postcondition_failed("the claim does not advance {} by exactly one".format(ns))
+        table[ns] = new_high[ns]
     counters["counters"] = table
-    row = {"id": ids[0], "actor": dict(req.actor)}
-    if req.subcommand == "create":
-        proposed = req.actor["kind"] in _opf_schema.PROPOSER_KINDS and spec.initial in spec.gated
-        row.update({"type": rtype, "status": spec.initial + ("/proposed" if proposed else ""),
-                    "title": req.values["--title"], "created_at": ts, "updated_at": ts})
-        row.update({name: value for name, value in req.fields})
-        if req.scopes:
-            row["scopes"] = list(req.scopes)
+    wid = ids[-1]
+    transition = None
+    if sub in ("create", "worklog-append"):
+        row = {"id": ids[0], "actor": dict(req.actor)}
+        if sub == "create":
+            proposed = req.actor["kind"] in _opf_schema.PROPOSER_KINDS and spec.initial in spec.gated
+            row.update({"type": rtype, "status": spec.initial + ("/proposed" if proposed else ""),
+                        "title": req.values["--title"], "created_at": ts, "updated_at": ts})
+            row.update({name: value for name, value in req.fields})
+            if req.scopes:
+                row["scopes"] = list(req.scopes)
+        else:
+            row.update({"date": ts, "kind": req.values["--kind"]})
+            if "--detail" in req.values:
+                row["detail"] = req.values["--detail"]
+        if "--summary" in req.values:
+            row["summary"] = req.values["--summary"]
+        if req.links:
+            row["links"] = [{"rel": link["rel"], "id": link["id"]} for link in req.links]
+        if req.refs:
+            row["refs"] = [{"kind": ref["kind"], "locator": ref["locator"], "note": ref["note"]}
+                           for ref in req.refs]
+        if sub == "create":
+            docs[rels[1]]["record"] = list(docs[rels[1]].get("record", [])) + [row]
+            entry = _expected_entry(wid, ts, req.actor, "added",
+                                    "created {} ({}) at {}".format(ids[0], rtype, row["status"]),
+                                    "opf-record create {} {}".format(ids[0], row["status"]), [ids[0]])
+        else:
+            entry = row
+    elif sub == "transition":
+        rid, target = req.positionals
+        prior = _prior_row(docs[rels[1]], rid, rels[1])
+        current = prior.get("status")
+        spec = _opf_schema.BASELINE_SPECS.get(prior.get("type")) if isinstance(prior.get("type"), str) else None
+        if spec is None or not isinstance(current, str):
+            raise _postcondition_failed("{} in the prior {} carries no baseline type and status".format(
+                rid, rels[1]))
+        cur_state, _sep, cur_qual = current.partition("/")
+        proposed = (req.actor["kind"] in _opf_schema.PROPOSER_KINDS and target != cur_state
+                    and (target in spec.terminal or target in spec.gated))
+        to_status = target + ("/proposed" if proposed else "")
+        prior.update({"status": to_status, "updated_at": ts})
+        verb = ("rejected" if target != cur_state else "ratified") if cur_qual == "proposed" else "transitioned"
+        detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
+        if "--reason" in req.values:
+            detail += "\nreason: " + req.values["--reason"]
+        entry = _expected_entry(wid, ts, req.actor, "changed",
+                                "{} {} from {} to {}".format(verb, rid, current, to_status), detail, [rid])
+        transition = (rid, current, to_status)
     else:
-        row.update({"date": ts, "kind": req.values["--kind"]})
-        if "--detail" in req.values:
-            row["detail"] = req.values["--detail"]
-    if "--summary" in req.values:
-        row["summary"] = req.values["--summary"]
-    if req.links:
-        row["links"] = [{"rel": link["rel"], "id": link["id"]} for link in req.links]
-    if req.refs:
-        row["refs"] = [{"kind": ref["kind"], "locator": ref["locator"], "note": ref["note"]} for ref in req.refs]
-    document = _reparse(operand_raw, operand_rel)
-    document[key] = list(document.get(key, [])) + [row]
-    return [(ctx.counters.rel, counters), (operand_rel, document)], ids
+        (rid,) = req.positionals
+        did = ids[0]
+        prior = _prior_row(docs[rels[1]], rid, rels[1])
+        current = prior.get("status")
+        receipt = {"id": did, "type": "done", "status": "recorded", "title": prior.get("title"),
+                   "created_at": ts, "updated_at": ts, "actor": dict(req.actor),
+                   "links": [{"rel": "receipt_of", "id": rid}]}
+        if "--summary" in req.values:
+            receipt["summary"] = req.values["--summary"]
+        prior.update({"status": "done", "updated_at": ts})
+        docs[rels[2]]["record"] = list(docs[rels[2]].get("record", [])) + [receipt]
+        entry = _expected_entry(wid, ts, req.actor, "changed", "{} {} from {} to done with receipt {}".format(
+            "ratified" if current == "done/proposed" else "completed", rid, current, did),
+            "opf-record transition {} {} -> done\nreceipt: {}".format(rid, current, did), [rid, did])
+        transition = (rid, current, "done")
+    worklog = docs[rels[-1]]
+    worklog["entry"] = list(worklog.get("entry", [])) + [entry]
+    return [(rel, docs[rel]) for rel in rels], ids, transition
 
 
 def _postcondition(plan, req, ctx, now):
     """POSTCONDITION (the spec 9.2 guard, applied to record authoring): every operand's EMITTED bytes,
     reparsed (a copy sharing nothing with the planner's rows), must equal EXACTLY its prior bytes,
-    reparsed, plus the allowed delta _expected_delta derives on its own, value for value: the one new row
-    appended with the requested content, the initial status the schema rules give, the clock's timestamps,
-    and the claimed id; the counters advanced by exactly the claim; nothing else. A stray mutation of an
-    existing record or of the new row, a lost or reordered row, a changed schema marker, or a counter
-    moved by anything but the claim refuses before anything is written. `req` must be a copy of the
-    request taken before planning, so nothing the planner does can reach the oracle."""
-    operand_rel = _operand_rel(req, ctx)
+    reparsed, plus the allowed delta _expected_delta derives on its own, value for value: each new row
+    appended with the requested content (the record or receipt, and the operation's own worklog entry),
+    the initial or target status the schema rules give, the clock's timestamps, and the claimed ids; for a
+    status change exactly `status` and `updated_at` of the one named record; the counters advanced by
+    exactly the claim; nothing else. A stray mutation of an existing record or of a new row, a lost or
+    reordered row, a changed schema marker, a status change touching another field or another record, or
+    a counter moved by anything but the claim refuses before anything is written, and so does a plan whose
+    reported status change is not the one the oracle derives (the final gate trusts that triple). `req`
+    must be a copy of the request taken before planning, so nothing the planner does can reach the oracle."""
     rels = [o.rel for o in plan.operands]
-    if rels != [ctx.counters.rel, operand_rel]:
-        raise _postcondition_failed("the operand set {} is not counters.toml then {}".format(rels, operand_rel))
+    want = _expected_rels(req, ctx)
+    if rels != want:
+        raise _postcondition_failed("the operand set {} is not {}".format(rels, want))
     raws = {o.rel: o.raw for o in plan.operands}
-    expected, ids = _expected_delta(req, ctx, raws[ctx.counters.rel], operand_rel, raws[operand_rel], now)
+    expected, ids, transition = _expected_delta(req, ctx, raws, now)
     if list(plan.ids) != ids:
         raise _postcondition_failed("the plan does not report exactly the claimed ids {}".format(ids))
+    if plan.transition != transition:
+        raise _postcondition_failed("the plan reports the status change {!r}, not the requested {!r}".format(
+            plan.transition, transition))
     for operand, (rel, model) in zip(plan.operands, expected):
         if operand.new_raw is None or _reparse(operand.new_raw, rel) != model:
             raise _postcondition_failed("the emitted {} differs from its allowed delta (exactly the requested "
-                                        "row appended and the counters advanced by exactly the "
-                                        "claim)".format(rel))
+                                        "rows appended, the one requested status change, and the counters "
+                                        "advanced by exactly the claim)".format(rel))
 
 
 # --- the journal: startup reconciliation and the one journaled publication ---------------------------
@@ -696,7 +1064,8 @@ def _leftover_lock_outcome(owner, states):
     _stamp, name, state = max(own)
     if state == "complete":
         return head + (": the dead run's transaction {} is COMPLETE, so its publication is present in the "
-                       "working tree, with its render and final doctor never run".format(name))
+                       "working tree; whether its render and final doctor ran, and what they reported, is not "
+                       "recorded by the journal, so run opf doctor before relying on it".format(name))
     return head + ": the dead run's transaction {} {}, so it published nothing".format(
         name, "was rolled back" if state == "rolled-back" else "never opened")
 
@@ -894,8 +1263,12 @@ def _publish(ctx, plan, subcommand):
         if held and not retain:
             try:
                 _journal.release_lock(journal_root)
-            except (_journal.JournalError, OSError):
-                pass   # a dead owner's leftover lock is reconciled by the next run (_reconcile_journal)
+            except (_journal.JournalError, OSError) as exc:
+                # Surfaced, never fatal here: the transaction reached a terminal state, and the next run
+                # reconciles the leftover lock once this process has exited (_reconcile_journal).
+                print("opf record: the record journal lock under {} could not be released ({}); it is left "
+                      "in place, and the next opf record run reconciles it and refuses once, naming the "
+                      "outcome.".format(JOURNAL_REL, exc), file=sys.stderr)
         _journal._close_fd_quietly(jr_fd)
 
 
@@ -915,29 +1288,55 @@ def _doctor(root):
     return _opf_check.validate_store(res, observations=obs)
 
 
-def _final_gate(root):
-    """Require a full doctor VALID over the published store before anything is offered as recorded."""
+def _snapshot_pending(transition):
+    """The predicate for the one doctor cannot-evaluate a transition this verb checked may leave until it
+    is committed, or None. Doctor judges a status change against the prior committed snapshot (HEAD) over
+    every actor kind, and the envelope does not identify the transitioning actor or the pre-proposal state,
+    so an actor-dependent or rejection-shaped change is CANNOT-EVALUATE there (C-HISTORY-RESURRECTION) until
+    the commit makes it the snapshot. This verb checked that exact change with the known actor, reason, and
+    recorded pre-proposal state, and `transition` is the triple the postcondition proved equal to the
+    oracle's own derivation of what was written, so it accepts that message, for that record and that
+    from/to pair only. Callers also require the message to be a cannot-evaluate, never a finding; doctor's
+    own grading is unchanged."""
+    if transition is None:
+        return None
+    prefix = "C-HISTORY-RESURRECTION: prior record {!r} transition {!r} -> {!r} ".format(*transition)
+    return lambda message: isinstance(message, str) and message.startswith(prefix)
+
+
+def _final_gate(root, transition=None):
+    """Require a full doctor VALID over the published store before anything is offered as recorded. The
+    one exception is a transition this operation checked (`transition` = (id, from, to)): the doctor may
+    then be CANNOT-EVALUATE with no finding, provided every cannot-evaluate line is the snapshot comparison
+    of exactly that change (_snapshot_pending). Returns those accepted lines (empty when VALID)."""
     try:
         result = _doctor(root)
     except _PostPublication:
         raise
     except Exception as exc:  # noqa: BLE001  a doctor escape must not read as a recorded change
         raise _PostPublication("the final doctor could not run ({!r}); fail-closed".format(exc))
+    accepted = _snapshot_pending(transition)
+    if (accepted is not None and result.status == _opf_store.CANNOT_EVALUATE and not result.findings
+            and result.cannot_evaluate and all(accepted(c) for c in result.cannot_evaluate)):
+        return list(result.cannot_evaluate)
     if result.status != _opf_store.VALID:
         lines = ["the published store is NOT doctor-VALID ({}); nothing is offered as recorded".format(
             result.status)]
         lines += ["  FINDING: {}".format(f) for f in result.findings]
         lines += ["  CANNOT-EVALUATE: {}".format(c) for c in result.cannot_evaluate]
         raise _PostPublication("\n".join(lines))
+    return []
 
 
-def _render(root):
+def _render(root, transition=None):
     """Render the declared views over the published store. Exit 1 (views regenerated, an AUTHORED
-    residual such as a changelog finding remains) is left for the final doctor to grade; exit 2 fails."""
+    residual such as a changelog finding remains) is left for the final doctor to grade; exit 2 fails. The
+    render's source gate accepts only the one pending cannot-evaluate of `transition` (_snapshot_pending)."""
     try:
         rres = _opf_store.resolve_store(Path(os.path.abspath(root)))
         robs, _notes = _opf_observe.gather(rres) if rres.status == _opf_store.RESOLVED else (None, [])
-        rc = _opf_views.render(["--root", root, "--write"], observations=robs)
+        rc = _opf_views.render(["--root", root, "--write"], observations=robs,
+                               accepted=_snapshot_pending(transition))
     except Exception as exc:  # noqa: BLE001  a render escape must not read as a recorded change
         raise _PostPublication("the view render after publication failed ({!r})".format(exc))
     if rc not in (0, 1):
@@ -952,7 +1351,8 @@ def _recovery_text(ctx, scope):
     product_root = str(ctx.res.product_root if ctx.res.product_root is not None else ctx.res.store_root)
     lines = ["opf record: the uncommitted change is left for review. Resolve the findings above and run opf "
              "doctor, or discard the publication by restoring these planned paths together (counters.toml "
-             "with its record file, never one without the other; confirm no opf run is live, spec 5.7):",
+             "with its record and worklog files, never one without the others; confirm no opf run is live, "
+             "spec 5.7):",
              "  git -C {} --literal-pathspecs restore --staged --worktree -- {}".format(
                  shlex.quote(store_root), " ".join(shlex.quote(p) for p in scope["store"]))]
     for p in scope["product"]:
@@ -971,9 +1371,16 @@ def _release(ctx, lease):
 
 
 def _emit_success(report):
-    print("opf record {}: recorded {} and the store is doctor-VALID; the change is left UNCOMMITTED in the "
-          "working tree (this verb never runs git add or commit).".format(report["subcommand"],
-                                                                           ", ".join(report["ids"])))
+    change = report.get("change")
+    pending = report.get("doctor_pending") or []
+    print("opf record {}: recorded {}{} and the store is {}; the change is left UNCOMMITTED in the working "
+          "tree (this verb never runs git add or commit).".format(
+              report["subcommand"], change + ", " if change else "", ", ".join(report["ids"]),
+              "doctor-VALID" if not pending else "free of doctor findings"))
+    for line in pending:
+        print("opf record: until this change is committed, opf doctor reports: CANNOT-EVALUATE: {}. This verb "
+              "checked the change with its actor, reason, and recorded pre-proposal state; the snapshot "
+              "comparison clears once the commit makes it the prior snapshot.".format(line))
     print(json.dumps(report, sort_keys=True))
     print("opf record: review the change, then stage and commit these paths yourself (the journal under {} "
           "is local recovery evidence, not part of the change):".format(JOURNAL_REL))
@@ -994,9 +1401,22 @@ def _conclude(ctx, lease, report):
 # --- the shared operation sequence --------------------------------------------------------------------
 
 def _operand_rel(req, ctx):
+    """The primary operand: the type index a record is created in or transitioned in (the type named by
+    the id's namespace), the backlog index for a receipt, or the worklog itself."""
     if req.subcommand == "worklog-append":
         return ctx.rel(_opf_check.WORKLOG_NAME)
-    return ctx.rel(req.values["--type"] + _opf_check.INDEX_SUFFIX)
+    if req.subcommand == "create":
+        return ctx.rel(req.values["--type"] + _opf_check.INDEX_SUFFIX)
+    if req.subcommand == "done-with-receipt":
+        return ctx.rel(BACKLOG + _opf_check.INDEX_SUFFIX)
+    ns = _ID_RE.match(req.positionals[0]).group(1)
+    owners = [t for t, n in ctx.types.items() if n == ns]
+    if len(owners) != 1 or owners[0] not in _opf_schema.BASELINE_SPECS:
+        raise RecordError("{} is not in the namespace of an enabled baseline record type; fail-closed".format(
+            req.positionals[0]))
+    if _opf_schema.BASELINE_SPECS[owners[0]].reduced:
+        raise RecordError("a worklog entry records a fact and does not transition (spec 8.4); fail-closed")
+    return ctx.rel(owners[0] + _opf_check.INDEX_SUFFIX)
 
 
 def _run_operation(req):
@@ -1026,10 +1446,15 @@ def _run_operation(req):
         _check_request(req, ctx)
         ctx.counters = _read_operand(root_fd, ctx.rel(_opf_check.COUNTERS_NAME))
         ctx.version = _read_operand(root_fd, ctx.rel(_opf_check.VERSION_NAME)).model
-        operand = _read_operand(root_fd, _operand_rel(req, ctx))
+        ctx.worklog = _read_operand(root_fd, ctx.rel(_opf_check.WORKLOG_NAME))
+        rel = _operand_rel(req, ctx)
+        operand = ctx.worklog if rel == ctx.worklog.rel else _read_operand(root_fd, rel)
+        if req.subcommand == "done-with-receipt":
+            ctx.done_index = _read_operand(root_fd, ctx.rel("done" + _opf_check.INDEX_SUFFIX))
         # 3. PRECONDITION: every file this operation rewrites is canonical (byte reproduction).
-        for op in (ctx.counters, operand):
-            _require_canonical(op)
+        for op in (ctx.counters, operand, ctx.worklog, ctx.done_index):
+            if op is not None:
+                _require_canonical(op)
         # 4. plan (the claim goes through the one allocation seam) and emit, then 5. POSTCONDITION over
         # the emitted bytes, against the oracle's own copy of the request taken before planning.
         now = _clock_now()
@@ -1059,13 +1484,14 @@ def _run_operation(req):
             # 7. ONE journaled publication; 8. render, then the final doctor.
             _publish(ctx, plan, req.subcommand)
             try:
-                _render(root)
-                _final_gate(root)
+                _render(root, plan.transition)
+                snapshot_pending = _final_gate(root, plan.transition)
             except _PostPublication as exc:
                 raise _PostPublication("{}\n{}".format(exc, _recovery_text(ctx, scope)))
             # 9. release the lease, THEN report (R5).
             report = {"event": "recorded", "subcommand": req.subcommand, "ids": list(plan.ids),
-                      "files": [op.rel for op in plan.operands],
+                      "change": "{} {} -> {}".format(*plan.transition) if plan.transition else None,
+                      "doctor_pending": snapshot_pending, "files": [op.rel for op in plan.operands],
                       "store_root": str(res.store_root), "store_paths": list(scope["store"]),
                       "product_root": str(product_root), "product_paths": list(scope["product"])}
             released = True
@@ -1113,8 +1539,9 @@ def cli(argv):
 
 def self_test():
     """Unit vectors over synthetic models: the argument grammar, the allocation seam (homes 1 live, homes 2
-    refusing), the counters completeness proof, the create and worklog-append planners, the released-span
-    check, the byte-reproduction precondition, and the allowed-delta postcondition. Judged on returned
+    refusing), the counters completeness proof, the four planners (the derived `/proposed`, the recorded
+    pre-proposal state and --reason of a rejection, the one-to-one receipt), the released-span check, the
+    byte-reproduction precondition, and the allowed-delta postcondition. Judged on returned
     values and refusals, never by grepping output. Returns 0 clean, 1 on a failure, 2 on a harness error."""
     failures = []
     checked = [0]
@@ -1136,7 +1563,7 @@ def self_test():
             print("  - " + f, file=sys.stderr)
         return 1
     print("opf-record self-test: PASS ({} checks: grammar, allocation seam, completeness proof, planners, "
-          "released span, precondition, postcondition)".format(checked[0]))
+          "transitions, receipts, released span, precondition, postcondition)".format(checked[0]))
     return EXIT_OK
 
 
@@ -1158,8 +1585,17 @@ def _self_test_units(check):
           and req.links == [{"rel": "relates", "id": "BI-1"}]
           and req.refs == [{"kind": "url", "locator": "https://x.invalid/a:b", "note": "n"}] and req.root == ".")
     for bad, needle in ((["frobnicate"], "unknown subcommand"), ([], "subcommand is required"),
-                        (["transition", "BI-1", "done"], "not yet implemented"),
-                        (["done-with-receipt", "BI-1"], "not yet implemented"),
+                        (["transition", "BI-1", "done"], "missing required"),
+                        (["transition", "BI-1"], "requires the operand"),
+                        (["transition", "--actor", "maintainer"], "requires the operand"),
+                        (["transition", "bogus", "done", "--actor", "maintainer"], "not a record id"),
+                        (["transition", "BI-1", "done/proposed", "--actor", "assistant"], "target STATE"),
+                        (["transition", "BI-1", "done", "--actor", "maintainer", "--kind", "x"],
+                         "unrecognized argument"),
+                        (["done-with-receipt", "BI-1"], "missing required"),
+                        (["done-with-receipt", "BI-1", "--actor", "assistant:c"], "maintainer-only"),
+                        (["done-with-receipt", "BI-1", "--actor", "automation"], "maintainer-only"),
+                        (["done-with-receipt", "FN-1", "--actor", "maintainer"], "not a backlog item"),
                         (["create", "--type", "backlog_item", "--title", "t"], "missing required"),
                         (["create", "--type", "a", "--type", "b", "--title", "t", "--actor", "maintainer"],
                          "more than once"),
@@ -1172,6 +1608,11 @@ def _self_test_units(check):
                         (["create", "--root", "-x"], "requires"),
                         (["worklog-append", "--type", "x"], "unrecognized argument")):
         check("parse refuses {!r}".format(bad), _refuses(lambda bad=bad: parse_request(bad), needle))
+    req = parse_request(["transition", "FN-2", "fixed", "--actor", "assistant", "--reason", "r"])
+    check("parse transition", req.positionals == ["FN-2", "fixed"] and req.values == {"--reason": "r"}
+          and req.actor == {"kind": "assistant"})
+    req = parse_request(["done-with-receipt", "BI-3", "--actor", "maintainer:j"])
+    check("parse done-with-receipt", req.positionals == ["BI-3"] and req.actor == {"kind": "maintainer", "id": "j"})
 
     # -- the allocation seam and the completeness proof ----------------------------------------------------
     ids, high = claim_ids(1, {"BI": 4, "WL": 0}, ["BI", "BI", "WL"], known_complete=True)
@@ -1188,6 +1629,8 @@ def _self_test_units(check):
         counters_model = {"schema": 1, "counters": dict(counters)}
         ctx.counters = Operand(".working/toml/counters.toml", _emit_bytes(counters_model), 0o644, counters_model)
         ctx.version = version or {"schema": 1, "release": [], "summary": []}
+        ctx.worklog = _model_operand(".working/toml/worklog.toml", {"schema": 1, "entry": []})
+        ctx.done_index = _model_operand(".working/toml/done.index.toml", {"schema": 1, "record": []})
         return ctx
 
     full = {ns: 0 for ns in _opf_store.BASELINE_TYPES.values()}
@@ -1200,15 +1643,22 @@ def _self_test_units(check):
     _self_test_planners(check, ctx_of, full, now)
 
 
+def _model_operand(rel, model):
+    """A synthetic operand whose bytes are the canonical emission of its model (the oracle reparses them)."""
+    return Operand(rel, _emit_bytes(model), 0o644, model)
+
+
 def _self_test_planners(check, ctx_of, full, now):
-    def plan(argv, rows=(), counters=None):
+    def plan(argv, rows=(), counters=None, entries=(), dones=()):
         c = ctx_of(counters or full)
+        c.worklog = _model_operand(c.worklog.rel, {"schema": 1, "entry": copy.deepcopy(list(entries))})
+        c.done_index = _model_operand(c.done_index.rel, {"schema": 1, "record": copy.deepcopy(list(dones))})
         r = parse_request(argv)
-        rel = c.rel(r.values["--type"] + _opf_check.INDEX_SUFFIX) if r.subcommand == "create" \
-            else c.rel(_opf_check.WORKLOG_NAME)
-        key = "record" if r.subcommand == "create" else "entry"
-        m = {"schema": 1, key: list(rows)}
-        op = Operand(rel, _emit_bytes(m), 0o644, m)
+        if r.subcommand == "worklog-append":
+            c.worklog = _model_operand(c.worklog.rel, {"schema": 1, "entry": copy.deepcopy(list(rows))})
+            op = c.worklog
+        else:
+            op = _model_operand(_operand_rel(r, c), {"schema": 1, "record": copy.deepcopy(list(rows))})
         return _PLANNERS[r.subcommand](r, c, op, now), c, op
 
     def post(p, c, argv):
@@ -1220,8 +1670,15 @@ def _self_test_planners(check, ctx_of, full, now):
     # -- the create planner --------------------------------------------------------------------------------
     p, c, op = plan(["create", "--type", "block", "--title", "b", "--actor", "assistant", "--scope", "BI-1"])
     check("an assistant block lands active/proposed",
-          op.new_model["record"][-1]["status"] == "active/proposed" and p.ids == ["BL-1"])
-    check("the claim advances exactly the block namespace", c.counters.new_model["counters"]["BL"] == 1)
+          op.new_model["record"][-1]["status"] == "active/proposed" and p.ids == ["BL-1", "WL-1"])
+    check("the claim advances exactly the block and worklog namespaces",
+          c.counters.new_model["counters"] == dict(full, BL=1, WL=1))
+    check("create appends its own worklog entry with the lifecycle line",
+          c.worklog.new_model["entry"] == [{
+              "id": "WL-1", "date": "2026-09-27T01:02:03Z", "actor": {"kind": "assistant"}, "kind": "added",
+              "summary": "created BL-1 (block) at active/proposed",
+              "detail": "opf-record create BL-1 active/proposed", "links": [{"rel": "relates", "id": "BL-1"}]}]
+          and [o.rel for o in p.operands] == [c.counters.rel, op.rel, c.worklog.rel])
     p, c, op = plan(["create", "--type", "block", "--title", "b", "--actor", "maintainer", "--scope", "BI-1"])
     check("a maintainer block is the bare grant", op.new_model["record"][-1]["status"] == "active")
     p, c, op = plan(["create", "--type", "reference", "--title", "r", "--actor", "assistant",
@@ -1253,6 +1710,9 @@ def _self_test_planners(check, ctx_of, full, now):
         "version": "1.0.0", "date": "2026-01-01T00:00:00Z", "worklog_span": ["WL-1", "WL-2"],
         "coverage_digest": "sha256:" + "0" * 64}]}
     check("an id inside a released span refuses", _refuses(lambda: _check_released_span(released, 2), "released"))
+    check("worklog-append refuses a forged lifecycle line", _refuses(lambda: plan(
+        ["worklog-append", "--kind", "changed", "--summary", "s", "--actor", "assistant", "--detail",
+         "opf-record transition BI-1 active -> done/proposed"]), "reserved"))
     check("a tail id passes the released-span check", _check_released_span(released, 3) is None)
 
     # -- the precondition and the postcondition -----------------------------------------------------------
@@ -1297,6 +1757,176 @@ def _self_test_planners(check, ctx_of, full, now):
     p.operands = p.operands[1:]
     check("the postcondition refuses a plan missing the counters operand",
           _refuses(lambda: post(p, c, argv), "operand set"))
+    _self_test_transitions(check, plan, post, full, now)
+
+
+def _self_test_transitions(check, plan, post, full, now):
+    earlier = "2026-09-26T00:00:00Z"
+
+    def bi(status, rid="BI-1", kind="assistant"):
+        return {"id": rid, "type": "backlog_item", "status": status, "title": "t", "created_at": earlier,
+                "updated_at": earlier, "actor": {"kind": kind}}
+
+    def line(rid, frm, to):
+        return {"id": "WL-1", "date": earlier, "actor": {"kind": "assistant"}, "kind": "changed", "summary": "s",
+                "detail": "opf-record transition {} {} -> {}".format(rid, frm, to)}
+
+    counters = dict(full, BI=2, WL=1)
+    # -- transition: the derived qualifier, the delta, and its own worklog entry ----------------------------
+    p, c, op = plan(["transition", "BI-1", "active", "--actor", "assistant"], rows=[bi("open")], counters=counters)
+    check("an assistant open -> active is unqualified (not terminal, not gated)",
+          op.new_model["record"][0]["status"] == "active" and p.ids == ["WL-2"])
+    two = [bi("active"), bi("open", "BI-2")]
+    p, c, op = plan(["transition", "BI-1", "done", "--actor", "assistant"], rows=two, counters=counters)
+    check("an assistant active -> done lands done/proposed with no receipt",
+          op.new_model["record"][0]["status"] == "done/proposed"
+          and op.new_model["record"][0]["updated_at"] == "2026-09-27T01:02:03Z"
+          and op.new_model["record"][1] == bi("open", "BI-2") and c.done_index.new_model is None)
+    entry = c.worklog.new_model["entry"][-1]
+    check("a transition's worklog entry carries the lifecycle line",
+          entry["detail"] == "opf-record transition BI-1 active -> done/proposed" and entry["kind"] == "changed"
+          and entry["links"] == [{"rel": "relates", "id": "BI-1"}])
+    t_argv = ["transition", "BI-1", "done", "--actor", "assistant"]
+    check("the transition passes the postcondition", post(p, c, t_argv) is None
+          and p.transition == ("BI-1", "active", "done/proposed"))
+    for label, mutate in (
+            ("a second field on the transitioned record",
+             lambda p, c, op: op.new_model["record"][0].__setitem__("title", "x")),
+            ("another record's status", lambda p, c, op: op.new_model["record"][1].__setitem__("status", "active")),
+            ("a bare terminal status for an assistant",
+             lambda p, c, op: op.new_model["record"][0].__setitem__("status", "done")),
+            ("an unchanged updated_at",
+             lambda p, c, op: op.new_model["record"][0].__setitem__("updated_at", earlier)),
+            ("a changed lifecycle line",
+             lambda p, c, op: c.worklog.new_model["entry"][-1].__setitem__("detail", "opf-record transition x")),
+            ("a reason the request did not give",
+             lambda p, c, op: c.worklog.new_model["entry"][-1].__setitem__(
+                 "detail", c.worklog.new_model["entry"][-1]["detail"] + "\nreason: r")),
+            ("a reported status change other than the requested one",
+             lambda p, c, op: setattr(p, "transition", ("BI-1", "active", "done"))),
+            ("a dropped worklog operand", lambda p, c, op: setattr(p, "operands", p.operands[:2]))):
+        p, c, op = plan(t_argv, rows=two, counters=counters)
+        mutate(p, c, op)
+        check("the postcondition refuses {}".format(label),
+              _refuses(lambda: post(p, c, t_argv), "postcondition failed"))
+    finding = {"id": "FN-1", "type": "finding", "status": "open", "title": "f", "created_at": earlier,
+               "updated_at": earlier, "actor": {"kind": "maintainer"}}
+    p, c, op = plan(["transition", "FN-1", "fixed", "--actor", "automation"], rows=[finding],
+                    counters=dict(counters, FN=1))
+    check("an automation terminal transition lands /proposed", op.new_model["record"][0]["status"] == "fixed/proposed")
+    # -- transition refusals ---------------------------------------------------------------------------------
+    proposed = [line("BI-1", "active", "done/proposed")]
+    for argv, rows, entries, needle in (
+            (["transition", "BI-1", "done", "--actor", "maintainer"], [bi("active")], (), "done-with-receipt"),
+            (["transition", "BI-1", "done", "--actor", "assistant"], [bi("open")], (), "illegal transition"),
+            (["transition", "BI-1", "active", "--actor", "maintainer"], [bi("done/proposed")], proposed,
+             "recorded reason"),
+            (["transition", "BI-1", "active", "--actor", "maintainer", "--reason", "r"], [bi("done/proposed")], (),
+             "no pre-proposal state"),
+            (["transition", "BI-1", "open", "--actor", "maintainer", "--reason", "r"], [bi("done/proposed")],
+             proposed, "actual pre-proposal state"),
+            (["transition", "BI-1", "active", "--actor", "assistant", "--reason", "r"], [bi("done/proposed")],
+             proposed, "only a maintainer"),
+            (["transition", "BI-2", "active", "--actor", "maintainer"], [bi("open")], (), "not a record"),
+            (["transition", "BI-1", "active", "--actor", "maintainer"], [bi("open"), bi("open")], (),
+             "seated 2 times"),
+            (["transition", "WL-1", "recorded", "--actor", "maintainer"], [], (), "does not transition"),
+            (["transition", "BI-1", "dropped", "--actor", "maintainer"],
+             [dict(bi("open"), updated_at=_rfc3339(now))], (), "not later than")):
+        check("transition refuses {}".format(needle), _refuses(
+            lambda argv=argv, rows=rows, entries=entries: plan(argv, rows=rows, counters=counters, entries=entries),
+            needle))
+    # -- the maintainer rejection, back to the recorded pre-proposal state -------------------------------------
+    p, c, op = plan(["transition", "BI-1", "active", "--actor", "maintainer", "--reason", "not finished"],
+                    rows=[bi("done/proposed")], counters=counters, entries=proposed)
+    check("a maintainer rejection with a reason returns to the recorded pre-proposal state",
+          op.new_model["record"][0]["status"] == "active" and c.worklog.new_model["entry"][-1]["detail"]
+          == "opf-record transition BI-1 done/proposed -> active\nreason: not finished")
+    check("the pre-proposal state is the latest lifecycle line's from-state",
+          _pre_proposal_state([line("BI-1", "open", "dropped/proposed"), line("BI-2", "active", "done/proposed")],
+                              "BI-1", "dropped/proposed") == "open")
+    check("a later lifecycle line for the record withholds the pre-proposal state",
+          _pre_proposal_state([line("BI-1", "active", "done/proposed"), line("BI-1", "open", "active")], "BI-1",
+                              "done/proposed") is None)
+    # -- done-with-receipt -------------------------------------------------------------------------------------
+    for frm, kind in (("active", "maintainer"), ("done/proposed", "assistant")):
+        d_argv = ["done-with-receipt", "BI-1", "--actor", "maintainer"]
+        p, c, op = plan(d_argv, rows=[bi(frm, kind=kind)], counters=counters)
+        receipt = c.done_index.new_model["record"][-1]
+        check("done-with-receipt from {} lands done with one receipt_of receipt".format(frm),
+              op.new_model["record"][0]["status"] == "done" and p.ids == ["DN-1", "WL-2"]
+              and receipt["links"] == [{"rel": "receipt_of", "id": "BI-1"}] and receipt["status"] == "recorded"
+              and c.counters.new_model["counters"] == dict(counters, DN=1, WL=2)
+              and post(p, c, d_argv) is None and p.transition == ("BI-1", frm, "done"))
+    d_argv = ["done-with-receipt", "BI-1", "--actor", "maintainer"]
+    for label, mutate in (
+            ("a receipt with another title", lambda c: c.done_index.new_model["record"][-1].__setitem__("title", "x")),
+            ("a receipt linked to another item", lambda c: c.done_index.new_model["record"][-1].__setitem__(
+                "links", [{"rel": "receipt_of", "id": "BI-2"}])),
+            ("a second receipt", lambda c: c.done_index.new_model["record"].append(
+                dict(c.done_index.new_model["record"][-1], id="DN-2"))),
+            ("a receipt counter over-advanced", lambda c: c.counters.new_model["counters"].__setitem__("DN", 2))):
+        p, c, op = plan(d_argv, rows=[bi("done/proposed")], counters=counters)
+        mutate(c)
+        check("the postcondition refuses {}".format(label),
+              _refuses(lambda: post(p, c, d_argv), "postcondition failed"))
+    held = [{"id": "DN-1", "type": "done", "status": "recorded", "title": "t", "created_at": earlier,
+             "updated_at": earlier, "actor": {"kind": "maintainer"}, "links": [{"rel": "receipt_of", "id": "BI-1"}]}]
+    for status, dones, needle in (("open", (), "active or done/proposed"), ("done", (), "active or done/proposed"),
+                                  ("dropped/proposed", (), "active or done/proposed"),
+                                  ("active", held, "already has a done receipt")):
+        check("done-with-receipt refuses {} ({})".format(needle, status), _refuses(
+            lambda status=status, dones=dones: plan(["done-with-receipt", "BI-1", "--actor", "maintainer"],
+                                                    rows=[bi(status)], counters=dict(counters, DN=1), dones=dones),
+            needle))
+    _self_test_pending(check)
+    _self_test_leftover_lock(check)
+
+
+def _self_test_pending(check):
+    """The one accepted snapshot cannot-evaluate: exactly this record and from/to pair, a cannot-evaluate
+    and never a finding, and no other source check relieved."""
+    from types import SimpleNamespace
+    accepted = _snapshot_pending(("BI-1", "active", "done/proposed"))
+    msg = ("C-HISTORY-RESURRECTION: prior record 'BI-1' transition 'active' -> 'done/proposed' is legal for "
+           "some actor kinds but illegal for others")
+    check("no transition accepts nothing", _snapshot_pending(None) is None)
+    check("the pending predicate names exactly the transition", accepted(msg)
+          and not accepted(msg.replace("'BI-1'", "'BI-2'")) and not accepted(msg.replace("'active'", "'open'")))
+    cids = _opf_check.source_checks(SimpleNamespace(checks={}))
+
+    def result(grade, by, cannot, cid="C-HISTORY-RESURRECTION"):
+        checks = dict.fromkeys(cids, "PASS")
+        checks[cid] = grade
+        return SimpleNamespace(checks=checks, by_check={cid: by}, cannot_evaluate=cannot, unattributed=[])
+
+    ok = _opf_check.source_integrity_ok
+    check("the pending cannot-evaluate blocks render without the predicate", not ok(result("CANNOT-EVALUATE",
+                                                                                          [msg], [msg])))
+    check("the predicate relieves exactly that cannot-evaluate", ok(result("CANNOT-EVALUATE", [msg], [msg]),
+                                                                    accepted))
+    check("the predicate never relieves a finding", not ok(result("CANNOT-EVALUATE", [msg], []), accepted)
+          and not ok(result("FINDING", [msg], []), accepted))
+    check("the predicate never relieves another message in the check",
+          not ok(result("CANNOT-EVALUATE", [msg, "x"], [msg, "x"]), accepted))
+    other = "C-ID-SPACE: duplicate id 'BI-1'"
+    check("the predicate never relieves another check's cannot-evaluate",
+          not ok(result("CANNOT-EVALUATE", [other], [other], cid="C-ID-SPACE"), accepted))
+
+
+def _self_test_leftover_lock(check):
+    """A dead run's leftover journal lock over its COMPLETE transaction: the outcome states the durable fact
+    only, never that render and the final doctor did not run (a run whose lock release failed after
+    COMPLETE went on to render, run doctor, and report)."""
+    utc = "2026-09-27T00:00:00Z"
+    since = int(datetime.datetime(2026, 9, 27, tzinfo=datetime.timezone.utc).timestamp())
+    name = "record-create.4242.{}".format((since + 1) * 10 ** 9)
+    line = _leftover_lock_outcome({"pid": 4242, "utc": utc}, {name: "complete"})
+    check("a leftover lock over a COMPLETE transaction names it and asserts no render or doctor outcome",
+          name in line and "COMPLETE" in line and "not recorded" in line and "never run" not in line)
+    line = _leftover_lock_outcome({"pid": 4242, "utc": utc}, {name: "rolled-back"})
+    check("a leftover lock over a rolled-back transaction says nothing was published",
+          "published nothing" in line)
 
 
 if __name__ == "__main__":

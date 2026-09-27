@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T5, T9-T14)
+  check_opf_record.py --self-test                    the fixture suite (T1-T15)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -11,17 +11,34 @@ Each case runs on its own copy of that template; the root is removed in a finall
 
   T1  a comment-bearing index, counters, or worklog refuses exit 2 with every byte untouched
       (flip: drop the byte-reproduction precondition)
-  T2  create with links and refs round-trips, the published bytes are canonical, and a lossy emitter is
-      refused before any write (flip: publish raw emit output instead of emit_checked)
+  T2  create with links and refs round-trips and the published bytes are canonical; with a lossy emitter
+      the verb's serializer (_emit_bytes) itself refuses, and the whole run refuses exit 2 with every byte
+      untouched (flip: publish raw emit output instead of emit_checked; the independent postcondition
+      still refuses the end-to-end run, so the flip turns red on the serializer's own refusal)
   T3  a plan that mutates one extra field of an existing record, or the initial status or requested title
       of the new record, or the requested summary of a new worklog entry, refuses exit 2, bytes untouched
       (flip: drop the allowed-delta postcondition)
-  T4  two sequential creates claim BI-1 then BI-2 with monotonic counters; a counters map missing an
-      enabled namespace refuses (flip: drop the known-complete proof)
-  T5  a kill at each journal step leaves the killed run's lease, which refuses the next run before any
-      recovery write; once the operator releases it, reconciliation leaves the operands exactly the
-      prestate or exactly the poststate, the poststate iff the transaction is COMPLETE, and no killed run
-      reports an id (flip: write counters outside the journaled transaction)
+  T4  two sequential creates claim BI-1 then BI-2 (and their own worklog entries WL-1, WL-2) with
+      monotonic counters; a counters map missing an enabled namespace refuses (flip: drop the
+      known-complete proof)
+  T5  a kill at each journal step over the three operands (counters, index, worklog) leaves the killed
+      run's lease, which refuses the next run before any recovery write; once the operator releases it,
+      reconciliation leaves the operands exactly the prestate or exactly the poststate, the poststate iff
+      the transaction is COMPLETE, and no killed run reports an id (flip: write counters outside the
+      journaled transaction)
+  T6  an assistant `transition BI done` lands done/proposed with zero receipts; an assistant
+      done-with-receipt refuses before the store is resolved, and a maintainer `transition BI done`
+      refuses, both with every byte untouched; a maintainer done-with-receipt (ratifying done/proposed, or
+      from active) lands unqualified done with exactly one receipt_of receipt and its own worklog entry,
+      doctor VALID once committed (flips: derive the bare status for an assistant; drop the
+      maintainer-only check; drop the done-only-through-its-receipt guard)
+  T7  a maintainer rejection without --reason, of a proposal the worklog does not record, to another
+      state, or by an assistant refuses with every byte untouched; with a reason it returns to the
+      recorded pre-proposal state and records the reason (flips: the check sees a placeholder reason;
+      guess the pre-proposal state)
+  T8  two branches that each create from the same committed counters conflict on the store paths; a
+      canonical union resolution with the duplicate BI-1 is doctor INVALID with a C-ID-SPACE finding
+      (flip: disable check_unique_ids)
   T9  a held lease refuses exit 2 and is never seized; success is reported only after the lease release
       (flip: emit the success report before releasing the lease)
   T10 a store the final doctor grades not VALID exits 2 with scoped recovery text, the change left for
@@ -36,12 +53,16 @@ Each case runs on its own copy of that template; the root is removed in a finall
       next run reconciles (flip: drop the intervening-edit check)
   T14 create with an unknown or path-like --type refuses with the enabled-baseline-types message, not an
       operand read failure (flip: skip the --type check before the operand read)
+  T15 a run whose journal lock release fails after COMPLETE still renders, runs doctor, and reports, and
+      says the lock was left; the next run reconciles the leftover lock and names the COMPLETE
+      transaction without claiming render and doctor never ran (flip: the old never-ran outcome text)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
 """
 import contextlib
 import copy
+import datetime
 import io
 import os
 import shutil
@@ -55,6 +76,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal as journal          # noqa: E402
+import _opf_check as opf_check      # noqa: E402
 import _opf_emit as emit            # noqa: E402
 import _opf_record as record        # noqa: E402
 import _opf_schema as schema        # noqa: E402
@@ -65,14 +87,16 @@ TOOLS = Path(__file__).resolve().parent
 MACH = ".working/toml"
 COUNTERS = MACH + "/counters.toml"
 BI_INDEX = MACH + "/backlog_item.index.toml"
+DN_INDEX = MACH + "/done.index.toml"
 WORKLOG = MACH + "/worklog.toml"
 VERSION = MACH + "/version.toml"
 LEASE = MACH + "/lease.toml"
+RECORDED_EVENT = '"event": "recorded"'
 CREATE = ["create", "--type", "backlog_item", "--title", "an item", "--actor", "assistant:gate"]
 APPEND = ["worklog-append", "--kind", "added", "--summary", "a fact", "--actor", "assistant:gate"]
-KILL_POINTS = ("after-lock", "after-preimage-0", "after-preimage-1", "after-preimages", "torn:INTENT",
-               "after-publish-INTENT", "torn-payload:0", "after-apply-0", "torn-payload:1", "after-apply-1",
-               "torn:COMPLETE", "after-publish-COMPLETE")
+KILL_POINTS = ("after-lock", "after-preimage-0", "after-preimage-1", "after-preimage-2", "after-preimages",
+               "torn:INTENT", "after-publish-INTENT", "torn-payload:0", "after-apply-0", "torn-payload:1",
+               "after-apply-1", "torn-payload:2", "after-apply-2", "torn:COMPLETE", "after-publish-COMPLETE")
 
 
 class Harness(Exception):
@@ -90,9 +114,12 @@ class Env:
                      "GIT_AUTHOR_EMAIL": "gate@example.invalid", "GIT_COMMITTER_NAME": "gate",
                      "GIT_COMMITTER_EMAIL": "gate@example.invalid"}
 
-    def git(self, root, *args):
-        proc = subprocess.run(["git", "-C", str(root), "-c", "init.defaultBranch=main"] + list(args),
+    def run_git(self, root, *args):
+        return subprocess.run(["git", "-C", str(root), "-c", "init.defaultBranch=main"] + list(args),
                               capture_output=True, text=True, timeout=120, env=self.vars)
+
+    def git(self, root, *args):
+        proc = self.run_git(root, *args)
         if proc.returncode != 0:
             raise Harness("fixture git {} failed: {}".format(args, proc.stderr.strip()))
         return proc.stdout
@@ -238,13 +265,25 @@ def t2_round_trip(fx):
     assert rec["links"] == [{"rel": r, "id": i} for r, i in LINKS], rec
     assert rec["refs"] == [{"kind": k, "locator": l, "note": n} for k, l, n in REFS], rec
     assert emit.emit_checked(parsed).encode("utf-8") == raw, "T2 published bytes are canonical"
-    # A lossy emitter (it drops refs) must be refused before any write.
+    # A lossy emitter (it drops refs): the verb's one serializer must itself refuse it. This isolated
+    # check is the emit_checked discriminator, because end to end the independent postcondition also
+    # refuses a lossy emission, so the run below cannot tell which guard caught it.
+    sample = dict(schema=1, record=[dict(id="BI-1", refs=[dict(kind=k, locator=l, note=n) for k, l, n in REFS])])
+    with patch.object(emit, "emit", _lossy_emit(emit.emit)):
+        try:
+            record._emit_bytes(sample)
+            serializer_refused = False
+        except record.RecordError:
+            serializer_refused = True
+    assert serializer_refused, "T2 the serializer refuses a lossy emission"
+    # End to end, a lossy emitter publishes nothing: exit 2 and every byte untouched, asserted on the
+    # outcome, not on which guard's message names it.
     root = fx.case("t2-lossy")
     before = snapshot(root)
     with patch.object(emit, "emit", _lossy_emit(emit.emit)):
-        result = record_cli(env, root, _t2_args())
-    refused(result, "does not round-trip")
+        rc, out, err = record_cli(env, root, _t2_args())
     assert snapshot(root) == before, "T2 a lossy emission writes nothing"
+    assert rc == 2 and RECORDED_EVENT not in out, ("T2 a lossy emission is refused", rc, err[-800:])
 
 
 def flip_t2():
@@ -303,8 +342,13 @@ def t4_allocation(fx):
     ids = [r["id"] for r in model(root, BI_INDEX)["record"]]
     after = model(root, COUNTERS)["counters"]
     assert ids == ["BI-1", "BI-2"], ids
-    assert after["BI"] == prior["BI"] + 2 and schema.check_monotonic(prior, after) == [], (prior, after)
-    assert {k: v for k, v in after.items() if k != "BI"} == {k: v for k, v in prior.items() if k != "BI"}
+    assert after["BI"] == prior["BI"] + 2 and after["WL"] == prior["WL"] + 2, (prior, after)
+    assert schema.check_monotonic(prior, after) == [], (prior, after)
+    assert {k: v for k, v in after.items() if k not in ("BI", "WL")} == {
+        k: v for k, v in prior.items() if k not in ("BI", "WL")}
+    entries = model(root, WORKLOG)["entry"]
+    assert [(e["id"], e["detail"]) for e in entries] == [
+        ("WL-1", "opf-record create BI-1 open"), ("WL-2", "opf-record create BI-2 open")], entries
     # A counters map missing an enabled namespace can never read as high-water 0.
     root = fx.case("t4-missing-namespace")
     counters = model(root, COUNTERS)
@@ -373,7 +417,7 @@ def journal_states(root):
 def t5_crash(fx):
     env = fx.env
     flip = _t5_flip[0]
-    operands = (COUNTERS, BI_INDEX)
+    operands = (COUNTERS, BI_INDEX, WORKLOG)
     reference = fx.case("t5-reference")
     proc = child(env, reference, CREATE)
     assert proc.returncode == 0 and '"event": "recorded"' in proc.stdout, (proc.returncode, proc.stderr[-800:])
@@ -465,7 +509,7 @@ def t10_final_doctor(fx):
 
 
 def flip_t10():
-    return patch.object(record, "_final_gate", lambda root: None)
+    return patch.object(record, "_final_gate", lambda root, transition=None: [])
 
 
 # --- T11: worklog-append and the released span -----------------------------------------------------------------
@@ -483,9 +527,7 @@ def t11_worklog(fx):
     version["release"] = [{"version": "0.1.0", "date": "2026-09-01T00:00:00Z",
                            "worklog_span": ["WL-1", "WL-2"], "coverage_digest": "sha256:" + "0" * 64}]
     write_commit(env, root, VERSION, emit.emit_checked(version).encode("utf-8"), "a frozen span")
-    before = snapshot(root)
-    refused(record_cli(env, root, APPEND), "already-released span")
-    assert snapshot(root) == before, "T11 bytes untouched"
+    refused_untouched(env, root, APPEND, "already-released span")
 
 
 def flip_t11():
@@ -512,9 +554,7 @@ def t12_recovery_lease(fx):
     try:
         peer = guard.acquire_lease(root_fd, MACH, "upgrade")
         try:
-            before = snapshot(root)
-            refused(record_cli(env, root, CREATE), "runs only under the single-writer lease")
-            assert snapshot(root) == before, "T12 no recovery write while a peer holds the lease"
+            refused_untouched(env, root, CREATE, "runs only under the single-writer lease")
             assert read(root, LEASE) == peer, "T12 the peer's lease is intact, never seized"
         finally:
             guard.release_lease(root_fd, MACH, peer, "upgrade")
@@ -536,9 +576,9 @@ def t13_intervening_edit(fx):
         (Path(root) / rel).write_bytes(original + b"# an owner's note written after the interruption\n")
         before = snapshot(root)
         result = record_cli(env, root, CREATE)
+        assert snapshot(root) == before, ("T13 the intervening edit is never overwritten", rel)
         refused(result, "an intervening edit")
         assert rel in result[2], ("T13 the edited path is named", rel, result[2][-800:])
-        assert snapshot(root) == before, ("T13 the intervening edit is never overwritten", rel)
         # Once the owner undoes the edit, the next run reconciles.
         (Path(root) / rel).write_bytes(original)
         refused(record_cli(env, root, CREATE), "was reconciled")
@@ -565,6 +605,240 @@ def flip_t14():
     return patch.object(record, "_check_request", lambda req, ctx: None)
 
 
+# --- T6-T8: transitions, the done receipt, and the parallel-branch collision --------------------------------
+
+ASSISTANT = ["--actor", "assistant:gate"]
+MAINTAINER = ["--actor", "maintainer:owner"]
+
+
+class Ticker:
+    """A strictly advancing clock for one case's in-process runs: a transition's updated_at must follow the
+    record's recorded timestamps, and two real runs can fall in the same second."""
+
+    def __init__(self):
+        self.now = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
+
+    def __call__(self):
+        self.now += datetime.timedelta(minutes=1)
+        return self.now
+
+
+def ticking():
+    return patch.object(record, "_clock_now", Ticker())
+
+
+def step(fx, root, args, message):
+    """One recorded operation, then a commit, so the next operation's cleanliness gate passes."""
+    out = recorded(record_cli(fx.env, root, args))
+    fx.commit_all(root, message)
+    return out
+
+
+def row(root, rid):
+    rows = [r for r in model(root, BI_INDEX)["record"] if r["id"] == rid]
+    assert len(rows) == 1, (rid, rows)
+    return rows[0]
+
+
+def receipts_of(root, rid):
+    link = {"rel": "receipt_of", "id": rid}
+    return [r for r in model(root, DN_INDEX).get("record", []) if link in r.get("links", [])]
+
+
+def lifecycle(root):
+    return [e["detail"] for e in model(root, WORKLOG)["entry"]]
+
+
+def doctor_valid(env, root):
+    rc, out, err = cli(env, ["doctor", "--root", str(root)])
+    assert rc == 0, ("doctor VALID at rest", rc, out[-1600:], err[-800:])
+
+
+def refused_untouched(env, root, args, needle):
+    """A refusal that writes nothing. The byte comparison is asserted BEFORE the refusal text, so a guard
+    removed under a flip turns this red on what was written, never on a changed message."""
+    before = snapshot(root)
+    result = record_cli(env, root, args)
+    assert snapshot(root) == before, ("bytes untouched on refusal", args, result[0], result[2][-800:])
+    refused(result, needle)
+
+
+def refused_before_store(env, root, args):
+    """A usage refusal that happens before the store is resolved at all: the resolver is never called and
+    no byte changes (asserted before any message)."""
+    before = snapshot(root)
+    calls = []
+    original = record._opf_store.resolve_store
+
+    def observing(*a, **k):
+        calls.append(a)
+        return original(*a, **k)
+
+    with patch.object(record._opf_store, "resolve_store", observing):
+        rc, out, err = record_cli(env, root, args)
+    assert calls == [], ("refused before the store is resolved", args, rc, err[-800:])
+    assert snapshot(root) == before and rc == 2, ("refused with nothing written", args, rc)
+    assert '"event": "recorded"' not in out, out[-800:]
+
+
+def t6_done_with_receipt(fx):
+    env = fx.env
+    root = fx.case("t6-ratify")
+    with ticking():
+        step(fx, root, CREATE, "BI-1")
+        out = step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
+        assert "CANNOT-EVALUATE" not in out, "an actor-independent transition leaves doctor VALID"
+        out = step(fx, root, ["transition", "BI-1", "done"] + ASSISTANT, "BI-1 done/proposed")
+        assert row(root, "BI-1")["status"] == "done/proposed" and receipts_of(root, "BI-1") == [], "T6 proposed"
+        assert model(root, DN_INDEX).get("record", []) == [] and model(root, COUNTERS)["counters"]["DN"] == 0
+        assert "until this change is committed" in out and "'active' -> 'done/proposed'" in out, out[-1200:]
+        doctor_valid(env, root)
+        refused_before_store(env, root, ["done-with-receipt", "BI-1"] + ASSISTANT)
+        refused_untouched(env, root, ["transition", "BI-1", "done"] + MAINTAINER, "done-with-receipt")
+        step(fx, root, ["done-with-receipt", "BI-1"] + MAINTAINER, "BI-1 done")
+        receipts = receipts_of(root, "BI-1")
+        assert row(root, "BI-1")["status"] == "done" and [r["id"] for r in receipts] == ["DN-1"], receipts
+        assert receipts[0]["status"] == "recorded" and receipts[0]["actor"] == {"kind": "maintainer", "id": "owner"}
+        assert len(model(root, DN_INDEX)["record"]) == 1 and model(root, COUNTERS)["counters"]["DN"] == 1
+        assert lifecycle(root) == ["opf-record create BI-1 open", "opf-record transition BI-1 open -> active",
+                                   "opf-record transition BI-1 active -> done/proposed",
+                                   "opf-record transition BI-1 done/proposed -> done\nreceipt: DN-1"], lifecycle(root)
+        doctor_valid(env, root)
+        refused_untouched(env, root, ["done-with-receipt", "BI-1"] + MAINTAINER, "active or done/proposed")
+    root = fx.case("t6-from-active")
+    with ticking():
+        step(fx, root, ["create", "--type", "backlog_item", "--title", "m"] + MAINTAINER, "BI-1")
+        step(fx, root, ["transition", "BI-1", "active"] + MAINTAINER, "BI-1 active")
+        step(fx, root, ["done-with-receipt", "BI-1"] + MAINTAINER, "BI-1 done")
+        assert row(root, "BI-1")["status"] == "done" and [r["id"] for r in receipts_of(root, "BI-1")] == ["DN-1"]
+        doctor_valid(env, root)
+
+
+def flip_t6_bare():
+    return patch.object(record, "_derived_status", lambda kind, spec, cur_state, target: target)
+
+
+def flip_t6_maintainer():
+    return patch.object(record, "_require_maintainer", lambda actor: None)
+
+
+def flip_t6_receipt():
+    return patch.object(record, "_require_receipt_path", lambda rtype, to_status: None)
+
+
+def t7_rejection(fx):
+    env = fx.env
+    root = fx.case("t7-reject")
+    with ticking():
+        step(fx, root, CREATE, "BI-1")
+        step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
+        step(fx, root, ["transition", "BI-1", "done"] + ASSISTANT, "BI-1 done/proposed")
+        refused_untouched(env, root, ["transition", "BI-1", "active"] + MAINTAINER, "recorded reason")
+        refused_untouched(env, root, ["transition", "BI-1", "open", "--reason", "x"] + MAINTAINER,
+                          "actual pre-proposal state")
+        refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + ASSISTANT,
+                          "only a maintainer")
+        step(fx, root, ["transition", "BI-1", "active", "--reason", "the fix did not hold"] + MAINTAINER, "rejected")
+        entry = model(root, WORKLOG)["entry"][-1]
+        assert row(root, "BI-1")["status"] == "active" and receipts_of(root, "BI-1") == []
+        assert entry["detail"] == "opf-record transition BI-1 done/proposed -> active\nreason: the fix did not hold"
+        assert entry["actor"] == {"kind": "maintainer", "id": "owner"}, entry
+        doctor_valid(env, root)
+    # A proposal made outside this verb: the worklog records no pre-proposal state, so it cannot be rejected.
+    root = fx.case("t7-unrecorded")
+    with ticking():
+        step(fx, root, CREATE, "BI-1")
+        step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
+        index = model(root, BI_INDEX)
+        index["record"][0].update(status="done/proposed", updated_at="2026-09-01T00:02:30Z")
+        write_commit(env, root, BI_INDEX, emit.emit_checked(index).encode("utf-8"), "proposed by hand")
+        refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
+                          "no pre-proposal state")
+
+
+def flip_t7_reason():
+    return patch.object(record, "_checked_reason", lambda req: req.values.get("--reason") or "placeholder")
+
+
+def flip_t7_pre():
+    return patch.object(record, "_pre_proposal_state", lambda entries, rid, status: "active")
+
+
+def t8_collision(fx):
+    env = fx.env
+    root = fx.case("t8-collision")
+    env.git(root, "branch", "peer")
+    with ticking():
+        step(fx, root, ["create", "--type", "backlog_item", "--title", "alpha"] + ASSISTANT, "BI-1 alpha")
+        doctor_valid(env, root)
+        env.git(root, "checkout", "-q", "peer")
+        step(fx, root, ["create", "--type", "backlog_item", "--title", "beta"] + ASSISTANT, "BI-1 beta")
+        doctor_valid(env, root)
+    env.git(root, "checkout", "-q", "main")
+    assert env.run_git(root, "merge", "--no-edit", "peer").returncode != 0, "T8 the store paths conflict"
+    conflicted = env.git(root, "diff", "--name-only", "--diff-filter=U").split()
+    assert BI_INDEX in conflicted, conflicted
+    # The hand merge spec 5.7 forbids: the index keeps both sides' rows, re-emitted canonically so byte
+    # reproduction cannot catch it; every other conflicted path takes this side.
+    for rel in conflicted:
+        if rel != BI_INDEX:
+            env.git(root, "checkout", "--ours", "--", rel)
+            continue
+        ours, theirs = (tomllib.loads(env.git(root, "show", ":{}:{}".format(n, rel))) for n in (2, 3))
+        ours["record"] = ours["record"] + [r for r in theirs["record"] if r not in ours["record"]]
+        (Path(root) / rel).write_bytes(emit.emit_checked(ours).encode("utf-8"))
+    env.git(root, "add", "-A")
+    env.git(root, "commit", "-q", "--no-edit")
+    ids = [r["id"] for r in model(root, BI_INDEX)["record"]]
+    assert ids == ["BI-1", "BI-1"], ids
+    rc, out, err = cli(env, ["doctor", "--root", str(root)])
+    assert rc == 1 and "store integrity: INVALID" in out, ("T8 doctor INVALID", rc, out[-2400:], err[-800:])
+    assert "  C-ID-SPACE: FINDING" in out, out[-2400:]
+    assert "FINDING: C-ID-SPACE: duplicate id 'BI-1'" in out, out[-2400:]
+
+
+def flip_t8():
+    return patch.object(opf_check, "check_unique_ids", lambda ids: [])
+
+
+# --- T15: a journal lock left after COMPLETE, then its reconciliation ----------------------------------------
+
+# Inside the child: the journal lock release fails after the transaction reached COMPLETE, so the run goes
+# on to render, run doctor, and report, leaving its journal lock behind.
+FAILING_LOCK_RELEASE = """
+import _journal
+def _failing_release(journal_root):
+    raise _journal.JournalError("synthetic journal lock release failure")
+_journal.release_lock = _failing_release
+"""
+
+
+def t15_leftover_lock(fx):
+    env = fx.env
+    root = fx.case("t15-leftover-lock")
+    proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
+    assert proc.returncode == 0 and '"event": "recorded"' in proc.stdout, (proc.returncode, proc.stderr[-800:])
+    assert "could not be released" in proc.stderr, ("T15 the retained lock is surfaced", proc.stderr[-800:])
+    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T15 the journal lock is left"
+    result = record_cli(env, root, CREATE)
+    refused(result, "was reconciled")
+    err = result[2]
+    assert "is COMPLETE" in err and "not recorded by the journal" in err, err[-1200:]
+    assert "never run" not in err and "never ran" not in err, ("T15 no claim that render and doctor did not "
+                                                             "run", err[-1200:])
+    assert not (Path(root) / record.JOURNAL_REL / "lock").exists(), "T15 the leftover lock is reconciled"
+
+
+def flip_t15():
+    original = record._leftover_lock_outcome
+
+    def claims_never_ran(owner, states):
+        line = original(owner, states)
+        head, sep, _rest = line.partition("present in the working tree")
+        return head + sep + ", with its render and final doctor never run" if sep else line
+    return patch.object(record, "_leftover_lock_outcome", claims_never_ran)
+
+
 def flip_t1():
     return patch.object(record, "_require_canonical", lambda operand: None)
 
@@ -581,12 +855,17 @@ TESTS = (
     ("T3-allowed-delta-postcondition", t3_postcondition, flip_t3),
     ("T4-allocation-known-complete", t4_allocation, flip_t4),
     ("T5-crash-prestate-or-poststate", t5_crash, None),     # its flip runs inside the killed child
+    ("T6-proposed-then-ratified-receipt", t6_done_with_receipt, (flip_t6_bare, flip_t6_maintainer,
+                                                                flip_t6_receipt)),
+    ("T7-rejection-reason-and-pre-proposal", t7_rejection, (flip_t7_reason, flip_t7_pre)),
+    ("T8-parallel-branch-collision", t8_collision, flip_t8),
     ("T9-lease-release-before-success", t9_lease, flip_t9),
     ("T10-final-doctor", t10_final_doctor, flip_t10),
     ("T11-worklog-released-span", t11_worklog, flip_t11),
     ("T12-recovery-under-the-lease", t12_recovery_lease, flip_t12),
     ("T13-recovery-intervening-edit", t13_intervening_edit, flip_t13),
     ("T14-create-type-before-read", t14_type_before_read, flip_t14),
+    ("T15-leftover-journal-lock", t15_leftover_lock, flip_t15),
 )
 
 
@@ -626,10 +905,12 @@ def self_test(red_on_revert=False):
         for name, test, _flip in TESTS:
             check(name, lambda test=test: test(fx))
         if red_on_revert:
-            for name, test, flip in TESTS:
-                if flip is not None:
-                    check("red-on-revert-" + name,
-                          lambda name=name, test=test, flip=flip: discriminate(name, lambda: test(fx), flip))
+            for name, test, flips in TESTS:
+                flips = () if flips is None else flips if isinstance(flips, tuple) else (flips,)
+                for flip in flips:
+                    label = name if len(flips) == 1 else "{}:{}".format(name, flip.__name__)
+                    check("red-on-revert-" + label,
+                          lambda name=label, test=test, flip=flip: discriminate(name, lambda: test(fx), flip))
             check("red-on-revert-T5-crash-prestate-or-poststate",
                   lambda: discriminate("T5", lambda: t5_crash(fx),
                                        lambda: _child_flip(fx)))

@@ -1353,7 +1353,7 @@ def _registered_vendors_and_kinds(manifest):
     return registered, None
 
 
-def render(argv, observations=None):
+def render(argv, observations=None, accepted=None):
     """`opf render [--root DIR] (--check | --write)`: render every declared view of the store at a PRODUCT
     root. Exactly one of --check / --write is required (a bare `render` is a usage error, exit 2). --check is
     strictly read-only and returns 0 clean, 1 on drift, 2 cannot-evaluate. --write is the MUTATING half and is
@@ -1368,9 +1368,11 @@ def render(argv, observations=None):
     (edit CHANGELOG.md / declare-or-remove VERSION) and NEVER advertising a `render --write` re-run.
     `observations` is the inert git-derived facts object the git-aware caller (opf.py's render --write, via
     _opf_observe.gather) injects for the gate; validate_store reads no git itself, so a write can only ever
-    pass when honest observations are supplied. NOT-ADOPTED reports NOT APPLICABLE and exits 0 (the pack's own
-    `--root .` case). Two-phase like run_generator: every payload is rendered before any target is written, so
-    a fail-closed source aborts before a single file is touched."""
+    pass when honest observations are supplied. `accepted` (default None) is passed to both source-integrity
+    gates: a predicate over CANNOT-EVALUATE messages the caller verified independently (`opf record` names
+    the one transition it checked, spec 8.8; see _opf_check.source_integrity_ok). NOT-ADOPTED reports NOT
+    APPLICABLE and exits 0 (the pack's own `--root .` case). Two-phase like run_generator: every payload is
+    rendered before any target is written, so a fail-closed source aborts before a single file is touched."""
     root = None
     check = None
     i = 0
@@ -1447,7 +1449,7 @@ def render(argv, observations=None):
     # exit 2 and nothing written, printing ONLY the source-attributed messages so the false "regenerate"
     # remedy is never advertised over a store render will not touch (guard-input-soundness; never-advertise).
     pre = _opf_check.validate_store(res, observations=observations)
-    if not _opf_check.source_integrity_ok(pre):
+    if not _opf_check.source_integrity_ok(pre, accepted):
         print("opf render: cannot evaluate: refusing to write; store SOURCE integrity is not sound "
               "(U6 validate_store); nothing written", file=sys.stderr)
         for cid in _opf_check.source_checks(pre):
@@ -1476,7 +1478,7 @@ def render(argv, observations=None):
     # certifies, or fails on, a deliverable it did not and could not regenerate). A miss on an owned check is a
     # render/check DISAGREEMENT: roll back to the captured preimages, name the affected paths, exit 2.
     post = _opf_check.validate_store(res, observations=observations)
-    owned_ok = (_opf_check.source_integrity_ok(post)
+    owned_ok = (_opf_check.source_integrity_ok(post, accepted)
                 and post.checks.get("C-VIEW-DRIFT") == "PASS"
                 and ("VERSION" not in planned_names or post.checks.get("C-VERSION-FILE") == "PASS"))
     if not owned_ok:
@@ -1496,7 +1498,7 @@ def render(argv, observations=None):
         # regression and evidence it from SOURCE_INTEGRITY_CHECKS (the same REQUIRED_CHECKS-ordered, source-
         # filtered print Phase A uses); otherwise keep the owned-deliverable wording and print C-VIEW-DRIFT /
         # C-VERSION-FILE. Either way roll back, print post.unattributed, and exit 2.
-        if not _opf_check.source_integrity_ok(post):
+        if not _opf_check.source_integrity_ok(post, accepted):
             print("opf render: cannot evaluate: post-write validation found a SOURCE-INTEGRITY regression "
                   "after the regenerate; {}".format(rollback), file=sys.stderr)
             for cid in _opf_check.source_checks(post):

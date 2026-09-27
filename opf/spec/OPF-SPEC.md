@@ -897,7 +897,10 @@ shapes this specification already defines, so it adds no store-format change and
 - `transition`: a status change checked against the type's grammar (section 8.5). An assistant or
   automation author landing a terminal or gated state takes `/proposed`; only a maintainer
   ratifies, or rejects with a recorded reason back to the recorded pre-proposal state
-  (section 8.4).
+  (section 8.4). The envelope records no prior state (section 8.3), so the pre-proposal state is
+  the one the worklog entry of the proposing transition records; a proposal with no such entry
+  cannot be rejected by the verb. A backlog item reaches unqualified `done` only through
+  `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
@@ -905,6 +908,12 @@ shapes this specification already defines, so it adds no store-format change and
 - `worklog-append`: one entry appended to the unreleased tail of `worklog.toml`, status `recorded`,
   never `/proposed` whatever the actor (sections 6.2 and 8.4). An entry that would fall inside a
   released span is refused.
+
+`create`, `transition`, and `done-with-receipt` each append their own worklog entry, one entry per
+change (section 6.2), in the same journaled transaction as the change. Its `detail` opens with a
+lifecycle line naming the record and its status change (`opf-record create <ID> <status>`, or
+`opf-record transition <ID> <from> -> <to>`); a rejection's entry also records its reason.
+`worklog-append` refuses a `detail` that opens with that lifecycle grammar.
 
 Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its
 guarantees:
@@ -929,20 +938,26 @@ guarantees:
 4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
    delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
    one status and `updated_at` change), value for value, before anything is written. The expected
-   delta is derived from the request, the claimed IDs, the clock value, and the schema rules, never
-   from the planned rows themselves.
+   delta is derived from the request, the prior bytes of each rewritten file, the claimed IDs, the
+   clock value, and the schema rules, never from the planned rows themselves.
 5. The in-repo store contract (section 5.7): the planned destinations are clean, including ignored
    files, and the single-writer lease is held across publication, render, and the final doctor.
 6. Every rewritten file is published in one crash-durable journaled transaction, so an
    interruption leaves the store exactly at its prestate or exactly at its poststate once
    reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1.
 7. The declared views are rendered, then a full doctor must report VALID; a failure leaves the
-   change for review with recovery advice scoped to the planned paths.
+   change for review with recovery advice scoped to the planned paths. One exception applies to a
+   status change: doctor compares it with the prior committed snapshot, where the transitioning
+   actor and the pre-proposal state are not identifiable, so it can grade that change
+   cannot-evaluate until the change is committed. The verb's render and final doctor accept that
+   cannot-evaluate only for exactly the record and the from and to statuses it has just written,
+   never a finding and never any other cannot-evaluate, and the verb reports it as pending until
+   commit. `opf doctor` itself is unchanged and still reports it until then.
 8. The lease is released, and only then are the claimed IDs and touched files reported. The
    change is left uncommitted in the working tree: the verb never stages or commits it.
 
-The verb exits 0 when the change is recorded and the store is doctor-VALID, and 2 on every refusal
-or cannot-evaluate.
+The verb exits 0 when the change is recorded and the store is doctor-VALID (or carries only the
+pending cannot-evaluate of item 7), and 2 on every refusal or cannot-evaluate.
 
 ## 9. The manifest
 

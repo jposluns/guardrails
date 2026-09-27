@@ -113,12 +113,13 @@
       or an unsuccessful operation: <code>render --write</code> requires passing source-integrity
       checks, with no internal or unattributed faults; otherwise it exits 2 and writes nothing.
       <code>upgrade</code> exits 2 when its doctor result is not VALID; after a schema rewrite,
-      failure at render or doctor leaves the changes in place for recovery.
+      failure at render or doctor leaves the changes in place for recovery. <code>record</code> uses
+      only exit 0 and exit 2.
       Where a command is aimed at a directory that has not adopted OPFiles, the
       applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>,
-      <code>absorb</code>) report NOT APPLICABLE and exit 0. The eight commands, documented one by one below, are <code>init</code>,
+      <code>absorb</code>) report NOT APPLICABLE and exit 0. The nine commands, documented one by one below, are <code>init</code>,
       <code>render</code>, <code>doctor</code>, <code>import</code>, <code>upgrade</code>,
-      <code>migrate</code>, <code>sync</code>, and <code>absorb</code>.</p>
+      <code>migrate</code>, <code>sync</code>, <code>absorb</code>, and <code>record</code>.</p>
 
     <h3 id="cmd-init"><code>opf init</code></h3>
     <p><b style="color:var(--ink)">Purpose.</b> Create validated source documents and a
@@ -256,6 +257,29 @@
       and no store changes. Exit 0 means success or not applicable; exit 2 means cannot-evaluate.
       Drafts still require human curation and the reviewed publication flow.</p>
     <p class="refchips"><code>opf absorb</code> <code>opf absorb --covers 1.2.3</code> <code>opf absorb --covers 1.2.3 --freeze-digest</code></p>
+
+    <h3 id="cmd-record"><code>opf record</code></h3>
+    <p><b style="color:var(--ink)">Purpose.</b> Author one change to the store's records at a time,
+      without editing TOML by hand.</p>
+    <p><b style="color:var(--ink)">How it works.</b> Four subcommands share one operation.
+      <code>create</code> adds a record of an enabled baseline type in its initial state.
+      <code>transition</code> changes a record's status under its type's rules: an assistant or
+      automation that lands a terminal or gated state gets <code>/proposed</code>, and only a
+      maintainer ratifies or rejects. A rejection needs <code>--reason</code> and returns the record
+      to the state its worklog records from before the proposal. <code>done-with-receipt</code> is
+      maintainer-only: it moves a backlog item to <code>done</code> and creates its one
+      <code>done</code> receipt in the same act. <code>worklog-append</code> adds one worklog entry.
+      The first three also add their own worklog entry. Every run refuses to rewrite a hand-edited
+      or comment-bearing file, requires clean planned paths and the single-writer lease, publishes
+      every changed file in one journaled transaction, renders the declared views, and runs a full
+      doctor.</p>
+    <p><b style="color:var(--ink)">Result.</b> The change, left uncommitted in your working tree for
+      review; <code>record</code> never stages or commits. Exit 0 means the change is recorded and
+      doctor reports no finding; exit 2 means a refusal or cannot-evaluate. Until you commit a status
+      change, doctor can report it as cannot-evaluate, because the committed snapshot does not show
+      who made it; <code>record</code> says so when it happens. A failure after publication leaves the
+      change for review, with recovery commands scoped to the planned paths.</p>
+    <p class="refchips"><code>opf record create --type backlog_item --title "Add export" --actor maintainer</code> <code>opf record transition BI-1 active --actor assistant</code> <code>opf record done-with-receipt BI-1 --actor maintainer</code> <code>opf record worklog-append --kind docs --summary "Updated the guide" --actor assistant</code></p>
 
     <h3 id="cmd-migrate"><code>opf migrate</code></h3>
     <p><b style="color:var(--ink)">Status.</b> Planned; the reference CLI currently exits 2
