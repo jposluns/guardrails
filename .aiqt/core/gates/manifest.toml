@@ -568,8 +568,10 @@ store refuses, a non-adopter root reports NOT APPLICABLE at 0, an already-homes-
 archive bytes with no completed-import execution proof stay left-in-place, argument parsing refuses
 its invalid vectors, dispatch is byte-for-byte compatible with the original upgrade parser, other
 read-only verbs (doctor, render --check) do not enter the planner, and the evidence-fixture cases
-each refuse. Under --red-on-revert each evidence rule and the plan builder are reverted in turn and
-required to be caught by their discriminator. It arguably serves the change-carries-a-check and
+each refuse. A fixture with both durable archive bindings corrupted and no staged run asserts
+acceptance.json is the exact first refusal across fresh isolated and explicitly seeded processes.
+Under --red-on-revert each evidence rule, the archive binding sort, and the plan builder are reverted
+in turn and required to be caught by their own discriminator. It arguably serves the change-carries-a-check and
 check-fails-closed-on-unreadable disciplines, but the linkage to a single corpus rule is not
 undeniable, so none is claimed here. Class c: coverage is representative, so it asserts these
 scenarios with exact verdicts over synthetic mocked-observation fixtures, not the planner's whole

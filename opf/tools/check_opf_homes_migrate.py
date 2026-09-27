@@ -198,6 +198,17 @@ def fixture_bytes(*, invalid_acceptance=False):
     return files, rid, jr
 
 
+def refusal_order_fixture():
+    files, rid, _ = fixture_bytes()
+    stage = imp.IMPORTS_REL + "/" + rid + "/"
+    # Remove the staged run so merge conflicts cannot mask either bad binding.
+    files = {rel: raw for rel, raw in files.items() if not rel.startswith(stage)}
+    archive = imp.IMPORT_ARCHIVE_REL + "/" + rid
+    files[archive + "/acceptance.json"] = b"corrupt acceptance\n"
+    files[archive + "/sources/" + sha(BODY)] = b"corrupt source\n"
+    return files, archive
+
+
 def evidence_fixtures():
     """Malformed evidence with otherwise consistent outer bindings."""
     files, rid, jr = fixture_bytes()
@@ -308,6 +319,69 @@ def reverted_evidence_rule(rule):
     exec(compile(source.replace(anchor, indent + "pass\n"),
                  "<reverted-" + rule + ">", "exec"), namespace)
     return patch.object(migrate, name, namespace[name])
+
+
+def reverted_archive_order():
+    name = "build_homes_plan"
+    anchor = "            for suffix in sorted(expected):\n"
+    source = inspect.getsource(getattr(migrate, name))
+    assert source.count(anchor) == 1, ("archive-order", "production mutation anchor changed")
+    namespace = vars(migrate).copy()
+    exec(compile(source.replace(anchor, "            for suffix in expected:\n"),
+                 "<reverted-archive-order>", "exec"), namespace)
+    return patch.object(migrate, name, namespace[name])
+
+
+def refusal_paths(root, *, reverted=False):
+    initial = snapshot(root)
+    _, archive = refusal_order_fixture()
+    paths = []
+    script = """
+import contextlib
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import check_opf_homes_migrate as gate
+assert gate.opf._bootstrap() == 0
+files, _ = gate.refusal_order_fixture()
+context = gate.reverted_archive_order() if sys.argv[3] == "reverted" else contextlib.nullcontext()
+with context:
+    try:
+        gate.evidence_plan(Path(sys.argv[2]), files)
+    except gate.migrate.MigrationPlanError as exc:
+        print(json.dumps([exc.path, exc.condition]))
+    else:
+        raise AssertionError("builder accepted competing bad archive bindings")
+"""
+    # -I ignores PYTHONHASHSEED. Pair isolated launches with -s -P launches
+    # under a closed environment so the explicit seeds really take effect.
+    # These sampled seeds discriminate this mutation, not every refusal order.
+    for seed in ("0", "1", "2", "3", "4", "5", "6", "7", "random"):
+        for flags in (("-I", "-B"), ("-s", "-P", "-B")):
+            proc = subprocess.run(
+                [sys.executable, *flags, "-c", script,
+                 str(Path(__file__).resolve().parent), str(root),
+                 "reverted" if reverted else "original"],
+                cwd=str(root.parent), capture_output=True, text=True, timeout=30,
+                env={"PATH": os.defpath, "LC_ALL": "C", "TZ": "UTC",
+                     "PYTHONHASHSEED": seed},
+            )
+            assert proc.returncode == 0 and proc.stderr == "", (
+                seed, flags, proc.returncode, proc.stdout, proc.stderr)
+            path, condition = json.loads(proc.stdout)
+            assert condition == "archive bytes are not bound by the transaction and its INTENT", (
+                seed, flags, path, condition)
+            assert path in (archive + "/acceptance.json",
+                            archive + "/sources/" + sha(BODY)), (seed, flags, path)
+            paths.append(path)
+    assert snapshot(root) == initial
+    return paths
+
+
+def assert_refusal_order(paths, expected):
+    assert paths and all(path == expected for path in paths), (
+        "refusal-deterministic-first-path", paths, expected)
 
 
 def materialize(root, files):
@@ -477,6 +551,15 @@ def self_test(red_on_revert=False):
             assert first == second
             assert imp.tomllib.loads(first[1])["generated_at"] == "2026-01-02T03:04:05Z"
         check("deterministic-with-fixed-clock", deterministic)
+
+        order_root = base / "refusal-order"
+        order_files, order_archive = refusal_order_fixture()
+        materialize(order_root, order_files)
+        # Lexical order puts acceptance.json before sources/<digest>; the
+        # oracle is fixed here, never obtained from the planner's iteration.
+        first_refusal = order_archive + "/acceptance.json"
+        check("refusal-deterministic-first-path",
+              lambda: assert_refusal_order(refusal_paths(order_root), first_refusal))
 
         def inert():
             assert snapshot(root) == before
@@ -663,6 +746,19 @@ def self_test(red_on_revert=False):
                       case, altered, needle, offending))
 
         if red_on_revert:
+            def discriminate_archive_order():
+                assert_refusal_order(refusal_paths(order_root), first_refusal)
+                paths = refusal_paths(order_root, reverted=True)
+                try:
+                    assert_refusal_order(paths, first_refusal)
+                except AssertionError as exc:
+                    assert exc.args[0][0] == "refusal-deterministic-first-path", exc
+                else:
+                    raise AssertionError("archive-order removal survived its discriminator")
+                assert_refusal_order(refusal_paths(order_root), first_refusal)
+            check("red-on-revert-refusal-deterministic-first-path",
+                  discriminate_archive_order)
+
             def discriminate_evidence(name, altered, needle, offending, rule):
                 case = base / name
                 initial = snapshot(case)
