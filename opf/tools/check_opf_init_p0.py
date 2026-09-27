@@ -298,7 +298,7 @@ def red_on_revert(source, f):
         print("RED {} -> {}".format(guard, identity))
 
 
-def runner_check(expected, text=None):
+def runner_check(expected, text=None, *, fail_own=False):
     import os
     import shutil
     import signal
@@ -314,10 +314,12 @@ def runner_check(expected, text=None):
     bash = os.path.abspath(bash)
 
     # This self-test asserts that the runner dispatches THIS suite exactly
-    # once with its exact argv and propagates its exit. It does not assert
-    # that other registered suites are dispatched: sibling dispatch
-    # completeness is outside this check; a runner-level dispatch audit
-    # would be a separate control. The argv log is diagnostic only.
+    # once with its exact argv (RED duplicate-own-call and wrong-own-argv,
+    # using the runtime argv log), and propagates its exit (RED
+    # own-suite-failure, discriminated by RED swallowed-own-failure).
+    # It does not assert that other registered suites are dispatched:
+    # sibling dispatch completeness is outside this check; a runner-level
+    # dispatch audit would be a separate control.
     # PATH interception also covers child shells, command and env forms.
     # Absolute paths or a changed PATH can bypass it; this is not a process
     # sandbox. Intercepted siblings return 0, so their failure propagation
@@ -327,6 +329,10 @@ printf '%s\0' "$#" "$@" >> "$p0_log" || exit 2
 if [ "$#" -eq 5 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
     && [ "$3" = "$p0_test" ] && [ "$4" = "--self-test" ] \
     && [ "$5" = "--red-on-revert" ]; then
+  if [ "${p0_fail_own:-}" = "1" ]; then
+    "$p0_python" -I -B "$p0_test" --self-test --vectors-only || exit "$?"
+    exit 7
+  fi
   exec "$p0_python" -I -B "$p0_test" --self-test --vectors-only
 fi
 case " $* " in *check_opf_init_p0.py*) exit 2;; esac
@@ -350,6 +356,8 @@ exit 0
                "PYTHONDONTWRITEBYTECODE": "1", "p0_log": str(log),
                "p0_python": sys.executable,
                "p0_test": str(here / "check_opf_init_p0.py")}
+        if fail_own:
+            env["p0_fail_own"] = "1"
 
         def run_shell(body):
             with subprocess.Popen(
@@ -382,9 +390,39 @@ exit 0
         if probe.returncode != 0 or probe.stdout != str(executable) + "\n":
             raise RuntimeError(identity + "/cannot-evaluate/interception")
         proc = run_shell(source)
+        try:
+            argv_log = log.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(identity + "/cannot-evaluate/argv-log") from exc
     reached = tuple(line[5:] for line in proc.stdout.splitlines() if line.startswith("PASS "))
     check(proc.returncode == 0, identity + "/return-code")
     check(reached == expected, identity + "/pass-lines")
+
+    # NUL-framed records begin with argc; only THIS suite's calls are asserted.
+    # Keep the existing return-code/pass-lines identities ahead of own-argv.
+    fields = argv_log.split(b"\0")
+    if fields.pop() != b"":
+        raise AssertionError(identity + "/own-argv")
+    own = []
+    offset = 0
+    basename = os.fsencode(Path(env["p0_test"]).name)
+    while offset < len(fields):
+        count = fields[offset]
+        offset += 1
+        try:
+            argc = int(count)
+        except ValueError as exc:
+            raise AssertionError(identity + "/own-argv") from exc
+        if count != str(argc).encode("ascii") or argc < 0 or argc > len(fields) - offset:
+            raise AssertionError(identity + "/own-argv")
+        argv = tuple(fields[offset:offset + argc])
+        offset += argc
+        if any(arg.rsplit(b"/", 1)[-1] == basename for arg in argv):
+            own.append(argv)
+    own_argv = tuple(os.fsencode(arg) for arg in (
+        "-I", "-B", env["p0_test"], "--self-test", "--red-on-revert"))
+    if own != [own_argv]:
+        raise AssertionError(identity + "/own-argv")
 
 
 def runner_red_checks(expected):
@@ -416,6 +454,30 @@ def runner_red_checks(expected):
     red("return-code", lambda: runner_check(
         expected, source.replace(anchor, anchor + "  exit 1\n", 1)),
         AssertionError, identity + "/return-code")
+
+    # Run the real vector leg, then fail THIS suite inside the fixture.
+    def own_failure(text):
+        red("own-suite-failure", lambda: runner_check(
+            expected, text, fail_own=True), AssertionError, identity + "/return-code")
+
+    own_failure(source)
+    propagation = '  if "$@"; then :; else failed=1; fi'
+    if source.count(propagation) != 1:
+        raise AssertionError(identity + "/red-fixture")
+
+    # The failure RED must go not-red if run_gate swallows the suite's exit.
+    red("swallowed-own-failure", lambda: own_failure(
+        source.replace(propagation, '  "$@" || true', 1)),
+        AssertionError, identity + "/own-suite-failure/not-red")
+
+    # Suppressed output cannot hide additional or re-argued own-suite calls.
+    for label, command in (
+        ("duplicate-own-call", '  "$@" >/dev/null 2>&1'),
+        ("wrong-own-argv", '  "$@" --unexpected >/dev/null 2>&1 || true'),
+    ):
+        red(label, lambda command=command: runner_check(
+            expected, source.replace(propagation, propagation + "\n" + command, 1)),
+            AssertionError, identity + "/own-argv")
 
     # Remove every execute bit, including for root. Permit only the probe:
     # a reverted interception guard must never launch the real runner.
