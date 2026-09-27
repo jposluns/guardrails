@@ -1408,49 +1408,467 @@ def _guard_self_test():
     return rows
 
 
-def _runner_check(expected, source):
-    """Exercise the real standalone shell dispatcher independently of manifests.
+def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False):
+    """Prove exact dispatch using the real shell text, as the P0 suite does.
 
-    Other Python gates are intercepted. Only this suite's vector leg runs.
-    This checks exact dispatch, not other gates or arbitrary shell rewrites.
+    Intercepted Python gates are stubbed. Only this suite's vector leg runs,
+    except for the umask scratch-only case, which emits canned output.
+    Vector-only dispatch avoids recursive registration checks.
+    The scope is this suite only.
     """
+    import errno
     import json
+    import shlex
     import subprocess
     import tempfile
 
+    identity = "runner/adopt-observe-registration"
+    # Vector-only entry points never call this registration check.
+    # Refuse an escaped fixture invocation before any shell can launch.
+    if "observe_log" in os.environ:
+        raise RuntimeError(identity + "/cannot-evaluate/recursion")
+    # env -i removes the environment marker, but preserves pass_fds. Use
+    # the same private-file payload as the P0 and pack registration checks,
+    # without an env-supplied descriptor number. Inspection errors refuse.
+    marker_bytes = b"OPF runner registration recursion v1\n"
+    try:
+        for entry in os.listdir("/dev/fd"):
+            fd = int(entry)
+            try:
+                info = os.fstat(fd)
+            except OSError as exc:
+                # The descriptor used to list /dev/fd has already closed.
+                if exc.errno == errno.EBADF:
+                    continue
+                raise
+            if (stat.S_ISREG(info.st_mode) and info.st_size == len(marker_bytes)
+                    and os.pread(fd, len(marker_bytes), 0) == marker_bytes):
+                raise RuntimeError(identity + "/cannot-evaluate/recursion")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(identity + "/cannot-evaluate/recursion-marker") from exc
+    if type(fail_own) is not int or fail_own not in (0, 1, 2, 7):
+        raise ValueError(identity + "/invalid-failure-code")
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
-    prefix = r'''
-python3() {
-  if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
-      && [ "$3" = "$observe_test" ] && [ "$4" = "--self-test" ]; then
-    "$observe_python" -I -B "$observe_test" --self-test --vectors-only
-  else
-    case " $* " in *_opf_adopt_observe.py*) return 2;; esac
-    return 0
+    source = runner.read_text(encoding="utf-8") if text is None else text
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError(identity + "/cannot-evaluate/bash")
+    bash = os.path.abspath(bash)
+
+    # This self-test asserts that the runner dispatches THIS suite exactly
+    # once with its exact argv (RED duplicate-own-call and wrong-own-argv,
+    # using the runtime argv log), and propagates exits 1, 2 and 7 (RED
+    # own-suite-failure variants, discriminated by swallowed-own-failure
+    # and tolerate-1/tolerate-2). Other nonzero statuses are not injected.
+    # It does not assert that other registered suites are dispatched:
+    # sibling dispatch completeness is outside this check; a runner-level
+    # dispatch audit would be a separate control.
+    # In-runner PATH changes remain covered by the
+    # function shim (PASS in-runner-path; RED removed-function-shim).
+    # The PATH fixture also covers child shells, command and env forms.
+    # Deliberately evasive runners are outside the threat model, including
+    # wrappers recognizing canned output and swallowing real failure or
+    # CANNOT diagnostics, and alternate interpreter names such as python3.14.
+    # Absolute paths, or bypassing the function together with changing PATH,
+    # remain outside interception. Deliberately closing inherited descriptors
+    # while clearing the environment can bypass recursion refusal and spawn
+    # nested sessions outside timeout killpg containment. Not a process sandbox.
+    # Intercepted siblings return 0; their failure propagation is outside
+    # this check too.
+    fixture = r'''#!/bin/sh
+printf '%s\0' "$#" "$@" >> "$observe_log" || exit 2
+if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
+    && [ "$3" = "$observe_test" ] && [ "$4" = "--self-test" ]; then
+  if [ "$observe_scratch_only" -eq 1 ]; then
+    printf '%s\n' "$observe_expected_output"
+    exit "$observe_fail_own"
   fi
-}
-observe_python="$1"
-observe_test="$2"
+  if [ "$observe_fail_own" -ne 0 ]; then
+    "$observe_python" -I -B "$observe_test" --self-test --vectors-only || exit "$?"
+    exit "$observe_fail_own"
+  fi
+  exec "$observe_python" -I -B "$observe_test" --self-test --vectors-only
+fi
+case " $* " in *_opf_adopt_observe.py*) exit 2;; esac
+exit 0
 '''
-    with tempfile.TemporaryDirectory(prefix="opf-observe-registration-") as tmp:
-        proc = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-c", prefix + source,
-             str(runner), sys.executable, str(here / "_opf_adopt_observe.py")],
-            cwd=tmp, env={"PATH": os.defpath, "TMPDIR": tmp,
-                          "PYTHONDONTWRITEBYTECODE": "1"},
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=120,
-        )
-    reports = [json.loads(line)["opf_adopt_observe_tests"]
-               for line in proc.stdout.splitlines()
-               if line.startswith('{"opf_adopt_observe_tests":')]
-    # Timing measurements vary between executions; compare the authoritative
-    # roster identities and actual statuses, never finding text or manifest rows.
-    if (proc.returncode != 0 or len(reports) != 1
-            or [row["id"] for row in reports[0]] != expected
-            or any(row["test_status"] != VALID for row in reports[0])):
-        raise AssertionError("runner/adopt-observe-registration")
+    # Preserve ordinary caller variables (including CI) so conditional
+    # dispatch is exercised. Remove the execution controls listed below, then
+    # pin configuration and fixture variables; not an environment sandbox.
+    # The runner resolves scripts from $0, so caller cwd is safe to preserve.
+    caller_cwd = Path.cwd()
+    with tempfile.TemporaryDirectory(prefix="opf-observe-registration-") as tmp, \
+            contextlib.ExitStack() as resources:
+        os.chmod(tmp, 0o700)
+        marker = resources.enter_context(tempfile.TemporaryFile(dir=tmp))
+        marker.write(marker_bytes)
+        marker.flush()
+        if os.pathsep in tmp:
+            raise RuntimeError(identity + "/cannot-evaluate/pathsep")
+        executable = Path(tmp) / "python3"
+        executable.write_text(fixture, encoding="utf-8")
+        executable.chmod(0o700)
+        log = Path(tmp) / "argv.log"
+        log.write_bytes(b"")
+        log.chmod(0o600)
+        env = {name: value for name, value in os.environ.items()
+               if name not in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4")
+               and not name.startswith(("GIT_", "BASH_FUNC_", "PYTHON", "LD_"))}
+        env.update({name: tmp for name in env if name.startswith("XDG_")})
+        env.update({"PATH": tmp + os.pathsep + os.defpath, "TMPDIR": tmp,
+                    "HOME": tmp, "XDG_CONFIG_HOME": tmp, "XDG_CACHE_HOME": tmp,
+                    "XDG_DATA_HOME": tmp, "XDG_STATE_HOME": tmp,
+                    "XDG_CONFIG_DIRS": tmp, "XDG_DATA_DIRS": tmp,
+                    "XDG_RUNTIME_DIR": tmp, "LC_ALL": "C",
+                    "PYTHONDONTWRITEBYTECODE": "1", "observe_log": str(log),
+                    "observe_python": sys.executable,
+                    "observe_test": str(here / "_opf_adopt_observe.py"),
+                    "observe_fail_own": str(fail_own),
+                    "observe_scratch_only": "1" if scratch_only else "0",
+                    "observe_expected_output": (
+                        json.dumps({"opf_adopt_observe_tests": [
+                            {"id": item, "test_status": VALID} for item in expected
+                        ]}, sort_keys=True) + "\n"
+                        + "\n".join("PASS " + item for item in expected)
+                        if scratch_only else "")})
+
+        def run_shell(body):
+            with subprocess.Popen(
+                    [bash, "--noprofile", "--norc", "-c", body, str(runner)],
+                    cwd=caller_cwd, env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, start_new_session=True,
+                    pass_fds=(marker.fileno(),)) as proc:
+                try:
+                    stdout, stderr = proc.communicate(timeout=120)
+                except subprocess.TimeoutExpired:
+                    # Kill descendants even when the shell itself has exited.
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        proc.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # An escaped session may still hold a pipe. Closing it
+                        # bounds collection; such processes are not contained.
+                        proc.stdout.close()
+                        proc.stderr.close()
+                    raise RuntimeError(identity + "/cannot-evaluate/timeout") from None
+                return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+        # Probe with exactly the runner's cwd, flags and environment. A noexec
+        # fixture or unusable PATH must never fall through to the real gates.
+        # Requires dirname on this PATH and executable /bin/sh; absence
+        # fails closed as cannot-evaluate/interception, never a clean skip.
+        probe = run_shell("type -P dirname >/dev/null && test -x /bin/sh && "
+                          "type -P python3")
+        if probe.returncode != 0 or probe.stdout != str(executable) + "\n":
+            raise RuntimeError(identity + "/cannot-evaluate/interception")
+        # Exec only in the function subshell, so the runner can continue.
+        shim = "python3() ( exec " + shlex.quote(str(executable)) + ' "$@" );\n'
+        proc = run_shell(shim + source)
+        try:
+            argv_log = log.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(identity + "/cannot-evaluate/argv-log") from exc
+
+    # NUL-framed records begin with argc. Any argument containing THIS
+    # basename counts as an own-call attempt, even embedded -c source; require
+    # one exact argv. Incidental mentions are conservatively attempts too.
+    # Dynamically constructed names without that substring are not classified.
+    # Diagnose malformed own calls before their exit or missing output.
+    # Absent calls retain the existing return-code/pass-lines identities.
+    fields = argv_log.split(b"\0")
+    if fields.pop() != b"":
+        raise AssertionError(identity + "/own-argv")
+    own = []
+    offset = 0
+    basename = os.fsencode(Path(env["observe_test"]).name)
+    while offset < len(fields):
+        count = fields[offset]
+        offset += 1
+        try:
+            argc = int(count)
+        except ValueError as exc:
+            raise AssertionError(identity + "/own-argv") from exc
+        if count != str(argc).encode("ascii") or argc < 0 or argc > len(fields) - offset:
+            raise AssertionError(identity + "/own-argv")
+        argv = tuple(fields[offset:offset + argc])
+        offset += argc
+        if any(basename in arg for arg in argv):
+            own.append(argv)
+    own_argv = tuple(os.fsencode(arg) for arg in (
+        "-I", "-B", env["observe_test"], "--self-test"))
+    if own and own != [own_argv]:
+        raise AssertionError(identity + "/own-argv")
+
+    if proc.returncode != 0:
+        raise AssertionError(identity + "/return-code")
+    try:
+        reports = [json.loads(line)["opf_adopt_observe_tests"]
+                   for line in proc.stdout.splitlines()
+                   if line.startswith('{"opf_adopt_observe_tests":')]
+        # Timing measurements vary; compare roster identities and statuses.
+        if (len(reports) != 1
+                or [row["id"] for row in reports[0]] != expected
+                or any(row["test_status"] != VALID for row in reports[0])):
+            raise AssertionError(identity + "/pass-lines")
+    except (ValueError, KeyError, TypeError) as exc:
+        raise AssertionError(identity + "/pass-lines") from exc
+
+    if own != [own_argv]:
+        raise AssertionError(identity + "/own-argv")
+
+
+def _runner_red_checks(expected):
+    import shlex
+    import subprocess
+    import tempfile
+    from unittest.mock import patch
+
+    runner = Path(__file__).resolve().parent / "run_all_checks.sh"
+    source = runner.read_text(encoding="utf-8")
+    identity = "runner/adopt-observe-registration"
+    anchor = '  local name="$1"; shift\n'
+    if source.count(anchor) != 1:
+        raise AssertionError(identity + "/red-fixture")
+
+    def red(label, call, error, wanted):
+        try:
+            call()
+        except error as exc:
+            if str(exc) != wanted:
+                raise AssertionError(identity + "/" + label + "/wrong-red") from exc
+        except Exception as exc:
+            raise AssertionError(identity + "/" + label + "/wrong-error") from exc
+        else:
+            raise AssertionError(identity + "/" + label + "/not-red")
+        print("RED {} -> {}".format(label, wanted))
+
+    # Set CI in the caller, not in the constructed runner environment.
+    with patch.dict(os.environ, {"CI": "true"}):
+        red("ci-conditional-skip", lambda: _runner_check(
+            expected, source.replace(
+                anchor, anchor + '  case "${CI:-}:$name" in '
+                '?*:opf-adopt-observe-selftest) return 0;; esac\n', 1)),
+            AssertionError, identity + "/pass-lines")
+
+    # Exercise caller-cwd dispatch from the repository or standalone root.
+    with contextlib.chdir(runner.parents[2]):
+        if not Path("opf/tools/run_all_checks.sh").is_file():
+            raise AssertionError(identity + "/cwd-fixture")
+        red("cwd-conditional-skip", lambda: _runner_check(
+            expected, source.replace(
+                anchor, anchor + '  if [ -e opf/tools/run_all_checks.sh ]; then '
+                'case "$name" in opf-adopt-observe-selftest) return 0;; esac; fi\n', 1)),
+            AssertionError, identity + "/pass-lines")
+
+    # Exit from the dispatcher before the runner can report success.
+    red("return-code", lambda: _runner_check(
+        expected, source.replace(anchor, anchor + "  exit 1\n", 1)),
+        AssertionError, identity + "/return-code")
+
+    # Run the real vector leg, then fail THIS suite inside the fixture.
+    def own_failure(text, status=7):
+        label = "own-suite-failure" if status == 7 else "own-suite-failure-" + str(status)
+        red(label, lambda: _runner_check(
+            expected, text, fail_own=status), AssertionError, identity + "/return-code")
+
+    for status in (1, 2, 7):
+        own_failure(source, status)
+    propagation = '  if "$@"; then :; else failed=1; fi'
+    if source.count(propagation) != 1:
+        raise AssertionError(identity + "/red-fixture")
+
+    # The failure RED must go not-red if run_gate swallows the suite's exit.
+    red("swallowed-own-failure", lambda: own_failure(
+        source.replace(propagation, '  "$@" || true', 1)),
+        AssertionError, identity + "/own-suite-failure/not-red")
+
+    # Selective wrappers must defeat the corresponding failure RED.
+    for status in (1, 2):
+        wrapper = ('tolerate_own() { "$@"; local rc=$?; if [ "$rc" -eq '
+                   + str(status) + ' ]; then return 0; fi; return "$rc"; }\n')
+        mutant = wrapper + source.replace(
+            anchor, anchor + '  set -- tolerate_own "$@"\n', 1)
+        red("tolerate-" + str(status),
+            lambda: own_failure(mutant, status), AssertionError,
+            identity + "/own-suite-failure-" + str(status) + "/not-red")
+
+    # Suppressed output cannot hide additional or re-argued own-suite calls.
+    for label, command in (
+        ("duplicate-own-call", '  "$@" >/dev/null 2>&1'),
+        ("wrong-own-argv", '  "$@" --unexpected >/dev/null 2>&1 || true'),
+        ("embedded-own-call", '  python3 -I -B -c "import runpy; '
+         "runpy.run_path('$here/_opf_adopt_observe.py', run_name='__main__')"
+         '" --self-test >/dev/null 2>&1 || true'),
+    ):
+        red(label, lambda command=command: _runner_check(
+            expected, source.replace(propagation, propagation + "\n" + command, 1)),
+            AssertionError, identity + "/own-argv")
+
+    # Drop a required flag from exactly this suite's registration.
+    own_lines = [line for line in source.splitlines(keepends=True)
+                 if line.startswith('run_gate "opf-adopt-observe-selftest"')]
+    if len(own_lines) != 1 or own_lines[0].count(" --self-test") != 1:
+        raise AssertionError(identity + "/red-fixture")
+    red("dropped-own-flag", lambda: _runner_check(
+        expected, source.replace(own_lines[0],
+                                 own_lines[0].replace(" --self-test", "", 1), 1)),
+        AssertionError, identity + "/own-argv")
+
+    # Presence, including an empty value, must refuse before any bash launch.
+    for value in ("", "nested-argv.log"):
+        with patch.dict(os.environ, {"observe_log": value}):
+            with patch("subprocess.Popen", side_effect=AssertionError(
+                    identity + "/recursion/unexpected-launch")) as launch:
+                red("nested-invocation", lambda: _runner_check(expected), RuntimeError,
+                    identity + "/cannot-evaluate/recursion")
+                if launch.call_count:
+                    raise AssertionError(identity + "/recursion/unexpected-launch")
+
+    # Scrub only our registration's environment. The bounded entry probe
+    # loads the real check, but forbids nested Popen even if the guard is
+    # reverted. Require the exact child refusal and zero launch attempts,
+    # not merely a nonzero outer runner exit.
+    with tempfile.TemporaryDirectory(prefix="opf-recursion-red-") as tmp:
+        os.chmod(tmp, 0o700)
+        report = Path(tmp) / "refusal.txt"
+        nested = Path(tmp) / Path(__file__).name
+        nested.write_text(
+            "import os, runpy, sys\n"
+            "from pathlib import Path\n"
+            "from unittest.mock import patch\n"
+            f"sys.path.insert(0, {str(runner.parent)!r})\n"
+            f"scope = runpy.run_path({str(Path(__file__).resolve())!r})\n"
+            "assert 'observe_log' not in os.environ\n"
+            "with patch('subprocess.Popen', side_effect=AssertionError('nested launch')) as launch:\n"
+            "    try:\n"
+            "        scope['_runner_check'](())\n"
+            "    except RuntimeError as exc:\n"
+            "        assert not launch.called\n"
+            f"        Path({str(report)!r}).write_text(str(exc), encoding='utf-8')\n"
+            "    else:\n"
+            "        raise AssertionError('recursion accepted')\n"
+            "raise SystemExit(2)\n", encoding="utf-8")
+        nested.chmod(0o600)
+        own_line = own_lines[0]
+        script_arg = '"$here/_opf_adopt_observe.py"'
+        if own_line.count("python3 ") != 1 or own_line.count(script_arg) != 1:
+            raise AssertionError(identity + "/red-fixture")
+        scrubbed = own_line.replace(
+            "python3 ", "env -i PATH=/usr/bin:/bin python3 ", 1).replace(
+                script_arg, shlex.quote(str(nested)), 1)
+        red("scrubbed-environment-exit", lambda: _runner_check(
+            expected, source.replace(own_line, scrubbed, 1)),
+            AssertionError, identity + "/return-code")
+        if report.read_text(encoding="utf-8") != identity + "/cannot-evaluate/recursion":
+            raise AssertionError(identity + "/scrubbed-environment/wrong-refusal")
+        print("RED scrubbed-environment -> " + identity + "/cannot-evaluate/recursion")
+        print("PASS " + identity + "/scrubbed-environment/no-nested-launch")
+
+    # A harmless competing executable makes reverting the function safe.
+    # The normal check requires exactly one own call in the fixture's log.
+    with tempfile.TemporaryDirectory(prefix="opf-runner-path-") as tmp:
+        os.chmod(tmp, 0o700)
+        if os.pathsep in tmp:
+            raise RuntimeError(identity + "/cannot-evaluate/pathsep")
+        stub = Path(tmp) / "python3"
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o700)
+        changed_path = "PATH=" + shlex.quote(tmp) + ":$PATH\n" + source
+        _runner_check(expected, changed_path)
+        print("PASS " + identity + "/in-runner-path")
+
+        original_popen = subprocess.Popen
+        removed = 0
+
+        def without_function(*args, **kwargs):
+            nonlocal removed
+            command = list(args[0])
+            if command[4].startswith("python3() ( exec "):
+                command[4] = command[4].split("\n", 1)[1]
+                removed += 1
+            return original_popen(command, *args[1:], **kwargs)
+
+        with patch("subprocess.Popen", side_effect=without_function):
+            red("removed-function-shim", lambda: _runner_check(expected, changed_path),
+                AssertionError, identity + "/pass-lines")
+        if removed != 1:
+            raise AssertionError(identity + "/in-runner-path/removed-count")
+
+    # Remove every execute bit, including for root. Permit only the probe:
+    # a reverted interception guard must never launch the real runner.
+    original_chmod = Path.chmod
+    original_popen = subprocess.Popen
+    launches = 0
+    probe_body = ("type -P dirname >/dev/null && test -x /bin/sh && "
+                  "type -P python3")
+
+    def non_executable(path, mode, *args, **kwargs):
+        if path.name == "python3":
+            mode = 0o600
+        return original_chmod(path, mode, *args, **kwargs)
+
+    def probe_only(*args, **kwargs):
+        nonlocal launches
+        launches += 1
+        command = args[0] if args else kwargs.get("args", ())
+        if (launches > 1 or len(command) != 6 or command[3] != "-c"
+                or command[4] != probe_body):
+            raise AssertionError(identity + "/interception/unexpected-launch")
+        return original_popen(*args, **kwargs)
+
+    with patch.object(Path, "chmod", non_executable), \
+            patch("subprocess.Popen", side_effect=probe_only):
+        red("non-executable-fixture", lambda: _runner_check(expected), RuntimeError,
+            identity + "/cannot-evaluate/interception")
+        if launches != 1:
+            raise AssertionError(identity + "/interception/launch-count")
+
+    # Remove dirname from the probe's PATH while retaining the fixture.
+    # The exact-body/launch-count guard also prevents a bypassed probe from
+    # reaching a real runner when this interception check is reverted.
+    launches = 0
+
+    def without_dirname(*args, **kwargs):
+        kwargs["env"] = dict(kwargs["env"], PATH=kwargs["env"]["TMPDIR"])
+        return probe_only(*args, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=without_dirname):
+        red("missing-dirname", lambda: _runner_check(expected), RuntimeError,
+            identity + "/cannot-evaluate/interception")
+        if launches != 1:
+            raise AssertionError(identity + "/interception/launch-count")
+
+    # Exercise only the harness's scratch permissions: the vector leg's
+    # own fixture setup is not required to work under umask 0200.
+    # The fixture emits this suite's expected report and PASS lines instead.
+    # Discriminates only where TMPDIR has no default ACL and the process
+    # lacks CAP_DAC_OVERRIDE (root commonly has it in CI containers).
+    # Either a default ACL overriding umask or that capability makes this
+    # case non-discriminating: it can pass with or without the chmods.
+    saved = os.umask(0o200)
+    try:
+        try:
+            _runner_check(expected, scratch_only=True)
+        except Exception as exc:
+            raise AssertionError(identity + "/umask-0200") from exc
+    finally:
+        os.umask(saved)
+    print("PASS " + identity + "/umask-0200")
+
+    # Block every launch so a reverted guard cannot execute a real gate.
+    # Reset tempfile's cache as well as TMPDIR to exercise this exact directory.
+    with tempfile.TemporaryDirectory(prefix="opf-path" + os.pathsep) as tmp:
+        with patch.dict(os.environ, {"TMPDIR": tmp}), patch.object(tempfile, "tempdir", tmp):
+            with patch("subprocess.Popen", side_effect=AssertionError(
+                    identity + "/pathsep/unexpected-launch")) as launch:
+                red("tmpdir-pathsep", lambda: _runner_check(expected), RuntimeError,
+                    identity + "/cannot-evaluate/pathsep")
+                if launch.call_count:
+                    raise AssertionError(identity + "/pathsep/unexpected-launch")
 
 
 def _runner_registration_test(expected):
@@ -1464,12 +1882,13 @@ def _runner_registration_test(expected):
     try:
         _runner_check(expected, source.replace(lines[0], "", 1))
     except AssertionError as exc:
-        if str(exc) != "runner/adopt-observe-registration":
+        if str(exc) != "runner/adopt-observe-registration/pass-lines":
             raise
     else:
         raise AssertionError("runner/adopt-observe-registration-not-red")
     print("PASS runner/adopt-observe-registration")
-    print("RED runner-registration -> runner/adopt-observe-registration")
+    print("RED runner-registration -> runner/adopt-observe-registration/pass-lines")
+    _runner_red_checks(expected)
 
 
 def self_test(vectors_only=False):
