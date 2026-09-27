@@ -102,8 +102,10 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
                            archived (`.aiqt/import-archive/<run-id>/acceptance.json`) once state >= published.
                            Both store-root control paths are read beneath a store-root descriptor opened from
                            the run-dir descriptor using the validated generation's run homes and inode binding
-                           (a detached run retains the legacy three-up fallback, bound to no store). An invalid
-                           generation, or one unsupplied once homes 2 is supported, fails both checks closed.
+                           (only a path matching no registered home in any generation retains the legacy
+                           three-up fallback, bound to no store). A registered shape outside the supplied
+                           generation is cannot-evaluate, including homes-1 grading of depth-four staging.
+                           An invalid generation, or one unsupplied once homes 2 is supported, fails closed.
                            No-follow on EVERY component (_read_store_control): a
                            symlinked parent, a FIFO, or any non-regular entry is a FINDING, never followed.
                            The shared journal `.aiqt/import/journal` and the archive path are classified
@@ -137,7 +139,10 @@ write access to the run dir) are gate-blind: the gate guards the review-to-promo
 authenticity (the reserved signature seam is the upgrade path). Likewise the Group C journal bind proves the
 record is the one its journal INTENT recorded, not that the journal itself is authentic: a principal with
 write access to the store can author a self-consistent INTENT + record pair. A passing gate proves nothing
-about those.
+about those. A genuinely detached run (no path match among any generation's registered run homes) still
+reads transaction controls from the three-up parent, without binding that parent to a store: absent
+controls there can pass, and controls there can affect the verdict. This compatibility residual does not
+apply to a registered staging shape graded under a generation that does not admit it; that is refused.
 
 This repository is not an OPFiles adopter (it has no store to import into), so even though the `opf
 import` verb is now wired (OPF-IMPORT-VERB, opf.py `_cmd_import`) there is no staged import run to check
@@ -1586,10 +1591,19 @@ def _staged_run_store_fd(rd, homes):
     """The store root holding the opened run, for the per-run transaction checks. The supplied homes is the
     gate's already-validated generation, never None: the run is located through the generation-aware
     run homes and inode binding durable acceptance uses (_ingest_store_fd), so a homes-2 staging run
-    (.working/staging/<kind>/<run-id>) reads its store four levels up. A detached copy (no home
-    matches) keeps the legacy three-up parent, which is bound to no store (disclosed residual)."""
+    (.working/staging/<kind>/<run-id>) reads its store four levels up. A path registered in another
+    generation refuses; only a detached copy matching no generation's run homes keeps the legacy
+    three-up parent, which is bound to no store (disclosed residual)."""
+    import _opf_import as imp
     fd = _ingest_store_fd(rd, homes)
     if fd is None:
+        # Enumerate the constructor's registered generations, including inactive ones: using
+        # SUPPORTED_HOMES here would misclassify a homes-2 staging shape as detached under homes 1.
+        for generation in (1, 2):
+            for rel in imp._import_run_locations(rd.path.name, generation):
+                parts = tuple(rel.split("/"))
+                if rd.path.parts[-len(parts):] == parts:
+                    raise _GateError("run path is registered outside homes generation {}".format(homes))
         fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)
     return fd
 
@@ -2232,7 +2246,7 @@ def _check_staged_run(rd, homes=None):
     # CONDITIONALLY PRESENT (mirroring acceptance.json): absent = "run not yet applied", recorded as a PASS
     # for both Group C checks; present = validated for schema and state-machine consistency. The store root
     # is located through the validated generation's run homes and inode binding, with the legacy
-    # three-up fallback for a detached run (bound to no store).
+    # three-up fallback only for a path matching no generation's registered home (bound to no store).
     # Round-4 F3: the store root is opened from THE SUPPLIED RUN-DIR DESCRIPTOR using parent components
     # (never symlinks), so a located home binds the physical store holding the classified directory,
     # never a re-resolved string path; every store-relative control path below is
@@ -3131,14 +3145,16 @@ def _self_test():
         if twin is not None:
             detached_labels.append(label + "-detached")
             _self_test_gate_generation_applied(expect, label + "-detached", twin, swept, False, credit)
-            # A control character is refused earlier by a located home's inode walk than by a
-            # detached copy's control-path reads. Both must still fail at that character.
+            # A control character is refused by a located home's inode walk. A detached copy
+            # must instead fail run-id validation while enumerating registered homes, before fallback.
             twin_first = swept[-1][1]
             expect("gate-generation-detached-{}".format(label), all(
                 twin_first[cid] == value or (
-                    cid in _TRANSACTION_CHECKS and value[0] is False and twin_first[cid][0] is False
+                    cid in _TRANSACTION_CHECKS and value[0] is False
                     and "carries a control character" in value[1]
-                    and "carries a control character" in twin_first[cid][1])
+                    and twin_first[cid] == (False,
+                        "cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                        "(invalid ingest run-id: {!r})".format(twin.name)))
                 for cid, value in first.items()))
         return first
 
@@ -4257,9 +4273,14 @@ def _self_test():
             decoy.parent.mkdir(parents=True)
             record.write_bytes(b"state =\n")
             legacy = check_staged_run(txn_run, homes=1)
-            expect("txn-homes1-staging-legacy-parent-" + kind,
-                   all(legacy[cid] == (True, "no transaction record (run not yet applied)")
-                       for cid in _TRANSACTION_CHECKS))
+            mismatch = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                        "(run path is registered outside homes generation 1)")
+            expect("txn-homes1-staging-cannot-" + kind,
+                   all(legacy[cid] == (False, mismatch) for cid in _TRANSACTION_CHECKS))
+            # Omission still defaults to homes 1 in shipped tooling; it must not admit this shape.
+            implicit = check_staged_run(txn_run)
+            expect("txn-homes1-staging-unsupplied-cannot-" + kind,
+                   all(implicit[cid] == (False, mismatch) for cid in _TRANSACTION_CHECKS))
             with imp._self_test_homes2_active(txn_root):
                 corrupt = check_staged_run(txn_run, homes=2)
                 expect("txn-homes2-staging-store-root-" + kind,
@@ -4277,8 +4298,8 @@ def _self_test():
                        and all(txn_clean[cid][0] for cid in EXPECTED_CHECKS))
             decoy.write_bytes(b"state =\n")
             legacy = check_staged_run(txn_run, homes=1)
-            expect("txn-homes1-staging-legacy-parent-decoy-" + kind,
-                   legacy["transaction-schema"][0] is False)
+            expect("txn-homes1-staging-decoy-cannot-" + kind,
+                   all(legacy[cid] == (False, mismatch) for cid in _TRANSACTION_CHECKS))
         # Flip: a _gate_homes that returns its input unvalidated admits each malformed generation.
         with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
             refused = []

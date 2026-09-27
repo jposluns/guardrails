@@ -896,6 +896,70 @@ def _st_reservation(root, run_id):
     return p.read_bytes() if p.exists() else None
 
 
+def _st_staged_apply(gate, base, kind, case):
+    """Exercise apply_ingest at either depth-four home, observing the actual gate call.
+    Withhold only the gate argument, so the coordinator still locates the run under homes 2."""
+    from unittest.mock import patch
+    root, rid, run = _st_build(base, "staged-{}-{}".format(kind, case))
+    staged = root / _opf_store.stage_run(kind, rid)
+    staged.parent.mkdir(parents=True)
+    run.rename(staged)
+    if case == "corrupt":
+        record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        record.parent.mkdir(parents=True)
+        record.write_bytes(b"state =\n")
+    before = _st_counters(root)
+    manifest = root / ".working/toml/manifest.toml"
+    manifest_before = manifest.read_bytes()
+    activation = (_opf_store.SUPPORTED_HOMES, _opf_store.HOMES2_SPEC_VERSION, _opf_store.validate_manifest)
+    real_check = gate.check_staged_run
+    seen = []
+
+    def observed(path, homes=None):
+        results = real_check(path, homes=None if case == "withheld" else homes)
+        seen.append((Path(path), homes, results))
+        return results
+
+    with _opf_import._self_test_homes2_active(root), \
+            patch.dict(sys.modules, {"check_opf_import": gate}), \
+            patch.object(gate, "check_staged_run", side_effect=observed):
+        result = apply_ingest(root, rid, now=_NOW)
+    restored = (activation == (_opf_store.SUPPORTED_HOMES, _opf_store.HOMES2_SPEC_VERSION,
+                              _opf_store.validate_manifest)
+                and manifest.read_bytes() == manifest_before and gate.check_staged_run is real_check)
+    if not (restored and len(seen) == 1 and seen[0][:2] == (staged, 2)):
+        return False
+    results = seen[0][2]
+    if case == "clean":
+        home = root / _opf_import._ingest_acceptance_home(rid)
+        return (result.verdict == CLEAN and result.promoted is True and result.outcome == "promoted"
+                and set(results) == set(gate.EXPECTED_CHECKS)
+                and all(results[cid][0] for cid in gate.EXPECTED_CHECKS)
+                and not staged.exists() and (home / PROMOTION_NAME).is_file()
+                and (root / ".archive/legacy/move.md").read_bytes() == b"moveme\n"
+                and _st_counters(root) == dict(BI=1, LF=3, WL=0))
+    refused = (result.verdict == CANNOT_EVALUATE and result.promoted is False
+               and result.outcome == "aborted" and staged.is_dir()
+               and _st_counters(root) == before and _st_reservation(root, rid) is None
+               and any("import gate failed:" in finding and "transaction-schema" in finding
+                       for finding in result.findings))
+    if case == "corrupt":
+        return (refused and results["transaction-schema"][0] is False
+                and "unreadable/unparseable" in results["transaction-schema"][1])
+    if case == "withheld":
+        error = "the store's homes generation was not supplied to this manifest-free gate"
+        return (refused and all(results[cid] == (False, error) for cid in
+                               ("transaction-schema", "transaction-consistency")))
+    raise ValueError("unknown staged apply case: " + case)
+
+
+def _t_staged_apply(kind, case):
+    def test(base, check):
+        import check_opf_import as gate
+        check("staged-{}-{}".format(kind, case), _st_staged_apply(gate, base, kind, case))
+    return test
+
+
 def _t_happy_path(base, check):
     """A reviewed, accepted run promotes: ids minted under both locks, keep/move/migrate executed, the
     evidence bundle written, staging reclaimed; a re-apply is a verified no-op that mints nothing."""
@@ -1756,7 +1820,9 @@ TESTS = (("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
          ("postverify-committed", _t_postverify_committed),
          ("postcommit-journal-fault", _t_postcommit_journal_fault),
          ("postlaunch-indeterminate", _t_postlaunch_indeterminate), ("postlaunch-total", _t_postlaunch_total),
-         ("postlaunch-retain", _t_postlaunch_retain))
+         ("postlaunch-retain", _t_postlaunch_retain)) + tuple(
+             ("staged-{}-{}".format(kind, case), _t_staged_apply(kind, case))
+             for kind in ("import", "ingest") for case in ("clean", "corrupt", "withheld"))
 
 
 def self_test(only=None):
@@ -1904,22 +1970,37 @@ def _d_inline_required(module, base_dir):
                   "per-record/inline-required")
 
 
-def _d_staged_run_store_depth(module, base_dir):
-    """A corrupt store-root transaction refuses depth-4 ingest promotion. The candidate gate must
-    be installed by name: _require_review_gate imports it lazily. Fixed three-up falsely promotes."""
-    from unittest.mock import patch
-    root, rid, run = _st_build(base_dir, "staged-depth")
-    staged = root / _opf_store.stage_run("ingest", rid)
-    staged.parent.mkdir(parents=True)
-    run.rename(staged)
-    record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
-    record.parent.mkdir(parents=True)
-    record.write_bytes(b"state =\n")
-    with _opf_import._self_test_homes2_active(root), patch.dict(sys.modules, {"check_opf_import": module}):
-        result = apply_ingest(root, rid, now=_NOW)
-    _revert_check(result.promoted is False and result.outcome == "aborted"
-                  and any("transaction-schema" in finding for finding in result.findings),
-                  "gate/staged-run-store-depth")
+def _d_staged_run_store_depth(kind):
+    """Reverting the locator must fail the end-to-end corrupt case's own assertion, for each home."""
+    def test(module, base_dir):
+        _revert_check(_st_staged_apply(module, base_dir, kind, "corrupt"),
+                      "gate/staged-run-store-depth/" + kind)
+    return test
+
+
+def _d_staging_generation_mismatch(kind):
+    """A registered but inadmissible shape is never detached, with or without a .working decoy."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, run = _st_build(base_dir, "staging-generation-" + kind)
+        staged = root / _opf_store.stage_run(kind, rid)
+        staged.parent.mkdir(parents=True)
+        run.rename(staged)
+        decoy = root / ".working" / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        error = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                 "(run path is registered outside homes generation 1)")
+        outcomes = []
+        for with_decoy in (False, True):
+            if with_decoy:
+                decoy.parent.mkdir(parents=True)
+                decoy.write_bytes(b"state =\n")
+            for supported, supplied in ((1, 1), (1, None), (2, 1)):
+                with patch.object(_opf_store, "SUPPORTED_HOMES", supported):
+                    result = module.check_staged_run(staged, homes=supplied)
+                outcomes.append(all(result[cid] == (False, error) for cid in
+                                    ("transaction-schema", "transaction-consistency")))
+        _revert_check(all(outcomes), "gate/staging-generation-mismatch/" + kind)
+    return test
 
 
 def _d_transaction_generation_required(module, base_dir):
@@ -2343,10 +2424,14 @@ _POST_LAUNCH = (
 # (identity, source-key, focused test, unique old, new). source-key selects which module's source is
 # mutated: "apply" is this file, "alloc" is _opf_allocation.py (a dependency guard, mutated at source the
 # same way the observer gate mutates its shared _opf_observe.py); "gate" is check_opf_import.py.
-_DISCRIMINATORS = (
-    ("gate/staged-run-store-depth", "gate", _d_staged_run_store_depth,
+_DISCRIMINATORS = tuple(
+    ("gate/staged-run-store-depth/" + kind, "gate", _d_staged_run_store_depth(kind),
      "store_fd = _staged_run_store_fd(rd, gen)",
-     'store_fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)'),
+     'store_fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)')
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/staging-generation-mismatch/" + kind, "gate", _d_staging_generation_mismatch(kind),
+     "if rd.path.parts[-len(parts):] == parts:", "if False:")
+    for kind in ("import", "ingest")) + (
     ("gate/transaction-generation-required", "gate", _d_transaction_generation_required,
      "if gen is None:\n        for cid in _TRANSACTION_CHECKS:\n            record(cid, False, gen_error)",
      "if False:\n        for cid in _TRANSACTION_CHECKS:\n            record(cid, False, gen_error)"),
