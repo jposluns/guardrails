@@ -435,13 +435,15 @@ def _watchdog_safety_case(mode):
 
     if mode == "missing-reap":
         original = _opf_emit.run_bounded
-        def skip_reap(pid, options):
-            if options == 0:
-                time.sleep(0.03)                       # let SIGKILL terminate, but leave the zombie
-                return pid, 0
-            return real_wait(pid, options)
+        def skip_reap(child):
+            # Close the control channel but leave the guardian unreaped: the
+            # bounded-close collector is exactly what this mutant removes.
+            _opf_emit._fixture_close_sockets(child.control, child.peer)
+        def skip_poll(child):
+            return None
         def mutant(*args, **kwargs):
-            with patch.object(os, "waitpid", skip_reap):
+            with patch.object(_opf_emit._FixtureProcess, "close", skip_reap), \
+                    patch.object(_opf_emit._FixtureProcess, "poll", skip_poll):
                 return original(*args, **kwargs)
         with patch.object(_opf_emit, "run_bounded", mutant):
             return (EXIT_OK if _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
@@ -845,18 +847,27 @@ def _watchdog_completion_case(mode):
         with patch.object(emit, "_fixture_children", transient):
             assert launch().returncode == 0
     elif mode == "inherited-control":
+        import errno
         import time
         other = emit._FixtureProcess(time.monotonic() + 10)
         real_subreaper = emit._fixture_subreaper
+        # Capture the numbers in the parent: the guardian sweep closes raw
+        # descriptors, so a sibling socket OBJECT keeps its fileno there.
+        unrelated = {"control": other.control.fileno(), "peer": other.peer.fileno()}
         try:
             def check_guardian():
-                assert other.control.fileno() == -1, "unrelated control inherited by guardian"
-                assert other.peer.fileno() == -1, "unrelated peer inherited by guardian"
+                for name, fd in sorted(unrelated.items()):
+                    try:
+                        os.fstat(fd)
+                    except OSError as exc:
+                        assert exc.errno == errno.EBADF, (name, exc)
+                        continue
+                    raise AssertionError("unrelated " + name + " inherited by guardian")
                 real_subreaper()
             with patch.object(emit, "_fixture_subreaper", check_guardian):
                 assert launch().returncode == 0
-                # Flip: omit the unrelated endpoints from child-side closure.
-                with patch.object(emit, "_fixture_sockets", type(emit._fixture_sockets)()):
+                # Flip: omit every sibling registration from the guardian sweep.
+                with patch.object(emit, "_fixture_owned_fds", type(emit._fixture_owned_fds)()):
                     refuses(emit.ChildStatusUnavailable, launch)
             assert not other.control.get_inheritable() and not other.peer.get_inheritable()
         finally:
@@ -1019,6 +1030,254 @@ def _watchdog_completion_case(mode):
                 patch.object(os, "kill") as kill:
             refuses(emit.ChildStatusUnavailable, lambda: emit._fixture_child_reaped(pid))
         assert not kill.called
+    elif mode == "overdue-success":
+        import time
+        # QA16 F1: an exit first observed after the deadline is TIMEOUT, whatever
+        # order the guardian and the collector were scheduled in. The guardian
+        # stops itself before supervision; the collector is gated before its
+        # first poll; the subject finishes only after the recorded deadline has
+        # decisively expired. Barriers order every step: no wall-clock race.
+        caller = os.getpid()
+        with tempfile.TemporaryDirectory(prefix="opf-overdue-") as directory:
+            release = Path(directory, "release")
+            guardian_file = Path(directory, "guardian")
+            recorded = []
+            real_init = emit._FixtureProcess.__init__
+
+            def record_init(child, deadline, **kwargs):
+                recorded.append(deadline)
+                return real_init(child, deadline, **kwargs)
+
+            real_group = emit._fixture_setpgid
+
+            def stop_guardian(subject):
+                real_group(subject)
+                if os.getpid() != caller:
+                    scratch = Path(directory, "guardian.tmp")
+                    scratch.write_text(str(os.getpid()), encoding="ascii")
+                    scratch.rename(guardian_file)  # atomic: never a partial PID
+                    os.kill(os.getpid(), signal.SIGSTOP)
+
+            gate = threading.Event()
+            real_poll = emit._FixtureProcess.poll
+
+            def gated_poll(child):
+                if os.getpid() == caller and not gate.is_set():
+                    assert gate.wait(30), "collector gate was never released"
+                return real_poll(child)
+
+            def state(target):
+                try:
+                    stat = Path("/proc", str(target), "stat").read_bytes()
+                except (FileNotFoundError, ProcessLookupError):
+                    return None
+                return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
+
+            def await_state(target, wanted, note):
+                bound = time.monotonic() + 30
+                while state(target) not in wanted:
+                    assert time.monotonic() < bound, note
+                    time.sleep(0.005)
+
+            body = ("import os, time\n"
+                    "bound = time.monotonic() + 30\n"
+                    "while not os.path.exists(" + repr(str(release)) + "):\n"
+                    "    if time.monotonic() >= bound:\n"
+                    "        return 1\n"
+                    "    time.sleep(0.005)\n"
+                    "return 0")
+            outcome = []
+
+            def run():
+                try:
+                    outcome.append(("returned", emit.run_status_owned(
+                        [*command[:4], body], fixture_id="completion/" + mode, timeout=1)))
+                except BaseException as exc:  # noqa: BLE001 - the verdict channel
+                    outcome.append(("raised", exc))
+
+            worker = threading.Thread(target=run, daemon=True)
+            with patch.object(emit._FixtureProcess, "__init__", record_init), \
+                    patch.object(emit._FixtureProcess, "poll", gated_poll), \
+                    patch.object(emit, "_fixture_setpgid", stop_guardian):
+                worker.start()
+                try:
+                    bound = time.monotonic() + 30
+                    while not guardian_file.exists():
+                        assert time.monotonic() < bound, "guardian never reached its stop point"
+                        time.sleep(0.005)
+                    gpid = int(guardian_file.read_text(encoding="ascii"))
+                    await_state(gpid, {"T"}, "guardian did not stop")
+                    assert recorded, "the fixture deadline was not observed"
+                    while time.monotonic() < recorded[0] + 0.2:
+                        time.sleep(0.005)
+                    release.write_text("go", encoding="ascii")
+                    children = Path("/proc", str(gpid), "task", str(gpid), "children")
+                    subject = int(children.read_text(encoding="ascii").split()[0])
+                    await_state(subject, {"Z"}, "subject did not finish after release")
+                    os.kill(gpid, signal.SIGCONT)
+                    await_state(gpid, {"Z", None}, "guardian did not exit after resume")
+                finally:
+                    gate.set()
+                worker.join(30)
+            assert not worker.is_alive(), "the collector never returned"
+            assert outcome and outcome[0][0] == "raised" and isinstance(
+                outcome[0][1], subprocess.TimeoutExpired), (
+                "an overdue completion was accepted as success: " + repr(outcome))
+    elif mode == "fork-registration":
+        import time
+        # QA16 F2: cancellation delivered between fork and the next statement
+        # must leave the fork result in cleanup-visible ownership state, so
+        # close() reaps the guardian: ECHILD after cleanup, never a zombie.
+        forked = []
+
+        def interrupt(frame, event, arg):
+            if event != "call" or frame.f_code.co_name != "_start":
+                return None
+
+            def local(frame, event, arg):
+                if event == "line" and not forked:
+                    pid = frame.f_locals.get("pid")
+                    # Parent only, at the first line event after the fork lock is
+                    # released (the same window a real SIGINT is delivered in).
+                    if pid and not emit._fixture_socket_lock.locked():
+                        forked.append(pid)
+                        raise KeyboardInterrupt("cancel between fork and registration")
+                return local
+
+            return local
+
+        child = emit._FixtureProcess(time.monotonic() + 30)
+        sys.settrace(interrupt)
+        try:
+            refuses(KeyboardInterrupt, child.start)
+        finally:
+            sys.settrace(None)
+        assert forked, "the fork boundary was never reached"
+        gpid = forked[0]
+        leaked = True
+        try:
+            os.waitid(os.P_PID, gpid, os.WEXITED | os.WNOWAIT)
+        except ChildProcessError:
+            leaked = False
+        if leaked:
+            os.waitpid(gpid, 0)  # hygiene: reap the leak before failing
+        assert not leaked, "cancellation between fork and registration leaked a guardian"
+        assert emit._fixture_child_reaped(gpid) is True
+    elif mode == "sibling-fds":
+        import errno
+        import time
+        # QA16 MINOR-1: a sibling call's pipe and receipt descriptors, not only
+        # its sockets, must not survive into a new guardian or its subject.
+        sib_r, sib_w = os.pipe()
+        other = emit._FixtureProcess(time.monotonic() + 30, keep_fds=(sib_r, sib_w))
+        sibling = dict((("pipe-r", sib_r), ("pipe-w", sib_w),
+                        ("report", other.report.fileno()),
+                        ("control", other.control.fileno()),
+                        ("peer", other.peer.fileno())))
+        # Identity, not mere openness: a swept number may be legitimately
+        # reused inside the guardian (e.g. by a dlopen); only the ORIGINAL
+        # pipe/socket/receipt still being reachable is a leak.
+        identity = dict((name, (os.fstat(fd).st_dev, os.fstat(fd).st_ino))
+                        for name, fd in sibling.items())
+        try:
+            def probe():
+                leaked = []
+                for name, fd in sorted(sibling.items()):
+                    try:
+                        stat = os.fstat(fd)
+                    except OSError as exc:
+                        if exc.errno != errno.EBADF:
+                            raise
+                        continue
+                    if (stat.st_dev, stat.st_ino) == identity[name]:
+                        leaked.append(name)
+                return "CLEAN" if not leaked else "LEAKED:" + " ".join(leaked)
+
+            result = emit.run_bounded(probe, timeout_s=10)
+            assert result == "CLEAN", result
+            # The sweep is an allowlist: this call's own channels survived it
+            # (the token above arrived through the kept pipe), and the sibling
+            # call's descriptors stay open and usable in the caller itself.
+            os.write(sib_w, b"S")
+            assert os.read(sib_r, 1) == b"S", "sibling pipe was closed in the caller"
+        finally:
+            other.close()
+            os.close(sib_r)
+            os.close(sib_w)
+    elif mode == "bounded-close":
+        import time
+        # QA16 MINOR-2: cancelling a long-budget call must not block the caller
+        # for the remaining execution budget. close() waits within its own
+        # bounded cleanup budget, escalates with a group SIGKILL, and records
+        # the escalation as a cannot-evaluate.
+        with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0):
+            child = emit._FixtureProcess(time.monotonic() + 3600)
+            pid = child.start()
+            if pid == 0:
+                time.sleep(3600)  # subject: outlives everything unless cancelled
+                os._exit(0)
+
+            def state(target):
+                try:
+                    stat = Path("/proc", str(target), "stat").read_bytes()
+                except (FileNotFoundError, ProcessLookupError):
+                    return None
+                return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
+
+            def children_of(owner):
+                pids = []
+                for entry in os.listdir("/proc"):
+                    if entry.isdecimal():
+                        try:
+                            stat = Path("/proc", entry, "stat").read_bytes()
+                        except (FileNotFoundError, ProcessLookupError):
+                            continue
+                        if int(stat.rsplit(b")", 1)[1].split()[1]) == owner:
+                            pids.append(int(entry))
+                return pids
+
+            bound = time.monotonic() + 30
+            while True:
+                assert time.monotonic() < bound, "the guardian subject never appeared"
+                listed = children_of(pid)
+                if listed:
+                    subject = listed[0]
+                    break
+                time.sleep(0.005)
+            # A stopped guardian models a cleanup that cannot make progress: it
+            # can never exit, so an unbounded close() would block until resumed.
+            os.kill(pid, signal.SIGSTOP)
+            bound = time.monotonic() + 30
+            while state(pid) != "T":
+                assert time.monotonic() < bound, "the guardian did not stop"
+                time.sleep(0.005)
+            failures = []
+
+            def cancel():
+                try:
+                    child.close()
+                except emit.ChildStatusUnavailable as exc:
+                    failures.append(str(exc))
+                except BaseException as exc:  # noqa: BLE001 - the verdict channel
+                    failures.append("unexpected: " + repr(exc))
+
+            worker = threading.Thread(target=cancel, daemon=True)
+            begun = time.monotonic()
+            worker.start()
+            worker.join(20)
+            blocked = worker.is_alive()
+            if blocked:
+                os.kill(pid, signal.SIGCONT)  # unwedge the leak before failing
+                worker.join(30)
+            elapsed = time.monotonic() - begun
+            try:
+                os.kill(subject, signal.SIGKILL)  # the orphaned sleeper, if any
+            except (ProcessLookupError, PermissionError):
+                pass
+            assert not blocked, "close() blocked past its bounded cleanup budget"
+            assert failures and "escalat" in failures[0], failures
+            assert emit._fixture_child_reaped(pid) is True
+            assert elapsed < 15, elapsed
     else:
         raise AssertionError("unknown completion fixture: " + mode)
     print("opf completion:", mode, "PASS")
@@ -1148,7 +1407,9 @@ def _watchdog_regression_self_test():
                               "nested-timeout", "nested-cancel", "no-signal-echild",
                               "exec-first", "group-ownership", "guardian-error",
                               "empty-children", "inherited-control", "bounded-diagnostics",
-                              "cleanup-budget", "deadline-flips", "socket-close", "subject-setup"))
+                              "cleanup-budget", "deadline-flips", "socket-close", "subject-setup",
+                              "overdue-success", "fork-registration", "sibling-fds",
+                              "bounded-close"))
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix

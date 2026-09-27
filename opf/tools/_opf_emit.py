@@ -772,6 +772,15 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
 _fixture_socket_lock = threading.Lock()
 _fixture_sockets = weakref.WeakSet()
 
+# Every descriptor a fixture call holds (control/peer sockets, its receipt, and the
+# caller-declared keep_fds such as run_bounded's pipe), keyed by the owning call. A
+# new guardian closes EVERY registered descriptor that is not in its own allowlist
+# of fds to KEEP, so sibling pipes and receipts (not only sockets) never survive
+# into an unrelated guardian. Registration and the sweep snapshot share the fork
+# lock; a caller drops a number (release_fd) BEFORE closing it, so a stale entry
+# can only leak a descriptor briefly, never mark a reused number for closure.
+_fixture_owned_fds = weakref.WeakKeyDictionary()
+
 
 def _fixture_close_sockets(*endpoints):
     # socket.close() invalidates fileno() before releasing the kernel descriptor.
@@ -791,12 +800,15 @@ class _FixtureProcess:
     private; the caller's SIGCHLD, masks, timers and subreaper flag stay untouched.
     Parent-side fork callbacks and uninterruptible kernel waits remain unbounded.
     """
-    def __init__(self, deadline):
+    def __init__(self, deadline, keep_fds=()):
         import socket
         import tempfile
         self.deadline = deadline
         self.pid = self.pidfd = self.status = None
         self.armed = self.collected = self.timed_out = False
+        # keep_fds: this call's own descriptors that its guardian and subject
+        # still need (e.g. run_bounded's pipe); registered sibling-visible below.
+        self.keep_fds = tuple(keep_fds)
         with _fixture_socket_lock:
             self.control, self.peer = socket.socketpair()  # non-inheritable across exec
             _fixture_sockets.update((self.control, self.peer))
@@ -805,6 +817,17 @@ class _FixtureProcess:
         except BaseException:
             _fixture_close_sockets(self.control, self.peer)
             raise
+        with _fixture_socket_lock:
+            _fixture_owned_fds[self] = {self.control.fileno(), self.peer.fileno(),
+                                        self.report.fileno(), *self.keep_fds}
+
+    def release_fd(self, fd):
+        """The caller is about to close `fd` itself: drop the registration FIRST,
+        so a reused number can never be swept out of a later sibling guardian."""
+        with _fixture_socket_lock:
+            owned = _fixture_owned_fds.get(self)
+            if owned is not None:
+                owned.discard(fd)
 
     def start(self):
         try:
@@ -826,14 +849,30 @@ class _FixtureProcess:
         if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
             raise ChildStatusUnavailable("unowned SIGCHLD disposition")
         with _fixture_socket_lock:
-            pid = os.fork()
+            sweep = sorted({fd for owned in _fixture_owned_fds.values() for fd in owned})
+            # The fork result is recorded in cleanup-visible ownership state on
+            # the fork statement itself, before any other statement can raise,
+            # so a cancellation delivered between fork and the next line still
+            # lets close() reap the guardian (the child's self.pid copy of 0 is
+            # inert: a guardian never consults it and never calls close()).
+            self.pid = pid = os.fork()
         if pid == 0:
             subject = subject_fd = cleanup_deadline = None
             stage = "startup"
             try:
-                for endpoint in list(_fixture_sockets):
-                    if endpoint is not self.peer:
-                        _fixture_close_sockets(endpoint)
+                # Close every descriptor a sibling call holds (pipes and
+                # receipts, not only sockets) by an allowlist of fds to KEEP:
+                # this call's peer, its receipt, and its caller-declared
+                # keep_fds. EOF on a sibling's pipe therefore keeps its meaning,
+                # and nothing this guardian's tree does can pin a sibling's
+                # descriptors open.
+                keep = {self.peer.fileno(), self.report.fileno(), *self.keep_fds}
+                for fd in sweep:
+                    if fd not in keep:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
                 os.setpgid(0, 0)
                 _fixture_subreaper()
                 os.write(self.peer.fileno(), b"R")
@@ -863,10 +902,16 @@ class _FixtureProcess:
                 stage = "supervision"
                 while True:
                     ended = os.waitid(os.P_PID, subject, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                    if ended is not None:
-                        break
+                    # Deadline expiry is authoritative BEFORE accepting
+                    # completion: the clock is sampled AFTER waitid, so only a
+                    # pre-expiry sample proves the exit preceded the deadline.
+                    # An exit first observed after expiry is recorded as a
+                    # timeout, whatever order the processes were scheduled in.
+                    # Cleanup below keeps its own separate budget.
                     if time.monotonic() >= self.deadline:
                         timed_out = True
+                        break
+                    if ended is not None:
                         break
                     try:
                         if not os.read(self.peer.fileno(), 1):
@@ -930,9 +975,14 @@ class _FixtureProcess:
                             os.close(subject_fd)
                     finally:
                         os._exit(125)
-        self.pid = pid
+        self.release_fd(self.peer.fileno())
         _fixture_close_sockets(self.peer)
         self.pidfd = _fixture_pidfd(pid)
+        if self.pidfd is not None:
+            with _fixture_socket_lock:
+                owned = _fixture_owned_fds.get(self)
+                if owned is not None:
+                    owned.add(self.pidfd)
         os.setpgid(pid, pid)
         self.control.setblocking(False)
         poller = select.poll()
@@ -991,22 +1041,51 @@ class _FixtureProcess:
     def close(self):
         import os
         import signal
+        import time
         # Cancellation addresses this guardian, never a stale PID.
+        with _fixture_socket_lock:
+            _fixture_owned_fds.pop(self, None)
         _fixture_close_sockets(self.control, self.peer)
         try:
             if self.pid is not None and not self.collected:
                 if not self.armed:
                     _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
-                try:
-                    waited, raw = os.waitpid(self.pid, 0)
-                except ChildProcessError as exc:
-                    self.collected = True
-                    raise ChildStatusUnavailable("guardian ownership lost") from exc
+                # A cancelled call no longer needs the subject's execution time:
+                # wait within a bounded cleanup budget (twice the grace, so an
+                # honest guardian's own grace-bounded drain fits), then escalate
+                # with a group SIGKILL rather than blocking for the remaining
+                # execution budget. An escalated collection is recorded on the
+                # cannot-evaluate channel below; it is never read as success.
+                escalated = False
+                deadline = time.monotonic() + 2 * _FIXTURE_CLEANUP_GRACE
+                while True:
+                    try:
+                        waited, raw = os.waitpid(self.pid, os.WNOHANG)
+                    except ChildProcessError as exc:
+                        self.collected = True
+                        raise ChildStatusUnavailable("guardian ownership lost") from exc
+                    if waited != 0:
+                        break
+                    if time.monotonic() >= deadline:
+                        if escalated:
+                            raise ChildStatusUnavailable(
+                                "guardian cleanup deadline: not collected after escalation")
+                        escalated = True
+                        _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                        deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+                    time.sleep(0.005)
                 self.collected = True
                 if waited != self.pid:
                     raise ChildStatusUnavailable("unexpected guardian cleanup PID")
                 if self.armed:
-                    self._read_report(raw)
+                    try:
+                        self._read_report(raw)
+                    except ChildStatusUnavailable as exc:
+                        if escalated:
+                            raise ChildStatusUnavailable(
+                                str(exc) + "; after bounded-close escalation "
+                                "(group SIGKILL to the guardian)") from exc
+                        raise
         finally:
             if self.pidfd is not None:
                 os.close(self.pidfd)
@@ -1030,7 +1109,8 @@ def _run_fixture_process(argv, *, timeout=120, cwd=None, env=None):
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("fixture timeout must be finite and positive")
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        child = _FixtureProcess(time.monotonic() + timeout)
+        child = _FixtureProcess(time.monotonic() + timeout,
+                                keep_fds=(out.fileno(), err.fileno()))
         try:
             if child.start() == 0:
                 try:
@@ -1043,12 +1123,22 @@ def _run_fixture_process(argv, *, timeout=120, cwd=None, env=None):
                     import traceback
                     traceback.print_exc()
                     os._exit(127)
-            while child.poll() is None:
-                if time.monotonic() >= child.deadline:
+            while True:
+                status = child.poll()
+                # Deadline expiry is authoritative BEFORE accepting completion:
+                # the clock is sampled AFTER the poll, so only a pre-expiry
+                # sample proves collection preceded the deadline. A completion
+                # first observed after expiry is a timeout, whatever order the
+                # guardian and this collector were scheduled in.
+                overdue = time.monotonic() >= child.deadline
+                if status is None:
+                    if overdue:
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    time.sleep(0.005)
+                    continue
+                if child.timed_out or overdue:
                     raise subprocess.TimeoutExpired(argv, timeout)
-                time.sleep(0.005)
-            if child.timed_out:
-                raise subprocess.TimeoutExpired(argv, timeout)
+                break
         except TimeoutError as exc:
             raise subprocess.TimeoutExpired(argv, timeout) from exc
         finally:
@@ -1232,7 +1322,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         return _bounded_setup_error(exc)
     child = None
     try:
-        child = _FixtureProcess(deadline)
+        child = _FixtureProcess(deadline, keep_fds=(rfd, wfd))
         pid = child.start()
     except BaseException as exc:
         try:
@@ -1284,6 +1374,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     timed_out = False
     failures = []
     try:
+        child.release_fd(wfd)
         os.close(wfd)
         os.set_blocking(rfd, False)
         poller = select.poll()
@@ -1300,7 +1391,9 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
             # for a sibling's inherited descriptor to close before polling it.
             wstatus = child.poll()
             if wstatus is not None:
-                timed_out = child.timed_out
+                # Deadline expiry is authoritative over the collected receipt:
+                # the clock is sampled after the poll (see _run_fixture_process).
+                timed_out = child.timed_out or time.monotonic() >= deadline
                 if not eof:
                     # The receipt follows ECHILD, so the complete (at most 200
                     # byte) payload is already buffered. Drain without waiting
@@ -1325,6 +1418,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         failures.append(_bounded_setup_error(exc))
     finally:
         try:
+            child.release_fd(rfd)
             os.close(rfd)
         finally:
             try:
