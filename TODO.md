@@ -38,6 +38,11 @@ reorganized.
 
 Fix errors and prevent their recurrence. Worked first.
 
+| ID | Item | Tags |
+| --- | --- | --- |
+| OPF-HOMES-ACTIVATION-CHECKLIST | Items that must land before homes 2 activates (gates L4) (H, M) | `[public]` `[tooling]` |
+| MODE-CANONICAL-SOURCE | Mode-gated hooks read an optional canonical mode file before the hand-synced lease field (H, S) | `[public]` `[tooling]` |
+
 ## Priority 2 - Fill significant gaps
 
 Fill significant gaps: deepen thin-but-present capability to operational sufficiency, and add the significant missing capabilities.
@@ -45,6 +50,7 @@ Fill significant gaps: deepen thin-but-present capability to operational suffici
 | ID | Item | Tags |
 | --- | --- | --- |
 | GD-152 | Portable consumer-side findings-lifecycle capability (queue, resurface, escalation) (M, L) | `[public]` |
+| JOURNAL-READ-CONTAINED-FD-LEAK | The journal reader leaks a directory descriptor when a close fails (H, M) | `[public]` `[tooling]` |
 
 ## Priority 3 - Tooling
 
@@ -52,6 +58,7 @@ Tooling: the pack's operational-files framework, migration and adoption machiner
 
 | ID | Item | Tags |
 | --- | --- | --- |
+| PREVIEW-FLEET-PORT | Port the 10 generally useful fleet hooks to .preview/ (M, L) | `[public]` `[tooling]` |
 | OPF-INIT | `opf init`: initialize and wire OPF into a project, with staging and a mutation lock (H, L) | `[public]` `[tooling]` |
 | OPF-DOGFOOD | dogfood: migrate this project's own operational records to OPF (M, M) | `[public]` `[tooling]` |
 | OPF-ADOPT-ENTRY | adoption entry point: a generated assistant-readable entry (llms.txt-style) for self-adoption (M, M) | `[public]` `[tooling]` |
@@ -64,7 +71,7 @@ Tooling: the pack's operational-files framework, migration and adoption machiner
 | VER-1 | Adoption + versioning umbrella: release/tag process, drift gate, adopter manifest (H, XL) | `[public]` |
 | EN-2 | New protective hooks: trojan-source detection, self-guard loop, config-surface guard (M, L) | `[public]` |
 | EN-5 | Prose-enforcement hook roster: publish/enable the plugin for adopters (H, M) | `[public]` |
-| S4 | Credential-destroy enforcement hook (M, L) | `[public]` `[BLOCKED: capability review]` |
+| S4 | Credential-destroy enforcement hook (M, L) | `[public]` `[adopter]` `[BLOCKED: shared shell-lexer dependency]` |
 | OPF-CUSTOM-FILES | OPF custom (adopter-defined) operational-file types (M, M) | `[public]` `[tooling]` |
 
 ## Priority 4 - Adopter experience
@@ -73,6 +80,7 @@ Adopter experience: capability and guidance for organizations adopting the pack.
 
 | ID | Item | Tags |
 | --- | --- | --- |
+| PACK-HOOKS-PROMOTE | Promote the .preview/ hooks into the pack's hook set (M, L) | `[public]` `[adopter]` |
 | DEV-1 | development-assistant install skill: per-agent file generation, setup wizard, install doctor (H, L) | `[public]` `[adopter]` |
 | DEV-2 | adopter QA/review skill (M, M) | `[public]` `[adopter]` |
 | TOOL-1 | `/aiqt` manager and external tooling catalog (M, M) | `[public]` `[adopter]` |
@@ -80,6 +88,7 @@ Adopter experience: capability and guidance for organizations adopting the pack.
 | ADOPT-TEMPLATE | adopter guardrail-seed submission template (S, S) | `[public]` `[adopter]` |
 | DOC-CNTDEF | Adopter guidance: vendor-and-point the continue-by-default rule file, don't paraphrase (L, S) | `[public]` |
 | DOC-RECORDS-STORE | Adopter guidance: out-of-tree records store (companion_stores / rooted-session) (M, S) | `[public]` |
+| FIXGUARD-NONVACUITY-GATE | CI gate: each fix-guard test must really fail on the merge-base code (H, M) | `[public]` `[tooling]` |
 
 ## Priority 5 - Future direction
 
@@ -89,6 +98,7 @@ Future direction: ideas under consideration, no commitment yet. Picked deliberat
 | --- | --- | --- |
 | TEAMS-1 | Teams web console: governance activity across projects without a terminal (idea; no commitment) | `[public]` `[future]` |
 | ENT-1 | Enterprise management: central policy, shared configuration, cross-team reporting (idea; no commitment) | `[public]` `[future]` |
+| CWE-RULE-SPLITS | Review six suggested security-rule splits (M, M) | `[public]` `[corpus]` |
 
 ---
 
