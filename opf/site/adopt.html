@@ -215,16 +215,18 @@
 
     <h3 id="cmd-upgrade"><code>opf upgrade</code></h3>
     <p><b style="color:var(--ink)">Purpose.</b> Apply the in-place base-schema upgrade from spec 1.0.0
-      or 1.1.0 to 1.2.0, staged for your own review and merge.</p>
-    <p>A 1.1.0 store needs only the <code>spec_version</code> bump; a 1.0.0 store also receives the
-      earlier schema delta. Neither path creates bootstrap provenance for an existing store.</p>
+      or 1.1.0 to 1.2.0, left uncommitted for your own review and merge.</p>
+    <p>The schema delta for a 1.1.0 store changes only <code>spec_version</code>; a 1.0.0 store also
+      receives the earlier schema delta. Declared views are then regenerated, so a stale committed
+      view can change. Neither path creates bootstrap provenance for an existing store.</p>
     <p><b style="color:var(--ink)">How it works.</b> The upgrade is additive and idempotent. It resolves
       the store and refuses a store above the tooling's spec version. A store already at the target
       version returns a byte no-op if doctor is VALID, or exits 2 without writing otherwise.
       When migrating a 1.0.0 or 1.1.0 store, its preconditions include readable, canonical manifest
-      and counters files matching a recognised origin shape, a clean <code>.working</code> subtree
-      and declared product-scope render targets, and acquisition of its single-writer lease.
-      An untracked lease is handled separately by the lease-acquisition check. A manifest or counters
+      and counters files matching a recognised origin shape, cleanliness over planned schema and
+      render destinations and index collision candidates (including ignored files there), and
+      acquisition of its single-writer lease. An untracked or ignored lease is excepted from the
+      cleanliness check and handled separately by lease acquisition. A manifest or counters
       file with noncanonical formatting or comments, or a held lease, prevents that migration.
       It holds the lease across the change, applies the allowed
       schema delta as a canonical model regeneration, renders the declared views, and requires a full
@@ -233,9 +235,13 @@
       uncommitted in your working tree for review and merge. A preflight refusal, including a
       newer-than-supported store or an older store failing the migration preconditions above, stops
       before writing the schema delta. A failure after the additive rewrite begins exits 2 and
-      leaves changes already made in place. When render returns nonzero or the final doctor reports
-      a result other than VALID, upgrade prints recovery commands using the committed HEAD,
-      scoped to the affected store and product paths.</p>
+      leaves changes already made in place. If view generation fails, the final doctor check does
+      not report VALID, or the run stops with any other error or interruption (including a safety
+      refusal) after the lease is taken and before doctor reports VALID, upgrade prints recovery
+      commands using the committed HEAD, limited to the
+      planned store and product paths. Once doctor reports VALID, no recovery commands are printed;
+      if the lease then fails to release, upgrade prints advice to confirm no OPF run is active and
+      resolve the leftover lease before taking further action.</p>
     <p class="refchips"><code>opf upgrade</code> <code>opf upgrade --root .</code></p>
 
     <h3 id="cmd-absorb"><code>opf absorb</code></h3>

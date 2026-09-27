@@ -3,6 +3,8 @@
 
 Checks documented topology against the constructor authority. Text checks protect the planned
 contract, not runtime conformance to homes 2. No store is mutated or required to install a block.
+Residual: wording checks require pinned text to be present; except for the self-test
+reconstruction of section 9.2, they do not detect added contradictory claims that leave the pins intact.
 """
 import re
 import sys
@@ -24,9 +26,78 @@ _CONTRACT = {
             "check roster and residuals are unchanged", "byte-exact",
             "fails closed on a reserved-name match or ambiguity"),
     "4.4": ("MUST NOT be used as a machine subdirectory", "legacy content cannot be re-absorbed"),
-    "9.2": ('spec_version = "2.0.0"', "unknown future generations are refused",
-            "idempotent and journaled", "Every destination is digest-verified before its source is removed",
-            "clean over exactly the paths", "full doctor VALID", "standing finding", "multi-root coordinator"),
+    "9.2": (
+        'The homes-generation upgrade targets spec_version = "2.0.0" with required integer '
+        '[opf].homes = 2.',
+        'Absent or 1 denotes legacy homes for migration; unknown future generations are refused.',
+        'The runtime supported version and init format remain unchanged until homes 2 is activated.',
+        'The migration refuses a store resolved outside the product root until a multi-root '
+        'coordinator exists.',
+        'Unproven legacy .archive/ entries remain in place with a standing finding until '
+        'dispositioned.',
+        'A base-schema version bump ships a tested, in-place store-schema upgrade (opf upgrade).',
+        'The upgrade is idempotent.',
+        'A purely schema-level bump is additive, using atomic replacement of existing files, '
+        'create-only writes for new index files, and regeneration of declared views through '
+        'exclusively created temporary files followed by atomic rename.',
+        'These writes are sequential, with recovery scope held in memory, not a durable '
+        'transaction journal.',
+        'A homes-generation bump additionally relocates OPF control areas as a versioned, '
+        'journaled, fail-closed relocation.',
+        'Every destination is digest-verified before its source is removed.',
+        'Both kinds of upgrade run under the store consistency contract and the single-writer lease '
+        '(section 5.7).',
+        'It fails closed on an unresolvable store, a declared spec_version ABOVE the tooling, a '
+        'divergence, a held lease, or any populated state that contradicts its preconditions; it '
+        'never lowers the fail-closed floor.',
+        'Before any write it enforces two fail-closed preconditions: it claims the single-writer '
+        'lease (section 5.7) and holds it across the whole mutation, and it verifies the working '
+        'tree is clean, including ignored files, over the planned schema and render destinations '
+        '(store and product roots) and the index collision candidates, so the committed HEAD is a '
+        'verified restore path for that scope; a held lease or a dirty store refuses, and a dirty '
+        'store is asked to commit its own changes, never restored by the tool.',
+        'After applying the schema delta, it regenerates the declared views and requires a full '
+        "doctor VALID before offering the uncommitted change for the adopter's own "
+        'branch-and-merge.',
+        'It never stages or commits the change.',
+        'The manifest and counters rewrite is a model regeneration through the canonical '
+        'new-document emitter, never a textual round-trip edit, bounded by two guards: a '
+        'precondition that re-emitting the UNCHANGED parsed model reproduces the on-disk bytes '
+        'exactly (proving the file is canonical and comment-free, so nothing can be lost), failing '
+        'closed otherwise; and a postcondition that the model diff equals exactly the allowed '
+        'delta, failing closed otherwise.',
+        'The allowed delta is expressed as ensure-present and ensure-absent over the whole 1.0.0 '
+        'origin family, so a governance-enabled, a decision_support-enabled, a bare, and a '
+        'view-omitting 1.0.0 store all migrate under one rule and the normative text cannot diverge '
+        'from the tooling.',
+        'For the 1.0.0 to 1.1.0 upgrade the allowed delta is: rename the base table [devprocess] to '
+        '[opf] and its standard discovery token from devprocess to opf (the OPFiles rebrand), '
+        'carrying every other base field over unchanged; bump spec_version to 1.1.0; remove the '
+        'retired decision_support module key where present; add each of the [types] rows for '
+        'contribution, maintainer_decision, and preference_pattern not already declared by an '
+        'enabled 1.0.0 module (a governance-enabled store already declares maintainer_decision and '
+        'a decision_support-enabled store preference_pattern; the row moves from module tier to '
+        'baseline unchanged); add the two new view rows (CONTRIBUTIONS.md and the DECISIONS.toml '
+        "projection); widen the existing DECISIONS.md composed view's sources from the two 1.0.0 "
+        'decision sources (pending_decision, autonomous_decision) to the four required at 1.1.0 by '
+        'adding maintainer_decision and preference_pattern where that view is declared (a 1.0.0 '
+        'store that declares no DECISIONS.md gains none and stays valid, since no composed view is '
+        'required); extend counters.toml with the CN/MD/PP zeros while preserving every existing '
+        'high-water; and create each missing empty *.index.toml file for the three baseline types, '
+        'skipping any that already exist (such as a maintainer_decision.index.toml where governance '
+        'was enabled, whose records are preserved byte-for-byte).',
+        'The upgrade weakens nothing: preference_pattern simply moves to always-on, so a populated '
+        'decision-support index is kept as is.',
+        'Base spec 1.2.0 admits one new managed machine-store file, .working/toml/init.toml: the '
+        'bootstrap provenance a coupled opf init records (its format is frozen in OPF-INIT-D2B).',
+        'It is a managed leaf when present and is never required, so a store without it stays '
+        'valid.',
+        'For the 1.1.0 to 1.2.0 upgrade the allowed schema delta is the spec_version bump alone: no '
+        'other manifest field, schema file, or counter changes, and no provenance is created for an '
+        'existing store (none is ever fabricated).',
+        'Declared views are then regenerated, so a stale committed view can change.',
+        'A 1.0.0 store takes the 1.0.0 delta above directly to 1.2.0.',
+    ),
     "12": ("Neither is scanned as the other", "retained indefinitely", "independent re-read",
            "age alone never authorizes deletion"),
     "14.1": (".working/staging/import/<run-id>/", ".working/staging/ingest/<run-id>/",
@@ -156,6 +227,290 @@ def _staged_generation_self_test(check):
     with patch.object(gate, "_gate_homes", side_effect=gate._GateError("generation policy sentinel")):
         check("staged-generation-shared-row-policy", lambda: gate._row_scope_error(
             ingest, [], None, 1) == "cannot evaluate: generation policy sentinel")
+
+
+def _staged_root_self_test(check):
+    """Exercise physical root binding independently of transaction support.
+
+    Root depth, custom-machine, pointer and decoy cases are controls: they already pass on
+    the predecessor. The detached homes-2 binding case discriminates the new refusal.
+    """
+    import errno
+    import os
+    import shutil
+    from unittest.mock import patch
+    import check_opf_import as gate
+    import _opf_import as imp
+
+    def grade(run, generation=2):
+        with patch.object(store, "SUPPORTED_HOMES", 2):
+            return gate.check_staged_run(run, homes=generation)
+
+    def bound(run, root):
+        with patch.object(store, "SUPPORTED_HOMES", 2):
+            rd = gate._RunDir(run)
+            try:
+                fd = gate._staged_run_store_fd(rd, 2)
+                try:
+                    actual, expected = os.fstat(fd), os.stat(root)
+                    return (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
+                finally:
+                    os.close(fd)
+            finally:
+                rd.close()
+
+    def binding_refused(run):
+        with patch.object(store, "SUPPORTED_HOMES", 2):
+            rd = gate._RunDir(run)
+            try:
+                try:
+                    fd = gate._staged_run_store_fd(rd, 2)
+                except gate._GateError as exc:
+                    return str(exc) == "no registered store binding for homes generation 2"
+                os.close(fd)
+                return False
+            finally:
+                rd.close()
+
+    def refused(result, needle):
+        return all(not result[cid][0] and needle in result[cid][1]
+                   for cid in gate._TRANSACTION_CHECKS)
+
+    with tempfile.TemporaryDirectory(prefix="opf-staged-root-") as tmp:
+        base = Path(tmp).resolve()
+        for kind in ("import", "ingest"):
+            root = base / kind
+            machine = root / ".working" / "custom"
+            machine.mkdir(parents=True)
+            (machine / "manifest.toml").write_text('[opf]\nstandard = "opf"\n', encoding="utf-8")
+            run = gate._self_test_gate_generation_disk(
+                root, "accepted" if kind == "import" else None, location=kind)
+            check("staged-root-homes2-" + kind, lambda: bound(run, root))
+            resolution = store.resolve_store(root)
+            check("staged-root-custom-machine-" + kind, lambda:
+                  resolution.status == store.RESOLVED and resolution.machine_dir == "custom"
+                  and bound(run, resolution.store_root))
+            product = base / (kind + "-product")
+            product.mkdir()
+            (product / store.POINTER_REL).write_text(
+                '[store]\ntarget = "dir:{}"\n'.format(root), encoding="utf-8")
+            resolution = store.resolve_store(product)
+            check("staged-root-pointer-" + kind, lambda:
+                  resolution.status == store.RESOLVED and resolution.store_root == root
+                  and bound(run, resolution.store_root))
+            check("staged-root-generation-mismatch-" + kind, lambda:
+                  refused(grade(run, 1), "registered outside homes generation 1"))
+            record = root / imp._txn_record_rel(run.name)
+            record.parent.mkdir(parents=True)
+            record.write_bytes(b"state =\n")
+            # The depth-three decoy is absent; diagnose the actual root's corruption.
+            check("staged-root-wrong-level-decoy-" + kind, lambda:
+                  not grade(run)["transaction-schema"][0]
+                  and "unreadable/unparseable" in grade(run)["transaction-schema"][1])
+            record.unlink()
+            clean = grade(run)
+            check("staged-root-no-transaction-" + kind, lambda:
+                  clean["staged-run-structure"] == (True, "")
+                  and all(clean[cid] == (
+                      True, gate._HOMES2_NO_LEGACY_TRANSACTION_DETAIL)
+                      for cid in gate._TRANSACTION_CHECKS))
+            # Inject only after binding: the real constructor has already classified both homes.
+            real_bind, real_stage = gate._staged_run_store_fd, store.stage_run
+            for error in (gate._BindingRefusal, RuntimeError):
+                opened = []
+                def bind_then_arm(rd, generation):
+                    fd = real_bind(rd, generation)
+                    opened.append(fd)
+                    return fd
+                def fail_kind(*args):
+                    if opened:
+                        raise error("kind-check sentinel")
+                    return real_stage(*args)
+                with patch.object(gate, "_staged_run_store_fd", side_effect=bind_then_arm), \
+                        patch.object(store, "stage_run", side_effect=fail_kind):
+                    observed = grade(run)
+                closed = False
+                if opened:
+                    try:
+                        os.fstat(opened[0])
+                    except OSError as exc:
+                        closed = exc.errno == errno.EBADF
+                check("staged-root-kind-exception-{}-{}".format(error.__name__, kind), lambda:
+                      bool(opened) and closed and refused(observed, "kind-check sentinel"))
+
+            # Attempts belong to the coordinator, including open and rolled-back journals.
+            # These real frames pin the standalone gate's deliberately narrower transaction scope.
+            if kind == "ingest":
+                import _journal
+                import _opf_journal
+                journal = root / store.journal_root(kind)
+                journal.mkdir(parents=True)
+                attempt = journal / _opf_journal.attempt_txn(kind, run.name, 1)
+                attempt.mkdir()
+                jfd = store._open_root_fd(journal)
+                try:
+                    _journal.publish(jfd, attempt, _journal.F_INTENT, dict(
+                        txn=attempt.name, header=dict(kind=kind, run_id=run.name, attempt=1,
+                                                     operation_id="synthetic-operation"), ops=[]))
+                    for state in ("open", "rolled-back"):
+                        if state == "rolled-back":
+                            for frame in (_journal.F_RIP, _journal.F_RC):
+                                _journal.publish(jfd, attempt, frame, {"txn": attempt.name})
+                        check("staged-root-attempt-" + state, lambda:
+                              _journal.classify_state(jfd, attempt) == state
+                              and grade(run) == clean)
+                    _journal.publish(jfd, attempt, _journal.F_INTENT, {"txn": attempt.name})
+                    malformed = False
+                    try:
+                        _journal.classify_state(jfd, attempt)
+                    except _journal.JournalError:
+                        malformed = True
+                    check("staged-root-attempt-malformed", lambda:
+                          malformed and grade(run) == clean)
+                finally:
+                    os.close(jfd)
+                shutil.rmtree(attempt)
+            # A typed projection/journal is not interchangeable with durable review acceptance.
+            # Probe both namespaces even when the staging kind differs; empty bytes still count.
+            for txn_kind in ("import", "ingest"):
+                typed = root / store.txn_record(txn_kind, run.name)
+                typed.parent.mkdir(parents=True)
+                typed_decoy = root / ".working" / store.txn_record(txn_kind, run.name)
+                typed_decoy.parent.mkdir(parents=True)
+                typed_decoy.write_bytes(b"state =\n")
+                check("staged-root-typed-ignore-decoy-{}-{}".format(txn_kind, kind), lambda:
+                      grade(run) == clean)
+                projection = imp._emit_bytes(dict(
+                    format="opf.journal.transaction/v1", kind=txn_kind, run_id=run.name,
+                    state="complete", operation_id="synthetic-operation",
+                    journal_rel=store.journal_root(txn_kind)), "typed projection")
+                for label, payload in (("empty", b""), ("malformed", b"state =\n"),
+                                       ("projection", projection)):
+                    typed.write_bytes(payload)
+                    observed = grade(run)
+                    check("staged-root-typed-{}-{}-{}".format(label, txn_kind, kind), lambda:
+                          refused(observed, "typed transaction evidence is not supported")
+                          and all(observed[cid] == clean[cid] for cid in gate.EXPECTED_CHECKS
+                                  if cid not in gate._TRANSACTION_CHECKS))
+                    typed.unlink()
+                typed.symlink_to(root / "absent-typed-target")
+                check("staged-root-typed-symlink-{}-{}".format(txn_kind, kind), lambda:
+                      refused(grade(run), "typed transaction evidence cannot be classified"))
+                typed.unlink()
+                os.mkfifo(typed)
+                check("staged-root-typed-fifo-{}-{}".format(txn_kind, kind), lambda:
+                      refused(grade(run), "typed transaction evidence cannot be classified"))
+                typed.unlink()
+                parent = typed.parent
+                moved_typed = parent.with_name(parent.name + "-saved")
+                parent.rename(moved_typed)
+                parent.symlink_to(moved_typed, target_is_directory=True)
+                check("staged-root-typed-parent-{}-{}".format(txn_kind, kind), lambda:
+                      refused(grade(run), "typed transaction evidence cannot be classified"))
+                parent.unlink()
+                moved_typed.rename(parent)
+                journal = root / store.journal_root(txn_kind)
+                journal.mkdir(parents=True, exist_ok=True)
+                (journal / "lock").write_bytes(b"writer lock")
+                check("staged-root-typed-empty-journal-{}-{}".format(txn_kind, kind), lambda:
+                      grade(run) == clean)
+                single = journal / run.name
+                single.mkdir()
+                check("staged-root-typed-journal-{}-{}".format(txn_kind, kind), lambda:
+                      refused(grade(run), "typed transaction evidence is not supported"))
+                single.rmdir()
+                # Unreadable typed controls must not collapse into the absent positive above.
+                real_read = gate._read_store_control
+                def denied_typed(fd, rel):
+                    if rel == store.txn_record(txn_kind, run.name):
+                        raise gate._GateError("typed control denied")
+                    return real_read(fd, rel)
+                with patch.object(gate, "_read_store_control", side_effect=denied_typed):
+                    check("staged-root-typed-unreadable-{}-{}".format(txn_kind, kind), lambda:
+                          refused(grade(run), "typed control denied"))
+            typed.write_bytes(b"state =\n")
+            record.write_bytes(b"state =\n")
+            check("staged-root-typed-retains-legacy-corruption-" + kind, lambda:
+                  refused(grade(run), "typed transaction evidence is not supported")
+                  and "unreadable/unparseable" in grade(run)["transaction-schema"][1])
+            typed.unlink()
+            record.unlink()
+            decoy = root / ".working" / imp._txn_record_rel(run.name)
+            decoy.parent.mkdir(parents=True)
+            decoy.write_bytes(b"state =\n")
+            check("staged-root-ignore-decoy-" + kind, lambda:
+                  grade(run) == clean)
+            os.mkfifo(record)
+            check("staged-root-fifo-" + kind, lambda:
+                  "not a regular file" in grade(run)["transaction-schema"][1])
+            record.unlink()
+            original = record.parent
+            moved = root / "moved-control"
+            original.rename(moved)
+            original.symlink_to(moved, target_is_directory=True)
+            check("staged-root-symlink-control-" + kind, lambda:
+                  not grade(run)["transaction-schema"][0]
+                  and "no-follow" in grade(run)["transaction-schema"][1])
+            original.unlink()
+            moved.rename(original)
+            # Deny only the physical store ascent, after _bind_run_name has succeeded.
+            # The run remains readable and its staged-data checks must still grade.
+            real_open, real_home = os.open, gate._physical_home
+            denied_steps = []
+            def denied(path, flags, *args, **kwargs):
+                if path == "..":
+                    denied_steps.append(path)
+                    raise PermissionError("ancestor denied")
+                return real_open(path, flags, *args, **kwargs)
+            def denied_home(rd, rel):
+                with patch.object(gate.os, "open", side_effect=denied):
+                    return real_home(rd, rel)
+            with patch.object(gate, "_physical_home", side_effect=denied_home):
+                observed = grade(run)
+            check("staged-root-unreadable-ancestor-" + kind, lambda:
+                  bool(denied_steps) and refused(observed, "ancestor denied")
+                  and observed["staged-run-structure"] == clean["staged-run-structure"]
+                  and observed["report-schema"] == clean["report-schema"]
+                  and observed["artifact-digest-integrity"] == clean["artifact-digest-integrity"])
+            check("staged-root-readable-ancestor-" + kind, lambda: grade(run) == clean)
+            detached = base / (kind + "-detached") / "a" / "b" / run.name
+            shutil.copytree(run, detached)
+            check("staged-root-detached-legacy-" + kind, lambda:
+                  all(grade(detached, 1)[cid] == (True, "no transaction record (run not yet applied)")
+                      for cid in gate._TRANSACTION_CHECKS))
+            check("staged-root-detached-binding-discriminator-" + kind, lambda:
+                  binding_refused(detached))
+            check("staged-root-detached-homes2-" + kind, lambda:
+                  refused(grade(detached), "no registered store binding for homes generation 2"))
+            other_kind = "ingest" if kind == "import" else "import"
+            crossed = root / store.stage_run(other_kind, run.name)
+            crossed.parent.mkdir(parents=True)
+            run.rename(crossed)
+            try:
+                observed = grade(crossed)
+                check("staged-root-cross-kind-" + kind, lambda:
+                      observed["staged-run-structure"] == (
+                          False, "staging kind does not match {} run content".format(kind))
+                      and observed["report-schema"] == clean["report-schema"])
+            finally:
+                crossed.rename(run)
+            check("staged-root-matching-kind-" + kind, lambda: grade(run) == clean)
+            misplaced = root / ".working" / "staging" / "preview" / run.name
+            misplaced.parent.mkdir(parents=True)
+            run.rename(misplaced)
+            try:
+                check("staged-root-kind-mismatch-" + kind, lambda:
+                      refused(grade(misplaced), "no registered store binding for homes generation 2"))
+            finally:
+                misplaced.rename(run)
+            claimant = base / (kind + "-claimant")
+            claimed = claimant / store.stage_run(kind, run.name)
+            claimed.parent.mkdir(parents=True)
+            claimed.symlink_to(run, target_is_directory=True)
+            route = claimant / "route"
+            route.symlink_to(root, target_is_directory=True)
+            check("staged-root-ambiguous-" + kind, lambda:
+                  refused(grade(route / run.relative_to(root)), "ambiguous second store claim"))
 
 
 def boundary_self_test():
@@ -1081,6 +1436,7 @@ def self_test():
     suffix = "-20260917T120000Z-0123456789abcdef"
     prefixes = {"import": "imp", "ingest": "imp", "adoption": "adopt", "layout": "layout", "preview": "preview"}
     _staged_generation_self_test(check)
+    _staged_root_self_test(check)
     check("control-boundaries", lambda: boundary_self_test() == 0)
     check("kinds", lambda: store.STAGING_KINDS == tuple(prefixes))
     check("homes", lambda: store.STORE_TREE_CONTROL_DIRS == ("imported", "archive", "staging", "journals"))
@@ -1182,6 +1538,36 @@ def self_test():
     for section, body in _sections(text).items():
         if section in _CONTRACT:
             check("spec-flip-" + section, lambda: bool(contract_findings(text.replace(body, "\n", 1))))
+    # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
+    body = _sections(text)["9.2"]
+    mutated, removed = re.subn(r"The upgrade\s+is idempotent\.", "", body)
+    check("spec-flip-9.2-idempotence", lambda: removed == 1 and
+          "spec 9.2 missing contract: The upgrade is idempotent." in
+          contract_findings(text.replace(body, mutated, 1)))
+    # Pin every normative sentence in 9.2 and exercise each deletion independently.
+    normalized = " ".join(body.replace("`", "").split())
+
+    def replace_body(replacement):
+        # Keep the body separate from both its heading and the following section.
+        return text.replace(body, "\n\n" + replacement + "\n\n", 1)
+
+    check("spec-control-9.2-undeleted", lambda:
+          contract_findings(replace_body(normalized)) == [])
+    def pins_cover_section():
+        return " ".join(_CONTRACT["9.2"]) == normalized
+
+    check("spec-control-9.2-pin-coverage", pins_cover_section)
+    # Mutate the registry itself: per-pin deletion tests cannot notice a dropped pin.
+    from unittest.mock import patch
+    with patch.dict(_CONTRACT, {"9.2": tuple(
+            pin for pin in _CONTRACT["9.2"]
+            if pin != "Every destination is digest-verified before its source is removed.")}):
+        check("spec-flip-9.2-dropped-pin", lambda: not pins_cover_section())
+    for fragment in _CONTRACT["9.2"]:
+        mutated = replace_body(normalized.replace(fragment, "", 1))
+        check("spec-flip-9.2-" + fragment, lambda f=fragment, m=mutated:
+              normalized.count(f) == 1 and
+              contract_findings(m) == ["spec 9.2 missing contract: " + f])
     for failure in failures:
         print("FAIL: " + failure)
     print("OPF-HOMES SELF-TEST: {} ({} checks)".format("FAILED" if failures else "OK", checked))
