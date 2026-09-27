@@ -50,7 +50,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated loader/expansion; recompute, never trust output
 
-HEX64 = frozenset("0123456789abcdef")
+_OPF_TOOLS = str(Path(__file__).resolve().parent.parent / "opf" / "tools")
+if _OPF_TOOLS not in sys.path:
+    sys.path.insert(0, _OPF_TOOLS)
 
 # The verifier-carried ABSOLUTE-MINIMUM-CLASS table (4.2): first match wins; the final row is the
 # category default. Strength order: pack-immutable > managed-block > manifest-self = derived >
@@ -94,46 +96,25 @@ def apply_minimums(classes):
                                              path, cls, minimum))
 
 
-def _hex_ok(value):
-    return isinstance(value, str) and len(value) == 64 and set(value) <= HEX64
-
-
 def load_manifest(root):
-    """Strict manifest schema (4.1): exact top-level keys, exact row keys, validated types and digests,
-    no duplicate paths, sources sorted bytewise. Violations raise GateError (exit 2)."""
+    """Use the shared pack grammar; map every refusal to GateError/exit 2."""
+    from _opf_pack_manifest import parse_manifest, MAX_FILE_BYTES
+    from _opf_adopt import VALID
+
     try:
-        data = load_toml(root / gen_manifest.MANIFEST_REL)
-    except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
-        raise gen_manifest.GateError("cannot read the manifest ({})".format(exc))
-    top = {"format-version", "release-version", "genesis", "tree-sha256", "sources", "artifacts"}
-    if set(data) != top:
-        raise gen_manifest.GateError("manifest: top-level keys must be exactly {}".format(sorted(top)))
-    if data["format-version"] != 1 or not isinstance(data["genesis"], bool):
-        raise gen_manifest.GateError("manifest: format-version must be 1 and genesis a real boolean")
-    if not _hex_ok(data["tree-sha256"]):
-        raise gen_manifest.GateError("manifest: tree-sha256 is not 64 lowercase hex")
-    seen = set()
-    for row in data["sources"]:
-        if set(row) != {"path", "bytes", "sha256"}:
-            raise gen_manifest.GateError("manifest sources row keys must be exactly path/bytes/sha256")
-        if not isinstance(row["bytes"], int) or isinstance(row["bytes"], bool) or row["bytes"] < 0 \
-                or not _hex_ok(row["sha256"]):
-            raise gen_manifest.GateError("manifest sources row for {!r} is malformed".format(
-                row.get("path")))
-        if row["path"] in seen:
-            raise gen_manifest.GateError("manifest: duplicate sources path {!r}".format(row["path"]))
-        seen.add(row["path"])
-    for row in data["artifacts"]:
-        allowed = {"artifact-id", "path", "kind", "sha256", "block-id"}
-        if set(row) - allowed or {"artifact-id", "path", "kind", "sha256"} - set(row):
-            raise gen_manifest.GateError("manifest artifacts row keys are malformed")
-        if not _hex_ok(row["sha256"]):
-            raise gen_manifest.GateError("manifest artifacts row for {!r} has a malformed digest".format(
-                row.get("artifact-id")))
-    paths = [r["path"] for r in data["sources"]]
-    if paths != sorted(paths):
-        raise gen_manifest.GateError("manifest: sources are not sorted bytewise by path")
-    return data
+        with (root / gen_manifest.MANIFEST_REL).open("rb") as stream:
+            raw = stream.read(MAX_FILE_BYTES + 1)
+    except (OSError, ValueError) as exc:
+        raise gen_manifest.GateError(
+            "cannot read the manifest ({})".format(exc)
+        ) from exc
+
+    document, result = parse_manifest(raw)
+    if result.status != VALID:
+        raise gen_manifest.GateError(
+            "manifest {}: {}".format(result.status, "; ".join(result.findings))
+        )
+    return document
 
 
 def walk_semantics(root, classes):
@@ -440,6 +421,39 @@ def self_test_main():
             return 2
         if check_quiet(clean) != 0:
             failures.append("clean fixture expected exit 0")
+
+        # Shared-parser/generator recipe parity on actual fixture output.
+        import _opf_pack_manifest as pack_manifest
+        from _opf_adopt import VALID, INVALID, CANNOT_EVALUATE, AdoptValidation
+        from unittest.mock import patch
+
+        if pack_manifest.self_test() != 0:
+            failures.append("TG-23/TG-24: shared pack-manifest suite failed")
+        generated = gm.compute_all(clean, write_mode=False)
+        generated_raw = generated[gm.MANIFEST_REL].encode("utf-8")
+        parsed, parsed_status = pack_manifest.parse_manifest(generated_raw)
+        if parsed_status.status != VALID:
+            failures.append("TG-23: generator fixture refused by shared parser")
+        else:
+            if pack_manifest.compute_tree(parsed["sources"]) != parsed["tree-sha256"]:
+                failures.append("TG-23: TREE recipe differs from generator output")
+            if ("sha256:" + pack_manifest.compute_root(generated_raw) + "\n"
+                    != generated[gm.ROOT_REL]):
+                failures.append("TG-23: ROOT recipe differs from generator output")
+            if load_manifest(clean) != parsed:
+                failures.append("TG-24: consumer differs from shared parser")
+
+        # Reverting delegation must fail even when the old loader accepts clean.
+        # Both refusing U1 statuses must translate to the consumer's exit-2 class.
+        for refusal in (INVALID, CANNOT_EVALUATE):
+            with patch.object(pack_manifest, "parse_manifest",
+                              return_value=(None, AdoptValidation(refusal, ["fixture"]))):
+                try:
+                    load_manifest(clean)
+                except gm.GateError:
+                    pass
+                else:
+                    failures.append("TG-24: consumer did not wrap " + refusal)
 
         # (b) a wrong SOURCES byte on disk -> exit 1 (bytes/sha256 disagree).
         b = _fresh("badbyte")
