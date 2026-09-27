@@ -136,6 +136,14 @@ class ViewsError(Exception):
     malformed record or ledger, or a manifest a view references inconsistently. Callers map it to a
     CANNOT-EVALUATE outcome (exit 2): fail-closed, never a silent empty or partial view."""
 
+class ViewsManifestError(ViewsError):
+    """U4 diagnostic text plus the original typed failure for doctor's attribution."""
+
+    def __init__(self, message, manifest_error):
+        super().__init__(message)
+        self.manifest_error = manifest_error
+
+
 
 # --- source-name -> store file resolution (spec 4.2) -------------------------------------------------
 
@@ -233,9 +241,10 @@ def _with_worklog_diagnostics(read):
     try:
         return read()
     except _opf_worklog.ManifestShapeError as exc:
-        raise ViewsError(str(exc) if exc.missing else "manifest is not valid: {}".format(exc))
+        raise ViewsManifestError(
+            str(exc) if exc.missing else "manifest is not valid: {}".format(exc), exc) from exc
     except _opf_worklog.ManifestValidationError as exc:
-        raise ViewsError("manifest is not valid: {}".format(exc)) from exc
+        raise ViewsManifestError("manifest is not valid: {}".format(exc), exc) from exc
     except _opf_worklog.ManifestReadError as exc:
         # U4's legacy manifest reader used a different non-regular-file label
         # and exposed the parser's recursion message without U1's extra context.
@@ -248,7 +257,7 @@ def _with_worklog_diagnostics(read):
         cause = exc.__cause__
         if isinstance(getattr(cause, "__context__", None), RecursionError):
             message = "cannot parse {} ({})".format(exc.relpath, cause.__context__)
-        raise ViewsError(message) from exc
+        raise ViewsManifestError(message, exc) from exc
     except _opf_worklog.WorklogError as exc:
         raise ViewsError(str(exc))
 

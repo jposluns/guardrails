@@ -266,13 +266,10 @@ def _watchdog_hostile_ambient_self_test():
 
 
 def _watchdog_observation_regressions():
-    """Exercise the real hostile-ambient wrapper with controlled timer borrowers.
-
-    Inject a scheduling pause around the actual arm/read syscalls, independently.
-    An elapsed-aware borrower must pass; a verbatim restoration must still fail.
-    """
+    """Separate deterministic restore discrimination from real scheduling delays."""
     import contextlib
     import io
+    import math
     import signal
     import time
     from unittest.mock import patch
@@ -282,48 +279,87 @@ def _watchdog_observation_regressions():
         print("opf watchdog observation regressions: SKIP (no POSIX timer)")
         return EXIT_OK
     failures = []
+
+    def restore_matches(restore):
+        # Neither deadline delivery nor a real sleep determines this verdict.
+        # The brackets record the clock values surrounding the restore; the
+        # recorder observes the actual arm arguments, without arming SIGALRM.
+        clock = 100.0
+        samples, calls = [], []
+
+        def monotonic():
+            samples.append(clock)
+            return clock
+
+        with patch.object(time, "monotonic", side_effect=monotonic), \
+                patch.object(signal, "getitimer", return_value=(8.0, 2.0)), \
+                patch.object(signal, "sigpending", return_value=set()), \
+                patch.object(signal, "setitimer",
+                             side_effect=lambda *args: calls.append(args)):
+            snapshot = _opf_store.snapshot_caller_alarm()
+            clock = 103.25
+            before = time.monotonic()
+            restore(*snapshot)
+            after = time.monotonic()
+        low = snapshot[0] - (after - snapshot[2])
+        high = snapshot[0] - (before - snapshot[2])
+        tolerance = sum(math.ulp(value) for value in
+                        (snapshot[0], snapshot[2], before, after))
+        return (snapshot == (8.0, 2.0, samples[0], False)
+                and len(calls) == 1 and len(calls[0]) == 3
+                and calls[0][0] == signal.ITIMER_REAL
+                and low - tolerance <= calls[0][1] <= high + tolerance
+                and calls[0][2] == snapshot[1])
+
+    def verbatim(value, interval, _t0, _pending):
+        signal.setitimer(signal.ITIMER_REAL, value, interval)
+
+    for label, restore, expected in (
+            ("elapsed", _opf_store.restore_caller_alarm, True),
+            ("verbatim", verbatim, False),
+            ("dropped", lambda *_: None, False)):
+        if restore_matches(restore) != expected:
+            failures.append("F2j-timer-restore-arguments-" + label)
+
+    # Real arm/read scheduling pauses test only absence of false failure.
+    # Unbounded oversleep must not determine whether a mutant is distinguished.
     real_get, real_set = signal.getitimer, signal.setitimer
     modules = (_opf_changelog, _opf_views, _opf_store, _opf_check)
     for pause_at in ("arm", "read"):
-        for verbatim in (False, True):
-            def borrower():
-                snapshot = _opf_store.snapshot_caller_alarm()
-                real_set(signal.ITIMER_REAL, 0)
-                time.sleep(0.05)
-                if verbatim:
-                    real_set(signal.ITIMER_REAL, snapshot[0], snapshot[1])
-                else:
-                    _opf_store.restore_caller_alarm(*snapshot)
-                return EXIT_OK
+        def borrower():
+            snapshot = _opf_store.snapshot_caller_alarm()
+            real_set(signal.ITIMER_REAL, 0)
+            time.sleep(0.05)
+            _opf_store.restore_caller_alarm(*snapshot)
+            return EXIT_OK
 
-            def arm(which, value, interval=0.0):
-                result = real_set(which, value, interval)
-                if pause_at == "arm" and value == 3600.0:
-                    time.sleep(0.01)
-                return result
+        def arm(which, value, interval=0.0):
+            result = real_set(which, value, interval)
+            if pause_at == "arm" and value == 3600.0:
+                time.sleep(0.10)
+            return result
 
-            def observe(which):
-                if pause_at == "read":
-                    time.sleep(0.01)
-                return real_get(which)
+        def observe(which):
+            if pause_at == "read":
+                time.sleep(0.10)
+            return real_get(which)
 
-            output = io.StringIO()
-            with contextlib.ExitStack() as stack:
-                for module in modules:
-                    stack.enter_context(patch.object(module, "self_test", borrower))
-                stack.enter_context(patch.object(signal, "setitimer", side_effect=arm))
-                stack.enter_context(patch.object(signal, "getitimer", side_effect=observe))
-                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                    rc = _watchdog_hostile_ambient_self_test()
-            label = "F2h-timer-{}-{}".format(pause_at, "verbatim" if verbatim else "elapsed")
-            expected = EXIT_FINDING if verbatim else EXIT_OK
-            if rc != expected or (verbatim and "ITIMER_REAL value elapsed-aware" not in output.getvalue()):
-                failures.append(label + ": rc={!r}; ".format(rc) + output.getvalue())
+        output = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for module in modules:
+                stack.enter_context(patch.object(module, "self_test", borrower))
+            stack.enter_context(patch.object(signal, "setitimer", side_effect=arm))
+            stack.enter_context(patch.object(signal, "getitimer", side_effect=observe))
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                rc = _watchdog_hostile_ambient_self_test()
+        if rc != EXIT_OK:
+            failures.append("F2j-timer-{}-elapsed: rc={!r}; ".format(pause_at, rc)
+                            + output.getvalue())
     if failures:
         for failure in failures:
             print("opf watchdog observation regressions: FAIL: " + failure, file=sys.stderr)
         return EXIT_FINDING
-    print("opf watchdog observation regressions: PASS (arm/read pauses; verbatim mutants refused)")
+    print("opf watchdog observation regressions: PASS (restore arguments; real arm/read pauses)")
     return EXIT_OK
 
 

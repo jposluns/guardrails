@@ -682,9 +682,11 @@ def _entry_point_regressions(check):
 
 
 def _doctor_reread_regressions(check):
-    """Public doctor: first manifest read succeeds, second intake must own its fault."""
+    """Each manifest reread owns its fault, including both real view intakes."""
     import _opf_emit
-    for mode in ("invalid", "generation", "parse", "unreadable", "absent"):
+    for phase, mode in ((phase, mode)
+                        for phase in ("records", "planner", "view-worklog")
+                        for mode in ("invalid", "generation", "parse", "unreadable", "absent")):
         with _Fixture() as fx:
             _manifest_readers(fx)
             bad = dict(fx.manifest, junk={})
@@ -703,9 +705,23 @@ def _doctor_reread_regressions(check):
                 "unreadable": "cannot read m/manifest.toml (fixture reread denied)",
                 "absent": "m/manifest.toml is absent (the store manifest is required; spec 4.5)",
             }[mode]
+            # Pin the complete parser diagnostic without depending on its
+            # Python-version-specific wording.
+            if mode == "parse":
+                try:
+                    _opf_store.tomllib.loads(payload.decode())
+                except ValueError as exc:
+                    expected = "cannot parse m/manifest.toml ({})".format(exc)
+            original = {
+                "invalid": "manifest: " + expected,
+                "generation": "m/manifest.toml: " + expected,
+                "parse": "cannot read m/manifest.toml: " + expected,
+                "unreadable": "cannot read m/manifest.toml: " + expected,
+                "absent": expected,
+            }[mode]
             manifest_reads, later_reads = [], []
-            real_load = wl.load_worklog_at
-            armed = False
+            real_load, real_plan = wl.load_worklog_at, _opf_views.plan_views
+            armed = in_plan = False
 
             def read(fd, rel, **kwargs):
                 path = fx.path(fd, rel)
@@ -715,28 +731,48 @@ def _doctor_reread_regressions(check):
                     later_reads.append(path)
                 return fx.read(fd, rel, **kwargs)
 
-            def intake(*args, **kwargs):
+            def fault():
                 nonlocal armed
                 armed = True
                 if mode == "absent":
                     fx.files.pop(M + "/manifest.toml")
                 else:
                     fx.files[M + "/manifest.toml"] = payload
+
+            def intake(*args, **kwargs):
+                if phase == "records" or (phase == "view-worklog" and in_plan):
+                    fault()
                 return real_load(*args, **kwargs)
 
+            def plan(*args, **kwargs):
+                nonlocal in_plan
+                in_plan = True
+                if phase == "planner":
+                    fault()
+                return real_plan(*args, **kwargs)
+
             with patch.object(_journal, "_read_contained", side_effect=read), \
-                    patch.object(wl, "load_worklog_at", side_effect=intake) as entered:
+                    patch.object(wl, "load_worklog_at", side_effect=intake) as entered, \
+                    patch.object(_opf_views, "plan_views", side_effect=plan) as planned:
                 result = _opf_check.validate_store(fx.res)
-            label = "F2h-doctor-reread-" + mode
+            label = "F2j-doctor-reread-" + phase + "-" + mode
             messages = result.cannot_evaluate + result.findings
-            check(label + "-reached", entered.call_count == 1
-                  and len(manifest_reads) == (1 if mode == "absent" else 2))
+            reads = {"records": 2, "planner": 3, "view-worklog": 4}[phase]
+            check(label + "-reached", armed
+                  and entered.call_count == (2 if phase == "view-worklog" else 1)
+                  and planned.call_count == (0 if phase == "records" else 1)
+                  and len(manifest_reads) == reads - (mode == "absent"))
             check(label + "-manifest-verdict", result.checks["C-MANIFEST"] ==
                   ("FINDING" if mode == "invalid" else "CANNOT-EVALUATE"))
             check(label + "-original-once",
                   sum(expected in m for m in messages) == 1
-                  and sum(expected in m for m in result.by_check.get("C-MANIFEST", [])) == 1)
-            check(label + "-dependent", result.by_check.get("C-RECORDS") == [_DOCTOR_DEPENDENT])
+                  and result.by_check.get("C-MANIFEST") == [original])
+            dependent = "C-RECORDS" if phase == "records" else "C-VIEW-DRIFT"
+            refusal = (_DOCTOR_DEPENDENT if phase == "records" else
+                       "C-VIEW-DRIFT is not evaluated: m/manifest.toml failed manifest "
+                       "validation (see C-MANIFEST)")
+            check(label + "-dependent", result.checks[dependent] == "CANNOT-EVALUATE"
+                  and result.by_check.get(dependent) == [refusal])
             check(label + "-no-duplicate-check",
                   not any("was run more than once" in m for m in messages))
             check(label + "-no-worklog-read", not any(

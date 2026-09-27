@@ -2420,6 +2420,26 @@ def _normalize_observations(observations):
 
 # --- the whole-store validator -----------------------------------------------------------------------
 
+def _attribute_manifest_failure(rep, exc):
+    """Revisit manifest attribution without registering C-MANIFEST a second time."""
+    current = rep._current
+    rep._current = "C-MANIFEST"
+    try:
+        if isinstance(exc, _opf_worklog.ManifestValidationError):
+            if exc.status == CANNOT_EVALUATE:
+                rep.cant("{}: {}".format(exc.relpath, exc))
+            else:
+                for finding in exc.findings:
+                    rep.finding("manifest: {}".format(finding))
+        elif isinstance(exc, _opf_worklog.ManifestShapeError):
+            rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(exc.relpath)
+                     if exc.missing else "{}: {}".format(exc.relpath, exc))
+        else:
+            rep.cant("cannot read {}: {}".format(exc.relpath, exc))
+    finally:
+        rep._current = current
+
+
 def validate_store(resolution, supported_profiles=None, *, observations=None, ancestral_floor=None):
     """Validate a RESOLVED store's whole-store integrity (OPF-SPEC 11). `resolution` is the object
     _opf_store.resolve_store returns; a resolution that is not RESOLVED is CANNOT-EVALUATE. `observations`
@@ -2555,25 +2575,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             required=True, machine_rel=machine_rel, propagate_manifest_failure=True) or {}
     except (_opf_worklog.ManifestShapeError, _opf_worklog.ManifestValidationError,
             _opf_worklog.ManifestReadError) as exc:
-        # Intake reopens the authority. Revisit its attribution without registering
-        # C-MANIFEST twice, and retain each original diagnostic before translating
-        # the dependent source's refusal. No archive traversal follows this failure.
-        current = rep._current
-        rep._current = "C-MANIFEST"
-        try:
-            if isinstance(exc, _opf_worklog.ManifestValidationError):
-                if exc.status == CANNOT_EVALUATE:
-                    rep.cant("{}: {}".format(exc.relpath, exc))
-                else:
-                    for finding in exc.findings:
-                        rep.finding("manifest: {}".format(finding))
-            elif isinstance(exc, _opf_worklog.ManifestShapeError):
-                rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(exc.relpath)
-                         if exc.missing else "{}: {}".format(exc.relpath, exc))
-            else:
-                rep.cant("cannot read {}: {}".format(exc.relpath, exc))
-        finally:
-            rep._current = current
+        _attribute_manifest_failure(rep, exc)
         rep.cant("{} is not evaluated: {} failed manifest validation "
                  "(see C-MANIFEST)".format(_rel(machine_rel, WORKLOG_NAME), exc.relpath))
         return evaluated_profiles, unevaluated_profiles
@@ -2933,6 +2935,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         try:
             planned = _opf_views.plan_views(
                 root_fd, machine_rel, on_legacy_conflict=_worklog_legacy_conflict)
+        except _opf_views.ViewsManifestError as exc:
+            _attribute_manifest_failure(rep, exc.manifest_error)
+            rep.cant("C-VIEW-DRIFT is not evaluated: {} failed manifest validation "
+                     "(see C-MANIFEST)".format(exc.manifest_error.relpath))
+            planned = None
         except _opf_views.ViewsError as exc:
             rep.cant("C-VIEW-DRIFT: {}".format(exc))
             planned = None

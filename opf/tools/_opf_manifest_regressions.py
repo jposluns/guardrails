@@ -24,6 +24,8 @@ def _finding_sites(source, check):
     """Closed syntax census over the validator's local, literal call graph.
 
     Reject accumulator aliases/mutations and unfamiliar result construction.
+    Emissions must start on a line containing no other statement or condition;
+    a line event alone cannot prove an inline conditional's body executed.
     Dynamic dispatch, imported emitters, reflection and deliberate AST spoofing
     remain outside this static census; changes to those require manual review.
     """
@@ -120,6 +122,14 @@ if not isinstance(prof, dict):
     lines = [line for start, _, end, _ in sites for line in range(start, end + 1)]
     check("F2h-census-unambiguous-lines", len(set(lines)) == len(lines))
 
+    # A simple suite (if/while/for/with/try/match case on one line) can
+    # emit a line event without executing its append/return. Requiring the
+    # emission to start the physical line also rejects semicolon predecessors.
+    source_lines = source.splitlines()
+    check("F2j-census-emission-only-lines", all(
+        not source_lines[start - 1][:column].strip()
+        for start, column, _, _ in sites))
+
     check("F2g-census-recognized-emissions", not unsupported)
     # HEAD 3b5ea91: 67 append sites - 1 unreachable profile-table defence
     # + 5 CANNOT_EVALUATE returns = 71 reachable emission sites.
@@ -168,6 +178,18 @@ if not isinstance(prof.get("base_compat"), str):
     check("F2h-census-rejects-same-line",
           "F2g-census-site-count-71" in failures
           and "F2h-census-unambiguous-lines" in failures)
+
+
+    # Only the condition executes for existing generated rows; the append is
+    # reachable at >=9.9.9. A line hit must not certify that append's execution.
+    emission = ('findings.append("{}.base_compat {!r} does not admit the base '
+                'spec_version".format(where, compat))')
+    conditional = source.replace(emission, 'if compat == ">=9.9.9": ' + emission, 1)
+    check("F2j-census-conditional-mutant-installed", conditional != source)
+    failures = []
+    _finding_sites(conditional, lambda name, ok: failures.append(name) if not ok else None)
+    check("F2j-census-rejects-conditional-only-line",
+          failures == ["F2j-census-emission-only-lines"])
 
 
 def manifest_cases(check):
