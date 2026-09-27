@@ -1311,8 +1311,14 @@ def gather_release(request, policy):
     previous_path = list(sys.path)
     previous_bytecode = sys.dont_write_bytecode
     try:
-        sys.dont_write_bytecode = True
-        from _opf_adopt_observe import gather_release as observe_release
+        try:
+            sys.dont_write_bytecode = True
+            from _opf_adopt_observe import gather_release as observe_release
+        finally:
+            sys.dont_write_bytecode = previous_bytecode
+            sys.path[:] = previous_path
+        # Observation has no lazy module loads. Finish restoration before the
+        # inner operation acquires rollback authority; its return is the handoff.
         return observe_release(request, policy)
     except Exception as exc:
         return (
@@ -1320,9 +1326,6 @@ def gather_release(request, policy):
             [{"status": CANNOT_EVALUATE, "phase": "observer",
               "detail": "observer import/call failed: " + type(exc).__name__}],
         )
-    finally:
-        sys.dont_write_bytecode = previous_bytecode
-        sys.path[:] = previous_path
 
 
 def investigate(product_root, *, sources, targets=()):

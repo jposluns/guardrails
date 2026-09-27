@@ -54,8 +54,10 @@ quarantine directories are never reused. Files are opened descriptor-relative
 with no-follow and nonblocking flags and reread with inode/stamp checks.
 Each run name contains 128 CSPRNG bits and is registered as PENDING before mkdir.
 Cleanup authority requires this invocation's recorded (st_dev, st_ino), captured
-by fstat of the new directory opened no-follow under the parent descriptor after
-successful exclusive mkdir. Removal rechecks that identity against the entry;
+by fstat of the directory opened no-follow after exclusive mkdir, only after
+verifying directory type, effective-uid ownership and mode 0700. A failed check
+leaves no deletion authority, including a foreign entry swapped in before open.
+Removal rechecks that identity against the entry;
 a PENDING name without a recorded identity is never deleted. EEXIST refuses
 without adopting the colliding entry. Creation needs no signal control. An
 asynchronous interruption between creation and identity capture can leak an
@@ -77,7 +79,9 @@ zlib/tarfile implementations on capped input. Filesystem and scheduling latency
 are not hard-real-time guarantees. noexec mounts can add protection; the
 prohibition here is that fetched bytes are never imported, executed, or checked
 out. One daemon resolver worker may survive a timeout until the OS resolver
-returns; a process-wide slot prevents accumulating such workers. Its result is
+returns; a process-wide slot permits only one outstanding resolver call.
+Each worker acquires and releases its own slot; competing workers refuse without
+calling the resolver. Its result is
 never reused by another request, and it cannot fetch an HTTP body.
 R8: an adversarial same-privilege concurrent writer to process memory,
 environment, or quarantine is out of scope. Gather is main-thread-only and
@@ -93,6 +97,7 @@ also establish the monotonic clock domain before comparing persisted records.
 
 import contextlib
 import datetime
+import encodings.idna  # Eagerly load the hostname codec before public observation.
 import hashlib
 import ipaddress
 import os
@@ -303,20 +308,34 @@ def _validate(request, policy):
 def _environment():
     _require(threading.current_thread() is threading.main_thread(),
              CANNOT_EVALUATE, "environment", "gather requires the main thread")
-    _require(_GATHER_LOCK.acquire(blocking=False),
-             CANNOT_EVALUATE, "environment", "another gather is active")
     previous = dict(os.environ)
+    clean = {key: previous[key] for key in ("PATH", "HOME") if key in previous}
+    acquired = False
+
+    def restore():
+        if acquired:
+            try:
+                os.environ.clear()
+                os.environ.update(previous)
+            finally:
+                # Main-thread-only, with no yield between release and retry.
+                if _GATHER_LOCK.locked():
+                    _GATHER_LOCK.release()
+
     try:
-        clean = {key: previous[key] for key in ("PATH", "HOME") if key in previous}
-        os.environ.clear()
-        os.environ.update(clean)
-        yield
-    finally:
         try:
+            acquired = _GATHER_LOCK.acquire(blocking=False)
+            _require(acquired, CANNOT_EVALUATE, "environment", "another gather is active")
             os.environ.clear()
-            os.environ.update(previous)
+            os.environ.update(clean)
+            yield
         finally:
-            _GATHER_LOCK.release()
+            restore()
+    except BaseException:
+        # A first cancellation can interrupt normal teardown itself. Retry its
+        # idempotent cleanup under the still-live outer cancellation handler.
+        restore()
+        raise
 
 
 def _client_context():
@@ -350,32 +369,37 @@ def _lookup(host):
 
 
 def _resolve(host, deadline):
-    _require(_RESOLVER_SLOT.acquire(blocking=False),
-             CANNOT_EVALUATE, "dns", "a prior resolver call is still outstanding")
     result = queue.Queue(maxsize=1)
 
     def worker():
+        # The worker acquires and releases its own slot. There is no transfer
+        # from the cancellable caller during Thread construction/start.
+        acquired = False
         try:
             try:
-                result.put((True, _lookup(host)))
+                acquired = _RESOLVER_SLOT.acquire(blocking=False)
+                _require(acquired, CANNOT_EVALUATE, "dns",
+                         "a prior resolver call is still outstanding")
+                outcome = (True, _lookup(host))
             except Exception as exc:
-                result.put((False, exc))
+                outcome = (False, exc)
         finally:
-            _RESOLVER_SLOT.release()
+            if acquired:
+                _RESOLVER_SLOT.release()
+        # A returned result permits the next fetch; release before publication.
+        result.put(outcome)
 
     thread = threading.Thread(
         target=worker, name="opf-adopt-resolver", daemon=True,
     )
-    try:
-        thread.start()
-    except BaseException:
-        _RESOLVER_SLOT.release()
-        raise
+    thread.start()
     try:
         succeeded, value = result.get(timeout=deadline.left())
     except queue.Empty:
         raise ObserveError(CANNOT_EVALUATE, "dns", "resolver deadline expired")
     deadline.left()
+    if not succeeded and isinstance(value, ObserveError):
+        raise value
     _require(succeeded, CANNOT_EVALUATE, "dns", "resolver could not answer")
     _require(type(value) is list and 0 < len(value) <= MAX_ENTRIES,
              CANNOT_EVALUATE, "dns", "invalid or empty resolver answer")
@@ -598,29 +622,32 @@ def _open_directory(parent, name, fresh=False, owner=None):
                                "exclusive directory already exists")
     else:
         created = True
-    fd = os.open(
-        name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
-        dir_fd=parent,
-    )
+    fd = None
     try:
+        fd = os.open(
+            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent,
+        )
         opened = os.fstat(fd)
+        if fresh or owner is not None:
+            _require(
+                stat.S_ISDIR(opened.st_mode)
+                and opened.st_uid == os.geteuid()
+                and stat.S_IMODE(opened.st_mode) == 0o700,
+                CANNOT_EVALUATE, "quarantine", "quarantine is not private",
+            )
         if created and owner is not None:
-            # Capture authority before any validation or registration callback.
-            # Cancellation before this assignment may leak an empty directory.
+            # Failed privacy/type checks leave no deletion authority. A swap
+            # before open may leak the entry; never adopt a foreign directory.
             owner.identity = (opened.st_dev, opened.st_ino)
             owner.created()
         named = os.stat(name, dir_fd=parent, follow_symlinks=False)
         _require(planning._stamp(opened) == planning._stamp(named),
                  CANNOT_EVALUATE, "quarantine", "directory changed while opening")
-        if fresh:
-            _require(
-                stat.S_IMODE(opened.st_mode) == 0o700
-                and opened.st_uid == os.geteuid(),
-                CANNOT_EVALUATE, "quarantine", "quarantine is not private",
-            )
         return fd
     except BaseException:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
         raise
 
 
@@ -1135,6 +1162,324 @@ def _gather_release(request, policy, observation, notes, owners):
               "observation could not be sealed: " + type(exc).__name__)
 
 
+def _cancellation_self_test():
+    """Replay every observed production line event, including repeated lines.
+
+    Scope: the public wrapper and this module on a successful synthetic-response
+    gather, including normal teardown and the main-thread resolver path.
+    OS socket/CA/DNS effects and resolver-thread dispatch are adapted;
+    production fetch/framing and the resolver worker itself still run.
+    Dependency internals, resolver-worker lines, cold module initialization,
+    refusal-only branches and a second cancellation during rollback are not
+    enumerated. Real TLS vectors cover the adapted transport effects.
+    """
+    import builtins
+    import gzip
+    import inspect
+    import textwrap
+    import tempfile
+    from unittest.mock import patch
+
+    module = sys.modules[__name__]
+    header = tarfile.TarInfo("wrap/data")
+    header.size = 4
+    body = gzip.compress(header.tobuf(format=tarfile.USTAR_FORMAT)
+                         + b"data" + b"\0" * 508 + b"\0" * 1024, mtime=0)
+    policy = {"format": POLICY_FORMAT,
+              "repository": "https://github.com/jposluns/guardrails",
+              "release_url": "https://codeload.github.com/jposluns/guardrails/tar.gz/" + "a" * 40,
+              "anchors": [ANCHOR_URL]}
+    original_import = builtins.__import__
+    original_trace = sys.gettrace()
+    original_path = list(sys.path)
+    original_bytecode = sys.dont_write_bytecode
+    original_environment = dict(os.environ)
+    events = []
+    injected = 0
+    started = time.monotonic()
+
+    # Exclude only this fixture's code objects, recursively. Production
+    # helpers remain in scope regardless of where they are defined in the file.
+    fixture_codes = set()
+
+    def exclude_fixture(code):
+        fixture_codes.add(id(code))
+        for value in code.co_consts:
+            if isinstance(value, type(code)):
+                exclude_fixture(value)
+
+    exclude_fixture(_cancellation_self_test.__code__)
+    class FixtureResolver:
+        def __init__(self, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            # Model an immediate worker outside the caller's trace, like a real
+            # resolver thread. Its production acquisition/release still run.
+            # Avoid thousands of OS threads; publication is probed separately.
+            previous = sys.gettrace()
+            try:
+                sys.settrace(None)
+                self.target()
+            finally:
+                sys.settrace(previous)
+
+    class FixtureSocket:
+        def __init__(self, *args):
+            self.pending = b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+        def close(self):
+            pass
+
+        def settimeout(self, timeout):
+            pass
+
+        def connect(self, endpoint):
+            pass
+
+        def getpeername(self):
+            return "93.184.216.34", 443
+
+        def do_handshake(self):
+            pass
+
+        def sendall(self, request):
+            payload = body if b"Host: codeload.github.com\r\n" in request else b"synthetic anchor\n"
+            self.pending = (b"HTTP/1.1 200 OK\r\nContent-Length: "
+                            + str(len(payload)).encode("ascii") + b"\r\n\r\n" + payload)
+
+        def recv(self, size):
+            block, self.pending = self.pending[:size], self.pending[size:]
+            return block
+
+    class FixtureContext:
+        check_hostname = True
+        verify_mode = ssl.CERT_REQUIRED
+        keylog_filename = None
+
+        def wrap_socket(self, sock, **kwargs):
+            return sock
+
+    publications = []
+
+    class FixtureQueue(queue.Queue):
+        def put(self, item, *args, **kwargs):
+            available = _RESOLVER_SLOT.acquire(blocking=False)
+            if available:
+                _RESOLVER_SLOT.release()
+            publications.append(available)
+            return super().put(item, *args, **kwargs)
+
+    def no_lazy_import(name, *args, **kwargs):
+        frame = sys._getframe(1)
+        while frame is not None:
+            if frame.f_code is gather_release.__code__ and name not in sys.modules:
+                raise AssertionError("lazy import during observation: " + name)
+            frame = frame.f_back
+        return original_import(name, *args, **kwargs)
+
+    def descriptors():
+        present = set()
+        for value in os.listdir("/proc/self/fd"):
+            try:
+                os.fstat(int(value))
+            except OSError as exc:
+                if exc.errno != 9:
+                    raise
+            else:
+                present.add(value)
+        return present
+
+    def run(target=None, exception=None):
+        nonlocal injected
+        publications.clear()
+        seen = []
+        observations = []
+        owners = []
+        fired = False
+        received = None
+        escaped = None
+
+        def trace(frame, event, arg):
+            nonlocal fired, injected
+            code = frame.f_code
+            eligible = (code is schema.gather_release.__code__ or
+                        (code.co_filename == __file__ and id(code) not in fixture_codes))
+            if not eligible:
+                return None
+            if event != "line":
+                return trace
+            if code is gather_release.__code__:
+                value = frame.f_locals.get("observation")
+                if value is not None and not any(value is item for item in observations):
+                    observations.append(value)
+                value = frame.f_locals.get("owners")
+                if value is not None:
+                    owners[:] = [value]
+            site = (code.co_filename.rsplit("/", 1)[-1], code.co_name, frame.f_lineno)
+            seen.append(site)
+            if target is not None and len(seen) - 1 == target:
+                if seen != events[:target + 1]:
+                    raise AssertionError("cancellation trace diverged before " + repr(site))
+                fired = True
+                injected += 1
+                raise exception()
+            return trace
+
+        with tempfile.TemporaryDirectory(prefix="opf-cancel-", dir="/dev/shm") as temp:
+            request = {"product_root": temp, "version": "1.0.0", "commit": "a" * 40}
+            # Held descriptors are a disclosed cancellation residual. Reclaim
+            # only this fixture's descriptors after observing the invariants.
+            before_fds = descriptors()
+            try:
+                sys.settrace(trace)
+                try:
+                    received = schema.gather_release(request, policy)
+                except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
+                    escaped = type(exc)
+                finally:
+                    sys.settrace(original_trace)
+                label = repr(seen[-1]) if seen else "empty"
+                if not all(publications):
+                    raise AssertionError("cancellation retained resolver slot before result publication at " + label)
+                if target is None:
+                    if publications != [True, True]:
+                        raise AssertionError("baseline did not publish both resolver results")
+                    if not seen or received is None or received[0].get("status") != VALID:
+                        raise AssertionError("cancellation enumeration was empty or not VALID")
+                    if received[1] or not isinstance(received[0].get("record"), bytes):
+                        raise AssertionError("cancellation baseline lacked sealed evidence")
+                    if (Path(received[0]["quarantine"]) / "members/data").read_bytes() != b"data":
+                        raise AssertionError("cancellation baseline did not populate quarantine")
+                    return seen
+                if not fired or escaped is not exception or received is not None:
+                    raise AssertionError("cancellation did not propagate at " + label)
+                if any(value.get("status") == VALID and "record" in value
+                       for value in observations):
+                    raise AssertionError("cancellation retained sealed VALID evidence at " + label)
+                if _GATHER_LOCK.locked():
+                    raise AssertionError("cancellation retained gather lock at " + label)
+                for owner in owners[0] if owners else ():
+                    path = Path(owner.parent_path) / owner.name
+                    if owner.identity is not None:
+                        try:
+                            path.lstat()
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            raise AssertionError("cancellation retained owned directory at " + label)
+                adopt = Path(temp) / ".working/adopt"
+                try:
+                    entries = list(adopt.iterdir())
+                except FileNotFoundError:
+                    entries = []
+                if any(list(path.iterdir()) for path in entries):
+                    raise AssertionError("cancellation retained populated directory at " + label)
+                # No lock repair before this independent subsequent call.
+                following, notes = schema.gather_release(request, policy)
+                if following.get("status") != VALID or notes or _GATHER_LOCK.locked():
+                    raise AssertionError("subsequent gather failed after " + label)
+            finally:
+                sys.settrace(original_trace)
+                sys.path[:] = original_path
+                sys.dont_write_bytecode = original_bytecode
+                os.environ.clear()
+                os.environ.update(original_environment)
+                for value in descriptors() - before_fds:
+                    try:
+                        os.close(int(value))
+                    except OSError as exc:
+                        if exc.errno != 9:  # already-closed enumeration fd
+                            raise
+
+    with patch.object(socket, "socket", FixtureSocket), \
+            patch.object(ssl, "create_default_context", lambda: FixtureContext()), \
+            patch.object(module, "_lookup", lambda host: [
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+                 ("93.184.216.34", 443))]), \
+            patch.object(threading, "Thread", FixtureResolver), \
+            patch.object(queue, "Queue", FixtureQueue), \
+            patch.object(builtins, "__import__", no_lazy_import):
+        def sweep(exceptions=(KeyboardInterrupt, SystemExit, GeneratorExit)):
+            events[:] = run()
+            for target in range(len(events)):
+                for exception in exceptions:
+                    run(target, exception)
+
+        sweep()
+        line_events, unique_lines, baseline_injections = len(events), len(set(events)), injected
+        flips = []
+        # These reversions use the same enumerator/invariants, with no chosen
+        # injection boundary. Each stops only on its named invariant failure.
+        wrapper = textwrap.dedent(inspect.getsource(schema.gather_release))
+        restore = ("        finally:\n"
+                   "            sys.dont_write_bytecode = previous_bytecode\n"
+                   "            sys.path[:] = previous_path\n")
+        early = ("        finally:\n"
+                 "            pass\n")
+        trailing = ("    finally:\n"
+                    "        sys.dont_write_bytecode = previous_bytecode\n"
+                    "        sys.path[:] = previous_path\n")
+        env = textwrap.dedent(inspect.getsource(_environment))
+        acquisition = "            acquired = _GATHER_LOCK.acquire(blocking=False)\n"
+        moved = env.replace(acquisition, "", 1).replace(
+            "    try:\n        try:\n",
+            "    acquired = _GATHER_LOCK.acquire(blocking=False)\n    try:\n        try:\n", 1)
+        gather = textwrap.dedent(inspect.getsource(gather_release))
+        resolver = textwrap.dedent(inspect.getsource(_resolve))
+        publication = ("        finally:\n"
+                       "            if acquired:\n"
+                       "                _RESOLVER_SLOT.release()\n"
+                       "        # A returned result permits the next fetch; release before publication.\n"
+                       "        result.put(outcome)\n")
+        premature = ("            result.put(outcome)\n"
+                     "        finally:\n"
+                     "            if acquired:\n"
+                     "                _RESOLVER_SLOT.release()\n")
+        if resolver.count(publication) != 1:
+            raise AssertionError("resolver publication mutation site is not unique")
+        specifications = (
+            ("wrapper-after-disarm", schema, schema.gather_release, wrapper,
+             wrapper.replace(restore, early, 1) + trailing, "sealed VALID evidence"),
+            ("lock-before-try", module, _environment, env, moved, "gather lock"),
+            ("rollback-disabled", module, gather_release, gather,
+             gather.replace("owner.finish(False)", "pass", 1), "owned directory"),
+            ("resolver-publish-before-release", module, _resolve, resolver,
+             resolver.replace(publication, premature, 1), "resolver slot before result publication"),
+        )
+        if wrapper.count(restore) != 1 or env.count(acquisition) != 1 or gather.count("owner.finish(False)") != 1:
+            raise AssertionError("cancellation mutation site is not unique")
+        for label, owner, function, source, changed, wanted in specifications:
+            namespace = {}
+            exec(compile(changed, inspect.unwrap(function).__code__.co_filename, "exec"),
+                 owner.__dict__, namespace)
+            try:
+                with patch.object(owner, function.__name__, namespace[function.__name__]):
+                    try:
+                        sweep((KeyboardInterrupt,))
+                    except AssertionError as exc:
+                        if not str(exc).startswith("cancellation retained " + wanted + " at "):
+                            raise
+                        flips.append({"id": label, "observed": str(exc)})
+                    else:
+                        raise AssertionError("cancellation mutant was not detected: " + label)
+            finally:
+                # A detected lock mutant has intentionally leaked this fixture's
+                # lock. Repair it only after recording the invariant failure.
+                if _GATHER_LOCK.locked():
+                    _GATHER_LOCK.release()
+    return [{"id": "TG-12/public-cancellation-line-sweep", "test_status": VALID,
+             "line_events": line_events, "unique_lines": unique_lines,
+             "injections": baseline_injections, "flips": flips,
+             "elapsed_seconds": time.monotonic() - started}]
+
+
 def _ownership_self_test():
     """Real directory ownership probes; no transport or mocked mkdir outcome."""
     import tempfile
@@ -1249,6 +1594,56 @@ def _ownership_self_test():
                 return preserved and refusal is None
             finally:
                 os.close(parent)
+
+    def private_identity(kind):
+        with tempfile.TemporaryDirectory(prefix="opf-owner-", dir="/dev/shm") as temp:
+            parent = store._open_dir_nofollow(temp)
+            try:
+                owner = _QuarantineOwner(parent, "run", temp)
+                original_fstat = os.fstat
+
+                def substituted(fd):
+                    opened = original_fstat(fd)
+                    values = list(opened)
+                    if kind == "wrong-type":
+                        values[0] = stat.S_IFREG | 0o700
+                    elif kind == "foreign-uid":
+                        values[4] = os.geteuid() + 1
+                    else:
+                        values[0] = stat.S_IFDIR | 0o755
+                    return os.stat_result(values)
+
+                refusal = None
+                with patch.object(os, "fstat", substituted):
+                    try:
+                        fd = _open_directory(parent, "run", fresh=True, owner=owner)
+                    except ObserveError as exc:
+                        refusal = exc.detail
+                    else:
+                        os.close(fd)
+                run = Path(temp) / "run"
+                (run / "foreign").write_bytes(b"preserve\n")
+                owner.remove()
+                return (refusal == "quarantine is not private" and owner.identity is None
+                        and (run / "foreign").read_bytes() == b"preserve\n")
+            finally:
+                os.close(parent)
+
+    def skip_privacy(condition, status, phase, detail):
+        if detail != "quarantine is not private":
+            original_require(condition, status, phase, detail)
+
+    for kind in ("wrong-type", "foreign-uid", "non-private-mode"):
+        baseline = private_identity(kind)
+        with patch.object(module, "_require", skip_privacy):
+            mutant = private_identity(kind)
+        rows.append({
+            "id": "unit/ownership/" + kind, "guard": "identity-before-privacy",
+            "expected": VALID, "observed": VALID if baseline else INVALID,
+            "mutant_observed": VALID if mutant else INVALID,
+            "mutation_detected": not mutant,
+            "test_status": VALID if baseline and not mutant else INVALID,
+        })
 
     for kind in ("eexist", "identity-mismatch", "before-identity"):
         baseline = probe(kind)
@@ -1629,6 +2024,18 @@ exit 0
         raise AssertionError(identity + "/own-argv")
 
 
+def _runner_descriptor_entry(expected):
+    try:
+        _runner_check(expected, scratch_only=True)
+    except RuntimeError as exc:
+        if ("/cannot-evaluate/" not in str(exc)
+                or str(exc).endswith("/recursion-marker")):
+            raise
+        print(str(exc), file=sys.stderr)
+        return 2
+    return 0
+
+
 def _runner_non_readable_fd_checks(expected):
     import json
     import subprocess
@@ -1637,8 +2044,8 @@ def _runner_non_readable_fd_checks(expected):
     kinds = [("write-only", os.O_WRONLY | os.O_APPEND)]
     if hasattr(os, "O_PATH"):
         kinds.append(("path", os.O_PATH))
-    # Each child exercises the real descriptor scan and one registration leg,
-    # including vector dispatch. It does not rerun the full registration REDs
+    # Each child exercises the real descriptor scan and a canned registration
+    # report. It does not rerun the vector leg or the full registration REDs
     # or this helper, so no recursive self-test suppression is needed.
     for kind, flags in kinds:
         identity = "runner/adopt-observe-registration/inherited-" + kind + "-fd"
@@ -1659,16 +2066,12 @@ def _runner_non_readable_fd_checks(expected):
                     "sys.argv = sys.argv[1:]\n"
                     "sys.path.insert(0, str(Path(sys.argv[0]).parent))\n"
                     "module = importlib.import_module(Path(sys.argv[0]).stem)\n"
-                    "try:\n"
-                    "    module._runner_check(json.loads(sys.argv[1]))\n"
-                    "except RuntimeError as exc:\n"
-                    "    if str(exc) != 'runner/adopt-observe-registration/cannot-evaluate/timeout':\n"
-                    "        raise\n"
-                    "    print(str(exc), file=sys.stderr)\n"
-                    "    raise SystemExit(2)\n")
+                    "raise SystemExit(module._runner_descriptor_entry(json.loads(sys.argv[1])))\n")
                 try:
                     # One _runner_check has two shell calls, each bounded by
                     # 120s plus 5s cleanup. Allow 50s more for setup/teardown.
+                    # The outer timeout kills only this child, leaving any
+                    # shell sessions it started outside that SIGKILL's scope.
                     proc = subprocess.run(
                         [sys.executable, "-I", "-B", "-c", child,
                          str(Path(__file__).resolve()), json.dumps(expected)],
@@ -1685,7 +2088,7 @@ def _runner_non_readable_fd_checks(expected):
                     print(identity + ": child rc={}\n{}".format(proc.returncode, proc.stderr),
                           file=sys.stderr)
                     if proc.returncode == 2:
-                        raise RuntimeError(identity + "/cannot-evaluate/timeout")
+                        raise RuntimeError(identity + "/cannot-evaluate/child")
                     raise AssertionError(identity)
             finally:
                 os.close(fd)
@@ -1742,11 +2145,12 @@ def _runner_red_checks(expected):
         expected, source.replace(anchor, anchor + "  exit 1\n", 1)),
         AssertionError, identity + "/return-code")
 
-    # Run the real vector leg, then fail THIS suite inside the fixture.
+    # Exit handling uses canned reports; the positive registration above
+    # independently runs the real vector leg once.
     def own_failure(text, status=7):
         label = "own-suite-failure" if status == 7 else "own-suite-failure-" + str(status)
         red(label, lambda: _runner_check(
-            expected, text, fail_own=status), AssertionError, identity + "/return-code")
+            expected, text, fail_own=status, scratch_only=True), AssertionError, identity + "/return-code")
 
     for status in (1, 2, 7):
         own_failure(source, status)
@@ -1778,7 +2182,8 @@ def _runner_red_checks(expected):
          '" --self-test >/dev/null 2>&1 || true'),
     ):
         red(label, lambda command=command: _runner_check(
-            expected, source.replace(propagation, propagation + "\n" + command, 1)),
+            expected, source.replace(propagation, propagation + "\n" + command, 1),
+            scratch_only=True),
             AssertionError, identity + "/own-argv")
 
     # Drop a required flag from exactly this suite's registration.
@@ -1864,7 +2269,7 @@ def _runner_red_checks(expected):
         stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         stub.chmod(0o700)
         changed_path = "PATH=" + shlex.quote(tmp) + ":$PATH\n" + source
-        _runner_check(expected, changed_path)
+        _runner_check(expected, changed_path, scratch_only=True)
         print("PASS " + identity + "/in-runner-path")
 
         original_popen = subprocess.Popen
@@ -1956,6 +2361,26 @@ def _runner_red_checks(expected):
                 if launch.call_count:
                     raise AssertionError(identity + "/pathsep/unexpected-launch")
 
+    # Exercise the entry actually called by descriptor children. Marker
+    # inspection defects must remain failures, not become environmental skips.
+    import io
+    for suffix in ("timeout", "interception", "bash", "pathsep", "argv-log",
+                   "recursion", "recursion-marker", "unexpected"):
+        message = identity + ("/" if suffix == "unexpected" else "/cannot-evaluate/") + suffix
+        error = RuntimeError(message)
+        with patch.object(sys.modules[__name__], "_runner_check", side_effect=error), \
+                contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+            try:
+                code = _runner_descriptor_entry(expected)
+            except RuntimeError as exc:
+                if suffix not in ("recursion-marker", "unexpected") or exc is not error:
+                    raise
+            else:
+                if (suffix in ("recursion-marker", "unexpected") or code != 2
+                        or diagnostics.getvalue() != message + "\n"):
+                    raise AssertionError(identity + "/child-status/" + suffix)
+        print("PASS " + identity + "/child-status/" + suffix)
+
     _runner_non_readable_fd_checks(expected)
 
 
@@ -2013,7 +2438,6 @@ def self_test(vectors_only=False):
     original_fetch = _fetch
     original_tls = _tls
     original_remove = _QuarantineOwner.remove
-    original_public_gather = gather_release
     public_ip = "93.184.216.34"
     commit = "a" * 40
     release_url = "https://codeload.github.com/jposluns/guardrails/tar.gz/" + commit
@@ -2058,7 +2482,7 @@ def self_test(vectors_only=False):
     def watchdog_preconditions():
         if (threading.current_thread() is not threading.main_thread()
                 or not all(callable(getattr(signal, name, None)) for name in (
-                    "getitimer", "setitimer", "pthread_sigmask", "pthread_kill",
+                    "getitimer", "setitimer",
                 ))
                 or not hasattr(signal, "ITIMER_REAL")
                 or not hasattr(signal, "SIGALRM")):
@@ -2419,24 +2843,6 @@ def self_test(vectors_only=False):
     add("TG-12/observer-backstop", CANNOT_EVALUATE, "backstop", exception=True)
     add("TG-12/public-wrapper-backstop", CANNOT_EVALUATE, "wrapper",
         wrapper_exception=True)
-    add("TG-12/cancellation", "CANCELLED", "cancellation", cancellation=True,
-        public_wrapper=True)
-    add("TG-12/cancellation-after-mkdir", "CANCELLED", "creation-signals",
-        cancel_after_mkdir=True, public_wrapper=True)
-    add("TG-12/cancellation-after-seal", "CANCELLED", "cancelled-retention",
-        cancel_after_seal=True, public_wrapper=True)
-    add("TG-12/process-sigint-after-mkdir", "CANCELLED", "pending-process-sigint",
-        cancel_after_mkdir=True, creation_signal="process", public_wrapper=True)
-    add("TG-12/itimer-after-mkdir", "CANCELLED", "pending-real-timer",
-        cancel_after_mkdir=True, creation_signal="timer", public_wrapper=True)
-    add("TG-12/cancellation-during-finalization", "CANCELLED", "finalize-rollback",
-        cancel_finalization="finalize", public_wrapper=True)
-    add("TG-12/cancellation-at-return", "CANCELLED", "return-rollback",
-        cancel_finalization="return", public_wrapper=True)
-    for exception in (KeyboardInterrupt, SystemExit, GeneratorExit):
-        add("TG-12/finalizer-boundary/" + exception.__name__, "CANCELLED",
-            "finalizer-after-disarm", finalizer_exception=exception,
-            public_wrapper=True)
 
     bad_archives = [
         ("traversal", [root_row, ("wrap/../escape", tarfile.REGTYPE, b"x")]),
@@ -2593,112 +2999,6 @@ def self_test(vectors_only=False):
         elapsed = 0.0
         path_before = list(sys.path)
         environment_before = None
-        cancellation_boundary = []
-        cancelled_observations = []
-        original_created = _QuarantineOwner.created
-        original_gather = _gather_release
-        original_finish = _finish_observation
-
-        @contextlib.contextmanager
-        def unmasked_helper():
-            # Force process-directed delivery through another thread, including
-            # when a regressed implementation masks signals in the main thread.
-            watched = {signal.SIGINT, signal.SIGALRM}
-            previous = signal.pthread_sigmask(signal.SIG_BLOCK, watched)
-            ready = threading.Event()
-            stop = threading.Event()
-            errors = []
-
-            def helper():
-                old_mask = None
-                try:
-                    old_mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, watched)
-                    ready.set()
-                    stop.wait()
-                except BaseException as exc:
-                    errors.append(type(exc).__name__)
-                    ready.set()
-                finally:
-                    if old_mask is not None:
-                        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
-
-            thread = threading.Thread(target=helper, daemon=True)
-            try:
-                thread.start()
-                if not ready.wait(2.0) or errors:
-                    raise RuntimeError("unmasked signal helper unavailable")
-                yield
-            finally:
-                stop.set()
-                if thread.ident is not None:
-                    thread.join(timeout=2.0)
-                signal.pthread_sigmask(signal.SIG_SETMASK, previous)
-                if thread.is_alive() or errors:
-                    raise RuntimeError("unmasked signal helper teardown failed")
-
-        def cancel_before_registration(owner):
-            # This boundary follows mkdir AND fstat identity capture, but still
-            # precedes the OWNED state transition. Pending alone is insufficient.
-            if owner.identity is None:
-                raise AssertionError("creation fixture has no captured identity")
-            cancellation_boundary.append("after-mkdir")
-            kind = config.get("creation_signal")
-            if kind == "process":
-                os.kill(os.getpid(), signal.SIGINT)
-                time.sleep(1.0)
-                raise AssertionError("process-directed SIGINT did not cancel")
-            if kind == "timer":
-                old_handler = signal.getsignal(signal.SIGALRM)
-                old_timer = signal.getitimer(signal.ITIMER_REAL)
-                started = time.monotonic()
-
-                def interrupt(signum, frame):
-                    raise KeyboardInterrupt
-
-                try:
-                    signal.signal(signal.SIGALRM, interrupt)
-                    signal.setitimer(signal.ITIMER_REAL, 0.01)
-                    time.sleep(1.0)
-                    raise AssertionError("ITIMER_REAL did not cancel")
-                finally:
-                    signal.setitimer(signal.ITIMER_REAL, 0)
-                    signal.signal(signal.SIGALRM, old_handler)
-                    remaining, interval = old_timer
-                    if remaining:
-                        remaining = max(0.001, remaining - (time.monotonic() - started))
-                    signal.setitimer(signal.ITIMER_REAL, remaining, interval)
-            signal.pthread_kill(threading.get_ident(), signal.SIGINT)
-            original_created(owner)
-
-        def finalization_trace(frame, event, arg):
-            if frame.f_code is module.gather_release.__code__ and event == "line":
-                relative = frame.f_lineno - frame.f_code.co_firstlineno
-                if relative == finalization_line:
-                    observed = frame.f_locals["observation"]
-                    if (observed.get("status") != VALID
-                            or type(observed.get("record")) is not bytes):
-                        raise AssertionError("finalization fixture did not reach sealed evidence")
-                    cancelled_observations.append(observed)
-                    cancellation_boundary.append(config["cancel_finalization"])
-                    raise KeyboardInterrupt
-            return finalization_trace
-
-        def cancel_after_sealing(req, pol, observed, gathered_notes, owners):
-            original_gather(req, pol, observed, gathered_notes, owners)
-            if observed.get("status") != VALID or type(observed.get("record")) is not bytes:
-                raise AssertionError("cancellation fixture did not reach a sealed observation")
-            cancellation_boundary.append("after-seal")
-            cancelled_observations.append(observed)
-            raise KeyboardInterrupt
-
-        def cancel_at_finalizer_boundary(observed, gathered_notes, owners):
-            original_finish(observed, gathered_notes, owners)
-            if observed.get("status") != VALID or type(observed.get("record")) is not bytes:
-                raise AssertionError("finalizer fixture did not reach sealed evidence")
-            cancelled_observations.append(observed)
-            cancellation_boundary.append("finalizer-boundary")
-            raise config["finalizer_exception"]()
-
         def fixture_context():
             environments.append(set(os.environ))
             return original_context(cadata=fixture_certificates)
@@ -2720,8 +3020,6 @@ def self_test(vectors_only=False):
 
         def tracked_fetch(url, cap, deadline, context):
             fetch_calls.append(url)
-            if config.get("cancellation"):
-                raise KeyboardInterrupt
             if config.get("exception"):
                 raise RuntimeError("synthetic observer exception")
             started = time.monotonic()
@@ -2735,12 +3033,6 @@ def self_test(vectors_only=False):
 
         def raising_gather(*args, **kwargs):
             raise RuntimeError("synthetic public-wrapper exception")
-
-        def swallowed_cancellation(req, pol):
-            try:
-                return schema.gather_release(req, pol)
-            except KeyboardInterrupt:
-                return {"status": CANNOT_EVALUATE}, []
 
         def unprotected_gather(req, pol):
             if config.get("exception"):
@@ -2845,16 +3137,6 @@ def self_test(vectors_only=False):
                         "CURL_CA_BUNDLE": str(home / "absent-ca"),
                         "GIT_TRACE": str(home / "must-not-write"),
                     }))
-                if config.get("cancel_after_mkdir"):
-                    previous_interrupt = signal.signal(signal.SIGINT, signal.default_int_handler)
-                    stack.callback(signal.signal, signal.SIGINT, previous_interrupt)
-                    if config.get("creation_signal"):
-                        stack.enter_context(unmasked_helper())
-                    patch(_QuarantineOwner, "created", cancel_before_registration)
-                if config.get("cancel_after_seal"):
-                    patch(module, "_gather_release", cancel_after_sealing)
-                if config.get("finalizer_exception"):
-                    patch(module, "_finish_observation", cancel_at_finalizer_boundary)
                 if config.get("seal_exception"):
                     patch(module, "_seal_observation", fail_seal)
                 if config.get("late_exception"):
@@ -2951,32 +3233,6 @@ def self_test(vectors_only=False):
                         policy_check = _archive_member_policy
                         patch(module, "_archive_member_policy",
                               lambda info, global_header=False: policy_check(info))
-                    elif mutation in ("creation-signals", "pending-process-sigint",
-                                      "pending-real-timer"):
-                        # Keep the row/mutant names: identity is captured, but
-                        # the OWNED state transition has not happened yet.
-                        patch(_QuarantineOwner, "remove", source_mutant(
-                            original_remove, 'self.state in ("PENDING", "OWNED")',
-                            'self.state == "OWNED"',
-                        ))
-                    elif mutation in ("finalize-rollback", "return-rollback"):
-                        patch(module, "gather_release", source_mutant(
-                            original_public_gather, "owner.finish(False)", "pass",
-                        ))
-                    elif mutation == "finalizer-after-disarm":
-                        source = textwrap.dedent(inspect.getsource(original_public_gather))
-                        finalizer = "        _finish_observation(observation, notes, owners)\n"
-                        if source.count(finalizer) != 1:
-                            raise AssertionError("finalizer mutation must select one call")
-                        moved = source.replace(finalizer, "", 1)
-                        moved += "    finally:\n" + finalizer
-                        patch(module, "gather_release", source_mutant(
-                            original_public_gather, source, moved,
-                        ))
-                    elif mutation == "cancelled-retention":
-                        patch(module, "gather_release", source_mutant(
-                            gather_release, "observation.clear()", "pass",
-                        ))
                     elif mutation == "cleanup":
                         patch(_QuarantineOwner, "remove", lambda owner: None)
                     elif mutation == "cleanup-failure":
@@ -2985,8 +3241,6 @@ def self_test(vectors_only=False):
                         call = unprotected_gather
                     elif mutation == "wrapper":
                         call = raising_gather
-                    elif mutation == "cancellation":
-                        call = swallowed_cancellation
                     elif mutation == "archive":
                         patch(module, "_unpack", lambda parent, body, deadline, commit=None: [])
                     elif mutation == "containment":
@@ -3002,22 +3256,6 @@ def self_test(vectors_only=False):
                         patch(module, "_unpack", candidate_mutant)
                     else:
                         raise AssertionError("unregistered mutation")
-
-                if config.get("cancel_finalization"):
-                    target = (
-                        '_finish_observation(observation, notes, owners)'
-                        if config["cancel_finalization"] == "finalize"
-                        else "return observation, notes"
-                    )
-                    source_lines = inspect.getsource(original_public_gather).splitlines()
-                    selected = [index for index, line in enumerate(source_lines)
-                                if line.strip().startswith(target)]
-                    if len(selected) != 1:
-                        raise AssertionError("finalization injection must select one line")
-                    finalization_line = selected[0]
-                    previous_trace = sys.gettrace()
-                    stack.callback(sys.settrace, previous_trace)
-                    sys.settrace(finalization_trace)
 
                 # Observe the return contract, not the diagnostic wording:
                 # disabling the truncation guard must not hide behind a later
@@ -3040,8 +3278,7 @@ def self_test(vectors_only=False):
                     except WatchdogExpired:
                         status = "WATCHDOG"
                     except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
-                        expected_exception = config.get("finalizer_exception", KeyboardInterrupt)
-                        status = "CANCELLED" if type(exc) is expected_exception else "ESCAPED"
+                        status = "ESCAPED"
                     except Exception:
                         status = "ESCAPED"
                 elapsed = time.monotonic() - started
@@ -3056,20 +3293,6 @@ def self_test(vectors_only=False):
                 and environment_restored
                 and not server.errors
             )
-            if config.get("cancel_after_mkdir"):
-                passed = passed and cancellation_boundary == ["after-mkdir"]
-            if config.get("cancel_after_seal"):
-                passed = passed and cancellation_boundary == ["after-seal"]
-            if config.get("cancel_finalization"):
-                passed = (passed and cancellation_boundary == [config["cancel_finalization"]])
-            if config.get("finalizer_exception"):
-                passed = passed and cancellation_boundary == ["finalizer-boundary"]
-            if (config.get("cancel_after_seal") or config.get("cancel_finalization")
-                    or config.get("finalizer_exception")):
-                passed = (passed and len(cancelled_observations) == 1
-                          and cancelled_observations[0] == {})
-            if status == "CANCELLED":
-                passed = passed and observation is None and not _GATHER_LOCK.locked()
             if status in (INVALID, CANNOT_EVALUATE):
                 passed = passed and (
                     type(observation) is dict
@@ -3195,7 +3418,7 @@ def self_test(vectors_only=False):
                 print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
                 return 1
 
-            guard_rows = _guard_self_test() + _ownership_self_test()
+            guard_rows = _guard_self_test() + _ownership_self_test() + _cancellation_self_test()
             executed.extend(guard_rows)
             for case in cases:
                 passed, status, elapsed = run_case(base, contexts, case, False)
