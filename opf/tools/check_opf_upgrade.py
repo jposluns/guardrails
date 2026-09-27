@@ -3,8 +3,8 @@
 
 Both the default entry and --self-test run the fixture suite. There is no live-adopter mutation leg and
 no root option: the gate drives `opf upgrade` (isolated, -I -B) over BYTE-PINNED 1.0.0 stores built beneath
-fresh temporary git repositories, and asserts the 1.0.0 -> 1.1.0 contract over an enumerated adopter-shape
-matrix, a set of refusal fixtures, direct postcondition unit vectors, and a seeded migration property test.
+fresh temporary git repositories, and asserts the 1.0.0 and 1.1.0 -> 1.2.0 contract over an
+enumerated adopter-shape matrix, a set of refusal fixtures, direct postcondition unit vectors, and a seeded migration property test.
 
 FIXTURE FIDELITY. The 1.0.0 fixture bytes are FROZEN, anchored on the frozen `_FIX_MANIFEST` /
 `_FIX_COUNTERS` baseline (not regenerated from the current builders), so the fixture cannot silently drift
@@ -18,10 +18,10 @@ enabled variant was additionally graded doctor-VALID at authoring time by the ac
 (commit 1c90fbb, `tools/opf.py doctor`, its pre-move path at that commit); at 1.0.0 the module-tier records (maintainer_decision /
 preference_pattern) are schema-DEFERRED by the baseline validator and become fully-validated baseline records
 only at 1.1.0, so a POPULATED module-tier fixture's records are validated at run time by the actual
-upgrade -> 1.1.0 doctor leg here rather than by the 1.0.0 baseline. In-gate re-verification is canonicity-only;
+upgrade -> 1.2.0 doctor leg here rather than by the 1.0.0 baseline. In-gate re-verification is canonicity-only;
 1.0.0-doctor fidelity is authoring-time evidence.
 
-VECTOR ROSTER (U1-U25, P1):
+VECTOR ROSTER (U1-U28, P1):
   U1  pristine baseline: full delta, doctor VALID.
   U2  idempotence: a second run is a byte no-op reporting already-current.
   U3  governance=true, MA+MD rows + empty indexes + counters: contribution+preference_pattern indexes
@@ -56,7 +56,7 @@ VECTOR ROSTER (U1-U25, P1):
   U14d absent ignored view/index/product destinations: refuse before mutation; probe-removal flips mutate.
   U15 [types.contribution] pre-declared: exit 2 naming contribution as an impossible 1.0.0 shape; unchanged.
   U16 governance=false plus [types.maintainer_decision]: exit 2 naming the module inconsistency; unchanged.
-  U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.1.0 triage refusals (with the scoped
+  U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.2.0 triage refusals (with the scoped
       recovery text).
   U17b post-manifest exception: planned restore/rm advice and F2 candidates, with suppression flips.
   U18 postcondition unit vectors: call opf._upgrade_postcondition directly with hand-mutated new models; each
@@ -80,7 +80,7 @@ VECTOR ROSTER (U1-U25, P1):
   U20 R8 module-coupling refusal: governance=true with maintainer_action but maintainer_decision ABSENT (a
       module-inconsistent 1.0.0 shape the delta would silently cure) refuses exit 2 before mutation; unchanged.
   U21 R2 absent-table migration: the missing [modules], missing [views], and both-missing origins (each oracle-
-      graded doctor-VALID at merge-base 1c90fbb) migrate to a doctor-VALID 1.1.0 store; an absent table is
+      graded doctor-VALID at merge-base 1c90fbb) migrate to a doctor-VALID 1.2.0 store; an absent table is
       never invented as an empty table beyond the two new views [views] must carry.
   U22 R1 nested-store held lease: a store root BELOW the git repo root with a foreign held lease reaches step
       4's never-seize message, not step 3's dirty-store remedy (the lease_excl prefix-normalization fix).
@@ -102,11 +102,13 @@ VECTOR ROSTER (U1-U25, P1):
       module set still plans; end-to-end, a stored governance="x" refuses exit 2 before any mutation. FIX3: an
       UNKNOWN [modules] key refuses UPFRONT (merge-base _validate_modules parity), while the known-but-retired
       decision_support key still plans; fails without the upfront unknown-key check.
-  U27 R1a relocated partial-recovery: a RELOCATED store (store_root != product_root) at spec_version 1.1.0 but
+  U27 R1a relocated partial-recovery: a RELOCATED store (store_root != product_root) at spec_version 1.2.0 but
       not doctor-VALID names the STORE root for inspection; no unverified subtree restore is offered.
+  U28 1.1.0 -> 1.2.0: only spec_version changes with current declared views; no provenance is
+      fabricated; doctor VALID; a second run is a byte no-op.
   P1  a seeded migration property test: 12 generated genuine-VALID 1.0.0 variants (module subset with the
       G2 coupling, 0-2 records per migrated type with matching high-waters, DECISIONS.md declared/omitted,
-      the decision_support key present/absent) each upgrade to a doctor-VALID 1.1.0 store with every index
+      the decision_support key present/absent) each upgrade to a doctor-VALID 1.2.0 store with every index
       byte-identical, every pre-existing counter preserved, and worklog/version byte-identical.
 
 Exit convention: 0 observed assertions pass; 1 an assertion fails; 2 cannot evaluate the harness.
@@ -707,7 +709,7 @@ def _suite():
             env_holder["env"].pop("XDG_CONFIG_HOME", None)
             env_holder["env"].pop("XDG_CONFIG_DIRS", None)
 
-            # U1) Happy path: 1.0.0 -> 1.1.0, doctor VALID, exact delta applied.
+            # U1) Happy path: 1.0.0 -> 1.2.0, doctor VALID, exact delta applied.
             s1 = base / "u1-happy"
             s1.mkdir()
             mach1 = build_store(s1)
@@ -1408,7 +1410,7 @@ def _suite():
                   "maintainer_decision" in out16 and "module" in out16.lower())
             check("U16 tree unchanged", _snapshot(s16) == before16)
 
-            # U17) the above-tooling / non-canonical / NOT-ADOPTED / partial-1.1.0 triage refusals.
+            # U17) the above-tooling / non-canonical / NOT-ADOPTED / partial-1.2.0 triage refusals.
             s17a = base / "u17-above"
             s17a.mkdir()
             above_manifest = _FIX_MANIFEST.replace('spec_version = "1.0.0"', 'spec_version = "2.0.0"')
@@ -1431,10 +1433,10 @@ def _suite():
             check("U17 not-adopted root is NOT APPLICABLE (exit 0)",
                   rc17c == EXIT_OK and "NOT APPLICABLE" in out17c)
 
-            # partial 1.1.0 (F2): take the VALID 1.1.0 store from U1, break it, re-run: never a false no-op.
+            # partial 1.2.0 (F2): take the VALID 1.2.0 store from U1, break it, re-run: never a false no-op.
             (mach1 / idx("maintainer_decision")).unlink()
             rc17d, out17d = upgrade(s1)
-            check("U17 partial 1.1.0 store is not a false rc-0 no-op (exit 2)", rc17d == EXIT_ERROR)
+            check("U17 partial 1.2.0 store is not a false rc-0 no-op (exit 2)", rc17d == EXIT_ERROR)
             check("U17 partial store fail-closed names not-doctor-VALID", "NOT doctor-VALID" in out17d)
             check("U17 partial-store recovery requires reconstructing the earlier write plan",
                   "earlier run's planned destinations" in out17d and "Exclude unmanaged paths and the lease"
@@ -1442,7 +1444,7 @@ def _suite():
             check("U17 partial-store recovery warns against a whole-tree restore",
                   "Never run a whole-tree restore" in out17d)
             drc17d, dout17d = doctor(s1)
-            check("U17 partial 1.1.0 store doctor is not VALID (exit 2)", drc17d == EXIT_ERROR)
+            check("U17 partial 1.2.0 store doctor is not VALID (exit 2)", drc17d == EXIT_ERROR)
 
             # U17b) Exceptions immediately after manifest replacement retain the entire planned scope.
             for suppress_recovery in (False, True):
@@ -1695,7 +1697,7 @@ def _suite():
             check("U20 tree unchanged (refused before mutation)", _snapshot(s20) == before20)
 
             # U21) R2: a 1.0.0 origin that OMITS the WHOLE [modules] / [views] table (each oracle-graded
-            # doctor-VALID at merge-base 1c90fbb) migrates to a doctor-VALID 1.1.0 store.
+            # doctor-VALID at merge-base 1c90fbb) migrates to a doctor-VALID 1.2.0 store.
             for _lbl, _man in (("modules", _man_drop_modules_table()),
                                ("views", _man_drop_views_table()),
                                ("both", _man_drop_views_table(_man_drop_modules_table()))):
@@ -1985,7 +1987,7 @@ def _suite():
             git_call(prod27, ["--literal-pathspecs", "add", "-A"])
             git_call(prod27, ["commit", "-m", "seed relocated 1.0.0 store"])
             rc27a, out27a = upgrade(prod27)
-            check("U27 relocated store migrates to 1.1.0 (exit 0)", rc27a == EXIT_OK)
+            check("U27 relocated store migrates to 1.2.0 (exit 0)", rc27a == EXIT_OK)
             git_call(prod27, ["--literal-pathspecs", "add", "-A"])
             git_call(prod27, ["commit", "-m", "commit staged migration"])
             (mach27 / idx("maintainer_decision")).unlink()
